@@ -19,16 +19,31 @@ package mcpserver
 //     both is a number about neither. A health block is the worst possible place
 //     for that number, because a health block's figures are the ones read without
 //     reading anything else.
-//   - The empty state is NAMED. Before #850's passive injections write their
-//     records, session_start and project_context have no rows on any store, and a
-//     block that lists only the sources with figures reads as "one source, all
-//     healthy" rather than as "two sources have never been measured".
+//   - The empty state is NAMED. A source that has recorded no call on this machine
+//     says so, whatever the reason — a store where the passive injections have not
+//     run yet, a project that only ever searched. A block that lists only the
+//     sources with figures reads as "one source, all healthy" rather than as "two
+//     sources have never been measured".
 //
 // The scope is the whole store, which is what this tool reports everywhere else —
-// projects are pooled WITHIN a source and never sources with each other, and
-// audit.MergeProjects is the only code here that combines reports. It reports
-// rather than fails: a store that cannot answer is reported as unreadable, because
-// a section's silence has to mean one thing.
+// projects are pooled WITHIN a source and never sources with each other — and the
+// header line says so on its face, because a per-source line under a tool that also
+// prints a project count reads as a statement about the project an agent is working
+// in. It names the per-project report beside it, so an agent that needs one project's
+// figures is told where they are rather than reading a store-wide line as a
+// project-wide one.
+//
+// It is STORE-WIDE on purpose: this tool is store-wide everywhere else (project count,
+// memory total, embedding coverage, history growth), and a per-project figure here
+// would be a different scope from every other number in the same output.
+//
+// It is computed by ONE aggregate per table (audit.BuildStoreReport), not by
+// BuildReport per project. That is not a performance detail: OpenDB caps the pool at
+// one connection, so a per-project loop meant a health check cost a number of full
+// passes over both tables proportional to the number of checkouts on the machine —
+// the tool an agent calls when something feels wrong, paying more the more projects
+// were registered. It reports rather than fails: a store that cannot answer is
+// reported as unreadable, because a section's silence has to mean one thing.
 
 import (
 	"context"
@@ -71,36 +86,27 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 	if !ok {
 		return
 	}
+	// The no-project state is answered BEFORE the figures, because it is a claim about
+	// whether there is a subject at all. The whole-store aggregate has no project to
+	// filter on and so cannot answer it: a store with no projects and a store with
+	// projects that have never recorded a call both return zero sources.
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
 		fmt.Fprintf(sb, "**Retrieval audit:** could not be read: %v\n", err)
 		return
 	}
-	reports := make([]audit.Report, 0, len(projects))
-	for _, p := range projects {
-		if p.ID == "" {
-			// Unreachable through the primary key, and skipped rather than passed on
-			// anyway: BuildReport refuses an empty project id, and handing it one
-			// would replace every project's figures with an error. A bucket carrying
-			// no project id has no per-project retrieval rows, which is what that
-			// refusal means.
-			continue
-		}
-		rep, err := audit.BuildReport(ctx, store, audit.ReportOptions{ProjectID: p.ID})
-		if err != nil {
-			fmt.Fprintf(sb, "**Retrieval audit:** could not be read: %v\n", err)
-			return
-		}
-		reports = append(reports, rep)
-	}
-	if len(reports) == 0 {
+	if len(projects) == 0 {
 		// A header with no lines under it reads as a section that ran and had
 		// nothing to say, which is a different claim from "there is no project to
 		// report on".
 		sb.WriteString("**Retrieval audit:** no project is registered, so no retrieval has been measured\n")
 		return
 	}
-	merged := audit.MergeProjects(reports)
+	merged, err := audit.BuildStoreReport(ctx, store, audit.ReportOptions{})
+	if err != nil {
+		fmt.Fprintf(sb, "**Retrieval audit:** could not be read: %v\n", err)
+		return
+	}
 
 	// Whether any source has a verdict at all, which decides two things below: the
 	// caveat is about a figure, and this store may have no figure.
@@ -112,7 +118,13 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 		}
 	}
 
-	sb.WriteString("**Retrieval audit** — per source, every call this store has recorded; a search and an injection are never pooled\n")
+	// The scope is named HERE rather than left to the reader, because this tool's other
+	// lines are per store and a source line sitting under them invites the reading that it
+	// describes the project the agent is working in. The remedy is named in the same
+	// breath, so an agent that does need one project's figures is told where they are
+	// instead of reinterpreting a store-wide line.
+	sb.WriteString("**Retrieval audit** — store-wide, per source, every call this store has recorded; a search and an injection are never pooled; " +
+		"for one project run `ghost context --audit --project <name>`\n")
 	for _, src := range merged.Sources {
 		fmt.Fprintf(sb, "  %s\n", src.Summary())
 		if src.DegradedVerdicts > 0 {
@@ -141,7 +153,7 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 		}
 		if unattributed > 0 {
 			fmt.Fprintf(sb,
-				"  ⚠ %d verdict(s) name no call at all, so they are in the figures above and in neither calls nor kept\n",
+				"  ⚠ %d verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
 				unattributed)
 		}
 	}

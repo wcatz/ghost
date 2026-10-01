@@ -20,9 +20,12 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -553,20 +556,21 @@ func TestReportSourceStringsAreOneLineEach(t *testing.T) {
 	}
 }
 
-// TestMergeProjectsPoolsProjectsAndNeverSources: the health block's one combining
-// operation, and the direction it is allowed to combine in.
+// TestBuildStoreReportPoolsProjectsAndNeverSources: the store-wide reader pools
+// PROJECTS within a source and never sources with each other, and the direction it
+// combines in is the whole of what this package is allowed to combine.
 //
-// The figures are chosen so that summing and averaging cannot be confused: p1 ran
-// three used verdicts and p2 ran one ignored one. Summed, the store's search
-// precision is 3 of 4 — 75%. Averaged per project it is (100% + 0%) / 2, also a
-// number, and a number about no verdict at all: a project with one verdict counts
-// as much as one with three hundred. So the counts and the percentage are both
-// asserted, and an implementation that averaged fails both.
+// The figures are chosen so summing and averaging cannot be confused: p1 ran three used
+// verdicts and p2 ran one ignored one. Summed, the store's search precision is 3 of 4 —
+// 75%. Averaged per project it is (100% + 0%) / 2, also a number, and a number about no
+// verdict at all: a project with one verdict counts as much as one with three hundred. So
+// the counts AND the percentage are both asserted, and an implementation that averaged
+// fails both.
 //
-// The structural properties are asserted alongside, because they are the ones that
-// matter on a store with no figures at all: one entry per source, the known
-// sources still named in order when empty, and no pooled figure reachable.
-func TestMergeProjectsPoolsProjectsAndNeverSources(t *testing.T) {
+// The structural properties are asserted alongside, because they are the ones that matter
+// on a store with no figures at all: one entry per source, the known sources still named
+// in order when empty, no pooled figure reachable, and no project id to print it as.
+func TestBuildStoreReportPoolsProjectsAndNeverSources(t *testing.T) {
 	store, p1, _ := reportStore(t)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
@@ -589,83 +593,113 @@ func TestMergeProjectsPoolsProjectsAndNeverSources(t *testing.T) {
 	judge(t, store, p1, s)
 	judge(t, store, "p2", s)
 
-	first, err := BuildReport(ctx, store, ReportOptions{ProjectID: p1})
+	rep, err := BuildStoreReport(ctx, store, ReportOptions{})
 	if err != nil {
-		t.Fatalf("BuildReport p1: %v", err)
+		t.Fatalf("BuildStoreReport: %v", err)
 	}
-	second, err := BuildReport(ctx, store, ReportOptions{ProjectID: "p2"})
-	if err != nil {
-		t.Fatalf("BuildReport p2: %v", err)
-	}
-	merged := MergeProjects([]Report{first, second})
 
-	// One entry per source, and only the sources: a merge that appended a total
+	// One entry per source, and only the sources: a reader that appended a total
 	// row would answer the question this package exists to refuse.
 	seen := map[string]int{}
-	for _, src := range merged.Sources {
+	for _, src := range rep.Sources {
 		seen[src.Source]++
 	}
 	for name, n := range seen {
 		if n != 1 {
-			t.Errorf("the merged report holds %d entries for %q, want 1", n, name)
+			t.Errorf("the store-wide report holds %d entries for %q, want 1", n, name)
 		}
 	}
-	if merged.Pooled() != nil {
-		t.Error("the merged report can be asked for a pooled figure; the whole rule is that it cannot")
+	if rep.Pooled() != nil {
+		t.Error("the store-wide report can be asked for a pooled figure; the whole rule is that it cannot")
 	}
 	// The known sources are still all named, in their documented order, even the
 	// ones no project has rows for: a store-wide view that dropped them would read
 	// as "one source, healthy" rather than "two sources, never measured".
 	var order []string
-	for _, src := range merged.Sources {
+	for _, src := range rep.Sources {
 		order = append(order, src.Source)
 	}
 	if strings.Join(order, ",") != strings.Join(KnownSources, ",") {
-		t.Errorf("merged sources = %v, want the known sources in order %v", order, KnownSources)
+		t.Errorf("store-wide sources = %v, want the known sources in order %v", order, KnownSources)
 	}
 
-	search := merged.Source("search")
+	search := rep.Source("search")
 	if search == nil {
-		t.Fatal("the merged report has no search figures")
+		t.Fatal("the store-wide report has no search figures")
 	}
 	if search.Calls != 3 {
-		t.Errorf("merged search calls = %d, want 3 (two in p1, one in p2)", search.Calls)
+		t.Errorf("store-wide search calls = %d, want 3 (two in p1, one in p2)", search.Calls)
 	}
 	if search.Kept != 4 || search.Scored != 4 || search.Used != 3 || search.Ignored != 1 {
-		t.Errorf("merged search kept %d, scored %d, used %d, ignored %d; want 4/4/3/1 — the counts summed, not averaged",
+		t.Errorf("store-wide search kept %d, scored %d, used %d, ignored %d; want 4/4/3/1 — the counts summed, not averaged",
 			search.Kept, search.Scored, search.Used, search.Ignored)
 	}
 	if got, want := search.PrecisionPercent(), 75; got != want {
-		t.Errorf("merged search precision = %d%%, want %d%%", got, want)
+		t.Errorf("store-wide search precision = %d%%, want %d%%", got, want)
 	}
 	if search.KeptNothing != 1 {
-		t.Errorf("merged search kept nothing %d times, want 1 (p1's empty call)", search.KeptNothing)
+		t.Errorf("store-wide search kept nothing %d times, want 1 (p1's empty call)", search.KeptNothing)
 	}
-	// The merged report is about no project, so it must not be printable as one.
-	if merged.ProjectID != "" {
-		t.Errorf("the merged report claims project %q; it is a store-wide view", merged.ProjectID)
+	// The store-wide report is about no project, so it must not be printable as one.
+	if rep.ProjectID != "" {
+		t.Errorf("the store-wide report claims project %q; it is a store-wide view", rep.ProjectID)
 	}
 }
 
-// TestMergeProjectsDoesNotTouchItsInputs: the merge copies each source's name
-// lists, because a caller holding a report and merging another into it must not
-// find its own contradicted ids rewritten. Aliasing the slice would be invisible
-// until a later merge appended to a shared backing array.
-func TestMergeProjectsDoesNotTouchItsInputs(t *testing.T) {
-	first := Report{ProjectID: "p1", Sources: []SourceReport{
-		{Source: "search", Calls: 1, ContradictedIDs: []string{"AAAA"}},
-	}}
-	second := Report{ProjectID: "p2", Sources: []SourceReport{
-		{Source: "search", Calls: 1, ContradictedIDs: []string{"BBBB"}},
-	}}
-
-	merged := MergeProjects([]Report{first, second})
-
-	if got := merged.Source("search").ContradictedIDs; len(got) != 2 || got[0] != "AAAA" || got[1] != "BBBB" {
-		t.Errorf("merged contradicted ids = %v, want [AAAA BBBB] sorted", got)
+// TestBuildStoreReportDoesNotAliasWhatItRenders: the store-wide report hands its
+// renderers slices, and a renderer that sorted or appended one in place would reach the
+// next source's line. The reader builds every value fresh per source rather than
+// accumulating into a shared slice, and this asserts it on the only two lists a renderer
+// can mutate: the contradicted ids and the degradation reasons.
+func TestBuildStoreReportDoesNotAliasWhatItRenders(t *testing.T) {
+	store, p1, _ := reportStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
+		t.Fatalf("EnsureProject p2: %v", err)
 	}
-	if got := first.Source("search").ContradictedIDs; len(got) != 1 || got[0] != "AAAA" {
-		t.Errorf("the merge changed the first report's contradicted ids to %v", got)
+	// Distinct ids per project: memory ids are globally unique, so the same id cannot be
+	// seeded into two projects — and a fixture that reused one would fail on the UNIQUE
+	// constraint rather than on anything this test is about.
+	seedMemory(t, store, p1, "ALIAS1", "The v20 migration runs before the pre-migration backup")
+	seedMemory(t, store, "p2", "ALIAS2", "The ledger reindexes itself after a snapshot restore")
+
+	recordCall(t, store, p1, "search", "ALIAS1")
+	recordCall(t, store, "p2", "search", "ALIAS2")
+
+	s := newTestSignals(t)
+	s.AddProse("that is wrong: the v20 migration runs before the pre-migration backup")
+	judge(t, store, p1, s)
+	judge(t, store, "p2", newTestSignals(t))
+
+	rep, err := BuildStoreReport(ctx, store, ReportOptions{})
+	if err != nil {
+		t.Fatalf("BuildStoreReport: %v", err)
+	}
+	// The list is named, and it is this report's own: a second read cannot have grown
+	// or reordered it.
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("the store-wide report has no search figures")
+	}
+	first := append([]string(nil), search.ContradictedIDs...)
+	firstReasons := append([]string(nil), search.DegradedReasons...)
+	// Mutating the rendered list, as a careless renderer would, must not change what the
+	// next read produces — which is the whole point of the value being copied per source.
+	if len(search.ContradictedIDs) > 0 {
+		search.ContradictedIDs[0] = "MUTATED"
+	}
+	if len(search.DegradedReasons) > 0 {
+		search.DegradedReasons[0] = "MUTATED"
+	}
+	again, err := BuildStoreReport(ctx, store, ReportOptions{})
+	if err != nil {
+		t.Fatalf("BuildStoreReport (second read): %v", err)
+	}
+	if got := again.Source("search").ContradictedIDs; !reflect.DeepEqual(got, first) {
+		t.Errorf("the contradicted id list changed between reads: %v then %v", first, got)
+	}
+	if got := again.Source("search").DegradedReasons; !reflect.DeepEqual(got, firstReasons) {
+		t.Errorf("the degradation reason list changed between reads: %v then %v", firstReasons, got)
 	}
 }
 
@@ -687,16 +721,19 @@ func TestReportStringNamesNoScope(t *testing.T) {
 		t.Errorf("the report named its own scope:\n%s", rep.String())
 	}
 
-	merged := MergeProjects([]Report{rep})
-	if merged.ProjectID != "" {
-		t.Fatalf("a merged report claims project %q; it is about none", merged.ProjectID)
+	whole, err := BuildStoreReport(context.Background(), store, ReportOptions{})
+	if err != nil {
+		t.Fatalf("BuildStoreReport: %v", err)
 	}
-	if strings.Contains(merged.String(), projectID) {
-		t.Errorf("a merged report printed a project id:\n%s", merged.String())
+	if whole.ProjectID != "" {
+		t.Fatalf("the store-wide report claims project %q; it is about none", whole.ProjectID)
+	}
+	if strings.Contains(whole.String(), projectID) {
+		t.Errorf("the store-wide report printed a project id:\n%s", whole.String())
 	}
 	// And the window is still on it, because that IS a property of the report.
-	if !strings.Contains(merged.String(), "window") {
-		t.Errorf("the report dropped its window:\n%s", merged.String())
+	if !strings.Contains(whole.String(), "window") {
+		t.Errorf("the report dropped its window:\n%s", whole.String())
 	}
 }
 
@@ -881,18 +918,30 @@ func TestReportCountsAVerdictThatNamesNoCallAndSaysSo(t *testing.T) {
 		t.Fatalf("BuildReport: %v", err)
 	}
 	search := rep.Source("search")
-	if search.Scored != 1 || search.Ignored != 1 {
-		t.Errorf("a verdict that names no call was not counted: %+v", *search)
+	// COUNTED and NAMED, but in no figure. The other half of the property is the
+	// test's own point: an unattributed verdict must not reach Scored, because
+	// precision is a ratio over (call, memory) pairs and this row has no call to be
+	// one of — a numerator and a denominator from two populations.
+	if search.Unattributed != 1 {
+		t.Errorf("Unattributed = %d, want 1 — a verdict naming no call must still be counted", search.Unattributed)
+	}
+	if search.Scored != 0 || search.Used != 0 || search.Ignored != 0 {
+		t.Errorf("a verdict naming no call reached a figure: %+v", *search)
 	}
 	if search.Detached != 0 {
 		t.Errorf("Detached = %d, want 0 — a verdict naming no call is unattributed, not detached", search.Detached)
 	}
-	if search.Unattributed != 1 {
-		t.Errorf("Unattributed = %d, want 1", search.Unattributed)
+	if percent, ok := search.Precision(); ok {
+		t.Errorf("Precision() reported %d%% over a source whose only verdict is unattributed, so there is nothing in the ratio", percent)
 	}
 	out := rep.String()
 	if !strings.Contains(out, "no call") {
 		t.Errorf("the report does not name the unattributed verdict:\n%s", out)
+	}
+	// And the note says WHY it is out of the figures, so a reader does not read the
+	// omission as a lost row.
+	if !strings.Contains(out, "no call to be one of") {
+		t.Errorf("the note does not say the unattributed verdict is out of the figures rather than lost:\n%s", out)
 	}
 }
 
@@ -997,4 +1046,210 @@ func TestTheDegradedReasonIsRenderedAsALabel(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestBuildStoreReportIsTheSumOfThePerProjectReports: the whole-store reader and the
+// per-project reader must be ONE arithmetic, not two that agree today.
+//
+// They are two implementations — one counts in Go over whole tables, the other is a
+// GROUP BY per table — and a second implementation of one figure is how this package
+// already produced one bug: the degraded note divided by Kept while the health block
+// divided by Scored, and the two surfaces of the same number disagreed for a release.
+// So the property is asserted as EQUALITY against the per-project reports rather than
+// against numbers picked by hand, over a store whose two halves are shaped differently
+// on purpose: p1 has a session_start injection, p2 does not, p1 has a degraded verdict,
+// p2 has one naming no call.
+//
+// A store-wide report that quietly disagreed here would be invisible in review, because
+// both numbers would look reasonable.
+func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
+	store, p1, _ := reportStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
+		t.Fatalf("EnsureProject p2: %v", err)
+	}
+	for _, id := range []string{"A1", "A2", "A3", "A4"} {
+		seedMemory(t, store, p1, id, memContent)
+	}
+	seedMemory(t, store, "p2", "B1", "The ledger reindexes itself after a snapshot restore")
+	seedMemory(t, store, "p2", "B2", "Bench seeds restore content through the shared clamp helper")
+
+	// p1: a search keeping four, an injection keeping one, and a search keeping none.
+	recordCall(t, store, p1, "search", "A1", "A2", "A3", "A4")
+	recordCall(t, store, p1, "session_start", "A1")
+	recordCall(t, store, p1, "search")
+	// p2: a search keeping two and an injection keeping nothing.
+	recordCall(t, store, "p2", "search", "B1", "B2")
+	recordCall(t, store, "p2", "session_start")
+
+	// p1 judged cleanly, p2 judged under a partial transcript read — so the degraded
+	// reason is named on one source and not the other.
+	judge(t, store, p1, newTestSignals(t))
+	degraded := newTestSignals(t)
+	degraded.MarkDegraded("scan transcript: truncated")
+	judge(t, store, "p2", degraded)
+
+	// The two verdicts that are in NO figure, one of each kind, because those are the
+	// two a store-wide reader can plausibly get wrong and a fixture holding only
+	// attributed verdicts cannot tell the two implementations apart on: a verdict
+	// naming no call, and one naming a rowid no row owns (what the call cap's eviction
+	// leaves behind).
+	if err := store.RecordRetrievalAudits(ctx, []memory.RetrievalAuditRow{
+		{
+			ProjectID: "p2", SessionID: "s9", Source: "search", MemoryID: "B2",
+			Outcome: string(OutcomeIgnored), RecordRowID: 0,
+		},
+		{
+			ProjectID: "p2", SessionID: "s9", Source: "search", MemoryID: "B1",
+			Outcome: string(OutcomeContradicted), RecordRowID: 999999,
+		},
+	}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	whole, err := BuildStoreReport(ctx, store, ReportOptions{})
+	if err != nil {
+		t.Fatalf("BuildStoreReport: %v", err)
+	}
+
+	perProject := make([]Report, 0, 2)
+	for _, p := range []string{p1, "p2"} {
+		rep, err := BuildReport(ctx, store, ReportOptions{ProjectID: p})
+		if err != nil {
+			t.Fatalf("BuildReport %s: %v", p, err)
+		}
+		perProject = append(perProject, rep)
+	}
+	// The reference side is spelled out HERE rather than shipped as a combining function
+	// over []Report: a combiner with no production caller is how the next reader
+	// concludes it is the sanctioned way to pool, which is the one thing this package
+	// refuses to be able to do.
+	summed := sumPerProject(perProject)
+
+	if whole.Pooled() != nil || summed.Pooled() != nil {
+		t.Error("a store-wide report can be asked for a pooled figure; the whole rule is that it cannot")
+	}
+	// The same sources, in the same order, so a difference below is arithmetic and not
+	// a source the whole-store path found or lost.
+	var wholeOrder, sumOrder []string
+	for _, src := range whole.Sources {
+		wholeOrder = append(wholeOrder, src.Source)
+	}
+	for _, src := range summed.Sources {
+		sumOrder = append(sumOrder, src.Source)
+	}
+	if strings.Join(wholeOrder, ",") != strings.Join(sumOrder, ",") {
+		t.Fatalf("the store-wide report holds %v and the summed one %v; the comparison below would compare different sources", wholeOrder, sumOrder)
+	}
+
+	for _, name := range wholeOrder {
+		w, s := whole.Source(name), summed.Source(name)
+		if w == nil || s == nil {
+			t.Fatalf("source %q is missing from one of the two reports", name)
+		}
+		if diff := diffSourceReports(*w, *s); diff != "" {
+			t.Errorf("source %q: the store-wide reader and the per-project reports disagree — this is the bug the two implementations share or do not share:\n%s", name, diff)
+		}
+	}
+}
+
+// diffSourceReports renders the fields of two figures that disagree, or "" when none do.
+// Every count is compared, and both id lists, because a renderer that prints one of them
+// must not be able to show a different value from the one the count says.
+func diffSourceReports(want, got SourceReport) string {
+	var b []string
+	note := func(field string, w, g any) {
+		if fmt.Sprint(w) != fmt.Sprint(g) {
+			b = append(b, fmt.Sprintf("%s: whole-store %v, per-project sum %v", field, w, g))
+		}
+	}
+	note("Calls", want.Calls, got.Calls)
+	note("Kept", want.Kept, got.Kept)
+	note("KeptNothing", want.KeptNothing, got.KeptNothing)
+	note("Scored", want.Scored, got.Scored)
+	note("Used", want.Used, got.Used)
+	note("Ignored", want.Ignored, got.Ignored)
+	note("Superseded", want.Superseded, got.Superseded)
+	note("Contradicted", want.Contradicted, got.Contradicted)
+	note("DegradedVerdicts", want.DegradedVerdicts, got.DegradedVerdicts)
+	note("Unattributed", want.Unattributed, got.Unattributed)
+	note("Detached", want.Detached, got.Detached)
+	note("DegradedReasons", want.DegradedReasons, got.DegradedReasons)
+	note("ContradictedIDs", want.ContradictedIDs, got.ContradictedIDs)
+	// And the rendered line, because two figures can agree field-by-field and still
+	// render differently — which is the shape the degraded-denominator bug had.
+	if wl, gl := want.Summary(), got.Summary(); wl != gl {
+		b = append(b, fmt.Sprintf("Summary(): whole-store %q, per-project sum %q", wl, gl))
+	}
+	out := ""
+	for _, s := range b {
+		out += "\n  " + s
+	}
+	return out
+}
+
+// sumPerProject is the reference side of the equality test: per-project reports added up
+// WITHIN each source, by SUM of counts and never by averaging percentages.
+//
+// It is a test helper rather than an exported function on purpose. A shipped combiner over
+// []Report with no production caller is how the next reader concludes it is the sanctioned
+// way to pool — which is the one thing this package refuses to be able to do — so the sum
+// lives where its only caller is.
+func sumPerProject(reports []Report) Report {
+	bySource := map[string]*SourceReport{}
+	for _, rep := range reports {
+		for _, src := range rep.Sources {
+			cur := bySource[src.Source]
+			if cur == nil {
+				entry := src
+				// Copied, not aliased, so summing cannot reach back into a caller's
+				// report through a shared slice.
+				entry.ContradictedIDs = append([]string(nil), src.ContradictedIDs...)
+				entry.DegradedReasons = append([]string(nil), src.DegradedReasons...)
+				bySource[src.Source] = &entry
+				continue
+			}
+			cur.Calls += src.Calls
+			cur.Kept += src.Kept
+			cur.KeptNothing += src.KeptNothing
+			cur.Scored += src.Scored
+			cur.Used += src.Used
+			cur.Ignored += src.Ignored
+			cur.Superseded += src.Superseded
+			cur.Contradicted += src.Contradicted
+			cur.DegradedVerdicts += src.DegradedVerdicts
+			cur.Unattributed += src.Unattributed
+			cur.Detached += src.Detached
+			cur.ContradictedIDs = mergeSortedNames(cur.ContradictedIDs, src.ContradictedIDs)
+			cur.DegradedReasons = mergeSortedNames(cur.DegradedReasons, src.DegradedReasons)
+		}
+	}
+	summed := Report{}
+	for _, name := range sortedKeys(bySource) {
+		summed.Sources = append(summed.Sources, *bySource[name])
+	}
+	return Report{Sources: orderSources(summed.Sources)}
+}
+
+// mergeSortedNames is the union of two already-sorted lists.
+func mergeSortedNames(a, b []string) []string {
+	if len(a) == 0 {
+		return append([]string(nil), b...)
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, s := range list {
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

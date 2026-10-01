@@ -981,6 +981,7 @@ retrieval audit report for project ghost
 
 retrieval audit — window: everything the store still holds
   search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 15 ignored, 1 superseded in session, 2 contradicted, 3 kept nothing
+    2 of those verdicts are degraded (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls in this window
   project_context: no rows — this source has recorded no calls in this window
   contradicted (search):
@@ -998,12 +999,12 @@ Read it with these four things in mind:
 
 - **The scope is always one project.** With no `--project`, it is the project the current directory (or `--cwd`) resolves to. A name, an id or a directory Ghost has never heard of is an error that names the remedy — never a report pooled over every project, because a mistyped project name answered with the whole corpus is a report about a scope nobody asked for.
 - **Figures are per source and never pooled.** A search asks "did the agent use what it looked up"; an injection asks "did it use what it was handed". A ratio over both is a number about neither, so there is no total.
-- **A source with no rows says so.** It does not report 0% used, which would read as a verdict on a source that has never run here. `session_start` and `project_context` are in that state on every store until their passive injections write their own records.
+- **A source with no rows says so.** It does not report 0% used, which would read as a verdict on a source that has never run here. `session_start` and `project_context` record their own retrievals, so on a store whose sessions have run they carry figures; they say `no rows` on a store that has only ever searched, and a project with no session-start injection at all is the ordinary way to see that.
 - **`ignored` is the residual, not a score.** It means the agent's own words never mentioned the memory. Nothing here ranks a memory, and a reader treating 60% ignored as advice about which memories to delete is reading a heuristic that never saw the session.
 
 `--since` bounds both retrieval tables by their `recorded_at`. The two columns are not the same instant — a call is stamped when it happened, a verdict when the detached audit judged it — so the verdict half is intersected with the calls this report counts, and a verdict whose call is outside the window (or no longer held) is counted and named as **detached** rather than dropped in silence. A row whose stamp cannot be read is kept rather than dropped. The window is echoed in its own line (`window: the last 168h0m0s`), because a figure with no window is a standing state and a window is not. `--since` is a duration, not a date, and `7d` is not one. `--as-of` cannot be combined with `--audit`: one reports the store at an instant, the other reports retrieval over a window, and each available answer to the combination is a confident wrong one.
 
-The verdicts are written by the lifecycle audit ([`ghost lifecycle`](#ghost-lifecycle)); a store whose sessions have not been audited shows `no verdict recorded yet` rather than a percentage. `ghost_health` carries the same figures in a shorter form, so an agent can read them without a terminal.
+The verdicts are written by the lifecycle audit ([the automatic lifecycle command](#automatic-lifecycle-command)); a store whose sessions have not been audited shows `no verdict recorded yet` rather than a percentage. `ghost_health` carries the same figures in a shorter form — **store-wide**, with projects pooled within a source, since that tool reports the whole store everywhere else — so an agent can read them without a terminal; for one project's figures the per-project report here is the surface.
 
 ### `ghost history <memory-ref>` / `ghost history purge <memory-id>` / `ghost history compact`
 

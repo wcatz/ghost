@@ -29,6 +29,24 @@ func dataDirPath() (string, error) {
 	return dir, nil
 }
 
+// The two operation clauses requireMigratedSchema can finish its refusal with.
+//
+// Constants rather than inline strings at the three call sites, because the sentence
+// has to read identically from `ghost export` and from a dry-run `ghost import` — the
+// two are one operation to a user ("get a copy in or out") — and a third spelling of it
+// is exactly what a doc line and a diagnostic stop matching.
+const (
+	// exportOperation is the export clause, byte-identical to what this check has
+	// always printed.
+	exportOperation = "exporting it or previewing an import into it"
+	// exportOrImportOperation is the same clause for the two callers that move a copy
+	// in or out: the export, and an import's dry run.
+	exportOrImportOperation = exportOperation
+	// auditOperation is the clause `ghost context --audit` gets. It names the command
+	// the user actually ran rather than the two they did not.
+	auditOperation = "reporting on it with `ghost context --audit`"
+)
+
 // openReadOnlyTransferStore opens the database at dataDir for reading only,
 // without running migrations, seeding builtin memories, or creating the file.
 //
@@ -38,12 +56,17 @@ func dataDirPath() (string, error) {
 // store would not expect a file to appear because they ran a read. That is also
 // why the missing-database case is named here rather than left as a stat error:
 // the actionable next step is to start a session.
-func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
+// `operation` is the clause the refusal finishes with, naming what the user asked
+// for. The export and dry-run-import wordings are byte-identical to the one sentence
+// this check has always printed, because those two ARE one operation as far as a user
+// is concerned — "get a copy in or out" — and changing prose here for no reason is how
+// a doc line and a diagnostic stop matching.
+func openReadOnlyTransferStore(dataDir, operation string) (*memory.Store, error) {
 	store, db, dbPath, err := openReadOnlyTransferStoreUnchecked(dataDir)
 	if err != nil {
 		return nil, err
 	}
-	if err := requireMigratedSchema(db, dbPath); err != nil {
+	if err := requireMigratedSchema(db, dbPath, operation); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -88,10 +111,18 @@ func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB,
 // the "safe copy" succeed and the export fail for no stated reason.
 //
 // The remedy sentence is the one the missing-database case already uses, because
-// it is the same remedy: a read-write open, which is a session or `ghost mcp
-// init`. A store from a NEWER Ghost is reported separately and does not get that
+// it is the same remedy: a read-only open, which is a session or `ghost mcp init`.
+// A store from a NEWER Ghost is reported separately and does not get that
 // sentence — OpenDB already refuses it, and "migrate" is not what that user
 // should do.
+//
+// The sentence also names the OPERATION, because "read-only" is a property of the
+// command family, not of the command the user typed: `ghost export`,
+// `ghost import` (dry run) and `ghost context --audit` share this check, and a user
+// who ran the audit was told to "export it or preview an import into it" — two
+// commands they did not run, which reads as though the wrong command was picked. The
+// operation is a parameter rather than a second copy of the sentence, so the three
+// callers cannot drift into three slightly different wordings of one remedy.
 //
 // Strict on both sides — equal and only equal passes. A floor is defensible on
 // the numbers (the only post-v10 columns these readers select are
@@ -115,15 +146,15 @@ func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB,
 // user is not left guessing which command they need.
 // TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor pins this and is
 // the thing to delete if the decision is ever reversed on purpose.
-func requireMigratedSchema(db *sql.DB, dbPath string) error {
+func requireMigratedSchema(db *sql.DB, dbPath, operation string) error {
 	version, err := memory.DBUserVersion(db)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dbPath, err)
 	}
 	switch {
 	case version < memory.SchemaVersion():
-		return fmt.Errorf("the database at %s is at schema v%d and this Ghost reads v%d — start a session, or run ghost mcp init, to migrate it before exporting it or previewing an import into it",
-			dbPath, version, memory.SchemaVersion())
+		return fmt.Errorf("the database at %s is at schema v%d and this Ghost reads v%d — start a session, or run ghost mcp init, to migrate it before %s",
+			dbPath, version, memory.SchemaVersion(), operation)
 	case version > memory.SchemaVersion():
 		return fmt.Errorf("the database at %s is at schema v%d, which is newer than this Ghost (v%d) — upgrade Ghost, or point at a different store",
 			dbPath, version, memory.SchemaVersion())
@@ -156,5 +187,5 @@ func openImportStore(apply bool) (*memory.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openReadOnlyTransferStore(dataDir)
+	return openReadOnlyTransferStore(dataDir, exportOrImportOperation)
 }
