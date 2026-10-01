@@ -6,10 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // coldProbeBurst is the size of the concurrent cold-cache burst both probe tests
@@ -113,40 +117,210 @@ func codexIdentityFor(t *testing.T, binary string) codexBinaryID {
 	return codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
 }
 
-// claudeIdentityFor is codexIdentityFor for the claude probe's key, so
-// settleAbandonedProbes can drain a claude flight the same way it drains a
-// codex one instead of the two tests growing their own.
-func claudeIdentityFor(t *testing.T, binary string) claudeBinaryID {
-	t.Helper()
-	path, err := exec.LookPath(binary)
-	if err != nil {
-		t.Fatalf("LookPath(%s): %v", binary, err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat(%s): %v", path, err)
-	}
-	return claudeBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+// probeSettleTimeout bounds ONE settleAbandonedProbes call, and it bounds the
+// whole call rather than each join in it — the settle runs from a t.Cleanup,
+// where an unbounded wait is a package that never finishes and a result set only
+// a killed run produces.
+//
+// It sits well past the 10s cap both probes put on their own child
+// (probeCodexFeatures, probeClaudeCapabilities), because a flight that outlives
+// that cap is a killed child winding down rather than a probe that will take
+// minutes. A timeout here is a bug report and not a slow machine, which is why it
+// fails the test with the flight it was waiting on rather than passing quietly.
+const probeSettleTimeout = 30 * time.Second
+
+// probeIdentity is one harness binary as BOTH probe groups key it.
+//
+// The two identity types stay distinct in production because a codex verdict and
+// a claude verdict are not interchangeable answers, but a test's fake is one file
+// that either probe may be pointed at. So the ledger keeps both readings of it
+// and the settle joins both groups, rather than making every test declare which
+// probe it meant.
+type probeIdentity struct {
+	codex  codexBinaryID
+	claude claudeBinaryID
 }
 
-// settleAbandonedProbes blocks until no probe goroutine for any of binaries is
-// still running, and registers the same wait as a cleanup.
+// probeLedger is what one test knows about the probes it could have abandoned: the
+// identities of the fake harness binaries it created, and whether a settle has been
+// claimed for them yet.
 //
-// The wait is the fix's other half and it is a JOIN, not a sleep. Both
-// codexFeaturesFor and claudeCapabilitiesFor deliberately walk away from a
-// flight whose caller has stopped waiting — a caller that cannot use the
-// verdict must not block on it — so the goroutine singleflight started outlives
-// them and keeps logging through the process default logger. A locked capture
-// buffer makes that write safe (see lockedBuffer); this makes it FINISHED, which
-// is what stops a straggler from one test's abandoned probe landing in the NEXT
-// test's capture and failing an assertion that nothing was logged.
+// It needs no lock of its own. Every access is on the test's own goroutine — a
+// test body and the cleanups it registered both run there, and a flight goroutine
+// never sees a ledger — so the only thing that could interleave is two tests, and
+// those do not share one. The MAP is the other way round: it is package-level and
+// keyed by *testing.T, and a plain map would be correct only while every test in
+// this package is serial, which is a fact about today's tests rather than a
+// property of this code.
+type probeLedger struct {
+	ids      []probeIdentity
+	captured bool
+}
+
+// probeLedgers maps *testing.T to its probeLedger.
+var probeLedgers sync.Map
+
+// ledgerFor returns t's ledger, creating it — and the one cleanup that forgets it
+// — if this is the test's first touch of it. Every path that reaches the ledger
+// goes through here, because a path that created one without the forget would pin
+// a finished *testing.T in a package-level map for the rest of the run: a capture
+// test that never builds a fake reaches the ledger through markCaptureInstalled
+// alone, and the settle it asks for has nothing to join.
+func ledgerFor(t *testing.T) *probeLedger {
+	t.Helper()
+	led, loaded := probeLedgers.LoadOrStore(t, &probeLedger{})
+	if !loaded {
+		// First touch by this test. Deleted last of all, so the map cannot pin a
+		// finished test — and everything its closures hold — for the rest of the
+		// run.
+		t.Cleanup(func() { probeLedgers.Delete(t) })
+	}
+	return led.(*probeLedger)
+}
+
+// recordProbeIdentity adds a fake's identity to t's ledger.
+//
+// The forget is registered on the ledger's first touch, wherever that is, rather
+// than inside a settle, because it is the one position that cannot cut a settle
+// short. The settle is registered inside claimProbeSettle, which every
+// registration path goes through, and that can happen at any point in the test
+// body: a cleanup registered at creation runs LAST (t.Cleanup is LIFO), so it
+// runs after every settle whatever order they were registered in. A forget hung
+// off a settle would instead run at that settle's position, and a test that
+// installed its capture afterwards would have its ledger deleted before the
+// capture could drain it.
+func recordProbeIdentity(t *testing.T, id probeIdentity) {
+	t.Helper()
+	led := ledgerFor(t)
+	led.ids = append(led.ids, id)
+}
+
+// markCaptureInstalled records that this test's settle belongs to its capture, and
+// is what makes the capture rather than the fake the owner of it.
+//
+// The capture is the better owner when a test has both, and the reason is ordering
+// rather than tidiness: it can put the settle and the restore of the previous
+// logger in ONE cleanup, so nothing can register between them. A fake's settle is
+// its own cleanup, and a test that creates its fake BEFORE installing the capture
+// registers that one first — which LIFO runs LAST, after the capture's cleanup has
+// already restored the handler. It is the last settle of such a test and finds
+// nothing in flight, so the drain that matters still happened inside the capture's
+// cleanup, before the restore.
+func markCaptureInstalled(t *testing.T) {
+	t.Helper()
+	ledgerFor(t).captured = true
+}
+
+// claimProbeSettle registers a settle cleanup for t, unless its capture already
+// owns one. Its one caller is registerProbeIdentity, and it covers the tests that
+// read no log at all — most of the probe tests, which are just as able to walk
+// away from a flight as the ones that do.
+//
+// It is a claim rather than an "is there anything to settle" check: a test whose
+// capture claimed first gets nothing here, because a second settle would drain
+// nothing and cost a join per group to prove it.
+func claimProbeSettle(t *testing.T) {
+	t.Helper()
+	led := ledgerFor(t)
+	if led.captured {
+		return
+	}
+	led.captured = true
+	t.Cleanup(func() { settleAbandonedProbes(t) })
+}
+
+// registerProbeIdentity records the identity of a fake harness binary and asks for
+// the settle to follow the test out. It is the whole of what a test that creates a
+// fake needs, so this is what fakeHarnessPolicyBinary calls for the two harnesses
+// that HAVE a probe.
+//
+// It is here rather than left to each test because a test cannot know whether it
+// abandoned a probe: the flight belongs to codexFeaturesFor or
+// claudeCapabilitiesFor, which walk away from it on purpose. Asking every test to
+// remember that is how #855's settle reached seven of the tests that could use it
+// and left the rest leaking into the next test's capture.
+//
+// A test that also installs a capture gets ONE settle rather than two: the capture
+// claims it (markCaptureInstalled) and this stands down. Neither helper has to know
+// whether the other has run, which is what keeps the settle-before-restore ordering
+// a property of captureProcessLogs alone rather than of the order two helpers happen
+// to be called in.
+//
+// The identity is read HERE, from the file as it was just written, and is never
+// re-derived from the path at settle time: t.TempDir has removed the file by
+// then, so a LookPath there fails, and a settle that cannot name the key it
+// means to join would skip exactly the flight it exists to join. That is also why
+// there is nothing to skip on this path — a fake that cannot be resolved cannot
+// have started a probe either, and saying so here points at the line that wrote
+// the file rather than reporting it as a silent absence during cleanup, where a
+// t.Fatalf would abort the rest of the chain including the logger restore.
+//
+// A test that writes its own fake binary — TestCodexProbeIsRekeyedWhenTheBinaryChanges
+// does — must call this itself if a probe on it can outlive the test.
+func registerProbeIdentity(t *testing.T, path string) {
+	t.Helper()
+	// Resolved exactly the way codexFeaturesFor and claudeCapabilitiesFor resolve
+	// it, so the keys built from this below are the keys the flights are filed
+	// under rather than near misses of them.
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		t.Fatalf("the fake just written is not resolvable as an executable (%v), so no probe could ever have started on it", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		t.Fatalf("Stat the fake just written: %v", err)
+	}
+	recordProbeIdentity(t, probeIdentity{
+		codex:  codexBinaryID{path: resolved, size: info.Size(), modTime: info.ModTime()},
+		claude: claudeBinaryID{path: resolved, size: info.Size(), modTime: info.ModTime()},
+	})
+	claimProbeSettle(t)
+}
+
+// probeFlight is one group, the key this test's fake is filed under in it, the
+// path to name in a report about that key, and the no-op flight to join when
+// nothing is in flight under it.
+type probeFlight struct {
+	name  string
+	group *singleflight.Group
+	key   string
+	path  string
+	empty func() (any, error)
+}
+
+// flightsFor is the two flights one fake binary can be in. Both are named because
+// a caller cannot tell from a path whether the flight it abandoned was a probe or
+// a capability probe, so a settle joins both and a report says which one was still
+// running.
+//
+// The path is carried per flight rather than read off the codex identity by the
+// caller, because the two readings happen to be the same file today and a report
+// that named the wrong one would be a lie the ledger's shape does not prevent.
+func flightsFor(id probeIdentity) []probeFlight {
+	return []probeFlight{
+		{"codex", &codexProbeGroup, id.codex.probeKey(), id.codex.path, func() (any, error) { return codexFeatureSupport{}, nil }},
+		{"claude", &claudeProbeGroup, id.claude.probeKey(), id.claude.path, func() (any, error) { return claudeCapabilities{}, nil }},
+	}
+}
+
+// settleAbandonedProbes blocks until no probe goroutine for any fake binary this
+// test created is still running.
+//
+// It is a JOIN, not a sleep. Both codexFeaturesFor and claudeCapabilitiesFor
+// deliberately walk away from a flight whose caller has stopped waiting — a
+// caller that cannot use the verdict must not block on it — so the goroutine
+// singleflight started outlives them and keeps logging through the process default
+// logger. A locked capture buffer makes that write SAFE (see lockedBuffer); this
+// makes it FINISHED, which is what stops a straggler from one test's abandoned
+// probe landing in the NEXT test's capture and failing an assertion that nothing
+// was logged.
 //
 // singleflight.Group.DoChan is the join primitive, and it is exact rather than
 // hopeful: with a call already in flight for the key, DoChan hands back THAT
-// call's result channel and never runs the function below, so receiving from it
-// means the abandoned probe has finished. With nothing in flight the function
-// runs and returns at once, which is the same answer. There is no window to
-// sleep through, and no dependence on the probe's 10s cap.
+// call's result channel and never runs the function beside it, so receiving from
+// it means the abandoned probe has finished. With nothing in flight the function
+// runs and returns at once, which is the same answer. There is no window to sleep
+// through, and no dependence on the probe's 10s cap.
 //
 // It is also safe against the callers a test still has running: doCall deletes
 // the key from the group's map BEFORE it sends on the result channels, so by the
@@ -154,23 +328,46 @@ func claudeIdentityFor(t *testing.T, binary string) claudeBinaryID {
 // `codexFeatureSupport{}` as a verdict. The no-op stores nothing, so it cannot
 // poison the cache either.
 //
-// Both groups are drained for each binary because a caller cannot tell from a
-// path whether the flight it abandoned was a probe or a capability probe, and
-// joining a group with nothing in flight costs one function call.
-func settleAbandonedProbes(t *testing.T, binaries ...string) {
+// Two ways to arrive here, and neither is a skip: a test that created no fake has
+// no ledger and nothing to settle, and a test whose flight has already landed pays
+// one function call per group to learn so. There is no third path that skips a
+// flight this cannot name — every flight a test could have started is under a key
+// built from a fake that registered here.
+//
+// The wait is bounded by probeSettleTimeout and REPORTS rather than aborts, and
+// t.Errorf is what reports it: it marks the test failed and returns, so the rest
+// of the cleanup chain still runs — including the restore of the previous default
+// logger, which is the one step that must not be skipped on the way out. Every
+// call site but one reaches this from a cleanup, where a Fatal would take those
+// steps with it.
+func settleAbandonedProbes(t *testing.T) {
 	t.Helper()
-	drain := func() {
-		for _, bin := range binaries {
-			<-codexProbeGroup.DoChan(codexIdentityFor(t, bin).probeKey(), func() (any, error) {
-				return codexFeatureSupport{}, nil
-			})
-			<-claudeProbeGroup.DoChan(claudeIdentityFor(t, bin).probeKey(), func() (any, error) {
-				return claudeCapabilities{}, nil
-			})
+	led, ok := probeLedgers.Load(t)
+	if !ok {
+		return // this test created no fake, so it started no flight
+	}
+	// Copied rather than read in place, so the ledger outlives this call for the
+	// second settle a test with both helpers gets, and so nothing appends to the
+	// slice while the loop below is handing its keys to DoChan.
+	ids := append([]probeIdentity(nil), led.(*probeLedger).ids...)
+	deadline := time.Now().Add(probeSettleTimeout)
+	for _, id := range ids {
+		for _, probe := range flightsFor(id) {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				t.Errorf("settling this test's probes spent its whole %s budget with a %s probe for %s still in flight", probeSettleTimeout, probe.name, probe.path)
+				return
+			}
+			timer := time.NewTimer(remaining)
+			select {
+			case <-probe.group.DoChan(probe.key, probe.empty):
+				timer.Stop()
+			case <-timer.C:
+				t.Errorf("a %s probe for %s was still in flight %s after this test's cleanups began, so it outlived the test and its warnings land in whatever capture runs next", probe.name, probe.path, probeSettleTimeout)
+				return
+			}
 		}
 	}
-	drain()
-	t.Cleanup(drain)
 }
 
 // sleepingCodexFake is a codex fake that records each `features list` probe and
@@ -178,6 +375,12 @@ func settleAbandonedProbes(t *testing.T, binaries ...string) {
 // flight" a fact rather than a timing hope. It is countingClaudeFake's codex
 // counterpart, and it exists in both this file and the other probe tests only
 // because the log path and the sleep are what a caller INSIDE a flight needs.
+//
+// Two seconds is that use's requirement rather than a default. A test that has to
+// put a second caller inside the flight wants a window the caller cannot miss; a
+// test that only has to END while the flight is open wants a fraction of it,
+// because it pays the sleep again on every -count. The short one is
+// sleepingCodexFakeHolding.
 //
 // The sleep's fds are redirected, and that is load-bearing rather than tidy: the
 // sleep is a GRANDCHILD of the process Go spawned, it inherits the stdout pipe,
@@ -189,6 +392,21 @@ func settleAbandonedProbes(t *testing.T, binaries ...string) {
 // binary does.
 func sleepingCodexFake(t *testing.T) (bin, probeLog string) {
 	t.Helper()
+	return sleepingCodexFakeHolding(t, 2*time.Second)
+}
+
+// sleepingCodexFakeHolding is sleepingCodexFake with the probe held open for
+// exactly as long as the caller asks.
+//
+// The hold is CONCATENATED rather than formatted, which is what leaves the
+// script's own printf verbs alone, and it is written as a plain fractional count
+// rather than Go's duration syntax so the shell gets a number every `sleep`
+// takes rather than a suffix it may not. It is not a shorter `sleep` in a second
+// copy of this script: the two fakes differ in that one number alone, and a copy
+// of the body is a second thing to keep in step with the argv the child is
+// driven under.
+func sleepingCodexFakeHolding(t *testing.T, hold time.Duration) (bin, probeLog string) {
+	t.Helper()
 	setHarnessPolicyParentEnv(t)
 	probeLog = filepath.Join(t.TempDir(), "probes")
 	t.Setenv("CODEX_PROBE_LOG", probeLog)
@@ -196,7 +414,7 @@ func sleepingCodexFake(t *testing.T) (bin, probeLog string) {
 	bin = fakeHarnessPolicyBinary(t, "codex", `
 if [ "$1" = "features" ]; then
   printf 'probe\n' >> "$CODEX_PROBE_LOG"
-  sleep 2 >/dev/null 2>&1
+  sleep `+strconv.FormatFloat(hold.Seconds(), 'f', 3, 64)+` >/dev/null 2>&1
   printf '`+allCodexFeatureRows+`'
   exit 0
 fi
@@ -335,10 +553,6 @@ printf '%s' 'KEEP'
 func TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, _ := countingClaudeFake(t)
-	// The cancelled leader below walks away from a flight that keeps running, so
-	// the probe it abandoned must not outlive the test — see
-	// settleAbandonedProbes.
-	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan error, 1)
@@ -389,11 +603,6 @@ func TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation(t *testi
 func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, _ := countingClaudeFake(t)
-	// This caller is dead on arrival, so it enters the group and then leaves
-	// without waiting — the flight it joined is somebody else's, and the leader
-	// below does wait for it, but a dead caller that found the cache COLD would
-	// have led a flight of its own and abandoned that. Drain it either way.
-	settleAbandonedProbes(t, bin)
 
 	leaderDone := make(chan error, 1)
 	go func() {
@@ -424,9 +633,6 @@ func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *t
 func TestCodexProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
-	// A cancelled leader abandons the flight it started; drain it so the probe
-	// cannot outlive the test — see settleAbandonedProbes.
-	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	go func() { _ = codexFeaturesFor(leaderCtx, bin) }()
@@ -510,10 +716,6 @@ func TestCodexProbeCancelledLeaderLeavesNoCachedNegative(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
 	id := codexIdentityFor(t, bin)
-	// This is the case with NO follower, so nothing else in the test is waiting
-	// on the flight the cancelled leader started: it is the one place where the
-	// abandoned probe is entirely unwitnessed.
-	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan struct{})
@@ -581,17 +783,19 @@ printf '%s' 'KEEP'
 	if _, _, err := (&CodexClient{binary: bin}).Reflect(cancelled, "prompt"); err == nil {
 		t.Fatal("a cancelled turn reported success")
 	}
-	// Settle the probe this call walked away from before reading the log. Two
-	// reasons, and the second is the one that made this test a data race on
-	// main (#853). The abandoned goroutine keeps running after Reflect returns —
-	// deliberately, so a caller that cannot use the verdict does not block on it
-	// — and harnessCommand inside it logs a scratch-budget warning through the
-	// process default logger, which is `logs`. And even with that write made
-	// safe, an unsettled probe makes BOTH assertions below read a log mid-write:
-	// the first could see a half-written record, and a straggler could still add
-	// a line after the test has moved on. Settling is what makes "the cancelled
-	// turn reported nothing" a statement about the whole turn.
-	settleAbandonedProbes(t, bin)
+	// Settle the probe this call walked away from before reading the log, which
+	// is mid-test and so is NOT the cleanup every probe test now gets from its
+	// helper. Two reasons, and the second is the one that made this test a data
+	// race on main (#853). The abandoned goroutine keeps running after Reflect
+	// returns — deliberately, so a caller that cannot use the verdict does not
+	// block on it — and harnessCommand inside it logs a scratch-budget warning
+	// through the process default logger, which is `logs`. And even with that
+	// write made safe, an unsettled probe makes BOTH assertions below read a log
+	// a straggler can still append to. Settling HERE is what makes "the cancelled
+	// turn reported nothing" a statement about the whole turn rather than about
+	// this instant; the end-of-test settle only keeps the straggler out of the
+	// NEXT test.
+	settleAbandonedProbes(t)
 	if strings.Contains(logs.String(), "unverified") {
 		t.Errorf("a caller that stopped waiting reported the unverified verdict: %q", logs.String())
 	}
@@ -601,6 +805,154 @@ printf '%s' 'KEEP'
 	}
 	if !strings.Contains(logs.String(), "unverified") {
 		t.Errorf("a genuine unverified verdict was silenced by the cancelled turn: %q", logs.String())
+	}
+}
+
+// TestCodexProbeIsSettledAtTestEnd is the contract #855's hand-placed settle
+// calls used to carry: a probe a test walked away from is FINISHED before that
+// test's cleanups end, whether or not the test installed a capture.
+//
+// #855 made the settle seven tests' job, and the tests it left out leak — a
+// straggler's warning lands in the NEXT test's capture, and
+// TestCodexProbePassesEveryKeyWhenAllAreDeclared asserts that a correct install
+// is silent. So the settle cannot be something a test remembers to do. It is
+// registered by the two helpers every such test already calls, and this is the
+// test that says so.
+//
+// What each row is evidence for is stated rather than implied, because the two
+// registrations are NOT interchangeable and only one of them is load-bearing for
+// this observable:
+//
+//   - "no capture" isolates fakeHarnessPolicyBinary's registration. Deleting the
+//     claimProbeSettle call fails this row and nothing else, which is the proof
+//     that the fake reaches the probe tests that read no log at all.
+//   - "a capture installed" is coverage of the shape, not a separate isolation of
+//     captureProcessLogs's registration. Deleting markCaptureInstalled leaves it
+//     PASSING, because the fake's own settle drains the same keys a moment later
+//     and t.Cleanup is LIFO, so the flight is still finished before the cleanups
+//     end. What the capture's registration adds is WHERE its settle runs: in the
+//     same closure as the restore of the previous handler, so it precedes it.
+//
+// That ordering is asserted by the shape of captureProcessLogs rather than
+// observed here, and deliberately so: it cannot be observed, because no probe logs
+// anything at the END of its flight — harnessCommand's warnings are all pre-spawn,
+// and warnOnWeakerCodexPolicy belongs to a caller that came back, not to an
+// abandoned flight. There is no write late enough for the settle-before-restore
+// order to move between one test's buffer and the next, so a test for it could
+// only assert the ordering back at itself. The evidence for the order is that the
+// settle and the restore are ONE closure with the settle first, not that some
+// second helper also drains the flight.
+//
+// Asserted from the PARENT, because a cleanup cannot be observed from inside the
+// test that owns it — a subtest's cleanups all run before its t.Run returns, so
+// what the parent sees is the state AFTER them. The observable is the probe's own
+// store rather than a sleep: the flight below stores its verdict because its
+// caller is alive, so an entry proves the probe ran to completion and an empty
+// cache proves it was still in flight when the subtest ended.
+//
+// Gated on windows the way every other shell-script fake in this package is: the
+// fake that holds the flight open is a `#!/bin/sh` script, which
+// fakeHarnessPolicyBinary refuses to write there, so there is no flight to settle.
+// The gate is on the WHOLE test rather than left to the fake's own skip, because a
+// skip inside the inner subtest leaves the parent's assertion running against an
+// identity nothing was ever filed under.
+func TestCodexProbeIsSettledAtTestEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	resetCodexFeatureProbe(t)
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		// The capture is where #856 put the settle, because it is the one thing
+		// every log-reading test installs and the one thing that knows when the
+		// test is over. See the note above on what this row does and does not
+		// isolate.
+		{name: "a capture installed", setup: func(t *testing.T) { captureProcessLogs(t) }},
+		// And the fake is the other half, because most probe tests read no log at
+		// all and are just as able to walk away from a flight. This is the row
+		// that fails if either of that helper's registrations goes away.
+		{name: "no capture", setup: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var id codexBinaryID
+			// Set by the inner subtest, and checked before the parent's own
+			// assertion reads id. A subtest that skipped or failed never assigns,
+			// and a zero codexBinaryID is a key no flight was ever filed under --
+			// so without this the parent would report "still in flight" about a
+			// probe that was never started. That is exactly what happened on
+			// windows before this check: fakeHarnessPolicyBinary skips there, which
+			// skips only the INNER subtest, and the parent went on to condemn a
+			// flight nobody had launched.
+			started := false
+			t.Run("walks away from a probe", func(t *testing.T) {
+				if tc.setup != nil {
+					tc.setup(t)
+				}
+				// A tenth of a second rather than sleepingCodexFake's two,
+				// because this test pays the hold twice on every -count and needs
+				// only a window no scheduling accident crosses: the body below
+				// ends microseconds after the spawn it waits for.
+				bin, probeLog := sleepingCodexFakeHolding(t, 100*time.Millisecond)
+				// Read here, while the fake still exists: the assertion below runs
+				// after this subtest's t.TempDir teardown, and a path that no
+				// longer exists cannot name the cache entry it is looking for.
+				id = codexIdentityFor(t, bin)
+				started = true
+				// The flight outliving the TEST rather than its caller is the whole
+				// situation, and it needs a live context: this goroutine stays
+				// blocked in singleflight's select, so the flight lands a positive
+				// verdict the assertion below can read. What nobody is watching is
+				// the goroutine, not the caller — and no amount of watching it from
+				// here is what settles the flight, which is the property under test.
+				go func() { _ = codexFeaturesFor(context.Background(), bin) }()
+				waitForProbeSpawns(t, probeLog, 1)
+				if _, ok := codexCachedSupport(id); ok {
+					t.Fatal("the probe answered before the subtest ended, so there is nothing in flight for the settle to join")
+				}
+			})
+			if !started {
+				t.Skip("the subtest above never reached its fake, so there is no flight and nothing to assert about it")
+			}
+			cached, ok := codexCachedSupport(id)
+			if !ok {
+				t.Fatal("the probe this subtest walked away from was still in flight when its cleanups ended, so its warnings can still land in whatever capture runs next")
+			}
+			if !cached.probed {
+				t.Errorf("the settled probe stored %+v, want the fake's positive verdict: the settle joined something, but not the probe", cached)
+			}
+		})
+	}
+}
+
+// TestProbeLedgerIsForgottenByATestThatBuildsNoFake covers the leak a capture-only
+// test would otherwise cause, and it exists because that test shape is easy to
+// write without noticing.
+//
+// probeLedgers is package-level and keyed by *testing.T, so a ledger that is never
+// deleted pins a finished test — and every closure its cleanups hold — for the rest
+// of the binary's run. A capture-only test reaches the ledger through
+// markCaptureInstalled alone: it registers nothing in probeLedger.ids, so nothing
+// else ever looks the ledger up again, and if the forget-cleanup rides only on the
+// fake's registration path then this test's own ledger is the one left behind.
+//
+// Asserted from the parent, because the forget is a cleanup: the subtest's cleanups
+// have all run by the time t.Run returns, so the parent's lookup is the state AFTER
+// them. The subtest also checks the ledger was really created, or the assertion
+// below would pass on a ledger that never existed — which is the other way this
+// could be wrong.
+func TestProbeLedgerIsForgottenByATestThatBuildsNoFake(t *testing.T) {
+	var sub *testing.T
+	t.Run("installs a capture and no fake", func(t *testing.T) {
+		sub = t
+		captureProcessLogs(t)
+		if _, ok := probeLedgers.Load(t); !ok {
+			t.Fatal("a capture-only test kept no ledger, so there is nothing here to forget and the assertion in the parent would be vacuous")
+		}
+	})
+	if _, ok := probeLedgers.Load(sub); ok {
+		t.Error("a test that installed a capture and built no fake left its ledger behind, so the package-level map pins the finished test for the rest of the run; the forget-cleanup has to ride on ledgerFor, which every path to the ledger goes through")
 	}
 }
 
@@ -619,9 +971,6 @@ printf '%s' 'KEEP'
 func TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, probeLog := countingClaudeFake(t)
-	// The leader below is cancelled mid-flight and walks away from it; drain it
-	// so the second probe it spawns is not still running when the test ends.
-	settleAbandonedProbes(t, bin)
 	const followers = 20
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -667,9 +1016,6 @@ func TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation(t *
 func TestCodexProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
-	// As above: a leader cancelled mid-flight leaves a probe running, and this is
-	// the burst that re-probes behind it.
-	settleAbandonedProbes(t, bin)
 	const followers = 20
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())

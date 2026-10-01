@@ -62,6 +62,64 @@ func readAuditRows(t *testing.T, store *Store) []RetrievalAuditRow {
 	return rows
 }
 
+// TestTheAuditWriteReportsTheVerdictsItRefused: a write that silently drops a row
+// cannot be told from a write that stored it, and the only thing that makes the
+// difference visible is the value this returns.
+//
+// The dropped row is a real product of the guard above — a verdict whose call has
+// been purged — so the caller above has already counted it into every figure it
+// will print. Returning nothing leaves that count describing a table it does not
+// match, and the branch that wrote nothing is indistinguishable from the branch
+// that wrote everything.
+//
+// It must be the refused ROWS and not a count, because the caller has to subtract
+// them from per-source figures as well as the total, and a bare count cannot say
+// which source or which outcome it came from.
+func TestTheAuditWriteReportsTheVerdictsItRefused(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	live := recordCallKeeping(t, s, testProject, "MEM-A", 830)
+	// No call holds this rowid and none ever did, which is the state a purge
+	// leaves behind. Both rows name the SAME memory, so a refused set keyed on the
+	// memory alone would report the live one too.
+	const gone = 9999
+	batch := []RetrievalAuditRow{
+		{ProjectID: testProject, RecordRowID: live, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-A", Outcome: "used", Signal: "identifier"},
+		{ProjectID: testProject, RecordRowID: gone, SessionID: "s1", Source: "session_start",
+			MemoryID: "MEM-A", Outcome: "ignored"},
+	}
+
+	refused, err := s.RecordRetrievalAudits(ctx, batch)
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+	if len(refused) != 1 {
+		t.Fatalf("the write reports %d refused row(s), want 1 — the row naming the rowid no call holds. "+
+			"Reported: %+v", len(refused), refused)
+	}
+	if refused[0].RecordRowID != gone || refused[0].Source != "session_start" || refused[0].Outcome != "ignored" {
+		t.Errorf("the refused row is %+v, want the one naming rowid %d under source session_start with outcome "+
+			"ignored — the caller subtracts per source and per outcome, so those fields have to survive the "+
+			"round trip", refused[0], gone)
+	}
+	if got := readAuditRows(t, s); len(got) != 1 || got[0].RecordRowID != live {
+		t.Errorf("the table holds %+v, want only the live call's verdict at rowid %d", got, live)
+	}
+
+	// A batch with nothing to refuse reports nothing, and says so by being empty
+	// rather than by a sentinel: a caller that prints "0 refused" and a caller that
+	// prints nothing must not be different code paths.
+	clean, err := s.RecordRetrievalAudits(ctx, batch[:1])
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits (clean): %v", err)
+	}
+	if len(clean) != 0 {
+		t.Errorf("a batch the guard accepts reports %d refused row(s), want none: %+v", len(clean), clean)
+	}
+}
+
 func TestRecordRetrievalAuditsRoundTrip(t *testing.T) {
 	store, _, ctx := auditStore(t)
 	recs, err := store.RetrievalRecordsForProject(ctx, "p1", 10)
@@ -82,7 +140,7 @@ func TestRecordRetrievalAuditsRoundTrip(t *testing.T) {
 		{ProjectID: "p1", RecordRowID: recID, Source: "search", SessionID: "", MemoryID: "MEM2",
 			Outcome: "ignored", Signal: ""},
 	}
-	if err := store.RecordRetrievalAudits(ctx, rows); err != nil {
+	if _, err := store.RecordRetrievalAudits(ctx, rows); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
 	}
 	got := readAuditRows(t, store)
@@ -115,7 +173,7 @@ func TestRetrievalAuditsFiltersByProjectAndOutcome(t *testing.T) {
 		auditRow("MEM2", "search", "ignored", ""),
 		{ProjectID: "p2", Source: "search", MemoryID: "MEM9", Outcome: "contradicted", Signal: "negation"},
 	}
-	if err := store.RecordRetrievalAudits(ctx, rows); err != nil {
+	if _, err := store.RecordRetrievalAudits(ctx, rows); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
 	}
 
@@ -158,14 +216,14 @@ func TestRecordRetrievalAuditsReplacesTheRecordsItJudges(t *testing.T) {
 		{ProjectID: "p1", RecordRowID: recID, Source: "search", MemoryID: "MEM1", Outcome: "ignored"},
 		{ProjectID: "p1", RecordRowID: recID, Source: "search", MemoryID: "MEM2", Outcome: "ignored"},
 	}
-	if err := store.RecordRetrievalAudits(ctx, first); err != nil {
+	if _, err := store.RecordRetrievalAudits(ctx, first); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	// The next turn's transcript knows better: MEM1 was read after all.
 	second := []RetrievalAuditRow{
 		{ProjectID: "p1", RecordRowID: recID, Source: "search", MemoryID: "MEM1", Outcome: "used", Signal: "identifier"},
 	}
-	if err := store.RecordRetrievalAudits(ctx, second); err != nil {
+	if _, err := store.RecordRetrievalAudits(ctx, second); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	got := readAuditRows(t, store)
@@ -182,7 +240,7 @@ func TestRecordRetrievalAuditsReplacesTheRecordsItJudges(t *testing.T) {
 // sit in the table forever because nothing else would replace it.
 func TestRecordRetrievalAuditsRejectsARowWithNoMemory(t *testing.T) {
 	store, _, ctx := auditStore(t)
-	err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
+	_, err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
 		{ProjectID: "p1", Source: "search", Outcome: "used"},
 	})
 	if err == nil {
@@ -195,7 +253,7 @@ func TestRecordRetrievalAuditsRejectsARowWithNoMemory(t *testing.T) {
 // retrieval was this" as "all of them", which is a claim about no call.
 func TestRecordRetrievalAuditsRejectsARowWithNoProject(t *testing.T) {
 	store, _, ctx := auditStore(t)
-	err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
+	_, err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
 		{MemoryID: "MEM1", Source: "search", Outcome: "used"},
 	})
 	if err == nil {
@@ -206,8 +264,32 @@ func TestRecordRetrievalAuditsRejectsARowWithNoProject(t *testing.T) {
 // TestRecordRetrievalAuditsEvictsOldestOverCap: the table is bounded, and the
 // bound evicts the OLDEST rows — the evidence an operator is looking at is the
 // recent past, so losing the far end is what keeps the window useful.
+//
+// Two more calls are recorded before the cap is lowered, so each pass below files
+// against a call the store actually holds. That is the shape a pass has in
+// production and it is the only shape the write accepts: a verdict naming a rowid
+// no call owns is refused (see
+// TestAVerdictForACallThatHasGoneAwayIsDroppedRatherThanInherited), so a fixture
+// that invented rowids 2 and 3 out of a single recorded call would now store
+// nothing and this test would be measuring the refusal instead of the eviction.
 func TestRecordRetrievalAuditsEvictsOldestOverCap(t *testing.T) {
 	store, _, ctx := auditStore(t)
+	// Two more calls, each KEEPING the memory the pass below files against it —
+	// the fixture's own call (rowid 1) kept MEM1 and MEM2. A call that kept
+	// nothing cannot be given a verdict: the write files one only against a call
+	// that kept that memory, so this fixture would otherwise be measuring the
+	// refusal instead of the eviction.
+	for i, memory := range []string{"MEM2", "MEM3"} {
+		if err := store.RecordRetrieval(ctx, RetrievalRecord{
+			ProjectID: "p1", Source: "search", QueryHash: digest(600 + i),
+			Outcome: "answerable",
+			Verdicts: []RowVerdict{
+				{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"},
+			},
+		}); err != nil {
+			t.Fatalf("RecordRetrieval %d: %v", i, err)
+		}
+	}
 	restore := retrievalAuditRowsCap
 	retrievalAuditRowsCap = 2
 	t.Cleanup(func() { retrievalAuditRowsCap = restore })
@@ -217,7 +299,7 @@ func TestRecordRetrievalAuditsEvictsOldestOverCap(t *testing.T) {
 			ProjectID: "p1", RecordRowID: int64(i), Source: "search",
 			MemoryID: "MEM" + string(rune('0'+i)), Outcome: "ignored",
 		}}
-		if err := store.RecordRetrievalAudits(ctx, rows); err != nil {
+		if _, err := store.RecordRetrievalAudits(ctx, rows); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
 		}
 	}
@@ -245,7 +327,7 @@ func TestRecordRetrievalAuditsStoresNoText(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateWithID: %v", err)
 	}
-	if err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
+	if _, err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
 		{ProjectID: "p1", RecordRowID: 1, Source: "search", MemoryID: "MEM1", Outcome: "used", Signal: "identifier"},
 	}); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
@@ -294,7 +376,7 @@ func TestHistoryPurgeRemovesTheVerdictsNamingAMemory(t *testing.T) {
 			t.Fatalf("CreateWithID %s: %v", id, err)
 		}
 	}
-	if err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
+	if _, err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
 		auditRow("MEM1", "search", "used", "identifier"),
 		auditRow("MEM2", "search", "ignored", ""),
 	}); err != nil {
@@ -307,6 +389,1026 @@ func TestHistoryPurgeRemovesTheVerdictsNamingAMemory(t *testing.T) {
 	if len(got) != 1 || got[0].MemoryID != "MEM2" {
 		t.Errorf("verdicts after the purge = %+v, want only MEM2's", got)
 	}
+}
+
+// TestAPurgeDoesNotLeaveAVerdictThatTheNextCallCanInherit: #852. A call admits
+// MEM1 and MEM2, so the audit holds (rowid, MEM1) and (rowid, MEM2). Purging
+// MEM1 takes the record row — its verdicts name MEM1 — and with it the
+// (rowid, MEM1) verdict, which is right. The (rowid, MEM2) verdict is NOT the
+// purged memory's, so nothing about the purge's own predicate reaches it, and it
+// survives pointing at a row that no longer exists.
+//
+// That is only half the damage, and the half that is bounded: the orphan is
+// counted by RetrievalAudits, the report's denominator, against a call nobody
+// can read. The other half is that retrieval_record has no AUTOINCREMENT, so the
+// freed rowid is handed to the NEXT call — and the orphan is silently
+// re-attributed to a call that never admitted MEM2.
+//
+// The assertion is made BEFORE the second call, because that is the state the
+// bug is in: an orphan is already wrong the moment its call is gone, and the
+// reuse only decides which wrong call is blamed for it. The reuse is then
+// checked as a PRECONDITION rather than as a hope — if a later build stops
+// reusing freed rowids, an orphan stops being inherited and stops being
+// misattributed, and this test must be re-read rather than left passing for the
+// wrong reason.
+func TestAPurgeDoesNotLeaveAVerdictThatTheNextCallCanInherit(t *testing.T) {
+	store, db, ctx := auditStore(t)
+	recs, err := store.RetrievalRecordsForProject(ctx, "p1", 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecordsForProject: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d record(s), want the fixture's 1", len(recs))
+	}
+	freed := recs[0].RowID
+
+	// The purge needs the memories to EXIST — it refuses to delete a name it
+	// cannot find, and refusing is right, so the verdict rows are not what this
+	// fixture has to arrange.
+	for _, id := range []string{"MEM1", "MEM2"} {
+		if _, err := store.CreateWithID(ctx, "p1", id, Memory{
+			Content: "a fixture memory " + id, Category: "gotcha", Source: "manual",
+		}); err != nil {
+			t.Fatalf("CreateWithID %s: %v", id, err)
+		}
+	}
+	// Filed against the CALL's rowid, which is the shape a row has in production.
+	if _, err := store.RecordRetrievalAudits(ctx, []RetrievalAuditRow{
+		{ProjectID: "p1", RecordRowID: freed, Source: "search", MemoryID: "MEM1",
+			Outcome: "used", Signal: "identifier"},
+		{ProjectID: "p1", RecordRowID: freed, Source: "search", MemoryID: "MEM2", Outcome: "ignored"},
+	}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	if err := store.DeleteWithOptions(ctx, "MEM1", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The record row is gone, so the rowid is free — the state the second half
+	// of the test depends on.
+	var records int
+	if err := db.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&records); err != nil {
+		t.Fatalf("count retrieval records: %v", err)
+	}
+	if records != 0 {
+		t.Fatalf("%d record row(s) survive the purge, want 0 — the premise is that rowid %d is free", records, freed)
+	}
+	for _, r := range readAuditRows(t, store) {
+		if r.RecordRowID == freed {
+			t.Errorf("the verdict about %s still names record rowid %d, which the purge removed: it is a verdict "+
+				"about a call that no longer exists, and the next call to take that rowid inherits it", r.MemoryID, freed)
+		}
+	}
+
+	// And the reuse, asserted rather than assumed: this is the step that turns an
+	// orphan into a wrong report, so a build that stopped freeing rowids must not
+	// let this test keep passing on the strength of a reuse that no longer happens.
+	if err := store.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: "p1", Source: "search", Outcome: "answerable",
+		Verdicts: []RowVerdict{{ID: "MEM2", Kept: true, Stage: "fit", Reason: "fit_response"}},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (the next call): %v", err)
+	}
+	next, err := store.RetrievalRecordsForProject(ctx, "p1", 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecordsForProject: %v", err)
+	}
+	if len(next) != 1 {
+		t.Fatalf("got %d record(s) after the second call, want 1", len(next))
+	}
+	if next[0].RowID != freed {
+		t.Fatalf("the second call took rowid %d, not the freed %d — freed rowids are no longer reused, so this "+
+			"test no longer demonstrates anything and must be re-read", next[0].RowID, freed)
+	}
+	// The call that now owns rowid `freed` has admitted MEM2 and been given no
+	// verdict of its own, so nothing may be attributed to it.
+	for _, r := range readAuditRows(t, store) {
+		if r.RecordRowID == freed {
+			t.Errorf("the new call at rowid %d is credited with a verdict about %s (%s, %s) — it is the call the "+
+				"purge removed, not the one that just ran", freed, r.MemoryID, r.Outcome, r.Source)
+		}
+	}
+}
+
+// TestTheRecordCapPairsOnEveryEvictionNotOnlyTheFirst: the pairing is not a
+// one-shot that fires when the table first crosses the bound.
+//
+// retrieval_record has no AUTOINCREMENT and its window never empties on its own,
+// so its rowid grows monotonically and `rowid > retrievalRecordRowsCap` is true of
+// EVERY insert from the cap-th onward — the steady state evicts exactly ONE record
+// row per call. A review of this PR read the sweep as amortised over a bulk
+// eviction and was right to: the shape that reads as amortised (one insert, many
+// rows gone) happens once, when a store is seeded past the cap, and never again.
+// So this walks three consecutive evictions and asks each one to take its own
+// call's verdict — the second and third are the ones a first-crossing-only
+// implementation would leave behind, and a sweep that deleted on a rising counter
+// instead of on the eviction's own bound would pass the first test and fail here.
+func TestTheRecordCapPairsOnEveryEvictionNotOnlyTheFirst(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two audited calls at the plain rowids the arithmetic below is written
+	// against, then a cap of one: every insert from the second onward crosses it,
+	// so the second and third inserts are the steady state itself.
+	calls := seedAuditedCalls(t, s, testProject, 2)
+	restore := retrievalRecordRowsCap
+	retrievalRecordRowsCap = 1
+	t.Cleanup(func() { retrievalRecordRowsCap = restore })
+
+	// judge records a call that KEPT memory and then files a verdict against the
+	// rowid it was given, which is the order the assembler produces them in. It
+	// returns that rowid rather than assuming one, so the assertions below name
+	// the row the store actually wrote.
+	judge := func(call int, memory string) int64 {
+		t.Helper()
+		if err := s.RecordRetrieval(ctx, RetrievalRecord{
+			ProjectID: testProject, Source: "search", QueryHash: digest(call),
+			Outcome: "answerable",
+			Verdicts: []RowVerdict{
+				{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"},
+			},
+		}); err != nil {
+			t.Fatalf("RecordRetrieval (call %d): %v", call, err)
+		}
+		recs, err := s.RetrievalRecords(ctx, 1)
+		if err != nil {
+			t.Fatalf("RetrievalRecords: %v", err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+		}
+		if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+			ProjectID: testProject, RecordRowID: recs[0].RowID, SessionID: "s1",
+			Source: "search", MemoryID: memory, Outcome: "ignored",
+		}}); err != nil {
+			t.Fatalf("RecordRetrievalAudits (call %d): %v", call, err)
+		}
+		return recs[0].RowID
+	}
+
+	// assertOnly reads the WHOLE table, not a filtered view of it: an orphan
+	// anywhere in it has to fail rather than being averaged away by the verdict
+	// that should have survived.
+	assertOnly := func(step, wantMemory string, wantRowID int64) {
+		t.Helper()
+		got := readAuditRows(t, s)
+		if len(got) != 1 {
+			t.Fatalf("%s: %d verdict(s) in the table, want 1 — a cap of one keeps one call, so at most one "+
+				"verdict can belong to a call the store still holds (%+v)", step, len(got), got)
+		}
+		if got[0].RecordRowID != wantRowID || got[0].MemoryID != wantMemory {
+			t.Errorf("%s: the surviving verdict is (%s, rowid %d), want (%s, rowid %d)", step,
+				got[0].MemoryID, got[0].RecordRowID, wantMemory, wantRowID)
+		}
+	}
+
+	// calls[0] is judged, then two more calls run. The first evicts calls[0] and
+	// takes its verdict; the second evicts the call the first one wrote and takes
+	// THAT call's verdict. The third call's write is the one a pairing that only
+	// fires when the table FIRST crosses the bound would leave an orphan behind.
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: calls[0], SessionID: "s1", Source: "search",
+		MemoryID: "MEM-1", Outcome: "ignored",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the seeded call): %v", err)
+	}
+	second := judge(902, "MEM-2")
+	assertOnly("after the second call", "MEM-2", second)
+
+	third := judge(903, "MEM-3")
+	assertOnly("after the third call", "MEM-3", third)
+
+	// And the record table is where the steady state is stated as a fact rather
+	// than inferred: one row in, one row out, forever.
+	recs, err := s.RetrievalRecords(ctx, 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("the record table holds %d rows at a cap of 1, want 1", len(recs))
+	}
+}
+
+// TestTheRecordCapTakesTheVerdictsWithIt: #852's second delete path. The cap
+// evicts the OLDEST recorded calls, and a verdict filed against an evicted call
+// outlives it — the same orphan as the purge's, reached by a different predicate
+// (a rowid bound, not a memory id) and therefore missed by a fix written only for
+// the purge.
+//
+// The purge's reuse is what makes its orphan visible in a report; the cap's is
+// not, and the difference is worth stating rather than leaving implied. The cap
+// keeps `cap` rows, so it never frees the HIGHEST rowid, and the next insert is
+// always max(rowid)+1 — so a cap orphan cannot be inherited by the next call. It
+// is still wrong: a verdict counted in the denominator of a precision report
+// belongs to a call the store no longer holds, and it is bounded only by the
+// audit's own cap. That is why the assertion is "no verdict names an evicted
+// rowid" and not "no verdict was inherited".
+func TestTheRecordCapTakesTheVerdictsWithIt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Three calls, each already judged, each with a verdict of its own.
+	calls := seedAuditedCalls(t, s, testProject, 3)
+	// One verdict per call, plus an UNATTRIBUTED one (record_rowid 0) — the second
+	// half of this test's subject. Zero is the deliberate "not attributable to a
+	// call" value, and the eviction's bound is a ROWID bound: a bare
+	// `record_rowid <= ?` reads 0 as "at or below the bound" and takes every
+	// unattributed verdict in the table the first time the cap evicts anything,
+	// which no other seed here would catch because every other one names a real
+	// call.
+	rows := make([]RetrievalAuditRow, 0, len(calls)+1)
+	for i, rowid := range calls {
+		rows = append(rows, RetrievalAuditRow{
+			ProjectID: testProject, RecordRowID: rowid, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-" + string(rune('1'+i)), Outcome: "ignored",
+		})
+	}
+	rows = append(rows, RetrievalAuditRow{
+		ProjectID: testProject, RecordRowID: 0, SessionID: "s1", Source: "search",
+		MemoryID: "MEM-SESSION", Outcome: "ignored",
+	})
+	if _, err := s.RecordRetrievalAudits(ctx, rows); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	// Lowered AFTER the seed so the fixture's own rowids are the plain 1,2,3 the
+	// eviction's arithmetic is written against, and the fourth call is the one
+	// that crosses the bound: at a cap of 2 it evicts everything at or below rowid
+	// 4-2, which is calls[0] and calls[1].
+	restore := retrievalRecordRowsCap
+	retrievalRecordRowsCap = 2
+	t.Cleanup(func() { retrievalRecordRowsCap = restore })
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: testProject, Source: "search", QueryHash: digest(999),
+		Outcome: "answerable",
+		Verdicts: []RowVerdict{
+			{ID: "MEM-4", Kept: true, Stage: "fit", Reason: "fit_response"},
+		},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (the call past the cap): %v", err)
+	}
+
+	survivors := readAuditRows(t, s)
+	for _, r := range survivors {
+		for _, evicted := range calls[:2] {
+			if r.RecordRowID == evicted {
+				t.Errorf("the verdict about %s still names record rowid %d, which the cap evicted: it is a verdict "+
+					"about a call the store no longer holds", r.MemoryID, evicted)
+			}
+		}
+		if r.RecordRowID != calls[2] && r.RecordRowID != 0 {
+			t.Errorf("the surviving verdict names rowid %d, want only the call the cap kept (%d) or the "+
+				"unattributed one (0)", r.RecordRowID, calls[2])
+		}
+	}
+	if len(survivors) != 2 {
+		t.Fatalf("%d verdict(s) survive the cap's eviction, want 2 (the kept call's and the unattributed one)",
+			len(survivors))
+	}
+	// Named, not merely counted: the count above is also what a sweep that took
+	// everything below the bound would leave if it took the kept call's verdict
+	// instead, and the unattributed row is the one the sweep cannot be allowed to
+	// take.
+	kept, unattributed := 0, 0
+	for _, r := range survivors {
+		switch r.RecordRowID {
+		case calls[2]:
+			kept++
+		case 0:
+			unattributed++
+		}
+	}
+	if kept != 1 || unattributed != 1 {
+		t.Errorf("survivors are %d attributed to the kept call and %d unattributed, want 1 and 1 — an unattributed "+
+			"verdict belongs to no call and the eviction must not reach it", kept, unattributed)
+	}
+}
+
+// TestAVerdictForACallThatHasGoneAwayIsDroppedRatherThanInherited: #852's WRITE
+// side, and the one door the delete-side pairing above leaves open.
+//
+// audit.Run reads the recent calls (RetrievalRecordsForProject), judges them —
+// a GetByIDs and a comparison against the transcript — and only then files the
+// verdicts, keyed by the rowids it read at the TOP of the run. A purge landing in
+// that window deletes the call row and, with the pairing, takes its verdicts with
+// it; the write then re-files them against a rowid the store has already freed.
+// When the purged call is the newest, its rowid IS the table's maximum, so the
+// very next RecordRetrieval takes it — and a verdict about what the purged call
+// admitted becomes a verdict about what the NEXT call never saw. The cap's
+// eviction is not reachable in that window (it evicts rowids far below
+// CallWindow), so the purge is the live door.
+//
+// A hole is preferred to that, and the reason is worth stating rather than
+// leaving to inference: the call the purge removed is gone, so the (call, memory)
+// pair this verdict was about no longer exists and the report has lost ONE pair.
+// A re-filed verdict is not a lost pair but a WRONG one, counted in the
+// denominator under a call that never admitted the memory — and it is
+// indistinguishable from a real one afterwards, because nothing about the row
+// says which call it was read against.
+//
+// The batch is mixed on purpose. One call survives the purge and one does not,
+// and a guard that refused the whole batch would satisfy "nothing was inherited"
+// by storing nothing at all — which is why the surviving call's verdict is
+// asserted present and NAMED, not merely counted.
+func TestAVerdictForACallThatHasGoneAwayIsDroppedRatherThanInherited(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The purge needs the memories to EXIST — it refuses to delete a name it
+	// cannot find — and each call must admit a DIFFERENT one, or purging either
+	// would take both record rows and the surviving call this test needs would go
+	// with them.
+	for _, id := range []string{"MEM-A", "MEM-B"} {
+		if _, err := s.CreateWithID(ctx, testProject, id, Memory{
+			Content: "a fixture memory " + id, Category: "gotcha", Source: "manual",
+		}); err != nil {
+			t.Fatalf("CreateWithID %s: %v", id, err)
+		}
+	}
+	// call records a call admitting exactly one memory and returns the rowid the
+	// store gave it rather than assuming one, so the assertions below name the
+	// row that exists.
+	seq := 0
+	call := func(memory string) int64 {
+		t.Helper()
+		seq++
+		if err := s.RecordRetrieval(ctx, RetrievalRecord{
+			ProjectID: testProject, Source: "search", QueryHash: digest(800 + seq),
+			Outcome:  "answerable",
+			Verdicts: []RowVerdict{{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"}},
+		}); err != nil {
+			t.Fatalf("RecordRetrieval (%s): %v", memory, err)
+		}
+		recs, err := s.RetrievalRecords(ctx, 1)
+		if err != nil {
+			t.Fatalf("RetrievalRecords: %v", err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+		}
+		return recs[0].RowID
+	}
+	first := call("MEM-A")
+	newest := call("MEM-B")
+
+	// The pass that reads, judges and writes normally, before anything is purged.
+	// Its verdicts are what the sweep below is expected to take.
+	pass := []RetrievalAuditRow{
+		{ProjectID: testProject, RecordRowID: first, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-A", Outcome: "used", Signal: "identifier"},
+		{ProjectID: testProject, RecordRowID: newest, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-B", Outcome: "ignored"},
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, pass); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the first pass): %v", err)
+	}
+
+	// The purge lands inside the second pass's read-judge-write window. MEM-B is
+	// the memory only the NEWEST call admitted, so this frees `newest` and leaves
+	// `first` alone — which is the state the assertions below are about.
+	if err := s.DeleteWithOptions(ctx, "MEM-B", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 || recs[0].RowID != first {
+		t.Fatalf("the purge left %d record row(s) (%+v), want just the call at rowid %d — the premise is that "+
+			"rowid %d is free and the one at %d is not", len(recs), recs, first, newest, first)
+	}
+
+	// The late write: the same pass, filing what it judged at the top of its run.
+	// One of the two calls it read no longer exists, and the write has to say so
+	// rather than store a verdict against a rowid the store has given away.
+	if _, err := s.RecordRetrievalAudits(ctx, pass); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+
+	got := readAuditRows(t, s)
+	for _, r := range got {
+		if r.RecordRowID == newest {
+			t.Errorf("the late pass stored a verdict about %s (%s) under record rowid %d, which the purge freed: "+
+				"the call that admitted it is gone, and the next call to take that rowid inherits a verdict about a "+
+				"memory it never admitted", r.MemoryID, r.Outcome, r.RecordRowID)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("%d verdict(s) in the table after the late pass, want 1 — the surviving call's, because a guard "+
+			"that dropped the whole batch would store nothing and still inherit nothing (%+v)", len(got), got)
+	}
+	if got[0].RecordRowID != first || got[0].MemoryID != "MEM-A" {
+		t.Errorf("the surviving verdict is (%s, rowid %d), want (MEM-A, rowid %d) — a guard that dropped the whole "+
+			"batch, or filed the dead call's, satisfies neither",
+			got[0].MemoryID, got[0].RecordRowID, first)
+	}
+
+	// And the reuse, asserted rather than assumed: this is the step that turns a
+	// stored orphan into a wrong report, so a build that stopped freeing rowids
+	// must not let this test keep passing on the strength of a reuse that no
+	// longer happens.
+	taken := call("MEM-A")
+	if taken != newest {
+		t.Fatalf("the next call took rowid %d, not the freed %d — freed rowids are no longer reused, so this test "+
+			"no longer demonstrates anything and must be re-read", taken, newest)
+	}
+	for _, r := range readAuditRows(t, s) {
+		if r.RecordRowID == newest {
+			t.Errorf("the call that now owns rowid %d is credited with a verdict about %s (%s) — it is not the call "+
+				"that was purged, and it admitted nothing that was judged", newest, r.MemoryID, r.Outcome)
+		}
+	}
+}
+
+// TestTheAuditCapStillBoundsTheTableWhenAPassDropsARow: the write-side guard's
+// second-order consequence, and the one a later reader of RecordRetrievalAudits
+// gets wrong by accident. The eviction rides on the rowid of the last row the
+// pass FILED, so a pass that drops a row must leave that bound alone: a dropped
+// row takes no rowid, and a bound reset on the drop path silently stops the
+// eviction — and the table then grows past its cap on every pass that races a
+// purge, which is a slower and quieter failure than the orphan it was fixing.
+//
+// Nothing above asserts it, because a dropped row is only reachable through the
+// window TestAVerdictForACallThatHasGoneAwayIsDroppedRatherThanInherited sets
+// up, and that test never fills the table. The dropped row goes LAST on purpose:
+// that is the position that decides the bound, so a guard that coped with a drop
+// in the middle of a batch and not at the end would be a guard with a hole in the
+// one place the cap reads it.
+func TestTheAuditCapStillBoundsTheTableWhenAPassDropsARow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	calls := seedAuditedCalls(t, s, testProject, 3)
+
+	// Lowered after seeding, so the calls above are at the plain rowids 1, 2, 3
+	// rather than at a cap's bound, and two of them are already judged: a table
+	// seeded with two verdicts and a cap of two sits AT the cap, so the next row
+	// filed is the one that makes the eviction live.
+	restore := retrievalAuditRowsCap
+	retrievalAuditRowsCap = 2
+	t.Cleanup(func() { retrievalAuditRowsCap = restore })
+
+	// The memory each seeded call kept: call i kept MEM-<i+1>, and a verdict may
+	// only name a memory its own call kept.
+	verdict := func(i int, record int64) RetrievalAuditRow {
+		return RetrievalAuditRow{
+			ProjectID: testProject, RecordRowID: record, SessionID: "s1",
+			Source: "search", MemoryID: "MEM-" + string(rune('1'+i)), Outcome: "ignored",
+		}
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{verdict(0, calls[0]), verdict(1, calls[1])}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the seeded pass): %v", err)
+	}
+
+	// A rowid beyond the table's, so nothing about the refusal is ambiguous: no
+	// call holds it and none ever did, which is the state a purge leaves behind
+	// and the state a future build that stops reusing rowids would leave a
+	// verdict in.
+	const gone = 9999
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{verdict(2, calls[2]), verdict(2, gone)}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the pass that drops a row): %v", err)
+	}
+
+	got := readAuditRows(t, s)
+	if len(got) != 2 {
+		t.Fatalf("%d verdict(s) in the table at a cap of 2, want 2 — the drop must not stand in for a filed row "+
+			"in the bound the eviction reads (%+v)", len(got), got)
+	}
+	// Named, not only counted: the count is also what a table holding the two
+	// NEWEST verdicts and a stale oldest one adds up to, and which pair survived
+	// is the whole of what the eviction is for.
+	for i, r := range got {
+		want := calls[i+1]
+		if r.RecordRowID != want {
+			t.Errorf("verdict %d names record rowid %d, want %d — at a cap of two the table keeps the two "+
+				"newest, so the oldest is the row the eviction exists to take", i, r.RecordRowID, want)
+		}
+	}
+}
+
+// recordCallKeeping records one call that KEPT memory, and returns the rowid the
+// store gave it rather than assuming one.
+//
+// "Kept" is the whole of what it takes, and it is why this exists instead of
+// RecordRetrieval with a hand-built verdicts slice at each call site: a verdict is
+// only filed against a call that admitted its memory, so a fixture whose call kept
+// nothing is a fixture whose verdicts the writer is right to drop, and it would
+// then be measuring the refusal rather than what the test is about.
+//
+// n seeds the query digest so repeated calls do not collide, and the memories are
+// real rows because a purge refuses to delete a name it cannot find.
+func recordCallKeeping(t *testing.T, s *Store, projectID, memory string, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.CreateWithID(ctx, projectID, memory, Memory{
+		Content: "a fixture memory " + memory, Category: "gotcha", Source: "manual",
+	}); err != nil {
+		t.Fatalf("CreateWithID %s: %v", memory, err)
+	}
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: projectID, Source: "search", QueryHash: digest(n),
+		Outcome: "answerable",
+		Verdicts: []RowVerdict{
+			{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"},
+		},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (%s): %v", memory, err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	return recs[0].RowID
+}
+
+// TestAVerdictForACallThatHasBeenReplacedIsNotInheritedByItsSuccessor: the guard
+// the write needs is not "the rowid still exists" but "the call at this rowid is
+// one that KEPT this memory".
+//
+// The gap it closes is the one an existence check cannot see. The window in
+// audit.Run (read calls at run.go:127, judge at 179-201, file at 214/224) is not
+// only wide enough for a purge to leave the rowid VACANT — it is wide enough for
+// the purge to be followed by a new search, so the freed rowid is RE-LET before the
+// pass writes. When the purged call is the newest, its rowid is the table's
+// maximum and the very next RecordRetrieval takes it, so `EXISTS (SELECT 1 FROM
+// retrieval_record WHERE rowid = ?)` answers about the successor and files the
+// dead call's verdict under a call that never admitted that memory. The predicate
+// checks the call's OWN kept set for the memory the verdict is about instead.
+//
+// The successor here deliberately admits a DIFFERENT memory, because a successor
+// that admitted the same one is not a wrong pair — that verdict would be a true
+// claim about a call that did admit its memory — and a test that let that case
+// pass for the wrong reason would be claiming more than the guard guarantees.
+func TestAVerdictForACallThatHasBeenReplacedIsNotInheritedByItsSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	survivor := recordCallKeeping(t, s, testProject, "MEM-A", 810)
+	doomed := recordCallKeeping(t, s, testProject, "MEM-B", 811)
+
+	// The first pass, before anything is purged.
+	pass := []RetrievalAuditRow{
+		{ProjectID: testProject, RecordRowID: survivor, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-A", Outcome: "used", Signal: "identifier"},
+		{ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-B", Outcome: "ignored"},
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, pass); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the first pass): %v", err)
+	}
+
+	// MEM-B is the memory only the NEWEST call kept, so this frees `doomed` and
+	// leaves `survivor` — the state both halves of the test need.
+	if err := s.DeleteWithOptions(ctx, "MEM-B", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// And the rowid is RE-LET before the pass writes. This call admits MEM-C, so
+	// the row sitting on `doomed` is a call that never kept MEM-B.
+	relet := recordCallKeeping(t, s, testProject, "MEM-C", 812)
+	if relet != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this test "+
+			"no longer demonstrates anything and must be re-read", relet, doomed)
+	}
+
+	// The late write, filing what the pass judged at the top of its run.
+	if _, err := s.RecordRetrievalAudits(ctx, pass); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+
+	for _, r := range readAuditRows(t, s) {
+		if r.MemoryID == "MEM-B" {
+			t.Errorf("the late pass stored a verdict about %s (%s) under record rowid %d, which now belongs to the "+
+				"call that kept MEM-C: the row EXISTS, so an existence check passes, and the verdict is filed "+
+				"against a call that never admitted its memory", r.MemoryID, r.Outcome, r.RecordRowID)
+		}
+	}
+	got := readAuditRows(t, s)
+	if len(got) != 1 || got[0].RecordRowID != survivor || got[0].MemoryID != "MEM-A" {
+		t.Fatalf("the table holds %+v, want exactly the surviving call's (MEM-A, rowid %d) — a guard that dropped "+
+			"the whole batch would store nothing, and one that filed the dead call's would store this", got, survivor)
+	}
+}
+
+// TestAVerdictIsNotFiledAgainstACallThatConsideredItsMemoryAndDroppedIt: the arm
+// that "does the rowid still exist" and even "does this call name the memory" both
+// miss, and it is the one that keeps the guard from being a weaker claim than it
+// looks.
+//
+// A record stores DROPPED verdicts as well as kept ones — a memory the call
+// considered and did not admit is exactly what the drop stages record — so "this
+// call names the memory" is not "this call showed the agent the memory". A
+// successor that CONSIDERED the dead call's memory and dropped it names it, so an
+// id-only guard files the verdict under a call that never put that memory in front
+// of the agent, and the report claims a use for a call that could not have had one.
+//
+// It is reachable, not hypothetical. The doomed call kept MEM-A and MEM-B, so a
+// purge of MEM-B frees its row while MEM-A survives; the successor's search then
+// considers MEM-A — it is still a candidate, it was never purged — and drops it
+// for its own reason. The late verdict about MEM-A belongs to the call that is
+// gone, and the row now under it belongs to one that refused to admit it.
+func TestAVerdictIsNotFiledAgainstACallThatConsideredItsMemoryAndDroppedIt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"MEM-A", "MEM-B", "MEM-C"} {
+		if _, err := s.CreateWithID(ctx, testProject, id, Memory{
+			Content: "a fixture memory " + id, Category: "gotcha", Source: "manual",
+		}); err != nil {
+			t.Fatalf("CreateWithID %s: %v", id, err)
+		}
+	}
+	// The doomed call kept BOTH MEM-A and MEM-B, so purging MEM-B frees its row
+	// without touching MEM-A — which is what leaves a still-live memory for the
+	// successor to consider.
+	doomed := recordCallKeepingAll(t, s, []string{"MEM-A", "MEM-B"}, 820)
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+		MemoryID: "MEM-A", Outcome: "used", Signal: "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the first pass): %v", err)
+	}
+	if err := s.DeleteWithOptions(ctx, "MEM-B", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The successor CONSIDERS MEM-A and DROPS it. It is the half a guard written
+	// as an id match cannot see, and the reason this is a separate test rather than
+	// a second phase of the one above.
+	relet := recordCallDropping(t, s, "MEM-A", 821)
+	if relet != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this test "+
+			"no longer demonstrates anything and must be re-read", relet, doomed)
+	}
+	var namesIt bool
+	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM retrieval_record WHERE rowid = ?
+		AND EXISTS (SELECT 1 FROM json_each(retrieval_record.verdicts) WHERE value->>'id' = ?))`,
+		doomed, "MEM-A").Scan(&namesIt); err != nil {
+		t.Fatalf("read the successor's verdicts: %v", err)
+	}
+	if !namesIt {
+		t.Fatal("the successor does not NAME MEM-A — this test's premise is that an id-only guard would pass it, " +
+			"so if the fixture stops dropping the memory the test no longer demonstrates anything")
+	}
+
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+		MemoryID: "MEM-A", Outcome: "used", Signal: "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+
+	for _, r := range readAuditRows(t, s) {
+		t.Errorf("the late pass stored a verdict about %s (%s) under record rowid %d, which now belongs to a call "+
+			"that considered that memory and DROPPED it — it never put it in front of the agent, so it cannot "+
+			"have used it", r.MemoryID, r.Outcome, r.RecordRowID)
+	}
+}
+
+// recordCallKeepingAll records one call that KEPT every memory named, and returns
+// its rowid. Several memories is the shape a real call has, and the one a purge
+// needs here: freeing the row by purging one of them leaves the others live.
+func recordCallKeepingAll(t *testing.T, s *Store, memories []string, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	verdicts := make([]RowVerdict, 0, len(memories))
+	for _, m := range memories {
+		verdicts = append(verdicts, RowVerdict{ID: m, Kept: true, Stage: "fit", Reason: "fit_response"})
+	}
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: testProject, Source: "search", QueryHash: digest(n),
+		Outcome: "answerable", Verdicts: verdicts,
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (%v): %v", memories, err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	return recs[0].RowID
+}
+
+// recordCallDropping records one call that CONSIDERED memory and did not admit it,
+// and returns its rowid. The stage and reason are a real drop reason rather than an
+// arbitrary string, because the point is that this is a verdict an assembler
+// produces, not a malformed row.
+func recordCallDropping(t *testing.T, s *Store, memory string, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: testProject, Source: "search", QueryHash: digest(n),
+		Outcome: "answerable",
+		Verdicts: []RowVerdict{
+			{ID: memory, Kept: false, Stage: "window", Reason: "outside_window"},
+		},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (dropping %s): %v", memory, err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	return recs[0].RowID
+}
+
+// TestALatePassCannotWipeTheSuccessorsVerdicts: the guard gates the INSERT, and
+// that leaves the DELETE half of the same write ungated — which is the same defect
+// reached through the other statement.
+//
+// RecordRetrievalAudits replaces a call's verdicts by deleting every row naming
+// that call's rowid, then inserting the batch's rows for it. The delete used to run
+// for every distinct rowid in the batch, unconditionally and up front, so a batch
+// carrying a row the guard would refuse still WIPED that rowid's existing verdicts
+// first. In the re-let window that destroys a legitimate call's evidence:
+//
+//  1. call A is the newest, rowid R, keeping MEM-X; a pass P is in flight having
+//     already read A.
+//  2. a purge of MEM-X deletes A and frees R (the sweep takes A's verdicts too).
+//  3. a new search records call B, which takes rowid R and keeps a different memory.
+//  4. a later pass Q reads B and files (R, MEM-B). That row is in the table, and Q's
+//     report says one verdict stored.
+//  5. P writes its stale batch: the replace-delete removes (R, MEM-B), and only
+//     THEN does the guard refuse P's (R, MEM-X) row because B never kept MEM-X.
+//
+// The table no longer holds B's verdict, nothing re-files it, and Q's already-printed
+// report claims a figure the table does not hold — the wrong number
+// Summary.Unfiled was added to prevent, reached through the delete rather than the
+// insert. So a pass may only REPLACE a call's verdicts when it is going to file
+// some: the guard's own outcome decides whether the batch has a claim on that
+// rowid at all.
+//
+// This is a separate test from the one above rather than another phase of it,
+// because the two pin different statements. That one is about what gets WRITTEN;
+// this is about what gets ERASED, and a fix to the insert's guard leaves the delete
+// exactly as exposed.
+func TestALatePassCannotWipeTheSuccessorsVerdicts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The doomed call is the newest, so its rowid is the table's maximum and the
+	// one a successor takes. recordCallKeeping creates the memory it names, which
+	// the purge below needs to exist.
+	doomed := recordCallKeeping(t, s, testProject, "MEM-X", 840)
+	stale := []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+		MemoryID: "MEM-X", Outcome: "used", Signal: "identifier",
+	}}
+	if _, err := s.RecordRetrievalAudits(ctx, stale); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the first pass): %v", err)
+	}
+	if err := s.DeleteWithOptions(ctx, "MEM-X", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The successor takes the freed rowid, keeping a different memory, and its own
+	// pass files that verdict. This row is what the late pass must not destroy.
+	successor := recordCallKeeping(t, s, testProject, "MEM-Y", 841)
+	if successor != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this "+
+			"test no longer demonstrates anything and must be re-read", successor, doomed)
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: successor, SessionID: "s2", Source: "search",
+		MemoryID: "MEM-Y", Outcome: "used", Signal: "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the successor's pass): %v", err)
+	}
+	if got := readAuditRows(t, s); len(got) != 1 {
+		t.Fatalf("the table holds %+v before the late pass, want the successor's one verdict — the premise is "+
+			"that it is there to be destroyed", got)
+	}
+
+	// The late pass, filing what it judged before the purge.
+	if _, err := s.RecordRetrievalAudits(ctx, stale); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+
+	got := readAuditRows(t, s)
+	if len(got) != 1 || got[0].RecordRowID != successor || got[0].MemoryID != "MEM-Y" {
+		t.Fatalf("the table holds %+v, want the successor's (MEM-Y, rowid %d) verdict still there. A refused "+
+			"verdict has no claim on that rowid, so this pass must not delete what the successor's own pass "+
+			"filed — and nothing re-files it, so the loss is permanent and the successor's printed report "+
+			"already claimed it", got, successor)
+	}
+}
+
+// TestAPartlyRefusedBatchStillKeepsTheRowsItFiled: the replacement delete runs
+// immediately after the FIRST row the guard accepts for a call, so it has to
+// exclude that row — and whether it can is decided by the order the batch happens
+// to name memories in, which is the one thing a caller does not control.
+//
+// The reachable shape is a partly-refused batch. The doomed call kept two
+// memories, so purging one frees its row; the successor takes the freed rowid and
+// kept ONE of the same two. The stale pass then names both: the memory the
+// successor dropped is refused, the one it kept is accepted. If the delete did not
+// exclude the row it had just written, that accepted row would delete ITSELF and
+// the table would end the pass holding nothing at all — a loss strictly worse than
+// the refusal it was avoiding, and one that a batch naming its memories in the
+// other order would not show.
+//
+// The order in the batch below is deliberate and load-bearing: the refused row
+// comes FIRST, so the delete lands after the accepted one has been written.
+func TestAPartlyRefusedBatchStillKeepsTheRowsItFiled(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The doomed call kept both memories, so purging one frees its row and leaves
+	// the other live for the successor to consider. Both are real rows because the
+	// purge below refuses to delete a name it cannot find.
+	for _, id := range []string{"MEM-X", "MEM-Y"} {
+		if _, err := s.CreateWithID(ctx, testProject, id, Memory{
+			Content: "a fixture memory " + id, Category: "gotcha", Source: "manual",
+		}); err != nil {
+			t.Fatalf("CreateWithID %s: %v", id, err)
+		}
+	}
+	doomed := recordCallKeepingAll(t, s, []string{"MEM-X", "MEM-Y"}, 850)
+	stale := []RetrievalAuditRow{
+		{ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-X", Outcome: "used", Signal: "identifier"},
+		{ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-Y", Outcome: "ignored"},
+	}
+	if err := s.DeleteWithOptions(ctx, "MEM-X", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The successor takes the freed rowid and kept only MEM-Y, so MEM-X is refused
+	// and MEM-Y is not. recordCallDropping alone would name nothing the guard could
+	// accept, so the successor's own kept set is MEM-Y and MEM-X is recorded as
+	// considered-and-dropped alongside it.
+	successor := recordCallKeepingAndDropping(t, s, []string{"MEM-Y", "MEM-X"}, 851)
+	if successor != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this "+
+			"test no longer demonstrates anything and must be re-read", successor, doomed)
+	}
+
+	refused, err := s.RecordRetrievalAudits(ctx, stale)
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+	if len(refused) != 1 || refused[0].MemoryID != "MEM-X" {
+		t.Fatalf("the pass refused %+v, want exactly the MEM-X row — the successor kept MEM-Y, so this test's "+
+			"premise is one refusal and one acceptance in that order", refused)
+	}
+
+	got := readAuditRows(t, s)
+	if len(got) != 1 || got[0].MemoryID != "MEM-Y" {
+		t.Fatalf("the table holds %+v, want the one row the guard accepted (MEM-Y). The replacement delete runs "+
+			"just after that row is written, so without excluding it the accepted row erases itself and the "+
+			"pass ends having stored nothing", got)
+	}
+}
+
+// recordCallKeepingAndDropping records one call that KEPT the first memory and
+// CONSIDERED-AND-DROPPED the rest, and returns its rowid. It is the mixed shape a
+// successor takes over a freed rowid when the dead call and the new one share some
+// of their memories.
+func recordCallKeepingAndDropping(t *testing.T, s *Store, memories []string, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	verdicts := make([]RowVerdict, 0, len(memories))
+	for i, m := range memories {
+		v := RowVerdict{ID: m, Stage: "fit", Reason: "fit_response", Kept: true}
+		if i > 0 {
+			v = RowVerdict{ID: m, Stage: "window", Reason: "outside_window", Kept: false}
+		}
+		verdicts = append(verdicts, v)
+	}
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: testProject, Source: "search", QueryHash: digest(n),
+		Outcome: "answerable", Verdicts: verdicts,
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (%v): %v", memories, err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	return recs[0].RowID
+}
+
+// TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts is the structural
+// half of the two behavioural tests above, and it exists because the gap was
+// invisible to the tests that were here: two delete paths, each correct about the
+// memory it was asked about and each silent about the calls they removed.
+//
+// The rule it checks is PER FUNCTION — the function that DELETEs from
+// retrieval_record must also DELETE from retrieval_audit — because a file-level
+// check would pass a file in which one path does this and another forgets. It
+// cannot see a WRONG predicate, which is why the two tests above exist and are
+// the ones that fail on the bug: the purge deleted verdicts by memory id, so this
+// scan was already satisfied before the fix. What it buys is the next path: a new
+// delete of recorded calls that reaches no verdicts at all is caught here, before
+// a report has counted one.
+func TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	const (
+		deletesRecords = "DELETE FROM retrieval_record"
+		deletesAudits  = "DELETE FROM retrieval_audit"
+	)
+	checked := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		// Split into top-level declarations by the `func ` line each one starts on,
+		// which is the coarsest split that still tells two paths apart. Each
+		// declaration's body is the lines up to the next one, and comment lines
+		// are dropped: a function that only EXPLAINS this rule must not be able to
+		// satisfy it. Whole-line `//` is the only comment form stripped, and it is
+		// enough here because every statement concerned opens its SQL with a
+		// backtick on the line after its `if`.
+		var fn, body string
+		seen := 0
+		flush := func() {
+			if fn == "" || !strings.Contains(body, deletesRecords) {
+				return
+			}
+			checked++
+			seen++
+			if !strings.Contains(body, deletesAudits) {
+				t.Errorf("%s's %s deletes retrieval_record rows and no retrieval_audit rows: every call that goes "+
+					"away takes the verdicts filed against it, or the report counts a verdict under a call that no "+
+					"longer exists", name, fn)
+			}
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			if strings.HasPrefix(line, "func ") {
+				flush()
+				fn = declaredName(strings.TrimPrefix(line, "func "))
+				body = ""
+			}
+			body += line + "\n"
+		}
+		flush()
+		// And the scan must not have walked PAST a delete it could not attribute.
+		// A split that silently misses a path is the same failure as no check at
+		// all, wearing the costume of one, so it is reported rather than skipped.
+		if seen == 0 && strings.Contains(string(src), deletesRecords) {
+			t.Errorf("%s holds a %s statement that no declaration in it was credited with — this scan did not "+
+				"read that file correctly, so treat its silence above as unchecked", name, deletesRecords)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no function deletes retrieval_record rows — this test is not looking at what it claims to")
+	}
+}
+
+// declaredName is the name a `func` line declares, with a method's receiver
+// reduced to its type: `func (s *Store) RecordRetrieval(ctx ...) error` reads as
+// `(*Store).RecordRetrieval`, so a failure names the path rather than a
+// signature.
+//
+// The receiver is stripped FIRST and the name cut from what is left. Built the
+// other way round — rewriting the signature and then cutting at the first `(` —
+// it returns "" for every method, because the "(" of the receiver it just wrote
+// is the first one it finds; and an empty name is indistinguishable from "not a
+// declaration" to the scan that calls it, so a test that skips every method is a
+// test that passes on two of the three paths it was written to cover. That is not
+// hypothetical: it is what this function did the first time.
+func declaredName(line string) string {
+	name, recv := strings.TrimSpace(line), ""
+	if strings.HasPrefix(name, "(") {
+		if end := strings.Index(name, ") "); end >= 0 {
+			recv = strings.TrimSpace(name[1:end])
+			if i := strings.LastIndex(recv, " "); i >= 0 {
+				recv = recv[i+1:]
+			}
+			recv = strings.TrimPrefix(recv, "*")
+			name = name[end+2:]
+		}
+	}
+	if end := strings.IndexAny(name, "(\t "); end >= 0 {
+		name = name[:end]
+	}
+	if recv != "" {
+		return "(*" + recv + ")." + name
+	}
+	return name
 }
 
 // TestRetrievalAuditsToleratesAnUnreadableRow: the reader must not fail the
@@ -527,18 +1629,29 @@ func TestRetrievalAuditTableIsNotExported(t *testing.T) {
 // call's rowid rather than a made-up one, because that is the shape a row has in
 // production — and because a fixture that could not be produced by the writer is
 // a fixture that can drift away from it unnoticed.
+// seedAuditedCalls records n calls in projectID and returns their rowids. Call i
+// KEEPS the memory `MEM-<i+1>`, and no other: the write only files a verdict
+// against a call that kept that memory, so a seeder that gave every call the same
+// memory would let a test file verdicts no call ever admitted and watch the
+// writer — correctly — refuse them.
+//
+// The memories are ids and nothing more. `RecordRetrieval` does not require one to
+// exist, and these tests are about rowids, caps and project ids rather than about
+// what is in the store, so nothing here creates a memory row; only the tests whose
+// subject is a PURGE need one, and they say so where they make it.
 func seedAuditedCalls(t *testing.T, s *Store, projectID string, n int) []int64 {
 	t.Helper()
 	ctx := context.Background()
 	var rowids []int64
 	for i := range n {
+		memory := "MEM-" + string(rune('1'+i))
 		rec := RetrievalRecord{
 			ProjectID: projectID,
 			Source:    "search",
 			QueryHash: digest(700 + i),
 			Outcome:   "answerable",
 			Verdicts: []RowVerdict{
-				{ID: "MEM-1", Kept: true, Stage: "fit", Reason: "fit_response"},
+				{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"},
 			},
 		}
 		if err := s.RecordRetrieval(ctx, rec); err != nil {
@@ -578,15 +1691,19 @@ func TestDeleteProjectTakesTheAuditsWithIt(t *testing.T) {
 		t.Fatalf("EnsureProject (other): %v", err)
 	}
 	otherCalls := seedAuditedCalls(t, s, "other-project", 1)
+	// The seeded call kept MEM-1, so that is the only memory its verdict can
+	// name: the write files a verdict against a call that KEPT the memory, so a
+	// verdict about anything else is refused and this fixture would be measuring
+	// the refusal rather than which project's rows the delete takes.
 	otherRows := []RetrievalAuditRow{{
 		ProjectID:   "other-project",
 		RecordRowID: otherCalls[0],
 		SessionID:   "s-other",
 		Source:      "search",
-		MemoryID:    "OTHER-MEM",
+		MemoryID:    "MEM-1",
 		Outcome:     "ignored",
 	}}
-	if err := s.RecordRetrievalAudits(ctx, otherRows); err != nil {
+	if _, err := s.RecordRetrievalAudits(ctx, otherRows); err != nil {
 		t.Fatalf("RecordRetrievalAudits (other): %v", err)
 	}
 
@@ -595,9 +1712,9 @@ func TestDeleteProjectTakesTheAuditsWithIt(t *testing.T) {
 		{ProjectID: testProject, RecordRowID: calls[0], SessionID: "s1", Source: "search",
 			MemoryID: "MEM-1", Outcome: "used", Signal: "identifier"},
 		{ProjectID: testProject, RecordRowID: calls[1], SessionID: "s1", Source: "search",
-			MemoryID: "MEM-1", Outcome: "ignored", Signal: ""},
+			MemoryID: "MEM-2", Outcome: "ignored", Signal: ""},
 	}
-	if err := s.RecordRetrievalAudits(ctx, rows); err != nil {
+	if _, err := s.RecordRetrievalAudits(ctx, rows); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
 	}
 
@@ -658,12 +1775,16 @@ func TestMergeProjectReassignsTheAudits(t *testing.T) {
 
 	oldCalls := seedAuditedCalls(t, s, old, 2)
 	newCalls := seedAuditedCalls(t, s, survivor, 1)
+	// Each verdict names the memory its own call kept — oldCalls[0] kept MEM-1,
+	// oldCalls[1] kept MEM-2, and newCalls[0] is the survivor's FIRST call so it
+	// kept MEM-1 too. Anything else is refused by the write, which files a
+	// verdict only against a call that kept its memory.
 	rows := []RetrievalAuditRow{
 		{ProjectID: old, RecordRowID: oldCalls[0], Source: "search", MemoryID: "MEM-1", Outcome: "used", Signal: "identifier"},
 		{ProjectID: old, RecordRowID: oldCalls[1], Source: "search", MemoryID: "MEM-2", Outcome: "ignored"},
-		{ProjectID: survivor, RecordRowID: newCalls[0], Source: "search", MemoryID: "MEM-3", Outcome: "superseded_in_session"},
+		{ProjectID: survivor, RecordRowID: newCalls[0], Source: "search", MemoryID: "MEM-1", Outcome: "superseded_in_session"},
 	}
-	if err := s.RecordRetrievalAudits(ctx, rows); err != nil {
+	if _, err := s.RecordRetrievalAudits(ctx, rows); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
 	}
 

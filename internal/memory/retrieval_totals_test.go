@@ -37,8 +37,16 @@ func totalsStore(t *testing.T) (*Store, string) {
 	return NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil))), dbPath
 }
 
-// totalsRecord writes one recorded call whose kept rows are the given ids.
-func totalsRecord(t *testing.T, s *Store, project, source string, kept ...string) {
+// totalsRecord writes one recorded call whose kept rows are the given ids, and returns
+// ITS OWN ROWID.
+//
+// The rowid comes back from the write rather than from a later read, because #857's
+// write guard files a verdict only against a call that kept THAT memory — so a fixture
+// that reached for "the newest row" instead of "the row this call is" would have its
+// verdict silently refused and would then assert on zeroes that agree for the wrong
+// reason. The guard returns the refusals rather than erroring, so only the fixture can
+// see it.
+func totalsRecord(t *testing.T, s *Store, project, source string, kept ...string) int64 {
 	t.Helper()
 	verdicts := make([]RowVerdict, 0, len(kept))
 	for _, id := range kept {
@@ -49,51 +57,40 @@ func totalsRecord(t *testing.T, s *Store, project, source string, kept ...string
 	}); err != nil {
 		t.Fatalf("RecordRetrieval(%s/%s): %v", project, source, err)
 	}
+	return newestRowID(t, s, project)
 }
 
-// totalsVerdict files one verdict against a call's rowid (0 for none).
+// fileVerdict files one verdict and FAILS if the store refused it. A refusal is not an
+// error — the rows simply are not there — and a fixture that ignores it asserts on a
+// store missing the very rows the test is about.
+func fileVerdict(t *testing.T, s *Store, row RetrievalAuditRow) {
+	t.Helper()
+	refused, err := s.RecordRetrievalAudits(context.Background(), []RetrievalAuditRow{row})
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits(%s): %v", row.MemoryID, err)
+	}
+	if len(refused) > 0 {
+		t.Fatalf("the fixture's verdict on %s was REFUSED and never stored: %+v", row.MemoryID, refused[0])
+	}
+}
+
+// totalsVerdict is the short form of fileVerdict.
 func totalsVerdict(t *testing.T, s *Store, project, source, memoryID, outcome string, recordRowID int64, degraded string) {
 	t.Helper()
-	if err := s.RecordRetrievalAudits(context.Background(), []RetrievalAuditRow{{
+	fileVerdict(t, s, RetrievalAuditRow{
 		ProjectID: project, SessionID: "s1", Source: source, MemoryID: memoryID,
 		Outcome: outcome, RecordRowID: recordRowID, Degraded: degraded,
-	}}); err != nil {
-		t.Fatalf("RecordRetrievalAudits(%s): %v", memoryID, err)
-	}
+	})
 }
 
-// The three rowid accessors a fixture needs, named for which recorded call they reach.
-// RetrievalRecordsForProject orders newest first, so the three are the first, second
-// and third rows of a fixture that recorded exactly three calls — and a fixture that
-// reaches for "the second row" of a store it recorded one call into gets a clear
-// failure rather than a silent rowid of nothing.
-func firstRowID(t *testing.T, s *Store, project string) int64 {
-	t.Helper()
-	return nthRowID(t, s, project, 0)
-}
-
-func middleRowID(t *testing.T, s *Store, project string) int64 {
-	t.Helper()
-	return nthRowID(t, s, project, 1)
-}
-
-func oldestRowID(t *testing.T, s *Store, project string) int64 {
-	t.Helper()
-	return nthRowID(t, s, project, 2)
-}
-
+// newestRowID is the rowid of the call just written.
 func newestRowID(t *testing.T, s *Store, project string) int64 {
 	t.Helper()
-	return nthRowID(t, s, project, 0)
-}
-
-func nthRowID(t *testing.T, s *Store, project string, n int) int64 {
-	t.Helper()
 	recs, err := s.RetrievalRecordsForProject(context.Background(), project, 0)
-	if err != nil || len(recs) <= n {
-		t.Fatalf("RetrievalRecordsForProject(%s): %v (%d records, wanted index %d)", project, err, len(recs), n)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("RetrievalRecordsForProject(%s): %v (%d records)", project, err, len(recs))
 	}
-	return recs[n].RowID
+	return recs[0].RowID
 }
 
 // totalsFor is the fixture's own lookup. A source the aggregate omits entirely comes
@@ -132,11 +129,11 @@ func TestRetrievalSourceTotalsCountsEveryShapeTheTablesHold(t *testing.T) {
 	// RecordRetrievalAudits replaces a call's verdicts rather than adding to them —
 	// which is itself worth being here, so the fixture cannot be read as "two verdicts
 	// on one call are two rows".
-	totalsRecord(t, s, "p1", "search", "M1", "M1", "M2")
-	totalsRecord(t, s, "p1", "search", "M3")
+	first := totalsRecord(t, s, "p1", "search", "M1", "M1", "M2")
+	second := totalsRecord(t, s, "p1", "search", "M3")
 	totalsRecord(t, s, "p1", "search")
-	totalsVerdict(t, s, "p1", "search", "M1", "used", firstRowID(t, s, "p1"), "")
-	totalsVerdict(t, s, "p1", "search", "M2", "ignored", middleRowID(t, s, "p1"), "")
+	totalsVerdict(t, s, "p1", "search", "M1", "used", first, "")
+	totalsVerdict(t, s, "p1", "search", "M3", "ignored", second, "")
 
 	got, err := s.RetrievalSourceTotals(ctx, time.Time{})
 	if err != nil {
@@ -169,7 +166,7 @@ func TestRetrievalSourceTotalsIsNotConfusedByAnUnreadableVerdictsColumn(t *testi
 	if err := s.EnsureProject(ctx, "p1", "/tmp/totals-p1", "p1"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	totalsRecord(t, s, "p1", "search", "M1")
+	only := totalsRecord(t, s, "p1", "search", "M1")
 
 	// Reached through a second handle, because no store API writes a raw document
 	// into that column and writing one by hand is the point.
@@ -182,7 +179,7 @@ func TestRetrievalSourceTotalsIsNotConfusedByAnUnreadableVerdictsColumn(t *testi
 	// fact this test discovered the hard way (the write refuses it), so a NULL stamp is
 	// impossible here however malformed the document is.
 	for i, doc := range []any{`{not json at all`, `{"kept":true}`, `"a bare string"`} {
-		if _, err := db.Exec(`UPDATE retrieval_record SET verdicts = ? WHERE rowid = ?`, doc, firstRowID(t, s, "p1")); err != nil {
+		if _, err := db.Exec(`UPDATE retrieval_record SET verdicts = ? WHERE rowid = ?`, doc, only); err != nil {
 			t.Fatalf("plant shape %d: %v", i, err)
 		}
 		got, err := s.RetrievalSourceTotals(ctx, time.Time{})
@@ -202,26 +199,43 @@ func TestRetrievalSourceTotalsIsNotConfusedByAnUnreadableVerdictsColumn(t *testi
 // are counted and NAMED rather than dropped.
 //
 // Detached is the one that regresses silently: with the membership test missing, a
-// verdict against a call outside the window lands in the figures and a precision is
+// verdict whose call the report does not count lands in the figures and a precision is
 // reported over two populations.
+//
+// Detached is also the one shape the CURRENT WRITER cannot produce: #857 refuses a
+// verdict naming a call that did not keep that memory, so a store written by this build
+// alone has none. It is real all the same — the call cap holds 5000 rows while the
+// verdict cap holds 50000, so a call evicted under pressure takes no verdicts with it,
+// and a store written before #857 has whatever its writer filed. So the fixture plants
+// it through SQL, which is the only way to reach it, and says so where a reader would
+// otherwise go looking for the missing write call.
 func TestRetrievalSourceTotalsSplitsTheVerdictsByWhatTheyName(t *testing.T) {
-	s, _ := totalsStore(t)
+	s, dbPath := totalsStore(t)
 	ctx := context.Background()
 	if err := s.EnsureProject(ctx, "p1", "/tmp/totals-p1", "p1"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	totalsRecord(t, s, "p1", "search", "M1")
-	totalsVerdict(t, s, "p1", "search", "M1", "used", firstRowID(t, s, "p1"), "")
+	call := totalsRecord(t, s, "p1", "search", "M1")
+	totalsVerdict(t, s, "p1", "search", "M1", "used", call, "")
 
 	// A verdict naming no call: the shape the write accepts for a verdict about a
 	// session rather than about one call.
 	totalsVerdict(t, s, "p1", "search", "M2", "ignored", 0, "")
 
 	// A verdict naming a rowid no row owns — what the call cap's eviction leaves
-	// behind. It must be DETACHED and counted, never dropped: a report that quietly
-	// loses real verdicts is indistinguishable from one over a store where they were
-	// never written.
-	totalsVerdict(t, s, "p1", "search", "M3", "ignored", 999999, "")
+	// behind, and what a pre-#857 store may hold. It must be DETACHED and counted,
+	// never dropped: a report that quietly loses real verdicts is indistinguishable
+	// from one over a store where they were never written.
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`INSERT INTO retrieval_audit
+		(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
+		VALUES ('p1', 999999, 's9', 'search', 'M3', 'ignored', '', '')`); err != nil {
+		t.Fatalf("plant the detached verdict: %v", err)
+	}
 
 	got, err := s.RetrievalSourceTotals(ctx, time.Time{})
 	if err != nil {
@@ -294,8 +308,8 @@ func TestRetrievalSourceTotalsCountsBothProjectsInOneSource(t *testing.T) {
 		if err := s.EnsureProject(ctx, p, "/tmp/totals-"+p, p); err != nil {
 			t.Fatalf("EnsureProject(%s): %v", p, err)
 		}
-		totalsRecord(t, s, p, "search", "M"+p)
-		totalsVerdict(t, s, p, "search", "M"+p, "used", firstRowID(t, s, p), "")
+		call := totalsRecord(t, s, p, "search", "M"+p)
+		totalsVerdict(t, s, p, "search", "M"+p, "used", call, "")
 	}
 	// A second source in one project, which must stay its own line.
 	totalsRecord(t, s, "p1", "session_start", "Ms")
@@ -324,15 +338,15 @@ func TestRetrievalSourceTotalsNamesEveryReasonAndId(t *testing.T) {
 	// Three calls, so each verdict is filed against its own call: the write REPLACES a
 	// call's verdicts, so three verdicts on one call would be one row and the fixture
 	// would assert nothing about distinctness.
-	totalsRecord(t, s, "p1", "search", "M1", "M2", "M1")
-	totalsRecord(t, s, "p1", "search", "M1")
-	totalsRecord(t, s, "p1", "search", "M2")
+	keptBoth := totalsRecord(t, s, "p1", "search", "M1", "M2", "M1")
+	keptM1 := totalsRecord(t, s, "p1", "search", "M1")
+	keptM2 := totalsRecord(t, s, "p1", "search", "M2")
 	// The SAME memory contradicted by two different calls, under two different reasons,
 	// and one reason repeated: the lists must name each thing once while the COUNTS
 	// stay per verdict.
-	totalsVerdict(t, s, "p1", "search", "M1", "contradicted", newestRowID(t, s, "p1"), "scan transcript: truncated")
-	totalsVerdict(t, s, "p1", "search", "M1", "contradicted", middleRowID(t, s, "p1"), "scan transcript: read failure")
-	totalsVerdict(t, s, "p1", "search", "M2", "contradicted", oldestRowID(t, s, "p1"), "scan transcript: truncated")
+	totalsVerdict(t, s, "p1", "search", "M1", "contradicted", keptM1, "scan transcript: truncated")
+	totalsVerdict(t, s, "p1", "search", "M1", "contradicted", keptBoth, "scan transcript: read failure")
+	totalsVerdict(t, s, "p1", "search", "M2", "contradicted", keptM2, "scan transcript: truncated")
 
 	got, err := s.RetrievalSourceTotals(ctx, time.Time{})
 	if err != nil {

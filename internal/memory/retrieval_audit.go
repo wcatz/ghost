@@ -24,9 +24,71 @@ package memory
 // machine, describing memories a portable artifact is not obliged to carry); and
 // `ghost history purge` DELETEs the rows naming the purged memory, because a
 // redaction is asked to remove a NAME and this table keeps one.
+//
+// A fourth delete is not optional, and it is the one this table's grain creates.
+// record_rowid points at a retrieval_record row, that table has no
+// AUTOINCREMENT, and so a rowid freed by ANY delete is handed to the next call —
+// which means a verdict left behind is not merely dangling but silently
+// re-attributed to a call that never admitted its memory, and RetrievalAudits
+// counts it in a report about precision. So every path that DELETEs
+// retrieval_record rows deletes the verdicts whose record_rowid names them, in the
+// SAME transaction: DeleteProject by project_id, `ghost history purge` by
+// SELECTing the doomed rowids with the record delete's own predicate, and the cap's
+// eviction by its own rowid bound. See purgeHistoryTx and RecordRetrieval, and
+// TestAPurgeDoesNotLeaveAVerdictThatTheNextCallCanInherit.
+//
+// The pairing is TWO-SIDED, and the delete side is not the half that finishes it.
+// A verdict is filed from a rowid a caller read BEFORE it began judging —
+// audit.Run reads the recent calls, judges them, and only then writes — so a
+// `ghost history purge` landing in that window deletes the call row, takes the
+// verdicts filed so far with it, and frees a rowid the very next RecordRetrieval
+// takes; the delete-side sweep cannot help the write that follows it, because by
+// then the rows it would have swept are the ones being written anew.
+//
+// So a verdict is filed only against a call that KEPT its memory, and the check is
+// on the CONTENT of the call rather than on the rowid: checking that the rowid
+// still EXISTS is not enough, because the window is wide enough for the freed
+// rowid to be RE-LET before the write lands, and a verdict filed against the
+// successor is the same wrong pair by another route. A verdict whose call did not
+// keep its memory becomes a HOLE in the report rather than a claim about a call
+// that never admitted the memory. What that costs is one lost (call, memory) pair;
+// what filing it would cost is a wrong one, counted in the denominator and
+// indistinguishable afterwards. See RecordRetrievalAudits and
+// retrievalRecordKeepingMemory, and the three tests named for each way the pairing
+// can be broken.
+//
+// AND THE HOLE IS REPORTED, which is what makes it honest rather than merely
+// defensible. The caller counted every row it handed over into the figures it is
+// about to print, before this write refused any of them, so a refusal the caller
+// cannot see leaves the report claiming a number this table does not hold — and a
+// branch that stored nothing is then indistinguishable from a branch that stored
+// everything, which is the one property a partial write cannot be allowed to lose.
+// Hence the return value: the refused ROWS rather than a count, because the caller
+// takes each one out of its per-source and per-outcome figures as well as its
+// total. audit.Run reconciles them into Summary.Unfiled and prints the loss BESIDE
+// the figures rather than folding it into them, so both numbers a reader needs —
+// what the run judged, and what the table holds — are stated.
+// TestTheAuditWriteReportsTheVerdictsItRefused holds the store's half and
+// TestRunReconcilesWhatTheStoreRefused the call site's.
+//
+// AND THE GUARD GATES THE REPLACE-DELETE AS WELL AS THE INSERT, which is the half
+// that is easy to leave open. A verdict is filed by replacing the call's existing
+// rows, and that delete used to run for every rowid in the batch, up front and
+// unconditionally — so a batch carrying a row the guard refuses still WIPED that
+// rowid's verdicts on the way to refusing it. In the re-let window that destroys a
+// legitimate call's evidence: a stale pass deletes the verdict a successor holding
+// the freed rowid already filed, and is then refused its own row. The table loses a
+// stored pair, nothing re-files it, and the successor's already-printed report
+// claims a figure the table does not hold — the same wrong number, reached through
+// the DELETE rather than the INSERT. So the claim is EARNED: a pass may replace a
+// call's verdicts only once the guard has accepted a row for it.
+// TestALatePassCannotWipeTheSuccessorsVerdicts, and
+// TestAPartlyRefusedBatchStillKeepsTheRowsItFiled for the shape where one batch is
+// both refused and accepted on the same call.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,47 +159,178 @@ var (
 // signals is this build's, and a store that may since have added a bucket would
 // have this build's rows filed beside it. It goes through beginWrite, so the check
 // runs in the same transaction as the write it guards.
-func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAuditRow) error {
+//
+// It RETURNS THE ROWS THE GUARD REFUSED, and that is the point of the signature.
+// A refusal is not an error — the write did what it was asked and declined to
+// store one pair it could not vouch for — but it is also not nothing, because the
+// caller has already counted every row it handed over into the report it is about
+// to print. A caller that cannot see the refusal prints figures describing a
+// table it does not match, and a branch that stored nothing is then
+// indistinguishable from one that stored everything, which is the one property a
+// partial write cannot be allowed to lose. The rows and not a count, because the
+// caller has to take each one out of its own per-source and per-outcome figures
+// as well as from its total, and a bare number cannot say which. Empty when
+// nothing was refused, so a caller that ignores the return is unaffected.
+func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAuditRow) ([]RetrievalAuditRow, error) {
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	for _, r := range rows {
 		if r.MemoryID == "" {
-			return errRetrievalAuditNoMemory
+			return nil, errRetrievalAuditNoMemory
 		}
 		if r.ProjectID == "" {
-			return errRetrievalAuditNoProject
+			return nil, errRetrievalAuditNoProject
 		}
 	}
 
 	tx, lock, err := s.beginWrite(ctx, "record-retrieval-audits")
 	if err != nil {
-		return fmt.Errorf("record retrieval audits: %w", err)
+		return nil, fmt.Errorf("record retrieval audits: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	seen := map[int64]bool{}
-	for _, r := range rows {
-		if r.RecordRowID <= 0 || seen[r.RecordRowID] {
-			continue
-		}
-		seen[r.RecordRowID] = true
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM retrieval_audit WHERE record_rowid = ?`, r.RecordRowID); err != nil {
-			return fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w", r.RecordRowID, err)
-		}
-	}
+	// Which calls this batch has already replaced. The replacement is keyed by
+	// record_rowid, so a call's verdicts are replaced ONCE per batch however many
+	// rows name it — and only once the guard below has accepted a row for it, which
+	// is the whole point: see the REPLACE block after the insert.
+	replaced := map[int64]bool{}
 
 	var maxRowID int64
+	// The rows the guard below refused, returned so the caller can take them out
+	// of its own figures. Declared here rather than at the signature so the write
+	// loop reads as the write loop.
+	var refused []RetrievalAuditRow
 	for _, r := range rows {
-		if err := tx.QueryRowContext(ctx, `
+		// The pairing is TWO-SIDED, and this is its other side. A caller judged
+		// its calls and is filing the verdicts now, so every rowid in this batch
+		// was read BEFORE this transaction opened: audit.Run reads the recent
+		// calls, judges them (a GetByIDs, then a comparison against the
+		// transcript), and only then writes, keyed by the rowids it read at the
+		// top of the run. A `ghost history purge` landing in that window deletes
+		// the call row and — with the delete-side pairing — takes its verdicts
+		// with it, which is right; and then this write files them again against a
+		// rowid the store has already given away. When the purged call is the
+		// newest, its rowid IS the table's maximum, so the very next
+		// RecordRetrieval takes it and the re-filed verdict becomes a claim about
+		// a call that never admitted the memory.
+		//
+		// So a verdict is filed only against a call that KEPT its memory. The
+		// guard is in the statement rather than in a branch above it because this
+		// transaction already holds the write lock, so it cannot go stale between
+		// the check and the insert: a check outside the transaction would be a
+		// check-then-write and would lose to the same race it is here to close.
+		//
+		// It binds IDENTITY, not the KEY, and that is the half that matters. A
+		// plain `EXISTS (SELECT 1 FROM retrieval_record WHERE rowid = ?)` is not
+		// enough, because the window is wide enough for the rowid to be RE-LET
+		// before the pass writes: the purge that removed the newest call frees the
+		// table's maximum rowid, and the next RecordRetrieval takes it. The row
+		// then EXISTS, the existence check passes, and the dead call's verdict is
+		// filed under its successor — which is precisely the wrong pair. So the
+		// guard asks whether the call now on that rowid kept the memory THIS row
+		// is about, which is the one property a report about a call's admitted
+		// memories is actually entitled to assert.
+		//
+		// What that leaves is a row whose pair is TRUE but whose call INSTANCE may
+		// be a successor that admitted the same memory in the same session — the
+		// only imprecision left, and deliberately accepted: without a stable
+		// per-call identity (the table's key is a reusable rowid) it cannot be
+		// closed, and unlike the orphan it is not a claim about a memory a call
+		// never admitted. Closing THAT needs AUTOINCREMENT on retrieval_record,
+		// which is a table rebuild and a migration, and is out of scope here.
+		//
+		// `? <= 0 OR` is the unattributed verdict, which is accepted and needs no
+		// call: rowid 0 is the deliberate "not attributable to a call" value this
+		// same function refuses to replace, and a bare guard would drop every such
+		// row in the table the first time a pass filed one.
+		//
+		// What a dropped verdict costs is ONE (call, memory) pair from the
+		// report, and only when a purge lands in that window: the call is gone, so
+		// the pair is gone too and nothing is miscounted — the report is a hole,
+		// not a lie. The alternative is not a smaller cost, it is the defect:
+		// re-filed, the row is counted in the denominator under a call that never
+		// admitted the memory, and it is indistinguishable afterwards from a
+		// verdict this write was entitled to make. A whole-batch refusal was
+		// rejected for the same reason — it would lose the surviving calls'
+		// verdicts, which are still true, to avoid losing one that is not.
+		//
+		// What it costs per row is one seek on retrieval_record's own b-tree plus
+		// a walk of that ONE row's verdicts array: the rowid is its INTEGER
+		// PRIMARY KEY, so the row is found by primary key and never scanned for,
+		// and the array is a call's own kept set — tens of entries, not a table.
+		// It is O(one call) per row where the delete-side sweeps in this package
+		// are O(rows stored), which is also why it needs no index on
+		// record_rowid and why TestRetrievalAuditsCarryOneIndex is unaffected.
+		var filed int64
+		err := tx.QueryRowContext(ctx, `
 			INSERT INTO retrieval_audit
 				(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?
+			WHERE ? <= 0 OR EXISTS (
+				SELECT 1 FROM retrieval_record
+				WHERE rowid = ? AND `+retrievalRecordKeepingMemory()+`
+			)
 			RETURNING rowid
 		`, r.ProjectID, r.RecordRowID, r.SessionID, r.Source, r.MemoryID,
-			r.Outcome, r.Signal, r.Degraded).Scan(&maxRowID); err != nil {
-			return fmt.Errorf("record retrieval audits: %w", err)
+			r.Outcome, r.Signal, r.Degraded, r.RecordRowID, r.RecordRowID, r.MemoryID).Scan(&filed)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The guard refused this row, so it wrote nothing and returned
+			// nothing. Not an error: see above. It IS reported, because a
+			// refusal the caller cannot see is indistinguishable from a row that
+			// was written — the caller has already counted this verdict into every
+			// figure it will print, and a branch that stores nothing has to be
+			// distinguishable from one that stored everything, all the way out to
+			// whatever the command records about it. The ROW and not a count,
+			// because the caller subtracts per source and per outcome as well as
+			// from the total, and a bare count cannot say which.
+			refused = append(refused, r)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("record retrieval audits: %w", err)
+		}
+		// maxRowID stays the table's highest rowid, which is what the eviction
+		// below reads. A rowid this transaction was given is higher than every
+		// rowid already in the table (SQLite hands out max+1, not a freelist
+		// slot), and rowids rise within the transaction, so the LAST row filed
+		// is the highest — and a row this pass DROPPED took no rowid at all, so
+		// skipping one moves nothing. When every row was dropped, maxRowID stays
+		// 0, the table did not grow, and the eviction does not run.
+		maxRowID = filed
+
+		// REPLACE, and only now. The delete used to run for every distinct rowid
+		// in the batch, up front and unconditionally, which meant a batch whose
+		// rows the guard refuses still WIPED that rowid's existing verdicts on the
+		// way to refusing them. In the re-let window that destroys a legitimate
+		// call's evidence: a purge frees the newest call's rowid, a successor takes
+		// it and files its own verdict, and a stale pass then deletes that verdict
+		// and is refused its own row — so the table loses a stored pair, nothing
+		// re-files it, and the successor's already-printed report claims a figure
+		// the table does not hold. The wrong number, reached through the DELETE
+		// rather than the INSERT.
+		//
+		// So the claim is earned, not assumed: a pass may replace a call's verdicts
+		// only once it has filed a row for that call, and the guard is what decides.
+		// `rowid <> ?` keeps the row just written, so the replacement is still a
+		// replacement — a re-audit drops the previous pass's rows for the same
+		// (call, memory) pair rather than doubling the table's denominators — and a
+		// batch naming several memories of one call still replaces once, not once
+		// per row, which is what `replaced` is for.
+		//
+		// It cannot be a whole-call delete on a row the guard will refuse, and it
+		// cannot be narrowed to (record_rowid, memory_id) pairs either: the call
+		// this batch is entitled to speak for is the one it read, and the rows
+		// already in the table under that rowid may name memories THIS pass judged
+		// differently or did not reach at all. Replacing them is the point.
+		if r.RecordRowID > 0 && !replaced[r.RecordRowID] {
+			replaced[r.RecordRowID] = true
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM retrieval_audit WHERE record_rowid = ? AND rowid <> ?`,
+				r.RecordRowID, filed); err != nil {
+				return nil, fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w",
+					r.RecordRowID, err)
+			}
 		}
 	}
 
@@ -149,14 +342,14 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM retrieval_audit WHERE rowid <= ?`,
 			maxRowID-int64(retrievalAuditRowsCap)); err != nil {
-			return fmt.Errorf("record retrieval audits: cap table size: %w", err)
+			return nil, fmt.Errorf("record retrieval audits: cap table size: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("record retrieval audits: %w", err)
+		return nil, fmt.Errorf("record retrieval audits: %w", err)
 	}
 	lock.reportHold("record-retrieval-audits", time.Now())
-	return nil
+	return refused, nil
 }
 
 // RetrievalAudits returns stored verdicts, oldest row first.

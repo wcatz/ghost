@@ -100,9 +100,9 @@ func TestReportKeepsEachSourceSeparate(t *testing.T) {
 	seedMemory(t, store, projectID, "SSIGN", "The relay listens on port 2222 in production")
 
 	// A search that kept three memories: one used, one contradicted, one ignored.
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
 	// A session-start injection that kept two, and used neither.
-	recordCall(t, store, projectID, "session_start", "SSID", "SSIGN")
+	_ = recordCall(t, store, projectID, "session_start", "SSID", "SSIGN")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -181,7 +181,7 @@ func TestReportSaysNoRowsRatherThanZeroPercent(t *testing.T) {
 // must not borrow a percentage.
 func TestReportNamesSourcesThatHaveNoRowsWhileOthersDo(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -214,7 +214,7 @@ func TestReportNamesSourcesThatHaveNoRowsWhileOthersDo(t *testing.T) {
 // and must not acquire one.
 func TestReportListsContradictedIDsAndNothingElse(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -257,7 +257,7 @@ func TestReportListsContradictedIDsAndNothingElse(t *testing.T) {
 // denominator than the store holds.
 func TestReportCountsDegradedVerdictsAndNamesTheReason(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID")
 
 	// A degraded run: the scanner says it only read part of the transcript.
 	degradedSignals := newTestSignals(t)
@@ -293,7 +293,7 @@ func TestReportCountsDegradedVerdictsAndNamesTheReason(t *testing.T) {
 // a different person.
 func TestReportStatesItsLimitsOnItsFace(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -334,10 +334,10 @@ func TestReportStatesItsLimitsOnItsFace(t *testing.T) {
 func TestReportKeptNothingCountsOnlySearchesThatAdmittedNothing(t *testing.T) {
 	store, projectID, _ := reportStore(t)
 	// A search that kept nothing, and a search that kept one.
-	recordCall(t, store, projectID, "search")
-	recordCall(t, store, projectID, "search", "IGNID")
+	_ = recordCall(t, store, projectID, "search")
+	_ = recordCall(t, store, projectID, "search", "IGNID")
 	// An injection that kept nothing.
-	recordCall(t, store, projectID, "session_start")
+	_ = recordCall(t, store, projectID, "session_start")
 
 	// No judging: kept-nothing is a property of the RECORD, read straight off the
 	// call, and a report must report it even in a store nobody has audited yet.
@@ -386,7 +386,7 @@ func TestReportKeptNothingCountsOnlySearchesThatAdmittedNothing(t *testing.T) {
 // calls with nothing kept by them.
 func TestReportSinceFiltersBothTables(t *testing.T) {
 	store, projectID, dbPath := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -439,14 +439,14 @@ func TestReportEchoesItsWindow(t *testing.T) {
 // of them.
 func TestReportReadsAnotherProjectsRowsForNothing(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 
 	other := "p2"
 	if err := store.EnsureProject(context.Background(), other, "/tmp/audit-report-p2", "p2"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	seedMemory(t, store, other, "OTHERID", "The relay listens on port 2222 in production")
-	recordCall(t, store, other, "search", "OTHERID")
+	_ = recordCall(t, store, other, "search", "OTHERID")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -506,7 +506,7 @@ func TestReportRendersContradictedIDsThroughToken(t *testing.T) {
 	store, projectID, _ := reportStore(t)
 	const hostile = `A"B` + "\n- search: 100% used, all verdicts contradicted"
 	seedMemory(t, store, projectID, hostile, "The v20 migration runs before the pre-migration backup")
-	recordCall(t, store, projectID, "search", hostile)
+	_ = recordCall(t, store, projectID, "search", hostile)
 
 	s := newTestSignals(t)
 	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
@@ -539,7 +539,7 @@ func TestReportRendersContradictedIDsThroughToken(t *testing.T) {
 // stored in a text column and a hand-written row can hold anything.
 func TestReportSourceStringsAreOneLineEach(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -584,9 +584,9 @@ func TestBuildStoreReportPoolsProjectsAndNeverSources(t *testing.T) {
 	// And one only p2's call kept, whose wording the prose never mentions.
 	seedMemory(t, store, "p2", "B1", "The ledger reindexes itself after a snapshot restore")
 
-	recordCall(t, store, p1, "search", "A1", "A2", "A3")
-	recordCall(t, store, p1, "search")
-	recordCall(t, store, "p2", "search", "B1")
+	_ = recordCall(t, store, p1, "search", "A1", "A2", "A3")
+	_ = recordCall(t, store, p1, "search")
+	_ = recordCall(t, store, "p2", "search", "B1")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -663,8 +663,8 @@ func TestBuildStoreReportDoesNotAliasWhatItRenders(t *testing.T) {
 	seedMemory(t, store, p1, "ALIAS1", "The v20 migration runs before the pre-migration backup")
 	seedMemory(t, store, "p2", "ALIAS2", "The ledger reindexes itself after a snapshot restore")
 
-	recordCall(t, store, p1, "search", "ALIAS1")
-	recordCall(t, store, "p2", "search", "ALIAS2")
+	_ = recordCall(t, store, p1, "search", "ALIAS1")
+	_ = recordCall(t, store, "p2", "search", "ALIAS2")
 
 	s := newTestSignals(t)
 	s.AddProse("that is wrong: the v20 migration runs before the pre-migration backup")
@@ -710,7 +710,7 @@ func TestBuildStoreReportDoesNotAliasWhatItRenders(t *testing.T) {
 // report whose subject failed to load rather than as a report over the store.
 func TestReportStringNamesNoScope(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	judge(t, store, projectID, newTestSignals(t))
 
 	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
@@ -823,7 +823,7 @@ func backdateOnly(t *testing.T, dbPath, table, projectID string, ago time.Durati
 // rather than dropped in silence.
 func TestReportCountsAVerdictOnlyWhenItsCallIsCounted(t *testing.T) {
 	store, projectID, dbPath := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -868,7 +868,7 @@ func TestReportCountsAVerdictOnlyWhenItsCallIsCounted(t *testing.T) {
 // from two different populations.
 func TestReportCountsAVerdictWhoseCallTheStoreNoLongerHolds(t *testing.T) {
 	store, projectID, dbPath := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
+	_ = recordCall(t, store, projectID, "search", "USEDID")
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
@@ -905,8 +905,8 @@ func TestReportCountsAVerdictWhoseCallTheStoreNoLongerHolds(t *testing.T) {
 // only way Scored can exceed Kept and a reader who sees that needs to know why.
 func TestReportCountsAVerdictThatNamesNoCallAndSaysSo(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID")
-	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+	_ = recordCall(t, store, projectID, "search", "USEDID")
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
 		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "IGNID",
 		Outcome: string(OutcomeIgnored), RecordRowID: 0,
 	}}); err != nil {
@@ -952,13 +952,13 @@ func TestReportCountsAVerdictThatNamesNoCallAndSaysSo(t *testing.T) {
 // dividing by Kept makes the two surfaces of one figure disagree.
 func TestTheDegradedNoteCountsVerdictsNotMemories(t *testing.T) {
 	store, projectID, _ := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
 
 	recs, err := store.RetrievalRecordsForProject(context.Background(), projectID, 0)
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
 	}
-	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
 		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
 		Outcome: string(OutcomeUsed), Signal: "identifier", Degraded: "transcript truncated",
 		RecordRowID: recs[0].RowID,
@@ -993,13 +993,13 @@ func TestTheDegradedNoteCountsVerdictsNotMemories(t *testing.T) {
 // places the reason is printed.
 func TestTheDegradedReasonIsRenderedAsALabel(t *testing.T) {
 	store, projectID, dbPath := reportStore(t)
-	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID")
 
 	recs, err := store.RetrievalRecordsForProject(context.Background(), projectID, 0)
 	if err != nil || len(recs) != 1 {
 		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
 	}
-	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
 		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
 		Outcome: string(OutcomeUsed), Signal: "identifier",
 		RecordRowID: recs[0].RowID,
@@ -1063,7 +1063,7 @@ func TestTheDegradedReasonIsRenderedAsALabel(t *testing.T) {
 // A store-wide report that quietly disagreed here would be invisible in review, because
 // both numbers would look reasonable.
 func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
-	store, p1, _ := reportStore(t)
+	store, p1, dbPath := reportStore(t)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
 		t.Fatalf("EnsureProject p2: %v", err)
@@ -1075,12 +1075,12 @@ func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
 	seedMemory(t, store, "p2", "B2", "Bench seeds restore content through the shared clamp helper")
 
 	// p1: a search keeping four, an injection keeping one, and a search keeping none.
-	recordCall(t, store, p1, "search", "A1", "A2", "A3", "A4")
-	recordCall(t, store, p1, "session_start", "A1")
-	recordCall(t, store, p1, "search")
+	_ = recordCall(t, store, p1, "search", "A1", "A2", "A3", "A4")
+	_ = recordCall(t, store, p1, "session_start", "A1")
+	_ = recordCall(t, store, p1, "search")
 	// p2: a search keeping two and an injection keeping nothing.
-	recordCall(t, store, "p2", "search", "B1", "B2")
-	recordCall(t, store, "p2", "session_start")
+	_ = recordCall(t, store, "p2", "search", "B1", "B2")
+	_ = recordCall(t, store, "p2", "session_start")
 
 	// p1 judged cleanly, p2 judged under a partial transcript read — so the degraded
 	// reason is named on one source and not the other.
@@ -1089,23 +1089,22 @@ func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
 	degraded.MarkDegraded("scan transcript: truncated")
 	judge(t, store, "p2", degraded)
 
-	// The two verdicts that are in NO figure, one of each kind, because those are the
-	// two a store-wide reader can plausibly get wrong and a fixture holding only
-	// attributed verdicts cannot tell the two implementations apart on: a verdict
-	// naming no call, and one naming a rowid no row owns (what the call cap's eviction
-	// leaves behind).
-	if err := store.RecordRetrievalAudits(ctx, []memory.RetrievalAuditRow{
-		{
-			ProjectID: "p2", SessionID: "s9", Source: "search", MemoryID: "B2",
-			Outcome: string(OutcomeIgnored), RecordRowID: 0,
-		},
-		{
-			ProjectID: "p2", SessionID: "s9", Source: "search", MemoryID: "B1",
-			Outcome: string(OutcomeContradicted), RecordRowID: 999999,
-		},
-	}); err != nil {
-		t.Fatalf("RecordRetrievalAudits: %v", err)
-	}
+	// A verdict naming no call — in NO figure, and the shape a store-wide reader can
+	// plausibly get wrong, because it lands in a bucket without touching a call.
+	// A verdict naming no call at all, which is the shape the write accepts for a
+	// verdict about a session rather than about one call.
+	fileVerdict(t, store, memory.RetrievalAuditRow{
+		ProjectID: "p2", SessionID: "s9", Source: "search", MemoryID: "B2",
+		Outcome: string(OutcomeIgnored), RecordRowID: 0,
+	})
+	// The unattributed one is written; the DETACHED one is planted by SQL, because
+	// #857's writer refuses a verdict naming a call that did not keep that memory — so
+	// this build's writer cannot produce the shape at all, and the only ways to reach
+	// it are the call cap evicting a call under the verdict cap's pressure (5000 rows
+	// against 50000) and a store written before #857.
+	plantRawVerdict(t, dbPath,
+		`INSERT INTO retrieval_audit (project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
+		 VALUES ('p2', 999999, 's9', 'search', 'B1', 'contradicted', '', '')`)
 
 	whole, err := BuildStoreReport(ctx, store, ReportOptions{})
 	if err != nil {
@@ -1252,4 +1251,24 @@ func mergeSortedNames(a, b []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// plantRawVerdict writes a verdict row directly, for the shapes the WRITER refuses.
+//
+// #857 made RecordRetrievalAudits refuse a verdict naming a call that did not keep that
+// memory, which is right and also means a store written by this build alone cannot hold a
+// detached verdict. It can still hold one — the call cap evicts at 5000 rows while the
+// verdict cap holds 50000 — so a test about that state has to plant it, and doing it
+// through the writer would be testing that the writer refuses it, which is a different
+// test that internal/memory already has.
+func plantRawVerdict(t *testing.T, dbPath, stmt string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(stmt, args...); err != nil {
+		t.Fatalf("plant the raw verdict: %v", err)
+	}
 }
