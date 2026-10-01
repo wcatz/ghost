@@ -96,8 +96,6 @@ operator's decision about a table the agent only reads.
 
 ### Retrieval health
 
-### Retrieval health
-
 `ghost_health` also reports what retrieval did, one line per source, below the
 history block. It is the same `audit` report `ghost context --audit` prints for one
 project, with the projects pooled **within** each source and shortened to one line —
@@ -105,11 +103,16 @@ so a figure here and a figure there are the same number over the same rows:
 
 ```text
 **Retrieval audit** — per source, every call this store has recorded; a search and an injection are never pooled
-  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 18 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 15 ignored, 1 superseded in session, 2 contradicted, 3 kept nothing
+  ⚠ search: 2 of its 30 scored verdict(s) are degraded — judged against a partly-read transcript (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls
   project_context: no rows — this source has recorded no calls
   "ignored" is the residual, not a relevance or usefulness score: it means the agent's own words never mentioned the memory
 ```
+
+That is one store's real block, cut at the retrieval part — the same rows
+[`ghost context --audit`](cli.md#ghost-context---audit) prints for one project,
+with the `⚠` line the compact form adds under the source it is about.
 
 An agent debugging "search returns things I did not use" is exactly who needs
 this, and it is here rather than in a twenty-third tool because every caller
@@ -129,7 +132,9 @@ confident wrong answer:
 - **`ignored` is the residual, not a score.** It is the only field here that an
   agent is likely to misread as a judgement about memory quality, and nothing in
   this package ranks a memory. The sentence is printed whenever any verdict
-  exists to misread.
+  exists to misread, and **only** then: a caveat attached to no figure is noise on
+  a fresh store, and a fresh store carrying a warning glyph is how an agent learns
+  to skip the warnings that matter.
 - **A degraded verdict is counted, not hidden.** A verdict filed under a partial
   transcript read stays in the denominator, so the precision beside it is exact
   about a transcript that stopped early — which is what the `⚠` line under that
@@ -140,7 +145,11 @@ sources with each other. It is a store-wide view rather than a per-project one
 because this tool is store-wide everywhere else; the per-project report, with the
 window filter and the list of contradicted memory ids, is
 `ghost context --audit`. That report opens the store read-only, and this one does
-not open it at all.
+not open it at all. A store that cannot answer prints `**Retrieval audit:** could
+not be read: …` rather than nothing, and a store with no project at all prints
+`**Retrieval audit:** no project is registered, so no retrieval has been measured`
+— because a header with no lines under it reads as a section that ran and had
+nothing to say, which is a different claim.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 
