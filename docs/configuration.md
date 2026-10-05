@@ -392,33 +392,41 @@ so the two are told apart by that notice rather than by the phase's stdout.
 
 The flag `ghost supersede <project> --apply --consensus N` is the same gate by
 hand, and it is **off unless typed** — a hand-run pass is never silently tripled.
-It is refused with `--reassess` and `--withdraw`, which judge edges already in
-the graph, where a split verdict would refuse the withdrawal the repair exists to
-perform.
+It also gates `--reassess`, the only command left that deletes a live
+`supersedes` edge, so `--reassess --consensus 3 --apply` withdraws an edge the
+**classifier decided** only when all three passes agree. It does not gate the
+deterministic veto, which is settled from the two note bodies before the gate with
+no classify call at all, so a vetoed edge is withdrawn on the first pass exactly
+as before. It is still refused with `--withdraw`, which asks no model: N passes
+would buy no agreement about a decision you already made by naming the edge.
 
 Turning the phase on still means writing real edges from a model that has not
 been measured on your notes; running `ghost supersede <project>` by hand and
 reading the list is free of that, and it is dry-run by default.
 
 
-**Upgrading from before #779: run `--reassess` once.** The tightened rubric
+**Upgrading from before #779: run `--reassess --consensus 3` once.** The tightened rubric
 applies to pairs judged from here on — the NEITHER cache's key prefix moved with
 the rubric, so every cached verdict is re-asked. Edges **already in the graph**
 are a different thing: `skip-if-unchanged` holds a live `supersedes` edge quiet
 until one of its endpoints changes, so a passing pass never re-judges one written
 under the old rules. `ghost supersede <project> --reassess` re-judges every live
 edge under the current rules and, with `--apply`, withdraws the ones they no
-longer support:
+longer support — every edge the classifier decided, and only where all three
+passes agreed on it, when you pass `--consensus 3`:
 
 ```bash
-ghost supersede <project> --reassess            # dry run
-ghost supersede <project> --reassess --apply    # withdraw, and print the resolve repair
+ghost supersede <project> --reassess --consensus 3            # dry run
+ghost supersede <project> --reassess --consensus 3 --apply    # withdraw, and print the resolve repair
 ```
 
 It is worth doing once after the upgrade and then not routinely. The repair pass
 is where the rubric's error argument does not apply — a false veto there deletes
 a correct edge, and being deterministic it re-fires until a note changes — so
-read the dry run before applying.
+read the dry run before applying, and prefer the gated form: an ungated
+`--reassess --apply` withdraws on one classifier verdict per edge, which is what
+[#845](https://github.com/wcatz/ghost/issues/845) measured at 6 wrong withdrawals
+in 11.
 
 When enabled, the Stop hook spawns one detached lifecycle process and runs the phases in this order:
 
@@ -444,8 +452,8 @@ ghost supersede <project> --reassess [--apply]
 ```
 
 - `ghost resolve --reassess` re-judges the memories already stamped `resolved_at` and, with `--apply`, clears the stamp on the ones that now come back KEEP. It does not re-run the keyword prefilter, so every already-resolved memory in the project is re-judged and the report has no silent gap.
-- `ghost supersede --reassess` re-judges every `supersedes` link already in the graph — the edges, not the candidate pairs, so `--threshold` does not apply — and with `--apply` **withdraws** the ones that no longer hold: a pair that comes back `neither`, a pair whose older note states a rule the newer note never retires, and a `causes` or `reversed` verdict. Each withdrawn edge is printed with the rule that withdrew it and with `[veto, no harness call]` or `[classifier]`, so the rows no model looked at are visible as such; a withdrawal that also drops the pair's `causes` edge says so on the row (`[+1 causes edge]`) and on the summary line — predicted in a dry run, and read back from the store under `--apply`, so a concurrent pass that took that edge first reports `0` rather than claiming a deletion. A sweep that *fails* is reported as unknown, not as `0`: the count is not knowable after a failed write. The withdrawal records an `unsupersede` row in the memory history, and a write that fails after some have landed still reports those, because each is its own transaction and a later pass will not see them again. A scope-conflicting edge is left alone: scope says which pairs may be related at all, not that one of them was a supersession. Note the one asymmetry with the ordinary pass: withdrawing a **vetoed** edge deletes a correct edge if the veto is wrong, and the ordinary pass will not re-create it, because the veto is deterministic on the same two notes — so read that row before applying.
-- **Order matters if a memory was buried by a wrong edge.** `ghost resolve` stamps `resolved_at` on the older endpoint of a live `supersedes` edge for free, and `ghost resolve --reassess` deliberately treats a live edge as a floor — so run `ghost supersede --reassess --apply` **first**, then `ghost resolve --reassess --apply`. Withdrawing the edge is what makes the resolution it justified clearable.
+- `ghost supersede --reassess --consensus 3` re-judges every `supersedes` link already in the graph — the edges, not the candidate pairs, so `--threshold` does not apply — and with `--apply` **withdraws** the ones that no longer hold: a pair that comes back `neither`, a `causes` or `reversed` verdict, and — **only when all three passes agreed** — every one of those; a pair whose older note states a rule the newer note never retires is **not** gated, because the veto settles it with no classify call at all. Each withdrawn edge is printed with the rule that withdrew it and with `[veto, no harness call]` or `[classifier]`, so the rows no model looked at are visible as such; a withdrawal that also drops the pair's `causes` edge says so on the row (`[+1 causes edge]`) and on the summary line — predicted in a dry run, and read back from the store under `--apply`, so a concurrent pass that took that edge first reports `0` rather than claiming a deletion. A sweep that *fails* is reported as unknown, not as `0`: the count is not knowable after a failed write. The withdrawal records an `unsupersede` row in the memory history, and a write that fails after some have landed still reports those, because each is its own transaction and a later pass will not see them again. A scope-conflicting edge is left alone: scope says which pairs may be related at all, not that one of them was a supersession. Note the one asymmetry with the ordinary pass: withdrawing a **vetoed** edge deletes a correct edge if the veto is wrong, and the ordinary pass will not re-create it, because the veto is deterministic on the same two notes — so read that row before applying.
+- **Order matters if a memory was buried by a wrong edge.** `ghost resolve` stamps `resolved_at` on the older endpoint of a live `supersedes` edge for free, and `ghost resolve --reassess` deliberately treats a live edge as a floor — so run `ghost supersede --reassess --consensus 3 --apply` **first**, then `ghost resolve --reassess --apply`. Withdrawing the edge is what makes the resolution it justified clearable.
 - Neither flag is ever emitted by the Stop hook's lifecycle chain. They are operator commands, and both spend harness calls on every pair they judge.
 - `ghost resolve --reassess` also honours a correction pairing as a floor, and holds back any row whose correction the same run is repairing — so a repair that the next ordinary pass would undo is reported as still asserted rather than done.
 

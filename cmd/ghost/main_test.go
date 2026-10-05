@@ -1764,7 +1764,7 @@ func TestSupersedeReport(t *testing.T) {
 		// command, and a command with a placeholder in it is one the operator
 		// has to edit before it runs — which is where a repair ends up against
 		// the wrong project.
-		"ghost supersede proj --reassess --apply",
+		"ghost supersede proj --reassess --consensus 3 --apply",
 	} {
 		if !strings.Contains(orientation, want) {
 			t.Errorf("supersedeReport() = %q, want it to contain %q", orientation, want)
@@ -1777,7 +1777,7 @@ func TestSupersedeReport(t *testing.T) {
 	// --project in single quotes, which is the quoting rule the followup package
 	// owns and the one that decides whether the pasted command runs at all.
 	awkward := supersedeReport("my proj", supersede.Result{Bidirectional: 1}, "would link", false, 0, 0)
-	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --apply") {
+	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --consensus 3 --apply") {
 		t.Errorf("supersedeReport() for a name holding a space = %q, want the --project form a shell reads as one argument", awkward)
 	}
 	// The write-time refusal (#806) is the only line on this report about a pair
@@ -1792,18 +1792,24 @@ func TestSupersedeReport(t *testing.T) {
 		"a concurrent pass got there first",
 		"this run wrote no edge for them",
 		"the pair keeps the edge that is there",
-		"ghost supersede proj --reassess --apply",
+		"ghost supersede proj --reassess --consensus 3 --apply",
 	} {
 		if !strings.Contains(raced, want) {
 			t.Errorf("supersedeReport() = %q, want it to contain %q", raced, want)
 		}
 	}
-	// followup.ReassessCommand ALREADY renders the applied form, so a line that
-	// appended --apply to it would print a command no other report in the tree
-	// emits. The parser tolerates the repeat (it sets apply = true per
-	// occurrence), which is exactly why only the rendered text catches it.
-	if strings.Contains(raced, "--apply --apply") {
-		t.Errorf("supersedeReport() = %q, want the repair quoted once: ReassessCommand is already the APPLIED form", raced)
+	// followup.ReassessCommand already renders the applied form, so a line
+	// that appended --apply to it would print a command no other report in the
+	// tree emits. The parser tolerates the repeat (it sets apply = true per
+	// occurrence), which is exactly why only the rendered text catches it — and
+	// why this counts --apply over the whole repair rather than looking for the
+	// literal `--apply --apply`: #862's first version appended ` --consensus 3
+	// --apply` to the ungated renderer and printed `--reassess --apply
+	// --consensus 3 --apply`, which this exact substring guard did not see.
+	for _, line := range strings.Split(raced, "\n") {
+		if n := strings.Count(line, "--apply"); n > 1 {
+			t.Errorf("supersedeReport() = %q, want --apply quoted once per command: the renderer already carries it", line)
+		}
 	}
 	// Each reason states the DECISION, not a judgment the pass may never have
 	// made. All three counts are taken before the filters that spend a call, so

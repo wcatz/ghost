@@ -596,7 +596,7 @@ func TestRunSupersedeReportsButDoesNotWithdrawTheEdgeItWouldRemove(t *testing.T)
 			if !strings.Contains(out, "1 pair(s) withheld") {
 				t.Errorf("the summary does not count the withheld withdrawal:\n%s", out)
 			}
-			if !strings.Contains(out, "ghost supersede projy --reassess --apply") {
+			if !strings.Contains(out, "ghost supersede projy --reassess --consensus 3 --apply") {
 				t.Errorf("the summary does not name the repair that removes the edge:\n%s", out)
 			}
 			// And the repair that is NOT owed.

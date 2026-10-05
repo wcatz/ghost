@@ -25,11 +25,15 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 		{name: "a project name holding a semicolon", project: "proj; rm -rf /"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			words := shellSplit(t, followup.ReassessCommand(tc.project))
+			words := shellSplit(t, followup.ReassessCommand(tc.project, 3))
 			if len(words) < 2 || words[1] != "supersede" {
 				t.Fatalf("not a supersede command: %v", words)
 			}
-			project, _, apply, reassess, _, _, withdraw, _, err := parseSupersedeArgs(words[2:])
+			// The rendered repair names the gate (#862), so the parser has to carry
+			// it through to the invocation it means — and because both flags are
+			// boolean, a renderer that doubled --apply would still parse, so the
+			// count below is what catches the doubling a substring cannot.
+			project, _, apply, reassess, _, consensus, withdraw, _, err := parseSupersedeArgs(words[2:])
 			if err != nil {
 				t.Fatalf("ReassessCommand does not parse: %v", err)
 			}
@@ -37,10 +41,16 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 				t.Errorf("project = %q, want %q", project, tc.project)
 			}
 			if !reassess || !apply {
-				t.Errorf("reassess=%v apply=%v, want both true: the flagless form is a dry run that withdraws nothing", reassess, apply)
+				t.Errorf("reassess=%v apply=%v, want both true: a repair that predicts withdraws nothing", reassess, apply)
+			}
+			if consensus != 3 {
+				t.Errorf("consensus = %d, want 3: the gate a report names is the gate the command carries", consensus)
 			}
 			if len(withdraw) != 0 {
 				t.Errorf("withdraw = %+v, want none: --reassess and --withdraw are refused together, by design", withdraw)
+			}
+			if n := strings.Count(strings.Join(words, " "), "--apply"); n != 1 {
+				t.Errorf("the rendered repair = %q, want --apply exactly once: the renderer already carries it", strings.Join(words, " "))
 			}
 
 			// The withdraw command, with the id shapes an imported artifact brings

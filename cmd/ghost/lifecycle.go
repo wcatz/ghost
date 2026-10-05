@@ -1647,14 +1647,14 @@ type supersedePair struct{ source, target string }
 // for every project; a valueless --project is an error. Extracted from
 // runSupersede so the argv contract is unit-testable without os.Exit.
 //
-// --consensus N gates the WRITES on N independent classification passes over the
-// same candidate set, and is off unless typed (one pass, the historical
+// --consensus N gates what a pass ACTS ON at N independent classification passes
+// over the same pairs, and is off unless typed (one pass, the historical
 // behaviour). N below supersede.MinConsensus is refused rather than clamped: a
-// gate of 1 runs the ordinary pass and writes whatever it proposed, which is the
-// ungated pass wearing the flag of a safety control, and an operator who typed
-// the flag meant to gate something. It is refused alongside the two repair modes
-// for the same kind of reason --withdraw is: those judge edges the graph already
-// holds, and the measurement the gate rests on was made about NEW proposals.
+// gate of 1 runs the pass again and acts on whatever the first answer proposed,
+// which is the ungated pass wearing the flag of a safety control, and an operator
+// who typed the flag meant to gate something. It applies to the creation pass and
+// to --reassess (both of which write or delete graph rows on a model's verdict),
+// and is still refused beside --withdraw, which asks no model at all.
 //
 // --withdraw takes TWO operands and is refused alongside --reassess, for the two
 // reasons that are load-bearing rather than stylistic. Its operands are
@@ -1691,7 +1691,7 @@ type supersedePair struct{ source, target string }
 // other, which is a silent divergence in an error path nothing else tests.
 func checkSupersedeConsensus(n int) error {
 	if n < supersede.MinConsensus {
-		return fmt.Errorf("--consensus needs at least %d passes (1 would run the ordinary pass again and gate on nothing)", supersede.MinConsensus)
+		return fmt.Errorf("--consensus needs at least %d passes (1 would run the pass again and gate on nothing)", supersede.MinConsensus)
 	}
 	return nil
 }
@@ -1793,14 +1793,23 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			return "", "", false, false, 0, 0, nil, "", rerr
 		}
 	}
-	if consensus > 1 && (reassess || len(withdraw) > 0) {
-		// Both repair modes judge edges the graph ALREADY holds, one verdict per
-		// edge, and a gate that quietly tripled those calls would make the repair
-		// cost three times what its report says it cost — and would refuse to
-		// withdraw an edge the passes happen to split on, which is the one job
-		// the repair exists to do. The creation pass is where the measurement
-		// applied; a repair is a decision about an edge that is already live.
-		return "", "", false, false, 0, 0, nil, "", errors.New("--consensus applies to the creation pass; --reassess and --withdraw judge edges that are already in the graph, one verdict per edge")
+	// --consensus is ACCEPTED beside --reassess since #862, because the reason it
+	// was refused is gone: it was refused because a split would withhold the
+	// withdrawal the repair exists to perform, which is exactly what a gate does
+	// — and that objection was made while --reassess was the only remaining
+	// deletion path, reading ONE verdict per edge. #845 measured that verdict at
+	// 6 wrong withdrawals in 11 even when three passes agreed (#845's run, restated
+	// in #862), so the ungated
+	// repair was the least-gated deletion path in the product. The gate costs N
+	// times the classify calls and lets a split stand instead of deleting a
+	// correct edge; that is the operator's trade to make, and it is why the
+	// default stays ungated rather than being turned on for everyone's scripts.
+	//
+	// --withdraw still refuses it, for the reason that never changed: that flag
+	// judges NOTHING, so N passes would buy no agreement at all — it would only
+	// make the operator wait N times to be told what they already named.
+	if consensus > 1 && len(withdraw) > 0 {
+		return "", "", false, false, 0, 0, nil, "", errors.New("--withdraw judges nothing: it removes the edge you name without asking a model, so --consensus would spend N classify calls to reach a decision you have already made")
 	}
 	return project, source, apply, reassess, threshold, consensus, withdraw, relation, nil
 }
@@ -1844,8 +1853,14 @@ Flags:
   --reassess          Re-judge the supersedes links ALREADY in the graph and, with
                       --apply, withdraw the ones that no longer hold. This is how a
                       wrong supersession is repaired, and the only way an ordinary
-                      pass reports one out of the graph. --threshold is not used:
-                      there are no candidates to select.
+                      pass reports one out of the graph. Takes --consensus N,
+                      which gates the classifier's verdicts: an edge the classifier
+                      decided moves only when all N passes agree, and a pair they
+                      did not all agree on keeps its edge and is reported. The
+                      deterministic veto is NOT gated: it is settled before the
+                      gate, costs no classify call, and is never voted on, so a
+                      vetoed edge is withdrawn on the first pass. --threshold is
+                      not used: there are no candidates to select.
   --withdraw <source-id> <target-id>
                       Withdraw the ONE link from source-id to target-id: the
                       supersedes link if the pair has one, else the causes link
@@ -1866,14 +1881,17 @@ Flags:
                       a 'causes' edge invalidates that edge and writes no
                       unsupersede history row, because a 'causes' claim never
                       held its target down.
-  --consensus N       Classify the candidate set N times and write ONLY what all
-                      N passes proposed, in the same direction (N >= 2; default 1,
-                      which is no gate). A pair the passes split on is reported as
-                      "not agreed" with its count and ids, and nothing is written
-                      for it. Costs N times the classify calls of an ungated pass.
-                      Refused with --reassess and --withdraw, which judge edges
-                      already in the graph. Not used in a dry run beyond telling
-                      you what --apply would write.
+  --consensus N       Classify the same pairs N times and act only on what all N
+                      passes agreed (N >= 2; default 1, which is no gate). A pair
+                      the passes did not all agree on is reported as "not agreed"
+                      with its count and ids, and nothing is written for it and
+                      nothing is withdrawn. Costs N times the classify calls of an
+                      ungated pass. Applies to the creation pass and to --reassess,
+                      where it gates the classifier's verdicts and not the
+                      deterministic veto: the veto is settled before the gate,
+                      costs no classify call, and is never voted on. Refused with
+                      --withdraw, which asks no model at all. In a dry run it tells
+                      you what --apply would do.
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1917,18 +1935,29 @@ shape: a newer note retiring ONE claim of an older note whose other claims still
 held. That verdict is a fair reading of the two bodies under the every-claim rule,
 and deleting the edge promoted a memory that was current and un-hid one that was
 not, both behind a flag the operator set for WRITES. So the edge stays until you
-remove it on purpose: --reassess --apply re-judges it under the current rules and
-withdraws what does not hold, and --withdraw removes the edge you name without
-asking a model.
+remove it on purpose: --reassess --consensus 3 --apply re-judges it under the
+current rules and withdraws what does not hold AND, for every edge the classifier
+decided, what all 3 passes agree does not. The deterministic veto is not part of
+that gate (the next paragraph says why). --withdraw removes the edge you name
+without asking a model.
 
-Read the --reassess dry run before its --apply. The measurement above is about the
-VERDICT, and --reassess acts on that same verdict while reading it exactly once: it
-asks the classifier one time per edge, which is why --consensus is refused beside it
-(a gate there would refuse the withdrawal the repair exists to perform). So the one
-remaining path to a deletion is the least-gated one, and it can still delete a correct
-edge on a single answer — run it without --apply first and read what it says it would
-withdraw. --withdraw carries no such caveat: it removes the edge you name, on your
-say-so, with no model involved.
+Read the --reassess dry run before its --apply, and pass --consensus 3 to it. The
+measurement above is about the VERDICT, and --reassess acts on that same verdict —
+so on ONE answer it can still delete a correct edge: on a copy of a production-shaped
+store, 6 of 11 withdrawals on a NEITHER verdict were wrong even when three unanimous
+passes produced them (#845's run, restated in #862), which is the number that makes a
+single answer worse. --reassess therefore takes --consensus N: with it an edge the
+classifier decided moves only when all N passes agree, and a pair they do not all
+agree on keeps its edge and is reported with its tally, at N times the classify
+calls. A VETOED edge is not part of that, and the reason is the veto's own nature
+rather than an exemption granted to it: the deterministic veto is settled before the
+gate, costs no classify call, and is never voted on, so N passes of a model cannot
+agree a rule about two note bodies more than one does -- a vetoed edge is withdrawn
+on the first pass, as it always has. The default stays one pass so an existing
+script's --reassess --apply keeps doing what it always did, and an ungated --apply
+that withdrew an edge on a classifier's verdict says so in a note rather than
+changing under you. --withdraw carries no such caveat:
+it removes the edge you name, on your say-so, with no model involved.
 
 A withheld edge is not cached either, so it is reported again on
 every later pass until it goes. The 'causes' sweep is not withheld: --reassess
@@ -1952,9 +1981,9 @@ pair is the case where guessing wrong withdraws the edge you did not mean. A
 refusal names the live edges of BOTH relations, since the missing one is the
 common case for an operator who has the pair but not the relation.
 
-Withdrawing a SUPERSEDES edge — which only --reassess --apply or --withdraw
---apply does, never an ordinary pass — writes the unsupersede history row and
-leaves the resolution it may have caused in place:
+Withdrawing a SUPERSEDES edge — which only --reassess --consensus 3 --apply or
+--withdraw --apply does, never an ordinary pass — writes the unsupersede history
+row and leaves the resolution it may have caused in place:
 resolve treats a live edge as a floor, so that resolution becomes clearable only
 now. BOTH runs therefore print their own follow-up — the exact
 
@@ -1970,6 +1999,76 @@ Withdrawing a CAUSES edge writes no history row and prints NO follow-up, because
 is no resolution for the repair to clear, and naming the target would send you to
 clear a memory nothing is holding down.
 `
+
+// verdictWithdrawn counts the edges this run withdrew on the CLASSIFIER's answer,
+// which is the population the --consensus note is about: rows the deterministic
+// veto settled carry `Vetoed` and spent no classify call, so counting them would
+// recommend a gate for a pass that asked no model.
+//
+// `Written` is the filter as well as `Vetoed`, because the note is advice about a
+// DELETION: a row under --apply that a concurrent pass took first is not one this
+// run removed, and its own marker already says "already gone".
+func verdictWithdrawn(withdrawn []supersede.WithdrawnEdge) int {
+	n := 0
+	for _, w := range withdrawn {
+		if w.Written && !w.Vetoed {
+			n++
+		}
+	}
+	return n
+}
+
+// reassessConsensusNote is the one-line recommendation an ungated
+// `--reassess --apply` prints after a run that withdrew an edge ON A VERDICT.
+//
+// It is a FUNCTION and not a Printf at the call site because the conditions are
+// the contract, and four of them have to hold together: --apply really wrote (a
+// dry run withdrew nothing, so there is no deletion to gate), no --consensus was
+// typed (printing "try --consensus 3" to someone who just ran `--consensus 5`
+// is noise), at least one edge really went (a run that withdrew nothing has no
+// finding to advise about), and at least one of those went on the CLASSIFIER's
+// answer rather than the deterministic veto.
+//
+// That last condition is the one that would otherwise make the note a lie. A
+// vetoed edge is settled from the two note bodies with no harness call at all, so
+// "that withdrew 1 edge on ONE verdict per edge" over a row the report itself
+// just printed as `[veto, no harness call]` claims a verdict that was never read
+// — and an operator who reads it as a claim about the model would gate a pass
+// that never asked one. byVerdict is that count.
+//
+// So the note's claim is SCOPED to the classifier-decided edge it names —
+// "withdraws one only when all N passes agree on it" — rather than making the
+// gate's claim about the whole command. A vetoed edge is settled before the
+// gate, costs no classify call and is never voted on, so a note saying the
+// gated form "withdraws only what all N passes agree on" would be false of
+// every vetoed edge in the run, and those rows are printed directly above it.
+// The help and the docs state the exemption outright; this is the surface that
+// cannot, because it is a per-run recommendation about one edge.
+//
+// The command is rendered through internal/followup, with the real project name
+// and its shell quoting, for the reason every other repair line on these reports
+// does: a command printed with a literal `<project>` is one the operator has to
+// edit before it runs, and an edit is where a repair lands in the wrong project.
+func reassessConsensusNote(projectName string, apply bool, consensus, byVerdict int) string {
+	if !apply || byVerdict <= 0 || consensus >= supersede.MinConsensus {
+		return ""
+	}
+	return fmt.Sprintf("  note: that withdrew %d edge(s) on ONE classifier verdict each; `%s` withdraws one only when all %d passes agree on it, at %dx the classify calls\n",
+		byVerdict, followup.ReassessCommand(projectName, supersedeConsensusRecommended), supersedeConsensusRecommended, supersedeConsensusRecommended)
+}
+
+// supersedeConsensusRecommended is the N the CLI names when it tells an operator
+// that an ungated `--reassess --apply` acted on one verdict per edge. It is 3 for
+// #779's reason and not for roundness: the measurement behind the gate is over
+// three passes, and a recommendation of a number nobody measured would be an
+// invented claim.
+//
+// It is NOT reflection.supersedeConsensus, and it is deliberately not that key's
+// value: that key is read ONLY when auto_supersede is true (its own comment says
+// so), so honouring it here would make the automatic phase's tunable silently
+// change what a hand-run report recommends. The two numbers can disagree, and
+// when they do the report is quoting the measurement rather than the config.
+const supersedeConsensusRecommended = 3
 
 // supersedeWithdrawReport renders the --withdraw result: the count, then one line
 // per named edge carrying the memory it was burying, and the step that un-hides
@@ -2109,6 +2208,24 @@ func relationsNamed(links []supersede.WithdrawnLink) string {
 // Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
 // above a list of three edges, because that field counts only invalidations that
 // actually landed.
+// unjudgedReason is why a pair reached the unjudged list, in one sentence, and
+// it is WORDS rather than a format because the two modes differ in a way one
+// sentence cannot cover without asserting something false.
+//
+// Ungated, every unjudged pair is a pair NO pass answered — the classify call
+// failed, or its reply carried the wrong number of verdicts — and the row says
+// exactly that. Under a gate (#862) that stops being true: a pair can have been
+// answered by the first of three passes and then missed by the one that died,
+// and it is unjudged for the narrower reason that it never collected all N
+// answers. "no verdict" would be a false claim about the harness for that row,
+// and the remedy — a rerun — is the same either way.
+func unjudgedReason(consensus int) string {
+	if consensus > 1 {
+		return fmt.Sprintf("no quorum: fewer than the %d passes answered the pair (a classify call failed, or answered with the wrong number of verdicts)", consensus)
+	}
+	return "no verdict: the classify call failed or answered with the wrong number of verdicts"
+}
+
 func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls, retries int) string {
 	verb := "would withdraw"
 	causesVerb := "would sweep"
@@ -2142,11 +2259,20 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// report whose whole job is the partial state.
 	unjudgedNote := ""
 	if n := len(res.Unjudged); n > 0 {
-		unjudgedNote = fmt.Sprintf(", %d unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand)", n)
+		unjudgedNote = ", " + strconv.Itoa(n) + " unjudged (" + unjudgedReason(res.Consensus) + "; their edges stand)"
 	}
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
+	// The gate, and its multiplier, when the repair ran one. "0 withdrawn" over a
+	// gated run and the same total over an ungated one are different claims, and
+	// the ungated one is the weaker of the two (#845), so a reader cannot be left
+	// to infer which they are looking at. Printed only above one pass, so an
+	// ungated run's line is byte-for-byte what it always was.
+	gateNote := ""
+	if res.Consensus > 1 {
+		gateNote = fmt.Sprintf(", consensus %d", res.Consensus)
+	}
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		assemble.Label(projectName), res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
-		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
+		res.Unclassified, unjudgedNote, gateNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
 	for _, w := range withdrawn {
 		// Three markers, because under --apply a row can be neither of the two
 		// the other modes use: a concurrent pass withdrew the supersedes edge
@@ -2192,8 +2318,36 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// not a per-edge finding, and the pass exits non-zero for the rerun. It
 	// names both causes for the reason the summary does.
 	for _, u := range res.Unjudged {
-		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
-			shortID(u.NewerID), shortID(u.OlderID))
+		fmt.Fprintf(&b, "  unjudged    %s -> %s  [%s, so the edge stands and the next pass re-asks it]\n",
+			shortID(u.NewerID), shortID(u.OlderID), unjudgedReason(res.Consensus))
+	}
+	// The pairs the N passes did not all agree on, and they are printed in BOTH
+	// modes for a reason the other rows above are not: nothing was written for
+	// them in either, so there is no tense to derive from `apply`. The line says
+	// the edge STANDS, because that is the finding — the gate refused a
+	// withdrawal, and a report that only counted the refusals would read as a
+	// pass that had nothing to withdraw.
+	//
+	// It says "did not all agree", NOT "split", because a pass whose reply could
+	// not be read votes for nothing and still blocks a quorum: `2 neither, 1
+	// unreadable` is not a model that changed its mind, it is one broken reply
+	// among two answers, and calling it a split sends the operator after the
+	// model's stability instead of the harness. The per-row tally names which it
+	// was, and it is rendered through the same helper the creation pass's own
+	// not-agreed rows use, in DESCENDING VOTE ORDER, so the verdict a reader
+	// takes away is the one most passes gave.
+	//
+	// The remedy is a rerun for the same reason, and it does NOT offer dropping
+	// the flag: on the creation pass that is one remedy among two, but here the
+	// ungated run is the one this report has just recommended gating, so naming
+	// it as the way out would have the report arguing with itself.
+	if res.Consensus > 1 && len(res.Disputed) > 0 {
+		fmt.Fprintf(&b, "  %d pair(s) not agreed: the %d classification passes did not all agree, so every edge of these pairs stands exactly as it was — re-run to ask again (fresh passes may agree); raising --consensus makes unanimity harder, not easier\n",
+			res.NotAgreed, res.Consensus)
+		for _, d := range res.Disputed {
+			fmt.Fprintf(&b, "  not agreed  %s -> %s  [%s, and the edge stands]\n",
+				shortID(d.NewerID), shortID(d.OlderID), supersedeTally(d))
+		}
 	}
 	// The cycles, one block each, AFTER the withdrawn rows so a reader meets the
 	// edges that moved before the pair they belong to. A block states which of
@@ -2289,6 +2443,8 @@ func cycleNote(c supersede.CyclicPair) string {
 		return "no verdict: the classify call failed or its reply could not be read, so no edge of this pair moved and the next pass re-asks it"
 	case supersede.CycleUnoriented:
 		return "undecided: both notes carry the same updated_at AND the same created_at, so there is no direction to ask about and this pass did not ask — a re-run will not change that"
+	case supersede.CycleNotAgreed:
+		return "not agreed: the classification passes did not all agree, so no direction was named and NEITHER edge moved — both stand, re-run to ask again (fresh passes may agree), and withdrawing one of them on a hunch would leave a live edge nothing judged"
 	}
 	return ""
 }
@@ -2301,13 +2457,16 @@ func cycleNote(c supersede.CyclicPair) string {
 // say WHICH edge moved, and the two rows of a block must not disagree with the
 // list printed above them.
 func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply bool, withdrawn []supersede.WithdrawnEdge) string {
-	denied := c.Outcome != edge && c.Outcome != supersede.CycleNoVerdict && c.Outcome != supersede.CycleUnoriented
+	denied := c.Outcome != edge && c.Outcome != supersede.CycleNoVerdict &&
+		c.Outcome != supersede.CycleUnoriented && c.Outcome != supersede.CycleNotAgreed
 	if !denied {
 		switch c.Outcome {
 		case supersede.CycleNoVerdict:
 			return "stands: no verdict, so no edge of this pair moved"
 		case supersede.CycleUnoriented:
 			return "stands: no direction knowable, so no edge of this pair moved"
+		case supersede.CycleNotAgreed:
+			return "stands: the passes did not all agree, so no edge of this pair moved"
 		}
 		return "stands: this is the direction the verdict named"
 	}
@@ -2405,7 +2564,7 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 		// literal `<project>` is a command the operator has to edit before it
 		// runs, and an edit is where a repair goes to the wrong project.
 		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `%s` to settle the cycle\n",
-			res.Bidirectional, followup.ReassessCommand(projectName))
+			res.Bidirectional, followup.ReassessCommand(projectName, supersedeConsensusRecommended))
 	}
 	// The write-time twin of the OppositeLive line above, and the only refusal
 	// on this report that happened AFTER a classify call and a verdict (#806).
@@ -2418,7 +2577,7 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 	// pass, which reads the live edge and asks about the pair in ITS direction.
 	if res.ReverseLive > 0 {
 		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and for a 'supersedes' edge `%s` settles it if the two passes disagree about which note is current (it loads live 'supersedes' edges only, so on a 'causes' pair the next ordinary pass is the whole of the repair)\n",
-			res.ReverseLive, followup.ReassessCommand(projectName))
+			res.ReverseLive, followup.ReassessCommand(projectName, supersedeConsensusRecommended))
 	}
 	// The population #845 created, and it is a line of its own rather than a
 	// subtraction from Reclassified because the two are different findings for the
@@ -2436,17 +2595,16 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 	// quote theirs that way: the flagless command is a dry run that withdraws
 	// nothing.
 	//
-	// The repair is quoted WITH its residual risk rather than bare, because #845's
-	// measurement is about the VERDICT and `--reassess` acts on that same verdict
-	// while reading it exactly once: `Reassess` spends a single `ClassifyBatch`
-	// per chunk (reassess.go), and `parseSupersedeArgs` refuses `--consensus`
-	// alongside `--reassess`/`--withdraw` precisely because a split would refuse
-	// the withdrawal the repair exists to perform. So the one remaining deletion
-	// path is the least-gated one, and an operator who reads this line has to be
-	// told that the flagless run is the step that shows what the model said.
+	// The repair is quoted WITH its gate rather than bare, because #845's
+	// measurement is about the VERDICT and `--reassess` acts on that same verdict:
+	// `ReassessWith` spends N `ClassifyBatch` calls per chunk (reassess.go), and
+	// since #862 it takes `--consensus N` so the one remaining deletion path is
+	// not the ungated one. The quoted command carries the flag, because a repair
+	// line that named the bare form would send the operator to the weakest version
+	// of the command that exists to repair their graph.
 	if res.WithdrawSuppressed > 0 {
-		out += fmt.Sprintf("  %d pair(s) withheld: a live supersedes edge this pass would withdraw on a denying verdict is REPORTED and left in the graph — measured over a real store, 6 of 11 such withdrawals were wrong (a newer note retiring one claim of an older note whose other claims still held), so the edge is still live and still demoting its target; --apply does not remove it either, and the repair is `%s` — which reads ONE verdict per edge and cannot be consensus-gated, so run it without --apply first and read what it says it would withdraw\n",
-			res.WithdrawSuppressed, followup.ReassessCommand(projectName))
+		out += fmt.Sprintf("  %d pair(s) withheld: a live supersedes edge this pass would withdraw on a denying verdict is REPORTED and left in the graph — measured over a real store, 6 of 11 such withdrawals were wrong (a newer note retiring one claim of an older note whose other claims still held), so the edge is still live and still demoting its target; --apply does not remove it either, and the repair is `%s` — which withdraws the edge only when all %d passes agree, so run it without --apply first and read what it says it would withdraw\n",
+			res.WithdrawSuppressed, followup.ReassessCommand(projectName, supersedeConsensusRecommended), supersedeConsensusRecommended)
 	}
 	// The two STALE populations, and they are two lines because they are two
 	// different facts about where a pair was dropped. One counter for both would
@@ -2511,21 +2669,35 @@ func supersedeNotAgreedLines(res supersede.Result) string {
 		// An unreadable pass is named as its own verdict because it is a
 		// different failure from a split between two readable ones: one is the
 		// model, the other is the harness or the prompt.
-		parts := make([]string, 0, len(d.Tally))
-		rels := make([]supersede.Relation, 0, len(d.Tally))
-		for _, rel := range []supersede.Relation{supersede.RelationSupersedes, supersede.RelationCauses, supersede.RelationNeither, supersede.RelationReversed, ""} {
-			if d.Tally[rel] > 0 {
-				rels = append(rels, rel)
-			}
-		}
-		sort.SliceStable(rels, func(i, j int) bool { return d.Tally[rels[i]] > d.Tally[rels[j]] })
-		for _, rel := range rels {
-			parts = append(parts, fmt.Sprintf("%d %s", d.Tally[rel], relationWord(rel)))
-		}
 		fmt.Fprintf(&b, "  %s -> %s  [not agreed: %s]\n",
-			shortID(d.NewerID), shortID(d.OlderID), strings.Join(parts, ", "))
+			shortID(d.NewerID), shortID(d.OlderID), supersedeTally(d))
 	}
 	return b.String()
+}
+
+// supersedeTally renders a Disputed pair's votes for a report line: descending
+// vote order, so the line reads as the finding rather than as a map dump.
+//
+// It is one function because the gate now has TWO surfaces that print it — the
+// creation pass's not-agreed rows and the repair pass's — and a per-row format
+// written twice is a format that will disagree. The ordering rule is the
+// creation pass's (#779's finding is the majority's answer, and a fixed verdict
+// order would print `1 supersedes, 2 neither` for a split whose majority is
+// NEITHER); ties keep the fixed order, so a three-way tie is still deterministic
+// and still reads supersedes, causes, neither, reversed, unreadable.
+func supersedeTally(d supersede.Disputed) string {
+	parts := make([]string, 0, len(d.Tally))
+	rels := make([]supersede.Relation, 0, len(d.Tally))
+	for _, rel := range []supersede.Relation{supersede.RelationSupersedes, supersede.RelationCauses, supersede.RelationNeither, supersede.RelationReversed, ""} {
+		if d.Tally[rel] > 0 {
+			rels = append(rels, rel)
+		}
+	}
+	sort.SliceStable(rels, func(i, j int) bool { return d.Tally[rels[i]] > d.Tally[rels[j]] })
+	for _, rel := range rels {
+		parts = append(parts, fmt.Sprintf("%d %s", d.Tally[rel], relationWord(rel)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // relationWord names a verdict for a tally line. The empty Relation is the
@@ -2776,12 +2948,33 @@ func runSupersede() {
 	cls.SetLogger(logger)
 
 	if reassess {
-		res, withdrawn, err := supersede.Reassess(ctx, store, cls, projectID, apply, logger)
+		res, withdrawn, err := supersede.ReassessWith(ctx, store, cls, projectID, supersede.ReassessOptions{
+			Apply:     apply,
+			Consensus: consensus,
+		}, logger)
 		// The report is printed before the error is raised, and the non-zero
 		// exit stays: each invalidation is its own transaction, so a failure on
 		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
 		// pass. A repair that partly happened has to be visible as such.
 		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls(), cls.Retries()))
+		// The recommendation, and only here: an ungated `--reassess --apply` is
+		// the one command in the product that deletes a live supersedes edge, and
+		// it does so on ONE verdict from the classifier #845 measured at 6 wrong
+		// withdrawals in 11. A note is the whole of the recommendation because
+		// changing the default is not available — an existing script that asks
+		// for `--reassess --apply` means one verdict per edge, and tripling its
+		// classify calls behind the same flag would change what the command they
+		// already run does.
+		//
+		// Printed when --apply actually WITHDREW something the CLASSIFIER decided,
+		// not on every ungated run: the line is advice about a deletion this run
+		// made on a model's answer, a run that withdrew nothing has no deletion to
+		// gate, and a run that withdrew only VETOED edges never asked a model at
+		// all — a note about "one verdict per edge" would be claiming a verdict
+		// nobody read. It goes BEFORE the follow-up, because the follow-up is the
+		// repair for the edges that went and the note is the reader's last chance
+		// to learn that the next run can be made harder to get wrong.
+		fmt.Print(reassessConsensusNote(projectName, apply, consensus, verdictWithdrawn(withdrawn)))
 		// The follow-up too, for the same reason and before the exit: the edges
 		// that did land orphaned resolutions that only a scoped resolve repair
 		// can clear, and an operator who does not learn that from this run
@@ -3174,7 +3367,7 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			// this run removed it, and `kept` that the verdict affirmed it — three
 			// false statements about an edge that is in the graph and should not be.
 			if c.WithdrawSuppressed {
-				extra += ", and the edge it would have withdrawn is STILL LIVE — this pass reports a supersedes withdrawal and never makes one; `ghost supersede --reassess --apply` reads ONE verdict for it and cannot be consensus-gated, so read its dry run first, and `--withdraw <source> <target> --apply` removes the edge you name without asking a model at all"
+				extra += ", and the edge it would have withdrawn is STILL LIVE — this pass reports a supersedes withdrawal and never makes one; `ghost supersede --reassess --consensus 3 --apply` withdraws it only when all 3 passes agree, so read its dry run first, and `--withdraw <source> <target> --apply` removes the edge you name without asking a model at all"
 			}
 			// The rows the run REMOVED: counted from what it moved under
 			// --apply, and counted from what it READ where nothing was applied.
@@ -3599,8 +3792,8 @@ harness). The harness owns its authentication and billing.
 Scope a repair with --only or --only-file rather than running a bare
 --reassess: an unscoped repair re-judges EVERY resolved memory in the project,
 and on a real store that proposed un-hiding memories which had been resolved
-for good reasons. "ghost supersede <project> --reassess --apply" prints the
-exact --only command that repairs what its withdrawal left resolved. Scoping
+for good reasons. "ghost supersede <project> --reassess --consensus 3 --apply"
+prints the exact --only command that repairs what its withdrawal left resolved. Scoping
 narrows which memories are judged and nothing else — a live 'supersedes' edge, a
 correction pairing and the KEEP cache all still hold a judged row back.
 
