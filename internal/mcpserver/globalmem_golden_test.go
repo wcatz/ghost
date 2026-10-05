@@ -40,12 +40,13 @@ import (
 //     and 170 days (30-day tau, floor 0.15), which is what makes the golden
 //     independent of the wall clock — an age only grows, so no later run can
 //     un-floor a row and reorder the block.
-//   - every row that the cap EXCLUDES is a DECAYING category, and the decayed
-//     order is the only thing putting four of them out: a `gotcha` at importance
-//     1.00 ranks below a `convention` at 0.45. Deleting the decay CASE therefore
-//     does NOT change which rows are in the answer — the undamped top fifteen is
-//     the same fifteen ids — so the fixture pins decay by ORDER, and the
-//     positional assertion on gmem07 before gmem12 is what catches it. Stated
+//   - every row that the cap EXCLUDES is a DECAYING category, and decay is
+//     what REORDERS them rather than what puts them out: a `gotcha` at
+//     importance 1.00 ranks below a `convention` at 0.45. Deleting the decay
+//     CASE therefore does NOT change which rows are in the answer — the
+//     undamped top fifteen is the same fifteen ids — so the fixture pins decay
+//     by ORDER, and the positional assertion on gmem07 before gmem12 is what
+//     catches it. Stated
 //     here because the opposite claim is the one this fixture's shape invites:
 //     gmem17-gmem21 sit below the cap undamped too (raw importance 0.30-0.22,
 //     under gmem07's 0.45), so they are rows the cap excludes either way, and a

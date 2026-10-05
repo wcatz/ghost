@@ -471,9 +471,9 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // an empty item set can be describing rows that belong to `_global` — and the
 // project itself may hold none at all.
 //
-// So it has THREE callers, and every one of them establishes that the rows are
-// the population before rendering what comes back — one with a count, two because
-// they do not need one.
+// So it has FOUR callers, and every one of them establishes that the rows are
+// the population before rendering what comes back — one with a count, three
+// because they do not need one.
 //
 // `projectContextOwnRowsNote` is the one that counts, counting the project's own
 // rows first, and that is not a style preference. `assemble.Result` carries no
@@ -483,15 +483,20 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // as a permission rather than as the sentence's own input read it, was satisfied,
 // and then rendered a different and false sentence.
 //
-// The other two are the `_global` bucket: `buildProjectContext`'s `_global`
-// branch and the `ghost://memories/global` resource, both of which read
-// `_global` ALONE — `projectContextGlobalBudget` sets no `IncludeGlobal`, because
-// the bucket is already the population — so an exclusion reason there describes
-// the whole window and there is no second population for it to be wrong about.
-// That is the whole difference between them and the project case, and it is why
-// neither needs the count rather than a reason the count may be skipped: not
-// because their verdict is sharper, but because there is nothing to reconcile it
-// against.
+// The other three are the `_global` bucket: `buildProjectContext`'s `_global`
+// branch, the `ghost://memories/global` resource, and the
+// `ghost_project_context` TOOL's own `args.ProjectID == "_global"` branch —
+// which is easy to miss because it lives in the tool handler rather than in
+// project_context.go, and which is why the count is written out here rather
+// than left for a reader to derive. All three read `_global` ALONE:
+// `projectContextGlobalBudget` sets no `IncludeGlobal`, because the bucket is
+// already the population — and `projectContextBudget` sets it to
+// `projectID != memory.GlobalProjectID`, which is false for that bucket — so an
+// exclusion reason there describes the whole window and there is no second
+// population for it to be wrong about. That is the whole difference between them
+// and the project case, and it is why none of them needs the count rather than a
+// reason the count may be skipped: not because their verdict is sharper, but
+// because there is nothing to reconcile it against.
 func projectContextEmptyNote(res assemble.Result) string {
 	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
 		return ""
