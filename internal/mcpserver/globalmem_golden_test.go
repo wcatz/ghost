@@ -54,6 +54,10 @@ import (
 //     the numbers do not produce.
 //   - a pinned row, a scoped row and a tagged row, so all three renderer labels
 //     are pinned on the answer.
+//   - one row carrying an agent, a source reference, a confidence and a non-manual
+//     source, and one whose content holds the « » data delimiters, so the EIGHT
+//     renderer fields are pinned by the recorded bytes rather than by a reader
+//     comparing two label functions side by side. See `extras` below.
 //   - a `supersedes` pair and a `duplicate` pair, each placed so that losing the
 //     demotion changes the answer's MEMBERSHIP rather than only its order —
 //     see the branch test.
@@ -134,12 +138,75 @@ func goldenGlobalMemoriesStore(t *testing.T) *Server {
 		{"decision", 0.24, false, none, "NULL", 0.036},                     // g20 below the cap
 		{"dependency", 0.22, false, none, "NULL", 0.033},                   // g21 below the cap
 	}
+	// The four columns the renderer reads that the table above does not carry: the
+	// agent, the source reference, the confidence, the origin source, and a content
+	// string holding the data delimiters themselves.
+	//
+	// They ride on ROWS ALREADY IN THE ANSWER rather than on a new one, and that is
+	// forced rather than chosen: the 15-cap is exactly full (fifteen of twenty
+	// penalty-free rows are admitted), so a twenty-third row would displace an
+	// admitted one and cost the demotion proof below its four-row membership
+	// change. The fields under test are the same either way — the golden pins the
+	// RENDERING of a row carrying them, and both renderers are handed the same
+	// columns for the same row.
+	//
+	// gmem04 takes the labels and the delimiters: a `convention` row is otherwise
+	// unremarkable, and the delimiter case is the one that has to be here rather
+	// than reasoned about, because `assemble.Data` and `mcpserver.quoteData` are
+	// two separate implementations of the SAME neutralisation and the golden is the
+	// only thing that can say they agree. gmem06 takes the non-manual source,
+	// because `source=` is the ORIGIN label — the one field whose value is computed
+	// from `project_id` and `source` TOGETHER through
+	// `memory.CanonicalOriginSourceForProject`, so it is the field most likely to
+	// be computed differently on the two paths.
+	type goldenExtra struct {
+		agent, srcRef, source string
+		conf                  float64
+		content               string
+	}
+	extras := map[int]goldenExtra{
+		4: {
+			agent: "claude-code", srcRef: "ghost#872", conf: 0.8,
+			// The « and » inside are the point: they must render as << and >>, and
+			// the << that follows must NOT be escaped again, because the replacer
+			// substitutes once in a single pass rather than repeatedly.
+			content: "global memory 04 holds «a» rule and a <<literal>>",
+		},
+		6: {source: "mcp"},
+	}
+	defaultContent := func(i int) string {
+		return "global memory " + twoDigits(i) + " content for the global memories golden"
+	}
 	for i, r := range rows {
 		id := "gmem" + twoDigits(i)
-		_, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, tags, scope, created_at, updated_at)
-		                   VALUES (?, '_global', ?, ?, 'manual', ?, ?, `+r.tags+`, `+r.scope+`, ?, ?)`,
-			id, r.cat, "global memory "+twoDigits(i)+" content for the global memories golden",
-			r.imp, boolToInt(r.pinned), stamps[i], stamps[i])
+		x := extras[i]
+		content := x.content
+		if content == "" {
+			content = defaultContent(i)
+		}
+		source := x.source
+		if source == "" {
+			source = "manual"
+		}
+		// The three optional columns bind as parameters and are NULL when unset,
+		// because that is what every real writer stores and what `scanMemories`
+		// expects — unlike `tags`, which the row above has to substitute as SQL
+		// text because the scanner binds it as a plain string and a NULL there is a
+		// Scan error rather than "no tags".
+		var agent, srcRef any
+		var conf any
+		if x.agent != "" {
+			agent = x.agent
+		}
+		if x.srcRef != "" {
+			srcRef = x.srcRef
+		}
+		if x.conf != 0 {
+			conf = x.conf
+		}
+		_, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, tags, scope, agent, source_ref, confidence, created_at, updated_at)
+		                   VALUES (?, '_global', ?, ?, ?, ?, ?, `+r.tags+`, `+r.scope+`, ?, ?, ?, ?, ?)`,
+			id, r.cat, content, source, r.imp, boolToInt(r.pinned), agent, srcRef, conf, stamps[i], stamps[i])
 		if err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
@@ -247,11 +314,17 @@ func TestGlobalMemoriesGoldenFixtureExercisesItsBranches(t *testing.T) {
 	out := renderGlobalMemoriesResource(t, goldenGlobalMemoriesStore(t))
 
 	for _, want := range []string{
-		"## Ghost Global Memories", // the surface's own heading
-		"- [preference] `gmem",     // the listing shape
-		"[pinned]",                 // the pin exemption and its label
-		`tags:["golden","pinned"]`, // the tag label
-		"scope{area=payments}",     // the scope label
+		"## Ghost Global Memories",           // the surface's own heading
+		"- [preference] `gmem",               // the listing shape
+		"[pinned]",                           // the pin exemption and its label
+		`tags:["golden","pinned"]`,           // the tag label
+		"scope{area=payments}",               // the scope label
+		"confidence 0.8",                     // the confidence label
+		"agent=«claude-code»",                // the agent label, delimited as stored text
+		"source_ref=«ghost#872»",             // the source reference label
+		"`gmem06` (0.6 source=mcp)",          // the ORIGIN label, on a non-manual row
+		"«global memory 04 holds <<a>> rule", // « and » neutralised to << and >>
+		"and a <<literal>>»",                 // and a literal << NOT escaped a second time
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fixture does not exercise %q; the answer is:\n%s", want, out)

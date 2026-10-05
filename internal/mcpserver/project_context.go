@@ -166,11 +166,21 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 	// nothing about its shape is duplicated here, and the verdicts it carries are
 	// this surface's own selection rather than a re-derivation of it.
 	//
-	// Set in THIS function rather than at the call sites, because all three
-	// project-context surfaces — the tool, the resource and the prompt — reach the
-	// assembler through here. A sink wired at the two callers would record the tool
-	// and leave the other two unaudited, and a resource read is a retrieval an agent
-	// acted on exactly as much as a tool call is.
+	// Set in THIS function rather than at the call sites, because all FOUR
+	// project-context surfaces — the tool, the `ghost://project/{id}/context`
+	// resource, the `recall_project` prompt, and (since #581) the
+	// `ghost://memories/global` resource — reach the assembler through here. A sink
+	// wired at the callers would record the tool and leave the other three
+	// unaudited, and a resource read is a retrieval an agent acted on exactly as
+	// much as a tool call is.
+	//
+	// That last one is a BEHAVIOUR CHANGE rather than a wiring detail, so it is
+	// stated here as well as pinned. `ghost://memories/global` read `_global`
+	// through `Store.GetTopMemories` until #581, which ranked and trimmed in SQL
+	// and wrote nothing; reaching the assembler gives it this row. Keeping it is
+	// the decision — a listing the audit cannot see is a listing whose per-source
+	// precision figures mean nothing — and `TestTheGlobalMemoriesResourceRecordsItsRead`
+	// is what holds it to one row per read, attributed to `_global`.
 	//
 	// nil when the store cannot record, which the assembler treats as "record
 	// nothing": a provider that cannot be audited still answers a listing, and the
