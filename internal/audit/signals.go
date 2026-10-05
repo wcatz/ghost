@@ -108,7 +108,8 @@ func (s *Signals) Hasher() Hasher { return s.h }
 // not about ("Per <id>, I'll ignore the formatting") is not evidence that the
 // memory was denied, and recording it as though it were is how an agent's
 // agreement became the audit's loudest finding. So cueFps and cueIDs are what the
-// cue is bound to (boundPositions and cueGap, in tokens.go) and fps is the
+// cue is bound to (boundPositions, and boundToCue with cueGap over cueFillers,
+// in tokens.go) and fps is the
 // sentence's own vocabulary, which the token bar is measured against.
 type negSegment struct {
 	fps    []string
@@ -191,8 +192,8 @@ func (s *Signals) addWords(text string) {
 func (s *Signals) AddProse(text string) {
 	s.addWords(text)
 	for _, seg := range segments(text) {
-		words := splitWords(seg)
-		cues := cueSpans(words)
+		words, clauses := splitClauses(seg)
+		cues := cueSpans(words, clauses)
 		if len(cues) == 0 {
 			continue
 		}
@@ -202,18 +203,23 @@ func (s *Signals) AddProse(text string) {
 		// detached child never sees it again.
 		//
 		// Two bindings, and they are not the same rule: an id is bound by counting
-		// the words between it and the cue, because an id is always a token and a
-		// rule that skipped to the nearest token would reach across a subject
-		// clause; the fingerprints are bound by skipping to the nearest word that
-		// could BE a token, because a clause boundary is not a word and the
-		// denial-then-restatement shape puts one between a cue and what it denies.
+		// the words between it and the cue — up to one arbitrary word, or up to
+		// three drawn from the closed set (cueFillers), so "ignore the advice in
+		// <id>" binds while "Per <id>, I now ignore the formatting" does not —
+		// and by requiring that no CLAUSE BOUNDARY stands between them, so "The
+		// build is stale, the memory <id> applies" does not bind either, because an
+		// id is a name the words around it are free to introduce and walk away from.
+		// The fingerprints are bound by skipping to the nearest word that could BE a
+		// token, across punctuation and all, because the denial-then-restatement
+		// shape puts a colon between the cue and the memory's own words and skipping
+		// it is what makes that a denial rather than a miss.
 		var boundWords []string
 		for _, i := range boundPositions(words, cues) {
 			boundWords = append(boundWords, words[i])
 		}
 		var boundIDs []string
 		for i, w := range words {
-			if boundToCue(i, cues) {
+			if boundToCue(i, words, clauses, cues) {
 				if id, ok := memoryIDWord(w); ok {
 					boundIDs = append(boundIDs, id)
 				}
