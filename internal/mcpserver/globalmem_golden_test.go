@@ -19,7 +19,23 @@ import (
 // that chose its own rows outside `assemble.Run`: `Store.GetTopMemories` ranked
 // and trimmed them in SQL, and the assembler's stages had nothing left to decide.
 //
-// The goldens here are recorded against origin/main, before this change.
+// The goldens here are recorded against origin/main's READER, and the exact scope
+// of that claim is worth stating rather than leaving to a reader: every line was
+// produced by the pre-migration code path — `mcpserver.go` and `project_context.go`
+// temporarily checked out from origin/main — run against the fixture as it stands
+// here. It is a reader-against-reader comparison, which is the comparison the
+// migration could break, because the two readers are handed the same rows and have
+// to print the same bytes.
+//
+// It is NOT a claim that origin/main shipped these bytes for this fixture, and for
+// two of the fifteen lines origin/main neither did nor could: `extras` below gives
+// gmem04 and gmem06 the agent, source reference, confidence, origin source and
+// data-delimiter content that this change added to the FIXTURE, so the pre-migration
+// reader never had those columns to print. Those two lines are origin/main's reader
+// run against the WIDENED fixture; the other thirteen are its run against the
+// fixture exactly as it stood before. That is why the golden diff shows two changed
+// lines — a fixture widened, not a renderer altered — and a reviewer reading the
+// diff is looking at the fixture change, not at the parity result.
 
 // goldenGlobalMemoriesStore builds the fixture store the global-resource golden
 // is recorded against. It is chosen to exercise every branch the migration
@@ -269,7 +285,10 @@ func renderGlobalMemoriesResource(t *testing.T, srv *Server) string {
 
 // TestGlobalMemoriesResourceGolden is the BEFORE picture for the named surface:
 // it pins the exact bytes `ghost://memories/global` renders for a fixed fixture
-// store, recorded on origin/main before any of this change existed.
+// store, recorded by origin/main's READER — for the thirteen rows whose columns
+// this change left alone, against the pre-change fixture as it stood on origin/main,
+// and for gmem04 and gmem06 against this PR's widened fixture. See the file header
+// for why the scope is drawn there rather than claimed flatly here.
 //
 // A whole-block string and not a set of substring assertions, on the same
 // reasoning as the project-context and session-start goldens: the migration
