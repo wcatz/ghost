@@ -208,10 +208,9 @@ func ValidityStateOf(from, until, verified *string, now time.Time) string {
 }
 
 // ValidityLabel renders a stored validity triple for a listing, for the surfaces
-// that render memory.Memory rather than an Item: ghost_memories_list,
-// ghost_search_all and the ghost://memories/global resource. A surface that runs
-// the pipeline does not need it — stage 2 has already dropped the retired rows
-// before Item.Line is handed one.
+// that render memory.Memory rather than an Item: ghost_memories_list and
+// ghost_search_all. A surface that runs the pipeline does not need it — stage 2
+// has already dropped the retired rows before Item.Line is handed one.
 //
 // It takes the stored strings because those are what memory.Memory carries, and
 // it parses them here so the parsing has one implementation: the column is

@@ -1,0 +1,17 @@
+## Ghost Global Memories
+
+- [preference] `gmem00` (1.0 [pinned] tags:["golden","pinned"]) «global memory 00 content for the global memories golden»
+- [convention] `gmem01` (1.0) «global memory 01 content for the global memories golden»
+- [fact] `gmem02` (0.9 scope{area=payments}) «global memory 02 content for the global memories golden»
+- [preference] `gmem03` (0.9) «global memory 03 content for the global memories golden»
+- [convention] `gmem04` (0.8) «global memory 04 content for the global memories golden»
+- [preference] `gmem05` (0.8) «global memory 05 content for the global memories golden»
+- [preference] `gmem06` (0.6) «global memory 06 content for the global memories golden»
+- [convention] `gmem07` (0.4) «global memory 07 content for the global memories golden»
+- [architecture] `gmem08` (0.9) «global memory 08 content for the global memories golden»
+- [pattern] `gmem09` (0.9) «global memory 09 content for the global memories golden»
+- [architecture] `gmem11` (0.6) «global memory 11 content for the global memories golden»
+- [gotcha] `gmem12` (1.0) «global memory 12 content for the global memories golden»
+- [decision] `gmem13` (1.0) «global memory 13 content for the global memories golden»
+- [gotcha] `gmem15` (0.9) «global memory 15 content for the global memories golden»
+- [dependency] `gmem16` (0.9) «global memory 16 content for the global memories golden»

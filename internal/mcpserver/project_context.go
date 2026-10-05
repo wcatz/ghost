@@ -471,13 +471,25 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // an empty item set can be describing rows that belong to `_global` — and the
 // project itself may hold none at all.
 //
-// So it has exactly ONE caller, `projectContextOwnRowsNote`, which establishes that
-// the project holds rows before rendering what comes back — and that is not a style
-// preference. `assemble.Result` carries no count and the store is not reachable from a
-// function that only renders bytes, so a caller that skipped the check could not make
-// the sentence true; it could only ship it. It was also the way this went wrong twice:
-// a caller holding the count as a permission rather than as the sentence's own input
-// read it, was satisfied, and then rendered a different and false sentence.
+// So it has two callers, and BOTH of them establish that the rows are the
+// population before rendering what comes back — one with a count, one because it
+// does not need one. `projectContextOwnRowsNote` counts the project's own rows
+// first, and that is not a style preference. `assemble.Result` carries no count
+// and the store is not reachable from a function that only renders bytes, so a
+// caller that skipped the check could not make the sentence true; it could only
+// ship it. It was also the way this went wrong twice: a caller holding the count
+// as a permission rather than as the sentence's own input read it, was satisfied,
+// and then rendered a different and false sentence.
+//
+// The other two are the `_global` bucket: `buildProjectContext`'s `_global`
+// branch and the `ghost://memories/global` resource, both of which read
+// `_global` ALONE — `projectContextGlobalBudget` sets no `IncludeGlobal`, because
+// the bucket is already the population — so an exclusion reason there describes
+// the whole window and there is no second population for it to be wrong about.
+// That is the whole difference between them and the project case, and it is why
+// neither needs the count rather than a reason the count may be skipped: not
+// because their verdict is sharper, but because there is nothing to reconcile it
+// against.
 func projectContextEmptyNote(res assemble.Result) string {
 	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
 		return ""
