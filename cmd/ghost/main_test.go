@@ -1362,6 +1362,13 @@ func TestParseResolveArgs(t *testing.T) {
 		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, nil, "", nil, ""},
 		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, nil, "", nil, ""},
 		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, nil, "", nil, ""},
+		// One project named ONCE, in either spelling, with the rest of the
+		// command around it. The parser counts occurrences rather than testing
+		// the value for emptiness, so this is the case that must not move: a
+		// counter that refused a second SIGHT rather than a second VALUE would
+		// break every ordinary invocation to fix an empty one.
+		{"one project flag with the rest of the command", []string{"--project", "myproj", "--reassess", "--apply", "--source", "claude"}, "myproj", "claude", true, true, nil, "", nil, ""},
+		{"one project flag in the equals form", []string{"--project=myproj", "--apply"}, "myproj", "", true, false, nil, "", nil, ""},
 		// The repair scope. Comma-separated on one flag, repeated across flags,
 		// and either spelling of the value form all reach Scope as one list.
 		{"only separate value", []string{"p", "--reassess", "--only", "abcdef01"}, "p", "", false, true, []string{"abcdef01"}, "", nil, ""},
@@ -1441,6 +1448,33 @@ func TestParseResolveArgs(t *testing.T) {
 		{"duplicate project flag", []string{"--project", "a", "--project", "b"}, "expected exactly one project"},
 		{"project missing value", []string{"--apply", "--project"}, "--project requires a value"},
 		{"project empty equals value", []string{"--project="}, "--project requires a value"},
+		// The separate-value spelling reaches runResolve as an empty project,
+		// where it prints the usage block rather than doing the work — so it is
+		// not a silent whole-store pass, but it is the same unset variable in a
+		// different spelling, and one flag must be refused for one reason.
+		{"project empty separate value", []string{"--project", ""}, "--project requires a value"},
+		// A repeat is COUNTED, not inferred from the value. An EMPTY first value
+		// used to read as "no project given", so the second one silently became
+		// the scope of a run whose command line named the scope twice. The
+		// duplicate is asked first, so a NAMED value followed by any second value
+		// is named as the duplicate it is — and two empty values stop at the
+		// FIRST one, because with no first value there is no scope in the command
+		// line to be a duplicate of. These three used to parse at all.
+		{"empty separate project then project flag", []string{"--project", "", "--project", "b"}, "--project requires a value"},
+		{"project flag then empty project", []string{"--project", "a", "--project="}, "expected exactly one project"},
+		{"project equals then empty project", []string{"--project=a", "--project="}, "expected exactly one project"},
+		{"project equals then project flag", []string{"--project=a", "--project", "b"}, "expected exactly one project"},
+		{"project flag then project equals", []string{"--project", "a", "--project=b"}, "expected exactly one project"},
+		// Already refused before the count, and still refused for the same reason
+		// rather than for the duplicate further along the line: the empty first
+		// value stops the parse where it is.
+		{"empty project then project flag", []string{"--project=", "--project", "b"}, "--project requires a value"},
+		{"empty project twice", []string{"--project=", "--project="}, "--project requires a value"},
+		// An empty POSITIONAL is the same missing operand in a third spelling,
+		// and the one that decides nothing: runResolve prints the usage block
+		// for an empty project. It is counted so that `ghost resolve "" b` is
+		// refused as a repeat rather than running b.
+		{"empty positional then project flag", []string{"", "--project", "b"}, "expected exactly one project"},
 		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
 		{"source missing value", []string{"myproj", "--source"}, `unknown flag "--source"`},
 		// A repair scope without --reassess has nothing to scope: the ordinary

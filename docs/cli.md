@@ -792,7 +792,7 @@ ghost export --out - | head -3
 
 | Flag | Meaning |
 |---|---|
-| `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. |
+| `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. Default: every project. An EMPTY value is refused rather than read as the default — `--project=` is an unset variable, and the way to export everything is to leave the flag off. |
 | `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. |
 
 The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
