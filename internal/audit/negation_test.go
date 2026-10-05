@@ -507,7 +507,8 @@ func TestANAdjacentFillerIsStillApartOfTheDistance(t *testing.T) {
 			{prose: "the note is stale", want: []cueSpan{{start: 2, end: 3}}},
 		}
 		for _, tc := range cases {
-			got := cueSpans(splitWords(tc.prose))
+			words, clauses := splitClauses(tc.prose)
+			got := cueSpans(words, clauses)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("cueSpans(%q) = %v, want %v: the span's leading edge is the cue's first word, never a filler ahead of it",
 					tc.prose, got, tc.want)
@@ -541,6 +542,236 @@ func TestANAdjacentFillerIsStillApartOfTheDistance(t *testing.T) {
 			t.Error("the memory's own word beside the cue was stepped over, so a genuine denial of it was not filed")
 		}
 	})
+}
+
+// TestACueIsNotBoundAcrossAClauseBoundary: #860, the other side of the closed set,
+// and the defect it left behind. The words in cueFillers are the words an agent
+// reaches for when it CITES a memory — the, memory, note, advice, in, this, now,
+// also — so an allowance that spans them also spans the punctuation of ordinary
+// agreeing prose:
+//
+//	"The build is stale, the memory <id> applies."
+//
+// Here the cue denies the BUILD and the id is the memory that says what to do
+// about it, which is the citation shape an agent uses constantly. A comma and two
+// of the allowance's own words stand between them and the id arm reads the whole
+// run as one denial. It is not the widening's fault alone: "The CI is deprecated,
+// also <id> covers lockfiles" and "Disregard this, <id> is accurate" reach an id
+// across a SINGLE arbitrary word, so they were already bound on a gap of one and
+// only stopped looking like a mistake once cueFillers existed.
+//
+// So a clause boundary ENDS the binding, in BOTH directions — between the cue and
+// the id, whichever of them comes first. It is the narrowest rule available,
+// because the comma is the mark English puts between "this is wrong" and "here is
+// the memory I mean", and a colon, a dash or a semicolon is that same boundary
+// with a different glyph.
+//
+// The cost is stated rather than discovered: a denial phrased across a boundary is
+// now a miss, which is the direction cueGap already chose — the denial is not
+// filed rather than a use being reported as the agent having found the memory
+// wrong.
+//
+// The positives are the half that decides whether this is a rule or a blank
+// veto, and two of them are on the wrong side of a boundary ALREADY: "Memory <id>
+// is wrong: the port is 8080, not 9090" and "ignore <id>, it is outdated" both put
+// their comma or colon on the FAR side of the cue from the id, so a rule that
+// ended a binding anywhere in the sentence would lose them. The boundary has to be
+// between the two things and nowhere else.
+func TestACueIsNotBoundAcrossAClauseBoundary(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+
+	// A memory whose wording appears in none of the sentences below, so the id arm
+	// is the only one that can reach a verdict.
+	unshared := "a memory whose wording the agent never repeated"
+
+	cases := []struct {
+		name  string
+		prose string
+		want  bool
+	}{
+		{
+			// The reviewer's sentence. The cue denies "the build" and the id is the
+			// memory it cites: two allowance words ("the", "memory") and a comma.
+			name:  "a citation behind a comma, the cue denying something else",
+			prose: "The build is stale, the memory " + id + " applies.",
+			want:  false,
+		},
+		{
+			// The same shape at the WIDTH of the allowance: determiner, noun and
+			// preposition, which is "ignore the advice in <id>" with a comma moved
+			// in front of them.
+			name:  "the widest allowance, behind a comma",
+			prose: "The flag is wrong, the advice in " + id + " fixes it.",
+			want:  false,
+		},
+		{
+			name:  "a citation behind a comma, cue on the other side of it",
+			prose: "That approach is outdated, the memory " + id + " has the new one.",
+			want:  false,
+		},
+		{
+			// "this note" is the run, and "this" is the determiner that makes the
+			// citation read as one.
+			name:  "a determiner and a noun behind a comma",
+			prose: "The old flag is deprecated, this note " + id + " documents the replacement.",
+			want:  false,
+		},
+		{
+			// The preposition is on the far side of the boundary from the cue, so the
+			// gap holds "in the" and the clause changed underneath it.
+			name:  "a preposition and a determiner behind a comma",
+			prose: "The CI config is obsolete, in the " + id + " we use new one.",
+			want:  false,
+		},
+		{
+			// "now" belongs to the CUE here ("is wrong now"), so this is the same
+			// closed-set word on the cue side of the boundary as on the id side.
+			name:  "an adverb inside the cue, then a citation",
+			prose: "is wrong now, in " + id + " it was right",
+			want:  false,
+		},
+		{
+			// The one that was already bound on a gap of ONE arbitrary word: the
+			// comma is all that stops it, which is why this is a bug and not a
+			// consequence of the widening.
+			name:  "one arbitrary word behind a comma",
+			prose: "The CI is deprecated, also " + id + " covers lockfiles.",
+			want:  false,
+		},
+		{
+			// The other one. "Disregard this" denies the thing in front of the comma,
+			// and "this" is a filler, so the gap is a single word of the allowance's
+			// own width.
+			name:  "a filler and a comma, with the denial on the other side",
+			prose: "Disregard this, " + id + " is accurate.",
+			want:  false,
+		},
+		{
+			// A colon rather than a comma, and the same sentence with the cue AFTER
+			// the id — the other direction of the rule.
+			name:  "a citation behind a colon",
+			prose: "the go cache is stale: the note " + id + " still holds.",
+			want:  false,
+		},
+		{
+			// A dash, which is the same boundary as a comma with a longer reach and a
+			// different glyph, and the case a rule written over "," alone would miss.
+			name:  "a citation behind an em dash",
+			prose: "The build is stale — the memory " + id + " applies.",
+			want:  false,
+		},
+		{
+			// A cited id with the cue denying the thing BEFORE the comma: the id is
+			// what the agent follows, so it is the citation and the cue is not about
+			// it.
+			name:  "a cited id behind a comma, the cue denying the clause before it",
+			prose: "The go cache is wrong, " + id + " is what we follow.",
+			want:  false,
+		},
+		{
+			// The positives, from both directions. None of these crosses a boundary,
+			// so the allowance is the whole of what binds them and nothing here can
+			// be fixed by loosening the cue list or the width.
+			name:  "a determiner and a noun between the cue and the id",
+			prose: "disregard the memory " + id,
+			want:  true,
+		},
+		{
+			name:  "an adverb inside the cue, with the id beside it",
+			prose: "Memory " + id + " is now obsolete",
+			want:  true,
+		},
+		{
+			name:  "a determiner, a noun and a preposition between them",
+			prose: "ignore the advice in " + id,
+			want:  true,
+		},
+		{
+			// The colon is on the FAR side of the cue from the id: the cue is "is
+			// wrong", the id is the noun phrase in front of it, and everything the
+			// colon introduces is the agent's correction. This is the denial-then-
+			// restatement shape, and it must survive.
+			name:  "the boundary after the cue, not between the cue and the id",
+			prose: "Memory " + id + " is wrong: the port is 8080, not 9090.",
+			want:  true,
+		},
+		{
+			// And the mirror: the comma is after the id, between the cue and the
+			// agent's agreement.
+			name:  "the boundary after the id, not between the cue and the id",
+			prose: "ignore " + id + ", it is outdated",
+			want:  true,
+		},
+		{
+			// A dash on the far side of the id, which is the third way a boundary can
+			// sit outside the two things without separating them.
+			name:  "a dash after the id, binding through the cue",
+			prose: "ignore the memory " + id + " — that is what the port 9090 note says",
+			want:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSignals(t)
+			s.AddProse(tc.prose)
+			if got := s.contradicts(testTokens(unshared), id); got != tc.want {
+				if tc.want {
+					t.Errorf("contradicts = false for %q: a denial with no clause boundary between the cue and the id is not bound", tc.prose)
+					return
+				}
+				t.Errorf("contradicts = true for %q: a clause boundary stands between the cue and the id", tc.prose)
+			}
+		})
+	}
+
+	// The mechanism, rather than the verdict: a sentence is split into clauses, and
+	// two words either side of a comma are not two words of the same clause.
+	// Asserted here because a verdict can also be reached by the fingerprint arm,
+	// and a rule that stopped the id binding by accident would still pass the table.
+	t.Run("and the boundary is carried, not dropped", func(t *testing.T) {
+		words, clauses := splitClauses("The build is stale, the memory " + id + " applies")
+		got := cueSpans(words, clauses)
+		if len(got) != 1 {
+			t.Fatalf("cueSpans = %v, want the one cue in the sentence", got)
+		}
+		if clauses[got[0].start] == clauses[len(words)-1] {
+			t.Errorf("the cue and the id are both in clause %d, so the comma between them was dropped rather than carried",
+				clauses[got[0].start])
+		}
+	})
+
+	// And that the rule is TWO-SIDED at the mechanism, because the table above is
+	// worded one way round only. Two sentences differing in nothing but whether a
+	// comma sits between the cue and the id, in each order — the id ahead of the
+	// cue is the half the prose naturally puts first ("Memory <id> is obsolete"),
+	// and a rule that only compared clause ids in one direction would pass every
+	// case above.
+	for _, tc := range []struct {
+		prose string
+		want  bool
+	}{
+		{prose: "The go cache is wrong, the note " + id + " applies", want: false},
+		{prose: "the note " + id + ", the advice is wrong", want: false},
+		{prose: "The go cache is wrong the note " + id + " applies", want: true},
+		{prose: "the note " + id + " the advice is wrong", want: true},
+	} {
+		words, clauses := splitClauses(tc.prose)
+		cues := cueSpans(words, clauses)
+		if len(cues) != 1 {
+			t.Fatalf("cueSpans(%q) = %v, want the one cue in the sentence", tc.prose, cues)
+		}
+		idPos := slices.IndexFunc(words, func(w string) bool {
+			_, ok := memoryIDWord(w)
+			return ok
+		})
+		if idPos < 0 {
+			t.Fatalf("no id in %q", words)
+		}
+		if got := boundToCue(idPos, words, clauses, cues); got != tc.want {
+			t.Errorf("boundToCue(id) = %v for %q, want %v: the clause comparison is not two-sided", got, tc.prose, tc.want)
+		}
+	}
 }
 
 // TestACueIsMatchedAsWholeWords: every cue is a run of WORDS, and the two that

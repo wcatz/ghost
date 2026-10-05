@@ -201,7 +201,11 @@ func (s *Signals) matchesSaves(toks []string) bool {
 //     negates one memory and quotes three others does not contradict all four.
 //
 //  2. The cue must be BOUND to the memory — beside the id, or beside the words of
-//     the memory it is denying (boundPositions and cueGap, in tokens.go).
+//     the memory it is denying (boundPositions and boundToCue, in tokens.go). The
+//     two arms differ on purpose: a cue binds to an id only within a CLAUSE, so a
+//     citation after a comma is not a denial, while it binds to the memory's own
+//     wording across punctuation, because a colon after "that is wrong" introduces
+//     the restatement rather than a new assertion about something else.
 //     "Per memory <id>, that applies" names an id and agrees with it, and "Per
 //     <id>, I'll ignore the formatting" names it and agrees with it again: a cue
 //     ANYWHERE in a sentence is not a denial of the memory that sentence mentions,

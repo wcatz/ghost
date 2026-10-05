@@ -105,24 +105,106 @@ func unhex64(s string) (string, bool) {
 // so an agent writing about a memory's "rm -rfs" wording cannot match it — which
 // is the conservative direction, since a missed match is an honest "ignored"
 // while a spurious one is a false "used".
+//
+// It DROPS punctuation, which is what makes "Per <id>, I'll ignore the
+// formatting" and "The build is stale, the memory <id> applies" the same list of
+// words — and the second of those is a use filed as a contradiction, because the
+// binding rule counts the words between a cue and an id and cannot see that a
+// comma is among them. So the tokenizer that does the binding carries the clause
+// each word falls in as well, and this is the half of it with no use for one —
+// which is every caller except the negation arm, since the token and id arms want
+// words and nothing else.
 func splitWords(text string) []string {
+	words, _ := splitClauses(text)
+	return words
+}
+
+// splitClauses is splitWords plus, for each word, the CLAUSE it falls in.
+//
+// A parallel slice rather than a token that keeps its punctuation, because the
+// punctuation is not something a cue or a memory token should ever match: what
+// the binding needs to know is only whether a boundary FELL between two words,
+// and attaching the glyph to a word would put "is," and "is" in the same
+// vocabulary.
+//
+// Clause ids are assigned in order and only ever increase, so one comparison —
+// are two positions in the same clause — is the whole of what asks whether a
+// clause boundary separates them.
+//
+// The boundaries themselves are named in clauseBoundary rather than inferred from
+// "not a letter and not a digit", because the difference between a boundary and
+// ordinary punctuation is the difference between "the build is stale, the memory
+// <id> applies" and "the memory <id> (see below) applies", and the second is a
+// citation of the memory while the first is a denial of something else that
+// happens to cite one.
+func splitClauses(text string) ([]string, []int) {
 	var out []string
+	var clauses []int
 	var cur strings.Builder
+	clause := 0
 	flush := func() {
 		if cur.Len() > 0 {
 			out = append(out, cur.String())
+			clauses = append(clauses, clause)
 			cur.Reset()
 		}
 	}
 	for _, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
 			cur.WriteRune(unicode.ToLower(r))
-			continue
+		case clauseBoundary(r):
+			// Flushed first, so the boundary falls BETWEEN two words rather than
+			// inside one: splitWords drops a hyphen in "rm-rfs" the same way it
+			// drops a comma, and the two tokens must stay two tokens here.
+			flush()
+			clause++
+		default:
+			flush()
 		}
-		flush()
 	}
 	flush()
-	return out
+	return out, clauses
+}
+
+// clauseBoundary reports whether r ends a clause.
+//
+// The set is a list and not a rule over unicode categories because the marks that
+// matter here are the ones an agent TYPES as a boundary, and a category test
+// cannot tell them from the ones it would sweep in with them: a period inside a
+// decimal or a colon inside "https:" is punctuation without ending anything.
+//
+// A paragraph break and a newline end a segment rather than a clause, so they are
+// absent here: segments already splits on them, and a cue cannot be in one segment
+// while the words it is about are in another (see contradicts).
+//
+// The list is what the comparison is entitled to read as a boundary, and it is
+// short on purpose. Each entry is a mark English puts between one assertion and
+// another, and the binding rule's whole claim is that a cue on one side of one of
+// them is not denying what the other side names — "The build is stale, the memory
+// <id> applies" is a denial of the build that CITES a memory, and the citation is
+// written in exactly the closed set the filler allowance spans.
+//
+// The dash is here for the same reason the comma is, and in particular the em and
+// en forms an agent actually types rather than the ASCII hyphen alone.
+//
+// A dash being a boundary costs something, and it is named rather than discovered
+// a year later: "ignore the memory-entry <id>" splits into two closed-set words
+// at the hyphen and so is not bound any more. A hyphenated compound standing
+// between a cue and an id is not a construction an agent writes, and the cost is
+// a denial that goes unfiled, which is the direction cueGap already chose.
+//
+// NOT parentheses, quotes or an ellipsis. Those bracket a clause rather than
+// ending one, and the marking they do is the cue's own: a denial in brackets is
+// still a denial, and a citation in brackets is still a citation. Reading them as
+// boundaries would blank "the advice (from the note <id>) is obsolete" on the
+// strength of a shape that says nothing about what is being denied.
+func clauseBoundary(r rune) bool {
+	switch r {
+	case ',', ':', ';', '—', '–', '-':
+		return true
+	}
+	return false
 }
 
 // idLen is the length of the ids Ghost mints: hex(randomblob(16)), upper case.
@@ -207,8 +289,10 @@ func isHex(s string) bool {
 //
 // "Consecutive" counts closed-set words as absent (cueFillers, #860): "is now
 // obsolete" is "is obsolete" with an adverb in it, and an agent writes the first
-// as readily as the second. That tolerance is bounded at one word and it is a
-// membership test rather than a distance — see cueRunFillers.
+// as readily as the second. That tolerance is bounded at one word, it is a
+// membership test rather than a distance (see cueRunFillers), and it is INTERNAL
+// to a cue: a filler ahead of the cue is part of the distance to what the cue
+// denies, and a boundary inside one is a boundary in the sentence — see cueRun.
 var negationCues = []string{
 	"is wrong", "is incorrect", "is false", "is not true", "is not correct",
 	"is obsolete", "is outdated", "is stale", "is deprecated", "is superseded",
@@ -246,6 +330,13 @@ var negationCueWords = func() [][]string {
 // denial it misses is a contradiction that is not filed, which is the honest
 // direction (see splitWords), while one it admits is ordinary use reported to an
 // operator as a finding.
+//
+// Not the WHOLE rule on this side, though, and the second half is a different kind
+// of check: the count is bounded twice over, by cueFillerGap over cueFillers and by
+// a clause boundary that no count can express (see boundToCue). A reader who comes
+// here for the binding rule and stops at the constant has the width and not the
+// boundary, and the width alone reads "the memory <id> applies" as a denial of the
+// memory because it is preceded by "the" and "memory".
 //
 // The count is of a SLICE of the words between them, so the constant cannot mean
 // adjacency by accident again: it was once written as a pair of position bounds
@@ -350,19 +441,25 @@ func isDistinctive(word string) bool {
 // boundPositions is where a cue's object is, in the sentence's word positions: the
 // cue's OWN words plus, on each side, the nearest word a fingerprint would keep.
 //
-// Skipping the words between is the point, and the skip is sound rather than
-// generous: splitWords drops punctuation, so a clause boundary is not a word and
-// cannot separate a cue from what follows it. "that is wrong — the opencode plugin
-// materializes its transcript" and "that is wrong: the v20 migration runs" are the
-// denial-then-restatement shape, and in both the cue's object is the next word
-// with a token in it. What stops the sentence this rule exists for is that the
+// Skipping the words between is the point, and the skip crosses punctuation
+// WITHOUT looking at it, which is what makes it sound on this arm rather than
+// merely convenient: a clause boundary is not a word, so a cue and the restatement
+// on the far side of a colon are adjacent here. "that is wrong — the opencode
+// plugin materializes its transcript" and "that is wrong: the v20 migration runs"
+// are the denial-then-restatement shape, and in both the cue's object is the next
+// word with a token in it. What stops the sentence this rule exists for is that the
 // words in between are words — "Per <id>, I'll ignore the formatting" reaches its
 // object across a subject and a possessive, not across punctuation.
 //
-// The id arm does NOT use this: an id is 32 characters and so always survives the
-// token filter, which would let this skip straight over a subject clause and bind
-// "ignore" to any id the sentence named. Ids are bound by cueGap instead, where
-// the words in between are counted rather than skipped.
+// The id arm does NOT use this, and the reason is the same sentence read two ways.
+// An id is 32 characters and so always survives the token filter, which would let
+// this skip straight over a subject clause and bind "ignore" to any id the sentence
+// named. Ids are bound by boundToCue instead, which COUNTS the words in between
+// and also refuses to cross a clause boundary at all — so this arm's skip and the
+// id arm's count disagree about punctuation by design, and the disagreement is the
+// rule: what a cue is about here is the memory's own WORDING, which a restatement
+// on the far side of a colon IS, and what a cue is about there is a NAME, which
+// the clause after a comma is free to introduce and walk away from.
 //
 // On this arm the same skip DOES put an id beside a cue, and that is harmless
 // rather than by luck: an id is never one of a memory's tokens (addWords keeps ids
@@ -433,11 +530,11 @@ type cueSpan struct {
 // Every occurrence and every cue, so the binding below is the union of what they
 // each deny rather than the first one's guess: a sentence can carry a cue per
 // memory id, which is the case a document listing several retractions takes.
-func cueSpans(words []string) []cueSpan {
+func cueSpans(words []string, clauses []int) []cueSpan {
 	var out []cueSpan
 	for _, cue := range negationCueWords {
 		for i := 0; i+len(cue) <= len(words); i++ {
-			if end, ok := cueRun(words, cue, i); ok {
+			if end, ok := cueRun(words, cue, clauses, i); ok {
 				out = append(out, cueSpan{start: i, end: end})
 			}
 		}
@@ -464,8 +561,14 @@ func cueSpans(words []string) []cueSpan {
 //
 // Reported as a span rather than a match so the binding downstream counts the same
 // positions this function matched, and a filler INSIDE a run counts as inside the
-// cue. That is what it is — the cue's own extent — but it has a consequence worth
-// naming, because it is the one place this tolerance can lose a genuine denial: if
+// cue. The same clause test applies inside a run as outside one: a cue is a run of
+// consecutive words, and two consecutive words either side of a comma are two
+// assertions, so a cue matching them would be a span whose own extent the id arm
+// has no single clause to compare against.
+//
+// A filler INSIDE a run counts as inside the cue, and that is what it is — the
+// cue's own extent — but it has a consequence worth naming, because it is the one
+// place this tolerance can lose a genuine denial: if
 // the memory's own distinctive word is the filler ("that entry is obsolete" for a
 // memory about "the entry that records weekly releases"), insideCue tells the
 // sideward skip to step over it and the binding never reaches a word the memory
@@ -475,7 +578,7 @@ func cueSpans(words []string) []cueSpan {
 // vocabulary, so neither error is avoidable by choosing a set that is narrower;
 // the one taken here is the one that reports a denial as `used`, which is the
 // honest direction (see cueGap).
-func cueRun(words, cue []string, i int) (int, bool) {
+func cueRun(words, cue []string, clauses []int, i int) (int, bool) {
 	pos := i
 	for k := 0; k < len(cue); k++ {
 		if k > 0 {
@@ -489,7 +592,12 @@ func cueRun(words, cue []string, i int) (int, bool) {
 			// through the tolerance meant to prevent it. So the leading position is an
 			// exact match or nothing.
 			for skipped := 0; pos < len(words) && words[pos] != cue[k]; skipped++ {
-				if skipped >= cueRunFillers || !cueFillers[words[pos]] {
+				// The filler must be in the SAME clause as the cue's first word,
+				// which is what keeps a cue a run of consecutive words rather than
+				// a run with a boundary inside it: "is, the obsolete" is two
+				// assertions, and a cue matching it would be a span the id arm has
+				// no single clause to compare.
+				if skipped >= cueRunFillers || !cueFillers[words[pos]] || clauses[pos] != clauses[i] {
 					break
 				}
 				pos++
@@ -521,8 +629,40 @@ func cueRun(words, cue []string, i int) (int, bool) {
 // longer gap of arbitrary words is the false contradiction, and a gap of the
 // allowance's width with a word outside the set in it is the same sentence with an
 // extra noun in it.
-func boundToCue(i int, words []string, cues []cueSpan) bool {
+//
+// **AND A CLAUSE BOUNDARY BETWEEN THEM ENDS THE BINDING**, checked before the
+// count because it is not a distance at all — the words on either side of it can
+// be zero and the binding still dies. It is a separate rule rather than a wider
+// condition on the count because the two failures are different: the count is what
+// keeps a cue off a subject clause, and this is what keeps it off the NEXT
+// assertion. "The build is stale, the memory <id> applies" denies the build and
+// cites a memory, and every word between the cue and the id is in cueFillers —
+// that is what makes it a citation — so the count alone binds it. And the fix
+// cannot be "one fewer filler", because "The CI is deprecated, also <id> covers
+// lockfiles" and "Disregard this, <id> is accurate" each reach the id across a
+// SINGLE arbitrary word: the comma is all that stops them, and it was already
+// doing so on a gap of one.
+//
+// Symmetric on purpose: the clause of a cue's first word and of the id must be
+// the same whichever of them the sentence writes first, so "Memory <id> is wrong"
+// binds and "Memory <id>, that is wrong" does not. Which is not a distinction an
+// agent intends — both read the same aloud — and it is the correct direction to
+// be wrong in: the second is filed as `used` rather than reported to an operator
+// as "the agent found this memory wrong".
+//
+// Only the ID arm. The fingerprints are bound by boundPositions, which SKIPS
+// punctuation deliberately, because "that is wrong: <the memory's wording>" is a
+// denial followed by its restatement and the words the cue is about are on the far
+// side of the colon (see boundPositions). That shape and this one are the same
+// punctuation read two ways, and they differ in what the cue is attached to: a
+// restatement IS the memory's own wording, so the skip landing on it is the
+// binding working, while an id is a name for the memory, which is what the words
+// around it are free to introduce and walk away from.
+func boundToCue(i int, words []string, clauses []int, cues []cueSpan) bool {
 	for _, c := range cues {
+		if clauses[i] != clauses[c.start] {
+			continue
+		}
 		// A position inside a cue is not a position between one, and the empty
 		// slice is the honest answer: an id cannot be one of a cue's own English
 		// words, so this branch exists only so that a position the cue already
@@ -549,7 +689,8 @@ func boundToCue(i int, words []string, cues []cueSpan) bool {
 // A denial of SOMETHING, not of a particular memory: what it denies is decided per
 // memory, against that memory's id and its own wording, by the arms in compare.go.
 func HasNegationCue(segment string) bool {
-	return len(cueSpans(splitWords(segment))) > 0
+	words, clauses := splitClauses(segment)
+	return len(cueSpans(words, clauses)) > 0
 }
 
 // sentenceSplit is where one sentence ends. Sentence-final punctuation and the
