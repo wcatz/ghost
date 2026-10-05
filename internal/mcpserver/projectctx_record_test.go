@@ -405,3 +405,75 @@ func TestAProjectContextWhoseRecordIsRefusedStillRendersTheSameBlock(t *testing.
 			"leave nothing behind. Recorded: %+v", len(records), records)
 	}
 }
+
+// TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes: the two
+// `ghost_project_context` shapes that are NOT the union read of a resolved project
+// each record exactly ONE row, attributed to `_global`.
+//
+// They are here because `docs/architecture.md`'s `retrieval_record` cell enumerates
+// which reads write that table, and enumerating it correctly needs these two shapes
+// pinned rather than read off the branches. The other three shapes have their own
+// tests in this file — the tool's union read, the resource's two reads, and (since
+// #581) the standalone global resource — so the cell's claim that a count of CALLS
+// is not a count of rows rests on all five and only two of them were measurable.
+//
+// Both shapes write one row for the same reason, which is that they never make two
+// reads. `projectContextBudget` unsets `IncludeGlobal` when the project IS
+// `_global`, because the bucket already reads those rows, so the tool's single read
+// is `_global`-only rather than a union with an empty half. The unresolved name
+// renders the Global section ALONE, skipping the project-keyed read rather than
+// running one that would match nothing. The attribution to `_global` on both is the
+// point: a project-keyed read lands in the REQUESTED project's denominator, and a
+// read that named the `_global` bucket must not widen that denominator with a window
+// holding none of its rows.
+//
+// `vproj`-vs-`nosuchproject` matters: a name that RESOLVES would take the union
+// branch and record a row attributed to it, which is the case the other tests cover.
+func TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		projectID string
+		why       string
+	}{
+		{"the bucket itself", memory.GlobalProjectID,
+			"IncludeGlobal is unset when the project IS `_global`, so this read is `_global`-only rather than a union " +
+				"with an empty half — one read, one row"},
+		{"an unresolved name", "nosuchproject",
+			"the unresolved branch renders the Global section alone and SKIPS the project-keyed read, so again one " +
+				"read and one row; a union here would have matched nothing and still been recorded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := projectRecordStore(t)
+			_, session := validityServerFor(t, st)
+			saveGlobalValidityRow(t, session, projectContextSentinel, nil)
+
+			out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": tc.projectID}))
+			if !strings.Contains(out, projectContextSentinel) {
+				t.Fatalf("the block did not render the fixture's global memory, so the row below is about a read "+
+					"that returned nothing:\n%s", out)
+			}
+
+			records, err := st.RetrievalRecords(t.Context(), 10)
+			if err != nil {
+				t.Fatalf("RetrievalRecords: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("recorded %d rows, want exactly 1 — %s. Recorded: %+v", len(records), tc.why, records)
+			}
+			got := records[0]
+			if got.Source != "project_context" {
+				t.Errorf("source = %q, want project_context", got.Source)
+			}
+			if got.ProjectID != memory.GlobalProjectID {
+				t.Errorf("project_id = %q, want %q — this read named the `_global` bucket, and attributing it to "+
+					"anything else would put another bucket's window in that project's denominator", got.ProjectID, memory.GlobalProjectID)
+			}
+			if got.QueryHash != "" {
+				t.Errorf("query_hash = %q, want empty — a listing carried no question", got.QueryHash)
+			}
+			if len(got.Verdicts) != 1 || !got.Verdicts[0].Kept {
+				t.Errorf("verdicts = %+v, want the one rendered global row kept", got.Verdicts)
+			}
+		})
+	}
+}
