@@ -446,3 +446,38 @@ func TestTheRunSummaryNamesTheEmptyCallCountAfterItsSource(t *testing.T) {
 		t.Errorf("the injection line names its figure as a failed lookup:\n%s", startLine)
 	}
 }
+
+// TestTheRunSummaryRendersItsSourceThroughLabel: the lifecycle summary prints one
+// line per source, and `src.Source` is the retrieval_record.source column verbatim —
+// plain TEXT with no CHECK, validated by nothing, and as ordinary a thing to receive
+// as a row from a restored backup.
+//
+// This is the third renderer of this exact line, and the other two both render the
+// column through assemble.Label for the reason report.go says: a raw source is a
+// string a stored row chooses, and one holding a newline forges a figure of its own.
+// It matters more here than in the report, because `ghost lifecycle` writes this to
+// stderr as the phase tail an operator reads in lifecycle.log. Asserted twice, for
+// the two ways a renderer can be wrong: the forged line must not appear, and the
+// label must be the escaped form (a raw %s would also fail the first assertion for
+// this particular payload only by luck).
+func TestTheRunSummaryRendersItsSourceThroughLabel(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	_ = recordCall(t, store, projectID, "search")
+
+	res, err := Run(context.Background(), store, projectID, newTestSignals(t))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Written onto the figure the Run just produced, rather than through a second
+	// Run with a hostile source: this is the RENDERER under test, and a hostile row
+	// would also have to survive RecordRetrieval first.
+	res.Sources[0].Source = "search\n- forged: 100% used"
+
+	out := res.String()
+	if strings.Contains(out, "\n- forged: 100%") {
+		t.Errorf("a source label forged a line of the lifecycle summary:\n%s", out)
+	}
+	if !strings.Contains(out, `\n`) {
+		t.Errorf("the source was not escaped, so its newline reached the log raw:\n%s", out)
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -358,9 +359,17 @@ func (r Summary) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "retrieval audit for %s\n", r.ProjectID)
 	for _, src := range r.Sources {
+		// The source column through assemble.Label, for the reason report.go's two
+		// renderers do it and says: retrieval_record.source is plain TEXT with no
+		// CHECK and nothing validates it, so a stored row — or a backup restored
+		// from one — chooses this string, and one holding a newline forges a
+		// figure of its own. It matters more in this summary than in the report
+		// because `ghost lifecycle` writes it to stderr as the phase tail an
+		// operator reads in lifecycle.log. keptNothingName gets the RAW value: it
+		// compares against a known source name, and an escaped one is not that name.
 		fmt.Fprintf(&b, "  %s: %d call(s), %d used, %d ignored, %d superseded in session, "+
 			"%d contradicted, %d %s\n",
-			src.Source, src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted,
+			assemble.Label(src.Source), src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted,
 			src.KeptNothing, keptNothingName(src.Source))
 	}
 	if len(r.Sources) > 1 {

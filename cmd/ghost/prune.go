@@ -110,8 +110,14 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 			} else {
 				value = strings.TrimPrefix(arg, "--project=")
 			}
+			// Quoted through memory.ProjectArg, not with %q: this sentence goes to
+			// stderr and the log, and a refusal that names a project argument has to
+			// survive a credential having been pasted into one (#839's way out).
+			// The same rule and the same shape as the --audit parser's refusal —
+			// TestNoDuplicateFlagRefusalQuotesWithPercentQ holds both of them.
 			if opts.Project != "" {
-				return opts, fmt.Errorf("--project was given twice (%q and %q)", opts.Project, value)
+				return opts, fmt.Errorf("--project was given twice (%s and %s)",
+					memory.ProjectArg("project", opts.Project), memory.ProjectArg("project", value))
 			}
 			opts.Project = value
 		case strings.HasPrefix(arg, "-"):
