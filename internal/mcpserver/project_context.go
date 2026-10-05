@@ -471,12 +471,14 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // an empty item set can be describing rows that belong to `_global` — and the
 // project itself may hold none at all.
 //
-// So it has two callers, and BOTH of them establish that the rows are the
-// population before rendering what comes back — one with a count, one because it
-// does not need one. `projectContextOwnRowsNote` counts the project's own rows
-// first, and that is not a style preference. `assemble.Result` carries no count
-// and the store is not reachable from a function that only renders bytes, so a
-// caller that skipped the check could not make the sentence true; it could only
+// So it has THREE callers, and every one of them establishes that the rows are
+// the population before rendering what comes back — one with a count, two because
+// they do not need one.
+//
+// `projectContextOwnRowsNote` is the one that counts, counting the project's own
+// rows first, and that is not a style preference. `assemble.Result` carries no
+// count and the store is not reachable from a function that only renders bytes, so
+// a caller that skipped the check could not make the sentence true; it could only
 // ship it. It was also the way this went wrong twice: a caller holding the count
 // as a permission rather than as the sentence's own input read it, was satisfied,
 // and then rendered a different and false sentence.

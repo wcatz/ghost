@@ -1878,9 +1878,13 @@ Rules the pipeline must hold:
   already, through `assemble.ScopeLabel`; the rest through
   `assemble.ValidityLabel`, `ConfidenceLabel`, `AgentLabel` and `SourceRefLabel`.
   `ghost_memory_search`, the session-start block, `ghost_project_context` and the
-  `ghost://memories/global` resource all reach them through `assemble.Item.Line`;
-  the two surfaces that still render `memory.Memory` directly —
-  `ghost_memories_list` and `ghost_search_all` — call the same four. The
+  `ghost://memories/global` resource all reach them through `assemble.Item.Line`.
+  What still renders `memory.Memory` directly calls the same four:
+  `ghost_memories_list` and `ghost_search_all`, plus the PRESENT-TENSE read's
+  sibling — `ghost_project_context --as_of`, which `validateRequest` refuses to
+  put through the assembler, so its rows reach `formatMemories` unchanged
+  (`splitMemoriesByProject` is the predicate written against `memory.AsOfRow`
+  because of it). The
   project-context block and the global listing were both already converged on the
   **labels** before they moved onto the assembler (`formatMemories` called the
   same four in the same order), so what those moves changed was the selection and
