@@ -411,3 +411,38 @@ func (r Summary) byMemory() map[string]Outcome {
 	}
 	return out
 }
+
+// TestTheRunSummaryNamesTheEmptyCallCountAfterItsSource: the lifecycle summary `ghost
+// lifecycle` prints to stderr has the same per-source line this package's report has,
+// and the same closing sentence — "only searches that kept nothing are reported as
+// missed" — so it has the same way of being misread, and it was fixed by the same
+// helper.
+//
+// Asserted on the string the command actually prints rather than on the Summary
+// struct's fields: the finding was never that the figure was wrong, it was that every
+// source's figure carried a search's NAME.
+func TestTheRunSummaryNamesTheEmptyCallCountAfterItsSource(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	// One of each, so both figures are in the same summary and each line has to
+	// carry its own name.
+	_ = recordCall(t, store, projectID, "search")
+	_ = recordCall(t, store, projectID, "session_start")
+
+	res, err := Run(context.Background(), store, projectID, newTestSignals(t))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := res.String()
+
+	searchLine := sourceLine(t, out, "search")
+	if !strings.Contains(searchLine, "1 kept nothing") {
+		t.Errorf("the search line does not say it kept nothing:\n%s", searchLine)
+	}
+	startLine := sourceLine(t, out, "session_start")
+	if !strings.Contains(startLine, "1 admitted nothing") {
+		t.Errorf("the injection line does not say it admitted nothing:\n%s", startLine)
+	}
+	if strings.Contains(startLine, "kept nothing") {
+		t.Errorf("the injection line names its figure as a failed lookup:\n%s", startLine)
+	}
+}

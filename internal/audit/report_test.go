@@ -380,6 +380,83 @@ func TestReportKeptNothingCountsOnlySearchesThatAdmittedNothing(t *testing.T) {
 	}
 }
 
+// TestTheKeptNothingCountIsNamedAfterTheSourceThatRanIt: the test above proves the
+// two figures are counted separately; this proves the reader can TELL them apart,
+// which is the half that was missing.
+//
+// Both renderers print one line per source and both are followed by a sentence
+// saying that the detectable half of "missed" is what SEARCHES kept nothing. A line
+// that named every source's figure "kept nothing" therefore put
+// `session_start: 40 call(s), 2 kept, ..., 30 kept nothing` directly under it, so a
+// reader (or an agent reading the health block) tallying missed retrievals adds an
+// injection's silence — which is the normal state of a healthy session start — to a
+// count of failed lookups. The count is the same; the NAME is what carries which
+// question it answers, so the name is per source: a search's is "kept nothing"
+// because the agent chose to look and found nothing, an injection's is "admitted
+// nothing" because Ghost offered something and the fit stage took none of it.
+func TestTheKeptNothingCountIsNamedAfterTheSourceThatRanIt(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	// A search that kept nothing, and an injection that admitted nothing: one of
+	// each, so both figures are present in the same report and each line has to
+	// carry its own name.
+	_ = recordCall(t, store, projectID, "search")
+	_ = recordCall(t, store, projectID, "session_start")
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	// Summary() is the one line per source a health check carries, built the way
+	// health_retrieval.go builds it, so the assertion is over the shape an AGENT
+	// reads rather than over a string this test composed for its own convenience.
+	var compact strings.Builder
+	for _, src := range rep.Sources {
+		fmt.Fprintf(&compact, "  %s\n", src.Summary())
+	}
+	for _, tc := range []struct {
+		shape string
+		out   string
+	}{
+		// String() is the human report; the compact form is the health block.
+		// Both were named the same way, and a health block is the surface an AGENT
+		// reads, so both are asserted.
+		{shape: "String()", out: rep.String()},
+		{shape: "the health block's one line per source", out: compact.String()},
+	} {
+		t.Run(tc.shape, func(t *testing.T) {
+			searchLine := sourceLine(t, tc.out, "search")
+			if !strings.Contains(searchLine, "1 kept nothing") {
+				t.Errorf("the search line does not say it kept nothing:\n%s", searchLine)
+			}
+			if strings.Contains(searchLine, "admitted nothing") {
+				t.Errorf("the search line calls a failed lookup an admission:\n%s", searchLine)
+			}
+			startLine := sourceLine(t, tc.out, "session_start")
+			if !strings.Contains(startLine, "1 admitted nothing") {
+				t.Errorf("the injection line does not say it admitted nothing:\n%s", startLine)
+			}
+			if strings.Contains(startLine, "kept nothing") {
+				t.Errorf("the injection line names its figure as a failed lookup:\n%s", startLine)
+			}
+		})
+	}
+}
+
+// sourceLine is the one line of out that belongs to source, or a failure: a renderer
+// that dropped the source would otherwise let both assertions above pass vacuously
+// against whatever line happened to be there.
+func sourceLine(t *testing.T, out, source string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, source+":") {
+			return line
+		}
+	}
+	t.Fatalf("%s prints no line for source %q:\n%s", source, source, out)
+	return ""
+}
+
 // TestReportSinceFiltersBothTables: --since has only recorded_at to work with on
 // both tables, and the rows it excludes must disappear from BOTH halves of the
 // figure — a window that filtered the verdicts but not the calls would report

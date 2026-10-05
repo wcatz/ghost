@@ -164,9 +164,12 @@ type SourceReport struct {
 	Superseded   int
 	Contradicted int
 	// KeptNothing counts calls from this source that admitted no memory at all.
-	// It is the DETECTABLE half of "missed": a lookup the agent made that
-	// returned nothing. The other half is not countable and is reported as not
-	// measured, never as zero.
+	// It is the DETECTABLE half of "missed" — but only for a source where the
+	// AGENT chose to look, which is what makes the renderer name it per source
+	// (see keptNothingName): a search's is a lookup that returned nothing, and an
+	// injection's is Ghost having offered something the fit stage took none of,
+	// which is a normal session start and not a failed retrieval. The other half
+	// of "missed" is not countable and is reported as not measured, never as zero.
 	KeptNothing int
 	// DegradedVerdicts is how many of this source's verdicts were filed under a
 	// partial transcript read, and DegradedReasons names the reasons.
@@ -496,50 +499,6 @@ func (r Report) Source(name string) *SourceReport {
 // out of anything.
 func (r Report) Pooled() *int { return nil }
 
-// AddInto accumulates another source's figures into this one, for the same source.
-//
-// It exists so that a caller pooling over PROJECTS cannot get the addition wrong,
-// and the fields that add are the ones that count. The id lists merge as sets
-// because a memory two projects both contradicted is two findings and one id;
-// counting it twice would print a duplicate under a line whose counts said once.
-//
-// This is the ONE permitted direction for combining figures, and the distinction is
-// the whole rule: adding two reports of the same source over different projects is
-// still one figure about one source, while adding two SOURCES is a number about
-// neither question. Report.Pooled cannot be made to do the latter.
-func (s *SourceReport) AddInto(other SourceReport) {
-	s.Calls += other.Calls
-	s.Kept += other.Kept
-	s.Scored += other.Scored
-	s.Used += other.Used
-	s.Ignored += other.Ignored
-	s.Superseded += other.Superseded
-	s.Contradicted += other.Contradicted
-	s.KeptNothing += other.KeptNothing
-	s.DegradedVerdicts += other.DegradedVerdicts
-	s.Unattributed += other.Unattributed
-	s.Detached += other.Detached
-	s.DegradedReasons = mergeNames(s.DegradedReasons, other.DegradedReasons)
-	s.ContradictedIDs = mergeNames(s.ContradictedIDs, other.ContradictedIDs)
-}
-
-// mergeNames unions two sorted name lists, keeping the result sorted.
-func mergeNames(a, b []string) []string {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, name := range append(append([]string{}, a...), b...) {
-		if !seen[name] {
-			seen[name] = true
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // BuildStoreReport is BuildReport's whole-store sibling: the same figures, over every
 // project at once, for the surfaces that report the store rather than a project.
 //
@@ -634,9 +593,30 @@ func (s SourceReport) Summary() string {
 	} else {
 		fmt.Fprintf(&b, "no verdict recorded yet for the %d kept, ", s.Kept)
 	}
-	fmt.Fprintf(&b, "%d ignored, %d superseded in session, %d contradicted, %d kept nothing",
-		s.Ignored, s.Superseded, s.Contradicted, s.KeptNothing)
+	fmt.Fprintf(&b, "%d ignored, %d superseded in session, %d contradicted, %d %s",
+		s.Ignored, s.Superseded, s.Contradicted, s.KeptNothing, keptNothingName(s.Source))
 	return b.String()
+}
+
+// keptNothingName is the PHRASE a source's empty-call count is rendered under, and it
+// is per source because the two renderers that print the figure are both followed by a
+// sentence saying that a search's is the detectable half of "missed".
+//
+// One name for both would put `session_start: 40 call(s), 2 kept, ..., 30 kept
+// nothing` under that sentence, and a reader — or an agent reading the health block —
+// tallying missed retrievals would add an injection's silence, which is what a healthy
+// session start looks like, to a count of failed lookups. The count is the same; the
+// name is what says which question it answers.
+//
+// search is the only source where the agent chose to look, and it keeps the original
+// wording, so every sample in docs/ and every existing reading of the report is
+// unchanged. Every other source is an injection Ghost made, and an injection that
+// admitted nothing admitted nothing BY ITS OWN DESIGN.
+func keptNothingName(source string) string {
+	if source == string(assemble.SourceSearch) {
+		return "kept nothing"
+	}
+	return "admitted nothing"
 }
 
 // String renders the report for an operator.
@@ -732,8 +712,8 @@ func (s SourceReport) line() string {
 	} else {
 		fmt.Fprintf(&b, "no verdict recorded yet for the %d kept, ", s.Kept)
 	}
-	fmt.Fprintf(&b, "%d ignored, %d superseded in session, %d contradicted, %d kept nothing\n",
-		s.Ignored, s.Superseded, s.Contradicted, s.KeptNothing)
+	fmt.Fprintf(&b, "%d ignored, %d superseded in session, %d contradicted, %d %s\n",
+		s.Ignored, s.Superseded, s.Contradicted, s.KeptNothing, keptNothingName(s.Source))
 	if unscored := s.Unscored(); unscored > 0 {
 		fmt.Fprintf(&b,
 			"    %d of the %d kept memory/memories have no verdict recorded, so they are in no bucket and in no percentage\n",

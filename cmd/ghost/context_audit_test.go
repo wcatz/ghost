@@ -216,6 +216,95 @@ func TestParseContextAuditArgs(t *testing.T) {
 	}
 }
 
+// TestParseContextAuditArgsDuplicateScopeQuotesThroughProjectArg: the two
+// "was given twice" refusals QUOTE the reader's own argument, and docs/invariants.md
+// (#839) says a refusal that quotes a project argument routes through
+// memory.ProjectArg rather than interpolating it with %q — the sentence reaches the
+// terminal and the log, so a credential pasted into --project by accident would be
+// relocated rather than contained.
+//
+// Both forms of both flags, because each is held by two spellings and a guard on one
+// is a guard on half the flag. And the ordinary case stays byte-identical, which is
+// the whole diagnostic ProjectArg exists to preserve: an agent's own typo is found by
+// seeing the value it typed.
+func TestParseContextAuditArgsDuplicateScopeQuotesThroughProjectArg(t *testing.T) {
+	const key = "sk-ant-api03-Zz09XxYyWwVvUuTtSsRrQqPpOoNnMmLlKkJj01"
+	for _, tc := range []struct {
+		name  string
+		field string
+		args  []string
+	}{
+		{
+			name:  "--project, both attached",
+			field: "project",
+			args:  []string{"--audit", "--project=" + key, "--project=ghost"},
+		},
+		{
+			name:  "--project, second detached",
+			field: "project",
+			args:  []string{"--audit", "--project=" + key, "--project", "ghost"},
+		},
+		{
+			name:  "--cwd, both attached",
+			field: "cwd",
+			args:  []string{"--audit", "--cwd=" + key, "--cwd=/tmp"},
+		},
+		{
+			name:  "--cwd, second detached",
+			field: "cwd",
+			args:  []string{"--audit", "--cwd=" + key, "--cwd", "/tmp"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseContextAuditArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseContextAuditArgs(%v) accepted the same flag twice", tc.args)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, key) {
+				t.Errorf("the refusal quotes the credential the reader passed:\n%s", msg)
+			}
+			if !strings.Contains(msg, "twice") {
+				t.Errorf("the refusal no longer names the duplicate:\n%s", msg)
+			}
+			if !strings.Contains(msg, "<"+tc.field+" withheld") {
+				t.Errorf("the refusal does not say which argument was withheld:\n%s", msg)
+			}
+		})
+	}
+
+	// The ordinary case, asserted as an EXACT sentence: ProjectArg returns %q for a
+	// value the guard does not recognise, so a refusal that routes through it must
+	// read exactly as it did before, and a test that only checked for "twice" would
+	// pass on a sentence that had quietly stopped quoting the reader's own value.
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "--project twice",
+			args: []string{"--audit", "--project", "ghost", "--project", "other"},
+			want: `--project was given twice ("ghost" and "other")`,
+		},
+		{
+			name: "--cwd twice",
+			args: []string{"--audit", "--cwd", "/tmp", "--cwd", "/var/tmp"},
+			want: `--cwd was given twice ("/tmp" and "/var/tmp")`,
+		},
+	} {
+		t.Run("an ordinary value is still quoted verbatim: "+tc.name, func(t *testing.T) {
+			_, err := parseContextAuditArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseContextAuditArgs(%v) accepted the same flag twice", tc.args)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("refusal = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 // TestParseContextAuditArgsNeedsNoAuditFlag: the parser is about the FLAGS of the
 // audit mode, not about deciding the mode. runContext decides that, and a parser
 // that also decided it would mean two functions answering "is this an audit run".

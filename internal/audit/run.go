@@ -120,8 +120,10 @@ type SourceSummary struct {
 	Superseded   int
 	Contradicted int
 	// KeptNothing counts the calls this source made that admitted no memory at
-	// all. It is the detectable half of the issue's "missed": a lookup the agent
-	// made that returned nothing it could use.
+	// all. For a source where the AGENT chose to look it is the detectable half of
+	// the issue's "missed": a lookup that returned nothing it could use. For an
+	// injection it is not a miss at all, which is why String() names the figure
+	// after the source (see keptNothingName).
 	KeptNothing int
 }
 
@@ -357,8 +359,9 @@ func (r Summary) String() string {
 	fmt.Fprintf(&b, "retrieval audit for %s\n", r.ProjectID)
 	for _, src := range r.Sources {
 		fmt.Fprintf(&b, "  %s: %d call(s), %d used, %d ignored, %d superseded in session, "+
-			"%d contradicted, %d kept nothing\n",
-			src.Source, src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted, src.KeptNothing)
+			"%d contradicted, %d %s\n",
+			src.Source, src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted,
+			src.KeptNothing, keptNothingName(src.Source))
 	}
 	if len(r.Sources) > 1 {
 		b.WriteString("  figures are per source and are never pooled: a search and an injection " +

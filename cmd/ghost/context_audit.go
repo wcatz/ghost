@@ -139,9 +139,13 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// --project=`, because the second value is empty and the guard reads
 			// it as the first being unset. Duplicate first, so `--project=
 			// --project=` is named as the two values it is rather than as one bad
-			// one.
+			// one. Both values reach the sentence through memory.ProjectArg and not
+			// through %q: a refusal prints to the terminal and lands in the log, so
+			// a value the secret guard recognises comes back as a placeholder
+			// naming the argument rather than as the argument (#839's way out).
 			if seenProject {
-				return opts, fmt.Errorf("--project was given twice (%q and %q)", opts.Project, value)
+				return opts, fmt.Errorf("--project was given twice (%s and %s)",
+					memory.ProjectArg("project", opts.Project), memory.ProjectArg("project", value))
 			}
 			if value == "" {
 				return opts, errors.New("--project was given an empty value (drop it to report on the project this directory resolves to, or name one explicitly)")
@@ -201,7 +205,8 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// is a scope the reader did not ask about and cannot see in the command
 			// they ran.
 			if seenCwd {
-				return opts, fmt.Errorf("--cwd was given twice (%q and %q)", opts.Cwd, value)
+				return opts, fmt.Errorf("--cwd was given twice (%s and %s)",
+					memory.ProjectArg("cwd", opts.Cwd), memory.ProjectArg("cwd", value))
 			}
 			if value == "" {
 				return opts, errors.New("--cwd was given an empty value (drop it to use the directory you are standing in, or name one explicitly)")
