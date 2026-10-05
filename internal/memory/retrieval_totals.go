@@ -12,24 +12,32 @@ package memory
 //
 // This reader answers the same questions in a fixed number of statements: two GROUP BY
 // aggregates, one per table, whose output is bounded by the size of the CLOSED
-// vocabularies rather than by the size of the tables.
+// vocabularies rather than by the size of the tables, plus one small statement that
+// lists the contradicted ids as rows.
 //
 // The arithmetic is deliberately the arithmetic BuildReport performs, because two
 // implementations of one figure is how this package already produced one bug (the
 // degraded note's denominator). Where the SQL cannot state a rule as plainly as Go
 // states it, the rule is spelled out at the query.
 //
-// #852 is why this is two statements and not a join. retrieval_audit.record_rowid is a
+// #852 is why the aggregates are not a join. retrieval_audit.record_rowid is a
 // rowid into a table that prunes and purges, so a JOIN could attribute a verdict to a
 // DIFFERENT call than the one it was filed against. The attribution test below is a
 // membership test on the rowid and reads nothing else — a verdict is either counted or
 // it is not.
+//
+// The id list is a third statement rather than a GROUP_CONCAT column on the verdict
+// aggregate, and that is not a performance choice. retrieval_audit.memory_id is
+// arbitrary stored text — the column deliberately carries no shape CHECK — so no
+// separator can be assumed absent from it, and any scheme that joins ids into one
+// string and splits it again would be a guess about the data. Rows are the only shape
+// that cannot be misread. It runs only when the aggregate found an attributed
+// contradicted verdict to name, so the common store pays nothing for it.
 
 import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -64,7 +72,8 @@ type RetrievalSourceTotals struct {
 	Contradicted int
 	// ContradictedIDs is every memory id this source's calls were judged to
 	// contradict, deduplicated and sorted. Ids only: the renderers have no content to
-	// print and no other field could reach them.
+	// print and no other field could reach them. An id is stored text and is carried
+	// whole — never pasted into a delimited string and cut apart again.
 	ContradictedIDs []string
 	// DegradedVerdicts is how many scored verdicts were filed under a partial
 	// transcript read, and DegradedReasons names the reasons.
@@ -90,17 +99,19 @@ const (
 )
 
 // RetrievalSourceTotals aggregates both retrieval tables per source over the whole
-// store, in two statements.
+// store, in a fixed number of statements: two aggregates and, only when there is a
+// contradicted id to name, one listing.
 //
 // `floor` is the window's start. The zero time means no floor — every row is counted
 // — which is what ghost_health asks for, because it reports a standing state rather
 // than a window.
 //
 // Read-only, and it holds no transaction: each statement is one pass, and the pool is
-// a single connection, so wrapping two passes in a read transaction would reserve that
-// connection across both for no consistency the figures do not already have. The
-// attribution membership test is inside the verdict statement, so the two halves of
-// every figure are decided against the same set of calls within it.
+// a single connection, so wrapping them in a read transaction would reserve that
+// connection across all of them for no consistency the figures do not already have.
+// The attribution membership test is inside the verdict statement, so the two halves of
+// every figure are decided against the same set of calls within it — and the id listing
+// carries the same test, so a named memory belongs to a figure that counts it.
 func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]RetrievalSourceTotals, error) {
 	records, err := s.retrievalRecordTotals(ctx, floor)
 	if err != nil {
@@ -128,10 +139,10 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 		t.Kept += r.kept
 		t.KeptNothing += r.keptNothing
 	}
-	// The verdict rows carry GROUP_CONCAT output, so the ids arrive comma-joined and
-	// are re-split here. A comma is not a legal character in a memory id (they are 32
-	// hex characters), which is what makes this separator unambiguous.
-	idsBySource := map[string][]string{}
+	// Whether any source has an attributed contradicted verdict worth naming. Read off
+	// the aggregate rather than queried separately, because the answer is already in
+	// hand and the answer decides whether the third statement runs at all.
+	anyContradicted := false
 	for _, v := range verdicts {
 		t := entry(v.source)
 		switch v.attribution {
@@ -152,7 +163,7 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 			t.Superseded += v.n
 		case "contradicted":
 			t.Contradicted += v.n
-			idsBySource[v.source] = append(idsBySource[v.source], strings.Split(v.memoryIDs, ",")...)
+			anyContradicted = true
 		}
 		// An outcome this build does not know is counted in Scored and in no bucket,
 		// so the buckets do not sum to Scored. That gap is the honest reading: the row
@@ -161,6 +172,13 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 		if v.degraded != "" {
 			t.DegradedVerdicts += v.n
 			t.DegradedReasons = append(t.DegradedReasons, v.degraded)
+		}
+	}
+
+	var idsBySource map[string][]string
+	if anyContradicted {
+		if idsBySource, err = s.retrievalContradictedIDs(ctx, floor); err != nil {
+			return nil, err
 		}
 	}
 
@@ -270,14 +288,14 @@ func (s *Store) retrievalRecordTotals(ctx context.Context, floor time.Time) ([]r
 }
 
 // One row of the verdict-side aggregate: one (source, outcome, degraded, attribution)
-// cell, plus the contradicted memory ids that cell contributed.
+// cell. The contradicted memory ids that cell contributed are NOT here — they are the
+// subject of their own statement, for the reason in the file comment.
 type verdictTotalsRow struct {
 	source      string
 	outcome     string
 	degraded    string
 	attribution int
 	n           int
-	memoryIDs   string
 }
 
 // retrievalVerdictTotals is the verdicts half.
@@ -295,22 +313,18 @@ type verdictTotalsRow struct {
 //
 // `memory_id <> ”` is the reader's own skip: a verdict naming no memory cannot be
 // reported on at all, so the Go reader drops it and so does this.
+//
+// No GROUP_CONCAT here, and that is the load-bearing omission. The aggregate used to
+// carry a `GROUP_CONCAT(DISTINCT memory_id)` column and re-split it on ',', justified
+// by a claim this checkout refutes: a memory id is NOT 32 hex characters. The column
+// carries no shape CHECK on purpose, CheckImportedID refuses only length, control
+// characters, whitespace, a backtick and «», and `ghost import` writes an artifact's
+// ids verbatim — so `M1,M2` is a legal, reachable id, and the split named two memories
+// that do not exist while the count beside them stayed correct. The count is right
+// enough to make the wrong list look right, which is why it survived. See
+// retrievalContradictedIDs for where the ids come from now.
 func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]verdictTotalsRow, error) {
-	// The attribution, written once and pasted twice below — once over the verdicts,
-	// once as the subquery that answers "does a counted call own this rowid". A CASE
-	// arm cannot take a bound parameter in SQLite, hence the two literal integers and
-	// the constants they correspond to.
-	callPredicate, callArgs := windowPredicate("r.recorded_at", floor)
-	auditPredicate, auditArgs := windowPredicate("a.recorded_at", floor)
-	attribution := fmt.Sprintf(`
-			CASE
-				WHEN a.record_rowid <= 0 THEN %d
-				WHEN a.record_rowid IN (
-					SELECT r.rowid FROM retrieval_record r WHERE %s
-				) THEN %d
-				ELSE %d
-			END`, unattributedVerdict, callPredicate, attributedVerdict, detachedVerdict)
-	args := append(append([]any{}, auditArgs...), callArgs...)
+	attribution, args := verdictAttribution(floor)
 
 	query := `
 		WITH judged AS (
@@ -318,11 +332,10 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 			       a.outcome AS outcome,
 			       a.degraded AS degraded,
 			       a.memory_id AS memory_id,` + attribution + ` AS attribution
-			FROM retrieval_audit a WHERE ` + auditPredicate + `
+			FROM retrieval_audit a WHERE ` + auditWindowPredicate(floor) + `
 			AND a.memory_id <> ''
 		)
-		SELECT source, outcome, degraded, attribution, COUNT(*) AS n,
-		       COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN outcome = 'contradicted' THEN memory_id END), '') AS ids
+		SELECT source, outcome, degraded, attribution, COUNT(*) AS n
 		FROM judged
 		GROUP BY source, outcome, degraded, attribution`
 
@@ -338,7 +351,7 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 	var out []verdictTotalsRow
 	for rows.Next() {
 		var r verdictTotalsRow
-		if err := rows.Scan(&r.source, &r.outcome, &r.degraded, &r.attribution, &r.n, &r.memoryIDs); err != nil {
+		if err := rows.Scan(&r.source, &r.outcome, &r.degraded, &r.attribution, &r.n); err != nil {
 			return nil, fmt.Errorf("read retrieval verdict totals: %w", err)
 		}
 		out = append(out, r)
@@ -347,6 +360,104 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 		return nil, fmt.Errorf("read retrieval verdict totals: %w", err)
 	}
 	return out, nil
+}
+
+// retrievalContradictedIDs lists, per source, the memory ids the attributed
+// contradicted verdicts name — one row per (source, id), so an id is carried whole.
+//
+// This is the whole of the fix the GROUP_CONCAT column needed, and the reason is
+// structural rather than cosmetic: there is no separator to choose safely. An id is
+// stored text with no shape constraint, so any character can occur inside one, and a
+// scheme that concatenates ids and splits them again has to bet that the delimiter does
+// not appear in the data — a bet about TEXT, on a column whose schema comment says in
+// as many words that the text is not constrained. Selecting the ids is not slower in any
+// way that matters: the statement carries the same predicates as the aggregate, it
+// returns one row per DISTINCT id rather than one per verdict, and the caller only runs
+// it when the aggregate found something to name.
+//
+// The attribution and the window are pasted from the same helpers the aggregate uses, so
+// a verdict named here is a verdict counted there: the ids belong to exactly the
+// population the figures describe, and an unattributed or detached contradiction is
+// counted in its own bucket and named by neither.
+//
+// DISTINCT is in the statement rather than left to the caller's dedupe, so the result
+// set is one row per memory rather than one per verdict; the caller still sorts and
+// dedupes, because a map keyed by source is what the renderer reads and SQLite's
+// grouping order is not a promise.
+func (s *Store) retrievalContradictedIDs(ctx context.Context, floor time.Time) (map[string][]string, error) {
+	attribution, args := verdictAttribution(floor)
+
+	query := `
+		WITH judged AS (
+			SELECT a.source AS source,
+			       a.outcome AS outcome,
+			       a.memory_id AS memory_id,` + attribution + ` AS attribution
+			FROM retrieval_audit a WHERE ` + auditWindowPredicate(floor) + `
+			AND a.memory_id <> ''
+		)
+		SELECT DISTINCT source, memory_id FROM judged
+		WHERE outcome = 'contradicted' AND attribution = ` + fmt.Sprint(attributedVerdict)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("read contradicted ids: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	bySource := map[string][]string{}
+	for rows.Next() {
+		var source, id string
+		if err := rows.Scan(&source, &id); err != nil {
+			return nil, fmt.Errorf("read contradicted ids: %w", err)
+		}
+		bySource[source] = append(bySource[source], id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read contradicted ids: %w", err)
+	}
+	return bySource, nil
+}
+
+// verdictAttribution returns the attribution CASE and the args that bind it, for BOTH
+// verdict statements — the aggregate and the id listing.
+//
+// One helper, because the two statements must agree: an id listed for a verdict the
+// aggregate did not count would be a memory named under a figure it is not part of,
+// which is the one thing a per-source report cannot do. Sharing the text also means
+// neither statement can drift from the other on the window or the membership test.
+//
+// A CASE arm cannot take a bound parameter in SQLite, hence the two literal integers
+// and the constants they correspond to.
+//
+// The args are in TEXT order, which is the only order a positional `?` can use: the
+// call predicate's argument sits inside the SELECT list, ahead of the audit predicate's
+// in the WHERE, so the call's binds first. The two hold the SAME string today — one
+// floor drives both — so the order is not currently observable, which is exactly why it
+// is stated here: bound the other way it would work by luck, and the first caller to
+// give the two tables different windows would get silently mis-paired numbers.
+func verdictAttribution(floor time.Time) (string, []any) {
+	callPredicate, callArgs := windowPredicate("r.recorded_at", floor)
+	_, auditArgs := windowPredicate("a.recorded_at", floor)
+	attribution := fmt.Sprintf(`
+		CASE
+			WHEN a.record_rowid <= 0 THEN %d
+			WHEN a.record_rowid IN (
+				SELECT r.rowid FROM retrieval_record r WHERE %s
+			) THEN %d
+			ELSE %d
+		END`, unattributedVerdict, callPredicate, attributedVerdict, detachedVerdict)
+	return attribution, append(append([]any{}, callArgs...), auditArgs...)
+}
+
+// auditWindowPredicate is the verdict side's own window clause, named as a helper so
+// both verdict statements read the same way and so the argument order in
+// verdictAttribution is legible at the place that binds it.
+func auditWindowPredicate(floor time.Time) string {
+	predicate, _ := windowPredicate("a.recorded_at", floor)
+	return predicate
 }
 
 // windowPredicate is the window test both aggregates share, WITHOUT a WHERE — so a
@@ -367,9 +478,10 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 // itself, because julianday(NULL) is NULL and would otherwise read as "unreadable,
 // keep" and let a NULL stamp into the figures.
 //
-// The argument order is the query's: a caller's own predicate is pasted FIRST, so its
-// args bind first — see retrievalVerdictTotals, which appends the audit clause's args
-// before the call clause's because the audit predicate appears first in the text.
+// The argument order is TEXT order and nothing else, because a positional `?` binds by
+// where it appears in the statement and not by which table it filters — see
+// verdictAttribution, which binds the call clause's argument and this verdict side's own,
+// in that order because that is the order the two placeholders sit in the text.
 func windowPredicate(col string, floor time.Time) (string, []any) {
 	if floor.IsZero() {
 		return "1", nil
