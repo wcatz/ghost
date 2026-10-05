@@ -138,9 +138,9 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 			// deletion in every project on the machine. The way to ask for that is
 			// to OMIT the flag, which the report names as "every project"; the
 			// empty spelling is a script with an unset variable, and it is the one
-			// spelling that gets there silently. parseReflectArgs and
-			// parseSupersedeArgs already refuse the same flag this way; prune was
-			// the outlier.
+			// spelling that gets there silently. parseContextAuditArgs already
+			// refuses the same flag this way; prune was the outlier among its
+			// own command's neighbours, and now it counts occurrences too.
 			if value == "" {
 				return opts, errors.New("--project was given an empty value (drop it to prune every project, or name one explicitly)")
 			}

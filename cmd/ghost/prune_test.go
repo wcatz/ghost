@@ -389,8 +389,8 @@ func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
 // spelling it as `--project=` is a script with an unset variable, and it is the one
 // spelling that gets there silently.
 //
-// So the empty value is refused, which is what `parseReflectArgs` and
-// `parseSupersedeArgs` already do with the same flag — prune was the outlier.
+// So the empty value is refused, which is what `parseContextAuditArgs` already
+// does with the same flag — prune was the outlier, and now it counts occurrences too.
 //
 // Occurrences are counted rather than tested with `opts.Project != ""`, for the same
 // reason the --audit parser counts them: that test cannot see `--project=
