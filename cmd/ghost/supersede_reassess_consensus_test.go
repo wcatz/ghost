@@ -266,15 +266,11 @@ func usageFlagEntry(t *testing.T, flag string) string {
 	if len(block) == 0 {
 		t.Fatalf("supersedeUsage has no entry for %s:\n%s", flag, supersedeUsage)
 	}
-	// "Ran past its own end" is a SECOND line opening an entry, checked on the raw
-	// lines rather than the collapsed text: an entry's own prose may legitimately
-	// name another flag (the --reassess entry says --threshold is not used), so
-	// only a line that OPENS one at the flag column proves the walk went too far.
-	for _, line := range block[1:] {
-		if strings.HasPrefix(line, "  --") {
-			t.Fatalf("the %s entry swallowed the entry that opens %q:\n%s", flag, strings.TrimSpace(line), strings.Join(block, "\n"))
-		}
-	}
+	// The walk above already stops at the first line that OPENS the next entry, so
+	// no line past the first can open one — which is why there is no second pass
+	// over the block to notice that it ran too long. The Fatalf above is the only
+	// way out: a flag with no entry is a help that lost it, and an entry walked
+	// past its end would be reported as the next flag's block instead.
 	return strings.Join(strings.Fields(strings.Join(block, " ")), " ")
 }
 

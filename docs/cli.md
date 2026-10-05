@@ -326,7 +326,7 @@ ghost supersede myproject --withdraw a1b2c3d4 e5f6a7b8 --apply
 | `--withdraw <source-id> <target-id>` | Withdraw one named link — by default the `supersedes` edge from `source-id` (the newer note) to `target-id` (the older, buried one), and the `causes` edge when the pair has no `supersedes` one. Repeatable. `--source` and `--threshold` are not used: nothing is classified. |
 | `--relation <supersedes\|causes>` | Which edge `--withdraw` acts on, for a pair that holds more than one. `supersedes` is the default, so a pair holding **both** needs this flag: it is the one case where the default and the operator's intent can differ. Only valid with `--withdraw`. |
 | `--threshold <float>` | Minimum cosine similarity for a candidate pair; default `0.80`. |
-| `--consensus <N>` | Classify the same pairs **N times** and act only on what *all N* passes agreed. `N` ≥ 2; default `1`, which is no gate. A pair the passes split on is reported as "not agreed" and nothing is written or withdrawn for it. Costs N times the classify calls. Applies to the ordinary pass and to `--reassess`; refused with `--withdraw`, which judges nothing. |
+| `--consensus <N>` | Classify the same pairs **N times** and act only on what *all N* passes agreed. `N` ≥ 2; default `1`, which is no gate. A pair the passes split on is reported as "not agreed" and nothing is written or withdrawn for it. Costs N times the classify calls. Applies to the ordinary pass and to `--reassess`; refused with `--withdraw`, which judges nothing. Gates the classifier's verdicts only — the deterministic veto is settled before the gate with no classify call, so a vetoed edge is withdrawn on the first pass and is never reported as "not agreed". |
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
@@ -346,8 +346,8 @@ That pass measured 55% precision over its 108 distinct proposals, rising to 79% 
 **Upgrading: the tightened rubric applies to NEW pairs, and only `--reassess` reaches the edges already in the graph.** The NEITHER cache's key prefix moves with the rubric, so every cached verdict is re-asked — a fresh pair is judged under the new rules on the next ordinary pass. But a `supersedes` **edge** that is already live is held quiet by `skip-if-unchanged` until one of its endpoints changes, and a passing pass does not re-judge it. So an edge written under the old rubric stays until an edit touches it, or until you run:
 
 ```bash
-ghost supersede <project> --reassess --consensus 3   # dry run: what the current rules would withdraw
-ghost supersede <project> --reassess --consensus 3 --apply   # withdraw what all 3 passes agree does not hold
+ghost supersede <project> --reassess --consensus 3   # dry run: what the current rules would withdraw, vetoed edges included
+ghost supersede <project> --reassess --consensus 3 --apply   # withdraw it: what all 3 passes agree does not hold, plus the vetoed edges
 ```
 
 That is the whole upgrade step for the rubric, and it is deliberate rather than an oversight: a wrong edge under a tightened rubric is exactly the case no ordinary pass will look at again, which is the reason the repair path exists. The cache clearing is not the same thing and does not reach edges — a cached verdict is a decision about a pair the graph never linked.

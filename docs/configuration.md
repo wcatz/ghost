@@ -412,9 +412,8 @@ are a different thing: `skip-if-unchanged` holds a live `supersedes` edge quiet
 until one of its endpoints changes, so a passing pass never re-judges one written
 under the old rules. `ghost supersede <project> --reassess` re-judges every live
 edge under the current rules and, with `--apply`, withdraws the ones they no
-longer support — on all three passes' agreement, for every edge the classifier
-decided, when you pass `--consensus 3`, which is the form worth running here (the
-deterministic veto is not gated; see the gate above):
+longer support — every edge the classifier decided, and only where all three
+passes agreed on it, when you pass `--consensus 3`:
 
 ```bash
 ghost supersede <project> --reassess --consensus 3            # dry run

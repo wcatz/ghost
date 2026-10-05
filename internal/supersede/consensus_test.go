@@ -53,10 +53,13 @@ func (m *perPassClassifier) ClassifyBatch(_ context.Context, pairs []Candidate) 
 	return out, nil
 }
 
-// supersedesEverywhere and neitherEverywhere are the two constant scripts, so a
-// test that wants unanimity does not have to write a closure to get it.
+// These four are the constant scripts — one per Relation the pass can read —
+// so a test that wants unanimity in a given answer does not have to write a
+// closure to get it.
 func supersedesEverywhere(_, _ string) Relation { return RelationSupersedes }
 func neitherEverywhere(_, _ string) Relation    { return RelationNeither }
+func causesEverywhere(_, _ string) Relation     { return RelationCauses }
+func reversedEverywhere(_, _ string) Relation   { return RelationReversed }
 
 // twoNotePair seeds one similar pair and returns its ids, oriented newer-last.
 func twoNotePair(t *testing.T, olderContent, newerContent string) (store *memory.Store, older, newer string) {
