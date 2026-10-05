@@ -174,9 +174,19 @@ func splitClauses(text string) ([]string, []int) {
 // cannot tell them from the ones it would sweep in with them: a period inside a
 // decimal or a colon inside "https:" is punctuation without ending anything.
 //
-// A paragraph break and a newline end a segment rather than a clause, so they are
-// absent here: segments already splits on them, and a cue cannot be in one segment
-// while the words it is about are in another (see contradicts).
+// Auditable against sentenceSplit, which is the other place a boundary is named.
+// ';' is in BOTH lists, and on the in-package path AddProse it is unreachable:
+// segments splits a sentence at ';' before splitClauses sees one, so the only text
+// that carries a ';' into this function is a caller's own through the exported
+// HasNegationCue. It is kept because the two lists answer different questions —
+// sentenceSplit decides where one SEGMENT ends, this decides whether two words are
+// in the same CLAUSE — and a reader who has to check the overlap to know which
+// marks are reachable cannot audit either list.
+//
+// A paragraph break and a newline end a SEGMENT rather than a clause, and are
+// absent here for that reason rather than by omission: segments already splits on
+// them, so a boundary of that kind is a segment boundary and a cue cannot be in
+// one segment while the words it is about are in another (see contradicts).
 //
 // The list is what the comparison is entitled to read as a boundary, and it is
 // short on purpose. Each entry is a mark English puts between one assertion and
@@ -603,7 +613,14 @@ func cueRun(words, cue []string, clauses []int, i int) (int, bool) {
 				pos++
 			}
 		}
-		if pos >= len(words) || words[pos] != cue[k] {
+		// Every position the run touches has to be in the cue's FIRST word's
+		// clause, including the matched one. The matched word is the case that
+		// matters: without it a cue run straddles a boundary — "is the, obsolete"
+		// matches, because the filler before the comma is still in the first clause
+		// — and a span whose own words sit in two clauses leaves boundToCue nothing
+		// to compare an id against, since it can only ask about the clause of the
+		// cue's first word.
+		if pos >= len(words) || words[pos] != cue[k] || clauses[pos] != clauses[i] {
 			return 0, false
 		}
 		pos++

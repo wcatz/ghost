@@ -774,6 +774,77 @@ func TestACueIsNotBoundAcrossAClauseBoundary(t *testing.T) {
 	}
 }
 
+// TestWhatTheClauseBoundaryDoesNotCover: the two places the clause rule leaves a
+// hole, pinned rather than described, because both were found by review of #865 and
+// a hole nobody wrote down is a hole the next reader assumes is closed.
+//
+// THE TOKEN ARM. The rule is the id arm's, and the fingerprint arm's skip
+// (boundPositions) still crosses every boundary — deliberately, because "that is
+// wrong: <the memory's wording>" is a denial followed by its restatement and the
+// words past the colon ARE the memory. The consequence is not obviously safe, so it
+// is asserted: boundPositions skips the comma and lands on the closed-set noun of
+// the citation, and any memory whose own wording contains that noun then satisfies
+// cueFps. "The build is stale, the memory <id> says <the memory's wording>" is
+// filed contradicted even though the agent called the BUILD stale and is quoting
+// the memory. That is the same false contradiction #858 exists to remove, reached
+// through the other arm.
+//
+// It is pre-existing — the same sentence comes back contradicted at d0f53686 and at
+// main, verified by running both — so this is not a regression the clause rule
+// introduced, and closing it would need the skip to tell a COLON from a COMMA,
+// which an int clause id cannot express and which the colon-restatement positives
+// pin on the other side. So it is stated and pinned instead: a narrower fix here
+// would have to be a boundary KIND rather than a boundary COUNT.
+//
+// The id arm in the same sentence DOES stop, which is the part this change is for
+// and is asserted alongside so the two cannot be confused: the sentence without the
+// id is still contradicted, and the sentence without the memory's wording is not
+// contradicted at all.
+func TestWhatTheClauseBoundaryDoesNotCover(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+	// A memory written in Ghost's own vocabulary, so the noun the sideward skip
+	// lands on IS one of its tokens. That is what makes the hole reachable: without
+	// a shared closed-set noun the skip finds nothing the memory holds.
+	const mem = "this memory records the lockfile checksum before publishing"
+
+	t.Run("the token arm still binds a citation after a comma", func(t *testing.T) {
+		toks := testTokens(mem)
+		s := newTestSignals(t)
+		s.AddProse("The build is stale, the memory " + id + " says " + mem)
+		if !s.matches(toks) {
+			t.Fatal("the fixture does not clear the token arm's bar, so it proves nothing about the binding")
+		}
+		if !s.contradicts(toks, id) {
+			t.Error("the token arm no longer binds a citation after a comma, which is NOT what the clause rule was supposed to change: it is the pre-existing hole, and a fix here would have to distinguish a colon from a comma")
+		}
+	})
+
+	t.Run("while the id arm stops on the same sentence", func(t *testing.T) {
+		// The same words with no memory wording in them, so the fingerprint arm has
+		// nothing to reach and only the id arm can return a verdict.
+		unshared := "a memory whose wording the agent never repeated"
+		s := newTestSignals(t)
+		s.AddProse("The build is stale, the memory " + id + " says it still holds")
+		if s.contradicts(testTokens(unshared), id) {
+			t.Error("the id arm bound a citation across the comma, which is what the clause rule exists to stop")
+		}
+	})
+
+	// And a cue run may not straddle a boundary either. Without this the span's own
+	// words sit in two clauses and boundToCue has no single clause to compare the id
+	// against — it can only ask about the clause of the cue's FIRST word.
+	t.Run("a cue run may not straddle a boundary", func(t *testing.T) {
+		for _, prose := range []string{"the note is the, obsolete", "the note is the; obsolete", "the note is the: obsolete"} {
+			if HasNegationCue(prose) {
+				t.Errorf("HasNegationCue(%q) = true: a cue run straddles a clause boundary", prose)
+			}
+		}
+		if !HasNegationCue("the note is the obsolete") {
+			t.Error(`HasNegationCue("the note is the obsolete") = false: a closed-set word inside a cue with no boundary around it must still match`)
+		}
+	})
+}
+
 // TestACueIsMatchedAsWholeWords: every cue is a run of WORDS, and the two that
 // read as words — "ignore" and "is false" — are also the two a substring match
 // finds inside ordinary ones ("ignored", "ignores", "falsehood", "falsely").
