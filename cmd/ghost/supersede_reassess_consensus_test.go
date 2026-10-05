@@ -168,8 +168,16 @@ func TestReassessConsensusNote(t *testing.T) {
 	// names the REAL project — a command printed with a literal `<project>` is a
 	// command the operator has to edit before it runs, and an edit is where a
 	// repair goes to the wrong project.
+	//
+	// "withdraws one ... on it" is SCOPED, not "withdraws only what all N passes
+	// agree on": the note's population is already the classifier-decided edges
+	// (`verdictWithdrawn` drops the vetoed ones, and the veto is settled before
+	// the gate), so the unscoped phrasing would be false of every vetoed row the
+	// report printed directly above this line. The whole phrase is asserted, not
+	// the substring "all 3 passes agree on it", because a substring is matched by
+	// the unscoped wording too and would pin nothing.
 	note := reassessConsensusNote("proj", true, 1, 2)
-	for _, fragment := range []string{"ONE classifier verdict each", "3x the classify calls", "ghost supersede proj --reassess --consensus 3 --apply"} {
+	for _, fragment := range []string{"ONE classifier verdict each", "withdraws one only when all 3 passes agree on it", "3x the classify calls", "ghost supersede proj --reassess --consensus 3 --apply"} {
 		if !strings.Contains(note, fragment) {
 			t.Errorf("the note does not say %q:\n%s", fragment, note)
 		}
@@ -226,5 +234,169 @@ func TestVerdictWithdrawnCountsOnlyTheRowsAModelDecided(t *testing.T) {
 				t.Errorf("note %q printed = %v, want %v", note, got, tc.wantNote)
 			}
 		})
+	}
+}
+
+// usageFlagEntry returns one flag's block of `supersedeUsage`, collapsed to a
+// single line so a phrase is matched as a SENTENCE and not as a wrapped layout:
+// the claim is what is under test here, and re-wrapping the same words to a
+// different column is not a change to it.
+//
+// The block runs from the line that opens the flag to the line that opens the
+// next one, which is how a reader sees it: an entry's own text is whatever
+// follows its name on the same column, and the next entry is the first thing
+// at that column again.
+func usageFlagEntry(t *testing.T, flag string) string {
+	t.Helper()
+	lines := strings.Split(supersedeUsage, "\n")
+	open := "  " + flag
+	var block []string
+	collecting := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  --") {
+			if collecting {
+				break
+			}
+			collecting = line == open || strings.HasPrefix(line, open+" ")
+		}
+		if collecting {
+			block = append(block, line)
+		}
+	}
+	if len(block) == 0 {
+		t.Fatalf("supersedeUsage has no entry for %s:\n%s", flag, supersedeUsage)
+	}
+	// "Ran past its own end" is a SECOND line opening an entry, checked on the raw
+	// lines rather than the collapsed text: an entry's own prose may legitimately
+	// name another flag (the --reassess entry says --threshold is not used), so
+	// only a line that OPENS one at the flag column proves the walk went too far.
+	for _, line := range block[1:] {
+		if strings.HasPrefix(line, "  --") {
+			t.Fatalf("the %s entry swallowed the entry that opens %q:\n%s", flag, strings.TrimSpace(line), strings.Join(block, "\n"))
+		}
+	}
+	return strings.Join(strings.Fields(strings.Join(block, " ")), " ")
+}
+
+// usageLongHelp returns the PROSE of `supersedeUsage` — the paragraphs below the
+// flag table, which is the third place the gate is claimed and the one an operator
+// reads top to bottom.
+//
+// The flag table is what lies between the "Flags:" header and the first line that
+// is not indented: an entry's name opens at two columns and its own text hangs
+// under it at the same column, so indentation is the only thing that separates the
+// two. Skipping by a "--" prefix instead would sweep the entries' own text into
+// the prose, and a test that reads the flag table when it asked for the prose then
+// passes for the wrong reason — so the helper asserts what it returned rather than
+// trusting the walk.
+func usageLongHelp(t *testing.T) string {
+	t.Helper()
+	var body []string
+	inFlags := false
+	for _, line := range strings.Split(supersedeUsage, "\n") {
+		switch {
+		case line == "Flags:":
+			inFlags = true
+		case inFlags && line == "":
+			// A blank line inside the table separates entries; the one that ENDS it
+			// is followed by an unindented line, which the next case collects.
+		case inFlags && line[0] == ' ':
+			// A flag entry, and its continuation text.
+		case inFlags:
+			body = append(body, line)
+		}
+	}
+	out := strings.Join(strings.Fields(strings.Join(body, " ")), " ")
+	if out == "" {
+		t.Fatalf("usageLongHelp found no prose below the flag table:\n%s", supersedeUsage)
+	}
+	// Text that lives ONLY in the flag table. Every flag NAME is discussed down in
+	// the prose — --consensus, --withdraw, --apply, --reassess all are — so a flag
+	// name cannot be the evidence. These two sentences appear exactly once each in
+	// the whole help, in the table, and their presence here would mean the walk
+	// leaked it: every assertion below would then be reading the flag entries it
+	// meant to be reading the long help for.
+	for _, tableOnly := range []string{
+		"N >= 2; default 1, which is no gate",
+		"unambiguous prefix of one (8 or more characters)",
+	} {
+		if strings.Contains(out, tableOnly) {
+			t.Fatalf("usageLongHelp returned the flag table, not the prose (%q leaked in):\n%s", tableOnly, out)
+		}
+	}
+	return out
+}
+
+// TestSupersedeUsageNamesTheGateAndTheVetoItDoesNotCover: the help must not
+// promise more than the pass does.
+//
+// `ReassessWith` settles every `VetoSupersede` pair into `settled` and never puts
+// it in `open`, so a vetoed edge costs ZERO classify calls and is never put to the
+// vote. `--reassess --consensus 3 --apply` therefore still deletes a live
+// 'supersedes' edge on a veto, and the repo's own rules call that deletion
+// permanent: the ordinary pass will not re-create it, because the veto is
+// deterministic on the same two note bodies. #862's help read "an edge moves only
+// when all N passes agree" and "act ONLY on what all N passes agreed", which is
+// FALSE for that population — and the veto is the population whose error argument
+// does not carry over at all.
+//
+// The three claims are pinned SEPARATELY, per surface, because a qualifier in one
+// place and an absolute in another reads as the absolute: an operator who reads
+// the --consensus flag entry is not holding the long help's --reassess paragraph.
+func TestSupersedeUsageNamesTheGateAndTheVetoItDoesNotCover(t *testing.T) {
+	// Why the exemption holds, as one phrase, required in all THREE surfaces. The
+	// halves are load-bearing: the veto is settled BEFORE the gate and costs no
+	// classify call, so there is nothing for N passes to vote on. A bare "the veto
+	// is not gated" leaves the reader to assume the pass simply forgot to count it.
+	const why = "settled before the gate, costs no classify call, and is never voted on"
+
+	for _, tc := range []struct {
+		name string
+		text string
+		// scope names the population the gate is claimed over, in that surface's
+		// own words. A gate that does not say which verdicts it covers has not
+		// said which it does not.
+		scope string
+	}{
+		{
+			name:  "--reassess entry",
+			text:  usageFlagEntry(t, "--reassess"),
+			scope: "gates the classifier's verdicts",
+		},
+		{
+			name:  "--consensus entry",
+			text:  usageFlagEntry(t, "--consensus"),
+			scope: "gates the classifier's verdicts and not the deterministic veto",
+		},
+		{
+			name:  "long help",
+			text:  usageLongHelp(t),
+			scope: "an edge the classifier decided moves only when all N passes agree",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.text, tc.scope) {
+				t.Errorf("the help does not scope the gate to the classifier: %q is missing", tc.scope)
+			}
+			if !strings.Contains(tc.text, why) {
+				t.Errorf("the help does not say why the veto is exempt: %q is missing", why)
+			}
+		})
+	}
+
+	// The absolutes are quoted EXACTLY, so this test fails if one comes back
+	// rather than passing while some other wording is wrong. Each shipped in #866,
+	// and each contradicts the report's own `[veto, no harness call]` rows — which
+	// `verdictWithdrawn` deliberately EXCLUDES from the population the gate note
+	// counts, so the run's own output already told the reader the veto is a
+	// different population.
+	for _, unwanted := range []string{
+		"an edge moves only when all N passes agree, and a pair they split on keeps its edge and is reported",
+		"act ONLY on what all N passes agreed",
+		"an edge moves only when all N passes agree, and a pair they do not all agree on keeps its edge",
+	} {
+		if strings.Contains(strings.Join(strings.Fields(supersedeUsage), " "), unwanted) {
+			t.Errorf("the help still claims the gate covers the veto: %q", unwanted)
+		}
 	}
 }

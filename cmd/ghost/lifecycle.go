@@ -1853,9 +1853,13 @@ Flags:
   --reassess          Re-judge the supersedes links ALREADY in the graph and, with
                       --apply, withdraw the ones that no longer hold. This is how a
                       wrong supersession is repaired, and the only way an ordinary
-                      pass reports one out of the graph. Takes --consensus N: with
-                      it, an edge moves only when all N passes agree, and a pair
-                      they split on keeps its edge and is reported. --threshold is
+                      pass reports one out of the graph. Takes --consensus N,
+                      which gates the classifier's verdicts: an edge the classifier
+                      decided moves only when all N passes agree, and a pair they
+                      did not all agree on keeps its edge and is reported. The
+                      deterministic veto is NOT gated: it is settled before the
+                      gate, costs no classify call, and is never voted on, so a
+                      vetoed edge is withdrawn on the first pass. --threshold is
                       not used: there are no candidates to select.
   --withdraw <source-id> <target-id>
                       Withdraw the ONE link from source-id to target-id: the
@@ -1877,14 +1881,17 @@ Flags:
                       a 'causes' edge invalidates that edge and writes no
                       unsupersede history row, because a 'causes' claim never
                       held its target down.
-  --consensus N       Classify the same pairs N times and act ONLY on what all N
+  --consensus N       Classify the same pairs N times and act only on what all N
                       passes agreed (N >= 2; default 1, which is no gate). A pair
-                      the passes split on is reported as "not agreed" with its
-                      count and ids, and nothing is written for it and nothing is
-                      withdrawn. Costs N times the classify calls of an ungated
-                      pass. Applies to the creation pass and to --reassess; refused
-                      with --withdraw, which asks no model at all. In a dry run it
-                      tells you what --apply would do.
+                      the passes did not all agree on is reported as "not agreed"
+                      with its count and ids, and nothing is written for it and
+                      nothing is withdrawn. Costs N times the classify calls of an
+                      ungated pass. Applies to the creation pass and to --reassess,
+                      where it gates the classifier's verdicts and not the
+                      deterministic veto: the veto is settled before the gate,
+                      costs no classify call, and is never voted on. Refused with
+                      --withdraw, which asks no model at all. In a dry run it tells
+                      you what --apply would do.
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1929,20 +1936,27 @@ held. That verdict is a fair reading of the two bodies under the every-claim rul
 and deleting the edge promoted a memory that was current and un-hid one that was
 not, both behind a flag the operator set for WRITES. So the edge stays until you
 remove it on purpose: --reassess --consensus 3 --apply re-judges it under the
-current rules and withdraws what does not hold AND what all 3 passes agree does
-not, and --withdraw removes the edge you name without asking a model.
+current rules and withdraws what does not hold AND, for every edge the classifier
+decided, what all 3 passes agree does not. The deterministic veto is not part of
+that gate (the next paragraph says why). --withdraw removes the edge you name
+without asking a model.
 
 Read the --reassess dry run before its --apply, and pass --consensus 3 to it. The
 measurement above is about the VERDICT, and --reassess acts on that same verdict —
 so on ONE answer it can still delete a correct edge: on a copy of a production-shaped
 store, 6 of 11 withdrawals on a NEITHER verdict were wrong even when three unanimous
 passes produced them (#845's run, restated in #862), which is the number that makes a
-single answer worse. --reassess therefore takes --consensus N: with it an
-edge moves only when all N passes agree, and a pair they do not all agree on keeps
-its edge and is reported with its tally, at N times the classify calls. The default
-stays one pass so an existing script's --reassess --apply keeps doing what it
-always did, and an ungated --apply that withdrew an edge on a classifier's verdict
-says so in a note rather than changing under you. --withdraw carries no such caveat:
+single answer worse. --reassess therefore takes --consensus N: with it an edge the
+classifier decided moves only when all N passes agree, and a pair they do not all
+agree on keeps its edge and is reported with its tally, at N times the classify
+calls. A VETOED edge is not part of that, and the reason is the veto's own nature
+rather than an exemption granted to it: the deterministic veto is settled before the
+gate, costs no classify call, and is never voted on, so N passes of a model cannot
+agree a rule about two note bodies more than one does -- a vetoed edge is withdrawn
+on the first pass, as it always has. The default stays one pass so an existing
+script's --reassess --apply keeps doing what it always did, and an ungated --apply
+that withdrew an edge on a classifier's verdict says so in a note rather than
+changing under you. --withdraw carries no such caveat:
 it removes the edge you name, on your say-so, with no model involved.
 
 A withheld edge is not cached either, so it is reported again on
@@ -2022,6 +2036,15 @@ func verdictWithdrawn(withdrawn []supersede.WithdrawnEdge) int {
 // — and an operator who reads it as a claim about the model would gate a pass
 // that never asked one. byVerdict is that count.
 //
+// So the note's claim is SCOPED to the classifier-decided edge it names —
+// "withdraws one only when all N passes agree on it" — rather than making the
+// gate's claim about the whole command. A vetoed edge is settled before the
+// gate, costs no classify call and is never voted on, so a note saying the
+// gated form "withdraws only what all N passes agree on" would be false of
+// every vetoed edge in the run, and those rows are printed directly above it.
+// The help and the docs state the exemption outright; this is the surface that
+// cannot, because it is a per-run recommendation about one edge.
+//
 // The command is rendered through internal/followup, with the real project name
 // and its shell quoting, for the reason every other repair line on these reports
 // does: a command printed with a literal `<project>` is one the operator has to
@@ -2030,7 +2053,7 @@ func reassessConsensusNote(projectName string, apply bool, consensus, byVerdict 
 	if !apply || byVerdict <= 0 || consensus >= supersede.MinConsensus {
 		return ""
 	}
-	return fmt.Sprintf("  note: that withdrew %d edge(s) on ONE classifier verdict each; `%s` withdraws only what all %d passes agree on, at %dx the classify calls\n",
+	return fmt.Sprintf("  note: that withdrew %d edge(s) on ONE classifier verdict each; `%s` withdraws one only when all %d passes agree on it, at %dx the classify calls\n",
 		byVerdict, followup.ReassessCommand(projectName, supersedeConsensusRecommended), supersedeConsensusRecommended, supersedeConsensusRecommended)
 }
 

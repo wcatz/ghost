@@ -2,6 +2,7 @@ package supersede
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,74 @@ import (
 // The gate is the ordinary pass's (#779): N independent ClassifyBatch calls over
 // the same pairs, and an edge moves only when all N name the same outcome. A
 // split keeps the edge exactly as the pass found it and is REPORTED.
+//
+// The one population the gate does NOT cover is the DETERMINISTIC VETO, and
+// TestReassessWithdrawsAVetoedEdgeUnderTheGate is the pass's own half of that:
+// the veto is settled before the gate exists, so a vetoed edge is withdrawn with
+// no classify call at all. The help and docs state the exemption, and a stated
+// exemption nothing tests is a promise about code that may change under it.
+
+// TestReassessWithdrawsAVetoedEdgeUnderTheGate: #862's help says the gate covers
+// the classifier's verdicts and not the deterministic veto. This is the other
+// half of that sentence, in the graph.
+//
+// A vetoed edge is settled into `settled` before any candidate reaches `open`,
+// so under `--consensus 3` it is withdrawn after ZERO classify calls — not three
+// of them, and not a vote the three passes would have to agree on. The fake is
+// scripted to return SUPERSEDES on every pass, so if the veto were ever moved
+// behind the gate this run would end with a unanimous confirmation and a LIVE
+// edge: the test would fail on both counts, which is the point. Asserting only
+// "withdrawn" would not catch that, because the ungated pass withdraws it too —
+// the call count is the half that distinguishes the two behaviours.
+func TestReassessWithdrawsAVetoedEdgeUnderTheGate(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	_, older := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+
+	cls := &perPassClassifier{script: []func(string, string) Relation{
+		supersedesEverywhere, supersedesEverywhere, supersedesEverywhere,
+	}}
+
+	res, withdrawn, err := ReassessWith(ctx, store, cls, "p", ReassessOptions{Apply: true, Consensus: 3}, nil)
+	if err != nil {
+		t.Fatalf("ReassessWith: %v", err)
+	}
+
+	// The load-bearing assertion. N x 0 = 0: there is nothing to vote on, because
+	// no pass was asked, so the gate has no say and the row is settled.
+	if len(cls.passSizes) != 0 {
+		t.Errorf("classify passes = %v, want none: the veto is settled BEFORE the gate, so a gated run must not bill a call to withdraw it", cls.passSizes)
+	}
+	if cls.pairsAsked != 0 {
+		t.Errorf("pairs asked = %d, want 0", cls.pairsAsked)
+	}
+
+	if res.Vetoed != 1 {
+		t.Errorf("Vetoed = %d, want 1: a vetoed row is counted even under a gate, so a report can say the run declined this work for free", res.Vetoed)
+	}
+	if res.Withdrawn != 1 || len(withdrawn) != 1 {
+		t.Fatalf("withdrew %d edge(s) (%+v), want exactly the one the veto settled: the gate narrows the classifier's verdicts and leaves this one alone", res.Withdrawn, withdrawn)
+	}
+	if !withdrawn[0].Vetoed || !withdrawn[0].Written {
+		t.Errorf("withdrawn[0] = %+v, want Vetoed and Written set: the row is the only place an operator can see this edge was settled by a rule rather than by a model", withdrawn[0])
+	}
+	if !strings.Contains(withdrawn[0].Reason, "vetoed") {
+		t.Errorf("withdrawn[0].Reason = %q, want it to name the veto", withdrawn[0].Reason)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{older}); len(pairs) != 0 {
+		t.Errorf("a vetoed edge must not survive a gated repair: %d pair(s) remain", len(pairs))
+	}
+	assertUnsupersedeHistory(t, store, older)
+
+	// The gate is not merely bypassed here — it RAN, and it ran at three. A
+	// result reading Consensus 1 would mean the flag was dropped rather than the
+	// veto exempted, which is a different bug with the same graph outcome.
+	if res.Consensus != 3 {
+		t.Errorf("Consensus = %d, want 3: the gate must have run, with the veto settled ahead of it", res.Consensus)
+	}
+}
 
 // TestReassessKeepsAnEdgeTheConsensusPassesSplitOn is the issue's own case, in
 // the pass's own graph: NEITHER, NEITHER, SUPERSEDES over three passes.
