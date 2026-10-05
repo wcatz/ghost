@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,12 @@ type pruneOptions struct {
 // into a report, or a report into a deletion.
 func parsePruneArgs(args []string) (pruneOptions, error) {
 	var opts pruneOptions
+	// seenProject counts OCCURRENCES rather than testing opts.Project != "".
+	// This parser refuses an empty value (see the --project clause), so the
+	// two questions are separate — but they cannot share one guard: a
+	// `!= ""` test sees `--project= --project=ghost` as the first value not
+	// having been given, and silently lets the second become the scope.
+	seenProject := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -110,15 +117,34 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 			} else {
 				value = strings.TrimPrefix(arg, "--project=")
 			}
-			// Quoted through memory.ProjectArg, not with %q: this sentence goes to
-			// stderr and the log, and a refusal that names a project argument has to
-			// survive a credential having been pasted into one (#839's way out).
-			// The same rule and the same shape as the --audit parser's refusal —
-			// TestNoDuplicateFlagRefusalQuotesWithPercentQ holds both of them.
-			if opts.Project != "" {
+			// seenProject counts OCCURRENCES, which `opts.Project != ""` cannot:
+			// the options struct has no place to record that an empty value has
+			// already been given, and an empty value is exactly the one this
+			// command cannot accept — see below.
+			if seenProject {
+				// Quoted through memory.ProjectArg, not with %q: this sentence
+				// goes to stderr and the log, and a refusal that names a project
+				// argument has to survive a credential having been pasted into
+				// one (#839's way out). The same rule and the same shape as the
+				// --audit parser's refusal —
+				// TestNoDuplicateFlagRefusalQuotesWithPercentQ holds both of them.
 				return opts, fmt.Errorf("--project was given twice (%s and %s)",
 					memory.ProjectArg("project", opts.Project), memory.ProjectArg("project", value))
 			}
+			// An empty value is not "no value". `runPrune` resolves a scope only
+			// when opts.Project != "", so `--project=` would fall through to the
+			// store-wide branch of PruneSessionMemories — which reaches _global
+			// rows too, deliberately (docs/cli.md) — and with --apply that is a
+			// deletion in every project on the machine. The way to ask for that is
+			// to OMIT the flag, which the report names as "every project"; the
+			// empty spelling is a script with an unset variable, and it is the one
+			// spelling that gets there silently. parseReflectArgs and
+			// parseSupersedeArgs already refuse the same flag this way; prune was
+			// the outlier.
+			if value == "" {
+				return opts, errors.New("--project was given an empty value (drop it to prune every project, or name one explicitly)")
+			}
+			seenProject = true
 			opts.Project = value
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)

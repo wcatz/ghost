@@ -137,9 +137,12 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// whatever it holds, so the count is a BOOL rather than a test on the
 			// value — `opts.Project != ""` alone cannot see `--project ghost
 			// --project=`, because the second value is empty and the guard reads
-			// it as the first being unset. Duplicate first, so `--project=
-			// --project=` is named as the two values it is rather than as one bad
-			// one. Both values reach the sentence through memory.ProjectArg and not
+			// it as the first being unset. The duplicate is checked first, so a NAMED
+			// value followed by any second value is named as the duplicate it is;
+			// two empty values still stop at the FIRST one, because the duplicate
+			// guard cannot fire until there is a first value, and with none there is
+			// no scope in the command line to be a duplicate of.
+			// Both values reach the sentence through memory.ProjectArg and not
 			// through %q: a refusal prints to the terminal and lands in the log, so
 			// a value the secret guard recognises comes back as a placeholder
 			// naming the argument rather than as the argument (#839's way out).

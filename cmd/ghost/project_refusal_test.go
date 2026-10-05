@@ -15,6 +15,8 @@ package main
 // it", and an exception is exactly what one parser out of two had become.
 
 import (
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -120,24 +122,33 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 // TestNoDuplicateFlagRefusalQuotesWithPercentQ: the structural half, over every
 // non-test file in this package, and it is what stops the third parser.
 //
-// The rule it enforces is narrow on purpose — a "was given twice" refusal that prints
-// any `%q` operand at all must feed every one of them through memory.ProjectArg — and
-// the narrowness is stated so a future reader does not mistake it for more than it is:
+// The rule: in a "was given twice" refusal, every operand printed with a %q-family
+// verb must BE a memory.ProjectArg call — matched POSITIONALLY, verb to argument. The
+// positional part is the whole test, and the first version of this guard did not have
+// it: it counted `%q` substrings and counted ProjectArg arguments and compared the two
+// for equality, which two shapes walked straight through.
 //
-//   - It holds the SHAPE the invariant names. A refusal written as
-//     fmt.Errorf("...given twice (%q and %q)", opts.Project, value) is a hole by
-//     definition, whatever the surrounding code does, and this is the only check that
-//     can fail on a parser that has no test case of its own.
-//   - It does not try to judge non-%q arguments. `--since was given twice (%s and
-//     %s)` prints two time.Durations, which are not caller-supplied text and have
-//     nothing for the guard to recognise, and telling those apart statically would
-//     need a type checker to be worth anything.
-//   - The VALUES are held by the test above, not by this one. A scan cannot tell
-//     whether an operand happens to hold a credential; only running the refusal can.
-//   - A refusal that routes every value through ProjectArg prints `%s` and has no
-//     `%q` to be wrong about, so it passes trivially — which is the state the fix
-//     drives every parser to, and the reason the scan exists for the NEXT parser
-//     rather than for these two.
+//   - A MIXED refusal. `--project was given twice (%q and %s)` with
+//     (opts.Project, memory.ProjectArg("project", value)) counts one verb and one
+//     ProjectArg, so the counts are equal — while the credential is in operand 0,
+//     printed raw. A count cannot see WHICH operand; an index can.
+//   - A FLAGGED or width-constrained %q. `%-10q`, `%+q`, `%.3q` contain no literal
+//     "%q" substring, so a substring count found zero verbs and skipped the refusal
+//     entirely.
+//
+// What it does not hold, stated so nobody reads more into it:
+//
+//   - Non-%q operands. `--since was given twice (%s and %s)` prints two
+//     time.Durations, which are not caller-supplied text and would need a type
+//     checker to be told apart from a string. A `%s` fed a raw project value is
+//     therefore out of scope here; the table test above is what holds the values.
+//   - Verb shapes this parser refuses to guess at. `quoteOperandIndexes` returns an
+//     error for a `*` width (which takes its width from another argument) rather than
+//     guessing, and the guard reports that as a failure to be fixed here — a scan that
+//     cannot attribute a verb to an argument must say so, not pass silently.
+//
+// It also fails if it finds no such refusal at all, so it cannot pass by scanning
+// nothing.
 func TestNoDuplicateFlagRefusalQuotesWithPercentQ(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -167,20 +178,25 @@ func TestNoDuplicateFlagRefusalQuotesWithPercentQ(t *testing.T) {
 				return true
 			}
 			scanned++
-			verbs := strings.Count(format, "%q")
-			rendered := 0
-			for _, arg := range call.Args[1:] {
-				if isMemoryProjectArg(arg) {
-					rendered++
-				}
+			quotes, perr := quoteOperandIndexes(format)
+			if perr != nil {
+				t.Errorf("%s: %v, so this scan cannot tell which operand the verb prints; "+
+					"extend quoteOperandIndexes here rather than letting the refusal past (%s)",
+					fset.Position(call.Pos()), perr, lit.Value)
+				return true
 			}
-			// Only a refusal that actually prints a bare operand is in scope. One
-			// that routes every value through ProjectArg prints %s and has no %q
-			// to be wrong about, which is the state this drives the package to.
-			if verbs > 0 && verbs != rendered {
-				t.Errorf("%s: a \"was given twice\" refusal prints %d %%q operand(s) but only "+
-					"%d of them go through memory.ProjectArg, so a credential in the flag is "+
-					"echoed verbatim (%s)", fset.Position(call.Pos()), verbs, rendered, lit.Value)
+			for _, idx := range quotes {
+				if idx+1 >= len(call.Args) {
+					t.Errorf("%s: the format has %d operands and %d arguments, so verb %d prints "+
+						"nothing at all (%s)", fset.Position(call.Pos()), len(quotes), len(call.Args)-1,
+						idx, lit.Value)
+					continue
+				}
+				if !isMemoryProjectArg(call.Args[idx+1]) {
+					t.Errorf("%s: a \"was given twice\" refusal prints operand %d with %%q and it "+
+						"does not go through memory.ProjectArg, so a credential in the flag is echoed "+
+						"verbatim (%s)", fset.Position(call.Pos()), idx, lit.Value)
+				}
 			}
 			return true
 		})
@@ -188,6 +204,124 @@ func TestNoDuplicateFlagRefusalQuotesWithPercentQ(t *testing.T) {
 	if scanned == 0 {
 		t.Error("no \"was given twice\" refusal was found to scan, so this guard is holding nothing")
 	}
+}
+
+// TestQuoteOperandIndexesIsTheCountingTheGuardDependsOn: the guard above is a claim
+// about a count, and a count of verbs by hand is exactly where a scan goes wrong —
+// this is the table that says which verb shapes are recognised and what each of them
+// attributes to which argument.
+//
+// Every row is a shape a refusal could plausibly be written in, and the two marked
+// MIXED are the shapes the first version of the guard passed.
+func TestQuoteOperandIndexesIsTheCountingTheGuardDependsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format string
+		want   []int
+	}{
+		{name: "two plain verbs", format: "--project was given twice (%q and %q)", want: []int{0, 1}},
+		{name: "one verb among others", format: "(%q and %s)", want: []int{0}},
+		{name: "the verb in the second position", format: "(%s and %q)", want: []int{1}},
+		{name: "a width flag", format: "(%-10q and %q)", want: []int{0, 1}},
+		{name: "a plus flag", format: "(%+q)", want: []int{0}},
+		{name: "a precision", format: "(%.3q)", want: []int{0}},
+		{name: "flags width and precision together", format: "(%+12.4q)", want: []int{0}},
+		{name: "an escaped percent is not a verb", format: "(100%% of %q)", want: []int{0}},
+		// The reviewer's case: `%%q` is how a refusal writes the literal text
+		// "%q", and a substring count reads its "%q" as a verb — shifting every
+		// later operand index by one as well, which is the quieter half of the
+		// same mistake.
+		{name: "an escaped percent before the letter is still not a verb", format: "(%%q and %q)", want: []int{0}},
+		{name: "two escaped percents leave no verb", format: "(%%%%q and %q)", want: []int{0}},
+		{name: "no quote verb at all", format: "--since was given twice (%s and %s)"},
+		{name: "no verb at all", format: "was given twice, plainly"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := quoteOperandIndexes(tc.format)
+			if err != nil {
+				t.Fatalf("quoteOperandIndexes(%q): %v", tc.format, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("quoteOperandIndexes(%q) = %v, want %v", tc.format, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("quoteOperandIndexes(%q) = %v, want %v", tc.format, got, tc.want)
+				}
+			}
+		})
+	}
+
+	// The two shapes it must REFUSE rather than guess at, because a guess here is a
+	// silent pass and the guard's whole value is that it cannot pass silently.
+	for _, tc := range []struct {
+		name   string
+		format string
+	}{
+		{name: "a star width takes its own argument", format: "(%*q)"},
+		{name: "a dangling percent", format: "trailing %"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := quoteOperandIndexes(tc.format); err == nil {
+				t.Errorf("quoteOperandIndexes(%q) accepted a shape it cannot attribute to an argument", tc.format)
+			}
+		})
+	}
+}
+
+// quoteOperandIndexes walks a printf format the way fmt does and returns, in order,
+// the indexes of the ARGUMENTS that a %q-family verb prints.
+//
+// Three rules make it agree with fmt, and each one is a shape the previous version of
+// this scan got wrong:
+//
+//   - `%%` is an escaped percent. It prints a literal % and consumes NO argument, so
+//     the first %q in "100%% of %q" is operand 0 — while a plain substring count would
+//     have read the "%q" inside "%%q" as a verb and shifted every later index by one.
+//   - Flags, width and precision sit between the % and the verb, and the verb letter
+//     alone decides whether this is a quote verb: `%-10q` and `%+.3q` print a quoted
+//     string and nothing about them contains the substring "%q".
+//   - `*` is refused rather than consumed. It takes its width from an ARGUMENT, which
+//     makes verb-to-argument indexing a guess, and a guess in this scan is a refusal
+//     that walks through.
+func quoteOperandIndexes(format string) ([]int, error) {
+	const flags = "+-# 0123456789."
+	var quotes []int
+	operand := 0
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			continue
+		}
+		if i+1 >= len(format) {
+			return nil, errors.New("the format ends in a bare percent, which fmt renders as a " +
+				"missing-verb marker rather than the text")
+		}
+		if format[i+1] == '%' {
+			i++ // an escaped percent consumes no operand
+			continue
+		}
+		j := i + 1
+		for j < len(format) {
+			c := format[j]
+			if c == '*' {
+				return nil, fmt.Errorf("the format uses a * width, which fmt fills from another "+
+					"argument, so verb %d cannot be attributed to one operand", operand)
+			}
+			if strings.IndexByte(flags, c) < 0 {
+				break
+			}
+			j++
+		}
+		if j >= len(format) {
+			return nil, fmt.Errorf("the format ends mid-verb at %q", format[i:])
+		}
+		if format[j] == 'q' {
+			quotes = append(quotes, operand)
+		}
+		operand++
+		i = j
+	}
+	return quotes, nil
 }
 
 func isFmtErrorf(call *ast.CallExpr) bool {

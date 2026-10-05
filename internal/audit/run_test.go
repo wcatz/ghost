@@ -481,3 +481,51 @@ func TestTheRunSummaryRendersItsSourceThroughLabel(t *testing.T) {
 		t.Errorf("the source was not escaped, so its newline reached the log raw:\n%s", out)
 	}
 }
+
+// TestTheRunSummaryRendersItsScopeAndDegradationAsLabels: the summary this package's
+// String() returns is printed to stderr by `ghost lifecycle`, as the phase tail an
+// operator reads in lifecycle.log. Three values in it are STORED text, and each is a
+// string a row or a restored file chose:
+//
+//   - ProjectID, a projects-row value. A hand-edited or restored database can hold one
+//     this build's import checkers would refuse, and a newline forges a line of the
+//     summary.
+//   - src.Source, the retrieval_record.source column — its own test above.
+//   - Degraded, the scan's reason. `MarkDegraded`'s contract says the argument is a
+//     reason from the hook's fail-open vocabulary and never a transcript phrase, but the
+//     one caller builds it with `%v` of an error, and the sidecar format quotes rather
+//     than rejects, so a newline survives a save/load round trip.
+//
+// All three now go through assemble.Label, which is what the two sibling renderers
+// already do for the same two of them: `report.go` labels its source and its degraded
+// reasons (labelDegraded), and `printContextAudit` labels the report's project id with
+// `TestTheAuditScopeLineRendersTheProjectAsALabel` pinning it. The failure mode is the
+// same in each case — a stored string becomes a line of figures — so the hardening has
+// to cover the whole function or none of it.
+//
+// Two payloads, distinct, so each site is pinned separately: a single forged substring
+// would satisfy "no forged line" for both if both were left raw and only one escaped.
+func TestTheRunSummaryRendersItsScopeAndDegradationAsLabels(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	_ = recordCall(t, store, projectID, "search")
+
+	res, err := Run(context.Background(), store, projectID, newTestSignals(t))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Written onto the summary the Run just produced, rather than through a second
+	// Run with hostile inputs: this is the RENDERER under test, and a hostile value
+	// would also have to survive whatever wrote it.
+	res.ProjectID = projectID + "\n- forged-scope: 100% used"
+	res.Degraded = "transcript truncated\n- forged-degraded: 100% used"
+
+	out := res.String()
+	for _, forged := range []string{"\n- forged-scope: 100%", "\n- forged-degraded: 100%"} {
+		if strings.Contains(out, forged) {
+			t.Errorf("a stored value forged a line of the lifecycle summary (%q):\n%s", forged, out)
+		}
+	}
+	if !strings.Contains(out, `\n- forged-scope`) || !strings.Contains(out, `\n- forged-degraded`) {
+		t.Errorf("neither value was escaped, so its newline reached the log raw:\n%s", out)
+	}
+}
