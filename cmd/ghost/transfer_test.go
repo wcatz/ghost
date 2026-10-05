@@ -106,6 +106,106 @@ func TestParseExportArgs(t *testing.T) {
 	}
 }
 
+// TestParseExportArgsRefusesAnEmptyProject: `--project` with no value is a refusal,
+// never "every project".
+//
+// This is the one scope flag in the tree whose empty value reached the WHOLE STORE
+// silently. `runExportCore` takes `projectFilter` as a string and an empty one is
+// every project, which is the correct default for a flag that was never typed and the
+// wrong answer for one that was typed with an unset variable behind it — the export
+// writes the artifact to a path and reports what it wrote, so nothing downstream
+// looks like a mistake. Both spellings are refused, and so is the `--project ""`
+// form, which reached the same branch by a different route.
+func TestParseExportArgsRefusesAnEmptyProject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"equals form", []string{"--project="}},
+		{"separate form", []string{"--project", ""}},
+		{"equals form beside an out", []string{"--out", "/tmp/x.jsonl", "--project="}},
+		{"separate form beside an out", []string{"--out", "/tmp/x.jsonl", "--project", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseExportArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseExportArgs(%v) = %+v: an empty --project is a refusal, not the whole store", tc.args, opts)
+			}
+			if !strings.Contains(err.Error(), "--project") {
+				t.Errorf("error %q must name the flag the reader has to fix", err)
+			}
+			if opts.Project != "" {
+				t.Errorf("Project = %q alongside the error: a refused parse hands back no scope to reach the store with", opts.Project)
+			}
+		})
+	}
+}
+
+// TestParseExportArgsRefusesARepeatedProject: a second --project is a repeat
+// whatever the first one said.
+//
+// Occurrences are counted rather than tested with `Project != ""`, because that test
+// cannot see `--project= --project ghost`: it reads the empty first value as no value
+// given, and the second silently becomes the scope. The export is the shape where
+// that matters most — the run reads a project and writes a file that is then handed
+// to someone else, so a scope that silently became the last spelling on the line is a
+// copy of the wrong corpus.
+func TestParseExportArgsRefusesARepeatedProject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"two separate forms", []string{"--project", "ghost", "--project", "other"}, "expected exactly one project"},
+		{"two equals forms", []string{"--project=ghost", "--project=other"}, "expected exactly one project"},
+		{"separate then equals", []string{"--project", "ghost", "--project=other"}, "expected exactly one project"},
+		{"equals then separate", []string{"--project=ghost", "--project", "other"}, "expected exactly one project"},
+		// A NAMED value followed by any second value is the duplicate it is, and
+		// the duplicate is the question asked first.
+		{"a project then an empty one", []string{"--project", "ghost", "--project="}, "expected exactly one project"},
+		// Two empty values stop at the FIRST one: the duplicate guard cannot fire
+		// until there is a first value, and with none there is no scope in the
+		// command line to be a duplicate of.
+		{"empty first then a project", []string{"--project=", "--project", "ghost"}, "--project requires a value"},
+		{"empty separate first then a project", []string{"--project", "", "--project", "ghost"}, "--project requires a value"},
+		{"two empty ones", []string{"--project=", "--project="}, "--project requires a value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseExportArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseExportArgs(%v) was accepted with the same scope twice", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q must contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseExportArgsTakesOneProject: the control for both refusals above, in both
+// spellings. A parser that counted SIGHTS instead of VALUES would pass them both.
+func TestParseExportArgsTakesOneProject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"separate form", []string{"--project", "ghost"}, "ghost"},
+		{"equals form", []string{"--project=ghost"}, "ghost"},
+		{"a dash-leading name is a name", []string{"--project", "-myproj"}, "-myproj"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseExportArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseExportArgs(%v): %v", tc.args, err)
+			}
+			if opts.Project != tc.want {
+				t.Errorf("Project = %q, want %q", opts.Project, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseImportArgs(t *testing.T) {
 	t.Run("file required", func(t *testing.T) {
 		if _, err := parseImportArgs(nil); err == nil {

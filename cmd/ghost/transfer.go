@@ -97,6 +97,11 @@ Writes memories, tasks, decisions and projects as JSON Lines — one JSON object
 per line, readable, diffable and editable.
 
   --project <name>   Export one project, matched by name or id exactly.
+                     Default: every project. An EMPTY value is refused rather
+                     than read as the default — --project= is a script with an
+                     unset variable, and the way to export everything is to leave
+                     the flag off. Naming the flag twice is refused too, whatever
+                     the values are.
   --out <path>       Where to write it. Default: a timestamped .jsonl beside
                      the database. Use "-" for standard output.
 
@@ -207,26 +212,59 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 
 // parseExportArgs parses `ghost export`. Both --flag value and --flag=value are
 // accepted, matching the obsidian command's spelling.
+//
+// --out is last-one-wins: it names a destination, and a second one is an operator
+// overriding their own earlier flag rather than a second copy of the same scope.
+// --project is the opposite case and refuses a second value, because it is a SCOPE:
+// runExportCore reads an empty projectFilter as every project, so a second --project
+// is two answers to which corpus this artifact holds, and an empty one is the
+// unset-variable spelling that answered "all of it" while the command line looked
+// scoped.
 func parseExportArgs(args []string) (exportOptions, error) {
 	var opts exportOptions
+	// projectSeen counts OCCURRENCES rather than testing the value for emptiness,
+	// because that test cannot see `--project ghost --project=`: it reads the empty
+	// second value as the first being unset, and lets a command line that named the
+	// scope twice export the first scope it happened to spell out. The duplicate is
+	// asked FIRST, as it is in every other parser that takes a scope: a named value
+	// followed by any second value is named as the duplicate it is, and two empty
+	// values stop at the first one, because with no first value there is no scope in
+	// the command line to be a duplicate of.
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "--out" || arg == "--project":
+		case arg == "--out":
 			if i+1 >= len(args) {
-				return opts, fmt.Errorf("flag %s needs a value", arg)
+				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
-			value := args[i]
-			if arg == "--out" {
-				opts.Out = value
-			} else {
-				opts.Project = value
-			}
+			opts.Out = args[i]
 		case strings.HasPrefix(arg, "--out="):
 			opts.Out = strings.TrimPrefix(arg, "--out=")
+		case arg == "--project":
+			if i+1 >= len(args) {
+				return opts, errors.New("--project requires a value")
+			}
+			if projectSeen {
+				return opts, errors.New("expected exactly one project")
+			}
+			if args[i+1] == "" {
+				return opts, errors.New("--project requires a value")
+			}
+			opts.Project = args[i+1]
+			projectSeen = true
+			i++
 		case strings.HasPrefix(arg, "--project="):
-			opts.Project = strings.TrimPrefix(arg, "--project=")
+			if projectSeen {
+				return opts, errors.New("expected exactly one project")
+			}
+			v := strings.TrimPrefix(arg, "--project=")
+			if v == "" {
+				return opts, errors.New("--project requires a value")
+			}
+			opts.Project = v
+			projectSeen = true
 		default:
 			return opts, fmt.Errorf("unknown argument %q", arg)
 		}

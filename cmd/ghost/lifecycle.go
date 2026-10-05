@@ -3567,6 +3567,20 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 		}
 		return nil
 	}
+	// projectSeen counts OCCURRENCES of a project rather than testing the value for
+	// emptiness. A `project != ""` test cannot see `--project= --project ghost`: it
+	// reads the empty first value as no project given, so the second one silently
+	// became the scope of a run whose command line named the scope twice — and a
+	// resolve pass judges and can stamp every memory in the project it settled for.
+	//
+	// All three spellings that name the scope — `--project X`, `--project=X` and the
+	// positional — ask the same two questions through this one bool, so a project is
+	// counted whether it arrived as a flag or as a word. The duplicate is asked
+	// FIRST, as it is in every other parser that takes a scope: a named value
+	// followed by any second value is named as the duplicate it is, and two empty
+	// values stop at the first one, because with no first value there is no scope in
+	// the command line to be a duplicate of.
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
@@ -3606,20 +3620,29 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			if i+1 >= len(args) {
 				return resolveArgs{}, errors.New("--project requires a value")
 			}
-			if out.project != "" {
+			if projectSeen {
 				return resolveArgs{}, errors.New("expected exactly one project")
 			}
+			// The separate spelling refused only a missing argument, so `--project ""`
+			// was the one spelling of the unset variable this parser accepted. It
+			// decided nothing here (runResolve prints the usage block for an empty
+			// project), but it is the same mistake and one flag is refused once.
+			if args[i+1] == "" {
+				return resolveArgs{}, errors.New("--project requires a value")
+			}
 			out.project = args[i+1]
+			projectSeen = true
 			i++
 		case strings.HasPrefix(args[i], "--project="):
+			if projectSeen {
+				return resolveArgs{}, errors.New("expected exactly one project")
+			}
 			v := strings.TrimPrefix(args[i], "--project=")
 			if v == "" {
 				return resolveArgs{}, errors.New("--project requires a value")
 			}
-			if out.project != "" {
-				return resolveArgs{}, errors.New("expected exactly one project")
-			}
 			out.project = v
+			projectSeen = true
 		case args[i] == "--source" && i+1 < len(args):
 			out.source = args[i+1]
 			i++
@@ -3655,10 +3678,11 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 		case args[i] == "--only-file":
 			return resolveArgs{}, errors.New("--only-file requires a path")
 		case !strings.HasPrefix(args[i], "-"):
-			if out.project != "" {
+			if projectSeen {
 				return resolveArgs{}, errors.New("expected exactly one project")
 			}
 			out.project = args[i]
+			projectSeen = true
 		default:
 			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
 		}
