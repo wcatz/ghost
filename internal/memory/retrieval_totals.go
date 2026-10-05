@@ -154,14 +154,22 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 			continue
 		}
 		t.Scored += v.n
+		// The four arms are the closed vocabulary of VerdictOutcome*, not four strings
+		// typed here, and that is not tidiness. This switch once matched "superseded"
+		// while the comparison stored "superseded_in_session", so every superseded
+		// verdict counted in Scored and in no bucket at all: the health block printed
+		// "0 superseded in session" beside a precision whose denominator included them,
+		// and the four buckets stopped summing to Scored. An arm that goes missing — or a
+		// fifth bucket added without one — fails here rather than in a store, in
+		// internal/audit's TestTheStoreWideAggregateMapsEveryOutcomeTheComparerCanStore.
 		switch v.outcome {
-		case "used":
+		case VerdictOutcomeUsed:
 			t.Used += v.n
-		case "ignored":
+		case VerdictOutcomeIgnored:
 			t.Ignored += v.n
-		case "superseded":
+		case VerdictOutcomeSuperseded:
 			t.Superseded += v.n
-		case "contradicted":
+		case VerdictOutcomeContradicted:
 			t.Contradicted += v.n
 			anyContradicted = true
 		}
@@ -169,6 +177,10 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 		// so the buckets do not sum to Scored. That gap is the honest reading: the row
 		// IS a verdict, and this build cannot say which bucket it falls in. Dropping
 		// it would report a stranger store's precision as better than it is.
+		//
+		// A gap over OUR OWN vocabulary is not that, and is a bug rather than a
+		// tolerance — the four arms above are exhaustive over VerdictOutcome*, which is
+		// the whole list the comparison writes from.
 		if v.degraded != "" {
 			t.DegradedVerdicts += v.n
 			t.DegradedReasons = append(t.DegradedReasons, v.degraded)
@@ -384,8 +396,17 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 // set is one row per memory rather than one per verdict; the caller still sorts and
 // dedupes, because a map keyed by source is what the renderer reads and SQLite's
 // grouping order is not a promise.
+//
+// The outcome it filters on is BOUND, not pasted, for the reason the aggregate's switch
+// names the vocabulary rather than typing it: `outcome = 'contradicted'` is one more
+// place a hand-written spelling of a stored value can disagree with the comparison, and
+// this one would disagree silently — the statement returns no rows at all, so the report
+// would name no contradicted memory while still counting the verdicts. The argument
+// goes last because that is where its placeholder sits in the text, after both window
+// predicates.
 func (s *Store) retrievalContradictedIDs(ctx context.Context, floor time.Time) (map[string][]string, error) {
 	attribution, args := verdictAttribution(floor)
+	args = append(args, VerdictOutcomeContradicted)
 
 	query := `
 		WITH judged AS (
@@ -396,7 +417,7 @@ func (s *Store) retrievalContradictedIDs(ctx context.Context, floor time.Time) (
 			AND a.memory_id <> ''
 		)
 		SELECT DISTINCT source, memory_id FROM judged
-		WHERE outcome = 'contradicted' AND attribution = ` + fmt.Sprint(attributedVerdict)
+		WHERE outcome = ? AND attribution = ` + fmt.Sprint(attributedVerdict)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()

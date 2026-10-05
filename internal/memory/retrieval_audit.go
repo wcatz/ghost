@@ -96,6 +96,44 @@ import (
 	"time"
 )
 
+// The outcome vocabulary retrieval_audit.outcome holds, spelled ONCE and here.
+//
+// The strings are here rather than in internal/audit because that package imports this
+// one — its report reads a memory.Store — so the dependency runs the only direction it
+// can, and both sides of the column share one declaration: internal/audit derives its
+// typed Outcome constants from these, and RetrievalSourceTotals switches on these.
+//
+// They are spelled once because a reader that spells one of them differently counts
+// nothing and says nothing. The store-wide aggregate matched `case "superseded"` against
+// a stored `superseded_in_session`, so every superseded verdict was counted in Scored
+// and in no bucket at all: `ghost_health` printed "0 superseded in session" beside a
+// precision whose denominator included them, and the store-wide figure stopped equalling
+// the sum of the per-project reports — a bucket whose reader and whose writer disagreed
+// about a word.
+//
+// Declaring the vocabulary is NOT constraining the column, and that stays true:
+// retrieval_audit.outcome carries no CHECK (see schema.go) so a row written by a build
+// with a bucket this one has no name for is still countable. These are the values THIS
+// build can place and match; TestTheStoreWideAggregateMapsEveryOutcomeTheComparerCanStore
+// holds the aggregate to every one of them, and internal/audit's AllOutcomes is derived
+// from the same list so a fifth bucket cannot be added by either package alone.
+const (
+	VerdictOutcomeUsed         = "used"
+	VerdictOutcomeIgnored      = "ignored"
+	VerdictOutcomeSuperseded   = "superseded_in_session"
+	VerdictOutcomeContradicted = "contradicted"
+)
+
+// AllVerdictOutcomes is every value above, in the order the four outcome buckets are
+// named in the figures — so it is a LIST and not a set, and the order is part of what
+// the two packages agree on.
+var AllVerdictOutcomes = []string{
+	VerdictOutcomeUsed,
+	VerdictOutcomeIgnored,
+	VerdictOutcomeSuperseded,
+	VerdictOutcomeContradicted,
+}
+
 // RetrievalAuditRow is one memory's fate in one recorded call.
 type RetrievalAuditRow struct {
 	ProjectID string

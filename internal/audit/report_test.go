@@ -1068,9 +1068,18 @@ func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
 	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
 		t.Fatalf("EnsureProject p2: %v", err)
 	}
-	for _, id := range []string{"A1", "A2", "A3", "A4"} {
+	for _, id := range []string{"A1", "A2", "A3"} {
 		seedMemory(t, store, p1, id, memContent)
 	}
+	// A4 gets its OWN wording, and that is the reason it is not simply a fourth copy of
+	// memContent. The superseded_in_session bucket is a save restating a memory's
+	// distinctive words, so a save written for one of four identical memories would
+	// supersede all four — and a fixture that cannot supersede exactly one memory cannot
+	// tell an aggregate that maps the bucket from one that maps it for everything. This
+	// fixture filed no superseded verdict at all before that, and that is how the store-wide
+	// reader came to match a bucket named "superseded" against the stored
+	// "superseded_in_session" for a release.
+	seedMemory(t, store, p1, "A4", "The relay listens on port 2222 in production")
 	seedMemory(t, store, "p2", "B1", "The ledger reindexes itself after a snapshot restore")
 	seedMemory(t, store, "p2", "B2", "Bench seeds restore content through the shared clamp helper")
 
@@ -1083,8 +1092,11 @@ func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
 	recordCall(t, store, "p2", "session_start")
 
 	// p1 judged cleanly, p2 judged under a partial transcript read — so the degraded
-	// reason is named on one source and not the other.
-	judge(t, store, p1, newTestSignals(t))
+	// reason is named on one source and not the other. p1's signals carry one SAVE, which
+	// restates A4's wording and supersedes exactly that memory.
+	p1Signals := newTestSignals(t)
+	p1Signals.AddSaveArgs("the relay listens on port 2222 in production")
+	judge(t, store, p1, p1Signals)
 	degraded := newTestSignals(t)
 	degraded.MarkDegraded("scan transcript: truncated")
 	judge(t, store, "p2", degraded)

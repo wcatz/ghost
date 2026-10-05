@@ -129,6 +129,15 @@ func totalsFor(got []RetrievalSourceTotals, source string) RetrievalSourceTotals
 // keeping the same memory is one (call, memory) pair, which is the table's grain, so
 // kept is 2 and not 3. This is the shape a single-project reader gets right by
 // de-duplicating in Go and an aggregate gets wrong by counting rows.
+//
+// It also carries ONE verdict in EVERY bucket, which is the point of it being here and
+// not only in its own test: the aggregate's fourth arm used to match the string
+// "superseded" while the comparison stored "superseded_in_session", and every fixture
+// that filed a superseded verdict was filed by hand around the reader rather than
+// through the comparison — so no store the comparer itself writes ever reached the arm,
+// and the bucket read 0 over a store that held the verdicts. VerdictOutcomeSuperseded
+// is spelled here rather than as a literal for the same reason it is spelled in the
+// reader: a fixture that types the bucket itself is a second spelling waiting to go stale.
 func TestRetrievalSourceTotalsCountsEveryShapeTheTablesHold(t *testing.T) {
 	s, _ := totalsStore(t)
 	ctx := context.Background()
@@ -147,20 +156,24 @@ func TestRetrievalSourceTotalsCountsEveryShapeTheTablesHold(t *testing.T) {
 	// on one call are two rows".
 	first := totalsRecord(t, s, "p1", "search", "M1", "M1", "M2")
 	second := totalsRecord(t, s, "p1", "search", "M3")
+	third := totalsRecord(t, s, "p1", "search", "M4")
 	totalsRecord(t, s, "p1", "search")
-	totalsVerdict(t, s, "p1", "search", "M1", "used", first, "")
-	totalsVerdict(t, s, "p1", "search", "M3", "ignored", second, "")
+	totalsVerdict(t, s, "p1", "search", "M1", VerdictOutcomeUsed, first, "")
+	totalsVerdict(t, s, "p1", "search", "M3", VerdictOutcomeIgnored, second, "")
+	totalsVerdict(t, s, "p1", "search", "M4", VerdictOutcomeSuperseded, third, "")
 
 	got, err := s.RetrievalSourceTotals(ctx, time.Time{})
 	if err != nil {
 		t.Fatalf("RetrievalSourceTotals: %v", err)
 	}
-	// Kept is 3 and not 4: the call that kept M1 twice kept it ONCE, because two
+	// Kept is 4 and not 5: the call that kept M1 twice kept it ONCE, because two
 	// stages of one call admitting the same memory is one (call, memory) pair. The
-	// other two calls contributed one pair and none.
+	// other three calls contributed one pair and none. And the four buckets are all
+	// non-zero, because a bucket this build can store but not count reads as a
+	// precision over a corpus it does not describe.
 	want := RetrievalSourceTotals{
-		Source: "search", Calls: 3, Kept: 3, KeptNothing: 1,
-		Scored: 2, Used: 1, Ignored: 1,
+		Source: "search", Calls: 4, Kept: 4, KeptNothing: 1,
+		Scored: 3, Used: 1, Ignored: 1, Superseded: 1,
 	}
 	if diff := diffTotals(want, totalsFor(got, "search")); diff != "" {
 		t.Errorf("the aggregate disagrees with the rows it summarizes:\n%s", diff)

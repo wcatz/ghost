@@ -19,6 +19,8 @@ package audit
 
 import (
 	"fmt"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // Outcome is which bucket one retrieved memory fell in.
@@ -27,23 +29,42 @@ import (
 // cannot be built from anything else by accident. The values are what the store
 // holds, which is why they are lower case with underscores: the column is read
 // back by an operator's SQL as often as by this package.
+//
+// The values themselves are declared in internal/memory, next to the column this
+// package writes and the store-wide reader reads back. That direction is the only
+// one available — this package already imports internal/memory, so it cannot be
+// imported back — and it means the comparison cannot spell a bucket differently
+// from the aggregate that counts it. It spelled one differently once: "superseded"
+// against a stored "superseded_in_session", counted in Scored and in no bucket.
 type Outcome string
 
 const (
 	// OutcomeUsed: the agent's own words named the memory or repeated enough of
 	// its distinctive wording to be a restatement rather than a coincidence.
-	OutcomeUsed Outcome = "used"
+	OutcomeUsed Outcome = memory.VerdictOutcomeUsed
 	// OutcomeIgnored: nothing the agent wrote mentions it. NOT a usefulness score
 	// — see the file comment.
-	OutcomeIgnored Outcome = "ignored"
+	OutcomeIgnored Outcome = memory.VerdictOutcomeIgnored
 	// OutcomeSuperseded: the agent saved Ghost the same knowledge in this session,
 	// which is a separate finding from a contradiction: the memory is not wrong,
 	// it is out of date with what the agent now knows.
-	OutcomeSuperseded Outcome = "superseded_in_session"
+	OutcomeSuperseded Outcome = memory.VerdictOutcomeSuperseded
 	// OutcomeContradicted: the agent denied this memory, in the same sentence as
 	// the wording or the id it names.
-	OutcomeContradicted Outcome = "contradicted"
+	OutcomeContradicted Outcome = memory.VerdictOutcomeContradicted
 )
+
+// AllOutcomes is every outcome the comparer can produce, in the order the four buckets
+// are named in the figures.
+//
+// It is the list a reader holds the comparer's vocabulary to, and it exists because Go
+// cannot enumerate constants: a fifth Outcome added above and not here would be a bucket
+// this build writes and no reader of the column counts. Both halves of that are checked
+// rather than trusted — TestTheOutcomeVocabularyIsOneListSpelledOnce parses the const
+// block above and fails if it and this list disagree in either direction, and
+// TestTheStoreWideAggregateMapsEveryOutcomeTheComparerCanStore drives the store-wide
+// aggregate with each value here and fails if one lands in no bucket.
+var AllOutcomes = []Outcome{OutcomeUsed, OutcomeIgnored, OutcomeSuperseded, OutcomeContradicted}
 
 // Signal is what PROVED a positive verdict, drawn from a closed set of three.
 //
