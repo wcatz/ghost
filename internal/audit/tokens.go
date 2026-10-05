@@ -175,13 +175,27 @@ func splitClauses(text string) ([]string, []int) {
 // decimal or a colon inside "https:" is punctuation without ending anything.
 //
 // Auditable against sentenceSplit, which is the other place a boundary is named.
-// ';' is in BOTH lists, and on the in-package path AddProse it is unreachable:
-// segments splits a sentence at ';' before splitClauses sees one, so the only text
-// that carries a ';' into this function is a caller's own through the exported
-// HasNegationCue. It is kept because the two lists answer different questions —
-// sentenceSplit decides where one SEGMENT ends, this decides whether two words are
-// in the same CLAUSE — and a reader who has to check the overlap to know which
-// marks are reachable cannot audit either list.
+// ';' is in BOTH lists, and that overlap is worth stating precisely because a ';' is
+// reachable here and its reach is a property of the CALLER, not of this function.
+//
+// A ';' does reach clauseBoundary: splitWords is splitClauses with the ids dropped,
+// and addWords calls it — through memoryIDs, over the same text — for every piece
+// of prose and every tool argument AddProse sees, discarding the ids. So the counter
+// splits on a ';' and the split is then never read.
+//
+// What is unreachable is a ';' on the path that READS the ids, which is the only path
+// a clause can change a verdict on. Inside AddProse, segments has already split at the
+// ';' (see sentenceSplit), so the per-segment splitClauses call cannot see one. The
+// exported HasNegationCue is the other reader and has no such guard: it takes a
+// parameter named segment and can only be as disciplined as its caller, so a caller
+// passing a multi-sentence string with a ';' hands the ids a boundary that the
+// in-package path would have split away. That is the same contract segments already
+// had, and it is the caller's to honour, not this function's to enforce.
+//
+// ';' is kept because the two lists answer different questions — sentenceSplit decides
+// where one SEGMENT ends, this decides whether two words are in the same CLAUSE — and
+// a reader who has to check the overlap to know which marks are reachable cannot audit
+// either list.
 //
 // A paragraph break and a newline end a SEGMENT rather than a clause, and are
 // absent here for that reason rather than by omission: segments already splits on
