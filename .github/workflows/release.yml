@@ -519,15 +519,16 @@ jobs:
         # repository's "Automatically delete head branches" setting, so there
         # is no delete logic here to fail.
         #
-        # MANUAL STEP after this job succeeds: the summary reports either the
-        # PR below (when the workflow opened it), or — the usual route in this
+        # MANUAL STEP after this job succeeds: the summary reports one of three
+        # cases, keyed on what the PR step below finds. If it opened the PR,
+        # or found one opened with GITHUB_TOKEN: click "Approve workflows to
+        # run", then merge. If it found a PR a human opened from the compare
+        # link: the three required checks are already running, so just merge
+        # once they pass. If it opened nothing — the usual route in this
         # repository, where GitHub does not let Actions create pull requests —
-        # the compare link that opens the pre-filled PR form. If the workflow
-        # opened the PR: click "Approve workflows to run", then merge. If a
-        # human opened the compare link: the three required checks start
-        # immediately, so just merge once they pass. Until the pin is merged,
-        # the catalog keeps pointing at the previous release — which is safe,
-        # because those URLs remain valid.
+        # open the compare link it reports, create the PR from it, then merge.
+        # Until the pin is merged, the catalog keeps pointing at the previous
+        # release — which is safe, because those URLs remain valid.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -629,12 +630,21 @@ jobs:
           EXISTING="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
           PR_URL=""
           PR_OPENED="no"
-          PR_CREATED_BY_WORKFLOW="no"
+          PR_HELD_FOR_APPROVAL="no"
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --body-file /tmp/pr-body.md
             echo "updated existing catalog PR #${EXISTING}"
             PR_URL="$(gh pr view "$EXISTING" --json url --jq .url)"
             PR_OPENED="yes"
+            # Whether GitHub HOLDS this PR's runs pending approval is a
+            # property of who created it, not of what this run did: a PR
+            # opened with GITHUB_TOKEN shows "Approve workflows to run" in the
+            # merge box, one a human opened does not. A re-run in a repository
+            # where Actions CAN create PRs finds the workflow's own earlier
+            # PR, so the author is read rather than inferred from the branch.
+            if [ "$(gh pr view "$EXISTING" --json author --jq '.author.login')" = "github-actions[bot]" ]; then
+              PR_HELD_FOR_APPROVAL="yes"
+            fi
           else
             # Capture, don't run: under `set -e` a refused create would end
             # the job here, and with it the summary and verification steps
@@ -646,7 +656,9 @@ jobs:
               printf '%s\n' "$CREATE_LOG"
               PR_URL="$(gh pr view "$BRANCH" --json url --jq .url)"
               PR_OPENED="yes"
-              PR_CREATED_BY_WORKFLOW="yes"
+              # Just created with GITHUB_TOKEN, so its runs are held pending
+              # approval by the same rule the author check above applies.
+              PR_HELD_FOR_APPROVAL="yes"
             else
               printf '%s\n' "$CREATE_LOG"
               echo "::notice::the repository does not let GitHub Actions open the catalog PR; open ${COMPARE_URL} by hand — the summary below reports it as the manual step"
@@ -661,12 +673,17 @@ jobs:
             echo "::error::could not resolve the catalog PR URL"
             exit 1
           fi
-          printf 'COMPARE_URL=%s\n' "$COMPARE_URL" >> "$GITHUB_OUTPUT"
-          printf 'PR_OPENED=%s\n' "$PR_OPENED" >> "$GITHUB_OUTPUT"
-          printf 'PR_CREATED_BY_WORKFLOW=%s\n' "$PR_CREATED_BY_WORKFLOW" >> "$GITHUB_OUTPUT"
-          if [ -n "$PR_URL" ]; then
-            printf 'PR_URL=%s\n' "$PR_URL" >> "$GITHUB_OUTPUT"
-          fi
+          # One grouped redirect, not one per line: individual `>>` to the same
+          # file is what actionlint's shellcheck pass rejects (SC2129), and
+          # each of these is a separate append either way.
+          {
+            printf 'COMPARE_URL=%s\n' "$COMPARE_URL"
+            printf 'PR_OPENED=%s\n' "$PR_OPENED"
+            printf 'PR_HELD_FOR_APPROVAL=%s\n' "$PR_HELD_FOR_APPROVAL"
+            if [ -n "$PR_URL" ]; then
+              printf 'PR_URL=%s\n' "$PR_URL"
+            fi
+          } >> "$GITHUB_OUTPUT"
         id: open-pr
 
       - name: Report the manual merge step
@@ -675,15 +692,14 @@ jobs:
           {
             echo "### Catalog pin needs a manual merge"
             echo
-            if [ "${{ steps.open-pr.outputs.PR_CREATED_BY_WORKFLOW }}" = "yes" ]; then
+            if [ "${{ steps.open-pr.outputs.PR_HELD_FOR_APPROVAL }}" = "yes" ]; then
               echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
               echo "2. Click **Approve workflows to run** in the merge box — the checks"
-              echo "   are held pending because the PR was created by the workflow"
+              echo "   are held pending because the PR was opened by the workflow"
               echo "3. Merge once the three required checks pass"
             elif [ "${{ steps.open-pr.outputs.PR_OPENED }}" = "yes" ]; then
-              # An existing PR the workflow only updated (e.g. a human opened
-              # it from the compare link on a prior run, then the job re-ran).
-              # Its checks are already running — no approval hold applies.
+              # A PR a human opened from the compare link: its checks are
+              # already running and there is no approval hold.
               echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
               echo "2. Merge once the three required checks pass"
             else
@@ -693,7 +709,7 @@ jobs:
               # main — the same PR the step would have opened. A human
               # opening that PR means the three required checks start
               # immediately; there is no 'Approve workflows to run' hold
-              # (that applies only to PRs the workflow itself created).
+              # (that applies only to PRs opened with GITHUB_TOKEN).
               echo "1. Open ${{ steps.open-pr.outputs.COMPARE_URL }}"
               echo "2. Create the pull request from the compare view"
               echo "3. Merge once the three required checks pass"

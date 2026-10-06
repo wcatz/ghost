@@ -1496,6 +1496,31 @@ func (s *pluginStepSandbox) env(extra map[string]string) map[string]string {
 	return env
 }
 
+// requireShellTools skips unless every tool the executed steps shell out to is
+// on PATH.
+//
+// Same rule as requireBash4, and the same reasoning: these tests run the
+// workflow's own scripts, and those scripts are not pure bash. The PR step
+// calls jq to build the PR body; the verification step calls jq, base64 -d and
+// cmp. A host with bash but no jq — macOS ships no jq by default — would make
+// every one of these tests exit 127 and fail on 'the PR step exited 127', a
+// statement about the machine rather than about the workflow. CI would not
+// catch it: build-and-test is ubuntu-24.04, which ships jq, and the Windows
+// leg runs this package under a -run filter that matches none of these names.
+//
+// Deliberately not requireBash4's version floor. These scripts use no bash-4
+// feature — no mapfile, no readarray — the same reason
+// TestThePublishedReleaseGuardRefuses declines that guard.
+func requireShellTools(t *testing.T) {
+	t.Helper()
+	for _, tool := range []string{"bash", "jq", "base64", "cmp", "diff"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not on PATH; the plugin job's steps are shell that shells out to it. "+
+				"Skipping rather than failing: a step that cannot run is a gap to close, not a defect to report", tool)
+		}
+	}
+}
+
 // runStep executes one of the plugin job's run steps the way the runner
 // would: bash -e, the step's ${{ }} expressions expanded from the outputs
 // the earlier steps would have written, and the script's hardcoded /tmp
@@ -1503,6 +1528,7 @@ func (s *pluginStepSandbox) env(extra map[string]string) map[string]string {
 // shared tmpfs.
 func (s *pluginStepSandbox) runStep(t *testing.T, step workflowStep, outputs, env map[string]string) (int, string) {
 	t.Helper()
+	requireShellTools(t)
 	script := expandStepOutputs(t, withOwnScratch(step.Run, s.scratch), outputs)
 	return runBashScript(t, s.dir, script, env)
 }
@@ -1559,6 +1585,16 @@ case "$1" in
         exit "${STUB_PR_CREATE_EXIT:-0}"
         ;;
       view)
+        # gh pr view takes ONE --json field, and the step asks for two
+        # different things: the URL the summary reports, and the author that
+        # decides whether GitHub holds the PR pending approval. Answer the
+        # author query when it is the one being asked.
+        for arg in "$@"; do
+          if [ "$arg" = "author" ]; then
+            printf '%s' "${STUB_PR_AUTHOR:-}"
+            exit "${STUB_PR_VIEW_EXIT:-0}"
+          fi
+        done
         printf '%s' "${STUB_PR_VIEW_URL:-}"
         exit "${STUB_PR_VIEW_EXIT:-0}"
         ;;
@@ -1661,7 +1697,7 @@ func runCatalogPRStep(t *testing.T, step workflowStep, stubEnv map[string]string
 // that refusal ended the job red, which also skipped the summary and
 // verification steps after it. The step must treat the refusal as an
 // outcome: exit 0, write the compare link a human opens instead, and say
-// whether a PR was opened (and whether the workflow created it).
+// whether a PR was opened and whether GitHub holds it pending approval.
 func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	step := findPluginStep(t, wf, catalogPRStepName)
@@ -1683,8 +1719,8 @@ func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 	if got := outputs["PR_OPENED"]; got != "no" {
 		t.Errorf("PR_OPENED = %q, want \"no\" — the step must say whether a PR was opened", got)
 	}
-	if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "no" {
-		t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"no\" — the workflow did not create a PR", got)
+	if got := outputs["PR_HELD_FOR_APPROVAL"]; got != "no" {
+		t.Errorf("PR_HELD_FOR_APPROVAL = %q, want \"no\" — no PR exists, so nothing is held", got)
 	}
 	if _, ok := outputs["PR_URL"]; ok {
 		t.Errorf("PR_URL was written even though no PR was opened: %q", outputs["PR_URL"])
@@ -1698,13 +1734,21 @@ func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 // from swallowing the happy path: when the repository does let the PR be
 // opened — a fork's workflow, or a setting change — the step must still
 // report the PR, and the compare link must still be available as the
-// fallback the summary can report. It also distinguishes the create path
-// (PR_CREATED_BY_WORKFLOW=yes) from finding an existing PR.
+// fallback the summary can report.
+//
+// The three subtests are the three ways a PR comes to exist, and they differ
+// in exactly one fact: who opened it. PR_HELD_FOR_APPROVAL is derived from
+// the PR's AUTHOR, not from what this run did, because the approval hold it
+// reports on is a property of the PR. An earlier version of this test read
+// the flag off "did this invocation create it", which is right on a first run
+// and wrong on every re-run in a repository where Actions can open PRs: the
+// re-run finds the workflow's own earlier PR, and the summary would then stop
+// telling the operator to approve checks that are still held.
 func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	step := findPluginStep(t, wf, catalogPRStepName)
 
-	t.Run("created by this step", func(t *testing.T) {
+	t.Run("created by this step, so held pending approval", func(t *testing.T) {
 		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
 			"STUB_PR_CREATE_EXIT":   "0",
 			"STUB_PR_CREATE_STDOUT": "https://github.com/wcatz/ghost/pull/889\n",
@@ -1716,8 +1760,8 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 		if got := outputs["PR_OPENED"]; got != "yes" {
 			t.Errorf("PR_OPENED = %q, want \"yes\"", got)
 		}
-		if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "yes" {
-			t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"yes\" — the workflow created this PR", got)
+		if got := outputs["PR_HELD_FOR_APPROVAL"]; got != "yes" {
+			t.Errorf("PR_HELD_FOR_APPROVAL = %q, want \"yes\" — a PR opened with GITHUB_TOKEN is held pending approval", got)
 		}
 		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
 			t.Errorf("PR_URL = %q", got)
@@ -1727,9 +1771,12 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 		}
 	})
 
-	t.Run("already open from an earlier run", func(t *testing.T) {
+	// The edit path, which is the route a re-run takes. The PR exists, so
+	// PR_OPENED is yes; whether it is HELD comes from its author.
+	t.Run("already open, opened by the workflow, so still held", func(t *testing.T) {
 		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
 			"STUB_PR_LIST":     "889",
+			"STUB_PR_AUTHOR":   "github-actions[bot]",
 			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
 		})
 		if code != 0 {
@@ -1738,8 +1785,28 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 		if got := outputs["PR_OPENED"]; got != "yes" {
 			t.Errorf("PR_OPENED = %q, want \"yes\" — a PR is open for this pin", got)
 		}
-		if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "no" {
-			t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"no\" — the workflow only updated an existing PR", got)
+		if got := outputs["PR_HELD_FOR_APPROVAL"]; got != "yes" {
+			t.Errorf("PR_HELD_FOR_APPROVAL = %q, want \"yes\" — this run only EDITED the PR, but a GITHUB_TOKEN-created PR's runs are still held pending approval", got)
+		}
+		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
+			t.Errorf("PR_URL = %q", got)
+		}
+	})
+
+	t.Run("already open, opened by a human, so not held", func(t *testing.T) {
+		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
+			"STUB_PR_LIST":     "889",
+			"STUB_PR_AUTHOR":   "wcatz",
+			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
+		})
+		if code != 0 {
+			t.Errorf("the PR step exited %d with an existing PR:\n%s", code, out)
+		}
+		if got := outputs["PR_OPENED"]; got != "yes" {
+			t.Errorf("PR_OPENED = %q, want \"yes\" — a PR is open for this pin", got)
+		}
+		if got := outputs["PR_HELD_FOR_APPROVAL"]; got != "no" {
+			t.Errorf("PR_HELD_FOR_APPROVAL = %q, want \"no\" — a human opened the PR, so there is no approval hold to click", got)
 		}
 		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
 			t.Errorf("PR_URL = %q", got)
@@ -1772,10 +1839,15 @@ func runSummaryStep(t *testing.T, step workflowStep, prOutputs map[string]string
 
 // TestTheManualMergeSummaryReportsTheRightLink runs the summary step after
 // the PR step, with the outputs the PR step actually wrote, and checks the
-// manual step it reports is the link that works: the PR when one is open,
-// the compare link when the creation was refused. It distinguishes between
-// a PR the workflow created (needs approval click) and an existing PR the
-// workflow only updated (checks already running, no click).
+// manual step it reports is the one that works for the case the PR step found:
+// the compare link when creation was refused, the PR link plus the approval
+// click when GitHub holds that PR pending approval, and the PR link alone when
+// a human opened it and its checks are already running.
+//
+// The approval click is asserted in BOTH held cases — the PR this run created
+// and the one an earlier run created that this run only edited — because those
+// are the two the earlier version of this test disagreed about, having keyed
+// the instruction off what the current invocation did rather than off the PR.
 func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	prStep := findPluginStep(t, wf, catalogPRStepName)
@@ -1796,7 +1868,7 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 		}
 	})
 
-	t.Run("opened by workflow: the PR link with approval click", func(t *testing.T) {
+	t.Run("created by this step: the PR link with the approval click", func(t *testing.T) {
 		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
 			"STUB_PR_CREATE_EXIT":   "0",
 			"STUB_PR_CREATE_STDOUT": "https://github.com/wcatz/ghost/pull/889\n",
@@ -1810,13 +1882,36 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
 		}
 		if !strings.Contains(body, "Approve workflows to run") {
-			t.Errorf("the summary does not ask for the approval click for a workflow-created PR:\n%s", body)
+			t.Errorf("the summary does not ask for the approval click for a PR GitHub holds pending approval:\n%s", body)
 		}
 	})
 
-	t.Run("already open from an earlier run: PR link, no approval click", func(t *testing.T) {
+	t.Run("edited, but opened by the workflow: still held, still needs the click", func(t *testing.T) {
 		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
 			"STUB_PR_LIST":     "889",
+			"STUB_PR_AUTHOR":   "github-actions[bot]",
+			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
+		})
+		body := runSummaryStep(t, summary, outputs)
+		if !strings.Contains(body, "https://github.com/wcatz/ghost/pull/889") {
+			t.Errorf("the summary does not report the PR link:\n%s", body)
+		}
+		if strings.Contains(body, "compare/main") {
+			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
+		}
+		// The load-bearing assertion. This run only edited the PR, and a flag
+		// read off that action would report no hold — leaving an operator at a
+		// merge box whose checks are held with nothing saying so, which is the
+		// stall this step exists to prevent.
+		if !strings.Contains(body, "Approve workflows to run") {
+			t.Errorf("the summary drops the approval click for a GITHUB_TOKEN-created PR that an earlier run opened:\n%s", body)
+		}
+	})
+
+	t.Run("opened by a human: the PR link, no approval click", func(t *testing.T) {
+		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
+			"STUB_PR_LIST":     "889",
+			"STUB_PR_AUTHOR":   "wcatz",
 			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
 		})
 		body := runSummaryStep(t, summary, outputs)
@@ -1827,7 +1922,7 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
 		}
 		if strings.Contains(body, "Approve workflows to run") {
-			t.Errorf("the summary asks for approval click for an existing PR the workflow only updated:\n%s", body)
+			t.Errorf("the summary asks for an approval click that does not exist for a human-opened PR:\n%s", body)
 		}
 		if !strings.Contains(body, "Merge once the three required checks pass") {
 			t.Errorf("the summary does not say to merge once checks pass:\n%s", body)
