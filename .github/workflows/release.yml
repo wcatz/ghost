@@ -649,12 +649,16 @@ jobs:
             # Failing toward the safe instruction: if we cannot read the
             # author, assume held and let the operator see the click they may
             # need rather than omitting it.
-            if AUTHOR="$(gh pr view "$EXISTING" --json author --jq '.author.login' 2>&1)"; then
+            # Keep stderr separate: 2>&1 would merge an error message into the
+            # value compared against "github-actions[bot]", causing a false
+            # "not held" on transient failures. Capture stderr to a file and
+            # only merge it into the warning if the call fails.
+            if AUTHOR="$(gh pr view "$EXISTING" --json author --jq '.author.login' 2>/tmp/gh-author.stderr)"; then
               if [ "$AUTHOR" = "github-actions[bot]" ]; then
                 PR_HELD_FOR_APPROVAL="yes"
               fi
             else
-              echo "::warning::could not read the catalog PR author; assuming held pending approval"
+              echo "::warning::could not read the catalog PR author ($(cat /tmp/gh-author.stderr)); assuming held pending approval"
               PR_HELD_FOR_APPROVAL="yes"
             fi
           else
