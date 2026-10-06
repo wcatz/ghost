@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 21
+const schemaVersion = 22
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -84,6 +84,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV19,
 	migrateV20,
 	migrateV21,
+	migrateV22,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1427,14 +1428,19 @@ var retrievalAuditIdentity = []string{"project_id", "record_rowid", "outcome"}
 // the pre-migration backup OpenDB has already taken is the net a conversion would
 // be guessing past. The remedy is STATED rather than logged, because the failure
 // it prevents is silent — `CREATE TABLE IF NOT EXISTS` is a no-op against the
-// existing table, so the step would stamp v21 over a shape nothing here can
-// write, and every later audit write would fail with "no such column: memory_id".
+// existing table, so the step would stamp its version over a shape nothing here
+// can write, and every later audit write would fail with "no such column:
+// memory_id".
 //
-// It is called from TWO places, and the second is the point, for the reasons
+// It is called from THREE places, and the second is the point, for the reasons
 // refuseForeignRetrievalRecordTable's second call has:
 //
 //   - from `migrateV21`, so the step that owns the precondition is safe on its
 //     own and does not depend on its caller having checked;
+//   - from `migrateV22`, where the guard matters MORE than it did in v21: the
+//     create it guards there is an ALTER, and ALTER TABLE ADD COLUMN succeeds
+//     against any table holding the name. v21's create was a no-op against a
+//     foreign table; v22's alter would happily modify one;
 //   - from `OpenDB`, BEFORE initSQL — and therefore before the pre-migration
 //     backup — because initSQL's own `CREATE INDEX ... ON
 //     retrieval_audit(project_id)` is the statement that fails against a foreign
@@ -1455,10 +1461,62 @@ func refuseForeignRetrievalAuditTable(tx tableInspector) error {
 		if !has {
 			return fmt.Errorf(
 				"this database already holds a retrieval_audit table without a %q column, so it is not Ghost's "+
-					"retrieval audit — a same-named table makes CREATE TABLE IF NOT EXISTS a silent no-op, so the "+
-					"migration would stamp v21 over a shape every later write would fail on. Drop it and reopen: "+
+					"retrieval audit — a same-named table makes CREATE TABLE IF NOT EXISTS a silent no-op and lets "+
+					"ALTER TABLE ADD COLUMN through, so the migration would stamp its version over a shape every "+
+					"later write would fail on. Drop it and reopen: "+
 					"sqlite3 <db> 'DROP TABLE retrieval_audit'", c)
 		}
+	}
+	return nil
+}
+
+// migrateV22 adds retrieval_audit.content_hash: the hash of the CONTENT each
+// verdict judged (#879).
+//
+// The column is the whole fix, because the reader had no other clock to trust.
+// UsefulnessByMemory used to guard on `memories.updated_at`, and that stamp is
+// NOT a content clock: a retag, a re-weight or a `verified: true` writes it
+// unconditionally (store.go's UPDATE) without touching a byte of the text, so a
+// contradicted memory's evidence was withheld from every later resolve and
+// reflect pass the moment anything metadata-ish happened to it. The hash names
+// what the verdict was about instead — an edit the text does not move cannot
+// move it, and a rewrite can.
+//
+// Nothing is backfilled, for the reason migrateV21 gives for its own table and
+// then some: the old rows are read by a NAMED LEGACY RULE (empty hash →
+// `recorded_at >= updated_at`, the pre-v22 rule verbatim), not by a synthesised
+// stamp. Backfilling would need the content as it stood at audit time, which
+// nobody has, and a hash computed against today's text would make a stale row
+// look current — the exact error the column exists to stop.
+//
+// The ALTER is why this step needs its own guard. migrateV21's CREATE ... IF NOT
+// EXISTS cannot fire against a table that already exists, but ALTER TABLE ADD
+// COLUMN succeeds against ANY table holding these columns, so a foreign
+// retrieval_audit would be silently given a column it is not ours to define and
+// the step would stamp v22 over it. refuseForeignRetrievalAuditTable is the same
+// identity check migrateV21 runs, called BEFORE the ALTER for the same reason
+// migrateV21 calls it before the create.
+func migrateV22(tx *sql.Tx) error {
+	if err := refuseForeignRetrievalAuditTable(tx); err != nil {
+		return err
+	}
+	// Idempotence for a hand-migrated database, the way the other ALTER steps have
+	// it: the version stamp is what says the work is done, and a database stamped
+	// back down (or migrated by hand) must not fail on a column that is there.
+	has, err := columnExists(tx, "retrieval_audit", "content_hash")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	// Not IF NOT EXISTS — SQLite has no such clause for a column — and the
+	// existence check above is what makes it one statement anyway. The column is
+	// appended, which is why initSQL keeps content_hash LAST: a fresh database and
+	// a migrated one have to agree on the position, and columnShapes compares them.
+	stmt := `ALTER TABLE retrieval_audit ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`
+	if _, err := tx.Exec(stmt); err != nil {
+		return fmt.Errorf("v22 retrieval audit content hash: %w", err)
 	}
 	return nil
 }

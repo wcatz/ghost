@@ -158,6 +158,15 @@ type RetrievalAuditRow struct {
 	// read, and a reader who cannot see that caveat would read it as a claim
 	// about the session.
 	Degraded string
+	// ContentHash is the hash of the CONTENT this verdict judged, stamped by the
+	// writer from memory.ContentHash and empty on a row written before schema
+	// v22. It is what UsefulnessByMemory compares against the content stored
+	// NOW, which is the only comparison that can tell a retag (the text is
+	// unchanged, the verdict stands) from a rewrite (the text it judged is gone,
+	// the verdict is a claim about nobody's words) — a distinction no timestamp
+	// in this schema can make, because updated_at is written by metadata-only
+	// edits too (#879).
+	ContentHash string
 	// RecordedAt is the store's clock, stamped by the writer.
 	RecordedAt string
 }
@@ -303,15 +312,15 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 		var filed int64
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO retrieval_audit
-				(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
-			SELECT ?, ?, ?, ?, ?, ?, ?, ?
+				(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded, content_hash)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
 			WHERE ? <= 0 OR EXISTS (
 				SELECT 1 FROM retrieval_record
 				WHERE rowid = ? AND `+retrievalRecordKeepingMemory()+`
 			)
 			RETURNING rowid
 		`, r.ProjectID, r.RecordRowID, r.SessionID, r.Source, r.MemoryID,
-			r.Outcome, r.Signal, r.Degraded, r.RecordRowID, r.RecordRowID, r.MemoryID).Scan(&filed)
+			r.Outcome, r.Signal, r.Degraded, r.ContentHash, r.RecordRowID, r.RecordRowID, r.MemoryID).Scan(&filed)
 		if errors.Is(err, sql.ErrNoRows) {
 			// The guard refused this row, so it wrote nothing and returned
 			// nothing. Not an error: see above. It IS reported, because a
@@ -406,7 +415,7 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 func (s *Store) RetrievalAudits(ctx context.Context, projectID, outcome string) ([]RetrievalAuditRow, error) {
 	query := `
 		SELECT project_id, record_rowid, session_id, source, memory_id, outcome, signal,
-		       degraded, recorded_at
+		       degraded, recorded_at, content_hash
 		FROM retrieval_audit`
 	var where []string
 	var args []interface{}
@@ -436,7 +445,8 @@ func (s *Store) RetrievalAudits(ctx context.Context, projectID, outcome string) 
 	for rows.Next() {
 		var r RetrievalAuditRow
 		if err := rows.Scan(&r.ProjectID, &r.RecordRowID, &r.SessionID, &r.Source,
-			&r.MemoryID, &r.Outcome, &r.Signal, &r.Degraded, &r.RecordedAt); err != nil {
+			&r.MemoryID, &r.Outcome, &r.Signal, &r.Degraded, &r.RecordedAt,
+			&r.ContentHash); err != nil {
 			return nil, fmt.Errorf("read retrieval audits: %w", err)
 		}
 		// A row naming no memory is the one shape that cannot be reported on at

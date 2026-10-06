@@ -134,6 +134,46 @@ func TestRunJudgesEveryVerdict(t *testing.T) {
 	}
 }
 
+// TestRunStampsTheHashOfTheContentItJudged: the writer's half of #879 (schema
+// v22). The reader withdraws a verdict whose stamp is not the hash of what is
+// stored now, so the stamp has to be the hash of the TEXT this run compared —
+// taken from the content map the comparison itself read, not re-read from the
+// store afterwards. A stamp of anything else withdraws every verdict on every
+// later pass, silently, and that is the failure this test cannot see from the
+// report's side: the run above still prints four figures while the rows it
+// wrote are already unreadable to the reader.
+func TestRunStampsTheHashOfTheContentItJudged(t *testing.T) {
+	store, projectID := auditStore(t)
+	const content = "Pinned versions come from the lockfile, never a floating tag"
+	seedMemory(t, store, projectID, "SUPID", content)
+	_ = recordCall(t, store, projectID, "search", "SUPID")
+
+	s := newTestSignals(t)
+	s.AddSaveArgs("pinned versions come from the lockfile and never a floating tag")
+	res, err := Run(context.Background(), store, projectID, s)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Verdicts != 1 {
+		t.Fatalf("Verdicts = %d, want 1 — the fixture judged nothing, so no row carries a stamp", res.Verdicts)
+	}
+	rows, err := store.RetrievalAudits(context.Background(), projectID, "")
+	if err != nil {
+		t.Fatalf("RetrievalAudits: %v", err)
+	}
+	if len(rows) != 1 || rows[0].MemoryID != "SUPID" {
+		t.Fatalf("stored %+v, want one verdict naming SUPID", rows)
+	}
+	if rows[0].Outcome != string(OutcomeSuperseded) {
+		t.Errorf("outcome = %q, want %q — the fixture's verdict moved under the stamp it is asserting",
+			rows[0].Outcome, OutcomeSuperseded)
+	}
+	if want := memory.ContentHash(content); rows[0].ContentHash != want {
+		t.Errorf("content_hash = %q, want the hash of the text the comparison read (%q): every verdict this "+
+			"run wrote would be withdrawn by the reader on the next pass", rows[0].ContentHash, want)
+	}
+}
+
 // TestRunSkipsMemoriesItCannotRead: a kept memory deleted after the call cannot
 // be judged, and a verdict about a row that no longer exists is a claim about
 // nothing. It is counted as unreadable rather than silently dropped, so the

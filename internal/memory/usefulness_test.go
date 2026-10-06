@@ -39,6 +39,22 @@ func usefulnessVerdictDegraded(t *testing.T, db *sql.DB, project, memoryID, outc
 	}
 }
 
+// usefulnessVerdictHashed plants a verdict that carries the hash of the content
+// it judged, which is what every writer has stamped since schema v22 (#879).
+//
+// The stamp is explicit here for the same reason the session and the instant are:
+// the writer takes the store's own content map, and the fixture has to choose
+// WHICH text was judged — including judging text that is no longer stored.
+func usefulnessVerdictHashed(t *testing.T, db *sql.DB, project, memoryID, outcome, session, at, contentHash string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO retrieval_audit
+		(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded, recorded_at, content_hash)
+		VALUES (?, 0, ?, 'search', ?, ?, '', '', ?, ?)`,
+		project, session, memoryID, outcome, at, contentHash); err != nil {
+		t.Fatalf("plant the hashed %s verdict on %s: %v", outcome, memoryID, err)
+	}
+}
+
 // usefulnessMemory writes the memories row a verdict is a claim ABOUT, with an
 // explicit id and stamp so the reader's join has something to find and a fixture
 // can order the rewrite against the verdict.
@@ -159,6 +175,44 @@ func TestUsefulnessByMemoryIsEmptyOnAStoreWithNoVerdicts(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("evidence = %+v, want empty", got)
+	}
+}
+
+// TestAVerdictWhoseMemoryIsGoneIsDroppedRatherThanCounted: a verdict keyed on
+// an id no memories row holds is a claim about text nobody can read, so it
+// renders nothing. Deleting a memory does not delete its audit rows —
+// retrieval_audit has no foreign key to memories; only PurgeMemoryHistory
+// deletes by memory_id — so the store reaches this state on its own.
+//
+// The reader used to make this drop in Go, once the read of the memories came
+// back without the row; the memory side of the statement is INNER, so the drop
+// now happens in SQL, and the guard left in the loop is that same drop. This
+// test holds the behaviour across that move — and it plants a memory that DOES
+// stand beside the orphan, so an empty map cannot pass for the right answer.
+func TestAVerdictWhoseMemoryIsGoneIsDroppedRatherThanCounted(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-orphan", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// No memories row behind this one.
+	usefulnessVerdict(t, db, "p1", "GONE", VerdictOutcomeContradicted, "ses_gone", "2026-09-24 10:00:00")
+	// And a memory that stands, so there is a correct answer to return.
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_here", "2026-09-24 11:00:00")
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if _, ok := got["GONE"]; ok {
+		t.Errorf("a verdict about a memory the store no longer holds has evidence %+v; it is a claim about "+
+			"text no pass can read, and reporting it would annotate an id nothing resolves to", got["GONE"])
+	}
+	if g := got["M1"]; g.Contradicted != 1 {
+		t.Errorf("evidence for M1 = %+v, want one contradiction — the memory that DOES stand must still be "+
+			"reported, or the drop above has swallowed the whole read", g)
 	}
 }
 
@@ -298,6 +352,137 @@ func TestUsefulnessByMemoryKeepsAVerdictWhoseMemoryHasNotChangedSince(t *testing
 	}
 	if len(got) != len(want) {
 		t.Errorf("evidence covers %d memories, want %d: %+v", len(got), len(want), got)
+	}
+}
+
+// TestAHashedVerdictSurvivesAMetadataOnlyEdit is #879: updated_at is not a
+// content clock, and a verdict is a claim about the CONTENT a call admitted.
+// A retag, a re-weight or a `verified: true` moves `updated_at` (store.go's
+// UPDATE writes it unconditionally) without changing a byte of the text, so the
+// timestamp rule above WITHHOLDS a contradicted memory's evidence from every
+// later resolve and reflect pass — silently, with no error and no report line.
+//
+// Since schema v22 the verdict carries the hash of the text it judged, and THAT
+// is what the reader compares. The fixture below therefore plants a verdict
+// whose stamp is in the PAST (which the legacy rule reads as stale) over content
+// that is still exactly what is stored, then performs a real metadata-only edit
+// through the store's own writer so `updated_at` moves past the verdict. The
+// evidence must survive, and the assertion that the stamp really DID move is
+// what keeps the test from passing vacuously on a writer that stopped moving it.
+func TestAHashedVerdictSurvivesAMetadataOnlyEdit(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-metadata", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	const content = "the claim carried by M1"
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	usefulnessVerdictHashed(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_meta",
+		"2026-06-01 00:00:00", ContentHash(content))
+
+	// The metadata-only edit: no content, no category, no importance, one tag.
+	if err := s.UpdateMemory(ctx, "p1", "M1", nil, nil, nil, []string{"tag"}); err != nil {
+		t.Fatalf("UpdateMemory (retag): %v", err)
+	}
+	// The stamp really did move past the verdict. Without this the test would
+	// pass against a writer that no longer moves updated_at at all, which is the
+	// one change that would make the whole fixture meaningless.
+	var updatedAt string
+	if err := db.QueryRow(`SELECT updated_at FROM memories WHERE id = 'M1' AND project_id = 'p1'`).
+		Scan(&updatedAt); err != nil {
+		t.Fatalf("read the memory's stamp: %v", err)
+	}
+	if updatedAt <= "2026-06-01 00:00:00" {
+		t.Fatalf("updated_at = %q, still at or before the verdict's 2026-06-01; the edit did not move the "+
+			"stamp, so this fixture measures nothing", updatedAt)
+	}
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	want := UsefulnessEvidence{Contradicted: 1, LastSession: "ses_meta", LastAt: "2026-06-01 00:00:00"}
+	if g := got["M1"]; g != want {
+		t.Errorf("evidence for M1 = %+v, want %+v — the text the verdict judged is still the text stored, so "+
+			"a metadata-only write must not withhold the contradiction (#879)", g, want)
+	}
+}
+
+// TestAHashedVerdictIsWithdrawnWhenTheContentChanges: the hash rule's other
+// direction, and the one that keeps it honest. A verdict hashed over text the
+// store no longer holds is a claim about text nobody can read, so it renders
+// nothing — byte-for-byte the input the pass had before the audit existed.
+//
+// The rewrite's stamp is deliberately OLDER than the verdict, so the legacy
+// timestamp rule alone would KEEP this row: only a comparison against the
+// stamped hash can withdraw it. That is what separates this from
+// TestUsefulnessByMemoryKeepsAVerdictWhoseMemoryHasNotChangedSince, which
+// plants an unstamped verdict and so exercises the legacy rule on its own.
+func TestAHashedVerdictIsWithdrawnWhenTheContentChanges(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-rewrite", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	// Judged against the ORIGINAL text, at an instant after the rewrite below.
+	usefulnessVerdictHashed(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_hashed",
+		"2026-10-01 10:00:00", ContentHash("the claim carried by M1"))
+	usefulnessRewrite(t, db, "p1", "M1", "2026-05-01 00:00:00")
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if _, ok := got["M1"]; ok {
+		t.Errorf("a verdict hashed over text the store no longer holds still has evidence %+v; the hash it "+
+			"stamped is not the hash of what is stored now", got["M1"])
+	}
+	if line := got["M1"].Line(); line != "" {
+		t.Errorf("Line() for a memory rewritten after its verdict = %q, want empty", line)
+	}
+}
+
+// TestAVerdictWithNoHashFollowsTheLegacyStampRule: the fallback, stated as a
+// rule rather than left as an accident. A row written before schema v22 carries
+// no hash, and there is nothing to compare — so the reader falls back to the
+// rule it always applied, `recorded_at >= updated_at`, named here because a
+// fallback nobody names is a silent one.
+//
+// Both halves are pinned: a memory whose stamp moved past an unstamped verdict
+// still WITHDROPS it (the pre-v22 behaviour, which errs toward silence), and a
+// memory whose stamp still stands behind one KEEPS it. A change to either arm
+// moves every row on every existing store, since they all hold empty hashes.
+func TestAVerdictWithNoHashFollowsTheLegacyStampRule(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-legacy", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// M1: contradicted in June, then written over in October — no content change
+	// is even needed for this arm; what matters is that the stamp moved past the
+	// verdict and the row carries no hash to say otherwise.
+	usefulnessMemory(t, db, "p1", "M1", "2026-10-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_legacy_old", "2026-06-01 00:00:00")
+	// M2: the other arm — the memory's stamp is older than the verdict.
+	usefulnessMemory(t, db, "p1", "M2", "2026-01-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M2", VerdictOutcomeContradicted, "ses_legacy_new", "2026-06-01 00:00:00")
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if _, ok := got["M1"]; ok {
+		t.Errorf("an unstamped verdict whose memory's stamp moved past it still has evidence %+v; the legacy "+
+			"pre-v22 rule withdraws it, and it is the rule every existing row is read by", got["M1"])
+	}
+	want := UsefulnessEvidence{Contradicted: 1, LastSession: "ses_legacy_new", LastAt: "2026-06-01 00:00:00"}
+	if g := got["M2"]; g != want {
+		t.Errorf("evidence for M2 = %+v, want %+v — the legacy rule KEEPS a verdict newer than its memory's "+
+			"stamp, and that arm has to survive the new one beside it", g, want)
 	}
 }
 
