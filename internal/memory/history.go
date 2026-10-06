@@ -123,11 +123,12 @@ var errHistoryNoMemory = errors.New("no live memory row")
 // secret than the row it was made to remove.
 //
 // It was the identity function while internal/secret (#656) — the value-SHAPE
-// detector every Ghost writer consults before it stores caller-supplied text — was
-// not on main, with a TODO naming this PR as the thing that would install it. That
-// is done: history_redactor.go installs redactHistoryContent through
-// setHistoryRedactor. The replacement, not a refusal, because refusing would fail
-// the user's own write over something only the history can see.
+// detector every Ghost writer consults before it stores caller-supplied text —
+// was still open, under a TODO naming that issue as the change that would
+// install it. #656 has since landed, and history_redactor.go's init installs
+// redactHistoryContent through setHistoryRedactor. The replacement, not a
+// refusal, because refusing would fail the user's own write over something only
+// the history can see.
 //
 // The cost is real and was measured rather than assumed, because the comment above
 // this seam is right that crossing into Go per appended row lands on the write
@@ -135,8 +136,8 @@ var errHistoryNoMemory = errors.New("no live memory row")
 // 8 KB content cap ~3.6 ms, per row, inside the transaction. A batched append pays
 // it once per id. It is paid on EVERY row whether or not anything is redacted,
 // because the only sound way to know is to look. The obvious optimisation — a
-// keyword pre-check that skips the detector — is the same trap this PR has already
-// documented once: a prefilter with a false negative is a silent leak, and
+// keyword pre-check that skips the detector — is the same trap #656's detector
+// already documented once: a prefilter with a false negative is a silent leak, and
 // LiteralPrefix returns empty for the \b-initial patterns these rules use, so a
 // hand-written one cannot be made sound by inspection either.
 //
@@ -164,7 +165,9 @@ func historyRedactorInstalled() bool { return historyRedactor.filter != nil }
 //
 // Calling the function when nothing is installed would cross into Go through the
 // driver for every appended row to do nothing — measurable on the write path's
-// critical section, and #656, the redactor it exists for, is not on main yet.
+// critical section. Reading the gate instead is not defensive: it is the state
+// #656's seam started in, with redactHistoryContent still the identity function
+// and no redactor installed, and the state setHistoryRedactor(nil) still creates.
 func historyContentExpr() string {
 	if historyRedactorInstalled() {
 		return historyContentFunc + "(content)"
@@ -208,8 +211,9 @@ func init() {
 // setHistoryRedactor installs the filter history rows are written through and
 // returns a function that restores the previous one. It is the ONLY way to
 // install one, which is what keeps the append path's gate and the function it
-// calls in step. It exists for the seam's own tests and for the wiring #656 will
-// add; nothing in production calls it.
+// calls in step. The seam's own tests use it to swap a filter out (or install
+// none), and history_redactor.go's init is the production call that installed the
+// real one; the filter field itself has no other writer.
 func setHistoryRedactor(fn func(string) string) func() {
 	prev := historyRedactor.filter
 	historyRedactor.filter = fn

@@ -993,10 +993,10 @@ func TestDeleteWithoutPurgeKeepsTheTombstone(t *testing.T) {
 }
 
 // TestRedactHistoryContentRewritesWhatIsStored: the seam a credential detector
-// plugs into (internal/secret, #656 — not on main yet). It is a var so the
-// plumbing is testable before the detector exists; without this test, #656 would
-// land as a change of shape and a reader could not tell whether the rewrite
-// happens on the way IN or only on the way out.
+// plugs into (internal/secret, #656 — now on main). It is a var so the
+// plumbing is testable; without this test the seam's fill would have been a
+// change of shape, and a reader could not tell whether the rewrite happens on
+// the way IN or only on the way out.
 func TestRedactHistoryContentRewritesWhatIsStored(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
