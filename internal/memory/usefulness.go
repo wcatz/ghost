@@ -136,11 +136,18 @@ func neutralSessionID(id string) string {
 // project's corpus. An empty project id would pool both, so it is refused here
 // rather than defaulted.
 //
-// Read-only, no transaction, one statement. The outcome filter is a bound
-// parameter, for the reason retrieval_totals states: a hand-spelled
-// `outcome = 'contradicted'` is one more place a stored value can be misspelled,
-// and it would miss silently — the statement returns no rows, so the map is empty
-// and every caller behaves exactly as it does on a store that was never audited.
+// Read-only, no transaction, one statement. Three filters narrow it, and all
+// three err toward SILENCE rather than toward a wrong annotation: a memory with
+// no qualifying verdict is simply not in the map, which is exactly how it read
+// before the audit existed. (1) the outcome is one of the two negative buckets,
+// for #284; (2) the verdict was not degraded, so a partial read's caveat is not
+// silently dropped; (3) the memory row still stands behind the verdict, so a
+// contradiction is not reported against text that has since been rewritten. The
+// outcome filter is a bound parameter, for the reason retrieval_totals states: a
+// hand-spelled `outcome = 'contradicted'` is one more place a stored value can be
+// misspelled, and it would miss silently — the statement returns no rows, so the
+// map is empty and every caller behaves exactly as it does on a store that was
+// never audited.
 func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[string]UsefulnessEvidence, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("usefulness evidence needs a project: an unscoped read would hand " +
@@ -157,6 +164,32 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 	// timestamp, and the newest among them has to be a rowid tie-break rather
 	// than an answer.
 	//
+	// Both halves join `memories` and require `a.recorded_at >= m.updated_at`,
+	// which is the staleness guard and not a nicety. A verdict is a claim about
+	// the CONTENT a call admitted, and Ghost rewrites content in place under a
+	// stable id — ReplaceNonManual's reuse branch and ghost_memory_update both
+	// UPDATE `content` on the existing row — while nothing deletes the audit rows
+	// for a rewritten memory (retrieval_audit has no foreign key to memories, and
+	// the only DELETE by memory_id is PurgeMemoryHistory's). So without the join
+	// the very next pass annotates a claim written AFTER the contradiction it is
+	// quoting, which is a wrong prompt annotation: the failure mode this whole
+	// reader exists to prevent. Keeping a verdict only while the memory row still
+	// stands behind it errs toward silence — a memory rewritten since renders
+	// nothing, byte-for-byte the input it had before the audit existed — and a
+	// verdict filed after a rewrite still counts, so a real contradiction is
+	// never dropped. The predicate is on the verdict, not on the memory: a memory
+	// with one pre-rewrite and one post-rewrite verdict keeps the post-rewrite
+	// figure and its count falls to what is still true.
+	//
+	// Both halves also require `a.degraded = ''`. retrieval_audit.degraded carries
+	// the scanner's reason for a partial transcript read, and the schema's own
+	// comment says a reader who cannot see that caveat reads the row as a claim
+	// about the session. Filtered rather than qualified, because the prompt
+	// promise this reader makes is byte-for-byte: a memory whose only negative
+	// verdicts are degraded must render NOTHING, not a weaker line that is still
+	// a line. internal/audit prints "N of those verdicts are degraded" for the
+	// same reason — a contradiction is a strong signal or it is not one.
+	//
 	// The two halves are SUBQUERIES rather than CTEs, so the statement opens
 	// with SELECT. That is not a style choice: the #746 structural scan resolves
 	// a statement's leading keyword and counts anything it cannot read as a
@@ -170,7 +203,9 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 		           SUM(CASE WHEN a.outcome = ? THEN 1 ELSE 0 END) AS contradicted,
 		           SUM(CASE WHEN a.outcome = ? THEN 1 ELSE 0 END) AS superseded
 		    FROM retrieval_audit a
-		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.outcome IN (?, ?)
+		    JOIN memories m ON m.id = a.memory_id AND m.project_id = a.project_id
+		                   AND a.recorded_at >= m.updated_at
+		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.degraded = '' AND a.outcome IN (?, ?)
 		    GROUP BY a.memory_id
 		) c
 		JOIN (
@@ -179,7 +214,9 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 		           ROW_NUMBER() OVER (PARTITION BY a.memory_id
 		                               ORDER BY a.recorded_at DESC, a.rowid DESC) AS rn
 		    FROM retrieval_audit a
-		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.outcome IN (?, ?)
+		    JOIN memories m ON m.id = a.memory_id AND m.project_id = a.project_id
+		                   AND a.recorded_at >= m.updated_at
+		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.degraded = '' AND a.outcome IN (?, ?)
 		) n ON n.memory_id = c.memory_id AND n.rn = 1`
 
 	s.mu.RLock()

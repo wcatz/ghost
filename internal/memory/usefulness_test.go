@@ -25,19 +25,57 @@ import (
 // anything, so the rows go in as rows.
 func usefulnessVerdict(t *testing.T, db *sql.DB, project, memoryID, outcome, session, at string) {
 	t.Helper()
+	usefulnessVerdictDegraded(t, db, project, memoryID, outcome, session, at, "")
+}
+
+// usefulnessVerdictDegraded is usefulnessVerdict with the scanner's caveat, which
+// is what a verdict derived from a PARTIAL transcript read carries.
+func usefulnessVerdictDegraded(t *testing.T, db *sql.DB, project, memoryID, outcome, session, at, degraded string) {
+	t.Helper()
 	if _, err := db.Exec(`INSERT INTO retrieval_audit
 		(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded, recorded_at)
-		VALUES (?, 0, ?, 'search', ?, ?, '', '', ?)`, project, session, memoryID, outcome, at); err != nil {
+		VALUES (?, 0, ?, 'search', ?, ?, '', ?, ?)`, project, session, memoryID, outcome, degraded, at); err != nil {
 		t.Fatalf("plant the %s verdict on %s: %v", outcome, memoryID, err)
+	}
+}
+
+// usefulnessMemory writes the memories row a verdict is a claim ABOUT, with an
+// explicit id and stamp so the reader's join has something to find and a fixture
+// can order the rewrite against the verdict.
+//
+// The row is not optional. A verdict keyed on an id alone cannot see that the
+// text changed underneath it, so the reader joins memories and keeps a verdict
+// only while the row still stands behind it — which means a fixture that planted
+// verdicts over ids no memory holds would be testing the join's absence case
+// while believing it was testing verdicts.
+func usefulnessMemory(t *testing.T, db *sql.DB, project, id, updatedAt string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at)
+		VALUES (?, ?, 'fact', ?, 'mcp', ?, ?)`, id, project, "the claim carried by "+id, updatedAt, updatedAt); err != nil {
+		t.Fatalf("plant the memory %s: %v", id, err)
 	}
 }
 
 // usefulnessFixture plants the four buckets over three memories, in a stamp order
 // that is not the insert order, so "most recent" cannot be answered by accident.
+//
+// Every memory is written before every verdict, so the join's staleness arm is not
+// what makes these verdicts visible — only the outcome filter is.
 func usefulnessFixture(t *testing.T) (*Store, string) {
 	t.Helper()
 	s, dbPath := totalsStore(t)
 	db := auditPlant(t, dbPath)
+	for _, p := range []string{"p1", "p2"} {
+		if err := s.EnsureProject(context.Background(), p, "/tmp/usefulness-"+p, p); err != nil {
+			t.Fatalf("EnsureProject(%s): %v", p, err)
+		}
+	}
+	// Written first, and dated before every verdict below.
+	const planted = "2026-01-01 00:00:00"
+	usefulnessMemory(t, db, "p1", "M1", planted)
+	usefulnessMemory(t, db, "p1", "M2", planted)
+	usefulnessMemory(t, db, "p1", "M3", planted)
+	usefulnessMemory(t, db, "p2", "M4", planted)
 	// M1: two contradictions and one in-session supersession, oldest first.
 	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeSuperseded, "ses_old", "2026-09-01 08:00:00")
 	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_1", "2026-09-20 09:00:00")
@@ -51,8 +89,9 @@ func usefulnessFixture(t *testing.T) (*Store, string) {
 	// used verdict's session, which is the leak this file is about.
 	usefulnessVerdict(t, db, "p1", "M3", VerdictOutcomeContradicted, "ses_6", "2026-09-02 14:00:00")
 	usefulnessVerdict(t, db, "p1", "M3", VerdictOutcomeUsed, "ses_7", "2026-09-28 15:00:00")
-	// Another project's contradiction: a project's reader must not borrow it.
-	usefulnessVerdict(t, db, "p2", "M1", VerdictOutcomeContradicted, "ses_8", "2026-09-29 16:00:00")
+	// Another project's contradiction, about that project's OWN memory: a
+	// project's reader must not borrow it, and p2 must still get p2's answer.
+	usefulnessVerdict(t, db, "p2", "M4", VerdictOutcomeContradicted, "ses_8", "2026-09-29 16:00:00")
 	return s, dbPath
 }
 
@@ -108,8 +147,11 @@ func TestUsefulnessByMemoryIsEmptyOnAStoreWithNoVerdicts(t *testing.T) {
 	}
 	// A positive verdict is not "no verdicts", and the two must not read alike
 	// either: they differ only in the absence of an entry, which is why the
-	// fixture above plants one.
-	usefulnessVerdict(t, auditPlant(t, dbPath), "p1", "M1", VerdictOutcomeUsed, "ses_1", "2026-09-24 10:00:00")
+	// fixture above plants one. The memory row is written too, so what is being
+	// excluded here is the OUTCOME and not the row the reader joins to.
+	db := auditPlant(t, dbPath)
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeUsed, "ses_1", "2026-09-24 10:00:00")
 
 	got, err := s.UsefulnessByMemory(ctx, "p1")
 	if err != nil {
@@ -137,8 +179,137 @@ func TestUsefulnessByMemoryRefusesToPoolProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UsefulnessByMemory(p2): %v", err)
 	}
-	if len(got) != 1 || got["M1"].Contradicted != 1 || got["M1"].LastSession != "ses_8" {
-		t.Errorf("p2's own evidence = %+v, want M1 contradicted once in ses_8", got)
+	if len(got) != 1 || got["M4"].Contradicted != 1 || got["M4"].LastSession != "ses_8" {
+		t.Errorf("p2's own evidence = %+v, want M4 contradicted once in ses_8", got)
+	}
+}
+
+// TestUsefulnessByMemoryLeavesADegradedVerdictOut: a verdict the scanner filed off
+// a PARTIAL transcript read carries its reason in retrieval_audit.degraded, and
+// the schema says outright that a reader which cannot see that caveat reads the
+// row as a claim about the session. Rendered without the caveat, "contradicted=1"
+// reaches resolve and reflect as a hard fact — the weaker claim presented as the
+// stronger one, which is the direction a classifier that decides what to keep must
+// not be pushed in.
+//
+// So the degraded rows are filtered in SQL beside the outcomes, not qualified at
+// render time. Both fixes would be honest; only this one keeps the prompt promise
+// this reader exists to make, because a memory whose ONLY negative verdicts are
+// degraded then renders nothing at all rather than a weaker line that is still a
+// line. Internal/audit counts the column and prints "N of those verdicts are
+// degraded (reasons)" for the same reason: a contradiction is a strong signal or
+// it is not one.
+func TestUsefulnessByMemoryLeavesADegradedVerdictOut(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// The memories exist and are OLDER than every verdict below, so the row the
+	// reader joins to can never be the reason a verdict is missing.
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	usefulnessMemory(t, db, "p1", "M2", "2026-01-01 00:00:00")
+	// M1's only negative verdict is degraded: nothing at all may reach the prompt.
+	usefulnessVerdictDegraded(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_1", "2026-09-24 10:00:00", "truncated_transcript")
+	// M2 has one degraded and one whole-transcript verdict. The clean one must
+	// count — dropping it would lose a real contradiction, which is the cost of
+	// this filter and the reason it is the column and not the whole table.
+	usefulnessVerdict(t, db, "p1", "M2", VerdictOutcomeContradicted, "ses_2", "2026-09-24 10:00:00")
+	usefulnessVerdictDegraded(t, db, "p1", "M2", VerdictOutcomeContradicted, "ses_3", "2026-09-26 10:00:00", "truncated_transcript")
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if _, ok := got["M1"]; ok {
+		t.Errorf("a memory whose only contradiction came off a partial read has evidence %+v; "+
+			"the caveat the scanner filed is exactly what this reader would have to drop to "+
+			"present it as a fact about the session", got["M1"])
+	}
+	if line := got["M1"].Line(); line != "" {
+		t.Errorf("Line() for a memory with only a degraded verdict = %q, want empty — "+
+			"silence is the promise, not a weaker line", line)
+	}
+	want := UsefulnessEvidence{Contradicted: 1, LastSession: "ses_2", LastAt: "2026-09-24 10:00:00"}
+	if g := got["M2"]; g != want {
+		t.Errorf("evidence for M2 = %+v, want %+v — the degraded verdict must not be counted, "+
+			"and being NEWER it must not become the 'latest' either", g, want)
+	}
+}
+
+// TestUsefulnessByMemoryKeepsAVerdictWhoseMemoryHasNotChangedSince: the other
+// direction of the same join. A retrieval verdict is a claim about the CONTENT a
+// call admitted, and Ghost rewrites content IN PLACE under a stable id —
+// ReplaceNonManual's reuse branch and ghost_memory_update both UPDATEs content on
+// the existing row — while nothing deletes the audit rows for a rewritten memory.
+// retrieval_audit has no foreign key to memories, so a contradiction recorded in
+// September is still sitting there beside a claim written in October, and the
+// pass would be told the new text is the one that was doubted.
+//
+// The fix is to keep a verdict only while the memory row still stands behind it:
+// recorded_at at least as new as updated_at. A memory rewritten after its verdict
+// therefore renders nothing — byte-for-byte the input it had before the audit
+// existed — while a verdict filed after a rewrite still counts, which is the
+// direction that errs toward silence and never toward a wrong annotation.
+func TestUsefulnessByMemoryKeepsAVerdictWhoseMemoryHasNotChangedSince(t *testing.T) {
+	s, dbPath := totalsStore(t)
+	db := auditPlant(t, dbPath)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p1", "/tmp/usefulness-p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// M1: contradicted in September, then rewritten in October.
+	usefulnessMemory(t, db, "p1", "M1", "2026-01-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M1", VerdictOutcomeContradicted, "ses_old", "2026-09-24 10:00:00")
+	usefulnessRewrite(t, db, "p1", "M1", "2026-10-01 09:00:00")
+	// M2: rewritten in September, contradicted AFTER — the rewrite must not have
+	// suppressed a verdict that really is about the text now stored.
+	usefulnessMemory(t, db, "p1", "M2", "2026-01-01 00:00:00")
+	usefulnessRewrite(t, db, "p1", "M2", "2026-09-20 09:00:00")
+	usefulnessVerdict(t, db, "p1", "M2", VerdictOutcomeContradicted, "ses_new", "2026-09-24 10:00:00")
+	// M3: one verdict before the rewrite and one after, so the COUNT must come
+	// down to one rather than the memory disappearing entirely — the join filters
+	// per row, so the verdict that still stands keeps its evidence readable.
+	usefulnessMemory(t, db, "p1", "M3", "2026-01-01 00:00:00")
+	usefulnessVerdict(t, db, "p1", "M3", VerdictOutcomeContradicted, "ses_a", "2026-09-10 10:00:00")
+	usefulnessRewrite(t, db, "p1", "M3", "2026-09-20 09:00:00")
+	usefulnessVerdict(t, db, "p1", "M3", VerdictOutcomeSuperseded, "ses_b", "2026-09-24 10:00:00")
+
+	got, err := s.UsefulnessByMemory(ctx, "p1")
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if _, ok := got["M1"]; ok {
+		t.Errorf("a memory rewritten AFTER its only contradiction still has evidence %+v; "+
+			"that verdict is a claim about text the store no longer holds", got["M1"])
+	}
+	if line := got["M1"].Line(); line != "" {
+		t.Errorf("Line() for a memory rewritten after its verdict = %q, want empty", line)
+	}
+	want := map[string]UsefulnessEvidence{
+		"M2": {Contradicted: 1, LastSession: "ses_new", LastAt: "2026-09-24 10:00:00"},
+		"M3": {SupersededInSession: 1, LastSession: "ses_b", LastAt: "2026-09-24 10:00:00"},
+	}
+	for id, w := range want {
+		if g := got[id]; g != w {
+			t.Errorf("evidence for %s = %+v, want %+v", id, g, w)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("evidence covers %d memories, want %d: %+v", len(got), len(want), got)
+	}
+}
+
+// usefulnessRewrite is what an operator's edit and ReplaceNonManual's reuse branch
+// do to a memory: the content changes in place under the same id, and updated_at
+// moves. The row is written directly because the store's own writers take the
+// store's clock, and the fixture needs an ORDER against a verdict it also chose.
+func usefulnessRewrite(t *testing.T, db *sql.DB, project, id, updatedAt string) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE memories SET content = ?, updated_at = ? WHERE id = ? AND project_id = ?`,
+		"a rewritten claim on "+id, updatedAt, id, project); err != nil {
+		t.Fatalf("rewrite %s: %v", id, err)
 	}
 }
 

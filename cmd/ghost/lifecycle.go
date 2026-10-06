@@ -1258,7 +1258,10 @@ func runReflect() {
 	// skips a corpus whose only change is that it has since been audited: the gate
 	// would otherwise stop skipping on any store that records verdicts, which is
 	// a cost this slice would introduce. The evidence is an input to the
-	// judgement, not a change in the corpus.
+	// judgement, not a change in the corpus. The exception is ALSO recorded in
+	// BuildReflectionPrompt's docstring, beside the rule it qualifies — that is
+	// where the next reader looks, and a rule stated there with no exception
+	// recorded is a rule this call site cannot overrule.
 	var usefulness map[string]memory.UsefulnessEvidence
 	if ev, evErr := store.UsefulnessByMemory(ctx, projectID); evErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: usefulness evidence unavailable: %v\n", evErr)

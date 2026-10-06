@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -33,6 +34,16 @@ import (
 // which memories were in the input.
 func reflectHarness(t *testing.T, capture string, keepIDs []string) {
 	t.Helper()
+	// The harness below is a #!/bin/sh script, and windows cannot execute one: it
+	// has no PATHEXT form, and /bin/cat does not exist there. Skipping here rather
+	// than in each test covers both of them, and matches this package's own
+	// convention — stubBinary in main_test.go guards the same way for the same
+	// reason. Windows is a supported target (plugin-windows ships in the tree,
+	// internal/procstat has alive_windows.go), so failing there would be a false
+	// alarm about the feature rather than about the fake.
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
 	binDir := t.TempDir()
 	// The reply lives in its own file rather than in the script: it is JSON with
 	// braces and quotes in it, and inlining it would mean hand-quoting it for a
