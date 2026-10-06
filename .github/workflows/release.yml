@@ -642,7 +642,19 @@ jobs:
             # merge box, one a human opened does not. A re-run in a repository
             # where Actions CAN create PRs finds the workflow's own earlier
             # PR, so the author is read rather than inferred from the branch.
-            if [ "$(gh pr view "$EXISTING" --json author --jq '.author.login')" = "github-actions[bot]" ]; then
+            # Read the author as its own statement: under `set -e` a command
+            # substitution inside an `if` test word does NOT trigger errexit on
+            # failure, so a transient API error would silently drop the author
+            # and report "not held" — the exact stall this output prevents.
+            # Failing toward the safe instruction: if we cannot read the
+            # author, assume held and let the operator see the click they may
+            # need rather than omitting it.
+            if AUTHOR="$(gh pr view "$EXISTING" --json author --jq '.author.login' 2>&1)"; then
+              if [ "$AUTHOR" = "github-actions[bot]" ]; then
+                PR_HELD_FOR_APPROVAL="yes"
+              fi
+            else
+              echo "::warning::could not read the catalog PR author; assuming held pending approval"
               PR_HELD_FOR_APPROVAL="yes"
             fi
           else

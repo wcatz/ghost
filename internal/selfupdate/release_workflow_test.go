@@ -1591,6 +1591,13 @@ case "$1" in
         # author query when it is the one being asked.
         for arg in "$@"; do
           if [ "$arg" = "author" ]; then
+            # Author query can fail independently of URL query — use a
+            # separate exit var so tests can express "URL resolved, author
+            # failed".
+            if [ -n "${STUB_PR_AUTHOR_EXIT:-}" ] && [ "${STUB_PR_AUTHOR_EXIT}" != "0" ]; then
+              printf '%s' "${STUB_PR_AUTHOR_STDERR:-}" >&2
+              exit "${STUB_PR_AUTHOR_EXIT}"
+            fi
             printf '%s' "${STUB_PR_AUTHOR:-}"
             exit "${STUB_PR_VIEW_EXIT:-0}"
           fi
@@ -1812,6 +1819,28 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 			t.Errorf("PR_URL = %q", got)
 		}
 	})
+
+	t.Run("author read fails: fail toward held, do not silently drop", func(t *testing.T) {
+		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
+			"STUB_PR_LIST":          "889",
+			"STUB_PR_AUTHOR":        "wcatz",
+			"STUB_PR_AUTHOR_EXIT":   "1",
+			"STUB_PR_AUTHOR_STDERR": "gh: API rate limit exceeded",
+			"STUB_PR_VIEW_URL":      "https://github.com/wcatz/ghost/pull/889",
+		})
+		if code != 0 {
+			t.Errorf("the PR step should exit 0 on author read failure (fail-safe toward held):\n%s", out)
+		}
+		if got := outputs["PR_OPENED"]; got != "yes" {
+			t.Errorf("PR_OPENED = %q, want \"yes\"", got)
+		}
+		if got := outputs["PR_HELD_FOR_APPROVAL"]; got != "yes" {
+			t.Errorf("PR_HELD_FOR_APPROVAL = %q, want \"yes\" — on author read failure, the safe default is to assume held so the operator sees the click they may need", got)
+		}
+		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
+			t.Errorf("PR_URL = %q", got)
+		}
+	})
 }
 
 // runSummaryStep executes the summary step with the PR step's outputs
@@ -1926,6 +1955,30 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 		}
 		if !strings.Contains(body, "Merge once the three required checks pass") {
 			t.Errorf("the summary does not say to merge once checks pass:\n%s", body)
+		}
+	})
+
+	t.Run("author read failed: fail-safe toward held, show the click", func(t *testing.T) {
+		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
+			"STUB_PR_LIST":          "889",
+			"STUB_PR_AUTHOR":        "wcatz",
+			"STUB_PR_AUTHOR_EXIT":   "1",
+			"STUB_PR_AUTHOR_STDERR": "gh: API rate limit exceeded",
+			"STUB_PR_VIEW_URL":      "https://github.com/wcatz/ghost/pull/889",
+		})
+		body := runSummaryStep(t, summary, outputs)
+		if !strings.Contains(body, "https://github.com/wcatz/ghost/pull/889") {
+			t.Errorf("the summary does not report the PR link:\n%s", body)
+		}
+		if strings.Contains(body, "compare/main") {
+			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
+		}
+		// The load-bearing assertion: on author read failure, the safe default
+		// is to assume held so the operator sees the approval click they may
+		// need. Dropping the click on error is the stall this step exists to
+		// prevent.
+		if !strings.Contains(body, "Approve workflows to run") {
+			t.Errorf("the summary drops the approval click on author read failure, which is the stall this output prevents:\n%s", body)
 		}
 	})
 }
