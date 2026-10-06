@@ -346,13 +346,14 @@ jobs:
   #                        failing the job. Users are unaffected: main's
   #                        catalog stays stale-but-valid. Recovery = the
   #                        compare link the summary reports.
-  #   after catalog push:  main's catalog pins this release's exact bytes;
-  #                        the digest script is byte-idempotent and the
-  #                        commit step skips when main already matches, so a
-  #                        re-run creates no duplicate commit. Cross-release:
-  #                        an older release's re-run stops at the downgrade
-  #                        guard in the commit step — main is never rolled
-  #                        back to an older catalog.
+  #   after the pin is MERGED (manual step):  main's catalog pins this
+  #                        release's exact bytes; the digest script is
+  #                        byte-idempotent and the commit step skips when
+  #                        main already matches, so a re-run creates no
+  #                        duplicate commit. Cross-release: an older
+  #                        release's re-run stops at the downgrade guard in
+  #                        the commit step — main is never rolled back to
+  #                        an older catalog.
   plugin:
     needs: release
     runs-on: ubuntu-24.04
@@ -678,11 +679,13 @@ jobs:
               # The usual route in this repository: GitHub does not let
               # Actions create pull requests, so the PR step could not open
               # one. The compare link opens the pre-filled PR form against
-              # main — the same PR the step would have opened.
+              # main — the same PR the step would have opened. A human
+              # opening that PR means the three required checks start
+              # immediately; there is no 'Approve workflows to run' hold
+              # (that only applies to PRs created by GITHUB_TOKEN).
               echo "1. Open ${{ steps.open-pr.outputs.COMPARE_URL }}"
               echo "2. Create the pull request from the compare view"
-              echo "3. Click **Approve workflows to run**, then merge once the"
-              echo "   three required checks pass"
+              echo "3. Merge once the three required checks pass"
             fi
             echo
             echo "Until then the catalog keeps pointing at the previous release."

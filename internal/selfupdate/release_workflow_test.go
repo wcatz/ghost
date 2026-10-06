@@ -1443,6 +1443,16 @@ func findPluginStep(t *testing.T, wf releaseWorkflow, name string) workflowStep 
 	return workflowStep{}
 }
 
+// TestPRStepHasExpectedID asserts the PR step carries the id that the
+// summary step's ${{ steps.open-pr.outputs.* }} references depend on.
+func TestPRStepHasExpectedID(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	step := findPluginStep(t, wf, catalogPRStepName)
+	if step.ID != "open-pr" {
+		t.Errorf("the PR step's id is %q, want \"open-pr\" — the summary step's outputs depend on this", step.ID)
+	}
+}
+
 // pluginStepSandbox lays out a directory the way the plugin job's working
 // directory is: the pinned catalog at .claude-plugin/marketplace.json, a stub
 // gh on PATH, and a scratch directory the scripts' hardcoded /tmp paths are
