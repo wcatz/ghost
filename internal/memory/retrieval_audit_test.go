@@ -159,6 +159,53 @@ func TestRecordRetrievalAuditsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRecordRetrievalAuditsStoresTheContentHash: since schema v22 a verdict
+// carries the hash of the content it judged, and UsefulnessByMemory withdraws a
+// row whose stamp does not match what is stored now (#879). So the stamp has to
+// SURVIVE the round trip byte for byte — a writer that dropped it would leave
+// every row reading as a pre-v22 row, and every verdict on every store would
+// quietly fall back to the legacy timestamp rule.
+//
+// The empty stamp is asserted beside the filled one for the mirror reason: an
+// unstamped row is how a pre-v22 row reads, and the writer producing one for a
+// caller that supplied a hash would be the same defect from the other side.
+func TestRecordRetrievalAuditsStoresTheContentHash(t *testing.T) {
+	store, _, ctx := auditStore(t)
+	recs, err := store.RetrievalRecordsForProject(ctx, "p1", 10)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
+	}
+	const judged = "the text the comparison judged"
+	stamped := ContentHash(judged)
+	rows := []RetrievalAuditRow{
+		{ProjectID: "p1", RecordRowID: recs[0].RowID, Source: "search", MemoryID: "MEM1",
+			Outcome: VerdictOutcomeContradicted, ContentHash: stamped},
+		{ProjectID: "p1", Source: "search", MemoryID: "MEM2",
+			Outcome: VerdictOutcomeContradicted},
+	}
+	if refused, err := store.RecordRetrievalAudits(ctx, rows); err != nil || len(refused) > 0 {
+		t.Fatalf("RecordRetrievalAudits: %v (refused: %+v)", err, refused)
+	}
+	got := readAuditRows(t, store)
+	if len(got) != 2 {
+		t.Fatalf("stored %d verdict(s), want 2", len(got))
+	}
+	byID := map[string]RetrievalAuditRow{}
+	for _, r := range got {
+		byID[r.MemoryID] = r
+	}
+	if h := byID["MEM1"].ContentHash; h != stamped {
+		t.Errorf("MEM1 content_hash = %q, want %q — a stamp that does not survive the round trip sends every "+
+			"verdict back to the legacy rule", h, stamped)
+	}
+	if h := byID["MEM1"].ContentHash; len(h) != 64 {
+		t.Errorf("MEM1 content_hash is %d bytes, want a 64-character sha256 hex digest", len(h))
+	}
+	if h := byID["MEM2"].ContentHash; h != "" {
+		t.Errorf("MEM2 content_hash = %q, want empty: an unstamped row is how a pre-v22 verdict reads", h)
+	}
+}
+
 // TestRetrievalAuditsFiltersByProjectAndOutcome is the read the report surface
 // needs, and the reason the filters exist: a per-project, per-bucket figure is
 // what the issue asked for, and pooling two projects' rows would be a number
@@ -1489,6 +1536,22 @@ func TestMigrateV21MatchesTheFreshDatabaseSchema(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	// The arm above reproduces the v21 SHIP shape, and the comparison is against a
+	// fresh database — which initSQL can only ever describe as it is NOW, holding
+	// `content_hash` (schema v22). So the arm continues with the step that takes it
+	// from that frozen shape to the current one; stopping at v21 would compare v21's
+	// DDL with today's and report the difference as a defect in the v21 step.
+	tx, err = migrated.Begin()
+	if err != nil {
+		t.Fatalf("begin (v22): %v", err)
+	}
+	if err := migrateV22(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("migrateV22: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit (v22): %v", err)
+	}
 
 	freshCols, err := columnShapes(t, fresh, "retrieval_audit")
 	if err != nil {
@@ -1583,6 +1646,129 @@ func TestMigrateV21LeavesAnEarlierStoreReadable(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("the migration backfilled %d verdict(s) — none of them were judged", n)
+	}
+}
+
+// TestMigrateV22AddsContentHashToExistingVerdicts: the step adds the column the
+// reader now keys on (#879), and it adds it to a store that already HOLDS
+// verdicts — so the two properties that matter are that the row survives and
+// that it comes through with the empty stamp rather than an invented one. An
+// empty stamp is precisely what the reader's named legacy rule is for, so a
+// backfill here would be a fabricated claim ("this verdict judged THIS text")
+// about rows whose judged text nothing recorded.
+//
+// The shape is compared against a fresh database for the reason the v21 test
+// compares its own: an upgraded store and a fresh one must be one schema, or the
+// same SELECT reads different columns on each path.
+func TestMigrateV22AddsContentHashToExistingVerdicts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	// Rewind to the state the v21 step leaves behind: the current table dropped and
+	// rebuilt under v21's own frozen DDL, with user_version stamped back to 21.
+	if _, err := db.Exec(`DROP TABLE retrieval_audit`); err != nil {
+		t.Fatalf("drop the current table: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := migrateV21(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("migrateV21: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v22-p1', 'p1')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO retrieval_audit
+		(project_id, record_rowid, source, memory_id, outcome) VALUES ('p1', 1, 'search', 'MEM1', 'contradicted')`); err != nil {
+		t.Fatalf("seed the v21 verdict: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 21`); err != nil {
+		t.Fatalf("stamp v21: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("reopen at v21: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+
+	var version int
+	if err := reopened.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != SchemaVersion() {
+		t.Errorf("user_version = %d, want %d — the step did not run, or ran without stamping", version, SchemaVersion())
+	}
+	var hash string
+	if err := reopened.QueryRow(`SELECT content_hash FROM retrieval_audit WHERE memory_id = 'MEM1'`).Scan(&hash); err != nil {
+		t.Fatalf("read the migrated verdict's stamp: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("the pre-v22 verdict reads content_hash = %q, want empty — nothing is backfilled, and an "+
+			"unstamped row is what the legacy rule exists for", hash)
+	}
+
+	fresh, err := OpenDB(filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatalf("OpenDB (fresh): %v", err)
+	}
+	defer fresh.Close() //nolint:errcheck
+	freshCols, err := columnShapes(t, fresh, "retrieval_audit")
+	if err != nil {
+		t.Fatalf("read the fresh table: %v", err)
+	}
+	migratedCols, err := columnShapes(t, reopened, "retrieval_audit")
+	if err != nil {
+		t.Fatalf("read the migrated table: %v", err)
+	}
+	if diff := columnShapeDiff(freshCols, migratedCols); diff != "" {
+		t.Errorf("an upgraded store and a fresh one disagree on retrieval_audit: %s", diff)
+	}
+}
+
+// TestMigrateV22RefusesAForeignRetrievalAuditTable: the step is an ALTER, and
+// unlike CREATE TABLE IF NOT EXISTS an ALTER SUCCEEDS against any table holding
+// that name — so without the guard inside the step, a `retrieval_audit` somebody
+// else owns would be given a column and the store would be stamped current over
+// a shape nothing here can write. The guard names the remedy instead.
+func TestMigrateV22RefusesAForeignRetrievalAuditTable(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ghost.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("initSQL: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE retrieval_audit`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE retrieval_audit (something_else TEXT)`); err != nil {
+		t.Fatalf("seed the foreign table: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := migrateV22(tx); err == nil {
+		t.Fatal("migrateV22 added a column to a retrieval_audit that is not Ghost's")
+	} else {
+		for _, want := range []string{"retrieval_audit", "DROP TABLE"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
 	}
 }
 

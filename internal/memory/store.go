@@ -152,11 +152,11 @@ type Store struct {
 	// itself. It redirects read-only search helpers to the transaction's
 	// consistent view.
 	snapshot Queryer
-	// readDB is the read-only handle a production store is given so
-	// Candidates can take its snapshot transaction without taking the write
-	// lock the primary handle's BEGIN IMMEDIATE would. nil means "use db",
-	// which is correct for in-memory and bench stores (no concurrent writer)
-	// and logged for a file-backed one.
+	// readDB is the read-only handle a production store is given so a snapshot
+	// read can take its transaction without taking the write lock the primary
+	// handle's BEGIN IMMEDIATE would. nil means "use db", which is correct for
+	// in-memory and bench stores (no concurrent writer) and logged for a
+	// file-backed one.
 	readDB   *sql.DB
 	mu       sync.RWMutex
 	warnOnce sync.Once
@@ -303,9 +303,11 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 // transaction (legs, hydration, edges and penalty lookups on one snapshot), and
 // holding the write lock across a full retrieval would block every concurrent
 // writer in the machine — the reflection, embedding and linking workers, and
-// any save arriving on the live MCP server. The read handle's DSN has no
-// _txlock, so the same transaction is a plain deferred read: WAL readers do not
-// wait on a writer, which is the whole point of running the store in WAL.
+// any save arriving on the live MCP server. UsefulnessByMemory's two reads take
+// theirs here for the same reason, at a smaller cost but the same lock. The
+// read handle's DSN has no _txlock, so the same transaction is a plain deferred
+// read: WAL readers do not wait on a writer, which is the whole point of
+// running the store in WAL.
 func NewStoreWithRead(db, readDB *sql.DB, logger *slog.Logger) *Store {
 	s := NewStore(db, logger)
 	s.readDB = readDB
@@ -332,7 +334,7 @@ func (s *Store) warnNoReadHandle() {
 		return
 	}
 	s.warnOnce.Do(func() {
-		s.logger.Warn("store has no read-only handle: candidate retrieval takes its snapshot on the primary connection, whose DSN issues BEGIN IMMEDIATE, so the transaction holds the write lock; build the store with NewStoreWithRead and memory.OpenReadDB for a file-backed database")
+		s.logger.Warn("store has no read-only handle: snapshot reads (candidate retrieval, usefulness evidence) take their transaction on the primary connection, whose DSN issues BEGIN IMMEDIATE, so the transaction holds the write lock; build the store with NewStoreWithRead and memory.OpenReadDB for a file-backed database")
 	})
 }
 

@@ -22,8 +22,6 @@ package resolve
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -96,14 +94,21 @@ type Classifier interface {
 // INJECTABLE rather than buried, which is the direction this pass errs in
 // everywhere else. Bumping would re-ask every cached KEEP in every project for
 // that, which is the far larger cost.
-const keepCacheHashVersion = "v3"
+//
+// The value itself now lives in memory.ContentHashVersion, because Ghost stamps
+// one hash and this cache is one of its two readers: retrieval_audit's
+// content_hash carries the same digest, so the two can never be renamed apart.
+const keepCacheHashVersion = memory.ContentHashVersion
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
 // tag or importance edit must not invalidate a cached verdict. The version
 // prefix is hashed in with the content (see keepCacheHashVersion).
+//
+// It delegates to memory.ContentHash, the single implementation both this cache
+// and retrieval_audit's content_hash are stamped with; resolve keeps the name
+// because its callers ask for a keep-cache key, not for an audit stamp.
 func ContentHash(content string) string {
-	sum := sha256.Sum256([]byte(keepCacheHashVersion + "\x00" + content))
-	return hex.EncodeToString(sum[:])
+	return memory.ContentHash(content)
 }
 
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
@@ -364,8 +369,8 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		// #648: one read of the audit's negative evidence for the whole pass,
 		// asked only once there is something to ask about. It is read here,
 		// after the pending set is known, so a converged project pays nothing —
-		// and it is a single statement over the project, never one query per
-		// candidate.
+		// and it is one read over the project (its two bounded statements share
+		// one snapshot), never one query per candidate.
 		//
 		// It FAILS OPEN. The evidence is an addition to a judgement that already
 		// works without it, so a store that cannot answer costs the pass the

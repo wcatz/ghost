@@ -636,7 +636,19 @@ CREATE TABLE IF NOT EXISTS retrieval_audit (
     degraded     TEXT NOT NULL DEFAULT '',
     -- The STORE's clock, for the reason retrieval_record's is: the instant a row
     -- became durable is what places it against a transcript.
-    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    -- The hash of the CONTENT this verdict judged (schema v22, #879), stamped by
+    -- audit.Run from memory.ContentHash — the one digest Ghost compares. It is
+    -- what makes the verdict answerable after the fact: UsefulnessByMemory keeps
+    -- the row only while the stored content still hashes to it, so a metadata-only
+    -- write (retag, re-weight, a verified flag) can no longer withhold a contradicted
+    -- memory's evidence, and a real rewrite withdraws it. Deliberately NOT NULL
+    -- DEFAULT '' rather than nullable: '' is the one value that means "this row
+    -- predates the column", and the reader has a named legacy rule for exactly
+    -- that value instead of a NULL branch. Deliberately LAST in this DDL: ALTER
+    -- TABLE ADD COLUMN appends, so a fresh database and a migrated one must agree
+    -- on the column's POSITION, which columnShapes pins.
+    content_hash TEXT NOT NULL DEFAULT ''
 );
 -- One b-tree, on project_id, for the same per-project read the record table's has.
 -- The audit's other predicate is record_rowid, and that one rides inside a

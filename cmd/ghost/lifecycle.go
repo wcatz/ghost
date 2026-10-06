@@ -1287,7 +1287,7 @@ func runReflect() {
 	// and it FAILS OPEN for resolve's reason — consolidation is worth doing
 	// without it, so an unreadable audit costs the prompt the annotation and
 	// nothing else. Reading it here, before the input is built, is what makes it
-	// one query per run rather than one per memory.
+	// one read per run rather than one per memory.
 	//
 	// It is deliberately NOT part of InputSignature, so --skip-unchanged still
 	// skips a corpus whose only change is that it has since been audited: the gate

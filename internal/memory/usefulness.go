@@ -21,15 +21,34 @@ package memory
 // callers would be one careless caller away from a boost, and closing that loop
 // is a property that has to hold without anyone remembering to close it.
 //
-// One statement, one pass, no transaction. The pool is a single connection, so
-// holding a read transaction would reserve it across statements for no
-// consistency a per-memory figure does not already have; and the whole answer is
-// a GROUP BY whose output is bounded by the number of memories with a negative
-// verdict, which is what makes "one bounded read per pass" true rather than
-// aspirational.
+// Two bounded reads, one pass, ONE SNAPSHOT: the project's negative verdicts,
+// then the content of exactly the memories those verdicts name, both inside ONE
+// deferred read transaction on the read handle. The transaction is what makes
+// the pair one snapshot — the shape before #879's review ran the two reads with
+// nothing between them, and a verdict another process DELETED in that window
+// was still counted for one pass, a figure naming a row the table no longer
+// holds, which is the one direction this package is pointed away from, and no
+// comment on that shape could have made it otherwise.
+//
+// There are two reads rather than one JOINED statement because of what a join
+// PROJECTS. content is the largest field in the table and a join repeats it
+// once per VERDICT row: retrieval_audit is capped at 50000 rows
+// (retrievalAuditRowsCap) and memories.content is unbounded, so a joined read
+// materialises a copy of the text per verdict and keeps one per memory, where
+// the second read here returns one row per memory and copies each memory's text
+// once. The transaction is bought with the read handle rather than the primary
+// one for the reason NewStoreWithRead states: the primary DSN issues BEGIN
+// IMMEDIATE, so a snapshot there would hold the write lock across the read.
+//
+// The pool is a single connection, so the rows are drained and CLOSED by the
+// call that opened them: a cursor left open holds the connection the next query
+// needs, which on this pool is not a slowdown but a deadlock. Both reads are
+// bounded — by the project's own audit rows, and by the memories those rows
+// name — so "two bounded reads per pass" is true rather than aspirational.
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -169,135 +188,368 @@ func boundSessionID(id string) string {
 // project's corpus. An empty project id would pool both, so it is refused here
 // rather than defaulted.
 //
-// Read-only, no transaction, one statement. Three filters narrow it, and all
-// three err toward SILENCE rather than toward a wrong annotation: a memory with
-// no qualifying verdict is simply not in the map, which is exactly how it read
-// before the audit existed. (1) the outcome is one of the two negative buckets,
-// for #284; (2) the verdict was not degraded, so a partial read's caveat is not
-// silently dropped; (3) the memory row still stands behind the verdict, so a
-// contradiction is not reported against text that has since been rewritten. The
-// outcome filter is a bound parameter, for the reason retrieval_totals states: a
-// hand-spelled `outcome = 'contradicted'` is one more place a stored value can be
-// misspelled, and it would miss silently — the statement returns no rows, so the
-// map is empty and every caller behaves exactly as it does on a store that was
-// never audited.
+// Read-only, ONE deferred read transaction carrying TWO bounded reads. Three
+// filters narrow the answer, and all three err toward SILENCE rather than
+// toward a wrong annotation: a
+// memory with no qualifying verdict is simply not in the map, which is exactly
+// how it read before the audit existed. (1) the outcome is one of the two
+// negative buckets, for #284; (2) the verdict was not degraded, so a partial
+// read's caveat is not silently dropped; (3) the verdict still describes the
+// content the memory holds NOW, which is the filter #879 rebuilt and is spelled
+// out on verdictDescribes below. The outcome filter is a bound parameter, for
+// the reason retrieval_totals states: a hand-spelled `outcome = 'contradicted'`
+// is one more place a stored value can be misspelled, and it would miss silently
+// — the read returns no rows, so the map is empty and every caller behaves
+// exactly as it does on a store that was never audited.
+//
+// The two reads run inside ONE transaction, and that is what buys the
+// consistency all three filters assume: the verdicts and the content they are
+// judged against are read from the same snapshot, so the window a two-statement
+// shape leaves open — a verdict another process deleted between the reads, still
+// counted for one pass — cannot exist here. The second read is keyed on the ids
+// the first returned and returns ONE ROW PER MEMORY, and a verdict whose memory
+// the store no longer holds (or one naming a memory another project owns) has
+// no row to match: it is dropped in Go by the guard below rather than by a join,
+// and that drop is pinned by TestAVerdictWhoseMemoryIsGoneIsDroppedRatherThanCounted.
+// The four predicates are spelled ONCE, in the verdict statement, and the second
+// statement never restates them — it asks for named ids inside the same project,
+// so the two cannot disagree about what counts. The ids travel as bound
+// parameters, never as pasted text, and each statement is rooted in a literal
+// SELECT, which is what the #746 structural scan resolves to a read. Everything
+// after the read is Go, because SQLite has no sha256: filter (3) cannot be
+// expressed in SQL at all, and the Go side hashes each memory's content ONCE
+// rather than once per verdict.
 func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[string]UsefulnessEvidence, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("usefulness evidence needs a project: an unscoped read would hand " +
 			"one project's pass another project's contradiction as evidence about its own memories")
 	}
 
-	// The count and the "latest" are ranked SEPARATELY and joined, rather than
-	// counting in one GROUP BY and reading bare session_id/recorded_at off it. A
-	// bare column beside a plain SUM is arbitrary in SQLite — it is documented
-	// only for the single min()/max() case — so that query would report SOME
-	// negative verdict's session, and which one would change with the plan. The
-	// rank orders by (recorded_at, rowid) for the reason asof.go states:
-	// recorded_at is second-precision, so every verdict one pass writes shares a
-	// timestamp, and the newest among them has to be a rowid tie-break rather
-	// than an answer.
-	//
-	// Both halves join `memories` and require `a.recorded_at >= m.updated_at`,
-	// which is the staleness guard and not a nicety. A verdict is a claim about
-	// the CONTENT a call admitted, and Ghost rewrites content in place under a
-	// stable id — ReplaceNonManual's reuse branch and ghost_memory_update both
-	// UPDATE `content` on the existing row — while nothing deletes the audit rows
-	// for a rewritten memory (retrieval_audit has no foreign key to memories, and
-	// the only DELETE by memory_id is PurgeMemoryHistory's). So without the join
-	// the very next pass annotates a claim written AFTER the contradiction it is
-	// quoting, which is a wrong prompt annotation: the failure mode this whole
-	// reader exists to prevent. The predicate is on the verdict, not on the
-	// memory, so a memory with one pre-rewrite and one post-rewrite verdict keeps
-	// the post-rewrite figure and its count falls to what is still true.
-	//
-	// THE KNOWN COST OF THIS GUARD, STATED BECAUSE IT IS SILENT: updated_at is not
-	// a content clock. UpdateMemory moves it on a metadata-only edit, and
-	// ReplaceNonManual's reusePreservesAge branch (reached through
-	// ApplyReflection, which only calls it) moves it after writing an identical
-	// `content` back, so a retag, a re-weight or a `verified: true` on a
-	// memory the audit contradicted withholds that memory's evidence from every
-	// later resolve and reflect pass — with no error, no report line and no log,
-	// and the contradiction the classifier was told about simply stops arriving.
-	// That is the over-filter, and it is silent. The exact fix needs a column
-	// that records every content change, and no such column exists —
-	// `resolve_kept_hash` is a content hash but not one: MarkResolveKept stamps
-	// it when resolve judges a row KEEP, it is cleared by SetResolved and
-	// MarkResolved, and no content edit writes it, so it is a cache keyed by
-	// content rather than a record of content changes. So the choice is a content
-	// hash recorded alongside the verdict (a retrieval_audit column, and therefore
-	// a schema change) or a decision to stop moving updated_at on metadata writes
-	// (which is store-wide: the passive `_global` bucket's tie-break and
-	// pruneActivitySQL both read it). Neither is a decision this reader may make
-	// on its own, so the guard keeps erring toward silence and this paragraph is
-	// the record of what that costs (#879).
-	//
-	// Both halves also require `a.degraded = ''`. retrieval_audit.degraded carries
-	// the scanner's reason for a partial transcript read, and the schema's own
-	// comment says a reader who cannot see that caveat reads the row as a claim
-	// about the session. Filtered rather than qualified, because the prompt
-	// promise this reader makes is byte-for-byte: a memory whose only negative
-	// verdicts are degraded must render NOTHING, not a weaker line that is still
-	// a line. internal/audit prints "N of those verdicts are degraded" for the
-	// same reason — a contradiction is a strong signal or it is not one.
-	//
-	// The two halves are SUBQUERIES rather than CTEs, so the statement opens
-	// with SELECT. That is not a style choice: the #746 structural scan resolves
-	// a statement's leading keyword and counts anything it cannot read as a
-	// WRITE, because a `WITH` can introduce an INSERT — so a reader written as
-	// a CTE needs an exemption entry claiming it is a read, and the honest way
-	// to keep that claim off the record is not to write one.
+	verdicts, contents, err := s.usefulnessRows(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	// A project the audit has nothing negative to say about reads no memory
+	// content at all: usefulnessRows issues the second statement only when the
+	// first returned verdicts, so an unaudited project costs one statement and
+	// no content read, and the map it gets back is the one every caller already
+	// behaves correctly with.
+	if len(verdicts) == 0 {
+		return map[string]UsefulnessEvidence{}, nil
+	}
+
+	out := map[string]UsefulnessEvidence{}
+	// The content hash is computed ONCE per memory, not once per verdict: the
+	// digest is a property of the text, and a memory with a dozen contradictions
+	// would otherwise pay for the same bytes a dozen times. The cache is keyed by
+	// id and lives only for this pass.
+	hashes := map[string]string{}
+	// The latest verdict is tracked as a (recorded_at, rowid) TUPLE beside the
+	// counts rather than read off a ranked row: there is no ranked row to read,
+	// because the filter that decides whether a verdict STANDS (#879's hash rule)
+	// can only run in Go, and a row ranked before it ran could name a verdict the
+	// rule then withdrew. recorded_at is second-precision, so every verdict one
+	// pass writes shares a timestamp and the newest among them has to be a rowid
+	// tie-break rather than an answer — for the reason asof.go states.
+	latest := map[string]usefulnessLatest{}
+
+	for _, v := range verdicts {
+		m, ok := contents[v.memory]
+		if !ok {
+			// The second read is keyed on these ids and scoped to this project, so
+			// this fires exactly when the memory a verdict names is not in the store
+			// (or not in this one): deleting a memory does not delete its audit rows
+			// — retrieval_audit has no foreign key to memories; only
+			// PurgeMemoryHistory deletes by memory_id — so the verdict arrives and
+			// the row it is a claim about does not. It stays as the drop made
+			// explicit in code rather than one a map miss performs silently,
+			// because the alternative is reading a zero value as content and asking
+			// the legacy rule about text nobody wrote — and an UNSTAMPED verdict
+			// answers yes to that question, since recorded_at is never before "".
+			continue
+		}
+		current, seen := hashes[v.memory]
+		if !seen {
+			current = ContentHash(m.content)
+			hashes[v.memory] = current
+		}
+		if !verdictDescribes(v.hash, current, v.at, m.updatedAt) {
+			continue
+		}
+		ev := out[v.memory]
+		switch v.outcome {
+		case VerdictOutcomeContradicted:
+			ev.Contradicted++
+		case VerdictOutcomeSuperseded:
+			ev.SupersededInSession++
+		}
+		out[v.memory] = ev
+
+		// The (recorded_at, rowid) tuple is compared STRICTLY and the GREATEST wins:
+		// a newer stamp replaces the incumbent, and inside one second — where every
+		// verdict one pass writes ties, since recorded_at is second-precision — the
+		// HIGHER rowid decides, which is the row SQLite inserted later. So the LAST
+		// row of a second wins, not the first one scanned. That is the pre-v22
+		// answer verbatim: the old statement ranked with
+		// ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY recorded_at DESC,
+		// rowid DESC) and took rn = 1, so the newest verdict won and the rowid broke
+		// the tie, rather than scan order answering a question nobody asked.
+		best, have := latest[v.memory]
+		if !have || v.at > best.at || (v.at == best.at && v.rowid > best.rowid) {
+			latest[v.memory] = usefulnessLatest{at: v.at, rowid: v.rowid, session: v.session}
+		}
+	}
+	// Every verdict that counted updated BOTH maps in the same iteration, so
+	// `latest` covers exactly the keys `out` gained and no dropped verdict can
+	// become the reported one. A memory whose every verdict was dropped never
+	// entered `out` at all, which is the silence every filter here is pointed at.
+	for id, best := range latest {
+		ev := out[id]
+		ev.LastSession, ev.LastAt = best.session, best.at
+		out[id] = ev
+	}
+	return out, nil
+}
+
+// usefulnessLatest is the newest verdict that STOOD for one memory: its stamp,
+// the rowid that breaks the tie inside a second, and the session the line
+// reports.
+type usefulnessLatest struct {
+	at      string
+	rowid   int64
+	session string
+}
+
+// usefulnessAuditRow is one negative verdict off retrieval_audit, with the rowid
+// it needs to order same-second rows and the stamp it needs to be judged
+// against its memory.
+type usefulnessAuditRow struct {
+	rowid   int64
+	memory  string
+	outcome string
+	session string
+	at      string
+	hash    string
+}
+
+// usefulnessContent is what the memory row has to say against one verdict: the
+// text itself, and the stamp the legacy rule still reads.
+type usefulnessContent struct {
+	content   string
+	updatedAt string
+}
+
+// verdictDescribes decides whether ONE stored verdict still describes the
+// content the memory holds now. It is filter (3), and #879 is the reason it is
+// a function rather than a join predicate.
+//
+// A verdict is a claim about the CONTENT a call admitted, and Ghost rewrites
+// content in place under a stable id — ReplaceNonManual's reuse branch and
+// ghost_memory_update both UPDATE `content` on the existing row — while nothing
+// deletes the audit rows for a rewritten memory. So a verdict must not outlive
+// the text it judged. Until schema v22 the only approximation of that available
+// was `recorded_at >= m.updated_at`, and it was wrong in the SILENT direction:
+// `updated_at` is not a content clock, so a retag, a re-weight or a
+// `verified: true` moved it past the verdict and withheld a contradicted
+// memory's evidence from every later resolve and reflect pass, with no error, no
+// report line and no log. The predicate is on the VERDICT, not on the memory, so
+// a memory with one pre-rewrite and one post-rewrite verdict keeps the
+// post-rewrite figure and its count falls to what is still true.
+//
+//	stamped == ""  → THE LEGACY RULE (pre-v22): recorded_at >= updated_at
+//	stamped != ""  → the hash rule: stamped == the hash of the content stored now
+//
+// The legacy branch is named here, in docs/invariants.md and in the test that
+// pins it, because a fallback nobody names is a silent one — and this one is
+// load-bearing rather than a placeholder: every verdict written before v22
+// carries an empty stamp, so on every store that exists today this is the arm
+// that runs. It errs toward silence (a stale row is withdrawn), which is the
+// direction the reader errs in everywhere else. It is NOT a guess at the old
+// behaviour being good enough; it is what those rows were already read by, kept
+// so that adding the column withdraws nothing twice.
+//
+// A non-empty stamp that does NOT match means the text was rewritten after the
+// verdict: the row's claim is about words nobody can read now, so it renders
+// nothing — byte-for-byte the input the pass had before the audit existed.
+// Withdrawing errs toward silence too. A bump of ContentHashVersion makes every
+// stored stamp mismatch, which withdraws all evidence at once — deliberately,
+// for the same reason, and stated in content_hash.go where the version lives.
+func verdictDescribes(stamped, current, recordedAt, updatedAt string) bool {
+	if stamped == "" {
+		return recordedAt >= updatedAt
+	}
+	return stamped == current
+}
+
+// usefulnessContentChunk is how many ids one content statement binds. It is a
+// bound on variables rather than on rows: SQLite's ceiling on bound parameters
+// is what chunked id-list reads elsewhere in this package are sized against
+// (getByIDsChunk, and evidence.go's batch of 200 carrying two placeholders an
+// id), and a store with verdicts on tens of thousands of memories would exceed
+// an unchunked list rather than return a partial one.
+const usefulnessContentChunk = 500
+
+// usefulnessRows is UsefulnessByMemory's read: TWO bounded statements inside
+// ONE deferred read transaction, so both describe the same database state.
+//
+// The transaction is opened on readHandle, never on the primary handle, for the
+// reason NewStoreWithRead gives: the primary DSN issues BEGIN IMMEDIATE, so a
+// snapshot there holds the write lock for the whole read.
+//
+// THE READ TAKES NO s.mu, and that is a decision rather than an omission. The
+// store's handles are fixed at construction (NewStore, NewStoreWithRead) and
+// warnOnce is a sync.Once, so there is no in-memory state here for the lock to
+// guard — every value this read consults comes out of the transaction. Taking it
+// anyway would put a mutex around a transaction in whichever order, and BOTH
+// orders are wrong on the single-connection pool: lock-then-transact waits for
+// the connection Candidates holds while Candidates waits for that same lock,
+// and transact-then-lock waits for the connection any writer holds while the
+// writer waits for that same lock. Not taking it removes the edge instead of
+// choosing which deadlock to risk, and nothing that completes on its own
+// (a query, a rollback) can hold this read up behind a lock it does not take.
+//
+// Rows are drained and closed by the helper that opened them, by its defer,
+// because the pool is one connection and a cursor left open would hold it.
+//
+// Both statements are literals used directly in QueryContext, which is what the
+// #746 structural scan needs to call them reads — an unresolved statement is
+// counted as a WRITE — and nothing in either is built from stored data: the
+// ids travel as bound parameters in an IN list.
+func (s *Store) usefulnessRows(ctx context.Context, projectID string) ([]usefulnessAuditRow, map[string]usefulnessContent, error) {
+	if s.readDB == nil {
+		s.warnNoReadHandle()
+	}
+	handle := s.readHandle()
+	if handle == nil {
+		return nil, nil, fmt.Errorf("usefulness evidence: store has no database handle")
+	}
+	tx, err := handle.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("usefulness evidence: begin read snapshot: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	verdicts, err := usefulnessVerdicts(ctx, tx, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(verdicts) == 0 {
+		return nil, nil, nil
+	}
+	contents, err := usefulnessMemories(ctx, tx, projectID, usefulnessMemoryIDs(verdicts))
+	if err != nil {
+		return nil, nil, err
+	}
+	return verdicts, contents, nil
+}
+
+// usefulnessVerdicts is the first read: every negative verdict the project
+// holds, in no particular order (the reader ranks them in Go, because it has to
+// rank them after filtering them).
+//
+// The four predicates live HERE and nowhere else — the project, the non-empty
+// memory id, the absence of the scanner's degraded caveat, and one of the two
+// negative outcomes. The outcome filter is a bound parameter for the reason
+// retrieval_totals states: a hand-spelled spelling is one more place a stored
+// value can be misspelled, and it would miss silently.
+//
+// The content_hash column rides along because filter (3) judges the verdict
+// against the content it was stamped with, and SQLite has no sha256 to do that
+// comparison here.
+func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]usefulnessAuditRow, error) {
 	query := `
-		SELECT c.memory_id, c.contradicted, c.superseded, n.session_id, n.recorded_at
-		FROM (
-		    SELECT a.memory_id AS memory_id,
-		           SUM(CASE WHEN a.outcome = ? THEN 1 ELSE 0 END) AS contradicted,
-		           SUM(CASE WHEN a.outcome = ? THEN 1 ELSE 0 END) AS superseded
-		    FROM retrieval_audit a
-		    JOIN memories m ON m.id = a.memory_id AND m.project_id = a.project_id
-		                   AND a.recorded_at >= m.updated_at
-		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.degraded = '' AND a.outcome IN (?, ?)
-		    GROUP BY a.memory_id
-		) c
-		JOIN (
-		    SELECT a.memory_id AS memory_id, a.session_id AS session_id,
-		           a.recorded_at AS recorded_at,
-		           ROW_NUMBER() OVER (PARTITION BY a.memory_id
-		                               ORDER BY a.recorded_at DESC, a.rowid DESC) AS rn
-		    FROM retrieval_audit a
-		    JOIN memories m ON m.id = a.memory_id AND m.project_id = a.project_id
-		                   AND a.recorded_at >= m.updated_at
-		    WHERE a.project_id = ? AND a.memory_id <> '' AND a.degraded = '' AND a.outcome IN (?, ?)
-		) n ON n.memory_id = c.memory_id AND n.rn = 1`
+		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash
+		FROM retrieval_audit
+		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND outcome IN (?, ?)`
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.QueryContext(ctx, query,
-		VerdictOutcomeContradicted, VerdictOutcomeSuperseded,
-		projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded,
-		projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded)
+	rows, err := q.QueryContext(ctx, query, projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded)
 	if err != nil {
 		return nil, fmt.Errorf("read usefulness evidence: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
 
-	out := map[string]UsefulnessEvidence{}
+	var verdicts []usefulnessAuditRow
 	for rows.Next() {
-		var id string
-		var contradicted, superseded int
-		var session, at string
-		if err := rows.Scan(&id, &contradicted, &superseded, &session, &at); err != nil {
+		var v usefulnessAuditRow
+		if err := rows.Scan(&v.rowid, &v.memory, &v.outcome, &v.session, &v.at, &v.hash); err != nil {
 			return nil, fmt.Errorf("read usefulness evidence: %w", err)
 		}
-		out[id] = UsefulnessEvidence{
-			Contradicted:        contradicted,
-			SupersededInSession: superseded,
-			LastSession:         session,
-			LastAt:              at,
-		}
+		verdicts = append(verdicts, v)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read usefulness evidence: %w", err)
 	}
-	return out, nil
+	return verdicts, nil
+}
+
+// usefulnessMemories is the second read: the content and stamp of exactly the
+// memories the verdicts name, ONE ROW PER MEMORY.
+//
+// That shape is the whole reason this is a second statement rather than a
+// column beside the first one. A join repeats m.content once per VERDICT row,
+// and retrieval_audit is capped at retrievalAuditRowsCap (50000) rows while
+// memories.content is unbounded, so the joined form hands the driver a full
+// copy of a memory's text per verdict about it and keeps one — where this
+// statement binds each id once and copies each memory's text once. The ids are
+// chunked at usefulnessContentChunk rather than bound in one statement for the
+// variable ceiling, so a store at the cap is answered in several reads instead
+// of failing.
+//
+// The project predicate is repeated here deliberately: it is not a filter that
+// can drift with the verdict read (it names no outcome, no degraded caveat and
+// nothing else the two reads decide differently), it is the scope of the answer
+// — a verdict naming a memory another project owns must not pull that memory's
+// text into this project's pass.
+func usefulnessMemories(ctx context.Context, q Queryer, projectID string, ids []string) (map[string]usefulnessContent, error) {
+	contents := make(map[string]usefulnessContent, len(ids))
+	for start := 0; start < len(ids); start += usefulnessContentChunk {
+		batch := ids[start:min(start+usefulnessContentChunk, len(ids))]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, projectID)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		query := `
+			SELECT id, content, updated_at
+			FROM memories
+			WHERE project_id = ? AND id IN (` + placeholders(len(batch)) + `)`
+
+		rows, err := q.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read usefulness content: %w", err)
+		}
+		for rows.Next() {
+			var id, content, updatedAt string
+			if err := rows.Scan(&id, &content, &updatedAt); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("read usefulness content: %w", err)
+			}
+			contents[id] = usefulnessContent{content: content, updatedAt: updatedAt}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("read usefulness content: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("read usefulness content: %w", err)
+		}
+	}
+	return contents, nil
+}
+
+// usefulnessMemoryIDs is the distinct memory ids a verdict set names, in first
+// appearance order. Distinct because a memory contradicted a dozen times is one
+// row of content, not twelve, and the order is only the order the verdicts
+// arrived in — the read it feeds has no ORDER BY and promises none.
+func usefulnessMemoryIDs(verdicts []usefulnessAuditRow) []string {
+	seen := make(map[string]struct{}, len(verdicts))
+	ids := make([]string, 0, len(verdicts))
+	for _, v := range verdicts {
+		if _, ok := seen[v.memory]; ok {
+			continue
+		}
+		seen[v.memory] = struct{}{}
+		ids = append(ids, v.memory)
+	}
+	return ids
 }

@@ -105,6 +105,12 @@ type placed struct {
 	record  int64
 	source  string
 	sess    string
+	// hash is memory.ContentHash over the CONTENT this run compared — the bytes
+	// the comparison actually read, not a later re-read of the row. It rides to
+	// the write instead of being recomputed there, because the whole claim a
+	// stamped verdict makes is "I judged THIS text", and only the comparison's own
+	// input is that text (#879).
+	hash string
 }
 
 // SourceSummary is one source's figures, and its denominator is CALLS.
@@ -213,7 +219,8 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 		for _, v := range Compare(s, judged) {
 			res.Verdicts++
 			res.VerdictList = append(res.VerdictList, v)
-			kept = append(kept, placed{verdict: v, record: rec.RowID, source: rec.Source, sess: rec.SessionID})
+			kept = append(kept, placed{verdict: v, record: rec.RowID, source: rec.Source, sess: rec.SessionID,
+				hash: memory.ContentHash(content[v.MemoryID])})
 			sum.count(v.Outcome)
 		}
 	}
@@ -235,6 +242,7 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 			Outcome:     string(p.verdict.Outcome),
 			Signal:      string(p.verdict.Signal),
 			Degraded:    res.Degraded,
+			ContentHash: p.hash,
 		})
 	}
 	if len(rows) > 0 {
