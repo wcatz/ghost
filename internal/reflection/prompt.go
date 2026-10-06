@@ -195,15 +195,16 @@ type ReflectMemory struct {
 // every project that records verdicts re-consolidate on every stop hook: verdicts
 // arrive from retrieval, not from a session saving something, so the gate would
 // see a changed input on a session that saved nothing — the same defect the access
-// count has, reached by a different column. The evidence is also only ever a
-// narrowing of what the prompt already says (the audit withholds a verdict whose
-// memory has since been rewritten), so leaving it out of the signature can let a
-// pass re-run on unchanged corpus text, and cannot let a pass SKIP a change the
-// corpus itself made: every field the gate does fingerprint is still fingerprinted.
-// Recorded here rather than only at the call site, because the rule and this
-// exception live in the function that renders the field — a reader who found the
-// rule here without this sentence would "fix" the asymmetry by mirroring
-// Usefulness and silently break the gate for every audited project.
+// count has, reached by a different column. Both halves of that argument are
+// about FINGERPRINTING the field, and neither is an argument that omitting it
+// makes the gate less conservative: InputSignature hashes only the corpus rows, so
+// leaving the evidence out cannot move it in either direction. It cannot make the
+// gate SKIP a change the corpus itself made, because every field the gate does
+// fingerprint is still fingerprinted. Recorded here rather than only at the call
+// site, because the rule and this exception live in the function that renders the
+// field — a reader who found the rule here without this sentence would "fix" the
+// asymmetry by mirroring Usefulness and silently break the gate for every audited
+// project.
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 

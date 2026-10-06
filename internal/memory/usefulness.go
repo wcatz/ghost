@@ -173,13 +173,25 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 	// the only DELETE by memory_id is PurgeMemoryHistory's). So without the join
 	// the very next pass annotates a claim written AFTER the contradiction it is
 	// quoting, which is a wrong prompt annotation: the failure mode this whole
-	// reader exists to prevent. Keeping a verdict only while the memory row still
-	// stands behind it errs toward silence — a memory rewritten since renders
-	// nothing, byte-for-byte the input it had before the audit existed — and a
-	// verdict filed after a rewrite still counts, so a real contradiction is
-	// never dropped. The predicate is on the verdict, not on the memory: a memory
-	// with one pre-rewrite and one post-rewrite verdict keeps the post-rewrite
-	// figure and its count falls to what is still true.
+	// reader exists to prevent. The predicate is on the verdict, not on the
+	// memory, so a memory with one pre-rewrite and one post-rewrite verdict keeps
+	// the post-rewrite figure and its count falls to what is still true.
+	//
+	// THE KNOWN COST OF THIS GUARD, STATED BECAUSE IT IS SILENT: updated_at is not
+	// a content clock. UpdateMemory moves it on a metadata-only edit, and
+	// ApplyReflection's reusePreservesAge branch moves it after writing an
+	// identical `content` back, so a retag, a re-weight or a `verified: true` on a
+	// memory the audit contradicted withholds that memory's evidence from every
+	// later resolve and reflect pass — with no error, no report line and no log,
+	// and the contradiction the classifier was told about simply stops arriving.
+	// That is the over-filter, and it is silent; the store has no column that
+	// moves only with content, so a guard on one needs either a content hash
+	// recorded alongside the verdict (a retrieval_audit column, and therefore a
+	// schema change) or a decision to stop moving updated_at on metadata writes
+	// (which is store-wide: the passive `_global` bucket's tie-break and
+	// pruneActivitySQL both read it). Neither is a decision this reader may make
+	// on its own, so the guard keeps erring toward silence and this paragraph is
+	// the record of what that costs.
 	//
 	// Both halves also require `a.degraded = ''`. retrieval_audit.degraded carries
 	// the scanner's reason for a partial transcript read, and the schema's own
