@@ -76,14 +76,28 @@ func (e UsefulnessEvidence) Line() string {
 		counts = append(counts, fmt.Sprintf("superseded_in_session=%d", e.SupersededInSession))
 	}
 	line := "audit: verdicts " + strings.Join(counts, " ")
-	// The id is bounded FIRST and quoted SECOND, and the order is load-bearing.
-	// Bounding first bounds the quoting: QuoteToASCII can render one rune as six
-	// characters (\u202e), so a bound applied afterwards could still be exceeded by
-	// a factor of six, and the bound is what keeps an arbitrary stored field from
-	// growing a prompt. Quoting second is what makes the bound honest — a
-	// truncation that cut a rune in half, or cut between a backslash and the
-	// character it escapes, would hand back a malformed literal that a reader
-	// parses as something other than an id.
+	// The id is bounded FIRST and quoted SECOND, and the order is load-bearing for
+	// ONE reason: bounding SECOND would cut an ESCAPE rather than a rune, so a
+	// truncation landing between a backslash and the character it escapes hands
+	// back a malformed literal a reader parses as something other than an id.
+	// Bounding the input is what makes the quoting well-formed.
+	//
+	// It is NOT what bounds the rendered length, and the difference is sixfold.
+	// usefulnessSessionMax counts RUNES of the stored id, and QuoteToASCII renders
+	// one rune as up to six characters (\u202e), so an id of 64 escaping runes
+	// renders 386 bytes. The renderer this replaced bounded the OUTPUT instead — it
+	// stopped writing once the byte index reached the limit — so the worst case one
+	// stored id could add to a prompt was ~64 bytes plus one escape and is now up
+	// to 386. It is still a CONSTANT, which is what "without limit" has to mean,
+	// but it is a worse constant by six, and the test that holds it measures the
+	// escaping case rather than a fixture of bare ASCII ids that cannot see the
+	// difference (TestTheUsefulnessLineBoundsAnUnboundedId).
+	//
+	// Clamping the quoted form afterwards, as assemble.PreviewLine does for display
+	// text, would recover the old ceiling and was not chosen: PreviewLine's contract
+	// is a PREVIEW of a value whose full text the reader has elsewhere, while this
+	// is the id itself, and a clamp that cut one would report an id no session
+	// holds — the one output that would be a lie.
 	session := SafeToken(boundSessionID(e.LastSession))
 	switch {
 	case e.LastSession != "" && e.LastAt != "":
@@ -101,9 +115,12 @@ func (e UsefulnessEvidence) Line() string {
 // grow the prompt without limit; the bound TRUNCATES, never drops the id, because
 // rendering no id at all would claim no session recorded it and one did.
 //
-// It counts RUNES, not bytes, for the reason PreviewLine does: a byte bound would
-// cut a multi-byte rune in half and produce a replacement character, which is a
-// different id from the one stored rather than a shortened one.
+// It counts RUNES of the STORED id, not bytes of the RENDERED one, and the two
+// differ by up to sixfold once the id needs quoting — see Line, which states the
+// resulting ceiling rather than leaving "64" to be read as 64 bytes. A byte bound
+// on the stored id would instead cut a multi-byte rune in half and produce a
+// replacement character, which is a different id from the one stored rather than a
+// shortened one.
 const usefulnessSessionMax = 64
 
 // boundSessionID truncates a session id to usefulnessSessionMax RUNES.

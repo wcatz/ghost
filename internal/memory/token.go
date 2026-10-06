@@ -13,9 +13,9 @@ package memory
 // reason: two implementations of one rule are two rules, and the copy nobody
 // tests is the one that ships the bug.
 //
-// The rule is an ALLOWLIST, and that is the whole point. The version this file
-// replaces was a denylist in the same reader, and a denylist can only list what
-// somebody thought of: it let U+2028 and U+0085 through (both LINE TERMINATORS to
+// The rule is an ALLOWLIST, and that is the whole point. What it replaces is a
+// denylist — neutralSessionID in usefulness.go, this package's usefulness reader —
+// and a denylist can only list what somebody thought of: it let U+2028 and U+0085 through (both LINE TERMINATORS to
 // JavaScript and to several newline-splitting readers), a bidi override that
 // reverses how the rest of a line displays, and an invisible zero-width space that
 // a reader cannot see in the output at all. Each of those is a way for stored text

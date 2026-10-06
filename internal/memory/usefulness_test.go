@@ -410,17 +410,63 @@ func TestTheUsefulnessLineCannotForgeARecordOrEndItsDataBlock(t *testing.T) {
 
 // TestTheUsefulnessLineBoundsAnUnboundedId: the session id is arbitrary stored
 // text and the line is a prompt fragment, so an id of any length must not be able
-// to grow the prompt without limit. The bound truncates — it never renders an
-// id that no session holds, which is the one output that would be a lie.
+// to grow the prompt without limit. The bound TRUNCATES — it never renders an id
+// that no session holds, which is the one output that would be a lie.
+//
+// TWO fixtures, because one of them cannot see the thing that matters. A bound on
+// the STORED id's runes does not bound the RENDERED id: QuoteToASCII renders one
+// rune as up to six characters, so the ceiling is six times the rune bound once
+// the id needs quoting. The original fixture here was 10000 bare ASCII `s`, which
+// stays bare and is cut at 64 runes — it would pass against a renderer whose
+// rendered output grew without limit. So the second case is 10000 runes that all
+// need escaping, and the ceiling asserted is the sixfold one the comment in Line
+// states. If usefulnessSessionMax moves, or the bound is reapplied to the rendered
+// string instead, this fails with a number rather than passing on a fixture that
+// cannot express the difference.
 func TestTheUsefulnessLineBoundsAnUnboundedId(t *testing.T) {
-	ev := UsefulnessEvidence{Contradicted: 1, LastSession: strings.Repeat("s", 10000), LastAt: "2026-09-24 10:00:00"}
-	line := ev.Line()
-	if len(line) > 1024 {
-		t.Errorf("the rendered line is %d bytes from a 10000-character session id; a stored "+
-			"field must not be able to grow a prompt fragment without bound", len(line))
-	}
-	if !strings.HasPrefix(line, "audit: ") {
-		t.Errorf("the rendered line no longer starts with its fixed prefix: %q", line)
+	// A rune outside every ASCII printable range, so SafeToken must escape it:
+	// U+202E, the bidi override, which is six characters written.
+	const escapingRune = "\u202e"
+
+	// The ceilings are MEASURED, with headroom, and not computed from the rune
+	// bound: a computed ceiling that lands a byte from the real one passes and then
+	// fails on an unrelated edit. Measured on this build at usefulnessSessionMax=64
+	// with the line prefix below, a bare id renders 125 bytes and an all-escaping id
+	// 447 — the second being 6*64+2 for the escapes and their quotes, plus the
+	// prefix, which is the sixfold the comment in Line states.
+	const (
+		bareCeiling     = 160
+		escapingCeiling = 512
+	)
+
+	for _, tc := range []struct {
+		name     string
+		id       string
+		maxBytes int
+	}{
+		// 10000 bare runes: every character is one a stored id is made of, so the
+		// rendered id is the truncated id and the bound is visible at its own value.
+		{"a bare id", strings.Repeat("s", 10000), bareCeiling},
+		// 10000 escaping runes: the quoted form is six characters each, so the
+		// rendered id is about six times the rune bound, and THAT is the real bound.
+		{"an id of escaping runes", strings.Repeat(escapingRune, 10000), escapingCeiling},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := UsefulnessEvidence{Contradicted: 1, LastSession: tc.id, LastAt: "2026-09-24 10:00:00"}.Line()
+			if len(line) > tc.maxBytes {
+				t.Errorf("the rendered line is %d bytes from a 10000-rune session id, above this "+
+					"fixture's %d ceiling; a stored field must not be able to grow a prompt "+
+					"fragment without limit: %q", len(line), tc.maxBytes, line)
+			}
+			if !strings.HasPrefix(line, "audit: ") {
+				t.Errorf("the rendered line no longer starts with its fixed prefix: %q", line)
+			}
+			// The bound truncates rather than dropping the id, so the count still
+			// rides and some of the id is still visible.
+			if !strings.Contains(line, "contradicted=1") {
+				t.Errorf("the rendered line dropped the count it exists to carry: %q", line)
+			}
+		})
 	}
 }
 
