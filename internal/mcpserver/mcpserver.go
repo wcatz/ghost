@@ -5,7 +5,6 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1744,36 +1743,22 @@ func (s *Server) registerTools() {
 			// so nothing downstream could tell it from a real empty answer.
 			SuppressRecordWhenLegsFailed: true,
 		}
-		// explain returns the store's ranking diagnosis instead of the
-		// formatted list. The explain projection of the assembler's trace
-		// replaces this branch once the stages carry it.
+		// explain returns a projection of the assembler's trace, so it can never
+		// disagree with the formatted answer about which rows were included.
 		if args.Explain {
-			// Refused with as_of, not downgraded. This branch is the store's own
-			// ExplainSearchScoped: a diagnosis of the CURRENT ranking, over the
-			// FTS5 index and the live vectors. Handing it back for a historical
-			// request would answer "how did the rows rank at T" with the ranking
-			// they have now, under a request that named T — the one outcome a
-			// caller cannot detect from the payload, since it carries no
-			// qualifier and no trace.
-			if asOf != nil {
-				return nil, nil, fmt.Errorf("explain cannot describe a historical (as_of) read: it reports the current ranking, "+
-					"over the search index and the embeddings as they stand now. Drop as_of to diagnose the present ranking, "+
-					"or drop explain to read the store as it stood at %s", asOf.Format(time.RFC3339))
+			// The assembler handles as_of by binding Now to the requested instant,
+			// so the trace describes the ranking at that instant. No special refusal.
+			candidates, ok := s.store.(assembleCapableStore)
+			if !ok {
+				return nil, nil, fmt.Errorf("ghost_memory_search: store does not support candidate retrieval")
 			}
-			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
-				assemble.RetrievalWindow(searchRequest), scopeFilter)
-			if xErr != nil {
-				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
+			result, err := assemble.Run(ctx, candidates, searchRequest)
+			if err != nil {
+				return nil, nil, fmt.Errorf("explain: assembler failed: %w", err)
 			}
-			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
-			}
-			if args.Retention != "" {
-				ex.Notes = append(ex.Notes, "a retention filter is not applied to these rows either: they are the retrieval window the formatted path searches, before the tier filter runs, so a row marked included may not be in that answer")
-			}
-			payload, mErr := json.MarshalIndent(ex, "", "  ")
+			payload, mErr := assemble.ExplainFromTraceJSON(result.Trace, searchRequest, result.Items)
 			if mErr != nil {
-				return nil, nil, fmt.Errorf("encode explanation: %w", mErr)
+				return nil, nil, fmt.Errorf("explain: encode failed: %w", mErr)
 			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},

@@ -464,21 +464,22 @@ func candidateRequest(req Request) memory.CandidateRequest {
 	window := retrievalWindow(req)
 	depth := window * legDepthFactor
 	return memory.CandidateRequest{
-		ProjectID: req.ProjectID,
-		Mode:      projectMode(req),
-		Query:     req.Query,
-		QueryVec:  req.QueryVec,
-		Scope:     req.Scope,
-		Category:  req.Category,
-		Condition: req.Condition,
-		Params:    resolvedParams(req),
-		Now:       req.Now,
+		ProjectID:          req.ProjectID,
+		Mode:               projectMode(req),
+		Query:              req.Query,
+		QueryVec:           req.QueryVec,
+		Scope:              req.Scope,
+		Category:           req.Category,
+		Condition:          req.Condition,
+		Params:             resolvedParams(req),
+		Now:                req.Now,
 		// The store treats AsOf as authoritative, so it is carried rather than
 		// re-derived: Run has already bound Now to the same instant, and passing
 		// only one of the two would leave the store guessing which is the clock.
-		AsOf:    req.AsOf,
-		Fetch:   memory.Fetch{FTSTopK: depth, VectorTopK: depth, Limit: window},
-		Passive: passivePolicies(req),
+		AsOf:               req.AsOf,
+		Fetch:              memory.Fetch{FTSTopK: depth, VectorTopK: depth, Limit: window},
+		Passive:            passivePolicies(req),
+		DeferScopeFilter:   true,
 	}
 }
 

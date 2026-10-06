@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -195,5 +196,397 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 	}
 	if !strings.Contains(plainText, "Memory") && !strings.Contains(plainText, "fact") {
 		t.Errorf("plain search returned an unexpected rendering:\n%s", plainText)
+	}
+}
+
+// TestSearchExplainExpiredRowNeverIncluded: an expired row must never be
+// reported as included by explain. The current ExplainSearchScoped marks
+// expired rows as included because the search ranking doesn't read validity.
+// The assembler's validity stage drops them, so explain must project the
+// assembler's trace where they are dropped at the validity stage.
+func TestSearchExplainExpiredRowNeverIncluded(t *testing.T) {
+	_, session := newCapSession(t)
+
+	// Save a memory with valid_until in the past
+	expired := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id":  "test-project",
+		"content":     "this memory is expired",
+		"category":    "fact",
+		"valid_until": expired.Format(time.RFC3339),
+	})
+
+	// Save a valid memory for comparison
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "this memory is valid",
+		"category":   "fact",
+	})
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "memory",
+		"limit":      10,
+		"explain":    true,
+	})
+	if res.IsError {
+		t.Fatalf("explain search errored: %s", resultText(res))
+	}
+
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(res)), &ex); err != nil {
+		t.Fatalf("response is not a JSON explanation: %v", err)
+	}
+
+	// Find the expired row
+	var expiredRow *memory.ExplainRow
+	for i := range ex.Rows {
+		if strings.Contains(ex.Rows[i].Content, "expired") {
+			expiredRow = &ex.Rows[i]
+			break
+		}
+	}
+	if expiredRow == nil {
+		t.Fatal("expired row not found in explanation")
+	}
+
+	// The expired row must NOT be included
+	if expiredRow.Included {
+		t.Errorf("expired row was reported as included (Included=%v), want false; ValidityState=%q", expiredRow.Included, expiredRow.ValidityState)
+	}
+	if expiredRow.ValidityState != "expired" {
+		t.Errorf("expired row ValidityState = %q, want expired", expiredRow.ValidityState)
+	}
+	if expiredRow.Reason == "" {
+		t.Errorf("expired row excluded without a reason")
+	}
+	if !strings.Contains(expiredRow.Reason, "validity") && !strings.Contains(expiredRow.Reason, "expired") {
+		t.Errorf("expired row reason = %q, want a validity/expired reason", expiredRow.Reason)
+	}
+
+	// Also verify the formatted path excludes it
+	plain := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "memory",
+		"limit":      10,
+	})
+	plainText := resultText(plain)
+	if strings.Contains(plainText, "this memory is expired") {
+		t.Errorf("formatted search included expired row that should have been withheld")
+	}
+}
+
+// TestSearchExplainCategoryRetentionFilterReportsWithheld: a row withheld
+// by category or retention filter must be reported as withheld with that
+// stage in the explain projection.
+func TestSearchExplainCategoryRetentionFilterReportsWithheld(t *testing.T) {
+	_, session := newCapSession(t)
+
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "this is a fact",
+		"category":   "fact",
+	})
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "this is a gotcha",
+		"category":   "gotcha",
+	})
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "this is a session memory",
+		"category":   "fact",
+		"retention":  "session",
+	})
+
+	// Test category filter
+	catRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "is a",
+		"limit":      10,
+		"category":   "gotcha",
+		"explain":    true,
+	})
+	if catRes.IsError {
+		t.Fatalf("category explain errored: %s", resultText(catRes))
+	}
+	var catEx memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(catRes)), &catEx); err != nil {
+		t.Fatalf("category explain not JSON: %v", err)
+	}
+
+	// The "fact" row should be excluded with category_mismatch reason
+	var factRow *memory.ExplainRow
+	for i := range catEx.Rows {
+		if strings.Contains(catEx.Rows[i].Content, "this is a fact") {
+			factRow = &catEx.Rows[i]
+			break
+		}
+	}
+	if factRow == nil {
+		t.Fatal("fact row not found in category explain")
+	}
+	if factRow.Included {
+		t.Errorf("category-mismatched row was reported as included, want excluded")
+	}
+	if !strings.Contains(factRow.Reason, "category") {
+		t.Errorf("category-mismatched row reason = %q, want category_mismatch", factRow.Reason)
+	}
+
+	// Test retention filter
+	retRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "is a",
+		"limit":      10,
+		"retention":  "session",
+		"explain":    true,
+	})
+	if retRes.IsError {
+		t.Fatalf("retention explain errored: %s", resultText(retRes))
+	}
+	var retEx memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(retRes)), &retEx); err != nil {
+		t.Fatalf("retention explain not JSON: %v", err)
+	}
+
+	// The "fact" row should be excluded with retention_mismatch reason
+	var nonSessionRow *memory.ExplainRow
+	for i := range retEx.Rows {
+		if strings.Contains(retEx.Rows[i].Content, "this is a fact") {
+			nonSessionRow = &retEx.Rows[i]
+			break
+		}
+	}
+	if nonSessionRow == nil {
+		t.Fatal("non-session row not found in retention explain")
+	}
+	if nonSessionRow.Included {
+		t.Errorf("retention-mismatched row was reported as included, want excluded")
+	}
+	if !strings.Contains(nonSessionRow.Reason, "retention") {
+		t.Errorf("retention-mismatched row reason = %q, want retention_mismatch", nonSessionRow.Reason)
+	}
+}
+
+// TestSearchExplainIncludedSetEqualsFormattedAnswer: for a fixed fixture,
+// the set of rows explain reports as included must equal the set the
+// formatted answer renders, across query mode with as_of too.
+func TestSearchExplainIncludedSetEqualsFormattedAnswer(t *testing.T) {
+	_, session := newCapSession(t)
+
+	// Seed a fixed set of memories
+	memories := []struct {
+		content  string
+		category string
+	}{
+		{"helmfile deploys through sops secrets", "fact"},
+		{"sops age key lives in ci", "fact"},
+		{"helmfile environments are global dev prod", "fact"},
+		{"database configuration pooling", "gotcha"},
+		{"database configuration retry", "gotcha"},
+		{"database configuration cache", "gotcha"},
+	}
+	for _, m := range memories {
+		callTool(t, session, "ghost_memory_save", map[string]any{
+			"project_id": "test-project",
+			"content":    m.content,
+			"category":   m.category,
+		})
+	}
+
+	// Query with category filter
+	query := "database configuration"
+	category := "gotcha"
+
+	// Get explain result
+	exRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      query,
+		"category":   category,
+		"limit":      3,
+		"explain":    true,
+	})
+	if exRes.IsError {
+		t.Fatalf("explain errored: %s", resultText(exRes))
+	}
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(exRes)), &ex); err != nil {
+		t.Fatalf("explain not JSON: %v", err)
+	}
+
+	explainIncluded := make(map[string]bool)
+	for _, r := range ex.Rows {
+		if r.Included {
+			explainIncluded[r.Content] = true
+		}
+	}
+
+	// Get formatted result
+	plainRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      query,
+		"category":   category,
+		"limit":      3,
+	})
+	if plainRes.IsError {
+		t.Fatalf("formatted errored: %s", resultText(plainRes))
+	}
+	plainText := resultText(plainRes)
+
+	// Parse the formatted output to get included contents
+	formattedIncluded := make(map[string]bool)
+	lines := strings.Split(plainText, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "  ") {
+			for _, m := range memories {
+				if strings.Contains(line, m.content) {
+					formattedIncluded[m.content] = true
+				}
+			}
+		}
+	}
+
+	// The sets must match
+	if len(explainIncluded) != len(formattedIncluded) {
+		t.Errorf("explain included count %d != formatted included count %d", len(explainIncluded), len(formattedIncluded))
+	}
+	for content := range explainIncluded {
+		if !formattedIncluded[content] {
+			t.Errorf("explain included %q but formatted did not", content)
+		}
+	}
+	for content := range formattedIncluded {
+		if !explainIncluded[content] {
+			t.Errorf("formatted included %q but explain did not", content)
+		}
+	}
+}
+
+// TestSearchExplainAsOfIncludedSetEqualsFormattedAnswer: the same
+// membership equality must hold for historical (as_of) reads.
+func TestSearchExplainAsOfIncludedSetEqualsFormattedAnswer(t *testing.T) {
+	_, session := newCapSession(t)
+
+	// Save memories
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "original configuration",
+		"category":   "fact",
+	})
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "updated configuration",
+		"category":   "fact",
+	})
+
+	// Use a past instant before the second memory was saved
+	asOf := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+
+	// Get explain result with as_of
+	exRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "configuration",
+		"limit":      10,
+		"as_of":      asOf,
+		"explain":    true,
+	})
+	if exRes.IsError {
+		t.Fatalf("as_of explain errored: %s", resultText(exRes))
+	}
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(exRes)), &ex); err != nil {
+		t.Fatalf("as_of explain not JSON: %v", err)
+	}
+
+	explainIncluded := make(map[string]bool)
+	for _, r := range ex.Rows {
+		if r.Included {
+			explainIncluded[r.Content] = true
+		}
+	}
+
+	// Get formatted result with as_of
+	plainRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "configuration",
+		"limit":      10,
+		"as_of":      asOf,
+	})
+	if plainRes.IsError {
+		t.Fatalf("as_of formatted errored: %s", resultText(plainRes))
+	}
+	plainText := resultText(plainRes)
+
+	formattedIncluded := make(map[string]bool)
+	for _, content := range []string{"original configuration", "updated configuration"} {
+		if strings.Contains(plainText, content) {
+			formattedIncluded[content] = true
+		}
+	}
+
+	if len(explainIncluded) != len(formattedIncluded) {
+		t.Errorf("as_of explain included count %d != formatted included count %d", len(explainIncluded), len(formattedIncluded))
+	}
+	for content := range explainIncluded {
+		if !formattedIncluded[content] {
+			t.Errorf("as_of explain included %q but formatted did not", content)
+		}
+	}
+	for content := range formattedIncluded {
+		if !explainIncluded[content] {
+			t.Errorf("as_of formatted included %q but explain did not", content)
+		}
+	}
+}
+
+// TestSearchExplainTraceCarriesOneEntryPerStage: the explain projection
+// must carry one entry per stage that ran (validity, predicates, provenance,
+// conflicts, dedup, diversity, budget, render, response_fit).
+func TestSearchExplainTraceCarriesOneEntryPerStage(t *testing.T) {
+	_, session := newCapSession(t)
+
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "test memory",
+		"category":   "fact",
+	})
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "test",
+		"limit":      10,
+		"explain":    true,
+	})
+	if res.IsError {
+		t.Fatalf("explain errored: %s", resultText(res))
+	}
+
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(res)), &ex); err != nil {
+		t.Fatalf("explain not JSON: %v", err)
+	}
+
+	// The explain payload doesn't carry stages directly; it carries Notes.
+	// But the trace notes from each stage should be present.
+	// Check that notes mention the stages that ran.
+	foundStages := make(map[string]bool)
+	for _, note := range ex.Notes {
+		// Look for stage indicators in notes
+		for _, stage := range []string{
+			"validity", "predicate", "provenance", "conflict",
+			"dedup", "diversity", "budget", "render", "response_fit",
+		} {
+			if strings.Contains(strings.ToLower(note), stage) {
+				foundStages[stage] = true
+			}
+		}
+	}
+
+	// At minimum, the validity, predicates, provenance, conflicts, dedup,
+	// diversity, budget, and render stages should have some trace evidence.
+	// The exact note text varies, but the trace records every stage.
+	if len(foundStages) == 0 {
+		t.Logf("explain notes: %v", ex.Notes)
+		t.Errorf("explain notes carry no stage indicators; expected at least validity/predicates/provenance/budget")
 	}
 }

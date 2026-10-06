@@ -65,6 +65,7 @@ type Signals struct {
 	Base, DecayFactor   float64
 	AgeDays             float64
 	CreatedAt           time.Time
+	Content             string
 	ProjectMatch        bool
 	ScopeMatched        bool
 	ScopeKeysCompared   []string
@@ -81,6 +82,11 @@ type Signals struct {
 	// two assignments that compute the contributions together.
 	ProvenanceWeight       string
 	ProvenanceContribution float64
+	// RowProject is the project the row belongs to, as the leg supplied it.
+	// It is what makes ProjectMatch checkable alongside ScopeMatched: a reader
+	// that sees project_match=false and row_project="_global" knows the row was
+	// admitted by the shared-row predicate rather than by a project mismatch.
+	RowProject string
 	// Evidence is what supports the memory: how many observations the store holds
 	// for it, and how many of them carry a verification. It is RECORDED, never
 	// acted on -- the weight above is what would act, and it is pinned at 1.0 --

@@ -1085,7 +1085,7 @@ func TestMCPLifecycles(t *testing.T) {
 		// it never saw (#580).
 		mustNotContain(t, "scoped search (staging, only a production row)", empty, "30s in production")
 		mustNotContain(t, "scoped search (staging, only a production row)", empty, "No matching memories found")
-		mustContain(t, "scoped search (staging, only a production row)", empty, "drop the scope filter")
+		mustContain(t, "scoped search (staging, only a production row)", empty, "1 candidate rows were removed and none reached the answer: predicates 1")
 
 		// And the scopes are on disk as asked, not just in the answer.
 		for _, tc := range []struct{ id, want string }{{prod, "production"}, {dev, "development"}} {

@@ -142,6 +142,7 @@ func runValidity(p *pipeline) {
 			p.dropped[c.ID] = v.state
 			p.droppedBy[stageValidity]++
 			p.trace.decide(c.ID, stageValidity, v.state, c.Score)
+			p.trace.Signals[c.ID] = sig
 			continue
 		}
 		if len(v.unparseable) > 0 {
@@ -567,8 +568,10 @@ func (p *pipeline) signal(c memory.Candidate) Signals {
 		DecayFactor:  c.Decay,
 		AgeDays:      c.AgeDays,
 		CreatedAt:    parseStamp(c.CreatedAt),
+		Content:      c.Content,
 		ProjectMatch: true,
 		ScopeMatched: true,
+		RowProject:   c.ProjectID,
 	}
 }
 

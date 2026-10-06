@@ -87,6 +87,11 @@ type CandidateRequest struct {
 	// refusal a passive+as_of request would be answered by the historical path with
 	// its policies discarded and a window its caller never stated.
 	Passive []SlicePolicy
+	// DeferScopeFilter tells the retriever to skip scopeEligiblePool and return
+	// the widened candidate set with all scope verdicts recorded in the trace,
+	// so the assembler can apply the filter at stage 3. This ensures explain
+	// can report scope exclusions with the correct stage.
+	DeferScopeFilter bool
 }
 
 // Fetch is the retrieval depth. FTSTopK and VectorTopK are the per-leg depths
@@ -406,7 +411,16 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		return nil, err
 	}
 
-	pool := scopeEligiblePool(fuseCandidatePool(fts.rows, vec.rows, p), p)
+	fused := fuseCandidatePool(fts.rows, vec.rows, p)
+	var pool []*hybridCandidate
+	if req.DeferScopeFilter {
+		// The assembler will apply scope filtering at stage 3, so return the
+		// full fused pool with scope verdicts unapplied. This lets the assembler
+		// record scope exclusions in its own trace with the correct stage.
+		pool = fused
+	} else {
+		pool = scopeEligiblePool(fused, p)
+	}
 	if len(pool) == 0 {
 		set.EdgesStatus = EdgeStatus{Status: edgesUnavailable}
 		return set, nil

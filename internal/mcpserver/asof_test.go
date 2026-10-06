@@ -1,9 +1,12 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // The instants the as_of tests read at. The store under a test is written now, so
@@ -212,24 +215,39 @@ func TestAsOfToolArgumentIsOptional(t *testing.T) {
 	}
 }
 
-// TestSearchExplainRefusedWithAsOf: the explain branch is the store's own
-// ExplainSearchScoped — a diagnosis of the CURRENT ranking, over the search index
-// and the live vectors — and it runs before the assembler. Answering it for a
-// historical request would return a present-day ranking with no qualifier and no
-// trace to say so, which is the one outcome a caller cannot detect from the
-// payload.
-func TestSearchExplainRefusedWithAsOf(t *testing.T) {
+// TestSearchExplainWithAsOf: the explain branch now uses the assembler which
+// correctly handles as_of by binding Now to the requested instant. The trace
+// describes the ranking at that instant.
+func TestSearchExplainWithAsOf(t *testing.T) {
 	_, session := newCapSession(t)
+	callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    "memory at time T",
+		"category":   "fact",
+	})
+
 	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
-		"query":      "anything",
+		"query":      "memory",
 		"as_of":      asOfToolFuture,
 		"explain":    true,
 	}))
-	if !strings.Contains(out, "explain cannot describe a historical") {
-		t.Errorf("explain with as_of returned %q, want a refusal: the payload is a present-day ranking", out)
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(out), &ex); err != nil {
+		t.Fatalf("explain with as_of returned invalid JSON: %v\n%s", err, out)
 	}
-	// explain alone is untouched.
+	// The trace should record the historical read
+	foundHistorical := false
+	for _, note := range ex.Notes {
+		if strings.Contains(note, "historical read at") {
+			foundHistorical = true
+			break
+		}
+	}
+	if !foundHistorical {
+		t.Errorf("explain with as_of missing historical read note: %v", ex.Notes)
+	}
+	// explain alone still works
 	plain := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
 		"query":      "anything",

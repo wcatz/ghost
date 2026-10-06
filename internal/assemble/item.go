@@ -31,6 +31,7 @@ type Item struct {
 	ResolvedAt            *time.Time
 	ValidFrom, ValidUntil *time.Time
 	VerifiedAt            *time.Time
+	Retention             string
 	// ValidityState is valid, future, expired, unverified or unset.
 	ValidityState string
 	Confidence    *float64
@@ -609,10 +610,23 @@ func itemOf(c memory.Candidate) Item {
 		Score:      c.Score,
 		Source:     c.Source,
 		Tokens:     tokenEstimate(len(c.Content)),
+		Retention:  c.Retention,
 	}
 	if c.ResolvedAt != nil {
 		resolved := parseStamp(*c.ResolvedAt)
 		it.ResolvedAt = &resolved
+	}
+	if c.ValidFrom != nil {
+		v := parseStamp(*c.ValidFrom)
+		it.ValidFrom = &v
+	}
+	if c.ValidUntil != nil {
+		v := parseStamp(*c.ValidUntil)
+		it.ValidUntil = &v
+	}
+	if c.VerifiedAt != nil {
+		v := parseStamp(*c.VerifiedAt)
+		it.VerifiedAt = &v
 	}
 	return it
 }
