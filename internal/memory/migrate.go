@@ -422,11 +422,13 @@ func migrateV6(tx *sql.Tx) error {
 	return nil
 }
 
-// migrateV7 adds memories.resolve_kept_hash: the content hash recorded when
-// resolve last judged a memory KEEP, so a converged pass can skip re-asking
-// the classifier. A nullable column would work too, but NOT NULL with an empty
-// string default matches the column's meaning — empty means "never judged
-// KEEP" — and needs no special-casing in the store.
+// migrateV7 adds memories.resolve_kept_hash: the key resolve records when it
+// last judged a memory KEEP — the content hash, combined with the negative
+// audit evidence the verdict was judged with when there was any (#880) — so a
+// converged pass can skip re-asking the classifier. A nullable column would
+// work too, but NOT NULL with an empty string default matches the column's
+// meaning — empty means "never judged KEEP" — and needs no special-casing in
+// the store.
 func migrateV7(tx *sql.Tx) error {
 	exists, err := columnExists(tx, "memories", "resolve_kept_hash")
 	if err != nil {

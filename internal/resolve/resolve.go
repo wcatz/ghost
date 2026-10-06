@@ -9,9 +9,15 @@
 // adjudicates the rest in batches of up to eight with a numbered
 // KEEP/RESOLVED question (biased to KEEP, and a RESOLVED must name what closed
 // the note), and — with apply — the confirmed set is stamped via SetResolved
-// while newly-judged KEEP verdicts are cached by content hash in
-// memories.resolve_kept_hash so a converged project makes no classifier calls at
-// all. The LLM Classifier implementation lives in resolution.go; the hosting
+// while newly-judged KEEP verdicts are stamped into memories.resolve_kept_hash
+// (KeepStamp: the content hash when the verdict saw no negative audit evidence,
+// that hash combined with the evidence when it did) so a converged project makes
+// no classifier calls at all — while still paying the one bounded evidence read
+// (#880) that lets a contradiction recorded after a KEEP re-ask it exactly once.
+// "Exactly once" is a promise about a verdict that comes BACK: an UNKNOWN
+// records nothing, so a note the parser cannot read is asked again — and billed
+// again — on every pass until it can.
+// The LLM Classifier implementation lives in resolution.go; the hosting
 // binary supplies a CLI-harness provider (see internal/ai). The stop hook spawns
 // `ghost lifecycle --project <id>` as a detached background process
 // (internal/mcpinit/stophook.go), whose resolve phase runs this command with
@@ -95,6 +101,16 @@ type Classifier interface {
 // everywhere else. Bumping would re-ask every cached KEEP in every project for
 // that, which is the far larger cost.
 //
+// Issue #880 did NOT bump it either, and for the mirror-image reason: the
+// evidence a stamp carries is in the STAMP (KeepStamp), not in the version, so
+// the bare content hash an existing entry holds is still exactly what
+// KeepStamp(content, no evidence) produces — every stored hash stays a valid
+// cache hit for content the audit has never doubted, which is most of every
+// corpus. Content the audit HAS contradicted does not match its entry and is
+// re-asked once and re-stamped, which is the behaviour #880 wants and which a
+// prefix bump would also produce only by re-asking the whole un-doubted corpus
+// first.
+//
 // The value itself now lives in memory.ContentHashVersion, because Ghost stamps
 // one hash and this cache is one of its two readers: retrieval_audit's
 // content_hash carries the same digest, so the two can never be renamed apart.
@@ -111,6 +127,72 @@ func ContentHash(content string) string {
 	return memory.ContentHash(content)
 }
 
+// KeepStamp is the KEEP-cache key for ONE judged KEEP, and it carries both
+// halves of the question the gate asks (#880): has this content been judged,
+// and has anything doubted it since?
+//
+// With no negative verdict it is memory.ContentHash(content) BYTE FOR BYTE —
+// so every hash written before #880 is still a hash this function produces, an
+// un-doubted corpus keeps its existing cache entries, and keepCacheHashVersion
+// needed no bump for this change. That is the whole reason the evidence rides
+// in the stamp rather than replacing the key: the content hash alone answers
+// "was this judged", and only the suffix says "with what in front of it".
+//
+// With evidence the suffix is a fixed fingerprint of the two negative counts
+// and the latest negative verdict's stamp: `%s:%d:%d:%s` (hash, contradicted,
+// superseded_in_session, LastAt). LastAt rather than the reader's rowid
+// tie-break because that rowid is not exposed past UsefulnessEvidence — the
+// counts alone would not move when a second verdict lands inside the same
+// second as the first, and the stamp is the only thing that can. An empty
+// LastAt is a real value (a verdict recorded without a stamp) and is stored
+// as the empty suffix it is.
+//
+// The figures here can only come from the two NEGATIVE buckets, because that
+// is all UsefulnessByMemory returns: `used` and `ignored` are filtered in SQL
+// before the reader sees them, so a memory that is merely retrieved often can
+// never move its own stamp — the #284 popularity loop closed at the reader
+// rather than at this function, which would otherwise have to be trusted to
+// exclude it.
+//
+// It is deterministic over (content, evidence), which is what makes "one
+// re-ask per new verdict" a promise rather than a hope: the same pair always
+// produces the same key, so a KEEP re-stamped over the evidence it was judged
+// with is skipped until the evidence actually changes. The format is never
+// parsed — only compared — and the only place a value is stored is
+// memories.resolve_kept_hash.
+func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
+	base := ContentHash(content)
+	if ev.Contradicted == 0 && ev.SupersededInSession == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s:%d:%d:%s", base, ev.Contradicted, ev.SupersededInSession, ev.LastAt)
+}
+
+// askedWithEvidence renders the batch the classifier sees: each memory's own
+// content, with that memory's negative audit verdict appended as ONE line when
+// the audit holds one (#880). A nil map — an empty audit, or a read that failed
+// and the caller failed open — appends nothing, so those notes reach the model
+// as exactly the bytes they reached it as before this existed.
+//
+// The line is appended to the CONTENT rather than passed beside it so it lands
+// inside the «...» the classifier's own quoteData renders and is read under that
+// rule with the rest of the note rather than as a line of instructions from the
+// harness. It is also the reason this is a shared function and not two loops:
+// Run and Reassess both stamp KEEP verdicts with KeepStamp over the same
+// evidence, and a stamp that says a verdict was judged with the evidence in
+// front of it is only true when the ask actually carried it. One renderer, so
+// the two passes cannot drift into stamping evidence the judge never saw.
+func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.UsefulnessEvidence) []string {
+	out := make([]string, len(mems))
+	for i, m := range mems {
+		out[i] = m.Content
+		if line := evidence[m.ID].Line(); line != "" {
+			out[i] = out[i] + "\n" + line
+		}
+	}
+	return out
+}
+
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
 // testability.
 type resolveStore interface {
@@ -121,10 +203,28 @@ type resolveStore interface {
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 	// UsefulnessByMemory is #648's negative evidence: what the retrieval audit has
-	// recorded about each memory. It is on the ordinary pass's store and NOT on
-	// reassessStore, because the repair pass exists to UNDO resolutions and the
-	// evidence points the other way — telling a repair that a memory was
-	// contradicted three times argues for leaving it resolved.
+	// recorded about each memory. It is on BOTH stores — this one and
+	// reassessStore — and #880 review finding 1 is what put it there.
+	//
+	// The exemption this comment used to record (the repair pass reading no
+	// evidence and comparing the BARE content hash) read the evidence as an
+	// argument: the repair exists to UNDO resolutions, so a note contradicted
+	// three times seemed like a note to leave alone. That is not what the map
+	// decides, and never was — a negative verdict RE-ASKS a note and the
+	// classifier decides, with the evidence attached, exactly as it decides
+	// everything else (#880's decision 1). What the exemption did decide was
+	// which key each pass wrote, and the two passes write ONE key: the repair
+	// stamping a bare hash the ordinary gate would not match made every
+	// repaired, contradicted note re-asked one lifecycle pass later — with the
+	// contradiction in front of the model, where a RESOLVED answer re-buries
+	// the note the operator just unburied. So both passes now read the map
+	// above their own gate, both append it to the ask through
+	// askedWithEvidence, and both stamp KeepStamp over it.
+	//
+	// The read still decides nothing on its own: an empty audit, a nil map
+	// from a failed read, or no evidence for a memory all leave the stamp as
+	// the plain content hash, so the evidence can only ever cost a re-ask,
+	// never buy a skip.
 	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
@@ -312,15 +412,23 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// Classify the remaining prefilter candidates; deterministically-demoted
 	// memories are excluded so a concurrent verdict can't land twice. The KEEP
 	// cache drops candidates whose content already earned a KEEP verdict, so a
-	// converged project makes no calls at all. The key is the content hash:
+	// converged project makes no calls at all. The key is the content hash —
 	// resolve's question is content-only, so tag/importance edits do not
-	// invalidate a cached verdict.
+	// invalidate a cached verdict — carried in a stamp that also covers the
+	// audit evidence the verdict was judged with (#880), so a contradiction
+	// recorded after the fact re-asks it exactly once.
 	keptHashes, err := store.ResolveKeptHashes(ctx, projectID)
 	if err != nil {
 		return res, nil, fmt.Errorf("load resolve kept hashes: %w", err)
 	}
-	var pending []memory.Memory
-	var pendingContents []string
+
+	// The gate set: prefilter candidates neither demoted nor settled by the
+	// veto — exactly the rows the cache gate below gets to decide. It is built
+	// BEFORE the evidence read so the read has a bound to hang off: a pass with
+	// nothing at this gate (no candidates, or nothing the veto did not settle)
+	// pays neither the read nor a call, and the veto's own counting and logging
+	// happen here rather than in the second loop so they are not done twice.
+	var gated []memory.Memory
 	for _, m := range cands {
 		if confirmedSet[m.ID] {
 			continue
@@ -336,26 +444,86 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			}
 			continue
 		}
-		if keptHashes[m.ID] == ContentHash(m.Content) {
+		gated = append(gated, m)
+	}
+
+	// #880: ONE read of the audit's negative evidence for the whole pass,
+	// taken BEFORE the cache gate, and only when something reaches the gate.
+	//
+	// This is the fix, and the bound is what makes its cost arguable. Before
+	// it, the read sat below the gate inside `if len(pending) > 0`, so a
+	// memory the cache dropped never saw the evidence at all — and the state
+	// that bites is the CONVERGED one, where most of the corpus is cached and
+	// therefore most of the corpus could never be told that the audit had
+	// since contradicted it. Reading here costs exactly one query on exactly
+	// the passes that could act on the answer: the only NEW payer is a pass
+	// where every candidate is already cached, which is one bounded read
+	// (measured in TestMeasuredCostOfTheConvergedPassEvidenceRead, reported
+	// with #880) and still zero classifier calls.
+	//
+	// The cost this does NOT bound is an UNKNOWN verdict, and it is worth
+	// stating here rather than leaving to the reader (#880 review finding 2):
+	// a stamp is written only for an explicit KEEP, so a note the parser
+	// cannot read leaves the stored stamp where it was, reaches this gate
+	// again next pass, and is asked and billed again for as long as it stays
+	// unparseable. Nothing about that is new — a parse failure must never
+	// become a cache entry (the default branch below) — but the evidence
+	// re-ask is the route that now reaches it, so the per-pass retry is a
+	// real, recurring cost on a note whose verdict keeps coming back UNKNOWN.
+	// "A contradiction re-asks it exactly once" counts verdicts that came
+	// back; TestAnUnknownVerdictRecordsNothingSoTheNoteIsAskedAgainNextPass
+	// pins the other half.
+	//
+	// It FAILS OPEN. The evidence is an addition to a judgement that already
+	// works without it, so a store that cannot answer costs the pass the
+	// annotation and nothing else; failing the pass would turn a missing
+	// audit into a missing maintenance phase, which makes the audit a
+	// dependency of resolve rather than an input to it. The direction of that
+	// failure is worth naming: with the map nil the gate below expects the
+	// BARE content hash, so a stamp written under evidence does not match and
+	// the note is re-asked un-annotated once and re-stamped plain — an
+	// unreadable audit errs toward re-asking, never toward trusting a verdict
+	// the pass cannot see the evidence for.
+	//
+	// The line is appended to the CONTENT, not passed beside it, so it lands
+	// inside the «...» the classifier's own quoteData renders and is read
+	// under that rule with the rest of the note rather than as a line of
+	// instructions from the harness. askedWithEvidence does that rendering for
+	// both passes, so the ask and the stamp below cannot drift apart.
+	var evidence map[string]memory.UsefulnessEvidence
+	if len(gated) > 0 {
+		read, evErr := store.UsefulnessByMemory(ctx, projectID)
+		if evErr != nil {
+			if logger != nil {
+				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
+			}
+			read = nil
+		}
+		evidence = read
+	}
+
+	var pending []memory.Memory
+	var pendingContents []string
+	for _, m := range gated {
+		// The stamp covers the evidence the KEEP was judged with (#880), so
+		// the gate answers two questions at once: has this content been judged
+		// (the content hash), and has anything since doubted it (the stamp's
+		// evidence fingerprint)? A cached KEEP with no negative verdict is the
+		// plain content hash byte for byte and skips exactly as it always did;
+		// one the audit has contradicted does not match, is put back in
+		// pending, and is asked again with the contradiction attached. It is a
+		// RE-ASK and never a rescue: the classifier decides with the evidence
+		// in front of it, as it decides everything else, and a negative
+		// verdict that resolves nothing changes no verdict here.
+		//
+		// One re-ask per new evidence, not one per pass: the KEEP that comes
+		// back is stamped with the same evidence in `newKept` below, so the
+		// next pass matches and skips — until the audit records another
+		// verdict, which moves the stamp once more. The exception is an
+		// UNKNOWN verdict, which writes nothing and so asks again next pass
+		// (see the cost model above).
+		if keptHashes[m.ID] == KeepStamp(m.Content, evidence[m.ID]) {
 			res.Skipped++
-			// THE LIMIT OF #648's EVIDENCE HERE, STATED BECAUSE IT IS ABOVE THIS
-			// LINE: a cached KEEP is dropped from the pending set BEFORE the audit's
-			// evidence is read, so a memory whose content already earned a KEEP never
-			// reaches the classifier again — and never reaches it WITH a contradiction
-			// either. In a converged corpus, which is the state a project reaches once
-			// the first pass has run, that is most of the corpus, so the evidence is
-			// delivered only to the memories this pass is already going to re-ask
-			// about. Resolve does not ALWAYS tell the classifier about a contradiction;
-			// it tells it about contradictions on candidates this pass is asking about
-			// anyway.
-			//
-			// The cache is deliberately NOT changed here. It is a content-keyed memo of
-			// a judgement resolve already paid for, and the key is deliberately the
-			// CONTENT alone so a retag or a re-weight re-asks nothing — which is
-			// correct for the cache's own purpose and wrong for this one, because an
-			// audit verdict arrives independently of the content. Making the evidence
-			// invalidate the cache is a change to what the cache MEANS, and the fix
-			// belongs beside it rather than inside this slice: #880.
 			continue
 		}
 		pending = append(pending, m)
@@ -366,42 +534,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	newKept := make(map[string]string)
 	var llmConfirmed int
 	if len(pending) > 0 {
-		// #648: one read of the audit's negative evidence for the whole pass,
-		// asked only once there is something to ask about. It is read here,
-		// after the pending set is known, so a converged project pays nothing —
-		// and it is one read over the project (its two bounded statements share
-		// one snapshot), never one query per candidate.
-		//
-		// It FAILS OPEN. The evidence is an addition to a judgement that already
-		// works without it, so a store that cannot answer costs the pass the
-		// annotation and nothing else; failing the pass would turn a missing
-		// audit into a missing maintenance phase, which makes the audit a
-		// dependency of resolve rather than an input to it.
-		//
-		// The line is appended to the CONTENT, not passed beside it, so it lands
-		// inside the «...» the classifier's own quoteData renders and is read
-		// under that rule with the rest of the note rather than as a line of
-		// instructions from the harness. ContentHash still keys on m.Content, so
-		// the KEEP cache is unaffected.
-		//
-		// Read this as a bound on what the evidence does, not a statement that the
-		// classifier hears about every contradiction: the cache gate above drops a
-		// memory with a cached KEEP before this read, so nothing here reaches a
-		// candidate this pass was not going to re-ask about anyway (#880).
-		evidence, evErr := store.UsefulnessByMemory(ctx, projectID)
-		if evErr != nil {
-			if logger != nil {
-				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
-			}
-			evidence = nil
-		}
-		asked := make([]string, len(pendingContents))
-		for i, m := range pending {
-			asked[i] = pendingContents[i]
-			if line := evidence[m.ID].Line(); line != "" {
-				asked[i] = asked[i] + "\n" + line
-			}
-		}
+		asked := askedWithEvidence(pending, evidence)
 		verdicts, err := cls.IsResolvedBatch(ctx, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d candidate(s): %w", len(pendingContents), err)
@@ -412,7 +545,10 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		for i, m := range pending {
 			switch verdicts[i] {
 			case VerdictKeep:
-				newKept[m.ID] = ContentHash(m.Content)
+				// Stamped over the evidence this KEEP was just judged with, so
+				// the next pass's gate matches it and skips (#880). With no
+				// evidence this IS the plain content hash, byte for byte.
+				newKept[m.ID] = KeepStamp(m.Content, evidence[m.ID])
 			case VerdictResolved:
 				res.Confirmed++
 				llmConfirmed++
@@ -420,7 +556,10 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			default:
 				// UNKNOWN (or an invalid classifier value) is not an implicit
 				// KEEP. Leave the memory unclassified so a later pass can ask
-				// it again instead of locking a parse failure into the cache.
+				// it again instead of locking a parse failure into the cache
+				// — which means the note is asked and billed on EVERY later
+				// pass until the parser reads it, an accepted cost of never
+				// caching a verdict nobody produced.
 				res.Unknown++
 			}
 		}

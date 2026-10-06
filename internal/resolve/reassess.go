@@ -28,6 +28,12 @@
 // The KEEP cache is honoured, for the same convergence reason the ordinary pass
 // honours it: content that already carries a current-version KEEP hash was
 // judged KEEP by these rules, so it is cleared without paying for the call again.
+// It is compared as resolve.KeepStamp over the SAME evidence the ordinary pass
+// reads, and a KEEP this pass returns is stamped with that evidence (#880 review
+// finding 1), because the two passes write and read one key: a stamp the ordinary
+// pass wrote over audit evidence is matched here rather than re-asked, and a note
+// the audit has contradicted is re-asked HERE — with that evidence in front of
+// the classifier, so the verdict this pass stamps is a verdict judged under it.
 package resolve
 
 import (
@@ -53,6 +59,16 @@ type reassessStore interface {
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	ClearResolved(ctx context.Context, projectID string, ids []string) (int, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
+	// UsefulnessByMemory is the same #648 negative evidence the ordinary pass
+	// reads, and #880 review finding 1 is why it is here at all. The old
+	// exemption — the repair comparing the BARE content hash because it read
+	// no evidence — made the two passes write and read different keys, and the
+	// shape that bites is ordinary: an operator repairs a note, and one
+	// lifecycle later the ordinary pass re-asks it with the contradiction
+	// attached, where a RESOLVED answer re-buries what the operator just
+	// undid. It reads the map ONCE for the pool, above the gate, and fails
+	// open (resolve.go states the read's cost and its failure direction).
+	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
 // ReassessResult summarizes a reassess pass. Unlike Result it has no "would
@@ -62,10 +78,10 @@ type ReassessResult struct {
 	Loaded        int // already-resolved eligible memories the pass considered
 	Demoted       int // already-resolved rows Run's free demotions still assert; left alone
 	Vetoed        int // settled KEEP by the deterministic veto, no classifier call
-	Cached        int // skipped: the content already carries a KEEP hash
+	Cached        int // skipped: the stored KEEP stamp matches the evidence the audit holds
 	ReKept        int // came back KEEP, so resolved_at is now wrong (veto + classifier)
 	StillResolved int // came back RESOLVED with a closed-by reason; stays resolved
-	Unknown       int // unparseable verdict; left resolved and re-offered next pass
+	Unknown       int // unparseable verdict; left resolved and re-offered by the next repair run
 	Cleared       int // rows actually cleared (0 in dry-run)
 	Pool          int // the project's already-resolved pool before any scope narrowed it
 	Misses        []ScopeMiss
@@ -153,15 +169,18 @@ func (h HeldMemory) Reason() string {
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
 // ALREADY stamped resolved_at, and returns the ones that now come back KEEP (in
 // load order). With apply it clears resolved_at on exactly those rows and
-// records the classifier's KEEP verdicts in the content-hash cache, so the
-// ordinary pass does not re-ask a note that was just repaired. Dry-run
-// (apply=false) writes nothing.
+// records the classifier's KEEP verdicts under KeepStamp over the same audit
+// evidence the ordinary pass reads, so the ordinary pass does not re-ask a note
+// that was just repaired. Dry-run (apply=false) writes nothing.
 //
 // A classifier error on any batch is fatal and clears nothing: a partial repair
 // would return notes to injection that the harness never judged. A failed clear
 // is fatal for the same reason — a repair that did not happen must not be
 // reported as one. A failed cache write only warns, because the repair itself
-// has already landed and losing derived state costs one re-ask next pass.
+// has already landed and losing derived state costs one re-ask next pass. A
+// failed EVIDENCE read is neither: it warns and the pass continues with a nil
+// map, which stamps the bare content hash and asks the note with no line
+// appended — a pass that cannot see the evidence claims only what it saw.
 func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, scope Scope, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
 	var res ReassessResult
 	pool, err := store.ResolvedCandidates(ctx, projectID)
@@ -200,6 +219,31 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// pool; only a vetoed note is looked up in it.
 	newerSubjects := indexSubjects(unresolved)
 
+	// #880 review finding 1: ONE read of the audit's negative evidence for the
+	// whole repair, taken BEFORE the gate and bounded to a pool with rows in
+	// it, exactly as Run bounds its own read (resolve.go carries the cost
+	// measurement). The repair needs it for one reason: the gate below and the
+	// stamp written further down are one key with the ordinary pass's, so both
+	// halves have to be built from the same evidence that pass reads.
+	//
+	// It FAILS OPEN for the same reason Run's does — an unreadable audit costs
+	// the pass the annotation, not the pass — and the direction of that failure
+	// is the safe one: with a nil map the gate expects the BARE content hash
+	// and the stamp written below is the bare content hash, so this pass claims
+	// only what it could read and errs toward asking rather than toward
+	// trusting a verdict made with evidence it never saw.
+	var evidence map[string]memory.UsefulnessEvidence
+	if len(loaded) > 0 {
+		read, evErr := store.UsefulnessByMemory(ctx, projectID)
+		if evErr != nil {
+			if logger != nil {
+				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
+			}
+			read = nil
+		}
+		evidence = read
+	}
+
 	// Settle the free decisions first: the veto and the KEEP cache both answer
 	// KEEP without a harness call. reKeptIDs collects every KEEP outcome, and
 	// the returned list is built from it in the store's own order below, so a
@@ -233,7 +277,25 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				continue
 			}
 		}
-		if keptHashes[m.ID] == ContentHash(m.Content) {
+		// ONE key with the ordinary pass (#880 review finding 1): the stored
+		// stamp is compared against KeepStamp over the evidence the audit
+		// holds right now, not against the bare content hash. A cached KEEP
+		// the audit has never doubted IS that bare hash byte for byte and
+		// skips exactly as it always did; one a contradiction has moved does
+		// not match, is put back in pending, and is asked HERE with that
+		// evidence appended (askedWithEvidence), because a stamp claiming a
+		// verdict was judged under evidence is only honest when the verdict
+		// really was. It is a RE-ASK and never a rescue: the classifier
+		// decides with the evidence in front of it, as it decides everything
+		// else. The stamp written for a KEEP this pass returns is built from
+		// the same evidence, so one new verdict costs one re-ask — until the
+		// audit records another, which moves the stamp once more. The
+		// exception is a verdict that comes back UNKNOWN: nothing is written,
+		// the stored stamp stands, and the note is asked again (and billed
+		// again) on the next repair run — resolved_at still stands, so the
+		// ordinary pass never sees it — for as long as the parser cannot
+		// read it.
+		if keptHashes[m.ID] == KeepStamp(m.Content, evidence[m.ID]) {
 			res.Cached++
 			reKeptIDs[m.ID] = true
 			continue
@@ -244,11 +306,15 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 
 	// newKept collects the classifier's KEEP verdicts; written only on apply.
 	// A row holdBack removes is deleted from it below: it is not being
-	// repaired, and a KEEP hash on a row Run will re-stamp anyway is state
+	// repaired, and a KEEP stamp on a row Run will re-stamp anyway is state
 	// that reads as a decision resolve never made.
 	newKept := make(map[string]string)
 	if len(pendingContents) > 0 {
-		verdicts, err := cls.IsResolvedBatch(ctx, pendingContents)
+		// The ask carries the evidence the stamp will claim the verdict was
+		// judged with — the same line, in the same place, the ordinary pass
+		// appends (askedWithEvidence), because the two passes write one key.
+		asked := askedWithEvidence(pending, evidence)
+		verdicts, err := cls.IsResolvedBatch(ctx, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d resolved candidate(s): %w", len(pendingContents), err)
 		}
@@ -258,13 +324,25 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		for i, m := range pending {
 			switch verdicts[i] {
 			case VerdictKeep:
-				newKept[m.ID] = ContentHash(m.Content)
+				// Stamped over the evidence this KEEP was just judged with,
+				// so the ordinary pass's gate matches it and skips (#880).
+				// With no evidence this IS the plain content hash, byte for
+				// byte. The judge saw the line above, so the stamp does not
+				// over-claim.
+				newKept[m.ID] = KeepStamp(m.Content, evidence[m.ID])
 				reKeptIDs[m.ID] = true
 			case VerdictResolved:
 				res.StillResolved++
 			default:
 				// UNKNOWN (or an invalid classifier value) is not an implicit
-				// KEEP: the note keeps resolved_at and is offered again.
+				// KEEP: the note keeps resolved_at, nothing is written, and
+				// the next repair offers it again — and bills for it again —
+				// for as long as the parser cannot read it. While
+				// resolved_at stands the ordinary pass never sees it, so the
+				// retry belongs to this pass alone. That is the pre-existing
+				// UNKNOWN contract (a parse failure must never become a cache
+				// entry), and it is why "re-asked exactly once" is a promise
+				// about a verdict that comes back.
 				res.Unknown++
 			}
 		}
