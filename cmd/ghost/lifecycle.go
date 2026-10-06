@@ -1283,6 +1283,27 @@ func runReflect() {
 		}
 	}
 
+	// #648: one bounded read of the audit's negative evidence for the whole run,
+	// and it FAILS OPEN for resolve's reason — consolidation is worth doing
+	// without it, so an unreadable audit costs the prompt the annotation and
+	// nothing else. Reading it here, before the input is built, is what makes it
+	// one query per run rather than one per memory.
+	//
+	// It is deliberately NOT part of InputSignature, so --skip-unchanged still
+	// skips a corpus whose only change is that it has since been audited: the gate
+	// would otherwise stop skipping on any store that records verdicts, which is
+	// a cost this slice would introduce. The evidence is an input to the
+	// judgement, not a change in the corpus. The exception is ALSO recorded in
+	// BuildReflectionPrompt's docstring, beside the rule it qualifies — that is
+	// where the next reader looks, and a rule stated there with no exception
+	// recorded is a rule this call site cannot overrule.
+	var usefulness map[string]memory.UsefulnessEvidence
+	if ev, evErr := store.UsefulnessByMemory(ctx, projectID); evErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: usefulness evidence unavailable: %v\n", evErr)
+	} else {
+		usefulness = ev
+	}
+
 	input := reflection.ReflectionInput{
 		ExistingMemories:  live,
 		CurrentContext:    currentContext,
@@ -1290,6 +1311,7 @@ func runReflect() {
 		ProjectLanguage:   projectLanguage,
 		ProjectName:       projectName,
 		OtherProjectNames: filteredNames,
+		Usefulness:        usefulness,
 		// The prompt tells the model what omitting an input costs, and that is
 		// the other side of this run's --allow-drops: without it an unreferenced
 		// memory is re-added verbatim, with it the memory is deleted.

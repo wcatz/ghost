@@ -115,6 +115,12 @@ type resolveStore interface {
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
+	// UsefulnessByMemory is #648's negative evidence: what the retrieval audit has
+	// recorded about each memory. It is on the ordinary pass's store and NOT on
+	// reassessStore, because the repair pass exists to UNDO resolutions and the
+	// evidence points the other way — telling a repair that a memory was
+	// contradicted three times argues for leaving it resolved.
+	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
 // linkScopeReader is the one method scopeCompatibleSupersedes needs. Both
@@ -327,6 +333,24 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		}
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Skipped++
+			// THE LIMIT OF #648's EVIDENCE HERE, STATED BECAUSE IT IS ABOVE THIS
+			// LINE: a cached KEEP is dropped from the pending set BEFORE the audit's
+			// evidence is read, so a memory whose content already earned a KEEP never
+			// reaches the classifier again — and never reaches it WITH a contradiction
+			// either. In a converged corpus, which is the state a project reaches once
+			// the first pass has run, that is most of the corpus, so the evidence is
+			// delivered only to the memories this pass is already going to re-ask
+			// about. Resolve does not ALWAYS tell the classifier about a contradiction;
+			// it tells it about contradictions on candidates this pass is asking about
+			// anyway.
+			//
+			// The cache is deliberately NOT changed here. It is a content-keyed memo of
+			// a judgement resolve already paid for, and the key is deliberately the
+			// CONTENT alone so a retag or a re-weight re-asks nothing — which is
+			// correct for the cache's own purpose and wrong for this one, because an
+			// audit verdict arrives independently of the content. Making the evidence
+			// invalidate the cache is a change to what the cache MEANS, and the fix
+			// belongs beside it rather than inside this slice: #880.
 			continue
 		}
 		pending = append(pending, m)
@@ -336,8 +360,44 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// newKept collects KEEP verdicts to cache; written only on apply.
 	newKept := make(map[string]string)
 	var llmConfirmed int
-	if len(pendingContents) > 0 {
-		verdicts, err := cls.IsResolvedBatch(ctx, pendingContents)
+	if len(pending) > 0 {
+		// #648: one read of the audit's negative evidence for the whole pass,
+		// asked only once there is something to ask about. It is read here,
+		// after the pending set is known, so a converged project pays nothing —
+		// and it is a single statement over the project, never one query per
+		// candidate.
+		//
+		// It FAILS OPEN. The evidence is an addition to a judgement that already
+		// works without it, so a store that cannot answer costs the pass the
+		// annotation and nothing else; failing the pass would turn a missing
+		// audit into a missing maintenance phase, which makes the audit a
+		// dependency of resolve rather than an input to it.
+		//
+		// The line is appended to the CONTENT, not passed beside it, so it lands
+		// inside the «...» the classifier's own quoteData renders and is read
+		// under that rule with the rest of the note rather than as a line of
+		// instructions from the harness. ContentHash still keys on m.Content, so
+		// the KEEP cache is unaffected.
+		//
+		// Read this as a bound on what the evidence does, not a statement that the
+		// classifier hears about every contradiction: the cache gate above drops a
+		// memory with a cached KEEP before this read, so nothing here reaches a
+		// candidate this pass was not going to re-ask about anyway (#880).
+		evidence, evErr := store.UsefulnessByMemory(ctx, projectID)
+		if evErr != nil {
+			if logger != nil {
+				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
+			}
+			evidence = nil
+		}
+		asked := make([]string, len(pendingContents))
+		for i, m := range pending {
+			asked[i] = pendingContents[i]
+			if line := evidence[m.ID].Line(); line != "" {
+				asked[i] = asked[i] + "\n" + line
+			}
+		}
+		verdicts, err := cls.IsResolvedBatch(ctx, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d candidate(s): %w", len(pendingContents), err)
 		}
