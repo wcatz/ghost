@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 # RUNNER IMAGE. Every job in .github/workflows/ names an EXPLICIT image rather
-# than a floating `-latest` label, and the only exceptions are the non-required
-# jobs that exist to try a candidate — the Linux pin is ubuntu-24.04.
+# than a floating `-latest` label, and the one exception is the non-required job
+# that exists to try a candidate — the Linux pin is ubuntu-24.04.
 # GitHub moves the `ubuntu-latest` label to Ubuntu 26 on 2026-10-19
 # (actions/runner-images#14748), and that is not a cosmetic change here: a
 # different toolchain, a different sqlite/libc, a different pwsh, and a
