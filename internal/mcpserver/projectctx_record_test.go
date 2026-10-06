@@ -445,7 +445,7 @@ func TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			st, _ := projectRecordStore(t)
 			_, session := validityServerFor(t, st)
-			saveGlobalValidityRow(t, session, projectContextSentinel, nil)
+			id := saveGlobalValidityRow(t, session, projectContextSentinel, nil)
 
 			out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": tc.projectID}))
 			if !strings.Contains(out, projectContextSentinel) {
@@ -471,8 +471,10 @@ func TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes(t *testing
 			if got.QueryHash != "" {
 				t.Errorf("query_hash = %q, want empty — a listing carried no question", got.QueryHash)
 			}
-			if len(got.Verdicts) != 1 || !got.Verdicts[0].Kept {
-				t.Errorf("verdicts = %+v, want the one rendered global row kept", got.Verdicts)
+			if len(got.Verdicts) != 1 || got.Verdicts[0].ID != id || !got.Verdicts[0].Kept {
+				t.Errorf("verdicts = %+v, want the one rendered global row %s kept — a verdict naming any other id "+
+					"would make the per-call figure in the audit a claim about a row this read never returned",
+					got.Verdicts, id)
 			}
 		})
 	}
