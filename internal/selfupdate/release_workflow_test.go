@@ -1661,7 +1661,7 @@ func runCatalogPRStep(t *testing.T, step workflowStep, stubEnv map[string]string
 // that refusal ended the job red, which also skipped the summary and
 // verification steps after it. The step must treat the refusal as an
 // outcome: exit 0, write the compare link a human opens instead, and say
-// whether a PR was opened.
+// whether a PR was opened (and whether the workflow created it).
 func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	step := findPluginStep(t, wf, catalogPRStepName)
@@ -1683,6 +1683,9 @@ func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 	if got := outputs["PR_OPENED"]; got != "no" {
 		t.Errorf("PR_OPENED = %q, want \"no\" — the step must say whether a PR was opened", got)
 	}
+	if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "no" {
+		t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"no\" — the workflow did not create a PR", got)
+	}
 	if _, ok := outputs["PR_URL"]; ok {
 		t.Errorf("PR_URL was written even though no PR was opened: %q", outputs["PR_URL"])
 	}
@@ -1695,7 +1698,8 @@ func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
 // from swallowing the happy path: when the repository does let the PR be
 // opened — a fork's workflow, or a setting change — the step must still
 // report the PR, and the compare link must still be available as the
-// fallback the summary can report.
+// fallback the summary can report. It also distinguishes the create path
+// (PR_CREATED_BY_WORKFLOW=yes) from finding an existing PR.
 func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	step := findPluginStep(t, wf, catalogPRStepName)
@@ -1711,6 +1715,9 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 		}
 		if got := outputs["PR_OPENED"]; got != "yes" {
 			t.Errorf("PR_OPENED = %q, want \"yes\"", got)
+		}
+		if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "yes" {
+			t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"yes\" — the workflow created this PR", got)
 		}
 		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
 			t.Errorf("PR_URL = %q", got)
@@ -1730,6 +1737,9 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 		}
 		if got := outputs["PR_OPENED"]; got != "yes" {
 			t.Errorf("PR_OPENED = %q, want \"yes\" — a PR is open for this pin", got)
+		}
+		if got := outputs["PR_CREATED_BY_WORKFLOW"]; got != "no" {
+			t.Errorf("PR_CREATED_BY_WORKFLOW = %q, want \"no\" — the workflow only updated an existing PR", got)
 		}
 		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
 			t.Errorf("PR_URL = %q", got)
@@ -1763,7 +1773,9 @@ func runSummaryStep(t *testing.T, step workflowStep, prOutputs map[string]string
 // TestTheManualMergeSummaryReportsTheRightLink runs the summary step after
 // the PR step, with the outputs the PR step actually wrote, and checks the
 // manual step it reports is the link that works: the PR when one is open,
-// the compare link when the creation was refused.
+// the compare link when the creation was refused. It distinguishes between
+// a PR the workflow created (needs approval click) and an existing PR the
+// workflow only updated (checks already running, no click).
 func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	prStep := findPluginStep(t, wf, catalogPRStepName)
@@ -1784,7 +1796,7 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 		}
 	})
 
-	t.Run("opened: the PR link is the manual step", func(t *testing.T) {
+	t.Run("opened by workflow: the PR link with approval click", func(t *testing.T) {
 		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
 			"STUB_PR_CREATE_EXIT":   "0",
 			"STUB_PR_CREATE_STDOUT": "https://github.com/wcatz/ghost/pull/889\n",
@@ -1796,6 +1808,29 @@ func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
 		}
 		if strings.Contains(body, "compare/main") {
 			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
+		}
+		if !strings.Contains(body, "Approve workflows to run") {
+			t.Errorf("the summary does not ask for the approval click for a workflow-created PR:\n%s", body)
+		}
+	})
+
+	t.Run("already open from an earlier run: PR link, no approval click", func(t *testing.T) {
+		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
+			"STUB_PR_LIST":     "889",
+			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
+		})
+		body := runSummaryStep(t, summary, outputs)
+		if !strings.Contains(body, "https://github.com/wcatz/ghost/pull/889") {
+			t.Errorf("the summary does not report the PR link:\n%s", body)
+		}
+		if strings.Contains(body, "compare/main") {
+			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
+		}
+		if strings.Contains(body, "Approve workflows to run") {
+			t.Errorf("the summary asks for approval click for an existing PR the workflow only updated:\n%s", body)
+		}
+		if !strings.Contains(body, "Merge once the three required checks pass") {
+			t.Errorf("the summary does not say to merge once checks pass:\n%s", body)
 		}
 	})
 }

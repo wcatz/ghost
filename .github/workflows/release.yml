@@ -629,6 +629,7 @@ jobs:
           EXISTING="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
           PR_URL=""
           PR_OPENED="no"
+          PR_CREATED_BY_WORKFLOW="no"
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --body-file /tmp/pr-body.md
             echo "updated existing catalog PR #${EXISTING}"
@@ -645,6 +646,7 @@ jobs:
               printf '%s\n' "$CREATE_LOG"
               PR_URL="$(gh pr view "$BRANCH" --json url --jq .url)"
               PR_OPENED="yes"
+              PR_CREATED_BY_WORKFLOW="yes"
             else
               printf '%s\n' "$CREATE_LOG"
               echo "::notice::the repository does not let GitHub Actions open the catalog PR; open ${COMPARE_URL} by hand — the summary below reports it as the manual step"
@@ -661,6 +663,7 @@ jobs:
           fi
           printf 'COMPARE_URL=%s\n' "$COMPARE_URL" >> "$GITHUB_OUTPUT"
           printf 'PR_OPENED=%s\n' "$PR_OPENED" >> "$GITHUB_OUTPUT"
+          printf 'PR_CREATED_BY_WORKFLOW=%s\n' "$PR_CREATED_BY_WORKFLOW" >> "$GITHUB_OUTPUT"
           if [ -n "$PR_URL" ]; then
             printf 'PR_URL=%s\n' "$PR_URL" >> "$GITHUB_OUTPUT"
           fi
@@ -672,11 +675,17 @@ jobs:
           {
             echo "### Catalog pin needs a manual merge"
             echo
-            if [ "${{ steps.open-pr.outputs.PR_OPENED }}" = "yes" ]; then
+            if [ "${{ steps.open-pr.outputs.PR_CREATED_BY_WORKFLOW }}" = "yes" ]; then
               echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
               echo "2. Click **Approve workflows to run** in the merge box — the checks"
               echo "   are held pending because the PR was created by the workflow"
               echo "3. Merge once the three required checks pass"
+            elif [ "${{ steps.open-pr.outputs.PR_OPENED }}" = "yes" ]; then
+              # An existing PR the workflow only updated (e.g. a human opened
+              # it from the compare link on a prior run, then the job re-ran).
+              # Its checks are already running — no approval hold applies.
+              echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
+              echo "2. Merge once the three required checks pass"
             else
               # The usual route in this repository: GitHub does not let
               # Actions create pull requests, so the PR step could not open
