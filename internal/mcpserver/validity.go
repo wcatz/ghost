@@ -157,8 +157,8 @@ func parseStampFields(args validityArgs) (memory.Validity, error) {
 //
 // This is the tool boundary's contract, not the column's: memories.confidence is
 // a bare REAL with no CHECK, and an imported portable artifact can still carry
-// anything (the value-shape detector that would catch it, #656, is not on main).
-// Nothing downstream corrects such a value either — stage 4's multiplier is
+// anything (the value-shape detector, #656, is on main and guards imports;
+// nothing downstream corrects such a value either — stage 4's multiplier is
 // pinned at 1.0 — so the renderer shows what the row says, and the one place a
 // caller can state a rating by hand is the one place that refuses a broken one.
 func parseConfidence(raw any) (*float64, error) {

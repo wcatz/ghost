@@ -9,11 +9,11 @@ import (
 // This is the wiring `internal/memory/history.go` was left for: #664 built
 // memory_history, and left `redactHistoryContent` as the identity function with a
 // `TODO(#656)` for the change that would install a detector through it. #656 has
-// landed — the write-path value guard covers every write path — and this file
-// fills that seam: init() below installs redactHistoryContent through
-// setHistoryRedactor, so every history row's content is passed through
-// `secret.Detect` before it is stored, which is what the append path's comments
-// claimed while it was still untrue.
+// landed — the value-shape detector every user-facing writer consults is in
+// place — and this file fills that seam: init() below installs
+// redactHistoryContent through setHistoryRedactor, so every history row's content
+// is passed through secret.Detect before it is stored, which is what the append
+// path's comments claimed while it was still untrue.
 
 // redactHistoryContent is the filter a history row's content column is written
 // through. It REPLACES rather than refuses, which is the seam's requirement and

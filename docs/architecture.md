@@ -951,8 +951,8 @@ prints it. Three things follow:
   function called by the append statement itself, so content is rewritten inside
   the one statement that copies the state out of `memories` rather than in a
   second pass that would leave an unredacted copy on disk. It is wired to
-  `internal/secret`'s `Detect` when [#656](https://github.com/wcatz/ghost/pull/656)
-  lands; until then it is the identity, and the plumbing is tested.
+  `internal/secret`'s `Detect` ([#656](https://github.com/wcatz/ghost/pull/656) has
+  landed), and the plumbing is tested.
 - **The pre-v17 gap is not a purge's job.** `migrateV17` records no starting row,
   so a memory that predates the table has no history until something writes one.
   The first write that would destroy its text files a `baseline` row first
@@ -1006,8 +1006,8 @@ assumed:
 - **The content filter is called only when one is installed.**
   `ghost_history_content` is a Go function reached through the driver, so calling
   it unconditionally means a cross-language call per appended row to do nothing
-  while #656 — the redactor it exists for — is not on main. With a redactor
-  installed the call is back, and that is the only case that pays.
+  while no redactor is installed. With a redactor installed the call is back,
+  and that is the only case that pays.
 
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.
