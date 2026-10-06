@@ -450,6 +450,9 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			if i+1 >= len(args) {
 				return "", "", "", fmt.Errorf("--project requires a value")
 			}
+			if args[i+1] == "" {
+				return "", "", "", fmt.Errorf("--project requires a value")
+			}
 			project, projectSet = args[i+1], true
 			i++
 		case "--source":
@@ -476,6 +479,9 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			}
 			if projectSet {
 				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+			}
+			if args[i] == "" {
+				return "", "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
 			}
 			project, projectSet = args[i], true
 		}
@@ -899,9 +905,18 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 			if i+1 >= len(args) {
 				return p, errors.New("--project requires a value")
 			}
+			if p.project != "" {
+				return p, errors.New("expected exactly one project")
+			}
+			if args[i+1] == "" {
+				return p, errors.New("--project requires a value")
+			}
 			p.project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
+			if p.project != "" {
+				return p, errors.New("expected exactly one project")
+			}
 			p.project = strings.TrimPrefix(args[i], "--project=")
 			if p.project == "" {
 				return p, errors.New("--project requires a value")
@@ -1748,13 +1763,23 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			if i+1 >= len(args) {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
+			if project != "" {
+				return "", "", false, false, 0, 0, nil, "", errors.New("expected exactly one project")
+			}
+			if args[i+1] == "" {
+				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
+			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
-			project = strings.TrimPrefix(args[i], "--project=")
-			if project == "" {
+			if project != "" {
+				return "", "", false, false, 0, 0, nil, "", errors.New("expected exactly one project")
+			}
+			v := strings.TrimPrefix(args[i], "--project=")
+			if v == "" {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
+			project = v
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
 				threshold = float32(v)
@@ -3679,6 +3704,9 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			return resolveArgs{}, errors.New("--only-file requires a path")
 		case !strings.HasPrefix(args[i], "-"):
 			if projectSeen {
+				return resolveArgs{}, errors.New("expected exactly one project")
+			}
+			if args[i] == "" {
 				return resolveArgs{}, errors.New("expected exactly one project")
 			}
 			out.project = args[i]

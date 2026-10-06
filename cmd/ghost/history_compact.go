@@ -75,12 +75,18 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 			if i+1 >= len(args) {
 				return opts, fmt.Errorf("flag %s needs a value", arg)
 			}
+			if opts.Project != "" {
+				return opts, fmt.Errorf("flag %s given more than once", arg)
+			}
 			i++
 			if args[i] == "" {
 				return opts, fmt.Errorf("flag %s needs a value", arg)
 			}
 			opts.Project = args[i]
 		case strings.HasPrefix(arg, "--project="):
+			if opts.Project != "" {
+				return opts, fmt.Errorf("flag --project given more than once")
+			}
 			value := strings.TrimPrefix(arg, "--project=")
 			if value == "" {
 				return opts, fmt.Errorf("flag --project needs a value")

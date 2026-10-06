@@ -189,6 +189,10 @@ func runProjectDelete() {
 				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
 				os.Exit(1)
 			}
+			if os.Args[i] == "" {
+				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
+				os.Exit(1)
+			}
 			projectName = os.Args[i]
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
