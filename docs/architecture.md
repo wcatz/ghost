@@ -1005,9 +1005,11 @@ assumed:
   takes an edit rather than happening quietly.
 - **The content filter is called only when one is installed.**
   `ghost_history_content` is a Go function reached through the driver, so calling
-  it unconditionally means a cross-language call per appended row to do nothing
-  while no redactor is installed. With a redactor installed the call is back,
-  and that is the only case that pays.
+  it unconditionally means a cross-language call per appended row to do nothing.
+  In production the redactor is always installed — `history_redactor.go`'s
+  `init()` registers it unconditionally — so every build pays the call; the only
+  no-filter state is the one `setHistoryRedactor(nil)` creates for the seam's
+  own tests, and `history.go:166-170` documents this explicitly.
 
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.
