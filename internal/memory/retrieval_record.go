@@ -216,12 +216,23 @@ func retrievalRecordKeepingMemory() string {
 
 // retrievalRecordRowsCap bounds the table as a whole, oldest row first.
 //
-// The cap is measured in CALLS because that is the unit the report needs: 5000
-// calls is a few weeks of an agent's searching, and a store that runs past it
-// loses the OLDEST evidence rather than the newest, so what survives is the
-// window an operator is actually looking at. It is a var because the cap's
-// policy is what the tests exercise, and a test that cannot lower the bound
-// cannot assert the eviction without writing 5000 rows.
+// The cap is measured in ROWS, which is what the eviction below enforces: it
+// deletes by rowid, so the table settles at the cap however its rows got there.
+// Calls and rows stopped being the same unit when #850 gave the project-context
+// surfaces a second read for their Global section, since one call of
+// `ghost://project/{id}/context` or `recall_project` then writes two rows, and
+// #581's `ghost://memories/global` is a fourth reader of that same seam. So the
+// bound is a few weeks of searching for a store whose calls mostly write one row,
+// and a SHORTER window in calls for a store whose project-context reads
+// dominate, because each of those spends two of them. Which of the two an
+// operator has is a fact about their own traffic, and the policy the bound
+// exists for is the same either way: a store that runs past it loses the OLDEST
+// evidence rather than the newest, so what survives is the window an operator is
+// actually looking at.
+//
+// It is a var because the cap's policy is what the tests exercise, and a test
+// that cannot lower the bound cannot assert the eviction without writing 5000
+// rows.
 var retrievalRecordRowsCap = 5000
 
 // errRetrievalNoProject reports a record with no project to attribute it to.
@@ -367,7 +378,7 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 		// key.
 		//
 		// What it costs, measured on this build's driver against a store at both
-		// caps (5000 calls, 50000 verdicts, a 7.5MiB audit table): ~5ms per
+		// caps (5000 record rows, 50000 verdicts, a 7.5MiB audit table): ~5ms per
 		// recorded call. retrieval_audit carries one index and it is not on
 		// record_rowid — TestRetrievalAuditsCarryOneIndex refuses the second one —
 		// so this is a sequential scan, and a delete keyed by record_rowid is

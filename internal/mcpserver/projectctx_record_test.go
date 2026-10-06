@@ -240,6 +240,116 @@ func TestTheProjectContextRecordCarriesNoMemoryText(t *testing.T) {
 	}
 }
 
+// TestTheGlobalMemoriesResourceRecordsItsRead: the `ghost://memories/global` resource
+// records, because it moved onto the assembler and #850's rule is that every surface
+// that assembles a context does.
+//
+// This is a behaviour CHANGE and not a wiring detail, so it is pinned rather than
+// assumed. Before #581 the resource read `_global` through `Store.GetTopMemories`,
+// which ranked and trimmed in SQL and wrote nothing at all; reaching the assembler
+// through `projectContextGlobals` means it now inherits
+// `assembleProjectContext`'s `req.Record`, so an agent reading the cross-project
+// memories appends a `retrieval_record` row where it used to append none. The
+// decision is to KEEP it — a resource read is a retrieval an agent acted on exactly
+// as much as a tool call is, and a listing the audit cannot see is a listing whose
+// per-source precision figures mean nothing — but a change nobody wrote down is a
+// change the next reader has to rediscover.
+//
+// ONE row is the count with teeth: this surface reads `_global` once, so a reader
+// that recorded per section or per candidate would write more. `_global` as the
+// project_id is the other half: it read that bucket, and attributing the row to
+// anything else would put a window of other projects' rows in that denominator.
+// The empty query_hash is the honest value for a call that carried no question, and
+// the kept ids are compared against the rows the RESOURCE RENDERED rather than the
+// rows the store holds — a record naming a row the block withheld would be a "used"
+// verdict for a memory nobody saw.
+func TestTheGlobalMemoriesResourceRecordsItsRead(t *testing.T) {
+	st, _ := projectRecordStore(t)
+	srv, session := validityServerFor(t, st)
+	id := saveGlobalValidityRow(t, session, projectContextSentinel, nil)
+
+	out := renderGlobalMemoriesResource(t, srv)
+	if !strings.Contains(out, projectContextSentinel) {
+		t.Fatalf("the resource did not render the fixture's memory, so the verdicts below are about a row nobody saw:\n%s", out)
+	}
+
+	records, err := st.RetrievalRecords(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("one read of ghost://memories/global recorded %d rows, want exactly 1 — the surface reads the bucket once. "+
+			"Recorded: %+v", len(records), records)
+	}
+
+	got := records[0]
+	if got.Source != "project_context" {
+		t.Errorf("source = %q, want project_context — this surface reaches the assembler through "+
+			"assembleProjectContext, and the audit splits its denominators by this column", got.Source)
+	}
+	if got.ProjectID != memory.GlobalProjectID {
+		t.Errorf("project_id = %q, want %q — it read the cross-project bucket, so that is what the row is a statement about",
+			got.ProjectID, memory.GlobalProjectID)
+	}
+	if got.QueryHash != "" {
+		t.Errorf("query_hash = %q, want empty — a listing carried no question, and a digest of \"\" would be the same "+
+			"constant on every read of this resource", got.QueryHash)
+	}
+	if got.Outcome == "" {
+		t.Error("outcome = \"\", want the assembler's own verdict: the audit reads it, and an absent one is a hole rather " +
+			"than an answer")
+	}
+	if len(got.Verdicts) != 1 || got.Verdicts[0].ID != id || !got.Verdicts[0].Kept {
+		t.Errorf("verdicts = %+v, want the one rendered row %s kept", got.Verdicts, id)
+	}
+}
+
+// TestTheGlobalMemoriesResourceRecordCarriesNoQueryOrMemoryText: the row this
+// surface now writes holds verdicts and ids, and neither the question it was asked
+// nor the text of what it answered.
+//
+// A resource read carries no question by construction — the handler passes `Query: ""`
+// — so a record that named one would be inventing it, and a record that carried the
+// content would outlive the call through every `ghost backup` the store is part of.
+// The scan is over the raw bytes of EVERY column as a SUBSTRING, for the reason
+// TestTheProjectContextRecordCarriesNoMemoryText gives: equality would miss a leak
+// stored inside a longer value, which is the shape a later writer would produce.
+func TestTheGlobalMemoriesResourceRecordCarriesNoQueryOrMemoryText(t *testing.T) {
+	st, dbPath := projectRecordStore(t)
+	srv, session := validityServerFor(t, st)
+	saveGlobalValidityRow(t, session, projectContextSentinel, nil)
+
+	if out := renderGlobalMemoriesResource(t, srv); !strings.Contains(out, projectContextSentinel) {
+		t.Fatalf("the resource did not render the fixture's memory, so the scan below would be vacuous:\n%s", out)
+	}
+
+	// The row count first, because an EMPTY table satisfies every column scan below.
+	records, err := st.RetrievalRecords(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(records) == 0 {
+		t.Fatal("the read recorded no row at all, so the scan below would pass on an empty table")
+	}
+
+	db, err := memory.OpenReadDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	for _, column := range []string{"project_id", "session_id", "source", "query_hash", "as_of", "reason", "verdicts", "outcome", "recorded_at"} {
+		var leaked int
+		if err := db.QueryRow(`SELECT count(*) FROM retrieval_record WHERE instr(`+column+`, ?) > 0`, projectContextSentinel).Scan(&leaked); err != nil {
+			t.Fatalf("scan retrieval_record.%s for the sentinel: %v", column, err)
+		}
+		if leaked != 0 {
+			t.Errorf("retrieval_record.%s holds a rendered global memory's text in %d row(s): the record is verdicts and "+
+				"ids, and it now outlives every read of this resource", column, leaked)
+		}
+	}
+}
+
 // refusingRecordStore answers every read and refuses the record write, which is the
 // shape a store whose audit path is broken has: the rows are all there and the
 // measurement cannot be taken.
@@ -293,5 +403,84 @@ func TestAProjectContextWhoseRecordIsRefusedStillRendersTheSameBlock(t *testing.
 	if len(records) != 1 {
 		t.Errorf("the table holds %d row(s) after a refused record, want the control run's 1 — a refused write must "+
 			"leave nothing behind. Recorded: %+v", len(records), records)
+	}
+}
+
+// TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes: the two
+// `ghost_project_context` shapes that are NOT the union read of a resolved project
+// each record exactly ONE row, attributed to `_global`.
+//
+// They are here because `docs/architecture.md`'s `retrieval_record` cell now states
+// the RULE those rows follow — a count of CALLS is not a count of rows, and a read
+// that named `_global` is attributed to `_global` — while `docs/mcp.md`'s Project
+// context section carries the per-shape detail of which read happens when. So these
+// two shapes' row counts are pinned HERE rather than derived from four branches, and
+// they are the two TOOL shapes whose row is `_global`-attributed and singular: a
+// `_global` request and an unregistered name. The other three have their own tests in
+// this file — the tool's union read, the resource's two reads, and (since #581) the
+// standalone global resource, which is a THIRD `_global`-attributed and singular shape
+// rather than a fourth kind — so all five shapes behind the cell's claim are
+// measurable rather than asserted.
+//
+// Both shapes write one row for the same reason, which is that they never make two
+// reads. `projectContextBudget` unsets `IncludeGlobal` when the project IS
+// `_global`, because the bucket already reads those rows, so the tool's single read
+// is `_global`-only rather than a union with an empty half. The unresolved name
+// renders the Global section ALONE, skipping the project-keyed read rather than
+// running one that would match nothing. The attribution to `_global` on both is the
+// point: a project-keyed read lands in the REQUESTED project's denominator, and a
+// read that named the `_global` bucket must not widen that denominator with a window
+// holding none of its rows.
+//
+// `vproj`-vs-`nosuchproject` matters: a name that RESOLVES would take the union
+// branch and record a row attributed to it, which is the case the other tests cover.
+func TestTheProjectContextToolRecordsOneRowOnBothOfItsUnmatchedShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		projectID string
+		why       string
+	}{
+		{"the bucket itself", memory.GlobalProjectID,
+			"IncludeGlobal is unset when the project IS `_global`, so this read is `_global`-only rather than a union " +
+				"with an empty half — one read, one row"},
+		{"an unresolved name", "nosuchproject",
+			"the unresolved branch renders the Global section alone and SKIPS the project-keyed read, so again one " +
+				"read and one row; a union here would have matched nothing and still been recorded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _ := projectRecordStore(t)
+			_, session := validityServerFor(t, st)
+			id := saveGlobalValidityRow(t, session, projectContextSentinel, nil)
+
+			out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": tc.projectID}))
+			if !strings.Contains(out, projectContextSentinel) {
+				t.Fatalf("the block did not render the fixture's global memory, so the row below is about a read "+
+					"that returned nothing:\n%s", out)
+			}
+
+			records, err := st.RetrievalRecords(t.Context(), 10)
+			if err != nil {
+				t.Fatalf("RetrievalRecords: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("recorded %d rows, want exactly 1 — %s. Recorded: %+v", len(records), tc.why, records)
+			}
+			got := records[0]
+			if got.Source != "project_context" {
+				t.Errorf("source = %q, want project_context", got.Source)
+			}
+			if got.ProjectID != memory.GlobalProjectID {
+				t.Errorf("project_id = %q, want %q — this read named the `_global` bucket, and attributing it to "+
+					"anything else would put another bucket's window in that project's denominator", got.ProjectID, memory.GlobalProjectID)
+			}
+			if got.QueryHash != "" {
+				t.Errorf("query_hash = %q, want empty — a listing carried no question", got.QueryHash)
+			}
+			if len(got.Verdicts) != 1 || got.Verdicts[0].ID != id || !got.Verdicts[0].Kept {
+				t.Errorf("verdicts = %+v, want the one rendered global row %s kept — a verdict naming any other id "+
+					"would make the per-call figure in the audit a claim about a row this read never returned",
+					got.Verdicts, id)
+			}
+		})
 	}
 }

@@ -166,11 +166,21 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 	// nothing about its shape is duplicated here, and the verdicts it carries are
 	// this surface's own selection rather than a re-derivation of it.
 	//
-	// Set in THIS function rather than at the call sites, because all three
-	// project-context surfaces — the tool, the resource and the prompt — reach the
-	// assembler through here. A sink wired at the two callers would record the tool
-	// and leave the other two unaudited, and a resource read is a retrieval an agent
-	// acted on exactly as much as a tool call is.
+	// Set in THIS function rather than at the call sites, because all FOUR
+	// project-context surfaces — the tool, the `ghost://project/{id}/context`
+	// resource, the `recall_project` prompt, and (since #581) the
+	// `ghost://memories/global` resource — reach the assembler through here. A sink
+	// wired at the callers would record the tool and leave the other three
+	// unaudited, and a resource read is a retrieval an agent acted on exactly as
+	// much as a tool call is.
+	//
+	// That last one is a BEHAVIOUR CHANGE rather than a wiring detail, so it is
+	// stated here as well as pinned. `ghost://memories/global` read `_global`
+	// through `Store.GetTopMemories` until #581, which ranked and trimmed in SQL
+	// and wrote nothing; reaching the assembler gives it this row. Keeping it is
+	// the decision — a listing the audit cannot see is a listing whose per-source
+	// precision figures mean nothing — and `TestTheGlobalMemoriesResourceRecordsItsRead`
+	// is what holds it to one row per read, attributed to `_global`.
 	//
 	// nil when the store cannot record, which the assembler treats as "record
 	// nothing": a provider that cannot be audited still answers a listing, and the
@@ -471,13 +481,32 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // an empty item set can be describing rows that belong to `_global` — and the
 // project itself may hold none at all.
 //
-// So it has exactly ONE caller, `projectContextOwnRowsNote`, which establishes that
-// the project holds rows before rendering what comes back — and that is not a style
-// preference. `assemble.Result` carries no count and the store is not reachable from a
-// function that only renders bytes, so a caller that skipped the check could not make
-// the sentence true; it could only ship it. It was also the way this went wrong twice:
-// a caller holding the count as a permission rather than as the sentence's own input
-// read it, was satisfied, and then rendered a different and false sentence.
+// So it has FOUR callers, and every one of them establishes that the rows are
+// the population before rendering what comes back — one with a count, three
+// because they do not need one.
+//
+// `projectContextOwnRowsNote` is the one that counts, counting the project's own
+// rows first, and that is not a style preference. `assemble.Result` carries no
+// count and the store is not reachable from a function that only renders bytes, so
+// a caller that skipped the check could not make the sentence true; it could only
+// ship it. It was also the way this went wrong twice: a caller holding the count
+// as a permission rather than as the sentence's own input read it, was satisfied,
+// and then rendered a different and false sentence.
+//
+// The other three are the `_global` bucket: `buildProjectContext`'s `_global`
+// branch, the `ghost://memories/global` resource, and the
+// `ghost_project_context` TOOL's own `args.ProjectID == "_global"` branch —
+// which is easy to miss because it lives in the tool handler rather than in
+// project_context.go, and which is why the count is written out here rather
+// than left for a reader to derive. All three read `_global` ALONE:
+// `projectContextGlobalBudget` sets no `IncludeGlobal`, because the bucket is
+// already the population — and `projectContextBudget` sets it to
+// `projectID != memory.GlobalProjectID`, which is false for that bucket — so an
+// exclusion reason there describes the whole window and there is no second
+// population for it to be wrong about. That is the whole difference between them
+// and the project case, and it is why none of them needs the count rather than a
+// reason the count may be skipped: not because their verdict is sharper, but
+// because there is nothing to reconcile it against.
 func projectContextEmptyNote(res assemble.Result) string {
 	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
 		return ""

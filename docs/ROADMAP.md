@@ -276,7 +276,7 @@ machine-readable scope ([#562](https://github.com/wcatz/ghost/pull/562),
 
 ### P0 — correctness first (make the axes mean something)
 
-The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity is written and consulted (the tools accept a claim's period, and `ghost_memory_search` withholds a row whose window has closed), but a store whose rows all predate the writer contract still reads every row as unset, and the browsing surfaces and the session-start block do not filter on it yet; confidence is written and rendered and still read by nothing. Scope is implemented — persisted, searchable, and now rendered and applied by session-start injection ([#577](https://github.com/wcatz/ghost/issues/577), closed). P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops the active defects below.
+The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity is written and consulted (the tools accept a claim's period, and `ghost_memory_search` withholds a row whose window has closed), but a store whose rows all predate the writer contract still reads every row as unset, and `ghost_memories_list` and `ghost_search_all` do not filter on it; confidence is written and rendered and still read by nothing. Scope is implemented — persisted, searchable, and now rendered and applied by session-start injection ([#577](https://github.com/wcatz/ghost/issues/577), closed). P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops the active defects below.
 
 | Issue | Why it is P0 |
 |---|---|
