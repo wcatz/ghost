@@ -756,7 +756,7 @@ The first line is the verdict, and there are three of them:
 verified ~/.local/share/ghost/ghost.db.backup-20260926T153207Z: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
   sha256           ok       matches the manifest's sha256 9f86d081884c…
   integrity check  ok       SQLite reports the file is structurally sound
-  schema version   ok       the file is at schema v18, this Ghost reads v18
+  schema version   ok       the file is at schema v22, this Ghost reads v22
   row counts       ok       the file holds the 1 project, 4 memories, 1 link, 1 task and 1 decision the manifest records
 ```
 
@@ -766,7 +766,7 @@ A file with **no manifest** beside it is not refused, and does not get the word 
 checked ~/.local/share/ghost/ghost.db.pre-migrate-1758800000: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
   sha256           skipped  no manifest to compare against
   integrity check  ok       SQLite reports the file is structurally sound
-  schema version   ok       the file is at schema v17 and this Ghost reads v18 — it is restorable, and the next open migrates it
+  schema version   ok       the file is at schema v21 and this Ghost reads v22 — it is restorable, and the next open migrates it
   row counts       skipped  no manifest to compare against; the file holds 1 project, 4 memories, 1 link, 1 task and 1 decision
   (no manifest at ~/.local/share/ghost/ghost.db.pre-migrate-1758800000.manifest.json, so the hash and the recorded counts were not checked)
 ```
@@ -913,7 +913,7 @@ A dry run is not a separate code path: every record goes through the same valida
 - Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
 
   ```text
-  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v17
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v21 and this Ghost reads v22
          — start a session, or run ghost mcp init, to migrate it before exporting it or
          previewing an import into it
   ```
