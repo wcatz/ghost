@@ -172,30 +172,60 @@ decisions, learned context, reflection snapshots, and cost/audit history.
 Irreversible. Refuses to delete _global.
 `
 
+// parseProjectDeleteArgs splits `ghost project delete <name-or-id> [--apply]`.
+// It exists so the argv contract is unit-testable: the command irreversible
+// enough to need a typed confirmation was reading os.Args inline, which meant
+// its duplicate check could not be asked about anything but the happy path.
+//
+// projectSeen counts OCCURRENCES rather than testing the name for emptiness.
+// A `projectName != ""` test cannot see `ghost project delete "" beta`: it
+// reads the empty first operand as no operand at all, so the second one became
+// the scope of a delete whose command line named the scope twice — and this is
+// the command that erases a project and everything under it. An empty operand is
+// refused too, and it stops the parse where it is: with no name in the command
+// line there is no scope to be a duplicate of, so the empty value is what the
+// reader needs to be told about.
+//
+// showUsage reports the missing-project case rather than an error, because that
+// is what this command has always answered with: `ghost project delete` alone
+// prints projectDeleteUsage.
+func parseProjectDeleteArgs(args []string) (projectName string, apply, showUsage bool, err error) {
+	projectSeen := false
+	for _, a := range args {
+		switch {
+		case a == "--apply":
+			apply = true
+		case !strings.HasPrefix(a, "-"):
+			if projectSeen {
+				return "", false, false, errors.New("expected exactly one project")
+			}
+			if a == "" {
+				return "", false, false, errors.New("project name must not be empty")
+			}
+			projectName = a
+			projectSeen = true
+		default:
+			return "", false, false, fmt.Errorf("unknown flag %q", a)
+		}
+	}
+	if !projectSeen {
+		return "", apply, true, nil
+	}
+	return projectName, apply, false, nil
+}
+
 // runProjectDelete implements `ghost project delete <name-or-id> [--apply]`.
 // Always prints the dry-run summary first. Without --apply it stops there.
 // With --apply, it re-prints the summary and requires re-typing the
 // project's name at a prompt before anything is actually deleted — this is
 // irreversible and there is no undo, so the flag alone is not enough.
 func runProjectDelete() {
-	var projectName string
-	apply := false
-	for i := 3; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--apply":
-			apply = true
-		case !strings.HasPrefix(os.Args[i], "-"):
-			if projectName != "" {
-				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
-				os.Exit(1)
-			}
-			projectName = os.Args[i]
-		default:
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
-			os.Exit(1)
-		}
+	projectName, apply, showUsage, err := parseProjectDeleteArgs(os.Args[3:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
-	if projectName == "" {
+	if showUsage {
 		fmt.Fprint(os.Stderr, projectDeleteUsage)
 		os.Exit(1)
 	}
