@@ -77,9 +77,9 @@ import (
 )
 
 // MarkStore is the subset of *memory.Store a targeted mark needs; narrowed for
-// testability. It is the same shape as reassessStore minus the classifier and
-// the two pool reads: nothing here asks a model anything, and the only writes go
-// through MarkResolved, which is the ordinary store path.
+// testability. It is the same shape as reassessStore minus the classifier, the
+// evidence read and the two pool reads: nothing here asks a model anything, and
+// the only writes go through MarkResolved, which is the ordinary store path.
 type MarkStore interface {
 	memref.Store
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)

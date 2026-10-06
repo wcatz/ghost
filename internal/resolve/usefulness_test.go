@@ -958,3 +958,122 @@ func TestMeasuredCostOfTheConvergedPassEvidenceRead(t *testing.T) {
 		passBest.Round(time.Microsecond), sampleRuns, firstPassCalls, negatives,
 		laterPassCalls, sampleRuns-1)
 }
+
+// TestARepairedNoteIsNotReaskedByTheNextOrdinaryPass is the review finding on
+// #880 that named this shape: the repair pass wrote the BARE content hash while
+// the ordinary gate compares KeepStamp over the evidence, so a note the audit
+// had contradicted was re-asked one lifecycle pass after an operator undid its
+// burial — with `audit: verdicts contradicted=N` in front of the classifier,
+// where a RESOLVED answer re-buries it, which is the exact harm holdBack exists
+// to prevent. Both passes now read one map and write one key, so the repair
+// stands.
+func TestARepairedNoteIsNotReaskedByTheNextOrdinaryPass(t *testing.T) {
+	s, ctx, rows := resolveRealStore(t)
+	const project = "usefulness"
+	repaired := rows[0]
+
+	// Converge: three explicit KEEPs, each cached over the plain content hash.
+	if _, _, err := Run(ctx, s, &fakeClassifier{}, project, true, nil); err != nil {
+		t.Fatalf("Run (converge): %v", err)
+	}
+	// The note is resolved — the state the repair pass reads — and the audit
+	// has since contradicted it.
+	if n, err := s.SetResolved(ctx, []string{repaired.ID}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = %d, %v; want 1", n, err)
+	}
+	plantVerdict(t, ctx, s, project, repaired.ID, memory.VerdictOutcomeContradicted)
+	ev := mustEvidence(t, ctx, s, project)[repaired.ID]
+
+	// The repair, scoped to that row, with the harness KEEPing it.
+	repair := &fakeClassifier{}
+	res, reKept, err := Reassess(ctx, s, repair, project, true, Scope{Only: []string{repaired.ID}}, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Cleared != 1 || len(reKept) != 1 {
+		t.Fatalf("cleared=%d reKept=%v, want the one repaired row", res.Cleared, reKept)
+	}
+
+	// The next ordinary pass must skip it, not ask about it. This is the harm:
+	// a re-ask here reaches the classifier with the contradiction attached, and
+	// a RESOLVED answer re-buries a note an operator just un-buried.
+	ordinary := &fakeClassifier{}
+	runRes, _, err := Run(ctx, s, ordinary, project, false, nil)
+	if err != nil {
+		t.Fatalf("Run (after repair): %v", err)
+	}
+	if ordinary.calls != 0 || len(ordinary.askedFor) != 0 {
+		t.Errorf("the ordinary pass re-asked %v in %d call(s) one lifecycle pass after the repair: "+
+			"a RESOLVED answer there re-buries what the operator just undid (#880)",
+			ordinary.askedFor, ordinary.calls)
+	}
+	if runRes.Skipped != len(rows) {
+		t.Errorf("res.Skipped = %d, want %d — the repaired note and the two untouched ones all cached",
+			runRes.Skipped, len(rows))
+	}
+
+	// And the two facts that make that true: the repair stamped a key the gate
+	// can match, and it earned that stamp by asking with the evidence in front
+	// of the classifier — the same line the ordinary pass appends.
+	stored, err := s.ResolveKeptHashes(ctx, project)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes: %v", err)
+	}
+	if got, want := stored[repaired.ID], KeepStamp(repaired.Content, ev); got != want {
+		t.Errorf("reassess stamped %q, want %q — the ordinary gate will not match anything else",
+			got, want)
+	}
+	if !sentVerbatim(repair.askedFor, repaired.Content+"\n"+ev.Line()) {
+		t.Errorf("the repair asked about %q, want the note carrying the same evidence line the "+
+			"ordinary pass appends — a stamp covering evidence needs a verdict judged with it",
+			repair.askedFor)
+	}
+}
+
+// TestAnUnknownVerdictRecordsNothingSoTheNoteIsAskedAgainNextPass pins the half
+// of #880's cost model the documents have to state: the evidence fingerprint is
+// written only for an explicit KEEP, so a verdict the parser cannot read leaves
+// the stored stamp as it was and the note is asked again — and billed again — on
+// the next pass, for as long as the harness cannot parse it. That is the
+// pre-existing UNKNOWN contract (a parse failure must never become a cache
+// entry), reached now through the evidence re-ask, and "a contradiction re-asks
+// it exactly once" is a promise about a verdict that comes back, not about one
+// that does not.
+func TestAnUnknownVerdictRecordsNothingSoTheNoteIsAskedAgainNextPass(t *testing.T) {
+	s, ctx, rows := resolveRealStore(t)
+	const project = "usefulness"
+	contradicted := rows[0]
+
+	if _, _, err := Run(ctx, s, &fakeClassifier{}, project, true, nil); err != nil {
+		t.Fatalf("Run (converge): %v", err)
+	}
+	plantVerdict(t, ctx, s, project, contradicted.ID, memory.VerdictOutcomeContradicted)
+	ev := mustEvidence(t, ctx, s, project)[contradicted.ID]
+	asked := contradicted.Content + "\n" + ev.Line()
+
+	cls := &fakeClassifier{unknown: map[string]bool{asked: true}}
+	res, _, err := Run(ctx, s, cls, project, true, nil)
+	if err != nil {
+		t.Fatalf("Run (unknown): %v", err)
+	}
+	if res.Unknown != 1 || res.Skipped != len(rows)-1 {
+		t.Fatalf("Unknown=%d Skipped=%d, want 1 and %d", res.Unknown, res.Skipped, len(rows)-1)
+	}
+	stored, err := s.ResolveKeptHashes(ctx, project)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes: %v", err)
+	}
+	if got, want := stored[contradicted.ID], ContentHash(contradicted.Content); got != want {
+		t.Fatalf("stamp = %q, want %q: an UNKNOWN verdict records nothing, so a note the parser "+
+			"cannot read never becomes a cache entry", got, want)
+	}
+
+	next := &fakeClassifier{}
+	if _, _, err := Run(ctx, s, next, project, false, nil); err != nil {
+		t.Fatalf("Run (next pass): %v", err)
+	}
+	if !sentVerbatim(next.askedFor, asked) {
+		t.Errorf("the next pass asked about %q, want the note asked again carrying the same evidence: "+
+			"nothing was recorded, so there is nothing to skip", next.askedFor)
+	}
+}

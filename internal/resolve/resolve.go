@@ -14,6 +14,9 @@
 // that hash combined with the evidence when it did) so a converged project makes
 // no classifier calls at all — while still paying the one bounded evidence read
 // (#880) that lets a contradiction recorded after a KEEP re-ask it exactly once.
+// "Exactly once" is a promise about a verdict that comes BACK: an UNKNOWN
+// records nothing, so a note the parser cannot read is asked again — and billed
+// again — on every pass until it can.
 // The LLM Classifier implementation lives in resolution.go; the hosting
 // binary supplies a CLI-harness provider (see internal/ai). The stop hook spawns
 // `ghost lifecycle --project <id>` as a detached background process
@@ -165,6 +168,31 @@ func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
 	return fmt.Sprintf("%s:%d:%d:%s", base, ev.Contradicted, ev.SupersededInSession, ev.LastAt)
 }
 
+// askedWithEvidence renders the batch the classifier sees: each memory's own
+// content, with that memory's negative audit verdict appended as ONE line when
+// the audit holds one (#880). A nil map — an empty audit, or a read that failed
+// and the caller failed open — appends nothing, so those notes reach the model
+// as exactly the bytes they reached it as before this existed.
+//
+// The line is appended to the CONTENT rather than passed beside it so it lands
+// inside the «...» the classifier's own quoteData renders and is read under that
+// rule with the rest of the note rather than as a line of instructions from the
+// harness. It is also the reason this is a shared function and not two loops:
+// Run and Reassess both stamp KEEP verdicts with KeepStamp over the same
+// evidence, and a stamp that says a verdict was judged with the evidence in
+// front of it is only true when the ask actually carried it. One renderer, so
+// the two passes cannot drift into stamping evidence the judge never saw.
+func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.UsefulnessEvidence) []string {
+	out := make([]string, len(mems))
+	for i, m := range mems {
+		out[i] = m.Content
+		if line := evidence[m.ID].Line(); line != "" {
+			out[i] = out[i] + "\n" + line
+		}
+	}
+	return out
+}
+
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
 // testability.
 type resolveStore interface {
@@ -175,19 +203,28 @@ type resolveStore interface {
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 	// UsefulnessByMemory is #648's negative evidence: what the retrieval audit has
-	// recorded about each memory. It is on the ordinary pass's store and NOT on
-	// reassessStore, because the repair pass exists to UNDO resolutions and the
-	// evidence points the other way — telling a repair that a memory was
-	// contradicted three times argues for leaving it resolved.
+	// recorded about each memory. It is on BOTH stores — this one and
+	// reassessStore — and #880 review finding 1 is what put it there.
 	//
-	// #880 re-examined this exemption (the issue named it as the first thing to
-	// revisit if evidence ever became cache-invalidating) and KEPT it: the
-	// ordinary pass reads the map above the cache gate and stamps its KEEPs
-	// with it, while the repair pass reads none and therefore compares the BARE
-	// content hash at its own gate — so a stamp carrying evidence costs
-	// reassess one re-ask of that row, which errs toward asking. It is a
-	// recorded choice rather than an omission, and reassess.go says the same
-	// where its gate is.
+	// The exemption this comment used to record (the repair pass reading no
+	// evidence and comparing the BARE content hash) read the evidence as an
+	// argument: the repair exists to UNDO resolutions, so a note contradicted
+	// three times seemed like a note to leave alone. That is not what the map
+	// decides, and never was — a negative verdict RE-ASKS a note and the
+	// classifier decides, with the evidence attached, exactly as it decides
+	// everything else (#880's decision 1). What the exemption did decide was
+	// which key each pass wrote, and the two passes write ONE key: the repair
+	// stamping a bare hash the ordinary gate would not match made every
+	// repaired, contradicted note re-asked one lifecycle pass later — with the
+	// contradiction in front of the model, where a RESOLVED answer re-buries
+	// the note the operator just unburied. So both passes now read the map
+	// above their own gate, both append it to the ask through
+	// askedWithEvidence, and both stamp KeepStamp over it.
+	//
+	// The read still decides nothing on its own: an empty audit, a nil map
+	// from a failed read, or no evidence for a memory all leave the stamp as
+	// the plain content hash, so the evidence can only ever cost a re-ask,
+	// never buy a skip.
 	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
@@ -424,6 +461,19 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// (measured in TestMeasuredCostOfTheConvergedPassEvidenceRead, reported
 	// with #880) and still zero classifier calls.
 	//
+	// The cost this does NOT bound is an UNKNOWN verdict, and it is worth
+	// stating here rather than leaving to the reader (#880 review finding 2):
+	// a stamp is written only for an explicit KEEP, so a note the parser
+	// cannot read leaves the stored stamp where it was, reaches this gate
+	// again next pass, and is asked and billed again for as long as it stays
+	// unparseable. Nothing about that is new — a parse failure must never
+	// become a cache entry (the default branch below) — but the evidence
+	// re-ask is the route that now reaches it, so the per-pass retry is a
+	// real, recurring cost on a note whose verdict keeps coming back UNKNOWN.
+	// "A contradiction re-asks it exactly once" counts verdicts that came
+	// back; TestAnUnknownVerdictRecordsNothingSoTheNoteIsAskedAgainNextPass
+	// pins the other half.
+	//
 	// It FAILS OPEN. The evidence is an addition to a judgement that already
 	// works without it, so a store that cannot answer costs the pass the
 	// annotation and nothing else; failing the pass would turn a missing
@@ -438,7 +488,8 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// The line is appended to the CONTENT, not passed beside it, so it lands
 	// inside the «...» the classifier's own quoteData renders and is read
 	// under that rule with the rest of the note rather than as a line of
-	// instructions from the harness.
+	// instructions from the harness. askedWithEvidence does that rendering for
+	// both passes, so the ask and the stamp below cannot drift apart.
 	var evidence map[string]memory.UsefulnessEvidence
 	if len(gated) > 0 {
 		read, evErr := store.UsefulnessByMemory(ctx, projectID)
@@ -468,7 +519,9 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		// One re-ask per new evidence, not one per pass: the KEEP that comes
 		// back is stamped with the same evidence in `newKept` below, so the
 		// next pass matches and skips — until the audit records another
-		// verdict, which moves the stamp once more.
+		// verdict, which moves the stamp once more. The exception is an
+		// UNKNOWN verdict, which writes nothing and so asks again next pass
+		// (see the cost model above).
 		if keptHashes[m.ID] == KeepStamp(m.Content, evidence[m.ID]) {
 			res.Skipped++
 			continue
@@ -481,13 +534,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	newKept := make(map[string]string)
 	var llmConfirmed int
 	if len(pending) > 0 {
-		asked := make([]string, len(pendingContents))
-		for i, m := range pending {
-			asked[i] = pendingContents[i]
-			if line := evidence[m.ID].Line(); line != "" {
-				asked[i] = asked[i] + "\n" + line
-			}
-		}
+		asked := askedWithEvidence(pending, evidence)
 		verdicts, err := cls.IsResolvedBatch(ctx, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d candidate(s): %w", len(pendingContents), err)
@@ -509,7 +556,10 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			default:
 				// UNKNOWN (or an invalid classifier value) is not an implicit
 				// KEEP. Leave the memory unclassified so a later pass can ask
-				// it again instead of locking a parse failure into the cache.
+				// it again instead of locking a parse failure into the cache
+				// — which means the note is asked and billed on EVERY later
+				// pass until the parser reads it, an accepted cost of never
+				// caching a verdict nobody produced.
 				res.Unknown++
 			}
 		}

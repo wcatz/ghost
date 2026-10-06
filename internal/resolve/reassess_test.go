@@ -117,6 +117,38 @@ func TestReassessSkipsCachedKeepVerdicts(t *testing.T) {
 	}
 }
 
+// TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence: the other half of
+// #880 review finding 1. The repair does not only WRITE the ordinary pass's
+// key, it READS it — so a row whose stored stamp already carries the evidence
+// the audit holds is skipped here exactly as the ordinary gate skips it, with no
+// classifier call, rather than re-asked for evidence it was already judged
+// under. Reverted to comparing the bare content hash, the two passes disagree
+// again: this row's stamp is not a bare hash, so the repair re-asks a note the
+// audit has already had its say about.
+func TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence(t *testing.T) {
+	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
+	ev := memory.UsefulnessEvidence{Contradicted: 2, SupersededInSession: 1,
+		LastSession: "ses_2", LastAt: "2026-09-24 10:00:00"}
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
+		kept:            map[string]string{"M1": KeepStamp(content, ev)},
+		usefulness:      map[string]memory.UsefulnessEvidence{"M1": ev},
+	}
+	cls := &fakeClassifier{}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Cached != 1 || cls.calls != 0 {
+		t.Errorf("cached=%d classifier calls=%d, want 1 and 0: a stamp that already covers the evidence "+
+			"is the same skip the ordinary gate gives it (%v)", res.Cached, cls.calls, cls.askedFor)
+	}
+	if len(reKept) != 1 || len(store.cleared) != 1 {
+		t.Errorf("reKept=%v cleared=%v, want the cached row returned to injection", reKept, store.cleared)
+	}
+}
+
 // TestReassessLeavesUnknownAlone: an unparseable verdict is not an implicit
 // KEEP, so the note keeps its resolved_at and is offered again next pass.
 func TestReassessLeavesUnknownAlone(t *testing.T) {
@@ -147,6 +179,101 @@ func TestReassessLeavesUnknownAlone(t *testing.T) {
 	}
 	if res.Unknown != 1 {
 		t.Errorf("second pass Unknown = %d, want 1", res.Unknown)
+	}
+}
+
+// TestReassessStampsTheEvidenceItJudgedTheNoteUnder: the repair pass and the
+// ordinary pass must write and read ONE key (#880 review finding 1). The repair
+// reads the same audit evidence the ordinary gate reads, so it can compare the
+// stamp it is about to overwrite — and it asks the classifier with that
+// evidence appended, because a stamp claiming a verdict was judged under
+// evidence is only honest when the verdict really was.
+func TestReassessStampsTheEvidenceItJudgedTheNoteUnder(t *testing.T) {
+	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
+	evidence := map[string]memory.UsefulnessEvidence{
+		"M1": {Contradicted: 2, SupersededInSession: 1, LastSession: "ses_2", LastAt: "2026-09-24 10:00:00"},
+	}
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
+		usefulness:      evidence,
+	}
+	cls := &fakeClassifier{}
+
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if got, want := store.kept["M1"], KeepStamp(content, evidence["M1"]); got != want {
+		t.Errorf("reassess stamped %q, want %q: the ordinary gate compares KeepStamp over the evidence "+
+			"it read, so a stamp that does not cover the evidence is a stamp the next pass misses and "+
+			"a note it re-asks (#880)", got, want)
+	}
+	if want := content + "\n" + evidence["M1"].Line(); !sentVerbatim(cls.askedFor, want) {
+		t.Errorf("reassess asked about %q, want %q: the stamp records the evidence the verdict was "+
+			"judged with, so the verdict has to have been judged with it", cls.askedFor, want)
+	}
+}
+
+// TestReassessReadsTheEvidenceOnceForThePool: the read is ONE bounded read per
+// repair over a pool with rows in it, and nothing at all over an empty pool —
+// the same bound Run holds (TestTheEvidenceReadIsBoundToCandidatesThatReachTheGate).
+func TestReassessReadsTheEvidenceOnceForThePool(t *testing.T) {
+	cls := &fakeClassifier{}
+
+	empty := &fakeStore{}
+	if _, _, err := Reassess(context.Background(), empty, cls, "proj", true, Scope{}, nil); err != nil {
+		t.Fatalf("Reassess (empty pool): %v", err)
+	}
+	if empty.usefulnessCalls != 0 {
+		t.Errorf("usefulnessCalls = %d, want 0: a repair with no row to judge reads no evidence",
+			empty.usefulnessCalls)
+	}
+
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{
+			{ID: "M1", Content: "kill experiment: the graph bonus is gone, PR #210 landed it"},
+			{ID: "M2", Content: "postmortem concluded: the deploy failure was a stale hash"},
+		},
+		usefulness: map[string]memory.UsefulnessEvidence{"M1": {Contradicted: 1, LastAt: "2026-09-24 10:00:00"}},
+	}
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if store.usefulnessCalls != 1 {
+		t.Errorf("usefulnessCalls = %d, want 1 — one bounded read for the whole pool, never one per memory",
+			store.usefulnessCalls)
+	}
+}
+
+// TestReassessFailsOpenWhenTheEvidenceCannotBeRead: an unreadable audit must
+// not fail a repair, and it must not let the repair claim evidence it never
+// read — the stamp it writes falls back to the bare content hash, which the
+// ordinary pass re-asks (errs toward asking) rather than trusts.
+func TestReassessFailsOpenWhenTheEvidenceCannotBeRead(t *testing.T) {
+	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
+		usefulnessErr:   errEvidenceUnavailable,
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	cls := &fakeClassifier{}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, logger)
+	if err != nil {
+		t.Fatalf("an unreadable audit must not fail the repair: %v", err)
+	}
+	if res.Cleared != 1 || len(reKept) != 1 {
+		t.Fatalf("cleared=%d reKept=%v, want the repair to land with the audit unreadable", res.Cleared, reKept)
+	}
+	if got, want := store.kept["M1"], ContentHash(content); got != want {
+		t.Errorf("stamped %q, want the bare content hash %q — a pass that could not read the evidence "+
+			"must not stamp a verdict as judged under it", got, want)
+	}
+	if len(cls.askedFor) != 1 || cls.askedFor[0] != content {
+		t.Errorf("asked about %q, want the note alone: an unreadable audit appends nothing", cls.askedFor)
+	}
+	if !strings.Contains(buf.String(), "usefulness evidence unavailable") {
+		t.Errorf("expected the evidence read failure to be logged, log:\n%s", buf.String())
 	}
 }
 
