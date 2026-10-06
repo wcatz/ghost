@@ -1681,6 +1681,12 @@ var projectMergeStatements = []string{
 	// AND names a memory the report would try to render under a project that no
 	// longer exists.
 	`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
+	// And this feature's flags (#648 slice 2), which carry all three problems
+	// exactly as the audit rows do — plus the sharper one: a flag's project_id
+	// is deliberately not a foreign key, so nothing else would move or remove it,
+	// and the evidence read is per project, meaning an orphan here is INVISIBLE
+	// rather than merely misattributed.
+	`UPDATE memory_flags SET project_id = ? WHERE project_id = ?`,
 }
 
 // mergeProjectTx folds oldID's rows into newID and deletes oldID.
@@ -1824,6 +1830,11 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// readable through its project: the report reads per project, so an orphan
 		// here is not merely misattributed, it is INVISIBLE.
 		`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
+		// And its flags, which are the same shape with nothing to fall back on:
+		// memory_flags.project_id has no foreign key, so a merge that forgot this
+		// line would orphan every flag of the outgoing project — under an id that
+		// no longer exists, in a table only the per-project evidence read reaches.
+		`UPDATE memory_flags SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -1862,14 +1873,21 @@ type DeleteProjectSummary struct {
 	// left behind would be the one row in the store that names a memory nobody can
 	// reach and a project nobody can find.
 	RetrievalAudits int
+	// MemoryFlags is the same again for #648 slice 2's flags. The principle the
+	// two fields above state does not stop at the feature that first stated it:
+	// this summary covers every table that references the project, and a table the
+	// command deletes but does not report is a table the user is not told they
+	// are losing — which is what the confirmation gate is FOR.
+	MemoryFlags int
 }
 
 // DeleteProject permanently removes a project and everything under it.
 // memories (with their FTS index entries, embeddings, links, and link_scans),
 // tasks, decisions, ghost_state, and memory_snapshots all cascade from the
 // projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log,
-// retrieval_record and retrieval_audit carry a project_id column but no foreign
-// key, so they're deleted explicitly in the same transaction.
+// retrieval_record, retrieval_audit and memory_flags carry a project_id column
+// but no foreign key to projects, so they're deleted explicitly in the same
+// transaction.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
@@ -1969,6 +1987,18 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
 	}
+	// And the flags, for the same reason with one difference: memory_flags has a
+	// foreign key to MEMORIES, not to projects, and this transaction is about to
+	// take the memories with it — so the cascade would fire on most rows. The
+	// explicit delete is still the right shape rather than belt to its braces:
+	// it states the intent in the same statement the counts were taken under,
+	// and it runs before deleteProjectRowTx so the ORDER of statements in this
+	// transaction is not what decides whether the rows go — a reader of this
+	// function should not have to know which parent the foreign key is on to
+	// know the flags are gone.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_flags WHERE project_id = ?`, id); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("delete memory_flags: %w", err)
+	}
 	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
 		return DeleteProjectSummary{}, err
 	}
@@ -1985,7 +2015,8 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
 		"retrieval_records", summary.RetrievalRecords,
-		"retrieval_audits", summary.RetrievalAudits)
+		"retrieval_audits", summary.RetrievalAudits,
+		"memory_flags", summary.MemoryFlags)
 	return summary, nil
 }
 
@@ -2032,6 +2063,11 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		`SELECT count(*) FROM retrieval_audit WHERE project_id = ?`, id,
 	).Scan(&summary.RetrievalAudits); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_audit: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM memory_flags WHERE project_id = ?`, id,
+	).Scan(&summary.MemoryFlags); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count memory_flags: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM token_usage WHERE project_id = ?`, id,

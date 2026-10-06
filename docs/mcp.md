@@ -1,6 +1,6 @@
 # MCP surface
 
-Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
+Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
 
 ## Tools
 
@@ -12,6 +12,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memories_list` | Browse memories, optionally by category and retention tier |
 | Memory | `ghost_memory_update` | Update memory content or metadata |
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
+| Memory | `ghost_memory_flag` | Record that this memory is wrong or stale, with a short reason: an append-only objection that changes nothing by itself — resolve and reflect count it as negative evidence, and the reason stays in the store |
 | Memory | `ghost_memory_pin` | Pin or unpin a memory |
 | Memory | `ghost_memory_promote` | Promote a project memory to `_global` |
 | Memory | `ghost_save_global` | Save a memory that applies to all projects; takes the same `retention` argument |
@@ -116,9 +117,9 @@ That is one store's real block, cut at the retrieval part — the same rows
 with the `⚠` line the compact form adds under the source it is about.
 
 An agent debugging "search returns things I did not use" is exactly who needs
-this, and it is here rather than in a twenty-third tool because every caller
-already fetches `ghost_health` — the tool count is 22 and this block does not
-change it.
+this, and it is here rather than in a tool of its own because every caller
+already fetches `ghost_health` — the count is 23 with `ghost_memory_flag`, and
+this block does not change it.
 
 Five things the block is careful about, each because the cheaper version is a
 confident wrong answer:

@@ -251,6 +251,10 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 		// And an eighth, for the verdicts derived from them. Same reason, and the
 		// distinct value is what keeps a swap of the two audit lines from passing.
 		RetrievalAudits: 8,
+		// And a ninth, for the objections #648 slice 2 files. A summary that omitted
+		// a table its own command deletes would under-report, and the distinct
+		// value is what keeps a swap of the flags line from passing.
+		MemoryFlags: 9,
 	}, "Would delete"); err != nil {
 		t.Fatalf("printDeleteSummary: %v", err)
 	}
@@ -264,6 +268,7 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
   audit_log:    6
   retrievals:   7
   audits:       8
+  flags:        9
 `
 	if out.String() != want {
 		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)

@@ -657,6 +657,54 @@ CREATE TABLE IF NOT EXISTS retrieval_audit (
 -- TestRetrievalAuditsCarryOneIndex is what keeps this honest.
 CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(project_id);
 
+-- memory_flags (schema v23, #648 slice 2): one row per agent flag saying this
+-- memory is wrong or stale, with the reason that agent gave. APPEND-ONLY — there
+-- is no update and no delete here beyond the memory's own removal — because a
+-- flag is a claim somebody made at a time, and overwriting it would destroy the
+-- very disagreement the count is meant to report.
+CREATE TABLE IF NOT EXISTS memory_flags (
+    -- No FK, matching retrieval_audit: the flags of a deleted project are
+    -- removed by DeleteProject's own DELETE, and a merge reassigns them.
+    project_id   TEXT NOT NULL,
+    -- On delete CASCADE, so a memory that goes takes its flags with it in the
+    -- SAME transaction: the count is a property of the memory, and a surviving
+    -- flag row would report a memory nothing can read.
+    memory_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    -- The closed vocabulary is the whole point of having two kinds rather than
+    -- free text: "wrong" and "stale" are the two things an agent can say, and a
+    -- third spelling would be a claim no reader knows how to weigh. The writer
+    -- (FlagMemory) refuses anything else too, so the CHECK is belt to its
+    -- braces — it protects a raw INSERT from an import or a future writer.
+    kind         TEXT NOT NULL CHECK (kind IN ('wrong','stale')),
+    -- Free text, STORED and never read back out of the store: only the count
+    -- reaches a prompt, an evidence line or a tool result. It lives here for the
+    -- human reading the database later, which is the same reason retrieval
+    -- records keep their reason column while the report keeps its buckets.
+    reason       TEXT NOT NULL,
+    -- The hash of the CONTENT the flag was filed against, from memory.ContentHash
+    -- — the same rule v22 gave the audit rows (#879, #884). UsefulnessByMemory
+    -- keeps a flag only while the stored content still hashes to it, so editing
+    -- the memory withdraws the flag filed against its old text, while a retag or
+    -- a re-weight leaves it standing. '' is the "no hash" value the reader has a
+    -- named legacy rule for. LAST in this DDL because ALTER TABLE ADD COLUMN
+    -- appends and a fresh database must agree with a migrated one on POSITION,
+    -- which columnShapes pins.
+    content_hash TEXT NOT NULL DEFAULT ''
+                 CHECK (content_hash = '' OR length(content_hash) = 64),
+    -- Attribution: which agent filed it and from which session, the way
+    -- retrieval_audit carries its source. '' means a writer had no transport to
+    -- ask, not that the flag is anonymous by design.
+    agent        TEXT NOT NULL DEFAULT '',
+    session_id   TEXT NOT NULL DEFAULT '',
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- One b-tree, on project_id, for the one predicate the reader has: the union
+-- that feeds UsefulnessByMemory asks for a project's rows. The second predicate
+-- (memory_id) rides the cascade, which is a delete — the rows are gone either
+-- way, and an index maintained for it would be an insert cost on every flag for
+-- a lookup the delete does not do.
+CREATE INDEX IF NOT EXISTS idx_memory_flags_project ON memory_flags(project_id);
+
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     kind                 TEXT NOT NULL,
@@ -832,6 +880,18 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// condition is permanent, so a refusal that has already copied the database is
 	// not the refusal we want.
 	if err := refuseForeignRetrievalAuditTable(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// The flag table's guard, for the reason the audit table's is, and it must
+	// sit here rather than only in migrateV23: initSQL's
+	// `CREATE INDEX ... ON memory_flags(project_id)` is the statement that fails
+	// against somebody else's table of this name, and it fails with "no such
+	// column: project_id" — which names neither the table nor the way out. Before
+	// the DDL, hence before backupBeforeMigrate, for the same reason as above: the
+	// condition is permanent, so a refusal that has already copied the database is
+	// not the refusal we want.
+	if err := refuseForeignMemoryFlagsTable(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

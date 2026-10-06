@@ -10,10 +10,10 @@ package mcpserver
 //
 // Three decisions, each with a cheaper option rejected:
 //
-//   - A block inside ghost_health rather than a twenty-third tool. This tool is
+//   - A block inside ghost_health rather than a tool of its own. This tool is
 //     already "what is Ghost's state", every caller already fetches it, and the
 //     alternative costs an agent a round trip to learn something it was already
-//     being told. It also keeps the tool count in the docs at 22.
+//     being told. It also keeps the tool count in the docs unchanged at 23.
 //   - Per-source lines, never one total. The same rule the report carries: a
 //     search and an injection answer different questions, and a precision over
 //     both is a number about neither. A health block is the worst possible place

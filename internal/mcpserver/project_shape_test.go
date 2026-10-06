@@ -70,6 +70,7 @@ func TestEveryToolThatTakesAProjectIDCannotCreateAProjectTheImporterRefuses(t *t
 		{"ghost_memory_update", map[string]any{"memory_id": "AABBCCDD", "content": "an edit"}},
 		{"ghost_memory_promote", map[string]any{"memory_id": "AABBCCDD"}},
 		{"ghost_memory_pin", map[string]any{"memory_id": "AABBCCDD", "pinned": true}},
+		{"ghost_memory_flag", map[string]any{"memory_id": "AABBCCDD", "kind": "wrong", "reason": "it is wrong"}},
 		{"ghost_task_create", map[string]any{"title": "a task"}},
 		{"ghost_task_list", nil},
 		{"ghost_task_complete", map[string]any{"task_id": "AABBCCDD"}},

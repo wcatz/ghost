@@ -179,6 +179,12 @@ var projectResolvingSurfaces = []struct {
 		read: toolReader("ghost_memory_pin", "project_id", map[string]any{"memory_id": "AABBCCDD", "pinned": true}),
 	},
 	{
+		name: "ghost_memory_flag", argKey: "project_id", argName: "project_id",
+		read: toolReader("ghost_memory_flag", "project_id", map[string]any{
+			"memory_id": "AABBCCDD", "kind": "wrong", "reason": "it is wrong",
+		}),
+	},
+	{
 		name: "ghost_decisions_list", argKey: "project_id", argName: "project_id",
 		read:              toolReader("ghost_decisions_list", "project_id", nil),
 		silentWhenUnknown: true,

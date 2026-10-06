@@ -659,6 +659,21 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge retrieval audits: %w", err)
 	}
 
+	// The flags go too, and this arm is NOT redundant the way a cascade would be:
+	// a purge keeps the memory row (that is what makes it a purge rather than a
+	// delete), so memory_flags' ON DELETE CASCADE never fires. A flag left behind
+	// would survive its own memory's redaction — an agent's objection, with its
+	// reason, still naming a memory whose recorded past the caller just paid to
+	// erase, and still counting as evidence against content that may be exactly
+	// what was purged. The delete is by memory_id because that is the id this
+	// transaction is purging, and it runs in the same transaction for the reason
+	// every statement here does: a purge that took the history and left the flags
+	// would report success over the rows it was asked to remove.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_flags WHERE memory_id = ?`, memoryID); err != nil {
+		return 0, fmt.Errorf("purge memory flags: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_history WHERE memory_id = ?`, memoryID)
 	if err != nil {

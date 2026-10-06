@@ -328,6 +328,19 @@ type assembleCapableStore interface {
 	Candidates(ctx context.Context, req memory.CandidateRequest) (*memory.CandidateSet, error)
 }
 
+// flagCapableStore narrows provider.MemoryStore's concrete backing store to
+// the two methods ghost_memory_flag needs: the append-only write, and the
+// evidence read the result quotes. Neither is on provider.MemoryStore — the
+// capability surface is what the tools expose, and flagging is a storage
+// detail — so s.store is type-asserted to this interface at call time;
+// *memory.Store satisfies it. The read sits beside the write on purpose: the
+// number this tool prints has to be the one figure resolve and reflect are
+// given, or the two would be free to disagree.
+type flagCapableStore interface {
+	FlagMemory(ctx context.Context, req memory.FlagMemoryRequest) error
+	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
+}
+
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
 // the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
 // supersedes-link read for deterministic demotion with GetByIDs for the link
@@ -3288,10 +3301,101 @@ func (s *Server) registerTools() {
 		// agent reading this before it deletes needs to see the whole of what the
 		// call removes.
 		fmt.Fprintf(&sb, "  audits:       %d\n", summary.RetrievalAudits)
+		// And this feature's flags, last for the reason the CLI's own line gives:
+		// an agent reading this before it deletes needs the whole of what the call
+		// removes, and an agent's objection to a memory that is about to go is part
+		// of it.
+		fmt.Fprintf(&sb, "  flags:        %d\n", summary.MemoryFlags)
 		if !args.Apply {
 			sb.WriteString("\nRe-run with apply:true to actually delete.")
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
+	})
+
+	// ghost_memory_flag — record that this agent believes a memory is wrong or
+	// stale (#648 slice 2).
+	type flagArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to flag"`
+		Kind      string `json:"kind" jsonschema:"\"wrong\" if the claim is false, \"stale\" if it is out of date"`
+		Reason    string `json:"reason" jsonschema:"Short reason the memory is wrong or stale (1-500 characters)"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_memory_flag",
+		Title:       "Flag Memory Wrong or Stale",
+		Description: "Record that this agent believes a memory is wrong or stale, with a short reason. Append-only: it adds an objection and changes nothing — no resolve, delete, demotion or re-rank, the classifier still decides. Requires project_id to verify ownership. The reason is stored for an operator to read and is NOT returned (it would land in your context twice); resolve and reflect see only a `flagged=N` count as negative evidence. Two flags on one memory are two separate objections, so this is not idempotent.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			// FALSE, and it is the only value this field may hold: the SDK types
+			// it as a plain bool and the spec defaults it to false, so `true` is
+			// the one spelling a client reads as "calling again changes nothing" —
+			// and a client that believed it would skip the second flag an agent
+			// meant to file. Two flags are two objections with two reasons.
+			IdempotentHint: false,
+			OpenWorldHint:  boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args flagArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" || args.MemoryID == "" {
+			return nil, nil, fmt.Errorf("project_id and memory_id are required")
+		}
+		resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolvedProjectID == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+		}
+		// FlagMemory and the evidence read are not on provider.MemoryStore: the
+		// capability surface is what the tools expose, and this is a storage
+		// detail — the same narrowing assembleCapableStore and resolveCapableStore
+		// do, for the same reason.
+		flagStore, ok := s.store.(flagCapableStore)
+		if !ok {
+			return nil, nil, fmt.Errorf("ghost_memory_flag: store does not support flags")
+		}
+		// Attribution is the transport's, never a value this tool constructs: a
+		// made-up agent or session id would be a claim about a session that never
+		// existed, indistinguishable afterwards from a real one.
+		prov := provenanceFor(req)
+		err = flagStore.FlagMemory(ctx, memory.FlagMemoryRequest{
+			ProjectID: resolvedProjectID,
+			MemoryID:  args.MemoryID,
+			Kind:      args.Kind,
+			Reason:    args.Reason,
+			Agent:     prov.Agent,
+			SessionID: prov.SessionID,
+		})
+		if err != nil {
+			// The store's own refusal, unwrapped: it names which argument to fix
+			// and never quotes the value it refused, so this boundary adds only
+			// the tool name that tells an agent which call to change.
+			return nil, nil, fmt.Errorf("ghost_memory_flag: %w", err)
+		}
+		// The count is read back through UsefulnessByMemory rather than counted
+		// from the write, because that is the figure resolve and reflect will
+		// actually be given: a second source of the same number would be free to
+		// disagree with the first, and the caller is being told what the next pass
+		// will see.
+		ev, err := flagStore.UsefulnessByMemory(ctx, resolvedProjectID)
+		if err != nil {
+			// The flag IS recorded. Saying "failed" would send an agent to retry,
+			// and a retry appends a SECOND objection — so the refusal states both
+			// halves: what happened, and what not to do about it.
+			return nil, nil, fmt.Errorf("ghost_memory_flag: memory %s was flagged, but the count could not be read back — do NOT retry, a retry appends a second flag: %w",
+				args.MemoryID, err)
+		}
+		// Count and id only. The reason deliberately does not come back: this
+		// result lands in the same agent context the reason came from, and echoing
+		// it would put it there twice — while the count is the whole of what the
+		// feature lets leave the store.
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+				"Flagged memory %s as %s. It now carries %d flag(s): resolve and reflect count this as "+
+					"negative evidence beside the note, and the classifier decides. The reason is stored for an "+
+					"operator to read and is not returned.",
+				assemble.Token(args.MemoryID), args.Kind, ev[args.MemoryID].Flagged)}},
+		}, nil, nil
 	})
 
 	// ghost_memory_pin — pin or unpin a memory.

@@ -92,7 +92,7 @@ func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb
 	if _, err := fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog); err != nil {
 		return err
 	}
-	// Last, in the struct's own order. The audit trail's rows for this project
+	// In the struct's own order. The audit trail's rows for this project
 	// (#646): DeleteProject removes them, and a summary that omitted a table its
 	// own command deletes would under-report what the user is about to lose.
 	if _, err := fmt.Fprintf(out, "  retrievals:   %d\n", summary.RetrievalRecords); err != nil {
@@ -101,6 +101,13 @@ func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb
 	// And the verdicts derived from those calls, on the same footing — a verdict
 	// names a memory, so it is part of what deleting a project takes away.
 	if _, err := fmt.Fprintf(out, "  audits:       %d\n", summary.RetrievalAudits); err != nil {
+		return err
+	}
+	// And #648 slice 2's flags, last in the struct's own order for the same
+	// reason: an agent's objection to a memory this command is about to remove is
+	// part of what it takes away, and a line here is the only place the user is
+	// told so before they type the confirmation.
+	if _, err := fmt.Fprintf(out, "  flags:        %d\n", summary.MemoryFlags); err != nil {
 		return err
 	}
 	return nil

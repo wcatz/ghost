@@ -8,7 +8,7 @@ GhostMem's documentation is split by audience. Start with the page that matches 
 - [Using GhostMem](usage.md) — the memory model, categories, search, projects, tasks, decisions, lifecycle operations, and Obsidian.
 - [Configuration](configuration.md) — config paths, precedence, environment variables, embeddings, lifecycle, injection, and routing.
 - [CLI reference](cli.md) — every public command, flag, dry-run default, and lifecycle operation.
-- [MCP surface](mcp.md) — the 22 tools, 4 resources, 2 prompts, and agent guidance.
+- [MCP surface](mcp.md) — the 23 tools, 4 resources, 2 prompts, and agent guidance.
 
 ## Understanding GhostMem
 

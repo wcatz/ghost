@@ -119,6 +119,69 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		}
 	},
 
+	// An agent saying "this memory is wrong" without deleting it. The flag is
+	// negative evidence and nothing else: it is appended, attributed, and hashed
+	// against the content it was about — and the REASON it was given is the one
+	// thing that must not come back, because this tool's answer lands in the same
+	// agent context the reason came from.
+	"ghost_memory_flag": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, seeded string) {
+		const marker = "ZZREASONNEVERLEAVESSTOREZZ"
+		out := call(t, cs, "ghost_memory_flag", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  seeded,
+			"kind":       "wrong",
+			"reason":     marker + " port 2222 was decommissioned in June",
+		})
+		mustContain(t, "flag", out, seeded)
+		mustNotContain(t, "flag", out, marker)
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_flags WHERE memory_id = ?`, seeded); n != 1 {
+			t.Fatalf("memory_flags rows for the flagged memory = %d, want 1", n)
+		}
+		// The stamp is what makes a flag answerable after a rewrite, so it is
+		// checked here rather than only in the store's own tests: a hash that
+		// does not match the stored content withdraws the flag silently.
+		hash := s.queryStrings(t, `SELECT content_hash FROM memory_flags WHERE memory_id = ?`, seeded)
+		if len(hash) != 1 || len(hash[0]) != 64 {
+			t.Fatalf("content_hash = %v, want one 64-character digest", hash)
+		}
+		// A second flag appends rather than replacing the first.
+		call(t, cs, "ghost_memory_flag", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  seeded,
+			"kind":       "stale",
+			"reason":     "the staging config moved to the new relay",
+		})
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_flags WHERE memory_id = ?`, seeded); n != 2 {
+			t.Fatalf("memory_flags rows after a second flag = %d, want 2", n)
+		}
+		// The contract's refusals, in the order an agent hits them: an id it
+		// guessed, a kind outside the two, and a reason at neither edge of its
+		// bound. Each is a refusal with a row not written behind it.
+		for _, tc := range []struct {
+			name string
+			args map[string]any
+		}{
+			{"unknown id", map[string]any{
+				"project_id": e2eProject, "memory_id": "ffffffffffffffffffffffffffffffff",
+				"kind": "wrong", "reason": "it is wrong",
+			}},
+			{"unknown kind", map[string]any{
+				"project_id": e2eProject, "memory_id": seeded,
+				"kind": "useful", "reason": "it is right",
+			}},
+			{"no reason", map[string]any{
+				"project_id": e2eProject, "memory_id": seeded,
+				"kind": "stale", "reason": "",
+			}},
+		} {
+			refused := callExpectingError(t, cs, "ghost_memory_flag", tc.args)
+			mustNotContain(t, tc.name+" refusal", refused, marker)
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_flags WHERE memory_id = ?`, seeded); n != 2 {
+			t.Fatalf("memory_flags rows after three refusals = %d, want 2", n)
+		}
+	},
+
 	// The repair for a wrong supersession an agent can SEE. Both repair passes
 	// are CLI-only, and one of them only withdraws what the current rules reject,
 	// so an edge the classifier still accepts had no path out of the graph at all
