@@ -410,12 +410,16 @@ func TestAProjectContextWhoseRecordIsRefusedStillRendersTheSameBlock(t *testing.
 // `ghost_project_context` shapes that are NOT the union read of a resolved project
 // each record exactly ONE row, attributed to `_global`.
 //
-// They are here because `docs/architecture.md`'s `retrieval_record` cell enumerates
-// which reads write that table, and enumerating it correctly needs these two shapes
-// pinned rather than read off the branches. The other three shapes have their own
-// tests in this file — the tool's union read, the resource's two reads, and (since
-// #581) the standalone global resource — so the cell's claim that a count of CALLS
-// is not a count of rows rests on all five and only two of them were measurable.
+// They are here because `docs/architecture.md`'s `retrieval_record` cell now states
+// the RULE those rows follow — a count of CALLS is not a count of rows, and a read
+// that named `_global` is attributed to `_global` — while `docs/mcp.md`'s Project
+// context section carries the per-shape detail of which read happens when. So these
+// two shapes' row counts are pinned HERE rather than derived from four branches, and
+// they are the two the cell's rule cannot be read off: a `_global` request and an
+// unregistered name are exactly the shapes where the row is `_global`-attributed and
+// singular. The other three have their own tests in this file — the tool's union read,
+// the resource's two reads, and (since #581) the standalone global resource — so all
+// five shapes behind the cell's claim are measurable rather than asserted.
 //
 // Both shapes write one row for the same reason, which is that they never make two
 // reads. `projectContextBudget` unsets `IncludeGlobal` when the project IS
