@@ -377,3 +377,73 @@ func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
 		}
 	})
 }
+
+// TestParsePruneArgsRefusesAnEmptyScope: `--project=` is not the same command line as
+// no `--project`, and on this command the difference is a DELETION.
+//
+// `runPrune` resolves a scope only when `opts.Project != ""`, so an empty value falls
+// through to `scope = ""` and `PruneSessionMemories` takes its store-wide branch —
+// which reaches `_global` rows too, deliberately (docs/cli.md). With `--apply` that
+// deletes expired session rows in every project on the machine. The way to ask for a
+// store-wide prune is to OMIT the flag, which the report names as "every project";
+// spelling it as `--project=` is a script with an unset variable, and it is the one
+// spelling that gets there silently.
+//
+// So the empty value is refused, which is what `parseContextAuditArgs` already
+// does with the same flag — prune was the outlier, and now it counts occurrences too.
+//
+// Occurrences are counted rather than tested with `opts.Project != ""`, for the same
+// reason the --audit parser counts them: that test cannot see `--project=
+// --project=ghost`, where the first occurrence is empty and the second silently
+// becomes the scope.
+func TestParsePruneArgsRefusesAnEmptyScope(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantFail string
+	}{
+		{name: "an empty attached --project", args: []string{"--project="}, wantFail: "empty"},
+		{name: "an empty --project value", args: []string{"--project", ""}, wantFail: "empty"},
+		// The dangerous pair: --apply is what turns the silent scope into a
+		// store-wide deletion, so it is named in the case rather than left out.
+		{name: "an empty --project with --apply", args: []string{"--project=", "--apply"}, wantFail: "empty"},
+		{name: "a detached empty --project with --apply", args: []string{"--apply", "--project", ""}, wantFail: "empty"},
+		// Two empties stop at the FIRST one, for the reason the --audit parser's
+		// matching case gives: there is no scope in the command line at all, so
+		// the thing to tell the reader is the empty value.
+		{name: "two empties stop at the first", args: []string{"--project=", "--project="}, wantFail: "empty"},
+		// A named scope followed by an empty one is still twice, and the empty
+		// value is never assigned, so the scope cannot become store-wide on the
+		// way out.
+		{name: "a named scope then an empty one is twice", args: []string{"--project", "ghost", "--project="}, wantFail: "twice"},
+		// The shape the `!= ""` guard cannot see: the first occurrence is empty,
+		// so the second looked like the first one had not been given, and it
+		// became the scope with no refusal at all. What this case exists for is
+		// that silence, not for which of the two refusals wins now — the empty
+		// value is refused first, exactly as context_audit_test.go pins for the
+		// --audit parser, because a duplicate guard cannot fire until there IS
+		// a first value and here there is none.
+		{name: "an empty scope then a named one stops at the empty", args: []string{"--project=", "--project", "ghost"}, wantFail: "empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parsePruneArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parsePruneArgs(%v) = %+v, want a refusal: an empty scope is a store-wide prune", tc.args, opts)
+			}
+			if !strings.Contains(err.Error(), tc.wantFail) {
+				t.Errorf("refusal = %q, want it to name %q", err.Error(), tc.wantFail)
+			}
+		})
+	}
+
+	// Omitting the flag is still the documented store-wide default, and it is the
+	// ONLY way to reach it now. Asserted because refusing the empty value would be
+	// a bug if it also removed the default.
+	opts, err := parsePruneArgs([]string{"--apply"})
+	if err != nil {
+		t.Fatalf("parsePruneArgs(--apply): %v", err)
+	}
+	if opts.Project != "" {
+		t.Errorf("Project = %q with no --project, want \"\" — the report names that as every project", opts.Project)
+	}
+}

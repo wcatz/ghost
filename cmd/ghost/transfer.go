@@ -595,7 +595,7 @@ func runExport() {
 		os.Exit(1)
 	}
 
-	store, err := openReadOnlyTransferStore(dataDir)
+	store, err := openReadOnlyTransferStore(dataDir, exportOperation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

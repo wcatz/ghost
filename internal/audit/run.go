@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -120,8 +121,10 @@ type SourceSummary struct {
 	Superseded   int
 	Contradicted int
 	// KeptNothing counts the calls this source made that admitted no memory at
-	// all. It is the detectable half of the issue's "missed": a lookup the agent
-	// made that returned nothing it could use.
+	// all. For a source where the AGENT chose to look it is the detectable half of
+	// the issue's "missed": a lookup that returned nothing it could use. For an
+	// injection it is not a miss at all, which is why String() names the figure
+	// after the source (see keptNothingName).
 	KeptNothing int
 }
 
@@ -354,11 +357,29 @@ func (r *Summary) dropUnfiled(kept []placed, bySource map[string]*SourceSummary,
 // every time.
 func (r Summary) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "retrieval audit for %s\n", r.ProjectID)
+	// Every stored string in this function goes through assemble.Label, and the
+	// reason is one sentence rather than three: this output is stderr, and
+	// `ghost lifecycle` writes it to lifecycle.log as the phase tail an
+	// operator reads, so a stored value carrying a newline forges a line of
+	// figures under the real one. Both sibling renderers of this same summary
+	// line already label their stored text — report.go labels its source and
+	// its degraded reasons (labelDegraded), and printContextAudit labels the
+	// report project id with TestTheAuditScopeLineRendersTheProjectAsALabel
+	// pinning it — and half of this function was the inconsistency.
+	fmt.Fprintf(&b, "retrieval audit for %s\n", assemble.Label(r.ProjectID))
 	for _, src := range r.Sources {
+		// The source column through assemble.Label, for the reason report.go's two
+		// renderers do it and says: retrieval_record.source is plain TEXT with no
+		// CHECK and nothing validates it, so a stored row — or a backup restored
+		// from one — chooses this string, and one holding a newline forges a
+		// figure of its own. It matters more in this summary than in the report
+		// because `ghost lifecycle` writes it to stderr as the phase tail an
+		// operator reads in lifecycle.log. keptNothingName gets the RAW value: it
+		// compares against a known source name, and an escaped one is not that name.
 		fmt.Fprintf(&b, "  %s: %d call(s), %d used, %d ignored, %d superseded in session, "+
-			"%d contradicted, %d kept nothing\n",
-			src.Source, src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted, src.KeptNothing)
+			"%d contradicted, %d %s\n",
+			assemble.Label(src.Source), src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted,
+			src.KeptNothing, keptNothingName(src.Source))
 	}
 	if len(r.Sources) > 1 {
 		b.WriteString("  figures are per source and are never pooled: a search and an injection " +
@@ -378,8 +399,13 @@ func (r Summary) String() string {
 			"%d judged\n", r.Unfiled, r.Verdicts, r.Verdicts+r.Unfiled)
 	}
 	if r.Degraded != "" {
+		// The degradation reason is STORED text too, whatever its contract says:
+		// MarkDegraded takes a reason from the hook fail-open vocabulary, but the
+		// one caller builds it with %v of an error and the sidecar quotes rather
+		// than rejects, so a newline survives a save and load. It reads as a
+		// caveat, which is exactly why a forged line under it would be believed.
 		fmt.Fprintf(&b, "  the transcript was only partly read (%s), so an ignored verdict is a claim "+
-			"about the text that was read\n", r.Degraded)
+			"about the text that was read\n", assemble.Label(r.Degraded))
 	}
 	b.WriteString("  \"ignored\" means the agent's own words never mentioned the memory; " +
 		"it is not a relevance or usefulness score\n")
