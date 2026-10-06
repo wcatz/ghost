@@ -168,10 +168,24 @@ func TestScopeFlagParsersRefuseEmptyAndRepeated(t *testing.T) {
 			{name: "an empty attached value", args: []string{"--project="}, want: "--project requires a value"},
 			{name: "an empty positional", args: []string{""}, want: "--project requires a value"},
 			{name: "two positionals", args: []string{"alpha", "beta"}, want: "expected exactly one project"},
+			// The mixed orders, because the positional is the spelling a guard
+			// written only for the flag arms cannot see: with a value test here
+			// instead of the occurrence count, `ghost resolve "" beta` would run
+			// on beta in a command line that named the scope twice.
+			{name: "an empty positional then a project", args: []string{"", "beta"}, want: "expected exactly one project"},
+			{name: "positional then separate flag", args: []string{"alpha", "--project", "beta"}, want: "expected exactly one project"},
+			{name: "positional then attached flag", args: []string{"alpha", "--project=beta"}, want: "expected exactly one project"},
+			{name: "separate flag then positional", args: []string{"--project", "alpha", "beta"}, want: "expected exactly one project"},
+			{name: "attached flag then positional", args: []string{"--project=alpha", "beta"}, want: "expected exactly one project"},
+			{name: "an empty positional then a separate flag", args: []string{"", "--project", "beta"}, want: "expected exactly one project"},
+			{name: "an empty positional then an attached flag", args: []string{"", "--project=beta"}, want: "expected exactly one project"},
 			{name: "separate then separate", args: []string{"--project", "alpha", "--project", "beta"}, want: "expected exactly one project"},
 			{name: "separate then attached", args: []string{"--project", "alpha", "--project=beta"}, want: "expected exactly one project"},
+			{name: "attached then separate", args: []string{"--project=alpha", "--project", "beta"}, want: "expected exactly one project"},
+			{name: "attached then attached", args: []string{"--project=alpha", "--project=beta"}, want: "expected exactly one project"},
 			{name: "two empty values stop at the first", args: []string{"--project", "", "--project", ""}, want: "--project requires a value"},
 			{name: "a named scope then an empty one is still twice", args: []string{"--project", "alpha", "--project", ""}, want: "expected exactly one project"},
+			{name: "a named scope then an empty positional is still twice", args: []string{"--project", "alpha", ""}, want: "expected exactly one project"},
 		})
 	})
 
