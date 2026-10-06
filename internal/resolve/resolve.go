@@ -333,6 +333,24 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		}
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Skipped++
+			// THE LIMIT OF #648's EVIDENCE HERE, STATED BECAUSE IT IS ABOVE THIS
+			// LINE: a cached KEEP is dropped from the pending set BEFORE the audit's
+			// evidence is read, so a memory whose content already earned a KEEP never
+			// reaches the classifier again — and never reaches it WITH a contradiction
+			// either. In a converged corpus, which is the state a project reaches once
+			// the first pass has run, that is most of the corpus, so the evidence is
+			// delivered only to the memories this pass is already going to re-ask
+			// about. Resolve does not ALWAYS tell the classifier about a contradiction;
+			// it tells it about contradictions on candidates this pass is asking about
+			// anyway.
+			//
+			// The cache is deliberately NOT changed here. It is a content-keyed memo of
+			// a judgement resolve already paid for, and the key is deliberately the
+			// CONTENT alone so a retag or a re-weight re-asks nothing — which is
+			// correct for the cache's own purpose and wrong for this one, because an
+			// audit verdict arrives independently of the content. Making the evidence
+			// invalidate the cache is a change to what the cache MEANS, and the fix
+			// belongs beside it rather than inside this slice: #880.
 			continue
 		}
 		pending = append(pending, m)
@@ -360,6 +378,11 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		// under that rule with the rest of the note rather than as a line of
 		// instructions from the harness. ContentHash still keys on m.Content, so
 		// the KEEP cache is unaffected.
+		//
+		// Read this as a bound on what the evidence does, not a statement that the
+		// classifier hears about every contradiction: the cache gate above drops a
+		// memory with a cached KEEP before this read, so nothing here reaches a
+		// candidate this pass was not going to re-ask about anyway (#880).
 		evidence, evErr := store.UsefulnessByMemory(ctx, projectID)
 		if evErr != nil {
 			if logger != nil {

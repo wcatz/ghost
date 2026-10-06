@@ -56,9 +56,10 @@ type UsefulnessEvidence struct {
 // Line renders the evidence as the ONE fixed format that reaches a prompt.
 //
 // It is built from counts and ids, never from free text a session wrote: the
-// session id is neutralised below, and nothing else in the line comes from the
-// row. The numbers are the two negative buckets and nothing else, so a line that
-// reaches a prompt cannot be a popularity signal wearing a different name.
+// session id is rendered by SafeToken below, and nothing else in the line comes
+// from the row. The numbers are the two negative buckets and nothing else, so a
+// line that reaches a prompt cannot be a popularity signal wearing a different
+// name.
 //
 // The empty string means "no negative verdict", and every consumer treats it as
 // "say nothing" rather than "say something blank" — a memory with no audit rows
@@ -75,13 +76,22 @@ func (e UsefulnessEvidence) Line() string {
 		counts = append(counts, fmt.Sprintf("superseded_in_session=%d", e.SupersededInSession))
 	}
 	line := "audit: verdicts " + strings.Join(counts, " ")
+	// The id is bounded FIRST and quoted SECOND, and the order is load-bearing.
+	// Bounding first bounds the quoting: QuoteToASCII can render one rune as six
+	// characters (\u202e), so a bound applied afterwards could still be exceeded by
+	// a factor of six, and the bound is what keeps an arbitrary stored field from
+	// growing a prompt. Quoting second is what makes the bound honest — a
+	// truncation that cut a rune in half, or cut between a backslash and the
+	// character it escapes, would hand back a malformed literal that a reader
+	// parses as something other than an id.
+	session := SafeToken(boundSessionID(e.LastSession))
 	switch {
 	case e.LastSession != "" && e.LastAt != "":
-		line += fmt.Sprintf("; latest session %s on %s", neutralSessionID(e.LastSession), e.LastAt[:min(10, len(e.LastAt))])
+		line += fmt.Sprintf("; latest session %s on %s", session, e.LastAt[:min(10, len(e.LastAt))])
 	case e.LastAt != "":
 		line += fmt.Sprintf("; latest verdict on %s", e.LastAt[:min(10, len(e.LastAt))])
 	case e.LastSession != "":
-		line += fmt.Sprintf("; latest session %s", neutralSessionID(e.LastSession))
+		line += fmt.Sprintf("; latest session %s", session)
 	}
 	return line
 }
@@ -90,41 +100,29 @@ func (e UsefulnessEvidence) Line() string {
 // and the line is a prompt fragment, so an id of any length must not be able to
 // grow the prompt without limit; the bound TRUNCATES, never drops the id, because
 // rendering no id at all would claim no session recorded it and one did.
+//
+// It counts RUNES, not bytes, for the reason PreviewLine does: a byte bound would
+// cut a multi-byte rune in half and produce a replacement character, which is a
+// different id from the one stored rather than a shortened one.
 const usefulnessSessionMax = 64
 
-// usefulnessReplaced is what a character a session could have chosen becomes. It
-// is a token nobody can forge and a model reads as "this character was altered",
-// so the reader can see the id was changed rather than silently believe it.
-const usefulnessReplaced = "<?>"
-
-// neutralSessionID makes an arbitrary stored session id safe to put in a prompt.
+// boundSessionID truncates a session id to usefulnessSessionMax RUNES.
 //
-// This is the one field of the line that came from a session, so it is the one
-// field that could be an instruction. Both consumers render the line into a
-// prompt where a NEWLINE ends a record — reflect lists one memory per line — so
-// an id carrying "\n- id:E1 ... " would forge a second record naming an id the
-// run was never given. And « closes the «...» data block resolve and reflect both
-// wrap their material in, after which anything reads as the harness speaking. A
-// control character could also drive a terminal that renders the transcript.
-//
-// So every character that could end a line, end a record, close a data block or
-// drive a terminal is replaced with one fixed escape, and the result is ONE line
-// of bounded length.
-func neutralSessionID(id string) string {
-	var b strings.Builder
-	b.Grow(len(id))
-	for i, r := range id {
-		if i >= usefulnessSessionMax {
-			break
+// It is deliberately a plain cut with no ellipsis and no marker. It runs BEFORE
+// SafeToken, so what it cuts is a rune sequence, not an escape sequence — the
+// quoting then sees well-formed input and cannot produce a malformed literal. An
+// ellipsis would itself have to be quoted, and a truncated id with a suffix
+// appended is no longer the id the store holds, which is the one thing the id is
+// for.
+func boundSessionID(id string) string {
+	count := 0
+	for i := range id {
+		if count == usefulnessSessionMax {
+			return id[:i]
 		}
-		switch {
-		case r == '\n' || r == '\r' || r == '«' || r == '»' || r < 0x20 || r == 0x7f:
-			b.WriteString(usefulnessReplaced)
-		default:
-			b.WriteRune(r)
-		}
+		count++
 	}
-	return b.String()
+	return id
 }
 
 // UsefulnessByMemory reads the negative verdicts for one project, as one map

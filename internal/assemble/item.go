@@ -261,28 +261,18 @@ func ScopeLabel(scope map[string]string) string {
 // printed on a line an agent reads as Ghost's own, so neither may be able to
 // start a line, close the construct it sits in, or open a data block of its own.
 //
-// A value is written bare only when every character is one a stored name
-// plausibly uses. Anything else is written as an ASCII-only Go quoted string: a
-// newline cannot start a line of its own, a `}` or a backtick cannot close the
-// label or the id span early, and a «, » or other non-ASCII rune cannot open a
-// data block of its own.
-//
-// The bare case is the one every real row takes — the ids Ghost mints are 32 hex
-// characters and a scope name is a word — so this is invisible on every honest
-// listing and costs nothing. It is exported because a second renderer printing
-// the same fields (mcpserver's formatMemories) must reach the SAME function: two
-// implementations of one rule are two rules, and the one that is not tested here
-// is the one that ships the bug.
+// The rule itself is memory.SafeToken and this is a delegation, not a copy. It
+// MOVED there rather than being duplicated because the audit's usefulness line
+// renders a session id into a prompt from internal/memory, and the dependency runs
+// assemble -> memory: a reader in internal/memory cannot reach a function in the
+// package that imports it. That is the same arrangement the stamp parsers already
+// use (memory.ParseStamp, memory.StampLayouts, memory.ValidityState), and for the
+// same reason — two implementations of one rule are two rules, and the copy that
+// is not tested is the one that ships the bug. It is kept as a named function
+// because a second renderer printing the same fields (mcpserver's formatMemories)
+// reads better against this name than against memory.SafeToken.
 func Token(s string) string {
-	if s == "" {
-		return `""`
-	}
-	for _, r := range s {
-		if !isTokenRune(r) {
-			return strconv.QuoteToASCII(s)
-		}
-	}
-	return s
+	return memory.SafeToken(s)
 }
 
 // Label renders one stored value that must occupy a single line of output and is
@@ -363,18 +353,24 @@ func PreviewLine(s string, max int) string {
 	return s
 }
 
-// isTokenRune is the set Token writes bare. It is the scope-name set the label
-// has always used, widened by nothing: the id column's own values are 32 hex
-// characters, and the other ids a real store holds (a bench corpus id, a restored
-// snapshot's) are words with separators. Nothing else needs to be bare to be
-// legible, and every character outside this set is exactly the class that can
-// break a line or a data block.
+// isTokenRune is the set Token writes bare. It is memory.SafeToken's own set,
+// reached through its unexported name here because three renderers in this package
+// consult it on a rune at a time rather than on a whole string — Label's escape
+// test and the two pipeline decisions about what an id may be shown as.
+//
+// It is the scope-name set the label has always used, widened by nothing: the id
+// column's own values are 32 hex characters, and the other ids a real store holds
+// (a bench corpus id, a restored snapshot's) are words with separators. Nothing
+// else needs to be bare to be legible, and every character outside this set is
+// exactly the class that can break a line, a record, a data block, or a reader's
+// view of one.
+//
+// It must not drift from memory.SafeToken's set: Token delegates there, so a
+// divergence would mean this package's rune-at-a-time checks decide on a
+// different rule than the whole-string renderer they sit beside.
+// TestTheSharedTokenRuneSetIsOneSet holds them together.
 func isTokenRune(r rune) bool {
-	switch {
-	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		return true
-	}
-	return strings.ContainsRune("._-:/@+", r)
+	return memory.IsSafeTokenRune(r)
 }
 
 // Data wraps untrusted stored text in «...» data delimiters, first rewriting
