@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -42,6 +43,8 @@ const attestAction = "actions/attest-build-provenance"
 // map[string]string because every value the attest action takes is a scalar.
 type workflowStep struct {
 	Name string            `yaml:"name"`
+	ID   string            `yaml:"id"`
+	If   string            `yaml:"if"`
 	Uses string            `yaml:"uses"`
 	Run  string            `yaml:"run"`
 	With map[string]string `yaml:"with"`
@@ -1403,5 +1406,430 @@ func TestReleaseJobAttestsAfterGoReleaser(t *testing.T) {
 	}
 	if attest <= goreleaser {
 		t.Errorf("attest step is at %d, at or before the GoReleaser step at %d; the archives do not exist yet", attest, goreleaser)
+	}
+}
+
+// The plugin job's catalog-PR steps, named so the tests below can find them
+// by the same name the workflow uses. The PR step is the one #888 is about:
+// it used to end the job red whenever GitHub refused `gh pr create`, which
+// also skipped the two steps after it.
+const (
+	catalogPRStepName     = "Open or update the catalog pull request"
+	manualMergeStepName   = "Report the manual merge step"
+	verifyCatalogStepName = "Verify the catalog on the pin branch matches the pinned copy"
+)
+
+// pinBranch is the branch the pin step writes for the tag the tests model.
+// It is the shape the workflow builds (automation/marketplace-pin-v<version>),
+// not a branch that exists.
+const pinBranch = "automation/marketplace-pin-v0.45.0"
+
+// refusedPRCreate is the error run 37497108475 (v0.45.0) logged when the
+// plugin job tried to open the catalog PR: GitHub does not let GitHub
+// Actions create or approve pull requests in this repository.
+const refusedPRCreate = "pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)"
+
+// findPluginStep returns the named step of the plugin job, failing the test
+// if it is absent — a renamed or deleted step is a build failure, not a
+// silent skip.
+func findPluginStep(t *testing.T, wf releaseWorkflow, name string) workflowStep {
+	t.Helper()
+	for _, s := range wf.Jobs["plugin"].Steps {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("the plugin job has no step named %q", name)
+	return workflowStep{}
+}
+
+// pluginStepSandbox lays out a directory the way the plugin job's working
+// directory is: the pinned catalog at .claude-plugin/marketplace.json, a stub
+// gh on PATH, and a scratch directory the scripts' hardcoded /tmp paths are
+// redirected into.
+type pluginStepSandbox struct {
+	dir     string
+	bin     string
+	scratch string
+}
+
+func newPluginStepSandbox(t *testing.T) *pluginStepSandbox {
+	t.Helper()
+	dir := t.TempDir()
+	writeCatalogFixture(t, dir)
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStubGH(t, bin)
+	scratch := filepath.Join(dir, "scratch")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &pluginStepSandbox{dir: dir, bin: bin, scratch: scratch}
+}
+
+// env returns the environment a plugin-job step runs under, with extra
+// merged on top. PATH carries the stub gh first; the rest is the test
+// process's own environment.
+func (s *pluginStepSandbox) env(extra map[string]string) map[string]string {
+	env := map[string]string{
+		"PATH":              s.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GITHUB_REPOSITORY": "wcatz/ghost",
+		"GITHUB_REF_NAME":   "v0.45.0",
+		"GH_TOKEN":          "stub-token",
+		"STUB_LOG":          filepath.Join(s.scratch, "gh-calls.log"),
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	return env
+}
+
+// runStep executes one of the plugin job's run steps the way the runner
+// would: bash -e, the step's ${{ }} expressions expanded from the outputs
+// the earlier steps would have written, and the script's hardcoded /tmp
+// scratch paths redirected into the sandbox so the test never touches the
+// shared tmpfs.
+func (s *pluginStepSandbox) runStep(t *testing.T, step workflowStep, outputs, env map[string]string) (int, string) {
+	t.Helper()
+	script := expandStepOutputs(t, withOwnScratch(step.Run, s.scratch), outputs)
+	return runBashScript(t, s.dir, script, env)
+}
+
+// writeCatalogFixture writes the pinned catalog the PR step reads and the
+// verification step compares against.
+func writeCatalogFixture(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{
+  "plugins": [
+    {
+      "name": "ghost",
+      "source": {
+        "type": "github",
+        "url": "https://github.com/wcatz/ghost/releases/download/v0.45.0/ghost-plugin.zip",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    }
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "marketplace.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeStubGH writes a stub gh into bin. Every invocation is appended to
+// $STUB_LOG so a test can assert which calls happened, and the answers come
+// from STUB_* variables so one stub serves every scenario: the refusal
+// #888 is about, the successful create, and the contents-API read the
+// verification step makes.
+func writeStubGH(t *testing.T, bin string) {
+	t.Helper()
+	script := `#!/usr/bin/env bash
+set -u
+{
+  printf 'gh'
+  for arg in "$@"; do printf ' %s' "$arg"; done
+  printf '\n'
+} >> "$STUB_LOG"
+case "$1" in
+  pr)
+    case "$2" in
+      list)
+        printf '%s' "${STUB_PR_LIST:-}"
+        exit "${STUB_PR_LIST_EXIT:-0}"
+        ;;
+      create)
+        printf '%s' "${STUB_PR_CREATE_STDOUT:-}"
+        printf '%s' "${STUB_PR_CREATE_STDERR:-}" >&2
+        exit "${STUB_PR_CREATE_EXIT:-0}"
+        ;;
+      view)
+        printf '%s' "${STUB_PR_VIEW_URL:-}"
+        exit "${STUB_PR_VIEW_EXIT:-0}"
+        ;;
+      edit)
+        exit "${STUB_PR_EDIT_EXIT:-0}"
+        ;;
+      *)
+        printf 'stub gh: unhandled pr subcommand: %s\n' "$2" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  api)
+    if [ "${STUB_API_EXIT:-0}" != "0" ]; then
+      printf '%s' "${STUB_API_STDERR:-}" >&2
+      exit "$STUB_API_EXIT"
+    fi
+    if [ -z "${STUB_CONTENTS_B64:-}" ]; then
+      printf 'stub gh: api called with no STUB_CONTENTS_B64\n' >&2
+      exit 64
+    fi
+    printf '{"content": "%s"}' "$STUB_CONTENTS_B64"
+    exit 0
+    ;;
+  *)
+    printf 'stub gh: unhandled command: %s\n' "$1" >&2
+    exit 64
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// withOwnScratch redirects the workflow's hardcoded /tmp scratch paths into
+// the sandbox. On a runner /tmp is private to the job; in a test it is the
+// shared tmpfs quota, and the standing rule is that test data lives under
+// the test's own directory.
+func withOwnScratch(script, scratch string) string {
+	return strings.ReplaceAll(script, "/tmp/", scratch+"/")
+}
+
+// stepOutputExpr matches the ${{ steps.<id>.outputs.<name> }} expressions a
+// run body carries. The runner expands them before the script runs; the
+// tests expand them from the outputs the earlier steps actually wrote.
+var stepOutputExpr = regexp.MustCompile(`\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*\}\}`)
+
+func expandStepOutputs(t *testing.T, script string, outputs map[string]string) string {
+	t.Helper()
+	out := stepOutputExpr.ReplaceAllStringFunc(script, func(m string) string {
+		sub := stepOutputExpr.FindStringSubmatch(m)
+		key := sub[1] + "." + sub[2]
+		// A step output that was never written expands to empty, exactly as
+		// the runner does — the summary step reads PR_URL in a branch that
+		// only runs when it exists.
+		return outputs[key]
+	})
+	if strings.Contains(out, "${{") {
+		t.Fatalf("script contains an expression this test does not model:\n%s", out)
+	}
+	return out
+}
+
+func readStepOutputs(t *testing.T, path string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read GITHUB_OUTPUT %s: %v", path, err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("malformed GITHUB_OUTPUT line %q", line)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// runCatalogPRStep executes the PR step against the stub gh and returns its
+// exit code, combined output and the outputs it wrote to GITHUB_OUTPUT.
+func runCatalogPRStep(t *testing.T, step workflowStep, stubEnv map[string]string) (int, string, map[string]string) {
+	t.Helper()
+	sb := newPluginStepSandbox(t)
+	output := filepath.Join(sb.scratch, "github-output")
+	env := sb.env(stubEnv)
+	env["GITHUB_OUTPUT"] = output
+	code, out := sb.runStep(t, step, map[string]string{"pin.BRANCH": pinBranch}, env)
+	return code, out, readStepOutputs(t, output)
+}
+
+// TestCatalogPRStepToleratesARefusedPullRequest is the behaviour #888 is
+// about. The repository does not let GitHub Actions create or approve pull
+// requests, so `gh pr create` is refused on every release — and until now
+// that refusal ended the job red, which also skipped the summary and
+// verification steps after it. The step must treat the refusal as an
+// outcome: exit 0, write the compare link a human opens instead, and say
+// whether a PR was opened.
+func TestCatalogPRStepToleratesARefusedPullRequest(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	step := findPluginStep(t, wf, catalogPRStepName)
+	if step.Run == "" {
+		t.Fatalf("step %q has no run body", catalogPRStepName)
+	}
+
+	code, out, outputs := runCatalogPRStep(t, step, map[string]string{
+		"STUB_PR_CREATE_EXIT":   "1",
+		"STUB_PR_CREATE_STDERR": refusedPRCreate,
+	})
+	if code != 0 {
+		t.Errorf("the PR step exited %d on a refused `gh pr create`, so the release job ends red and the two steps after it are skipped:\n%s", code, out)
+	}
+	wantCompare := "https://github.com/wcatz/ghost/compare/main..." + pinBranch + "?expand=1"
+	if got := outputs["COMPARE_URL"]; got != wantCompare {
+		t.Errorf("COMPARE_URL = %q, want %q — the summary's manual step is this link", got, wantCompare)
+	}
+	if got := outputs["PR_OPENED"]; got != "no" {
+		t.Errorf("PR_OPENED = %q, want \"no\" — the step must say whether a PR was opened", got)
+	}
+	if _, ok := outputs["PR_URL"]; ok {
+		t.Errorf("PR_URL was written even though no PR was opened: %q", outputs["PR_URL"])
+	}
+	if !strings.Contains(out, wantCompare) {
+		t.Errorf("the step's log does not surface the compare link a human needs:\n%s", out)
+	}
+}
+
+// TestCatalogPRStepReportsAPullRequestItCanOpen keeps the refusal tolerance
+// from swallowing the happy path: when the repository does let the PR be
+// opened — a fork's workflow, or a setting change — the step must still
+// report the PR, and the compare link must still be available as the
+// fallback the summary can report.
+func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	step := findPluginStep(t, wf, catalogPRStepName)
+
+	t.Run("created by this step", func(t *testing.T) {
+		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
+			"STUB_PR_CREATE_EXIT":   "0",
+			"STUB_PR_CREATE_STDOUT": "https://github.com/wcatz/ghost/pull/889\n",
+			"STUB_PR_VIEW_URL":      "https://github.com/wcatz/ghost/pull/889",
+		})
+		if code != 0 {
+			t.Errorf("the PR step exited %d on a successful `gh pr create`:\n%s", code, out)
+		}
+		if got := outputs["PR_OPENED"]; got != "yes" {
+			t.Errorf("PR_OPENED = %q, want \"yes\"", got)
+		}
+		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
+			t.Errorf("PR_URL = %q", got)
+		}
+		if got := outputs["COMPARE_URL"]; got == "" {
+			t.Error("COMPARE_URL is not written on the success path — the summary must be able to fall back to it")
+		}
+	})
+
+	t.Run("already open from an earlier run", func(t *testing.T) {
+		code, out, outputs := runCatalogPRStep(t, step, map[string]string{
+			"STUB_PR_LIST":     "889",
+			"STUB_PR_VIEW_URL": "https://github.com/wcatz/ghost/pull/889",
+		})
+		if code != 0 {
+			t.Errorf("the PR step exited %d with an existing PR:\n%s", code, out)
+		}
+		if got := outputs["PR_OPENED"]; got != "yes" {
+			t.Errorf("PR_OPENED = %q, want \"yes\" — a PR is open for this pin", got)
+		}
+		if got := outputs["PR_URL"]; got != "https://github.com/wcatz/ghost/pull/889" {
+			t.Errorf("PR_URL = %q", got)
+		}
+	})
+}
+
+// runSummaryStep executes the summary step with the PR step's outputs
+// expanded in, and returns what it wrote to GITHUB_STEP_SUMMARY.
+func runSummaryStep(t *testing.T, step workflowStep, prOutputs map[string]string) string {
+	t.Helper()
+	sb := newPluginStepSandbox(t)
+	summaryFile := filepath.Join(sb.scratch, "step-summary")
+	outputs := map[string]string{"pin.BRANCH": pinBranch}
+	for k, v := range prOutputs {
+		outputs["open-pr."+k] = v
+	}
+	code, out := sb.runStep(t, step, outputs, sb.env(map[string]string{
+		"GITHUB_STEP_SUMMARY": summaryFile,
+	}))
+	if code != 0 {
+		t.Fatalf("the summary step exited %d:\n%s", code, out)
+	}
+	raw, err := os.ReadFile(summaryFile)
+	if err != nil {
+		t.Fatalf("read the step summary: %v", err)
+	}
+	return string(raw)
+}
+
+// TestTheManualMergeSummaryReportsTheRightLink runs the summary step after
+// the PR step, with the outputs the PR step actually wrote, and checks the
+// manual step it reports is the link that works: the PR when one is open,
+// the compare link when the creation was refused.
+func TestTheManualMergeSummaryReportsTheRightLink(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	prStep := findPluginStep(t, wf, catalogPRStepName)
+	summary := findPluginStep(t, wf, manualMergeStepName)
+
+	t.Run("refused: the compare link is the manual step", func(t *testing.T) {
+		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
+			"STUB_PR_CREATE_EXIT":   "1",
+			"STUB_PR_CREATE_STDERR": refusedPRCreate,
+		})
+		body := runSummaryStep(t, summary, outputs)
+		want := "https://github.com/wcatz/ghost/compare/main..." + pinBranch + "?expand=1"
+		if !strings.Contains(body, want) {
+			t.Errorf("the summary does not report the compare link as the manual step:\n%s", body)
+		}
+		if strings.Contains(body, "/pull/") {
+			t.Errorf("the summary reports a PR link even though no PR was opened:\n%s", body)
+		}
+	})
+
+	t.Run("opened: the PR link is the manual step", func(t *testing.T) {
+		_, _, outputs := runCatalogPRStep(t, prStep, map[string]string{
+			"STUB_PR_CREATE_EXIT":   "0",
+			"STUB_PR_CREATE_STDOUT": "https://github.com/wcatz/ghost/pull/889\n",
+			"STUB_PR_VIEW_URL":      "https://github.com/wcatz/ghost/pull/889",
+		})
+		body := runSummaryStep(t, summary, outputs)
+		if !strings.Contains(body, "https://github.com/wcatz/ghost/pull/889") {
+			t.Errorf("the summary does not report the PR link:\n%s", body)
+		}
+		if strings.Contains(body, "compare/main") {
+			t.Errorf("the summary reports the compare link even though a PR is open:\n%s", body)
+		}
+	})
+}
+
+// TestTheCatalogVerificationRunsAfterARefusedPullRequest is the other half of
+// #888: the PR failure used to skip the two steps after it, so the
+// branch-versus-pinned-copy check never ran on a real release. The runner
+// skips a step when an earlier step failed, so the property that matters is
+// the pair: the PR step exits 0 on a refusal, and the verification step's
+// own `if` still gates only on the pin step's skip flag — gating it on the
+// PR step's outputs would skip it exactly when the PR is refused.
+func TestTheCatalogVerificationRunsAfterARefusedPullRequest(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	prStep := findPluginStep(t, wf, catalogPRStepName)
+	verify := findPluginStep(t, wf, verifyCatalogStepName)
+
+	if strings.Contains(verify.If, "open-pr") {
+		t.Errorf("the verification step's `if` is %q — gating it on the PR step would skip it exactly when the PR is refused, which is the bug #888 had", verify.If)
+	}
+	if !strings.Contains(verify.If, "steps.pin.outputs.SKIPPED") {
+		t.Errorf("the verification step's `if` is %q — it must still gate on the pin step's skip flag", verify.If)
+	}
+
+	// The runner's rule, modelled: a step runs when every step before it
+	// succeeded and its own `if` holds. Run the PR step under the refusal,
+	// then the verification step, and require both to pass.
+	code, out, _ := runCatalogPRStep(t, prStep, map[string]string{
+		"STUB_PR_CREATE_EXIT":   "1",
+		"STUB_PR_CREATE_STDERR": refusedPRCreate,
+	})
+	if code != 0 {
+		t.Fatalf("the PR step exited %d on a refusal, so the runner would skip the verification step:\n%s", code, out)
+	}
+
+	sb := newPluginStepSandbox(t)
+	catalog := filepath.Join(sb.dir, ".claude-plugin", "marketplace.json")
+	raw, err := os.ReadFile(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, out = sb.runStep(t, verify, map[string]string{"pin.BRANCH": pinBranch}, sb.env(map[string]string{
+		"STUB_CONTENTS_B64": base64.StdEncoding.EncodeToString(raw),
+	}))
+	if code != 0 {
+		t.Errorf("the verification step exited %d after a refused PR:\n%s", code, out)
 	}
 }
