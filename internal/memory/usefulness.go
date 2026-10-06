@@ -179,19 +179,24 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 	//
 	// THE KNOWN COST OF THIS GUARD, STATED BECAUSE IT IS SILENT: updated_at is not
 	// a content clock. UpdateMemory moves it on a metadata-only edit, and
-	// ApplyReflection's reusePreservesAge branch moves it after writing an
-	// identical `content` back, so a retag, a re-weight or a `verified: true` on a
+	// ReplaceNonManual's reusePreservesAge branch (reached through
+	// ApplyReflection, which only calls it) moves it after writing an identical
+	// `content` back, so a retag, a re-weight or a `verified: true` on a
 	// memory the audit contradicted withholds that memory's evidence from every
 	// later resolve and reflect pass — with no error, no report line and no log,
 	// and the contradiction the classifier was told about simply stops arriving.
-	// That is the over-filter, and it is silent; the store has no column that
-	// moves only with content, so a guard on one needs either a content hash
-	// recorded alongside the verdict (a retrieval_audit column, and therefore a
-	// schema change) or a decision to stop moving updated_at on metadata writes
+	// That is the over-filter, and it is silent. The exact fix needs a column
+	// that records every content change, and no such column exists —
+	// `resolve_kept_hash` is a content hash but not one: MarkResolveKept stamps
+	// it when resolve judges a row KEEP, it is cleared by SetResolved and
+	// MarkResolved, and no content edit writes it, so it is a cache keyed by
+	// content rather than a record of content changes. So the choice is a content
+	// hash recorded alongside the verdict (a retrieval_audit column, and therefore
+	// a schema change) or a decision to stop moving updated_at on metadata writes
 	// (which is store-wide: the passive `_global` bucket's tie-break and
 	// pruneActivitySQL both read it). Neither is a decision this reader may make
 	// on its own, so the guard keeps erring toward silence and this paragraph is
-	// the record of what that costs.
+	// the record of what that costs (#879).
 	//
 	// Both halves also require `a.degraded = ''`. retrieval_audit.degraded carries
 	// the scanner's reason for a partial transcript read, and the schema's own
