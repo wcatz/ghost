@@ -65,6 +65,13 @@ import (
 // already-built binary.
 var ghostBin string
 
+// e2eBinFromEnv reports that ghostBin came from GHOST_E2E_BIN rather than the
+// suite's own build. A test whose premise is a property of the suite's build
+// (a dev-only refusal, a debug flag) has to know which one it is holding: the
+// suite's own build can never lose the premise, but a binary handed in from
+// outside can be a release, where the premise does not exist.
+var e2eBinFromEnv bool
+
 // commandTimeout bounds one `ghost ...` invocation. Generous, because a
 // reflection phase legitimately spawns a harness and a migration legitimately
 // takes its pre-migration backup — but finite, so a hang fails the test instead
@@ -97,6 +104,7 @@ func resolveBinary() (string, func(), error) {
 		if _, err := os.Stat(abs); err != nil {
 			return "", nil, fmt.Errorf("GHOST_E2E_BIN=%s: %w", p, err)
 		}
+		e2eBinFromEnv = true
 		return abs, func() {}, nil
 	}
 	dir, err := os.MkdirTemp("", "ghost-e2e-bin-")

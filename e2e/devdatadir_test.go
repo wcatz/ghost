@@ -14,6 +14,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/selfupdate"
 )
 
 // withoutEnv removes one variable from the sandbox child's environment. It
@@ -92,9 +93,49 @@ func seedLifecycleFailure(t *testing.T, s *sandbox, project string) {
 	}
 }
 
+// devBuildPremise is the one premise all three tests here share: the binary
+// under test is a DEVELOPMENT build, so config.CheckDevDataDir refuses a
+// directory GHOST_DEV_FORBID_DATA_DIR names. A release build ignores the
+// variable entirely (internal/config/devforbid.go returns before resolving
+// anything), so against a release these tests would measure nothing — the
+// refusal they assert does not exist in that binary.
+//
+// The premise is decided by asking the binary what it is, not by assuming it:
+// `ghost version` prints the string the release ldflags stamp into main.version
+// ("dev" for a plain `go build`), and selfupdate.IsRelease is the same parser
+// the product's own guard uses, so the test's answer to "is this a release" is
+// the release parser's and not a second spelling of "looks like a version".
+//
+// What happens when the premise is absent depends on where the binary came
+// from. A binary handed in through GHOST_E2E_BIN may be a release — that is
+// how a release is checked after it is cut — and the honest result is a skip
+// that says why. The suite's own build cannot be a release: it is built with
+// no release ldflags, so a release stamp there means the harness started
+// stamping a version, and the premise is a hard failure rather than a skip.
+// That is what keeps these tests from ever passing for the wrong reason.
+func devBuildPremise(t *testing.T, s *sandbox) {
+	t.Helper()
+	r := s.run("version")
+	if r.code != 0 {
+		t.Fatalf("ghost version: %s", r)
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(r.stdout), "\n")
+	ver, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(line), "ghost "), " ")
+	if ver == "" {
+		t.Fatalf("`ghost version` printed %q, which carries no version to judge", r.stdout)
+	}
+	if !selfupdate.IsRelease(ver) {
+		return
+	}
+	if e2eBinFromEnv {
+		t.Skipf("the dev-only data-dir refusal does not exist in a release build: GHOST_E2E_BIN is %s, which reports version %q", ghostBin, ver)
+	}
+	t.Fatalf("the binary under test reports version %q, a release, but the suite built it itself: the dev-only data-dir refusal these tests assert does not exist in a release build, so the premise is broken rather than absent", ver)
+}
+
 // TestDevBuildRefusesAForbiddenDataDir is the end-to-end shape of the rule: a
-// DEVELOPMENT build, pointed at a store that is one schema step behind, refuses
-// to open it and leaves the file exactly as it found it.
+// DEVELOPMENT build, pointed at a store that is several schema steps behind,
+// refuses to open it and leaves the file exactly as it found it.
 //
 // The store is a fixture rather than a fresh one on purpose. A fresh store is
 // already at the current schema, so an open would have nothing to migrate and
@@ -102,13 +143,12 @@ func seedLifecycleFailure(t *testing.T, s *sandbox, project string) {
 // that had done nothing. A v17 store makes the difference observable in three
 // places at once: the stamp, the pre-migration copy, and the bytes.
 //
-// The premise is asserted rather than assumed. The suite builds the binary with
-// `go build` and no release ldflags, so main.version is "dev"; if the harness
-// ever starts stamping a version, the release build ignores the variable and
-// this test would pass for the wrong reason.
+// The premise is asserted rather than assumed, by devBuildPremise: the suite
+// builds the binary with `go build` and no release ldflags, so main.version is
+// "dev", and a release stamp there fails the premise rather than skipping it.
 func TestDevBuildRefusesAForbiddenDataDir(t *testing.T) {
 	s := newSandbox(t)
-	mustContain(t, "the binary under test", s.mustRun("version").stdout, "ghost dev")
+	devBuildPremise(t, s)
 
 	// A store holding a memory, downgraded to v17 so an ordinary open would
 	// migrate it. The content is written through the product's own MCP surface,
@@ -211,6 +251,7 @@ func TestDevBuildRefusesAForbiddenDataDir(t *testing.T) {
 // exactly why a reproduction that left it in place saw nothing here.
 func TestLifecycleRunCreatesNothingInAForbiddenDataDir(t *testing.T) {
 	s := newSandbox(t)
+	devBuildPremise(t, s)
 	cs := s.mcpSession(t)
 	call(t, cs, "ghost_memory_save", map[string]any{
 		"project_id": e2eProject,
@@ -273,6 +314,7 @@ func TestLifecycleRunCreatesNothingInAForbiddenDataDir(t *testing.T) {
 // host. It must fail open: an empty block, no store read, and nothing written.
 func TestSessionStartHookTouchesNothingInAForbiddenDataDir(t *testing.T) {
 	s := newSandbox(t)
+	devBuildPremise(t, s)
 	cs := s.mcpSession(t)
 	call(t, cs, "ghost_memory_save", map[string]any{
 		"project_id": e2eProject,
