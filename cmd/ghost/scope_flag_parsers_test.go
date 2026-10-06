@@ -81,6 +81,11 @@ func historyCompactProject(args []string) (string, error) {
 	return opts.Project, err
 }
 
+func obsidianProject(args []string) (string, error) {
+	_, project, _, err := parseObsidianFlags(args)
+	return project, err
+}
+
 // projectDeleteProject asks parseProjectDeleteArgs for the name only. The
 // no-project case answers usage rather than an error (that is the historical
 // behaviour: `ghost project delete` prints the usage block), so it is reported
@@ -238,6 +243,44 @@ func TestScopeFlagParsersRefuseEmptyAndRepeated(t *testing.T) {
 			{name: "two empty values stop at the first", args: []string{"--project", "", "--project", ""}, want: "needs a value"},
 			{name: "a named scope then an empty one is still twice", args: []string{"--project", "alpha", "--project", ""}, want: "more than once"},
 			{name: "a positional is not a project here", args: []string{"alpha"}, want: "history compact takes flags"},
+		})
+	})
+
+	// obsidian takes only the two flag spellings — a bare word is an unknown
+	// flag there, not a positional project — so no positional case exists, and
+	// the mirror's blast radius is what the refusals are for: an empty
+	// --project is not a narrower mirror, it is EVERY project written into the
+	// vault, which is the opposite of what a script with an unset variable meant.
+	t.Run("obsidian", func(t *testing.T) {
+		runScopeCases(t, "obsidian", obsidianProject, []scopeCase{
+			{name: "a single separate --project", args: []string{"--project", "alpha"}, wantProject: "alpha"},
+			{name: "a single attached --project", args: []string{"--project=alpha"}, wantProject: "alpha"},
+			// --project takes the next token verbatim, so a dash-leading name is a
+			// name and never a second occurrence.
+			{name: "a dash-leading name", args: []string{"--project", "-alpha"}, wantProject: "-alpha"},
+			{name: "an empty separate value", args: []string{"--project", ""}, want: "--project requires a value"},
+			{name: "an empty attached value", args: []string{"--project="}, want: "--project requires a value"},
+			{name: "separate then separate", args: []string{"--project", "alpha", "--project", "beta"}, want: "expected exactly one project"},
+			{name: "separate then attached", args: []string{"--project", "alpha", "--project=beta"}, want: "expected exactly one project"},
+			{name: "attached then separate", args: []string{"--project=alpha", "--project", "beta"}, want: "expected exactly one project"},
+			{name: "attached then attached", args: []string{"--project=alpha", "--project=beta"}, want: "expected exactly one project"},
+			{name: "two empty values stop at the first", args: []string{"--project", "", "--project", ""}, want: "--project requires a value"},
+			// The empty FIRST value followed by a named one is the shape the
+			// occurrence count exists for: a `project != ""` test reads the empty
+			// first value as no project given and lets the second one name the
+			// scope — and an empty scope is every project in obsidian's case, so
+			// that regression would mirror the whole store from a command line
+			// whose first spelling was an unset variable.
+			{name: "an empty attached value then a named one", args: []string{"--project=", "--project", "alpha"}, want: "--project requires a value"},
+			{name: "an empty separate value then a named one", args: []string{"--project", "", "--project", "alpha"}, want: "--project requires a value"},
+			{name: "a named scope then an empty one is still twice", args: []string{"--project", "alpha", "--project", ""}, want: "expected exactly one project"},
+			{name: "a named scope then an empty attached one is still twice", args: []string{"--project=alpha", "--project="}, want: "expected exactly one project"},
+			// A --project with no argument at all was already refused before
+			// #876, and it shares one arm with --out and --interval, so its
+			// wording stays this parser's own ("flag --project needs a value"):
+			// the rule under test is the empty VALUE and the repeat, not this.
+			{name: "a --project with no argument", args: []string{"--project"}, want: "flag --project needs a value"},
+			{name: "a positional is not a project here", args: []string{"alpha"}, want: "unknown or malformed flag"},
 		})
 	})
 

@@ -23,7 +23,27 @@ import (
 // errors on an unknown flag or a value flag missing its argument rather than
 // silently falling back to defaults (a misspelled --intervl would otherwise
 // leave the user believing a cadence that isn't in effect).
+//
+// --out and --interval are destinations and cadences, so they stay
+// last-one-wins: a second one is an operator overriding their own earlier flag.
+// --project is a SCOPE and refuses a second value and an empty one, with the
+// same two sentences every other scope-taking parser uses, because the harm it
+// prevents is wider than export's: an empty project is not a narrower mirror,
+// it is every project's memories written into the vault. A script that ran
+// `ghost obsidian export --project "$PROJECT"` with PROJECT unset answered
+// "mirror everything" while the command line read as if it were scoped.
 func parseObsidianFlags(args []string) (out, project, interval string, err error) {
+	// projectSeen counts OCCURRENCES of a project rather than testing the value
+	// for emptiness: a `project != ""` test cannot see `--project= --project
+	// ghost`, which would read the empty first value as no project given and let
+	// the second one name the scope of a command line that named it twice — and
+	// on the empty-first spelling that is the scope that mirrors EVERYTHING. Both
+	// spellings ask through this one bool, so a repeat is refused whichever form
+	// it is typed in, and the duplicate is asked FIRST as it is everywhere else:
+	// a named value followed by any second value is named as the duplicate it is,
+	// and two empty values stop at the first one, since with no first value there
+	// is no scope in the command line to be a duplicate of.
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -36,14 +56,28 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			case "--out":
 				out = args[i]
 			case "--project":
+				if projectSeen {
+					return "", "", "", errors.New("expected exactly one project")
+				}
+				if args[i] == "" {
+					return "", "", "", errors.New("--project requires a value")
+				}
 				project = args[i]
+				projectSeen = true
 			case "--interval":
 				interval = args[i]
 			}
 		case strings.HasPrefix(arg, "--out="):
 			out = strings.TrimPrefix(arg, "--out=")
 		case strings.HasPrefix(arg, "--project="):
+			if projectSeen {
+				return "", "", "", errors.New("expected exactly one project")
+			}
 			project = strings.TrimPrefix(arg, "--project=")
+			if project == "" {
+				return "", "", "", errors.New("--project requires a value")
+			}
+			projectSeen = true
 		case strings.HasPrefix(arg, "--interval="):
 			interval = strings.TrimPrefix(arg, "--interval=")
 		default:
