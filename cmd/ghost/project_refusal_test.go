@@ -56,9 +56,12 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 			args:  []string{"--audit", "--cwd=" + key, "--cwd=/tmp"},
 		},
 		{
-			// prune has no --cwd, and its duplicate guard is `opts.Project != ""`
-			// rather than an occurrence count, so it is a separate case rather than
-			// a flag column on the audit parser's.
+			// prune has no --cwd, so it is a case of its own rather than a flag
+			// column on the audit parser's. Both parsers count occurrences and ask
+			// the duplicate before the empty — the two questions in order are
+			// pinned by TestParsePruneArgsRefusesAnEmptyScope — so this row is
+			// what holds prune's refusal quote to the same promise, not a
+			// second parser that had to be taught the rule.
 			name:  "ghost prune --project",
 			field: "project",
 			parse: func(args []string) error { _, err := parsePruneArgs(args); return err },
