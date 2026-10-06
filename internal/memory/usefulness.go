@@ -82,16 +82,21 @@ func (e UsefulnessEvidence) Line() string {
 	// back a malformed literal a reader parses as something other than an id.
 	// Bounding the input is what makes the quoting well-formed.
 	//
-	// It is NOT what bounds the rendered length, and the difference is sixfold.
-	// usefulnessSessionMax counts RUNES of the stored id, and QuoteToASCII renders
-	// one rune as up to six characters (\u202e), so an id of 64 escaping runes
-	// renders 386 bytes. The renderer this replaced bounded the OUTPUT instead — it
-	// stopped writing once the byte index reached the limit — so the worst case one
-	// stored id could add to a prompt was ~64 bytes plus one escape and is now up
-	// to 386. It is still a CONSTANT, which is what "without limit" has to mean,
-	// but it is a worse constant by six, and the test that holds it measures the
-	// escaping case rather than a fixture of bare ASCII ids that cannot see the
-	// difference (TestTheUsefulnessLineBoundsAnUnboundedId).
+	// It is NOT what bounds the rendered length, and the factor is TEN. The bound
+	// counts RUNES of the stored id; under ASCII-only quoting Go writes a BMP rune
+	// as \uXXXX (6 characters) and an ASTRAL one as \UXXXXXXXX (10), so an id of
+	// 64 escaping runes renders up to 64*10+2 = 642 bytes. This is reachable and
+	// not theoretical: retrieval_audit.session_id is written with no character
+	// validation, and a host payload's session_id is an arbitrary JSON string.
+	// Measured, the whole line is 703 bytes against 125 for a bare id
+	// (TestTheUsefulnessLineBoundsAnUnboundedId measures all three cases, and the
+	// astral one is a separate fixture because a BMP one cannot express the
+	// maximum). The renderer this replaced bounded the OUTPUT instead — it stopped
+	// writing once the byte index reached the limit — so the worst case one stored
+	// id can add to a prompt grew from about 64 bytes to 703. It is still a
+	// CONSTANT, which is what "without limit" has to mean, but it is a worse
+	// constant by about ten, and this comment must not let a reader take 64 for 64
+	// bytes of prompt.
 	//
 	// Clamping the quoted form afterwards, as assemble.PreviewLine does for display
 	// text, would recover the old ceiling and was not chosen: PreviewLine's contract
@@ -116,8 +121,9 @@ func (e UsefulnessEvidence) Line() string {
 // rendering no id at all would claim no session recorded it and one did.
 //
 // It counts RUNES of the STORED id, not bytes of the RENDERED one, and the two
-// differ by up to sixfold once the id needs quoting — see Line, which states the
-// resulting ceiling rather than leaving "64" to be read as 64 bytes. A byte bound
+// differ by up to TENFOLD once the id needs quoting — an astral rune escapes to
+// ten characters — so "64" here is not 64 bytes of prompt. See Line, which states
+// the measured ceiling rather than leaving the reader to derive it. A byte bound
 // on the stored id would instead cut a multi-byte rune in half and produce a
 // replacement character, which is a different id from the one stored rather than a
 // shortened one.

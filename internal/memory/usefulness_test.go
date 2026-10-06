@@ -413,30 +413,23 @@ func TestTheUsefulnessLineCannotForgeARecordOrEndItsDataBlock(t *testing.T) {
 // to grow the prompt without limit. The bound TRUNCATES — it never renders an id
 // that no session holds, which is the one output that would be a lie.
 //
-// TWO fixtures, because one of them cannot see the thing that matters. A bound on
-// the STORED id's runes does not bound the RENDERED id: QuoteToASCII renders one
-// rune as up to six characters, so the ceiling is six times the rune bound once
-// the id needs quoting. The original fixture here was 10000 bare ASCII `s`, which
-// stays bare and is cut at 64 runes — it would pass against a renderer whose
-// rendered output grew without limit. So the second case is 10000 runes that all
-// need escaping, and the ceiling asserted is the sixfold one the comment in Line
-// states. If usefulnessSessionMax moves, or the bound is reapplied to the rendered
-// string instead, this fails with a number rather than passing on a fixture that
-// cannot express the difference.
+// THREE fixtures, because the two obvious ones cannot express the bound they claim
+// to hold. The bound counts RUNES of the stored id, and under ASCII-only quoting a
+// BMP rune escapes to six characters while an ASTRAL one escapes to ten — so a
+// fixture of U+202E measures the cheap case and would pass against a renderer whose
+// worst case was ten times worse. The first fixture was worse still: 10000 bare
+// ASCII, which stays bare and is cut at 64, so it passes against any bound at all.
+//
+// The ceilings are MEASURED with headroom, not computed from the rune bound: a
+// computed ceiling landing a byte from the real one passes, then fails on an
+// unrelated edit. Measured on this build at usefulnessSessionMax=64: a bare id
+// renders 125 bytes, a BMP id 447, and an astral id 703. If the bound moves, or is
+// reapplied to the rendered string instead, one of the three fails with a number.
 func TestTheUsefulnessLineBoundsAnUnboundedId(t *testing.T) {
-	// A rune outside every ASCII printable range, so SafeToken must escape it:
-	// U+202E, the bidi override, which is six characters written.
-	const escapingRune = "\u202e"
-
-	// The ceilings are MEASURED, with headroom, and not computed from the rune
-	// bound: a computed ceiling that lands a byte from the real one passes and then
-	// fails on an unrelated edit. Measured on this build at usefulnessSessionMax=64
-	// with the line prefix below, a bare id renders 125 bytes and an all-escaping id
-	// 447 — the second being 6*64+2 for the escapes and their quotes, plus the
-	// prefix, which is the sixfold the comment in Line states.
 	const (
-		bareCeiling     = 160
-		escapingCeiling = 512
+		bareCeiling   = 160
+		bmpCeiling    = 512
+		astralCeiling = 1024
 	)
 
 	for _, tc := range []struct {
@@ -447,16 +440,20 @@ func TestTheUsefulnessLineBoundsAnUnboundedId(t *testing.T) {
 		// 10000 bare runes: every character is one a stored id is made of, so the
 		// rendered id is the truncated id and the bound is visible at its own value.
 		{"a bare id", strings.Repeat("s", 10000), bareCeiling},
-		// 10000 escaping runes: the quoted form is six characters each, so the
-		// rendered id is about six times the rune bound, and THAT is the real bound.
-		{"an id of escaping runes", strings.Repeat(escapingRune, 10000), escapingCeiling},
+		// 10000 BMP runes that must escape: six characters each, so the rendered id
+		// is about six times the rune bound.
+		{"an id of BMP escaping runes", strings.Repeat("\u202e", 10000), bmpCeiling},
+		// 10000 ASTRAL runes that must escape: ten characters each. This is the
+		// maximum, and it is the case the other two cannot see — the bound counts
+		// runes, so 64 of these is still 64 of them, and they cost ten each.
+		{"an id of astral escaping runes", strings.Repeat("\U000e0001", 10000), astralCeiling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			line := UsefulnessEvidence{Contradicted: 1, LastSession: tc.id, LastAt: "2026-09-24 10:00:00"}.Line()
 			if len(line) > tc.maxBytes {
 				t.Errorf("the rendered line is %d bytes from a 10000-rune session id, above this "+
 					"fixture's %d ceiling; a stored field must not be able to grow a prompt "+
-					"fragment without limit: %q", len(line), tc.maxBytes, line)
+					"fragment without limit", len(line), tc.maxBytes)
 			}
 			if !strings.HasPrefix(line, "audit: ") {
 				t.Errorf("the rendered line no longer starts with its fixed prefix: %q", line)
@@ -469,6 +466,63 @@ func TestTheUsefulnessLineBoundsAnUnboundedId(t *testing.T) {
 		})
 	}
 }
+
+// TestTheAstralCeilingIsTheRealOne: the third fixture above holds the bound, and
+// this pins WHY it is the maximum rather than another example of it. The bound
+// counts runes, the renderer charges by what Go's ASCII-only quoting writes, and
+// that is ten characters for any rune above U+FFFF — more than the six for a BMP
+// rune and more than the one for a bare one. So the per-rune cost is monotone in
+// the escaping class and the astral case is the top of it.
+//
+// Without this the third fixture is one data point: a future change that made the
+// renderer charge twelve for an astral rune would still pass every fixture here,
+// because 64*12 is only 30% over the ceiling. The claim is about the maximum
+// expansion, so it is tested as one.
+func TestTheAstralCeilingIsTheRealOne(t *testing.T) {
+	// Six for a BMP rune, ten for an astral one, measured from the renderer rather
+	// than from the source of strconv.
+	for _, tc := range []struct {
+		name       string
+		r          string
+		wantEscape int
+	}{
+		{"a bare rune", "s", 1},
+		{"a BMP escaping rune", "\u202e", 6},
+		{"an astral escaping rune", "\U000e0001", 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeToken(tc.r)
+			if tc.wantEscape == 1 {
+				// The bare case is the one that costs nothing, and it is here so the
+				// comparison has its floor: a renderer that began quoting honest ids
+				// would change the ceiling for every real row, not only for a hostile one.
+				if got != tc.r {
+					t.Errorf("SafeToken(%q) = %q, want it written bare; every id Ghost mints and "+
+						"every session id an operator types must stay byte-identical", tc.r, got)
+				}
+				return
+			}
+			if got == tc.r {
+				t.Fatalf("SafeToken(%q) wrote it bare, so this case measures no escaping", tc.r)
+			}
+			if len(got) != tc.wantEscape+2 {
+				t.Errorf("SafeToken(%q) = %q, %d bytes; expected %d characters escaped plus the "+
+					"two quotes", tc.r, got, len(got), tc.wantEscape)
+			}
+		})
+	}
+	// And the bound is on runes, so the worst line is bound*runeCost + prefix.
+	const bound = usefulnessSessionMax
+	if worst := bound*10 + 2; worst <= bareCeilingForTest() {
+		t.Errorf("the astral worst case (%d) is not above the bare one, so the third fixture "+
+			"is not the maximum it claims to be", worst)
+	}
+}
+
+// bareCeilingForTest is the bare fixture's ceiling, restated here so the comparison
+// above is against the number the other test asserts rather than a fresh constant
+// that could drift from it.
+func bareCeilingForTest() int { return 160 }
 
 // TestTheLatestNegativeVerdictIsOrderedByRowidWithinOneSecond: recorded_at is
 // SECOND-PRECISION, so every verdict one pass writes shares a timestamp, and the
