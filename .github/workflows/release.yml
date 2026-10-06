@@ -520,12 +520,14 @@ jobs:
         # is no delete logic here to fail.
         #
         # MANUAL STEP after this job succeeds: the summary reports either the
-        # PR below, or — the usual route in this repository, where GitHub
-        # does not let Actions create pull requests — the compare link that
-        # opens the pre-filled PR form. Either way: click "Approve workflows
-        # to run", then merge. Until the pin is merged, the catalog keeps
-        # pointing at the previous release — which is safe, because those
-        # URLs remain valid.
+        # PR below (when the workflow opened it), or — the usual route in this
+        # repository, where GitHub does not let Actions create pull requests —
+        # the compare link that opens the pre-filled PR form. If the workflow
+        # opened the PR: click "Approve workflows to run", then merge. If a
+        # human opened the compare link: the three required checks start
+        # immediately, so just merge once they pass. Until the pin is merged,
+        # the catalog keeps pointing at the previous release — which is safe,
+        # because those URLs remain valid.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -682,7 +684,7 @@ jobs:
               # main — the same PR the step would have opened. A human
               # opening that PR means the three required checks start
               # immediately; there is no 'Approve workflows to run' hold
-              # (that only applies to PRs created by GITHUB_TOKEN).
+              # (that applies only to PRs the workflow itself created).
               echo "1. Open ${{ steps.open-pr.outputs.COMPARE_URL }}"
               echo "2. Create the pull request from the compare view"
               echo "3. Merge once the three required checks pass"
