@@ -1753,8 +1753,8 @@ func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	if strings.Contains(result, memID) {
-		t.Errorf("memory ID must NOT be shown under compact formatting (%s); got:\n%s", memID, result)
+	if !strings.Contains(result, memID) {
+		t.Errorf("memory ID must be shown (now rendered via Item.Line, like search) (%s); got:\n%s", memID, result)
 	}
 	if !strings.Contains(result, "full-id gotcha") {
 		t.Errorf("memory content must still be shown under compact formatting; got:\n%s", result)

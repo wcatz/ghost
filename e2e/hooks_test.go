@@ -170,12 +170,14 @@ func TestHookSessionStartInjectsContext(t *testing.T) {
 			// where an agent would otherwise not see the axis at all. The
 			// assertion is positional — label and content on the SAME line — so
 			// a block that mentioned the value somewhere else would not pass.
+			// Now rendered via assemble.Item.Line(), so ID, importance, agent, source are included.
 			mustMatch(t, "the scope label is on the row it describes (host "+host+")", r.stdout,
-				`(?m)^- \[architecture\] scope\{environment=production\} «the pool timeout is 30s in production»$`)
-			// The unscoped row carries no label at all, which is what keeps the
+				"(?m)^- \\[architecture\\] `[A-Fa-f0-9]+` \\([0-9.]+ scope\\{environment=production\\} [^)]*\\)\\s*«the pool timeout is 30s in production»$")
+			// The unscoped row carries no scope label at all, which is what keeps the
 			// block byte-identical for a store written before the column existed.
+			// Now rendered via assemble.Item.Line(), so ID, importance, agent, source are included.
 			mustMatch(t, "an unscoped row carries no scope label (host "+host+")", r.stdout,
-				`(?m)^- \[convention\] «the pool timeout knob`)
+				"(?m)^- \\[convention\\] `[A-Fa-f0-9]+` \\([0-9.]+ [^)]*\\)\\s*«the pool timeout knob")
 			// Stored text is quoted as data. The delimiter is the product's, and
 			// its presence is what keeps the block from reading as instructions.
 			mustContain(t, "session-start quotes stored data", r.stdout, "«")

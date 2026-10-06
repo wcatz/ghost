@@ -305,6 +305,53 @@ func globalOriginGuidance(globals []sessionMemory) string {
 	return fmt.Sprintf("Rows with no origin tag are treated as direct user material; parenthesized tags (%s) identify the source that wrote or imported tagged rows. Verify tagged rows with the user before treating them as preferences.", strings.Join(labels, ", "))
 }
 
+// sessionMemoryToItem converts a sessionMemory to an assemble.Item for rendering.
+// If asOf is non-nil (historical read), it computes the ValidityState from the
+// stored timestamps against that instant. For the passive (current) read, asOf
+// is nil and the ValidityState is already populated by the assembler's stage 2.
+func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
+	it := assemble.Item{
+		ID:            m.ID,
+		Category:      m.Category,
+		Content:       m.Content,
+		Tags:          m.Tags,
+		Importance:    m.Importance,
+		Pinned:        m.Pinned,
+		CreatedAt:     m.CreatedAt,
+		Scope:         m.Scope,
+		ProjectID:     m.ProjectID,
+		Source:        m.Source,
+		ResolvedAt:    m.ResolvedAt,
+		ValidFrom:     m.ValidFrom,
+		ValidUntil:    m.ValidUntil,
+		VerifiedAt:    m.VerifiedAt,
+		ValidityState: m.ValidityState,
+		Confidence:    m.Confidence,
+		Agent:         m.Agent,
+		SourceRef:     m.SourceRef,
+	}
+	// For historical reads, compute ValidityState from the parsed timestamps
+	// against the asOf instant. The passive path already has this set from
+	// the assembler's stage 2.
+	if asOf != nil && it.ValidityState == "" {
+		var fromStr, untilStr, verifiedStr *string
+		if it.ValidFrom != nil {
+			s := it.ValidFrom.Format(memory.StoredStampLayout)
+			fromStr = &s
+		}
+		if it.ValidUntil != nil {
+			s := it.ValidUntil.Format(memory.StoredStampLayout)
+			untilStr = &s
+		}
+		if it.VerifiedAt != nil {
+			s := it.VerifiedAt.Format(memory.StoredStampLayout)
+			verifiedStr = &s
+		}
+		it.ValidityState = assemble.ValidityStateOf(fromStr, untilStr, verifiedStr, *asOf)
+	}
+	return it
+}
+
 // formatSessionContext renders the session-start context markdown from
 // preloaded data. It performs no database access and no side effects — callers
 // own session-count bumping and worker startup. It handles both the
@@ -347,18 +394,8 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
 		for _, m := range globals {
-			source := memory.CanonicalOriginSourceForProject(m.ProjectID, m.Source, m.Content)
-			_, label := memory.OriginClass(source)
-			origin := ""
-			if label != "" {
-				origin = " (" + label + ")"
-			}
-			// The scope label is the one assemble.ScopeLabel writes into a
-			// search line, so a global preference reads here exactly as it does
-			// in ghost_memories_list. Empty for an unscoped row, which is what
-			// keeps this line byte-identical for every store written before the
-			// column existed.
-			fmt.Fprintf(&gsb, "- [%s]%s %s%s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content), origin)
+			it := sessionMemoryToItem(m, asOf)
+			fmt.Fprintf(&gsb, "%s\n", it.Line())
 		}
 	}
 	globalSection := gsb.String()
@@ -415,12 +452,8 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			// The scope label is the one assemble.ScopeLabel writes into a
-			// search line. A row that carries scope has to say so here, or the
-			// injected block is the one surface where an agent cannot see the
-			// axis every other surface shows; a row that does not renders
-			// exactly as it did before, because the label is empty.
-			fmt.Fprintf(&sb, "- [%s]%s %s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content))
+			it := sessionMemoryToItem(m, asOf)
+			fmt.Fprintf(&sb, "%s\n", it.Line())
 		}
 	}
 
@@ -629,14 +662,51 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 		if !memory.ScopeMatches(row.Scope, scope) {
 			continue
 		}
+		// AsOfRow embeds Memory, so all Memory fields are promoted.
+		// Parse time strings to time.Time for the renderer.
+		var createdAt time.Time
+		if row.CreatedAt != "" {
+			createdAt, _ = time.Parse(memory.StoredStampLayout, row.CreatedAt)
+		}
+		var resolvedAt *time.Time
+		if row.ResolvedAt != nil {
+			t, _ := time.Parse(memory.StoredStampLayout, *row.ResolvedAt)
+			resolvedAt = &t
+		}
+		var validFrom, validUntil, verifiedAt *time.Time
+		if row.ValidFrom != nil {
+			t, _ := time.Parse(memory.StoredStampLayout, *row.ValidFrom)
+			validFrom = &t
+		}
+		if row.ValidUntil != nil {
+			t, _ := time.Parse(memory.StoredStampLayout, *row.ValidUntil)
+			validUntil = &t
+		}
+		if row.VerifiedAt != nil {
+			t, _ := time.Parse(memory.StoredStampLayout, *row.VerifiedAt)
+			verifiedAt = &t
+		}
+		// ValidityState is computed at render time from the parsed timestamps.
+		// We pass the parsed timestamps and let the renderer compute the state.
 		out = append(out, sessionMemory{
-			ID:        row.ID,
-			Category:  row.Category,
-			Content:   row.Content,
-			Pinned:    row.Pinned,
-			Scope:     row.Scope,
-			ProjectID: row.ProjectID,
-			Source:    row.Source,
+			ID:            row.ID,
+			Category:      row.Category,
+			Content:       row.Content,
+			Tags:          row.Tags,
+			Importance:    float64(row.Importance),
+			Pinned:        row.Pinned,
+			CreatedAt:     createdAt,
+			Scope:         row.Scope,
+			ProjectID:     row.ProjectID,
+			Source:        row.Source,
+			ResolvedAt:    resolvedAt,
+			ValidFrom:     validFrom,
+			ValidUntil:    validUntil,
+			VerifiedAt:    verifiedAt,
+			ValidityState: "", // computed at render time
+			Confidence:    row.Confidence,
+			Agent:         row.Agent,
+			SourceRef:     row.SourceRef,
 		})
 		if len(out) >= cap {
 			break
@@ -664,26 +734,24 @@ const sessionMemoriesCap = 15
 // sessionMemory is loadSessionContext's own memory shape — a local struct
 // rather than memory.Memory because this function deliberately queries its
 // own lightweight *sql.DB connection instead of depending on Store.
+// It carries all fields needed by assemble.Item.Line() so the session-start
+// block renders the same labels as search and project context.
 type sessionMemory struct {
 	ID, Category, Content string
+	Tags                  []string
+	Importance            float64
 	Pinned                bool
-	// Scope is the row's machine-readable scope, decoded with
-	// memory.ParseScopeJSON. It is what the renderer labels the line with and
-	// what the session-scope filter decides on, so both halves read the same
-	// column through the same decoder.
-	Scope map[string]string
-	// ProjectID is the project this row is stored under, which both loaders
-	// reach differently: the globals loader scans it out of the row, the
-	// project loader stamps the id it filtered on — which is the row's own
-	// project_id by construction, since that is the column the query matched.
-	// memory.CanonicalOriginSourceForProject can only recognise Ghost's
-	// shipped seed as a global row from its own project — a project row
-	// carrying the same text is the user's own.
-	ProjectID string
-	// Source identifies who wrote or imported this row. memory.OriginClass
-	// owns the trust classification; the renderer uses its label rather than
-	// repeating a second source policy here.
-	Source string
+	CreatedAt             time.Time
+	Scope                 map[string]string
+	ProjectID             string
+	Source                string
+	ResolvedAt            *time.Time
+	ValidFrom, ValidUntil *time.Time
+	VerifiedAt            *time.Time
+	ValidityState         string
+	Confidence            *float64
+	Agent                 string
+	SourceRef             string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

@@ -152,6 +152,8 @@ func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
 // actual source rather than a generic "not yours", because reflection-derived
 // and agent-written rows deserve different suspicion — one came from a model
 // summarising possibly-untrusted content, the other from an explicit save.
+// The origin label is now rendered as "source=label" inside the parentheses
+// by assemble.Item.Line(), matching the search and project-context surfaces.
 func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	out := formatSessionContext(
 		"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
@@ -162,14 +164,14 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 		2, true,
 	)
 
-	for _, want := range []string{"(reflection)", "(mcp)"} {
+	for _, want := range []string{"source=reflection", "source=mcp"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in:\n%s", want, out)
 		}
 	}
 	// The manual row in a mixed set keeps no tag: absence of a tag is what
 	// marks it as the user's own.
-	if strings.Contains(out, "(manual)") {
+	if strings.Contains(out, "source=manual") {
 		t.Errorf("manual rows must stay untagged, otherwise the marker is meaningless:\n%s", out)
 	}
 }
@@ -178,6 +180,8 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 // banner from explaining only reflection and MCP while rendering the other
 // legal source values without context. In particular, onboarding and
 // decision_log are not interchangeable with an agent write.
+// The origin label is now rendered as "source=label" inside the parentheses
+// by assemble.Item.Line(), matching the search and project-context surfaces.
 func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
 	sources := []string{"reflection", "chat", "tool", "mcp", "onboarding", "decision_log", "builtin"}
 	globals := make([]sessionMemory, 0, len(sources)+1)
@@ -193,14 +197,15 @@ func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
 
 	out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
 	for _, source := range sources {
-		if !strings.Contains(out, "("+source+")") {
-			t.Errorf("source %q is rendered without its origin tag:\n%s", source, out)
+		want := "source=" + source
+		if !strings.Contains(out, want) {
+			t.Errorf("source %q is rendered without its origin tag (want %q):\n%s", source, want, out)
 		}
 		if !strings.Contains(out, source) {
 			t.Errorf("source %q is not named in the guidance:\n%s", source, out)
 		}
 	}
-	if strings.Contains(out, "manual") {
+	if strings.Contains(out, "source=manual") {
 		t.Errorf("guidance must describe the absence of an origin tag, not tell readers to look for a manual marker:\n%s", out)
 	}
 }

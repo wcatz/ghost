@@ -73,8 +73,8 @@ func TestSessionStartOnAStoreBehindTheRetentionColumnStillRenders(t *testing.T) 
 
 	got := renderSessionStart(t, projectPath)
 	for _, want := range []string{
-		"- [convention] «sign every commit with DCO»",
-		"- [fact] «the prod datastore is postgres»",
+		"- [convention] `tierold01` (0.9) «sign every commit with DCO»",
+		"- [fact] `tierold02` (0.8) «the prod datastore is postgres»",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a store below the retention column's version must render as it did before tiers were read; %q missing from:\n%s", want, got)
