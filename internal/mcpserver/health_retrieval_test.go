@@ -309,7 +309,7 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	if err != nil || len(recs) == 0 {
 		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
 	}
-	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
 		ProjectID: "abc123", SessionID: "s9", Source: "search", MemoryID: retrievalHealthMemory,
 		Outcome: "ignored", RecordRowID: 0,
 	}}); err != nil {
@@ -349,7 +349,7 @@ func TestHealthSaysNothingAboutAttributionWhenThereIsNothingToSay(t *testing.T) 
 	if err != nil || len(recs) == 0 {
 		t.Fatalf("RetrievalRecordsForProject: %v", err)
 	}
-	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
 		ProjectID: "abc123", SessionID: "s9", Source: "search", MemoryID: retrievalHealthMemory,
 		Outcome: "ignored", RecordRowID: recs[0].RowID,
 	}}); err != nil {
