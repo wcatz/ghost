@@ -38,8 +38,9 @@ type PortableProject struct {
 //     fail the foreign key or fabricate relationships. The linking worker
 //     recomputes related edges after import.
 //   - resolve_kept_hash. A cache of the resolve classifier's KEEP verdicts,
-//     keyed by content hash. Ghost recomputes it, and a stale one would mark a
-//     memory it has never classified as reviewed.
+//     keyed by the content hash, plus the negative audit evidence the verdict
+//     was judged with when there was any (#880). Ghost recomputes it, and a
+//     stale one would mark a memory it has never classified as reviewed.
 //
 // Every other column is here, including the ones Memory does not expose:
 // access_count, last_accessed, the validity triple (valid_from, valid_until,

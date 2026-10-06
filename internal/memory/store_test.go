@@ -4243,8 +4243,9 @@ func TestMarkResolvedRecordsThePerformerOnItsHistoryRow(t *testing.T) {
 	}
 }
 
-// TestMarkResolvedClearsTheKeptCache: the issue's second effect. A KEEP hash is a
-// verdict keyed by content, and an ordinary pass that finds one skips the row as
+// TestMarkResolvedClearsTheKeptCache: the issue's second effect. A KEEP hash is
+// a verdict under resolve.KeepStamp, and an ordinary pass that finds one skips
+// the row as
 // cached. Leaving it on a row an operator just stamped means the row reports
 // `N KEEP cached` and is never re-judged — so a note buried on purpose returns
 // the moment anything rewrites its text, and the stamp is undone by an edit.

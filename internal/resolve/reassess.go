@@ -28,6 +28,9 @@
 // The KEEP cache is honoured, for the same convergence reason the ordinary pass
 // honours it: content that already carries a current-version KEEP hash was
 // judged KEEP by these rules, so it is cleared without paying for the call again.
+// It is compared as the BARE content hash, because this pass reads no evidence
+// and a stamp the ordinary pass wrote over audit evidence is not a verdict this
+// pass made — such a row is re-asked once, at the gate below (#880).
 package resolve
 
 import (
@@ -233,6 +236,17 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				continue
 			}
 		}
+		// The repair pass compares the BARE content hash, and that is a
+		// recorded choice rather than an omission (#880): reassessStore reads
+		// no evidence — the exemption resolveStore's comment states and #880
+		// re-examined and kept — so this pass could not build a stamp covering
+		// evidence it never read, and must not claim a verdict was judged with
+		// something in front of it that was not. The cost is one re-ask per
+		// repair run over a row whose stored stamp carries evidence (an
+		// ordinary pass re-stamped it after the audit contradicted it), which
+		// errs toward asking — the direction a repair exists to err in — and
+		// the ordinary passes between repair runs are quiet, because they read
+		// the evidence and match the stamp.
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Cached++
 			reKeptIDs[m.ID] = true

@@ -4707,8 +4707,9 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 //     reader of the audit cannot otherwise check.
 //
 // It also drops resolve_kept_hash on every row it stamps, in the same
-// statement. The cache is a KEEP verdict keyed by content, and a row the
-// operator has just stamped is not a KEEP the next pass may honour: leaving the
+// statement. The cache is a KEEP verdict under resolve.KeepStamp (content plus
+// any negative retrieval evidence), and a row the operator has just stamped is
+// not a KEEP the next pass may honour: leaving the
 // hash would make the ordinary pass skip the row as `N KEEP cached` for as long
 // as its text stood, so a note buried on purpose came straight back the moment
 // anything rewrote it. SetResolved reaches the same statement, so a row a pass
@@ -4757,8 +4758,10 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 	return s.setResolvedStampTx(ctx, ids, projectID, prov)
 }
 
-// ResolveKeptHashes returns the content hash recorded when resolve last judged
-// each memory KEEP, keyed by memory ID. Only rows with a recorded hash appear.
+// ResolveKeptHashes returns the key resolve recorded when it last judged each
+// memory KEEP, keyed by memory ID — the content hash, or that hash combined
+// with the negative audit evidence the verdict was judged with (#880), which
+// is resolve.KeepStamp's two shapes. Only rows with a recorded key appear.
 func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -4784,8 +4787,10 @@ func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[st
 	return out, rows.Err()
 }
 
-// MarkResolveKept records KEEP verdicts (id -> content hash) for memories
-// resolve classified as not-resolved. It deliberately does not touch
+// MarkResolveKept records KEEP verdicts (id -> resolve's keep stamp: the
+// content hash, plus the negative audit evidence the verdict was judged with
+// when there was any — see resolve.KeepStamp, #880) for memories resolve
+// classified as not-resolved. It deliberately does not touch
 // updated_at: the content did not change, and bumping freshness would perturb
 // the reflect signature and decay ranking. The update is project-scoped, so a
 // stale caller cannot write another project's rows. A no-op on an empty map.

@@ -176,7 +176,7 @@ ghost resolve myproject
 ghost resolve myproject --apply
 ```
 
-`resolve` finds intermediate findings, changelog notes, and other resolved evidence. Applying the result stamps `resolved_at`, which removes the note from ranked session injection while keeping it searchable. Only explicit KEEP decisions are cached by content hash; garbled or otherwise unknown verdicts are reported as UNKNOWN, remain uncached, and are offered again on a later pass, so converged projects avoid repeated calls only after a real KEEP verdict.
+`resolve` finds intermediate findings, changelog notes, and other resolved evidence. Applying the result stamps `resolved_at`, which removes the note from ranked session injection while keeping it searchable. Only explicit KEEP decisions are cached, under `resolve.KeepStamp` — the content hash when the retrieval audit held no negative verdict for that memory, and that hash combined with the evidence when it did, so a contradiction recorded after a KEEP re-asks it exactly once (#880); garbled or otherwise unknown verdicts are reported as UNKNOWN, remain uncached, and are offered again on a later pass, so converged projects avoid repeated calls only after a real KEEP verdict.
 
 ### Link superseding memories
 
