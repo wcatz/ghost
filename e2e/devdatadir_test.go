@@ -145,8 +145,7 @@ func devBuildPremise(t *testing.T, s *sandbox) {
 //
 // The premise is asserted rather than assumed, by devBuildPremise: the suite
 // builds the binary with `go build` and no release ldflags, so main.version is
-// "dev"; if the harness ever starts stamping a version, the release build
-// ignores the variable and this test would pass for the wrong reason.
+// "dev", and a release stamp there fails the premise rather than skipping it.
 func TestDevBuildRefusesAForbiddenDataDir(t *testing.T) {
 	s := newSandbox(t)
 	devBuildPremise(t, s)
