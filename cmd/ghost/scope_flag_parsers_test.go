@@ -265,6 +265,14 @@ func TestScopeFlagParsersRefuseEmptyAndRepeated(t *testing.T) {
 			{name: "attached then separate", args: []string{"--project=alpha", "--project", "beta"}, want: "expected exactly one project"},
 			{name: "attached then attached", args: []string{"--project=alpha", "--project=beta"}, want: "expected exactly one project"},
 			{name: "two empty values stop at the first", args: []string{"--project", "", "--project", ""}, want: "--project requires a value"},
+			// The empty FIRST value followed by a named one is the shape the
+			// occurrence count exists for: a `project != ""` test reads the empty
+			// first value as no project given and lets the second one name the
+			// scope — and an empty scope is every project in obsidian's case, so
+			// that regression would mirror the whole store from a command line
+			// whose first spelling was an unset variable.
+			{name: "an empty attached value then a named one", args: []string{"--project=", "--project", "alpha"}, want: "--project requires a value"},
+			{name: "an empty separate value then a named one", args: []string{"--project", "", "--project", "alpha"}, want: "--project requires a value"},
 			{name: "a named scope then an empty one is still twice", args: []string{"--project", "alpha", "--project", ""}, want: "expected exactly one project"},
 			{name: "a named scope then an empty attached one is still twice", args: []string{"--project=alpha", "--project="}, want: "expected exactly one project"},
 			// A --project with no argument at all was already refused before
