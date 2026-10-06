@@ -480,9 +480,6 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			if projectSet {
 				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
 			}
-			if args[i] == "" {
-				return "", "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
-			}
 			project, projectSet = args[i], true
 		}
 	}
@@ -887,40 +884,56 @@ type reflectArgs struct {
 
 // parseReflectArgs parses `ghost reflect`'s arguments (everything after the
 // subcommand word). Hand-rolled, matching the historical loop exactly: value
-// flags accept both "--flag value" and "--flag=value", positionals set the
-// project (last one wins), and unknown flags are silently ignored — the caller
-// prints the usage block when the project comes out empty. The project may
-// also come from --project, which takes the NEXT argument verbatim — a
-// dash-leading name such as -x or --odd is a name, not a flag — so the
-// lifecycle coordinator can emit one uniform form for every project; the
-// positional form is unchanged for manual use. A valueless --project (no
-// argument, or an empty --project=) is an error rather than a silent fall
-// back to another interpretation. Extracted from runReflect so the argv
-// contract is unit-testable without spawning.
+// flags accept both "--flag value" and "--flag=value", unknown flags are
+// silently ignored, and exactly one project is named — by --project or by a
+// bare positional — because two of them is a command line whose scope is
+// ambiguous and last-one-wins would silently rewrite whichever project's
+// memories the last spelling happened to name. The caller prints the usage
+// block when no project comes out at all. The project may come from --project,
+// which takes the NEXT argument verbatim — a dash-leading name such as -x or
+// --odd is a name, not a flag — so the lifecycle coordinator can emit one
+// uniform form for every project; the positional form is unchanged for manual
+// use. A valueless --project (no argument, or an empty --project=) is an error
+// rather than a silent fall back to another interpretation. Extracted from
+// runReflect so the argv contract is unit-testable without spawning.
 func parseReflectArgs(args []string) (reflectArgs, error) {
 	p := reflectArgs{tier: "auto"}
+	// projectSeen counts OCCURRENCES of a project rather than testing the value
+	// for emptiness, and the POSITIONAL sets it too. All three spellings that
+	// name the scope — `--project X`, `--project=X` and the positional — ask the
+	// same two questions through this one bool, so a project is counted whether
+	// it arrived as a flag or as a word: a value test cannot see a second
+	// occurrence that is empty, and a guard only the flag arms consult is
+	// invisible to a positional, which would make `ghost reflect --project a b`
+	// act on b while `ghost reflect b --project a` was refused. The duplicate is
+	// asked FIRST, as it is in every other parser that takes a scope; two empty
+	// values stop at the first one, because with no first value there is no scope
+	// in the command line to be a duplicate of.
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--project":
 			if i+1 >= len(args) {
 				return p, errors.New("--project requires a value")
 			}
-			if p.project != "" {
+			if projectSeen {
 				return p, errors.New("expected exactly one project")
 			}
 			if args[i+1] == "" {
 				return p, errors.New("--project requires a value")
 			}
 			p.project = args[i+1]
+			projectSeen = true
 			i++
 		case strings.HasPrefix(args[i], "--project="):
-			if p.project != "" {
+			if projectSeen {
 				return p, errors.New("expected exactly one project")
 			}
 			p.project = strings.TrimPrefix(args[i], "--project=")
 			if p.project == "" {
 				return p, errors.New("--project requires a value")
 			}
+			projectSeen = true
 		case args[i] == "--tier" && i+1 < len(args):
 			p.tier = args[i+1]
 			i++
@@ -946,7 +959,14 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 		case strings.HasPrefix(args[i], "--source="):
 			p.source = strings.TrimPrefix(args[i], "--source=")
 		case !strings.HasPrefix(args[i], "-"):
+			if projectSeen {
+				return p, errors.New("expected exactly one project")
+			}
+			if args[i] == "" {
+				return p, errors.New("--project requires a value")
+			}
 			p.project = args[i]
+			projectSeen = true
 		}
 	}
 	return p, nil
@@ -1651,16 +1671,21 @@ type supersedePair struct{ source, target string }
 
 // parseSupersedeArgs parses `ghost supersede`'s arguments (everything after
 // the subcommand word). Hand-rolled, matching the historical loop exactly:
-// value flags accept both "--flag value" and "--flag=value", positionals set
-// the project (last one wins — --project assigns the same way), a
+// value flags accept both "--flag value" and "--flag=value", exactly one
+// project is named (by --project or by a bare positional — two of them is a
+// command line whose scope is ambiguous, and last-one-wins would silently
+// answer for whichever project the last spelling named), a
 // non-numeric --threshold keeps the default, --reassess selects the repair
 // pass over the edges already in the graph (issue #686), --withdraw names the
 // edges to remove outright, and any other flag is an unknown-flag error (which
 // the caller prints and exits on). The project may come from --project, which
 // takes the NEXT argument verbatim — a dash-leading name such as -x or --odd is
 // a name, not a flag — so the lifecycle coordinator can emit one uniform form
-// for every project; a valueless --project is an error. Extracted from
-// runSupersede so the argv contract is unit-testable without os.Exit.
+// // for every project; a valueless --project is an error, and so is an empty one —
+// `--project "$VAR"` with an unset VAR is a command line that looks scoped and
+// is not, and this command writes links and deletes withdrawn edges under it.
+// Extracted from runSupersede so the argv contract is unit-testable without
+// os.Exit.
 //
 // --consensus N gates what a pass ACTS ON at N independent classification passes
 // over the same pairs, and is off unless typed (one pass, the historical
@@ -1722,6 +1747,21 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 	// unset VAR silently meaning auto-select on exactly the pair the flag exists to
 	// disambiguate.
 	relationSeen := false
+	// projectSeen counts OCCURRENCES of a project rather than testing the value
+	// for emptiness, and the POSITIONAL sets it too. Both flag spellings and the
+	// bare word ask the same two questions through this one bool, so a project is
+	// counted whether it arrived as a flag or as an operand: a value test cannot
+	// see a second occurrence that is empty, and a guard only the flag arms
+	// consult is invisible to an operand, which would make
+	// `ghost supersede --project a b` answer for b while
+	// `ghost supersede b --project a` was refused. That matters more here than
+	// anywhere else: this command writes supersedes/causes links and, with
+	// --withdraw --apply, DELETES edges, so a command line naming the scope
+	// twice must not be answered for whichever project the operand happened to
+	// name. The duplicate is asked FIRST, as it is in every other parser that
+	// takes a scope; two empty values stop at the first one, because with no
+	// first value there is no scope in the command line to be a duplicate of.
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
@@ -1763,16 +1803,17 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			if i+1 >= len(args) {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
-			if project != "" {
+			if projectSeen {
 				return "", "", false, false, 0, 0, nil, "", errors.New("expected exactly one project")
 			}
 			if args[i+1] == "" {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
 			project = args[i+1]
+			projectSeen = true
 			i++
 		case strings.HasPrefix(args[i], "--project="):
-			if project != "" {
+			if projectSeen {
 				return "", "", false, false, 0, 0, nil, "", errors.New("expected exactly one project")
 			}
 			v := strings.TrimPrefix(args[i], "--project=")
@@ -1780,6 +1821,7 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
 			project = v
+			projectSeen = true
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
 				threshold = float32(v)
@@ -1795,7 +1837,14 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		case strings.HasPrefix(args[i], "--source="):
 			source = strings.TrimPrefix(args[i], "--source=")
 		case !strings.HasPrefix(args[i], "-"):
+			if projectSeen {
+				return "", "", false, false, 0, 0, nil, "", errors.New("expected exactly one project")
+			}
+			if args[i] == "" {
+				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
+			}
 			project = args[i]
+			projectSeen = true
 		default:
 			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %q", args[i])
 		}
@@ -3703,10 +3752,10 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 		case args[i] == "--only-file":
 			return resolveArgs{}, errors.New("--only-file requires a path")
 		case !strings.HasPrefix(args[i], "-"):
+			// The positional is counted, not assigned untracked: a guard only the
+			// flag arms consult cannot see it, so `ghost resolve "" b` would
+			// otherwise answer for b in a command line that named the scope twice.
 			if projectSeen {
-				return resolveArgs{}, errors.New("expected exactly one project")
-			}
-			if args[i] == "" {
 				return resolveArgs{}, errors.New("expected exactly one project")
 			}
 			out.project = args[i]
@@ -3714,6 +3763,15 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 		default:
 			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
 		}
+	}
+	// An empty POSITIONAL is the same missing operand in the third spelling, and
+	// the one that decides nothing when it is alone: runResolve prints the usage
+	// block for an empty project, so `ghost resolve ""` read as a refusal while
+	// having parsed as a scoped run. It is asked after the loop rather than in
+	// the operand's own clause so that a command line which ALSO named a second
+	// scope is still reported as the duplicate it is.
+	if projectSeen && out.project == "" {
+		return resolveArgs{}, errors.New("--project requires a value")
 	}
 	if len(out.mark) > 0 || out.markFile != "" {
 		if out.reassess {

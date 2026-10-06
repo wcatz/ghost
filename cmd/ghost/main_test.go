@@ -1269,13 +1269,15 @@ func TestParseLifecycleArgs(t *testing.T) {
 	}
 }
 
-// TestParseReflectArgs pins `ghost reflect` argv parsing: the historical
-// positional form (with any accepted flag combination) parses unchanged, and
-// --project takes the NEXT argument verbatim — including dash-leading names
-// such as -x or --odd — so they read as project names, not flags.
-// --project=VALUE matches the parser's other equals-form flags, a valueless
-// --project is a clear error, and unknown flags stay silently ignored
-// (reflect's historical behavior; resolve/supersede error on them).
+// TestParseReflectArgs pins `ghost reflect` argv parsing: the single-project
+// forms (with any accepted flag combination) parse unchanged, and --project
+// takes the NEXT argument verbatim — including dash-leading names such as -x or
+// --odd — so they read as project names, not flags. --project=VALUE matches the
+// parser's other equals-form flags, a valueless --project is a clear error, and
+// unknown flags stay silently ignored (reflect's historical behavior;
+// resolve/supersede error on them). The empty-value and repeat rows for every
+// parser that takes a project are in
+// TestScopeFlagParsersRefuseEmptyAndRepeated, one table for all of them.
 func TestParseReflectArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1294,7 +1296,6 @@ func TestParseReflectArgs(t *testing.T) {
 		{"tier equals value", []string{"myproj", "--tier=cli"}, reflectArgs{project: "myproj", tier: "cli"}},
 		{"restore allow-drops source-equals", []string{"myproj", "--restore", "--allow-drops", "--source=codex"},
 			reflectArgs{project: "myproj", tier: "auto", restore: true, allowDrops: true, source: "codex"}},
-		{"last positional wins", []string{"a", "b"}, reflectArgs{project: "b", tier: "auto"}},
 		{"unknown flag ignored", []string{"myproj", "--wat"}, reflectArgs{project: "myproj", tier: "auto"}},
 		{"project flag dash value", []string{"--project", "-x", "--apply"}, reflectArgs{project: "-x", tier: "auto", apply: true}},
 		{"project flag double-dash value", []string{"--project", "--odd"}, reflectArgs{project: "--odd", tier: "auto"}},
@@ -2206,11 +2207,12 @@ func TestSupersedeReassessReport(t *testing.T) {
 }
 
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
-// resolve except the project is last-wins across positionals (historical
-// behavior) and --threshold exists in both value forms, defaulting to 0.80
-// when the value does not parse. --reassess is resolve's repair flag with the
-// same meaning (#686): the edges are already in the graph, so --apply withdraws
-// them instead of writing new ones.
+// resolve, --threshold exists in both value forms, defaulting to 0.80 when the
+// value does not parse, and --reassess is resolve's repair flag with the same
+// meaning (#686): the edges are already in the graph, so --apply withdraws them
+// instead of writing new ones. The project repeats — flag then flag, operand
+// then flag, either order — are in TestScopeFlagParsersRefuseEmptyAndRepeated,
+// one table for every parser that takes a project.
 func TestParseSupersedeArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -2231,7 +2233,6 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, false, 0.80},
 		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, 0.80},
 		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, 0.80},
-		{"last positional wins", []string{"a", "b"}, "b", "", false, false, 0.80},
 		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, 0.80},
 		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, 0.80},
 		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, 0.80},

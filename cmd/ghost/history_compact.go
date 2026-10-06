@@ -64,6 +64,7 @@ type historyCompactOptions struct {
 // compactable.
 func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 	var opts historyCompactOptions
+	projectSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -75,7 +76,14 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 			if i+1 >= len(args) {
 				return opts, fmt.Errorf("flag %s needs a value", arg)
 			}
-			if opts.Project != "" {
+			// projectSeen counts OCCURRENCES rather than testing the value for
+			// emptiness: `opts.Project != ""` cannot see `--project ghost --project=`,
+			// which reads the empty second value as the first being unset and then
+			// compacts the project the command line named first while the second
+			// spelling said nothing. This repair rewrites a table nobody reading
+			// the command is looking at, so a scope it silently resolved is a scope
+			// nobody can audit afterwards.
+			if projectSeen {
 				return opts, fmt.Errorf("flag %s given more than once", arg)
 			}
 			i++
@@ -83,8 +91,9 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 				return opts, fmt.Errorf("flag %s needs a value", arg)
 			}
 			opts.Project = args[i]
+			projectSeen = true
 		case strings.HasPrefix(arg, "--project="):
-			if opts.Project != "" {
+			if projectSeen {
 				return opts, fmt.Errorf("flag --project given more than once")
 			}
 			value := strings.TrimPrefix(arg, "--project=")
@@ -92,6 +101,7 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 				return opts, fmt.Errorf("flag --project needs a value")
 			}
 			opts.Project = value
+			projectSeen = true
 		case arg == "--before":
 			if i+1 >= len(args) {
 				return opts, fmt.Errorf("flag %s needs a value", arg)
