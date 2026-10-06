@@ -415,11 +415,12 @@ func TestAProjectContextWhoseRecordIsRefusedStillRendersTheSameBlock(t *testing.
 // that named `_global` is attributed to `_global` — while `docs/mcp.md`'s Project
 // context section carries the per-shape detail of which read happens when. So these
 // two shapes' row counts are pinned HERE rather than derived from four branches, and
-// they are the two the cell's rule cannot be read off: a `_global` request and an
-// unregistered name are exactly the shapes where the row is `_global`-attributed and
-// singular. The other three have their own tests in this file — the tool's union read,
-// the resource's two reads, and (since #581) the standalone global resource — so all
-// five shapes behind the cell's claim are measurable rather than asserted.
+// they are the two TOOL shapes whose row is `_global`-attributed and singular: a
+// `_global` request and an unregistered name. The other three have their own tests in
+// this file — the tool's union read, the resource's two reads, and (since #581) the
+// standalone global resource, which is a THIRD `_global`-attributed and singular shape
+// rather than a fourth kind — so all five shapes behind the cell's claim are
+// measurable rather than asserted.
 //
 // Both shapes write one row for the same reason, which is that they never make two
 // reads. `projectContextBudget` unsets `IncludeGlobal` when the project IS
