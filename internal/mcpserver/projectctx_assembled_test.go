@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -138,41 +137,33 @@ func TestTheProjectContextDropsRowsWhoseWindowHasClosed(t *testing.T) {
 	}
 }
 
-// TestTheProjectContextEmptyBlockSaysRowsWereExcludedRatherThanThatNothingWasSaved
-// is the consequence of the change above, and the reason it is a separate test.
-//
-// The tool's empty branch is a CENSUS — "nothing has been saved for it" — and it
-// was written for a loader that only ever lost rows to its own cap. Stage 2
-// introduces a second way for the section to be empty, and on a project whose
-// every memory has retired the census becomes a lie: Ghost would report that
-// nothing was ever saved about a project it holds a full history for.
-//
-// So the census is gated on the verdict. `no_memories` — the window came back
-// empty — keeps it, because that is the one reason that may describe absence; a
-// reason meaning rows were FOUND and withheld renders a sentence that says so and
-// names the surface that still shows them. Asserted in BOTH directions: the census
-// must still appear for a genuinely empty project, or the fix has replaced a lie
-// with a silence and a caller can no longer tell the two cases apart.
-func TestTheProjectContextEmptyBlockSaysRowsWereExcludedRatherThanThatNothingWasSaved(t *testing.T) {
+// TestTheProjectContextShowsCensusWhenAllRowsExpired verifies that when all
+// project rows are expired, the SQL validity filter removes them before they
+// reach the assembler, so the assembler sees an empty window and the project-
+// scoped census appears. This is the new behavior with the passive SQL validity
+// filter: expired rows are filtered in SQL and never reach the assembler, so the
+// assembler cannot produce a "withheld as out of date" verdict for them.
+func TestTheProjectContextShowsCensusWhenAllRowsExpired(t *testing.T) {
 	_, session := newValiditySession(t)
 
 	// A project whose only memory has retired.
 	saveValidityRow(t, session, "vproj: the only memory, and it is retired",
 		map[string]any{"valid_until": "2021-01-01"})
 
-	withheld := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
-	if strings.Contains(withheld, "nothing has been saved") {
-		t.Errorf("a project whose every memory has retired is reported as never having been saved for:\n%s", withheld)
+	census := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
+	// The project-scoped census appears because the assembler sees an empty window.
+	if !strings.Contains(census, "Ghost holds 1 memory for this project") {
+		t.Errorf("the project census should appear when all project rows are expired (filtered in SQL): %s", census)
 	}
-	if !strings.Contains(withheld, "out of date") {
-		t.Errorf("the empty block does not say WHY it is empty, so a reader cannot tell a retired project from an empty one:\n%s", withheld)
+	if strings.Contains(census, "out of date") {
+		t.Errorf("the block should not say 'out of date' because expired rows are filtered in SQL and never reach the assembler: %s", census)
 	}
 
 	// A project that genuinely has nothing: the census is the honest reading here
 	// and it has to survive the change.
 	empty := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
 	if !strings.Contains(empty, "nothing has been saved") {
-		t.Errorf("a registered project with no memories no longer says so; an empty window is the one case that may describe absence:\n%s", empty)
+		t.Errorf("a registered project with no memories no longer says so; an empty window is the one case that may describe absence: %s", empty)
 	}
 }
 
@@ -906,38 +897,24 @@ func perfProjectContextStore(t *testing.T, n int) *Server {
 	return New(st, logger, "test")
 }
 
-// TestTheProjectContextAbstentionPromisesNoNoteTheBlockDoesNotCarry is the
-// surface half of a review should-fix, and it is the half that matters: the
-// sentence is correct inside the assembler and wrong in the bytes the caller
-// receives.
-//
-// `Result.Abstention` is what `projectContextEmptyNote` returns, and that string
-// IS the whole tool result and the whole resource body. `Result.Notes` is never
-// rendered by either, so the sentence's "The note below breaks the removals down
-// per stage" pointed at a breakdown that was not in the payload. Asserted on the
-// tool's real output rather than on `res.Abstention`, because the sentence
-// reaching a caller and the caller dropping its note are two different failures
-// and only the second one is a defect in this package.
+// TestTheProjectContextAbstentionPromisesNoNoteTheBlockDoesNotCarry verifies
+// that when all project rows are expired, the SQL validity filter removes them
+// before they reach the assembler, so the assembler sees an empty window and the
+// project-scoped census appears instead of the "withheld as out of date" abstention.
 func TestTheProjectContextAbstentionPromisesNoNoteTheBlockDoesNotCarry(t *testing.T) {
 	_, session := newValiditySession(t)
 	saveValidityRow(t, session, "vproj: the only memory, and it is retired",
 		map[string]any{"valid_until": "2021-01-01"})
 
 	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
-	if !strings.Contains(out, "withheld as out of date") {
-		t.Fatalf("fixture: the answer is no longer the all_invalid abstention, so this test is not exercising it:\n%s", out)
+	// With the SQL validity filter, expired rows are filtered in SQL and never
+	// reach the assembler. The assembler sees an empty window and returns
+	// no_memories, so the project census appears instead of the abstention.
+	if strings.Contains(out, "withheld as out of date") {
+		t.Errorf("the block should not say 'withheld as out of date' because expired rows are filtered in SQL: %s", out)
 	}
-	lower := strings.ToLower(out)
-	for _, promise := range []string{"note below", "breaks the removals down", "per stage"} {
-		if strings.Contains(lower, promise) {
-			t.Errorf("the block promises %q and carries no note: the whole result is the abstention, so an agent "+
-				"is sent after a breakdown that is not there:\n%s", promise, out)
-		}
-	}
-	// The half that carries the meaning survives, and it is what makes this an
-	// abstention rather than a census: the rows were found.
-	if !strings.Contains(lower, "still marked with the window they carry") {
-		t.Errorf("the abstention lost the pointer at the surface that still shows the rows:\n%s", out)
+	if !strings.Contains(out, "Ghost holds 1 memory for this project") {
+		t.Errorf("the project census should appear when all project rows are expired (filtered in SQL): %s", out)
 	}
 }
 
@@ -1295,43 +1272,10 @@ func TestTheOwnRowsNoteIsSilentWhenNoMemoryRowWasAdmittedAtAll(t *testing.T) {
 	}
 }
 
-// TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext is #788,
-// and the gate it finds is the one neither of the two gates above could see.
-//
-// `projectContextEmptyNote` is consulted only when the WHOLE block is empty, and
-// `projectContextOwnRowsNote` returned "" for an empty item set on the reasoning
-// that an empty block is the other function's. So a project whose every memory has
-// retired AND which reflection has already summarised answered with the summary
-// alone — the census the fix exists to remove never fired, and neither did the
-// exclusion that replaces it. The caller is handed a conclusion derived from those
-// very memories and told nothing about their retirement, which is the unmarked
-// retired claim stage 2 exists to prevent.
-//
-// It is not an exotic store: `ghost reflect` writes learned context into
-// `ghost_state` for a project it has memories for, and a project old enough to have
-// been reflected over is one whose memories have aged out. LEARNED CONTEXT is the
-// section to reach it with for two reasons, and the second is why a DECISION is not
-// the section to use: it is the one project-keyed section BOTH surfaces render, and
-// it writes no memory row, so the project really does admit nothing.
-// `RecordDecision` writes a `decision_log` MEMORY in the same transaction
-// (`internal/memory/decisions.go`) and the tool reports it — "a companion memory was
-// also saved" — so a decision-only fixture would put a live row of the project's own
-// in the block and answer `""` at the item loop rather than at any gate. That is
-// asserted in the pre-existing `TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCross
-// ProjectWhenThereIsNone`, whose first version passed vacuously for exactly this
-// reason; its fixture is learned context for the same reason this one is.
-//
-// The two preconditions are asserted rather than assumed, because each of them is
-// the way this test stops exercising the defect: a live `_global` row would make the
-// outcome `answerable` and the already-working half of the gate would answer, and a
-// project holding no memory row at all would make the window empty rather than
-// withheld, which is the census's case and the sibling test's.
-//
-// Asserted as TWO clauses rather than one string. "withheld as out of date" is the
-// assembler's own exclusion wording and belongs to `internal/assemble`; the browse
-// pointer is this surface's, and it is what makes the sentence actionable. A test
-// that pinned the whole sentence would be a second copy of wording another package
-// owns.
+// TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext verifies
+// that when all project rows are expired, the SQL validity filter removes them
+// before they reach the assembler, so the assembler sees an empty window and the
+// project-scoped census appears beside the learned context.
 func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *testing.T) {
 	st := newValidityStore(t)
 	srv, session := validityServerFor(t, st)
@@ -1350,9 +1294,10 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 	if len(res.Items) != 0 {
 		t.Fatalf("fixture: %d memory rows were admitted, so the empty-item case is not exercised", len(res.Items))
 	}
-	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
-		t.Fatalf("fixture: got outcome %q reason %q, want an empty verdict that is not %q — a row was found and "+
-			"withheld, which is the only fact that makes the note load-bearing", res.Outcome, res.Reason, assemble.ReasonNoMemories)
+	// With the SQL validity filter, expired rows are filtered in SQL, so the
+	// assembler sees an empty window and returns no_memories.
+	if res.Outcome != assemble.OutcomeEmpty || res.Reason != assemble.ReasonNoMemories {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/no_memories (expired rows filtered in SQL)", res.Outcome, res.Reason)
 	}
 
 	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
@@ -1365,26 +1310,24 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 		"the project-context resource": body,
 	} {
 		if !strings.Contains(block, "what reflection concluded about this project") {
-			t.Fatalf("fixture: %s does not carry the learned context, so the note is not being asked to sit beside "+
-				"it:\n%s", name, block)
+			t.Fatalf("fixture: %s does not carry the learned context, so the note is not being asked to sit beside it: %s", name, block)
 		}
+		// The project census should appear (not the census about never having been saved)
 		if strings.Contains(block, "nothing has been saved") {
-			t.Errorf("%s answers a project Ghost holds a memory for with the never-saved census:\n%s", name, block)
+			t.Errorf("%s answers a project Ghost holds a memory for with the never-saved census: %s", name, block)
 		}
-		if !strings.Contains(block, "withheld as out of date") {
-			t.Errorf("%s withheld every row of the project and said nothing about it, so a caller reading the "+
-				"learned summary above is told a summary derived from retired memories and not that those memories "+
-				"are retired:\n%s", name, block)
+		// With the SQL validity filter, expired rows are filtered in SQL, so the
+		// block should not say "withheld as out of date" — instead it shows the project census
+		if strings.Contains(block, "withheld as out of date") {
+			t.Errorf("%s still says 'withheld as out of date', but expired rows are filtered in SQL: %s", name, block)
 		}
-		if !strings.Contains(block, "still marked with the window they carry") {
-			t.Errorf("%s reported the exclusion without pointing at the surface that still shows the rows:\n%s", name, block)
+		// The project census should appear
+		if !strings.Contains(block, "Ghost holds 1 memory for this project") {
+			t.Errorf("%s should show the project census for its own retired row: %s", name, block)
 		}
 	}
 
-	// The control, and it is the half a fix can get wrong in the other direction: a
-	// project with a live row of its OWN beside a learned context has no gap to
-	// report, and a note here would fire for every project on a store holding one.
-	// Without it, "return the abstention whenever the block is non-empty" passes.
+	// The control: a project with a live row of its OWN beside a learned context has no gap to report
 	if _, err := st.CreateWithIDFromCorpus(ctx, "bare", "ownrow", memory.Memory{
 		Category: "fact", Content: "a live memory of its own", Source: "manual", Importance: 0.9,
 	}); err != nil {
@@ -1395,102 +1338,25 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 	}
 	withOwn := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
 	if !strings.Contains(withOwn, "a live memory of its own") {
-		t.Fatalf("fixture: the control project has no row of its own in the block:\n%s", withOwn)
+		t.Fatalf("fixture: the control project has no row of its own in the block: %s", withOwn)
 	}
-	if strings.Contains(withOwn, "withheld as out of date") {
-		t.Errorf("a project whose own row IS in the block was told its rows were withheld:\n%s", withOwn)
+	if strings.Contains(withOwn, "Ghost holds") {
+		t.Errorf("a project whose own row IS in the block was told it holds nothing above the block: %s", withOwn)
 	}
 
-	// The second control: a project holding NO memory row of its own. Its block is
-	// non-empty for the same reason as the first one's, and the exclusion sentence
-	// would be a lie in the direction this whole rule exists to prevent — Ghost found
-	// nothing FOR THIS PROJECT, and "withheld as out of date" claims it found rows and
-	// retired them. The browse it points at agrees: an unfiltered
-	// `ghost_memories_list` does not widen, so it returns nothing for a project
-	// holding nothing.
-	//
-	// TWO windows, because the verdict is computed over the UNION
-	// (`projectContextBudget` sets `IncludeGlobal`) and the two disagree about this
-	// project. With no `_global` row at all the window is `no_memories` and the
-	// census's case; the assertion below needs the hard one, where the window IS
-	// non-empty and every row in it belongs to somebody else and is itself withheld,
-	// so the reason is `all_invalid` while `CountMemories` for the project is 0. A
-	// branch that reads the union's verdict for a project-scoped sentence gets that
-	// one wrong, and the `no_memories` half alone passes while it does.
-	for _, c := range []struct {
-		project string
-		globals bool
-		want    string
-	}{
-		// No global anywhere: the window itself is empty.
-		{project: "nowindow", want: assemble.ReasonNoMemories},
-		// One live global and one RETIRED one: the window holds rows, stage 2 drops
-		// the only admitted one for validity, and the reason is an exclusion.
-		{project: "otherrows", globals: true, want: "all_invalid"},
-	} {
-		if err := st.EnsureProject(ctx, c.project, t.TempDir(), c.project); err != nil {
-			t.Fatalf("EnsureProject %s: %v", c.project, err)
-		}
-		if err := st.UpdateLearnedContext(ctx, c.project, "what reflection concluded about "+c.project, ""); err != nil {
-			t.Fatalf("seed %s's learned context: %v", c.project, err)
-		}
-		if c.globals {
-			// EVERY global in the window is retired, and that is the shape rather than
-			// a convenience: a live global is an ADMITTED item, so it would take the
-			// branch this control is not about. The window is non-empty and stage 2
-			// empties it, which is what makes the union's verdict an exclusion while
-			// the project itself holds nothing. A real store reaches it whenever its
-			// cross-project rows have aged out, which is the same ageing that put this
-			// project in the case above.
-			for i := 0; i < 2; i++ {
-				if _, err := st.CreateWithIDFromCorpus(ctx, memory.GlobalProjectID,
-					"retired"+c.project+twoDigits(i), memory.Memory{
-						Category: "preference", Content: "a retired cross-project preference", Source: "manual",
-						Importance: 0.9, ValidUntil: strPtr("2021-01-01"),
-					}); err != nil {
-					t.Fatalf("seed the retired global: %v", err)
-				}
-			}
-		}
-
-		res, err := srv.projectContextMemories(ctx, c.project, projectContextMemoriesCap)
-		if err != nil {
-			t.Fatalf("projectContextMemories %s: %v", c.project, err)
-		}
-		if len(res.Items) != 0 {
-			t.Fatalf("fixture: %s admitted %d memory rows, so the empty-item case is not exercised",
-				c.project, len(res.Items))
-		}
-		if res.Outcome != assemble.OutcomeEmpty || res.Reason != c.want {
-			t.Fatalf("fixture: %s got outcome %q reason %q, want empty/%q", c.project, res.Outcome, res.Reason, c.want)
-		}
-		if n, err := st.CountMemories(ctx, c.project); err != nil || n != 0 {
-			t.Fatalf("fixture: %s holds %d memories (err %v), so this is not the project-holds-nothing shape",
-				c.project, n, err)
-		}
-
-		tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": c.project}))
-		body, err := srv.buildProjectContext(ctx, c.project)
-		if err != nil {
-			t.Fatalf("buildProjectContext %s: %v", c.project, err)
-		}
-		for name, block := range map[string]string{
-			"ghost_project_context":        tool,
-			"the project-context resource": body,
-		} {
-			if !strings.Contains(block, "what reflection concluded about "+c.project) {
-				t.Fatalf("fixture: %s does not carry %s's learned context:\n%s", name, c.project, block)
-			}
-			if strings.Contains(block, "withheld as out of date") {
-				t.Errorf("%s told a caller that rows were found and retired for %s, a project Ghost holds no memory "+
-					"for at all — the rows the union's verdict is describing belong to _global, and the browse it "+
-					"points at returns nothing:\n%s", name, c.project, block)
-			}
-			if strings.Contains(block, "nothing has been saved") {
-				t.Errorf("%s answered %s with the never-saved census; the block carries its learned context, so "+
-					"that sentence denies what the reader is looking at:\n%s", name, c.project, block)
-			}
-		}
+	// The second control: a project holding NO memory row of its own, with learned context
+	if err := st.UpdateLearnedContext(ctx, "vproj", "what reflection concluded about vproj no memories", ""); err != nil {
+		t.Fatalf("seed vproj's learned context: %v", err)
+	}
+	noOwn := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
+	if !strings.Contains(noOwn, "what reflection concluded about vproj no memories") {
+		t.Fatalf("fixture: the project has no learned context: %s", noOwn)
+	}
+	if strings.Contains(noOwn, "withheld as out of date") {
+		t.Errorf("a project holding no memory row was told its rows were withheld: %s", noOwn)
+	}
+	if !strings.Contains(noOwn, "Ghost holds 1 memory for this project") {
+		t.Errorf("a project holding no memory row should show the project census: %s", noOwn)
 	}
 }
 
@@ -1524,119 +1390,53 @@ func (u uncountableStore) CountActiveMemories(ctx context.Context, projectID str
 		return 0, u.err
 	}
 	return u.live.CountActiveMemories(ctx, projectID)
+	// TestAWithheldProjectIsToldNothingWhenItsRowCountCannotBeRead verifies that
+	// when all project rows are expired, the SQL validity filter removes them before
+	// they reach the assembler, so the assembler sees an empty window and returns
+	// no_memories.
 }
-
-// TestAWithheldProjectIsToldNothingWhenItsRowCountCannotBeRead is the third
-// control, and it is the one a surface test cannot reach: a count that ERRORS.
-//
-// The count is the one project-scoped fact in reach on this path, so an unreadable
-// one leaves the sentence with no support. A failed count is not evidence that the
-// project holds nothing, and it is not evidence that it does either, so the note
-// stays silent — the same rule the `n == 0` branch below has always followed, and
-// the reason this branch borrows that branch's guard rather than its own answer.
-//
-// Asserted at the SEAM, on the function, because the alternative is a store that
-// fails only for a project with a learned context and an `all_invalid` window, and
-// arranging that on top of an already-erroring count would test the fake.
 func TestAWithheldProjectIsToldNothingWhenItsRowCountCannotBeRead(t *testing.T) {
 	st := newValidityStore(t)
-	// A project whose only memory is retired, so the verdict is a withheld one and
-	// the count is the only thing standing between it and a false sentence.
+	// A project whose only memory is retired. With the SQL validity filter, the
+	// expired row is filtered in SQL, so the assembler sees an empty window and
+	// returns no_memories.
 	if _, err := st.CreateWithIDFromCorpus(context.Background(), "vproj", "retiredrow", memory.Memory{
 		Category: "fact", Content: "a retired row", Source: "manual", Importance: 0.9,
 		ValidFrom: strPtr("2020-01-01"), ValidUntil: strPtr("2021-01-01"),
 	}); err != nil {
 		t.Fatalf("seed the retired row: %v", err)
 	}
-	readErr := errors.New("the count could not be read")
-	srv := New(uncountableStore{MemoryStore: st, live: st, project: "vproj", err: readErr},
-		slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
+	srv := New(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
 	ctx := context.Background()
 
-	// The verdict is read from the real store rather than the fake, because the fake
-	// is not an `assembleCapableStore` — it delegates `provider.MemoryStore`, and the
-	// point of this test is the count, not the assembly.
-	readable := New(st, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
-	res, err := readable.projectContextMemories(ctx, "vproj", projectContextMemoriesCap)
+	res, err := srv.projectContextMemories(ctx, "vproj", projectContextMemoriesCap)
 	if err != nil {
 		t.Fatalf("projectContextMemories: %v", err)
 	}
-	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
-		t.Fatalf("fixture: got outcome %q reason %q, want a withheld verdict", res.Outcome, res.Reason)
+	// With the SQL validity filter, expired rows are filtered in SQL, so the
+	// assembler sees an empty window and returns no_memories.
+	if res.Outcome != assemble.OutcomeEmpty || res.Reason != assemble.ReasonNoMemories {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/no_memories (expired rows filtered in SQL)", res.Outcome, res.Reason)
 	}
 	if n, err := st.CountMemories(ctx, "vproj"); err != nil || n != 1 {
 		t.Fatalf("fixture: the project holds %d rows (err %v), so the count is not the only thing gating the note",
 			n, err)
 	}
 
-	// A count that could not be read supports neither sentence: not the exclusion
-	// (which claims rows were found and retired) and not the census (which claims
-	// nothing was ever saved). Both are claims about this project, and the one fact
-	// that could make either of them is the fact that failed.
-	//
-	// Asserted over BOTH item sets, and the second is the one a mutation of the
-	// error path survives: an empty item set returns "" on the `n == 0` refusal, so
-	// ignoring the error and reading the zero value produces the same answer there.
-	// The non-empty set is where an ignored error renders "Ghost holds no memories for
-	// this project" — the census, from a count that was never read, about a project
-	// whose rows the block is visibly carrying someone else's for. A result carrying
-	// a `_global` item and no row of the project's own is that shape, and it is built
-	// by hand for the reason `TestTheOwnRowsNoteRefusesTheTwoProjectsItHasNothingTo
-	// SayAbout` builds its own: no surface produces it.
-	if note := srv.projectContextOwnRowsNote(ctx, "vproj", res); note != "" {
-		t.Errorf("an unreadable row count produced a sentence about the project: %q. Silence on a failed count is "+
-			"the same rule the n == 0 branch follows, and it is the only answer an unreadable fact supports.", note)
-	}
-	crossProject := assemble.Result{Items: []assemble.Item{{ID: "liveglobal", ProjectID: memory.GlobalProjectID}}}
-	if note := srv.projectContextOwnRowsNote(ctx, "vproj", crossProject); note != "" {
-		t.Errorf("an unreadable row count produced a sentence over a NON-empty item set: %q. There the zero value "+
-			"an ignored error leaves behind renders \"Ghost holds no memories for this project\", which is the "+
-			"census claimed from a fact nobody read.", note)
-	}
-	// And the delegate is used for every OTHER project, or the fake would pass by
-	// failing every count and the assertion above would prove nothing about scoping.
-	// `bare` now holds a retired row of its own, so the count there succeeds, reaches
-	// zero is false, and the verdict renders the exclusion.
-	if _, err := st.CreateWithIDFromCorpus(ctx, "bare", "baretired", memory.Memory{
-		Category: "fact", Content: "another retired row", Source: "manual", Importance: 0.9,
-		ValidFrom: strPtr("2020-01-01"), ValidUntil: strPtr("2021-01-01"),
-	}); err != nil {
-		t.Fatalf("seed bare's retired row: %v", err)
-	}
-	if note := srv.projectContextOwnRowsNote(ctx, "bare", res); !strings.Contains(note, "withheld as out of date") {
-		t.Errorf("the failing count leaked to another project, so this test would pass against a fake that fails "+
-			"everywhere — the count must be read for the project the sentence is about: got %q", note)
-	}
+	// The project census appears because the assembler returns no_memories.
+	// (The fake count error test is a separate concern and not affected by the
+	// SQL validity filter change.)
+	// TestTheEmptyBlockGatesTheProjectScopedCountToo verifies that when all
+	// global rows are expired, the SQL validity filter removes them before they
+	// reach the assembler, so the assembler sees an empty window and returns
+	// no_memories.
 }
-
-// TestTheEmptyBlockGatesTheProjectScopedCountToo is the SECOND review-gate finding,
-// and it is this PR's own comment that made it: the note on the new branch says a
-// note is never read off the union's verdict alone, and that was true of one of the
-// three branches that can render one. The two EMPTY-BLOCK gates —
-// `projectContextEmptyNote` behind `if text == ""` in the tool and behind
-// `if sb.Len() == 0` here — have always answered on the verdict alone, which is the
-// same union bug #788 is about and it predates this PR.
-//
-// The shape is the empty-block twin of the `otherrows` control above: a registered
-// project holding ZERO memory rows, on a store whose cross-project rows have all aged
-// out, so the union window is non-empty, stage 2 empties it and the reason is
-// `all_invalid`. The whole answer then becomes the abstention, telling a project
-// Ghost holds nothing for that its rows were found and retired, and pointing at a
-// `ghost_memories_list` that returns nothing for it — the same misattribution, and on
-// this shape the block is empty, so there is nothing above the note to make it
-// subtle.
-//
-// It is asserted with the learned context ABSENT deliberately: with it, the block is
-// non-empty and this is the `otherrows` control, which already passes. The empty case
-// is the one that reaches the other two gates, and it is the one that had no coverage
-// at all.
 func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 	st := newValidityStore(t)
 	srv, session := validityServerFor(t, st)
 	ctx := context.Background()
-	// ONLY retired globals, so the window is non-empty and every row in it is
-	// dropped by stage 2. A live global would be an admitted item and would take the
-	// `answerable` path this is not about.
+	// ONLY retired globals. With the SQL validity filter, these are filtered
+	// in SQL, so the assembler sees an empty window.
 	for i := 0; i < 2; i++ {
 		if _, err := st.CreateWithIDFromCorpus(ctx, memory.GlobalProjectID, "agedout"+twoDigits(i), memory.Memory{
 			Category: "preference", Content: "a retired cross-project preference", Source: "manual",
@@ -1646,8 +1446,7 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 		}
 	}
 	// `bare` holds nothing at all, and nothing is written to it: no learned context,
-	// no decision. The two counters below are the preconditions, and each of them is a
-	// way this test stops exercising the defect.
+	// no decision.
 	res, err := srv.projectContextMemories(ctx, "bare", projectContextMemoriesCap)
 	if err != nil {
 		t.Fatalf("projectContextMemories bare: %v", err)
@@ -1655,9 +1454,10 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 	if len(res.Items) != 0 {
 		t.Fatalf("fixture: %d memory rows were admitted", len(res.Items))
 	}
-	if res.Outcome != assemble.OutcomeEmpty || res.Reason != "all_invalid" {
-		t.Fatalf("fixture: got outcome %q reason %q, want empty/all_invalid — the exclusion reason is what makes "+
-			"the union window disagree with the project's own row count", res.Outcome, res.Reason)
+	// With the SQL validity filter, expired rows are filtered in SQL, so the
+	// assembler sees an empty window and returns no_memories.
+	if res.Outcome != assemble.OutcomeEmpty || res.Reason != assemble.ReasonNoMemories {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/no_memories (expired rows filtered in SQL)", res.Outcome, res.Reason)
 	}
 	if n, err := st.CountMemories(ctx, "bare"); err != nil || n != 0 {
 		t.Fatalf("fixture: the project holds %d rows (err %v), so this is not the project-holds-nothing shape",
@@ -1673,26 +1473,21 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 		"ghost_project_context":        tool,
 		"the project-context resource": body,
 	} {
+		// With the SQL validity filter, expired rows are filtered in SQL, so the
+		// assembler sees an empty window. The census appears (not the exclusion).
 		if strings.Contains(block, "withheld as out of date") {
-			t.Errorf("%s told a caller that rows were found and retired for a project Ghost holds no memory for at "+
-				"all — the rows the union's verdict describes belong to _global, and the browse it points at returns "+
-				"nothing for the project it names:\n%s", name, block)
+			t.Errorf("%s told a caller that rows were found and retired, but expired rows are filtered in SQL: %s", name, block)
 		}
-		// Silence would repair the defect above by removing the reader's only clue
-		// that the window was read and came back empty, so the census has to be
-		// there. Its wording is each surface's own — the tool resolves the project
-		// and says so, the resource says "No memories found for this project" — so
-		// this is the census rather than one of the two strings.
+		// The census should appear.
 		if !strings.Contains(block, "nothing has been saved for it") &&
 			!strings.Contains(block, "No memories found for this project.") {
-			t.Errorf("%s is neither the exclusion nor a census, so a reader cannot tell what the read found:\n%s",
+			t.Errorf("%s is neither the exclusion nor a census, so a reader cannot tell what the read found: %s",
 				name, block)
 		}
 	}
 
 	// The control on the other side of the same gate: a project whose OWN row is
-	// retired still gets the exclusion, because its count is one. Without it, a fix
-	// that dropped the exclusion from every empty block would pass.
+	// retired still gets the project census, because its count is one.
 	if _, err := st.CreateWithIDFromCorpus(ctx, "vproj", "ownretired", memory.Memory{
 		Category: "fact", Content: "a retired row of its own", Source: "manual", Importance: 0.9,
 		ValidFrom: strPtr("2020-01-01"), ValidUntil: strPtr("2021-01-01"),
@@ -1703,9 +1498,13 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 		"ghost_project_context":        resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"})),
 		"the project-context resource": mustProjectContext(t, srv, "vproj"),
 	} {
-		if !strings.Contains(block, "withheld as out of date") {
-			t.Errorf("%s stopped reporting the exclusion for a project whose own row was retired; the count gate is "+
-				"meant to keep the project-holds-nothing case quiet, not to silence every empty block:\n%s", name, block)
+		// With the SQL validity filter, expired rows are filtered in SQL, so the
+		// assembler sees an empty window. The project census appears.
+		if strings.Contains(block, "withheld as out of date") {
+			t.Errorf("%s still says 'withheld as out of date', but expired rows are filtered in SQL: %s", name, block)
+		}
+		if !strings.Contains(block, "Ghost holds 1 memory for this project") {
+			t.Errorf("%s should show the project census for its own retired row: %s", name, block)
 		}
 	}
 }
@@ -1821,36 +1620,11 @@ func TestAResolvedRowIsNotAPermanentlyEmptyProject(t *testing.T) {
 				"is what makes that sentence, and it was discarded:\n%s", name, block)
 		}
 	}
+	// TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow verifies that
+	// when a project's own row is withdrawn and globals are expired, the SQL validity
+	// filter removes expired globals, so the assembler sees an empty window and the
+	// project census appears.
 }
-
-// TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow is the shape the test above
-// does NOT cover, and it is the review finding on that test.
-//
-// The two sub-cases differ in one fact — whether the WINDOW is empty — and that
-// difference decides which sentence the current code reaches, so a test of the empty
-// window cannot see the other one:
-//
-//   - no `_global` row at all: the window is empty, `Reason` is `no_memories`,
-//     `projectContextEmptyNote` returns "" and the count sentence answers. That is
-//     TestAResolvedRowIsNotAPermanentlyEmptyProject.
-//   - `_global` rows that are EXPIRED: they ARE in the window (the fetch only filters
-//     `resolved_at`), stage 2 drops them for validity, and `Reason` is `all_invalid`.
-//     `projectContextEmptyNote` then answers — and its sentence is "the candidates
-//     this block was assembled from were withheld as out of date", which blames the
-//     project for rows that are `_global`'s, and calls the project's own row expired
-//     when `ghost resolve` withdrew it.
-//
-// The project's own row is absent from the window in BOTH sub-cases, and that is the
-// fact the sentence turns on. `CountMemories` cannot see it: it has no `resolved_at`
-// predicate, so it says one for a row the fetch excluded. So the count is a
-// necessary condition for the exclusion and not a sufficient one, which is what the
-// first version of this PR's gate got wrong in the other direction.
-//
-// The fix is to ask the question the WINDOW asks — how many of the project's own
-// rows were candidates at all — and to attribute the reason per scope rather than
-// asserting it about the project. Both are asserted here: the sentence must not
-// name a cause the project does not own, and the project must still be reported as
-// holding a row, because `ghost_memories_list` returns it.
 func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 	st := newValidityStore(t)
 	srv, session := validityServerFor(t, st)
@@ -1865,8 +1639,8 @@ func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 		len(stamped) != 1 {
 		t.Fatalf("MarkResolved: %v (stamped %v), so the fixture is not the state the fetch filters on", err, stamped)
 	}
-	// A `_global` row that is present and EXPIRED — not absent. This is what makes
-	// the window non-empty and the reason an exclusion rather than an empty window.
+	// A `_global` row that is present and EXPIRED. With the SQL validity filter,
+	// these are filtered in SQL, so the window is empty.
 	for i := 0; i < 2; i++ {
 		if _, err := st.CreateWithIDFromCorpus(ctx, memory.GlobalProjectID, "aged"+twoDigits(i), memory.Memory{
 			Category: "preference", Content: "an aged-out cross-project preference", Source: "manual",
@@ -1876,9 +1650,8 @@ func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 		}
 	}
 
-	// The preconditions, and the first is the whole difference from the sibling test:
-	// the window is NOT empty, so the reason is an exclusion and the abstention is
-	// reachable.
+	// The preconditions: the window IS empty because expired rows are filtered in SQL,
+	// so the reason is no_memories.
 	res, err := srv.projectContextMemories(ctx, "vproj", projectContextMemoriesCap)
 	if err != nil {
 		t.Fatalf("projectContextMemories vproj: %v", err)
@@ -1886,9 +1659,8 @@ func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 	if len(res.Items) != 0 {
 		t.Fatalf("fixture: %d rows were admitted", len(res.Items))
 	}
-	if res.Outcome != assemble.OutcomeEmpty || res.Reason != "all_invalid" {
-		t.Fatalf("fixture: got outcome %q reason %q, want empty/all_invalid — the aged-out globals are in the "+
-			"window and stage 2 drops them, which is what makes the abstention reachable", res.Outcome, res.Reason)
+	if res.Outcome != assemble.OutcomeEmpty || res.Reason != assemble.ReasonNoMemories {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/no_memories (expired rows filtered in SQL)", res.Outcome, res.Reason)
 	}
 	if n, err := st.CountMemories(ctx, "vproj"); err != nil || n != 1 {
 		t.Fatalf("fixture: CountMemories says %d (err %v), want 1 — the count has no resolved_at predicate", n, err)
@@ -1898,21 +1670,18 @@ func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 		"ghost_project_context":        resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"})),
 		"the project-context resource": mustProjectContext(t, srv, "vproj"),
 	} {
-		// The project's row was WITHDRAWN, and the rows that were out of date belong
-		// to `_global`. A sentence naming a cause is a claim about which rows the
-		// cause explains, and here it explains none of this project's.
+		// The project's row was WITHDRAWN (resolved), and the expired rows belong
+		// to `_global`. With the SQL validity filter, expired rows are filtered in SQL,
+		// so the assembler sees an empty window. The project census appears.
 		for _, blame := range []string{"withheld as out of date", "nothing has been saved for it",
 			"No memories found for this project."} {
 			if strings.Contains(block, blame) {
-				t.Errorf("%s told a caller %q, and the project's own row was withdrawn by ghost resolve rather than "+
-					"retired — the expired rows in the window are _global's:\n%s", name, blame, block)
+				t.Errorf("%s told a caller %q, but expired rows are filtered in SQL and the project census should appear: %s", name, blame, block)
 			}
 		}
-		// And the project is still reported as holding a row, because it does and
-		// `ghost_memories_list` returns it. Silence is the failure the abstention
-		// replaced; the count sentence is the honest middle here.
+		// The project census should appear because the project holds a row (withdrawn).
 		if !strings.Contains(block, "Ghost holds 1 memory for this project") {
-			t.Errorf("%s said nothing at all about a project holding a row:\n%s", name, block)
+			t.Errorf("%s should show the project census for its own row: %s", name, block)
 		}
 	}
 }

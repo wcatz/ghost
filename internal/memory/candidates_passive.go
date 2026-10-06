@@ -262,6 +262,28 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 		scopeClause = " AND " + ScopeMatchesSQL("scope", req.Scope)
 	}
 
+	// The validity predicate is applied HERE, in SQL, rather than only in the
+	// assembler's stage 2. The over-fetch chooses which rows are read at all, so
+	// a row whose validity window has closed or has not opened must not spend any
+	// of the window: filtering it afterwards would fill the window with rows the
+	// caller cannot use and then cut them, and a window that small reaches a
+	// weaker block.
+	//
+	// GATED on the column existing, which is the same guard the session-start
+	// loaders apply: on a store below the validity floor the predicate names
+	// columns that are not there, and the whole fetch would fail with
+	// "no such column: valid_from". The rows the block then shows are the ones
+	// that store has, labelled without a validity window — which is exactly the
+	// block it produced before validity was read.
+	validityClause := ""
+	if cols.HasValidity {
+		// The clock is bound to the same instant the decay ranking uses, so the
+		// window, the decay score derived from it in selectPassive, and the row
+		// ages the trace reports are all made against the same clock.
+		stamp := req.Now.UTC().Format(stampLayoutForSQL)
+		validityClause = fmt.Sprintf(" AND (valid_until IS NULL OR valid_until >= '%s') AND (valid_from IS NULL OR valid_from <= '%s')", stamp, stamp)
+	}
+
 	// The project predicate: the POLICY'S BUCKET, unioned with `_global` when the
 	// policy says so. It is spelled here rather than borrowed from
 	// CandidateRequest.Mode, because Mode is a property of the REQUEST and this is
@@ -316,9 +338,9 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM memories
-		WHERE %s AND resolved_at IS NULL%s
+		WHERE %s AND resolved_at IS NULL%s%s
 		ORDER BY %s
-		LIMIT ?`, cols.list, projectClause, scopeClause, orderBy)
+		LIMIT ?`, cols.list, projectClause, scopeClause, validityClause, orderBy)
 	return query, append(args, pol.OverFetch)
 }
 
@@ -648,9 +670,10 @@ func decayRankingSQLAt(now time.Time, hasTier bool) (string, []any) {
 // retention" on a store below the tier floor, where the loader it replaces
 // renders the block perfectly well.
 type passiveColumns struct {
-	list     string
-	HasTier  bool
-	HasScope bool
+	list        string
+	HasTier     bool
+	HasScope    bool
+	HasValidity bool
 	// HasProvenance gates the EVIDENCE read, which is not a column in the memories
 	// table at all: `memory_provenance` is a table migrateV18 creates, so a store
 	// below that floor has never had it. Unlike the demotion lookups, which degrade
@@ -673,13 +696,14 @@ type passiveColumns struct {
 	ProvenanceKnown bool
 }
 
-// The schema versions that added memories.scope and memories.retention. They are
-// the same floors the session-start loaders apply, stated here rather than
-// imported: a column cannot be selected on a store that does not have it, and a
-// decay order cannot multiply by one that is not there.
+// The schema versions that added memories.scope, memories.retention and the
+// validity triple. They are the same floors the session-start loaders apply,
+// stated here rather than imported: a column cannot be selected on a store that
+// does not have it, and a decay order cannot multiply by one that is not there.
 const (
 	passiveScopeColumnFloor     = 12
 	passiveRetentionColumnFloor = 19
+	passiveValidityColumnFloor  = 15
 	// memory_provenance is a TABLE rather than a column, so it needs its own floor:
 	// the SELECT list cannot express "this table may not exist" the way a column
 	// can be replaced by a NULL literal.
@@ -700,7 +724,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// not have is substituted for, so a path that fails to set one loses a label
 	// rather than failing the read. The error branch below leaves them false on
 	// purpose, and says why.
-	var hasScope, hasTier, hasProvenance bool
+	var hasScope, hasTier, hasValidity, hasProvenance bool
 	var versionKnown bool
 
 	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
@@ -713,10 +737,11 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 		hasScope = version >= passiveScopeColumnFloor
 		hasTier = version >= passiveRetentionColumnFloor
 		hasProvenance = version >= passiveProvenanceColumnFloor
+		hasValidity = version >= passiveValidityColumnFloor
 	} else {
 		// Warn, and the reason is what the substitutions below are FOR: a version
 		// this cannot read means every flag stays false, so the fetch silently
-		// drops its scope filter, its tier label and its expiry window and the
+		// drops its scope filter, its tier label and its expiry window, its validity window and the
 		// block renders as an unscoped, undated one. The session-start loaders
 		// this replaced printed exactly this diagnosis on stderr and said why it
 		// had to be loud: the fallbacks keep working, which is what makes the loss
@@ -751,6 +776,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 		list:            qualifyColumnsFrom(names, ""),
 		HasTier:         hasTier,
 		HasScope:        hasScope,
+		HasValidity:     hasValidity,
 		HasProvenance:   hasProvenance,
 		ProvenanceKnown: versionKnown,
 	}, nil
