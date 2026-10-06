@@ -341,6 +341,9 @@ type resolveCapableStore interface {
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
+	// UsefulnessByMemory is #648's negative evidence, read once per pass by
+	// resolve.Run through this interface, so the assertion below has to offer it.
+	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
 // linkCapableStore narrows provider.MemoryStore's concrete backing store to what

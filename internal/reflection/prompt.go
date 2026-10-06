@@ -27,6 +27,23 @@ type ReflectionInput struct {
 	// flags; the consolidator tiers never see a flag. It changes what the prompt
 	// may promise about omission, so it is an input rather than an inference.
 	AllowDrops bool
+	// Usefulness is #648's negative evidence about individual memories, keyed by
+	// memory id: what the retrieval audit recorded about a memory that was
+	// contradicted, or that a session found already superseded. Consolidation was
+	// re-deriving that judgement from each note's text on every pass, from
+	// information the store already held.
+	//
+	// The map carries ONLY the two negative buckets. `used` and `ignored` describe
+	// how often a memory was RETRIEVED, and putting either in front of the model
+	// that decides what to keep is the #284 popularity loop: a memory that has
+	// merely been shown starts to look worth keeping because it has been shown.
+	// memory.UsefulnessByMemory filters them in SQL, so the guarantee is the
+	// reader's and not these call sites' memory.
+	//
+	// Nil or an empty map renders nothing at all, which is what keeps a project
+	// with no audit history byte-for-byte on the prompt it was built before this
+	// field existed.
+	Usefulness map[string]memory.UsefulnessEvidence
 }
 
 // ReflectionResult holds the parsed output from a reflection call.
@@ -294,8 +311,23 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 				}
 				line += fmt.Sprintf(", tags:[%s]", strings.Join(escaped, "|"))
 			}
-			line += fmt.Sprintf(") %s\n", quoteData(m.Content))
-			sb.WriteString(line)
+			line += fmt.Sprintf(") %s", quoteData(m.Content))
+			// #648: the audit's negative evidence rides on the memory's OWN line,
+			// after its quoted content, so the model reads "this specific memory
+			// was contradicted" beside the claim it is about rather than in a
+			// separate block it has to correlate by hand. It is rendered from
+			// counts and a neutralised session id (memory.UsefulnessEvidence.Line),
+			// so nothing a session wrote reaches the prompt as text.
+			//
+			// Empty renders NOTHING — not an empty bracket pair — so a corpus with
+			// no audit rows produces the prompt it produced before this existed.
+			if audit := input.Usefulness[m.ID].Line(); audit != "" {
+				// The line carries its own `audit:` label, which is what makes it
+				// legible here too — this bracket says where it came from, and the
+				// label says what it is.
+				line += fmt.Sprintf(" [%s]", audit)
+			}
+			sb.WriteString(line + "\n")
 		}
 	}
 
