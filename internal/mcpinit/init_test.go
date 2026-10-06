@@ -395,8 +395,8 @@ func TestGhostPermissions_Complete(t *testing.T) {
 	// Verify the canonical list has the expected count. It tracks the number of
 	// tools the MCP server registers, so a tool added without a permission here
 	// is a tool an operator is prompted about on every call.
-	if len(ghostPermissions) != 22 {
-		t.Errorf("expected 22 ghost permissions, got %d", len(ghostPermissions))
+	if len(ghostPermissions) != 23 {
+		t.Errorf("expected 23 ghost permissions, got %d", len(ghostPermissions))
 	}
 
 	// All should start with the correct prefix.

@@ -1,7 +1,7 @@
 package memory
 
-// #648 slice 1: what the retrieval audit already knows about a memory, read as
-// INPUT by the two passes that maintain a corpus.
+// #648 slice 1: what the store already knows about a memory, read as INPUT by
+// the two passes that maintain a corpus.
 //
 // retrieval_audit holds four verdicts per (call, memory): used, ignored,
 // superseded_in_session and contradicted. Two of them are facts about the
@@ -10,6 +10,13 @@ package memory
 // and reflect were never told either. They re-derived the same judgement from
 // the note's text every pass, which is the expensive way to learn something the
 // store already recorded.
+//
+// memory_flags adds the third thing, from slice 2: an agent that read this
+// memory and believes it is wrong or stale said so, with a reason. The reason
+// stays in the table — this reader projects COUNTS and ids and never a byte of
+// an agent's own words — and the flag reaches the passes as one more number in
+// the same fixed-format line, where the classifier decides what a doubt is
+// worth.
 //
 // The other two are facts about the READ, not about the memory. `used` means a
 // call returned it, which every memory in the result set has by definition;
@@ -65,6 +72,15 @@ import (
 type UsefulnessEvidence struct {
 	Contradicted        int
 	SupersededInSession int
+	// Flagged is how many flags an agent has filed against this memory (#648
+	// slice 2) — a COUNT and nothing else, deliberately: the reason text each
+	// flag carries stays in memory_flags where a human reads it, and the row
+	// never leaves the store through this struct. It is negative evidence
+	// exactly like a contradicted verdict in the one way that matters (it reaches
+	// the classifier as a doubt), and exactly unlike one in every other: it is
+	// not a retrieval's verdict, so it never moves LastSession/LastAt, and it
+	// never resolves, deletes, demotes or re-ranks anything by itself.
+	Flagged int
 	// LastSession and LastAt are the latest of THIS memory's negative verdicts, and
 	// either may be empty: a verdict recorded without a session is a real row, and
 	// a stamp the writer did not set is not worth refusing.
@@ -76,15 +92,19 @@ type UsefulnessEvidence struct {
 //
 // It is built from counts and ids, never from free text a session wrote: the
 // session id is rendered by SafeToken below, and nothing else in the line comes
-// from the row. The numbers are the two negative buckets and nothing else, so a
-// line that reaches a prompt cannot be a popularity signal wearing a different
-// name.
+// from the row. The numbers are the three negative counts — the two verdict
+// buckets and the flag count — and nothing else, so a line that reaches a prompt
+// cannot be a popularity signal wearing a different name. The flag's REASON is
+// deliberately not among them: it is free text an agent wrote, it is stored for
+// the human reading the table, and it would reach a third-party model the moment
+// it reached this line.
 //
-// The empty string means "no negative verdict", and every consumer treats it as
+// The empty string means "no negative evidence", and every consumer treats it as
 // "say nothing" rather than "say something blank" — a memory with no audit rows
-// must reach a model as exactly the bytes it reached it as before this existed.
+// and no flags must reach a model as exactly the bytes it reached it as before
+// this existed.
 func (e UsefulnessEvidence) Line() string {
-	if e.Contradicted == 0 && e.SupersededInSession == 0 {
+	if e.Contradicted == 0 && e.SupersededInSession == 0 && e.Flagged == 0 {
 		return ""
 	}
 	var counts []string
@@ -93,6 +113,12 @@ func (e UsefulnessEvidence) Line() string {
 	}
 	if e.SupersededInSession > 0 {
 		counts = append(counts, fmt.Sprintf("superseded_in_session=%d", e.SupersededInSession))
+	}
+	// LAST, so every line a store without flags produced is byte-identical to
+	// the line it produces now: the count is appended only when it is non-zero,
+	// and no existing fixture has one.
+	if e.Flagged > 0 {
+		counts = append(counts, fmt.Sprintf("flagged=%d", e.Flagged))
 	}
 	line := "audit: verdicts " + strings.Join(counts, " ")
 	// The id is bounded FIRST and quoted SECOND, and the order is load-bearing for
@@ -179,8 +205,8 @@ func boundSessionID(id string) string {
 	return id
 }
 
-// UsefulnessByMemory reads the negative verdicts for one project, as one map
-// keyed by memory id.
+// UsefulnessByMemory reads the project's negative evidence — the two verdict
+// buckets and the flags — as one map keyed by memory id.
 //
 // The scope is REQUIRED. RetrievalAudits can read the whole table because its
 // callers report on the whole table; this one's output is an input to one
@@ -191,12 +217,14 @@ func boundSessionID(id string) string {
 // Read-only, ONE deferred read transaction carrying TWO bounded reads. Three
 // filters narrow the answer, and all three err toward SILENCE rather than
 // toward a wrong annotation: a
-// memory with no qualifying verdict is simply not in the map, which is exactly
+// memory with no qualifying evidence is simply not in the map, which is exactly
 // how it read before the audit existed. (1) the outcome is one of the two
-// negative buckets, for #284; (2) the verdict was not degraded, so a partial
-// read's caveat is not silently dropped; (3) the verdict still describes the
+// negative buckets (or, for a flag row, one of its two kinds), for #284;
+// (2) the verdict was not degraded, so a partial
+// read's caveat is not silently dropped; (3) the row still describes the
 // content the memory holds NOW, which is the filter #879 rebuilt and is spelled
-// out on verdictDescribes below. The outcome filter is a bound parameter, for
+// out on verdictDescribes below and which a flag is judged by for the same
+// reason. The outcome filter is a bound parameter, for
 // the reason retrieval_totals states: a hand-spelled `outcome = 'contradicted'`
 // is one more place a stored value can be misspelled, and it would miss silently
 // — the read returns no rows, so the map is empty and every caller behaves
@@ -276,6 +304,20 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 		if !verdictDescribes(v.hash, current, v.at, m.updatedAt) {
 			continue
 		}
+		if v.source == usefulnessSourceFlag {
+			// A flag counts and STOPS here, deliberately. It never touches
+			// `latest`: rowids do not compare across retrieval_audit and
+			// memory_flags, and the tuple is a stamp of the moment a RETRIEVAL
+			// last doubted this memory — a flag is an agent's claim, not a
+			// retrieval's verdict, so letting one win the tuple would report it
+			// as the moment the store was last contradicted. The counts are the
+			// whole of what a flag does here, and the reason text the row
+			// carries is not read at all: it stays in the table for the human.
+			ev := out[v.memory]
+			ev.Flagged++
+			out[v.memory] = ev
+			continue
+		}
 		ev := out[v.memory]
 		switch v.outcome {
 		case VerdictOutcomeContradicted:
@@ -320,9 +362,16 @@ type usefulnessLatest struct {
 	session string
 }
 
-// usefulnessAuditRow is one negative verdict off retrieval_audit, with the rowid
-// it needs to order same-second rows and the stamp it needs to be judged
-// against its memory.
+// usefulnessAuditRow is one negative EVIDENCE row: a verdict off
+// retrieval_audit, or a flag off memory_flags, with the rowid it needs to order
+// same-second rows and the stamp it needs to be judged against its memory.
+//
+// `source` says which table it came from, and it is the one field the two
+// spell differently in the union. It matters because the rowids of the two
+// tables do not compare with each other — the "latest verdict" tuple is
+// audit-only — and because the two rows count into different fields: a flag is
+// not a verdict and must never be reported as the moment a retrieval last
+// doubted this memory.
 type usefulnessAuditRow struct {
 	rowid   int64
 	memory  string
@@ -330,7 +379,16 @@ type usefulnessAuditRow struct {
 	session string
 	at      string
 	hash    string
+	source  string
 }
+
+// The two source literals the union's literal third column carries. Constants
+// rather than pasted strings so the SQL and the Go branch on `source` cannot
+// drift into disagreeing about what a row is.
+const (
+	usefulnessSourceAudit = "audit"
+	usefulnessSourceFlag  = "flag"
+)
 
 // usefulnessContent is what the memory row has to say against one verdict: the
 // text itself, and the stamp the legacy rule still reads.
@@ -443,26 +501,45 @@ func (s *Store) usefulnessRows(ctx context.Context, projectID string) ([]usefuln
 	return verdicts, contents, nil
 }
 
-// usefulnessVerdicts is the first read: every negative verdict the project
-// holds, in no particular order (the reader ranks them in Go, because it has to
-// rank them after filtering them).
+// usefulnessVerdicts is the first read: every piece of NEGATIVE EVIDENCE the
+// project holds — the two verdict buckets off retrieval_audit, and the flags off
+// memory_flags — in no particular order (the reader ranks them in Go, because it
+// has to rank them after filtering them).
 //
-// The four predicates live HERE and nowhere else — the project, the non-empty
-// memory id, the absence of the scanner's degraded caveat, and one of the two
-// negative outcomes. The outcome filter is a bound parameter for the reason
-// retrieval_totals states: a hand-spelled spelling is one more place a stored
-// value can be misspelled, and it would miss silently.
+// ONE statement rather than two, by UNION ALL, because the second read this
+// feeds is keyed on the ids the first returns: splitting the two would mean a
+// second statement and a second place to keep the shared predicates in step.
+// The union's seventh column is a LITERAL, so a row carries which table it came
+// from without the reader having to infer it — and inference is exactly what it
+// must not do, since rowids do not compare across the two tables and a flag is
+// not a verdict.
 //
-// The content_hash column rides along because filter (3) judges the verdict
-// against the content it was stamped with, and SQLite has no sha256 to do that
-// comparison here.
+// The predicates are the four the audit branch has always had — the project, the
+// non-empty memory id, the absence of the scanner's degraded caveat, and one of
+// the two negative outcomes — and the flag branch repeats the two that belong to
+// it (project, non-empty id) and names its own closed vocabulary of kinds. The
+// two vocabularies are bound parameters for the reason retrieval_totals states:
+// a hand-spelled spelling is one more place a stored value can be misspelled,
+// and it would miss silently — the read returns no rows, so the map is empty and
+// every caller behaves exactly as it does on a store that was never audited.
+//
+// The content_hash column rides along because filter (3) judges the row against
+// the content it was stamped with, and SQLite has no sha256 to do that
+// comparison here. Flags are stamped by FlagMemory with the same digest, so one
+// rule withdraws a verdict and a flag alike when the text is rewritten.
 func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]usefulnessAuditRow, error) {
 	query := `
-		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash
+		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash, 'audit' AS source
 		FROM retrieval_audit
-		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND outcome IN (?, ?)`
+		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND outcome IN (?, ?)
+		UNION ALL
+		SELECT rowid, memory_id, kind, session_id, recorded_at, content_hash, 'flag' AS source
+		FROM memory_flags
+		WHERE project_id = ? AND memory_id <> '' AND kind IN (?, ?)`
 
-	rows, err := q.QueryContext(ctx, query, projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded)
+	rows, err := q.QueryContext(ctx, query,
+		projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded,
+		projectID, FlagKindWrong, FlagKindStale)
 	if err != nil {
 		return nil, fmt.Errorf("read usefulness evidence: %w", err)
 	}
@@ -471,7 +548,7 @@ func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]use
 	var verdicts []usefulnessAuditRow
 	for rows.Next() {
 		var v usefulnessAuditRow
-		if err := rows.Scan(&v.rowid, &v.memory, &v.outcome, &v.session, &v.at, &v.hash); err != nil {
+		if err := rows.Scan(&v.rowid, &v.memory, &v.outcome, &v.session, &v.at, &v.hash, &v.source); err != nil {
 			return nil, fmt.Errorf("read usefulness evidence: %w", err)
 		}
 		verdicts = append(verdicts, v)

@@ -138,16 +138,32 @@ func ContentHash(content string) string {
 // in the stamp rather than replacing the key: the content hash alone answers
 // "was this judged", and only the suffix says "with what in front of it".
 //
-// With evidence the suffix is a fixed fingerprint of the two negative counts
-// and the latest negative verdict's stamp: `%s:%d:%d:%s` (hash, contradicted,
-// superseded_in_session, LastAt). LastAt rather than the reader's rowid
+// With evidence the suffix is a fixed fingerprint of the negative counts
+// and the latest negative verdict's stamp. There are two spellings, and the
+// difference between them is #648 slice 2's flag count:
+//
+//	`%s:%d:%d:%s`   (hash, contradicted, superseded_in_session, LastAt) — no
+//	                flags, byte-identical to what every build wrote before
+//	                flags existed, so a corpus an agent has never flagged keeps
+//	                every cache entry it already holds;
+//	`%s:%d:%d:%d:%s` (the same, plus flagged) — only when Flagged > 0, which is
+//	                what makes "a new flag re-asks a cached KEEP once" a
+//	                property of this function rather than of a counter somebody
+//	                has to remember to compare: the entry the KEEP gate holds no
+//	                longer matches, the note is asked about again with its count
+//	                attached, and the KEEP comes back stamped over that count so
+//	                the next pass is quiet.
+//
+// LastAt rather than the reader's rowid
 // tie-break because that rowid is not exposed past UsefulnessEvidence — the
 // counts alone would not move when a second verdict lands inside the same
 // second as the first, and the stamp is the only thing that can. An empty
 // LastAt is a real value (a verdict recorded without a stamp) and is stored
-// as the empty suffix it is.
+// as the empty suffix it is. A flag never contributes a LastAt of its own:
+// the tuple is a retrieval's, and a flag is not a retrieval.
 //
-// The figures here can only come from the two NEGATIVE buckets, because that
+// The verdict figures here can only come from the two NEGATIVE buckets,
+// because that
 // is all UsefulnessByMemory returns: `used` and `ignored` are filtered in SQL
 // before the reader sees them, so a memory that is merely retrieved often can
 // never move its own stamp — the #284 popularity loop closed at the reader
@@ -155,13 +171,20 @@ func ContentHash(content string) string {
 // exclude it.
 //
 // It is deterministic over (content, evidence), which is what makes "one
-// re-ask per new verdict" a promise rather than a hope: the same pair always
+// re-ask per new verdict or flag" a promise rather than a hope: the same pair always
 // produces the same key, so a KEEP re-stamped over the evidence it was judged
 // with is skipped until the evidence actually changes. The format is never
 // parsed — only compared — and the only place a value is stored is
 // memories.resolve_kept_hash.
 func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
 	base := ContentHash(content)
+	// The flag-bearing spelling first, so a flag moves the stamp even when it is
+	// the only evidence there is — a pure flag with no verdict must re-ask just
+	// as a contradiction does, and falling through to the two-count forms would
+	// collapse it to the bare hash the moment both verdict counts were zero.
+	if ev.Flagged > 0 {
+		return fmt.Sprintf("%s:%d:%d:%d:%s", base, ev.Contradicted, ev.SupersededInSession, ev.Flagged, ev.LastAt)
+	}
 	if ev.Contradicted == 0 && ev.SupersededInSession == 0 {
 		return base
 	}

@@ -249,7 +249,7 @@ func TestHealthCountsDegradedVerdicts(t *testing.T) {
 // TestHealthRetrievalBlockIsAdditive: ghost_health is a tool other agents parse.
 // Every line it already printed keeps its name and its place, the block goes after
 // the history one, and no tool is added — the retrieval figures ride the health
-// tool an agent already has rather than costing a twenty-third call.
+// tool an agent already has rather than costing one of its own.
 func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 	store, _ := testStoreWithPath(t)
 	seedRetrievalHealth(t, store)
@@ -270,15 +270,15 @@ func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	// 22 is the count docs/mcp.md, docs/architecture.md, docs/README.md and
+	// 23 is the count docs/mcp.md, docs/architecture.md, docs/README.md and
 	// overview.html all state in prose. Nothing here registers a tool, and this
 	// assertion is what proves it.
-	if len(res.Tools) != 22 {
+	if len(res.Tools) != 23 {
 		names := make([]string, 0, len(res.Tools))
 		for _, tool := range res.Tools {
 			names = append(names, tool.Name)
 		}
-		t.Errorf("the server registers %d tools (%s), want 22 — the count the docs state", len(res.Tools), strings.Join(names, ", "))
+		t.Errorf("the server registers %d tools (%s), want 23 — the count the docs state", len(res.Tools), strings.Join(names, ", "))
 	}
 	for _, tool := range res.Tools {
 		if tool.Name == "ghost_health" {

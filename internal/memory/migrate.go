@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 22
+const schemaVersion = 23
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -85,6 +85,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV20,
 	migrateV21,
 	migrateV22,
+	migrateV23,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1519,6 +1520,113 @@ func migrateV22(tx *sql.Tx) error {
 	stmt := `ALTER TABLE retrieval_audit ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`
 	if _, err := tx.Exec(stmt); err != nil {
 		return fmt.Errorf("v22 retrieval audit content hash: %w", err)
+	}
+	return nil
+}
+
+// migrateV23 adds memory_flags: one row per agent flag marking a memory wrong or
+// stale, with the reason that agent gave (#648 slice 2).
+//
+// The whole table is new, so this repeats initSQL's DDL rather than altering
+// anything, for the reason migrateV20 and migrateV21 give their own copies: a
+// migration step is frozen in time and must not depend on initSQL, which keeps
+// moving. TestMigrateV23MatchesTheFreshDatabaseSchema compares the two shapes
+// rather than trusting this comment.
+//
+// The guard below is the half a copy of the DDL does not bring with it, and the
+// reason the copy is not the whole story: IF NOT EXISTS is a SILENT no-op
+// against a table that already exists under this name, so a database holding
+// someone else's `memory_flags` would be stamped v23 and then fail every flag
+// write on a column it does not have — a store that will not open, from an error
+// that names neither the table nor the way out. refuseForeignMemoryFlagsTable
+// runs BEFORE the create for the reason refuseForeignRetrievalAuditTable does.
+//
+// No data migration and nothing to backfill: every flag is written by an agent
+// looking at the memory NOW, so an empty table is the honest state for every
+// store that reaches this version — there is no past flag to carry across.
+func migrateV23(tx *sql.Tx) error {
+	// BEFORE the create, and that placement is the point. See
+	// refuseForeignMemoryFlagsTable.
+	if err := refuseForeignMemoryFlagsTable(tx); err != nil {
+		return err
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_flags (
+    project_id   TEXT NOT NULL,
+    memory_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('wrong','stale')),
+    reason       TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT ''
+                CHECK (content_hash = '' OR length(content_hash) = 64),
+    agent        TEXT NOT NULL DEFAULT '',
+    session_id   TEXT NOT NULL DEFAULT '',
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_flags_project ON memory_flags(project_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v23 memory flags: %w", err)
+		}
+	}
+	return nil
+}
+
+// memoryFlagsIdentity is the columns that identify a `memory_flags` as Ghost's,
+// and it is deliberately NOT the full column set — the same rule, for the same
+// reason, as retrievalAuditIdentity.
+//
+// A guard that compared every column would turn a table one version AHEAD of
+// this build into a refusal whose remedy is `DROP TABLE memory_flags`, a command
+// that destroys real flags. And this one runs from OpenDB on EVERY open, so it
+// is not reached only by a store that is mid-migration.
+//
+// The pair is what makes the identity specific: this is the only Ghost table
+// keyed by project that stores a wrong/stale kind beside its memory, and neither
+// column is one a same-named foreign table would plausibly carry — the CHECK on
+// the kind would not have been there either.
+var memoryFlagsIdentity = []string{"project_id", "kind"}
+
+// refuseForeignMemoryFlagsTable returns an error naming the remedy when the
+// database already holds a `memory_flags` that is NOT Ghost's flag table.
+//
+// It REFUSES rather than adapts, for the reason refuseForeignRetrievalAuditTable
+// does: the rows are somebody else's, there is no shape to convert them into,
+// and the pre-migration backup OpenDB has already taken is the net a conversion
+// would be guessing past. The remedy is STATED rather than logged because the
+// failure it prevents is silent — `CREATE TABLE IF NOT EXISTS` is a no-op
+// against the existing table, so the step would stamp v23 over a shape nothing
+// here can write.
+//
+// It is called from TWO places, and the second is the point, for the reasons
+// refuseForeignRetrievalAuditTable's second call has:
+//
+//   - from `migrateV23`, so the step that owns the precondition is safe on its
+//     own and does not depend on its caller having checked;
+//   - from `OpenDB`, BEFORE initSQL — and therefore before the pre-migration
+//     backup — because initSQL's own `CREATE INDEX ... ON
+//     memory_flags(project_id)` is the statement that fails against a foreign
+//     table, and it fails with an error naming neither the table nor the way out.
+func refuseForeignMemoryFlagsTable(tx tableInspector) error {
+	present, err := tableExists(tx, "memory_flags")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	for _, c := range memoryFlagsIdentity {
+		has, err := columnExists(tx, "memory_flags", c)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return fmt.Errorf(
+				"this database already holds a memory_flags table without a %q column, so it is not Ghost's "+
+					"memory-flag table — a same-named table makes CREATE TABLE IF NOT EXISTS a silent no-op and lets "+
+					"the migration stamp its version over a shape every later flag write would fail on. Drop it and "+
+					"reopen: sqlite3 <db> 'DROP TABLE memory_flags'", c)
+		}
 	}
 	return nil
 }
