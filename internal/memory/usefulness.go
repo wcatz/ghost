@@ -85,13 +85,25 @@ func (e UsefulnessEvidence) Line() string {
 	// It is NOT what bounds the rendered length, and the factor is TEN. The bound
 	// counts RUNES of the stored id; under ASCII-only quoting Go writes a BMP rune
 	// as \uXXXX (6 characters) and an ASTRAL one as \UXXXXXXXX (10), so an id of
-	// 64 escaping runes renders up to 64*10+2 = 642 bytes. This is reachable and
-	// not theoretical: retrieval_audit.session_id is written with no character
-	// validation, and a host payload's session_id is an arbitrary JSON string.
-	// Measured, the whole line is 703 bytes against 125 for a bare id
+	// 64 escaping runes renders up to 64*10+2 = 642 bytes. Measured, the whole line
+	// is 703 bytes against 125 for a bare id
 	// (TestTheUsefulnessLineBoundsAnUnboundedId measures all three cases, and the
 	// astral one is a separate fixture because a BMP one cannot express the
-	// maximum). The renderer this replaced bounded the OUTPUT instead — it stopped
+	// maximum).
+	//
+	// That ceiling is a constant whether or not a store can currently reach it, and
+	// on the SHIPPED transport it cannot: the auditor copies the retrieval record's
+	// own session id (audit/run.go), that comes from assemble.Request.SessionID, and
+	// over stdio — which is what Ghost serves — the transport reports no session id,
+	// so LastSession is always "" and Line takes the `case e.LastAt != ""` branch
+	// instead. A transport that DOES assign one (streamable HTTP) records it
+	// verbatim with no character validation on the way in, so this is the bound that
+	// holds when such a value exists, not one currently exercised. It is kept
+	// because the reader has to be safe for the store it will be given, and a bound
+	// that waited for a hostile value to arrive would be a bound added after the
+	// fact.
+	//
+	// The renderer this replaced bounded the OUTPUT instead — it stopped
 	// writing once the byte index reached the limit — so the worst case one stored
 	// id can add to a prompt grew from about 64 bytes to 703. It is still a
 	// CONSTANT, which is what "without limit" has to mean, but it is a worse
