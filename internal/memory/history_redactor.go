@@ -8,9 +8,12 @@ import (
 
 // This is the wiring `internal/memory/history.go` was left for: #664 built
 // memory_history, and left `redactHistoryContent` as the identity function with a
-// `TODO(#656)` naming this PR. Until it is installed the seam is worse than
-// absent — the append path's own comments claim the content is redacted, and it
-// is not — so this file either installs the filter or the TODO is a lie.
+// `TODO(#656)` for the change that would install a detector through it. #656 has
+// landed — the write-path value guard covers every write path — and this file
+// fills that seam: init() below installs redactHistoryContent through
+// setHistoryRedactor, so every history row's content is passed through
+// `secret.Detect` before it is stored, which is what the append path's comments
+// claimed while it was still untrue.
 
 // redactHistoryContent is the filter a history row's content column is written
 // through. It REPLACES rather than refuses, which is the seam's requirement and
@@ -58,8 +61,8 @@ func redactHistoryContent(content string) string {
 // ~1.1 ms for a 2 KB memory and ~3.6 ms at the 8 KB content cap, per row, inside
 // the write transaction — a batched append pays it once per id. Skipping the
 // detector on rows that "look clean" is not available: a prefilter with a false
-// negative is a silent leak, which is the same lesson the detector's own keyword
-// prefilter taught this PR earlier.
+// negative is a silent leak — the same lesson the detector's own keyword
+// prefilter learned while #656 was being built.
 //
 // Installing here rather than in history.go keeps the two apart on purpose: this is
 // the consumer half of #664's seam and that file is the mechanism half, and a

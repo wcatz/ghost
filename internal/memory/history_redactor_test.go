@@ -6,16 +6,19 @@ import (
 	"testing"
 )
 
-// TestHistoryRedactorIsInstalled is the wiring #664 left for this PR, and the
-// test that says whether it is done or not.
+// TestHistoryRedactorIsInstalled is the test that says whether the wiring #664
+// left behind is in place: a redactor is installed, and the history statement
+// reaches the filter rather than reading the bare column.
 //
 // #664 added memory_history as the one place Ghost keeps text it holds nowhere
 // else — a memory row is overwritten by the next edit and gone by the next
 // delete, while its earlier versions sit in this table and are printed by
 // `ghost history`. It also left the seam: `redactHistoryContent` as an identity
-// function, with a `TODO(#656)` saying this PR installs `secret.Detect` through
-// it. Until that is done the seam is worse than absent — the append path's
-// comments claim the content is redacted, and it is not.
+// function, with a `TODO(#656)` for the change that would install `secret.Detect`
+// through it. #656 has landed — the write-path value guard covers every write
+// path — and history_redactor.go's init fills the seam. This test exists because
+// while the seam was empty the append path's comments claimed the content was
+// redacted and it was not; it fails if the claim and the code ever part again.
 //
 // The threat is narrow and worth stating, because it decides how careful the
 // redaction has to be. Every writer now REFUSES a credential, so a credential
@@ -25,9 +28,10 @@ import (
 // trade rather than a lazy one — see redactHistoryContent.
 func TestHistoryRedactorIsInstalled(t *testing.T) {
 	if !historyRedactorInstalled() {
-		t.Fatal("no redactor is installed, so `ghost history` returns credential " +
-			"text verbatim. #664 left this seam as the identity function with a " +
-			"TODO for this PR; a TODO is not a control.")
+		t.Fatal("no redactor is installed, so history rows would be stored " +
+			"without passing redactHistoryContent — the property checked here is " +
+			"that every history row is written through the credential filter, so " +
+			"`ghost history` never returns credential text verbatim.")
 	}
 	if historyContentExpr() != historyContentFunc+"(content)" {
 		t.Errorf("historyContentExpr() = %q, want the SQL filter — the append "+
@@ -134,7 +138,7 @@ func TestHistoryRedactsACredentialAndKeepsEverythingElse(t *testing.T) {
 	})
 }
 
-// preGuardRow reproduces the state a build from before this PR left behind: a
+// preGuardRow reproduces the state a build from before #656 left behind: a
 // memory whose content holds a credential, with that text in its history.
 //
 // Both guards have to be stepped around, and that is the point rather than an
