@@ -108,6 +108,12 @@ func TestDedupedTallyComesFromTheTrace(t *testing.T) {
 // TestExplainReportsADroppedLoserAsNotIncluded: explain is a projection of the
 // same trace, so a removed loser is a candidate that was not included, with the
 // reason and near_duplicate_of naming its winner.
+//
+// The set is HAND-BUILT, and that is the limit of what this proves: explain
+// requires a query and a query-mode request carries no passive policies, so the
+// store never fills DroppedLosers on a path explain can reach today. The test
+// pins the projection for a future passive explain surface; it does not exercise
+// a production path.
 func TestExplainReportsADroppedLoserAsNotIncluded(t *testing.T) {
 	set := factSet(nil, candidate("w", "proj", "fact", "database configuration winner", 0.9))
 	set.DroppedLosers = []memory.DroppedLoser{
@@ -120,6 +126,9 @@ func TestExplainReportsADroppedLoserAsNotIncluded(t *testing.T) {
 	}
 	if !reflect.DeepEqual(row.NearDuplicateOf, []string{Token("w")}) {
 		t.Errorf("near_duplicate_of = %v, want [%s]", row.NearDuplicateOf, Token("w"))
+	}
+	if row.NearDuplicatePenalty != 0 {
+		t.Errorf("near_duplicate_penalty = %d, want 0: a removed loser was never ranked with a penalty, and explain reports only ranking values", row.NearDuplicatePenalty)
 	}
 	if row.Reason == "" || row.Reason == "not in the answer, and no stage recorded why" {
 		t.Errorf("reason = %q, want the stage 6 verdict", row.Reason)

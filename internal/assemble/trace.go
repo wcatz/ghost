@@ -100,6 +100,13 @@ type Signals struct {
 // therefore only ever read false, and a trace projection that read a permanently
 // false flag as a fact would be wrong about a stage that had reordered. A stage
 // that starts reordering has to add the field back WITH the stage.
+//
+// In and Out are what the stage saw and left, and they chain from one stage to
+// the next EXCEPT at stage 6: its In is the rows it was handed plus the
+// near-duplicate losers the retriever removed before the pipeline began, which
+// are counted In and dropped here (so In - Out equals len(DroppedIDs)) but were
+// never in stage 5's Out. Stage 6 is the first stage that can report a drop made
+// upstream of it, and counting them In is what keeps In - Out = dropped true.
 type StageTrace struct {
 	Stage      string
 	In, Out    int

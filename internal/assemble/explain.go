@@ -174,8 +174,11 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 	// A removed near-duplicate loser carries no ranking fact (it was never in the
 	// window the ranking facts cover), so the trace's own record names what it
 	// lost to. A fact the retriever did record is the same verdict and stands.
+	// NearDuplicatePenalty is left at 0 on purpose: it is a ranking value (the
+	// penalty the window's ordering applied), and a removed loser was never
+	// ranked with one. The pairing is reported only through near_duplicate_of and
+	// the reason, never as a number the ranking did not produce.
 	if l, ok := p.losers[m.ID]; ok && len(row.NearDuplicateOf) == 0 {
-		row.NearDuplicatePenalty = len(l.LostTo)
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(l.LostTo))
 	}
 	row.RetentionFactor = memory.RetentionDecayFactor(m.Retention, m.Pinned, row.AgeDays)

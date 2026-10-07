@@ -1586,7 +1586,11 @@ Axis interaction rules:
 > total, reported with the withheld rows, never as the ranking's cut),
 > `BucketTally.CountedAgainst` does not infer losers from the store's count, the
 > retrieval record carries it as a dropped verdict, and explain reports it as not
-> included with `near_duplicate_of` set. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> included with `near_duplicate_of` set (and `near_duplicate_penalty` 0, because it was
+> never ranked with a penalty). Today that explain row is EMPTY IN PRACTICE: explain
+> requires a query, query mode carries no passive policies, and so `DroppedLosers` is
+> never filled on a path explain can reach; the projection is pinned by a hand-built
+> test for a future passive explain surface. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state
