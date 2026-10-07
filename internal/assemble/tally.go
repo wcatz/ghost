@@ -38,9 +38,9 @@ type BucketTally struct {
 	// set by CountedAgainst and is already part of RankedOut.
 	Beyond int
 	// Deduped is how many rows the retriever fetched and then removed as
-	// near-duplicate losers (a bucket policy's DropDemotedLosers). They never
-	// reach the trace, so they are in no other fate; they are the policy's
-	// doing, not the ranking's cut. Set by CountedAgainst, and not part of
+	// near-duplicate losers (a bucket policy's DropDemotedLosers). Counted by
+	// CountsFor from the trace's stage 6 decisions, which are the one record of
+	// them; they are the policy's doing, not the ranking's cut, and not part of
 	// RankedOut or Withheld.
 	Deduped int
 	// Excluded is how many of Withheld never entered the window: rows the fetch's
@@ -77,9 +77,10 @@ func (t BucketTally) Total() int {
 //     `eligible` and in no trace decision.
 //   - the rest of the eligible rows past the over-fetch were cut by the ranking
 //     before any stage saw them, so they are ranked out (Beyond).
-//   - rows inside the limit that the trace never recorded were removed by the
-//     bucket policy as near-duplicate losers (Deduped): neither the ranking's cut
-//     nor a stage's withholding.
+//   - near-duplicate losers are NOT derived here: the trace records each one
+//     (stage 6) and CountsFor has already counted them, so Deduped has one source.
+//     A row inside the limit that the trace never recorded (a write raced the two
+//     reads) is left uncounted rather than guessed into a fate.
 //
 // A negative eligible count means the count could not be read and changes
 // nothing; a count smaller than what the tally already holds (a write raced the
@@ -88,7 +89,6 @@ func (t BucketTally) CountedAgainst(eligible, excluded, overFetch int) BucketTal
 	if eligible < 0 || excluded < 0 || excluded > eligible || eligible < t.Total() {
 		return t
 	}
-	known := t.Total()
 	inWindow := eligible - excluded
 	fetched := inWindow
 	if overFetch > 0 && overFetch < inWindow {
@@ -106,9 +106,6 @@ func (t BucketTally) CountedAgainst(eligible, excluded, overFetch int) BucketTal
 			// validity states share one sentence, so either names it.
 			t.Reason = validityExpired
 		}
-	}
-	if gone := fetched - known; gone > 0 {
-		t.Deduped += gone
 	}
 	return t
 }
@@ -136,6 +133,10 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 			continue
 		}
 		switch d.Stage {
+		case stageDedup:
+			// The retriever's removal of a near-duplicate loser: neither the
+			// ranking's cut nor a stage refusing the row's content.
+			t.Deduped++
 		case stageBudget, stageResponseFit:
 			t.RankedOut++
 		default:

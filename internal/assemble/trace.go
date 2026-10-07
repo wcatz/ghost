@@ -100,6 +100,13 @@ type Signals struct {
 // therefore only ever read false, and a trace projection that read a permanently
 // false flag as a fact would be wrong about a stage that had reordered. A stage
 // that starts reordering has to add the field back WITH the stage.
+//
+// In and Out are what the stage saw and left, and they chain from one stage to
+// the next EXCEPT at stage 6: its In is the rows it was handed plus the
+// near-duplicate losers the retriever removed before the pipeline began, which
+// are counted In and dropped here (so In - Out equals len(DroppedIDs)) but were
+// never in stage 5's Out. Stage 6 is the first stage that can report a drop made
+// upstream of it, and counting them In is what keeps In - Out = dropped true.
 type StageTrace struct {
 	Stage      string
 	In, Out    int
@@ -111,16 +118,18 @@ type StageTrace struct {
 // stage that decided it, the reason that stage gave, and the score the row held
 // when the decision was made.
 //
-// It records no row the decision was made AGAINST and no score AFTER it, and both
-// are absences rather than omissions — which is the opposite of what a trace
-// consumer would assume of a struct whose fields are simply unset. No stage here
-// decides one row against another: the pairwise judgements are the retriever's,
-// made over a window this pipeline never saw the edges of, and stage 5 records a
-// `contradicts` pair without separating it. And no stage re-scores a row, so
-// there is no "after" to record — stage 4's weight is pinned at 1.0 and both the
-// contributions it writes are zero, so Before is still the row's final score.
-// Whichever stage first does either has to add the field here, because a Decision
-// that carries an unset one is indistinguishable from a stage that judged it.
+// It records no score AFTER the decision: no stage re-scores a row, so there is
+// no "after" to record — stage 4's weight is pinned at 1.0 and both the
+// contributions it writes are zero, so Before is still the row's final score. A
+// stage that starts re-scoring has to add the field, because a Decision that
+// carries an unset one is indistinguishable from a stage that judged it.
+//
+// The row a decision was made AGAINST is Against, and only stage 6 sets it. The
+// pairwise judgement is the retriever's, made over a window this pipeline never
+// saw the edges of, so stage 6 does not decide it: it records the verdict the
+// retriever reported (CandidateSet.DroppedLosers), the winner ids included. Every
+// other stage leaves it empty, and stage 5 records a `contradicts` pair without
+// separating it, so no other decision names a counterpart.
 //
 // ProjectID is the row's own project, recorded because a trace is read per
 // bucket: the session-start block keys its "N shown of M total" line on it, and
@@ -134,6 +143,9 @@ type Decision struct {
 	Reason    string
 	Kept      bool
 	Before    float64
+	// Against is the ids of the rows this one lost to, sorted. Set only by a
+	// stage 6 near_duplicate drop; empty on every other decision.
+	Against []string
 }
 
 // stage names, in pipeline order.

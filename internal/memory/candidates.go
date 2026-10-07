@@ -183,13 +183,30 @@ type SlicePolicy struct {
 	DropDemotedLosers bool
 }
 
+// DroppedLoser is one near-duplicate loser the retriever removed from a passive
+// bucket, with the ids of the rows it lost to (sorted, never empty). The
+// Candidate is the row as the retriever scored it, so a consumer reads the same
+// project, score and age it would have read had the row been returned.
+type DroppedLoser struct {
+	Candidate
+	LostTo []string
+}
+
 // CandidateSet is one retrieval's rows plus the facts about how they were
 // retrieved. Widened reports that the set is larger than the requested window,
 // which is the assembler's evidence that it could filter before closing.
 type CandidateSet struct {
-	Rows        []Candidate
-	Edges       []LinkEdge
-	EdgesStatus EdgeStatus
+	Rows []Candidate
+	// DroppedLosers are the near-duplicate losers the retriever REMOVED instead
+	// of ranking last (a passive bucket whose policy sets DropDemotedLosers),
+	// each with the ids of the rows it lost to. They are not in Rows, and the
+	// assembler cannot rediscover them: the removal happened over a window whose
+	// edges it never saw. Carrying them is what lets stage 6 put each one in the
+	// trace and the retrieval record with its reason. Empty on every read that
+	// drops nothing, which is every query-mode read.
+	DroppedLosers []DroppedLoser
+	Edges         []LinkEdge
+	EdgesStatus   EdgeStatus
 	// Legs is keyed by leg name: "fts" and "vector".
 	Legs    map[string]LegStatus
 	Widened bool

@@ -2,6 +2,7 @@ package assemble
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -73,6 +74,15 @@ func (p *pipeline) explainProjection(res Result) *memory.SearchExplain {
 	}
 	for _, c := range p.set.Rows {
 		add(c.Memory)
+	}
+	// The retriever's removed near-duplicate losers: not in Rows, but the stage 6
+	// trace holds each, so they are reported as candidates that were not included
+	// rather than absent.
+	for _, l := range p.set.DroppedLosers {
+		if _, ok := p.losers[l.ID]; ok {
+			add(l.Memory)
+			rowByID[l.ID] = l.Candidate
+		}
 	}
 	for _, m := range p.set.Excluded {
 		add(m)
@@ -161,6 +171,16 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 		row.SupersededBy = tokens(memory.ClampAttribution(f.SupersededBy))
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(f.NearDuplicateOf))
 	}
+	// A removed near-duplicate loser carries no ranking fact (it was never in the
+	// window the ranking facts cover), so the trace's own record names what it
+	// lost to. A fact the retriever did record is the same verdict and stands.
+	// NearDuplicatePenalty is left at 0 on purpose: it is a ranking value (the
+	// penalty the window's ordering applied), and a removed loser was never
+	// ranked with one. The pairing is reported only through near_duplicate_of and
+	// the reason, never as a number the ranking did not produce.
+	if l, ok := p.losers[m.ID]; ok && len(row.NearDuplicateOf) == 0 {
+		row.NearDuplicateOf = tokens(memory.ClampAttribution(l.LostTo))
+	}
 	row.RetentionFactor = memory.RetentionDecayFactor(m.Retention, m.Pinned, row.AgeDays)
 
 	// The assembler's own verdicts, from its own stages: validity at the run's
@@ -216,6 +236,8 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			return fmt.Sprintf("withheld by the category filter: the memory's category is not %s", Token(p.req.Category))
 		case "retention_mismatch":
 			return fmt.Sprintf("withheld by the retention filter: the memory's tier is not %s", Token(p.req.Retention))
+		case reasonNearDuplicate:
+			return fmt.Sprintf("removed as a near-duplicate: the retriever dropped it in favour of %s", strings.Join(tokens(memory.ClampAttribution(p.losers[id].LostTo)), ", "))
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
 		case "budget", "slice_budget":
