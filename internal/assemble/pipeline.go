@@ -307,8 +307,10 @@ func runConflicts(p *pipeline) {
 	// retriever is an interface, and the rule is cheaper to state than to assume.
 	if len(p.items) > 0 && p.set.EdgesStatus.Status != "err" {
 		admitted := make(map[string]bool, len(p.items))
+		scopes := make(map[string]map[string]string, len(p.items))
 		for _, it := range p.items {
 			admitted[it.ID] = true
+			scopes[it.ID] = it.Scope
 		}
 		// "unavailable" means the read found nothing, and that is a claim about
 		// the whole candidate set only when one query covered it. The read is
@@ -337,6 +339,13 @@ func runConflicts(p *pipeline) {
 		seen := make(map[[2]string]bool, len(p.set.Edges))
 		for _, e := range p.set.Edges {
 			if e.Relation != "contradicts" || !admitted[e.From] || !admitted[e.To] {
+				continue
+			}
+			// Two rows that name different values for a shared scope key are two
+			// true claims about two places, so the edge is not a conflict. Every
+			// other reader of a link applies this same rule (memory.ScopesConflict),
+			// and a pair recorded here would be marked and noted on every surface.
+			if memory.ScopesConflict(scopes[e.From], scopes[e.To]) {
 				continue
 			}
 			pair := [2]string{e.From, e.To}
@@ -696,6 +705,45 @@ func (p *pipeline) notes() []string {
 	}
 	all = append(all, p.noteBuf...)
 	return p.cutNotes(boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes))
+}
+
+// markConflicts sets Item.ConflictsWith on every row that shares a live
+// `contradicts` edge with another row still in the answer. It is the one place
+// the marker is decided, so every surface that renders Item.Line inherits it.
+//
+// It runs from fitResponse, on every pass, and not at stage 5: the response-fit
+// post-pass can drop a row after the stages are done, and a survivor must not
+// keep naming a partner the reader no longer has. Nothing is removed or reordered
+// here — admitting both rows is the documented contract, and this only says so.
+func (p *pipeline) markConflicts() {
+	partners := make(map[string]map[string]bool)
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	for _, pair := range p.contradictPairs {
+		if !present[pair[0]] || !present[pair[1]] {
+			continue
+		}
+		for i := range 2 {
+			if partners[pair[i]] == nil {
+				partners[pair[i]] = map[string]bool{}
+			}
+			partners[pair[i]][pair[1-i]] = true
+		}
+	}
+	for i := range p.items {
+		p.items[i].ConflictsWith = nil
+		if len(partners[p.items[i].ID]) == 0 {
+			continue
+		}
+		// In rank order, so the label is stable and reads the way the block does.
+		for _, other := range p.items {
+			if partners[p.items[i].ID][other.ID] {
+				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, other.ID)
+			}
+		}
+	}
 }
 
 // breakdownLeads reports whether the per-stage removal breakdown heads the note

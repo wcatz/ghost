@@ -233,6 +233,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 			Confidence:    it.Confidence,
 			Agent:         it.Agent,
 			SourceRef:     it.SourceRef,
+			ConflictsWith: it.ConflictsWith,
 		}
 		if it.ProjectID == memory.GlobalProjectID {
 			// 300 bytes here vs. 200 below is deliberate, not drift: globals are

@@ -332,6 +332,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 		Confidence:    m.Confidence,
 		Agent:         m.Agent,
 		SourceRef:     m.SourceRef,
+		ConflictsWith: m.ConflictsWith,
 	}
 	// For historical reads, judge the window at T. The passive path already has
 	// the state set from the assembler's stage 2.
@@ -887,6 +888,9 @@ type sessionMemory struct {
 	Confidence            *float64
 	Agent                 string
 	SourceRef             string
+	// ConflictsWith is the assembler's marker, carried through unchanged: the
+	// rows this one contradicts in the same block (assemble.Item.ConflictsWith).
+	ConflictsWith []string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

@@ -55,6 +55,11 @@ type Item struct {
 	// itself comes from memory.OriginClass, never from this field's literal
 	// value, and the compatibility correction is scoped by ProjectID above.
 	Source string
+	// ConflictsWith lists the ids of the other rows in the SAME rendered answer
+	// that this one is joined to by a live `contradicts` edge. It is set in one
+	// place, after the last stage that can remove a row (markConflicts), so a row
+	// is never marked against a partner the reader cannot see.
+	ConflictsWith []string
 }
 
 // Line renders the shared item prefix: the one line shape both surfaces emit for
@@ -84,11 +89,27 @@ func (i Item) Line() string {
 	if _, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(i.ProjectID, i.Source, i.Content)); label != "" {
 		origin = SourceLabel(label)
 	}
+	// A field on the same physical line, never a line of its own: a memory is one
+	// line, and a marker on a second one would read as a second memory.
+	conflicts := ConflictsLabel(i.ConflictsWith)
 	return "- [" + i.Category + "] `" + Token(i.ID) + "` (" +
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
-		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
+		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts +
 		") " + Data(i.Content)
+}
+
+// ConflictsLabel renders the rows a memory contradicts, as they are rendered on
+// their own lines (Token), or "" when it contradicts none in this answer.
+func ConflictsLabel(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	toks := make([]string, len(ids))
+	for i, id := range ids {
+		toks[i] = "`" + Token(id) + "`"
+	}
+	return " conflicts_with=" + strings.Join(toks, ",")
 }
 
 // SourceLabel renders a row's origin label as ` source=<label>`. The label is
