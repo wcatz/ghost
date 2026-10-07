@@ -306,11 +306,12 @@ func globalOriginGuidance(globals []sessionMemory) string {
 }
 
 // sessionMemoryToItem converts a sessionMemory to an assemble.Item for rendering.
-// If asOf is non-nil (historical read), it derives the ValidityState from the
-// stored timestamps with memory.AsOfValidityState — the clock-independent part
-// only, because the window is the current row's and does not describe the
-// requested instant. For the passive (current) read, asOf is nil and the
-// ValidityState is already populated by the assembler's stage 2.
+// If asOf is non-nil (historical read), it derives the ValidityState by judging
+// the stored timestamps AT the requested instant with memory.ValidityAt, the same
+// call ghost_project_context's as_of branch makes. Rows withheld at that instant
+// never reach here (historicalSessionMemories drops them). For the passive
+// (current) read, asOf is nil and the ValidityState is already populated by the
+// assembler's stage 2.
 func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 	it := assemble.Item{
 		ID:            m.ID,
@@ -332,12 +333,8 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 		Agent:         m.Agent,
 		SourceRef:     m.SourceRef,
 	}
-	// For historical reads, derive ValidityState from the parsed timestamps. A
-	// clock-dependent verdict (expired / not yet valid) at the requested instant
-	// would be a claim the borrowed window cannot support, so
-	// memory.AsOfValidityState drops it and keeps only the clock-independent
-	// fact (unverified / valid). The passive path already has this set from the
-	// assembler's stage 2.
+	// For historical reads, judge the window at T. The passive path already has
+	// the state set from the assembler's stage 2.
 	if asOf != nil && it.ValidityState == "" {
 		var fromStr, untilStr, verifiedStr *string
 		if it.ValidFrom != nil {
@@ -352,7 +349,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 			s := it.VerifiedAt.Format(memory.StoredStampLayout)
 			verifiedStr = &s
 		}
-		it.ValidityState = memory.AsOfValidityState(fromStr, untilStr, verifiedStr, *asOf)
+		it.ValidityState, _ = memory.ValidityAt(fromStr, untilStr, verifiedStr, *asOf)
 	}
 	return it
 }
@@ -398,15 +395,11 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		if totalGlobalCountKnown && totalGlobalCount > len(globals) {
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
-		showedGlobalWindow := false
 		for _, m := range globals {
 			it := sessionMemoryToItem(m, asOf)
-			if it.ValidFrom != nil || it.ValidUntil != nil || it.VerifiedAt != nil {
-				showedGlobalWindow = true
-			}
 			fmt.Fprintf(&gsb, "%s\n", it.Line())
 		}
-		if asOf != nil && showedGlobalWindow {
+		if asOf != nil {
 			fmt.Fprintf(&gsb, "\n(%s)\n", memory.AsOfValidityNote(*asOf))
 		}
 	}
@@ -463,18 +456,13 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		} else {
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
-		showedWindow := false
 		for _, m := range memories {
 			it := sessionMemoryToItem(m, asOf)
-			if it.ValidFrom != nil || it.ValidUntil != nil || it.VerifiedAt != nil {
-				showedWindow = true
-			}
 			fmt.Fprintf(&sb, "%s\n", it.Line())
 		}
-		// Only a historical read states the borrow, and only when a window was
-		// actually drawn: a listing of undated rows carries no line about
-		// windows it does not have.
-		if asOf != nil && showedWindow {
+		// Only a historical read says validity was judged at T, and it says so
+		// whenever rows are listed.
+		if asOf != nil {
 			fmt.Fprintf(&sb, "\n(%s)\n", memory.AsOfValidityNote(*asOf))
 		}
 	}
@@ -635,7 +623,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 			slog.Debug("historical session context: read failed", "error", err)
 			readErr = "This store's recorded history could not be read, so nothing below is a reading of that instant: " + err.Error()
 		default:
-			memories = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap)
+			memories = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
 			gapNote = set.UnknownNote()
 		}
 	}
@@ -646,7 +634,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// per-section error line would imply the project half had succeeded when it
 	// may not have.
 	if gset, err := memory.ReadMemoriesAsOf(context.Background(), db, memory.GlobalOnly, memory.GlobalProjectID, asOf); err == nil {
-		globals = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap)
+		globals = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
 	}
 	if projectID == "" && len(globals) == 0 {
 		return ""
@@ -675,13 +663,19 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 // wants would put a scoping decision in the enum every search carries. The
 // version row's own project_id is exact, so the filter is an equality on a value
 // the read already chose.
-func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int) []sessionMemory {
+func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) []sessionMemory {
 	out := make([]sessionMemory, 0, min(len(rows), cap))
 	for _, row := range rows {
 		if row.ProjectID != projectID {
 			continue
 		}
 		if !memory.ScopeMatches(row.Scope, scope) {
+			continue
+		}
+		// Validity is judged at T before the cap, with the rule search applies
+		// when it binds its clock to as_of: a row whose window had closed or not
+		// yet opened at T is withheld rather than listed.
+		if _, withheld := memory.ValidityAt(row.ValidFrom, row.ValidUntil, row.VerifiedAt, asOf); withheld {
 			continue
 		}
 		// AsOfRow embeds Memory, so all Memory fields are promoted.

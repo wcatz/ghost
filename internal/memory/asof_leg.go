@@ -78,9 +78,9 @@ func AsOfSourceNote(t time.Time) string {
 // row — tags, scope, pin, confidence, agent, source_ref and the validity window,
 // which are exactly the fields a row line renders that the history table does
 // not version — because "nothing in this block is a claim about the present"
-// would be false about them. AsOfValidityNote is where the window's borrow is
-// stated beside the rows; this sentence names the whole set too, so the two
-// notes cannot read as a contradiction.
+// would be false about them. AsOfValidityNote is where the window's judgement at
+// T and the borrow of its bounds are stated beside the rows; this sentence names
+// the whole set too, so the two notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
 		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
@@ -88,69 +88,19 @@ func AsOfUnversionedNote() string {
 		"this block is a claim about the present."
 }
 
-// AsOfValidityNote is the sentence stating that the validity window a historical
-// read renders — like the row's other unversioned fields — comes from the CURRENT
-// row rather than the version, and it is the same sentence on every surface that
-// renders one.
+// AsOfValidityNote is the sentence stating how a historical listing judged
+// validity, and it is the same sentence on every surface that renders one.
 //
-// It lives here, beside the other two historical notes, because the store owns
-// the fact: memory_history versions a memory's STATE in content, category,
-// importance, resolved_at, source and project_id (the six columns AsOfRow's doc
-// names), and the rest of a row line — tags, scope, pin, confidence, agent,
-// source_ref and the validity triple — is not among them, so the read takes each
-// from the live row. A surface that worded the borrow itself would let the two
-// drift, and a drift here is not cosmetic — it is the difference between a
-// reader taking a present-day window for the window that held at the instant the
-// block is a reading of, and knowing it is not.
-//
-// The note names the full borrowed set rather than the window alone, and it does
-// NOT say "the rest of the line is the version's": that would be false, because
-// the same row line prints the current row's tags, confidence and provenance
-// beside the window. The instant is named because the note's whole point is what
-// it is NOT a claim about; the block's AsOfSourceNote names the same instant, and
-// a reader who meets either line first has met it. The note says in as many words
-// that no verdict is drawn from the window, because a verdict at the instant
-// would be exactly the claim the borrow makes false.
+// Validity is judged AT the requested instant, the way ghost_memory_search with
+// as_of judges it (the assembler binds its clock to that instant): a row whose
+// window had closed or had not yet opened at T is withheld, and a row valid at T
+// is shown as valid at T even if its window has closed since. memory_history never
+// versioned the window itself, so the bounds are read from the current row, and
+// the note says so rather than letting the verdict read as more than it is.
 func AsOfValidityNote(at time.Time) string {
-	return "A memory row's validity window, and its tags, scope, pin, confidence, agent and source_ref, are read " +
-		"from the current row rather than the version the row's content and category come from. The window shown " +
-		"is the CURRENT one, not the window the memory held at " + at.UTC().Format(time.RFC3339) + ", so no expiry " +
-		"or future-start verdict is drawn from it."
-}
-
-// AsOfValidityState is the validity state a HISTORICAL listing may draw from a
-// row's borrowed window, and it is what the as_of surfaces pass to ValidityLabel.
-//
-// It is ValidityState's answer with its clock-dependent half taken out. expired
-// and future measure a clock against the window, and the window is the current
-// row's rather than the version the line comes from (AsOfRow's doc says so, and
-// AsOfValidityNote is where a surface states the borrow), so neither is drawn.
-// What is left is the clock-independent fact about the row: unset when it states
-// no validity at all, unverified when it states a window nobody ever verified,
-// and valid when the window carries a readable verification stamp (ValidityLabel
-// prints the stamp itself and renders no word for valid). A window that is
-// currently closed or not yet open therefore still reads unverified when no
-// verification was recorded — that the claim was never checked is a fact about
-// the row the window came from, not about when it is read — and reads with no
-// marker when it was verified.
-//
-// now is the current clock, named because ValidityState takes one; the answer
-// does not depend on it, which is the point of dropping the states that do.
-func AsOfValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) string {
-	state, _ := ValidityState(validFrom, validUntil, verifiedAt, now)
-	switch state {
-	case ValidityExpired, ValidityFuture:
-		// The verdict is dropped; the verification fact is not. A readable
-		// window with no readable verification stamp is unverified whatever the
-		// clock says about the window, and a verified window needs no marker
-		// here because ValidityLabel prints the stamp itself.
-		if _, ok := parseStoredStamp(verifiedAt); !ok {
-			return ValidityUnverified
-		}
-		return ""
-	default:
-		return state
-	}
+	return "Validity judged at " + at.UTC().Format(time.RFC3339) + ": a memory whose validity window had closed " +
+		"or had not yet opened at that instant is withheld. The window's bounds, like the row's tags, scope, pin, " +
+		"confidence, agent and source_ref, are read from the current row, because the history table does not version them."
 }
 
 // asOfLeg is a query term prepared for matching against text, rather than for

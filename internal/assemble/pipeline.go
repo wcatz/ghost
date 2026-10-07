@@ -137,7 +137,7 @@ func runValidity(p *pipeline) {
 			// instruction. Delimited like every other stored text in an answer.
 			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", ShortID(c.ID), Data(raw)))
 		}
-		if v.state == validityExpired || v.state == validityFuture {
+		if memory.ValidityWithheld(v.state) {
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = v.state
 			p.droppedBy[stageValidity]++

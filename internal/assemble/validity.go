@@ -221,16 +221,11 @@ func ValidityStateOf(from, until, verified *string, now time.Time) string {
 // trace reports as validity_unparseable.
 //
 // state is the row's verdict against the clock the caller is rendering for;
-// ValidityStateOf is what a surface with no trace to read it from passes. An
-// empty state renders the values and no verdict, and is right in exactly two
-// cases. The first is where the caller already knows the row survived stage 2.
-// The second is a historical read whose window is read from the current row
-// rather than versioned: there is no clock the window describes, so a verdict at
-// the request's instant would be a claim the borrowed window cannot support.
-// memory.AsOfValidityState produces that state, keeping only the
-// clock-independent fact, so an empty state from that path is a window the
-// borrowed row cannot judge at the request's instant, and drawing no verdict is
-// the honest rendering rather than an omitted one.
+// ValidityStateOf is what a current listing passes, and memory.ValidityAt at the
+// requested instant is what an as_of listing passes, so the verdict is the one
+// ghost_memory_search reaches at that instant. An empty state renders the values
+// and no verdict, and is right where the caller already knows the row survived
+// stage 2.
 func ValidityLabel(state string, from, until, verified *string) string {
 	f, u, v := parseStampPtr(from), parseStampPtr(until), parseStampPtr(verified)
 	if f == nil && u == nil && v == nil && state != validityUnverified {

@@ -2138,7 +2138,9 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return nil, nil, fmt.Errorf("read memories as of %s: %w", asOf.Format(time.RFC3339), err)
 			}
-			live := set.Live()
+			// Validity is judged at the requested instant BEFORE the limit, so a
+			// withheld row does not take a slot a valid one should have.
+			live := withholdInvalidAt(set.Live(), *asOf)
 			if len(live) > args.Limit {
 				live = live[:args.Limit]
 			}
@@ -4185,19 +4187,18 @@ func truncateUTF8(s string, maxBytes int) string {
 
 // formatMemoriesInternal is the shared implementation for formatting memories.
 // A nil asOf is a current read: each row's validity window is judged against the
-// wall clock. A non-nil asOf is a historical read, and the ONE thing it changes
-// is the verdict — memory_history never recorded valid_from, valid_until or
-// verified_at, so a historical row's window is the current row's, and a verdict
-// against it would describe an instant the window does not hold at. Only the
-// clock-dependent states are dropped (memory.AsOfValidityState): the window is
-// shown with whatever verdict reads off the row itself, and AsOfValidityNote is
-// appended once, below the rows, and only when a window was actually shown: an
-// empty body is what tells projectContextSection to write no heading at all, so a
-// disclosure appended to an empty listing would print a heading over nothing.
+// wall clock. A non-nil asOf is a historical read and the window is judged AT
+// that instant, which is what ghost_memory_search does when it binds the
+// assembler's clock to as_of: a row whose window had closed or not yet opened at
+// T is withheld (memory.ValidityAt), and a row valid at T is shown as valid at T
+// even if it has expired since. AsOfValidityNote is appended once, below the
+// rows, and only when a row was shown: an empty body is what tells
+// projectContextSection to write no heading at all, so a disclosure appended to
+// an empty listing would print a heading over nothing.
 func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 	var sb strings.Builder
 	now := time.Now().UTC()
-	showedWindow := false
+	shown := false
 	for _, m := range memories {
 		pin := ""
 		if m.Pinned {
@@ -4208,30 +4209,42 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		verdict := ""
+		var verdict string
 		if asOf == nil {
 			verdict = assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
 		} else {
-			// Historical read: the clock-independent part of the state only —
-			// unverified survives, because it is a fact about the current row,
-			// while expired and future would be claims about T the borrowed
-			// window cannot support (see memory.AsOfValidityState).
-			verdict = memory.AsOfValidityState(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
+			state, withheld := memory.ValidityAt(m.ValidFrom, m.ValidUntil, m.VerifiedAt, *asOf)
+			if withheld {
+				continue
+			}
+			verdict = state
 		}
+		shown = true
 		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
-		if validity != "" {
-			showedWindow = true
-		}
 		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
 			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
 			sourceLabelForMemory(m), quoteData(m.Content))
 	}
-	if asOf != nil && showedWindow {
+	if asOf != nil && shown {
 		sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf) + ")\n")
 	}
 	return sb.String()
+}
+
+// withholdInvalidAt drops the rows whose validity window had closed or had not
+// yet opened at t, with the same rule ghost_memory_search applies when it binds
+// its clock to as_of (memory.ValidityAt).
+func withholdInvalidAt(rows []memory.AsOfRow, t time.Time) []memory.AsOfRow {
+	out := make([]memory.AsOfRow, 0, len(rows))
+	for _, r := range rows {
+		if _, withheld := memory.ValidityAt(r.ValidFrom, r.ValidUntil, r.VerifiedAt, t); withheld {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // formatMemories formats memories using the wall clock for validity evaluation.
@@ -4239,9 +4252,8 @@ func formatMemories(memories []memory.Memory) string {
 	return formatMemoriesInternal(memories, nil)
 }
 
-// formatMemoriesAt formats a past read's rows. The instant is not a clock to
-// judge the validity window against — see formatMemoriesInternal — but the
-// instant the disclosure says the window does NOT hold at.
+// formatMemoriesAt formats a past read's rows, judging each row's validity
+// window at the given instant — see formatMemoriesInternal.
 func formatMemoriesAt(memories []memory.Memory, asOf time.Time) string {
 	return formatMemoriesInternal(memories, &asOf)
 }

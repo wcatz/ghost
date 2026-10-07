@@ -179,131 +179,158 @@ func TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched(t *testing.T)
 	}
 }
 
-// TestRenderSessionContextAtWindowIsTheCurrentOneNotAVerdictAtT fixes the honesty
-// property of the historical block's memory rows: memory_history never recorded
-// valid_from/valid_until/verified_at, so a row's window comes from the CURRENT
-// row. The block may SHOW the window, but it must not draw a verdict from it at T
-// — a window opened, moved or closed after T would then read as a past fact it
-// never was — and it must say the window is the current one.
-func TestRenderSessionContextAtWindowIsTheCurrentOneNotAVerdictAtT(t *testing.T) {
-	base := time.Date(2026, 10, 5, 22, 20, 24, 0, time.UTC)
-	past := base
-	future := base.Add(48 * time.Hour)
+// validityRow is one memory a historical-validity fixture writes: its content,
+// the three validity columns (empty means NULL) and nothing else, because the
+// rest of the row is not what these tests are about.
+type validityRow struct {
+	id, content, from, until, verified string
+}
 
+// validityStore builds a store holding the given rows, each with one recorded
+// version before t, and returns the project directory. The validity columns live
+// on the memories table only (memory_history never versioned them).
+func validityStore(t *testing.T, at time.Time, rows []validityRow) string {
+	t.Helper()
 	stampLayout := memory.StoredStampLayout
-
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
 		t.Fatalf("mkdir ghostDir: %v", err)
 	}
-	dbPath := filepath.Join(ghostDir, "ghost.db")
 	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
-
-	db, err := memory.OpenDB(dbPath)
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
-		"histproj", dir, "histproj"); err != nil {
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`, "histproj", dir, "histproj"); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
-	// mem1: window closed now, open at T. mem2: window opens after T. mem3:
-	// open-ended. The validity columns are read from the current memories table,
-	// and the block must render them WITHOUT a verdict at T.
-	// Memory valid at T=past but expired since (valid_until = past)
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"mem1", "histproj", "fact", "valid at T, expired since", "manual",
-		past.Add(-48*time.Hour).Format(stampLayout), past.Format(stampLayout),
-		past.Add(-72*time.Hour).Format(stampLayout), past.Add(-24*time.Hour).Format(stampLayout),
-	); err != nil {
-		t.Fatalf("insert mem1: %v", err)
+	nullable := func(s string) any {
+		if s == "" {
+			return nil
+		}
+		return s
 	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mem1", "histproj", "fact", "valid at T, expired since", "manual",
-		past.Add(-24*time.Hour).Format(stampLayout), "save",
-	); err != nil {
-		t.Fatalf("insert mem1 history: %v", err)
-	}
-	// Memory not yet valid at T=past (valid_from = future)
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"mem2", "histproj", "fact", "not yet valid at T", "manual",
-		future.Format(stampLayout), future.Add(48*time.Hour).Format(stampLayout),
-		past.Add(-72*time.Hour).Format(stampLayout), past.Add(-24*time.Hour).Format(stampLayout),
-	); err != nil {
-		t.Fatalf("insert mem2: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mem2", "histproj", "fact", "not yet valid at T", "manual",
-		past.Add(-24*time.Hour).Format(stampLayout), "save",
-	); err != nil {
-		t.Fatalf("insert mem2 history: %v", err)
-	}
-	// Open-ended memory (no validity window)
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mem3", "histproj", "fact", "open ended", "manual",
-		past.Add(-72*time.Hour).Format(stampLayout), past.Add(-24*time.Hour).Format(stampLayout),
-	); err != nil {
-		t.Fatalf("insert mem3: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mem3", "histproj", "fact", "open ended", "manual",
-		past.Add(-24*time.Hour).Format(stampLayout), "save",
-	); err != nil {
-		t.Fatalf("insert mem3 history: %v", err)
+	for _, r := range rows {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, verified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.id, "histproj", "fact", r.content, "manual", nullable(r.from), nullable(r.until), nullable(r.verified),
+			at.Add(-72*time.Hour).Format(stampLayout), at.Add(-24*time.Hour).Format(stampLayout),
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			r.id, "histproj", "fact", r.content, "manual", at.Add(-24*time.Hour).Format(stampLayout), "save",
+		); err != nil {
+			t.Fatalf("insert %s history: %v", r.id, err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	t.Setenv("XDG_DATA_HOME", xdgHome)
+	return dir
+}
 
-	block := RenderSessionContextAt(dir, &past)
+// TestRenderSessionContextAtJudgesValidityAtTheRequestedInstant fixes the rule
+// the block shares with ghost_memory_search and ghost_project_context: validity
+// is judged AT the requested instant (#899). A row valid at T and closed since
+// is shown as valid at T; a row whose window had closed or not yet opened at T
+// is withheld; a bound exactly at T is inside the window; an open-ended or
+// unreadable-bound row is kept with no verdict.
+func TestRenderSessionContextAtJudgesValidityAtTheRequestedInstant(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	stamp := func(d time.Duration) string { return at.Add(d).Format(f) }
+	verified := stamp(-time.Hour)
+
+	dir := validityStore(t, at, []validityRow{
+		{id: "m-closed-since", content: "valid at T closed since", from: stamp(-48 * time.Hour), until: stamp(24 * time.Hour), verified: verified},
+		{id: "m-future", content: "opens after T", from: stamp(24 * time.Hour), until: stamp(72 * time.Hour), verified: verified},
+		{id: "m-expired", content: "closed before T", from: stamp(-72 * time.Hour), until: stamp(-time.Hour), verified: verified},
+		{id: "m-open", content: "open ended row"},
+		{id: "m-until-at-t", content: "ends exactly at T", from: stamp(-48 * time.Hour), until: stamp(0), verified: verified},
+		{id: "m-from-at-t", content: "starts exactly at T", from: stamp(0), until: stamp(48 * time.Hour), verified: verified},
+		{id: "m-unreadable", content: "unreadable bound row", until: "not a date"},
+		{id: "m-unverified", content: "unverified window row", from: stamp(-time.Hour)},
+	})
+
+	block := RenderSessionContextAt(dir, &at)
 	if block == "" {
 		t.Fatal("the historical block is empty")
 	}
 
-	// Check that the block discloses the instant
-	if !strings.Contains(block, "as_of "+past.Format(time.RFC3339)) {
-		t.Errorf("the block does not name the instant it read:\n%s", block)
+	// The block says validity was judged at T.
+	if !strings.Contains(block, "Validity judged at "+at.Format(time.RFC3339)) {
+		t.Errorf("the block does not say validity was judged at T:\n%s", block)
 	}
 
-	// No verdict at T on any row, and the block says the window is the current
-	// one. The contents deliberately spell "expired" and "not yet valid", so
-	// each row's validity SECTION is what gets checked, not the block's text.
-	if strings.Contains(block, "Validity judged at") {
-		t.Errorf("the block still claims validity was judged at T:\n%s", block)
-	}
-	if !strings.Contains(block, "CURRENT one") || !strings.Contains(block, past.Format(time.RFC3339)) {
-		t.Errorf("the block does not say the validity window is the current one:\n%s", block)
+	// Withheld at T: closed before T, and not yet open at T.
+	for _, content := range []string{"closed before T", "opens after T"} {
+		if strings.Contains(block, content) {
+			t.Errorf("%q is outside its window at T but the block lists it:\n%s", content, block)
+		}
 	}
 
-	// mem1: window closed now, open at T -> shown as a window, no verdict.
-	if got := sessionValiditySection(block, "valid at T, expired since"); !strings.Contains(got, "until") {
-		t.Errorf("mem1's window was dropped rather than shown without a verdict: %q", got)
-	} else if strings.Contains(got, "expired") {
-		t.Errorf("mem1's window is the current row's, not T's, so it must not read expired: %q", got)
+	// Shown, and never labelled with the clock's verdict on the current window.
+	for _, content := range []string{"valid at T closed since", "ends exactly at T", "starts exactly at T"} {
+		got := sessionValiditySection(block, content)
+		if got == "" || !strings.Contains(block, content) {
+			t.Errorf("%q is inside its window at T but is missing:\n%s", content, block)
+			continue
+		}
+		if strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") || strings.Contains(got, "unverified") {
+			t.Errorf("%q is valid at T but is labelled %q", content, got)
+		}
+	}
+	if got := sessionValiditySection(block, "valid at T closed since"); !strings.Contains(got, "until") {
+		t.Errorf("the window of a row valid at T is not shown: %q", got)
 	}
 
-	// mem2: window opens after T -> shown as a window, no verdict at T.
-	if got := sessionValiditySection(block, "not yet valid at T"); !strings.Contains(got, "valid from") {
-		t.Errorf("mem2's window was dropped rather than shown without a verdict: %q", got)
-	} else if strings.Contains(got, "not yet valid") {
-		t.Errorf("mem2's window opens after T but the block judged the current window at T: %q", got)
+	// An open-ended row and one with an unreadable bound carry no claim.
+	for _, content := range []string{"open ended row", "unreadable bound row"} {
+		if !strings.Contains(block, content) {
+			t.Errorf("%q states no readable window but is missing:\n%s", content, block)
+			continue
+		}
+		got := sessionValiditySection(block, content)
+		for _, bad := range []string{"valid from", "until", "expired", "not yet valid", "unverified"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%q carries a validity claim %q: %q", content, bad, got)
+			}
+		}
 	}
 
-	// mem3: open-ended -> no window and no verdict.
-	if got := sessionValiditySection(block, "open ended"); strings.Contains(got, "valid from") || strings.Contains(got, "until") ||
-		strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") || strings.Contains(got, "unverified") {
-		t.Errorf("mem3 is open-ended but carries a validity claim: %q", got)
+	// A readable window nobody verified keeps its unverified marker.
+	if got := sessionValiditySection(block, "unverified window row"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window lost its marker: %q", got)
+	}
+}
+
+// TestRenderSessionContextAtCapsAfterWithholdingAtT: a row withheld at T must not
+// take a slot from a valid one, or a block would show fewer rows than the store
+// holds for that instant.
+func TestRenderSessionContextAtCapsAfterWithholdingAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	rows := []validityRow{{id: "m-valid", content: "the only valid row"}}
+	for i := 0; i < sessionMemoriesCap+2; i++ {
+		rows = append(rows, validityRow{
+			id: "m-gone-" + strings.Repeat("x", i+1), content: "withheld at T " + strings.Repeat("y", i+1),
+			until: at.Add(-time.Hour).Format(f),
+		})
+	}
+	dir := validityStore(t, at, rows)
+	block := RenderSessionContextAt(dir, &at)
+	if !strings.Contains(block, "the only valid row") {
+		t.Errorf("a withheld row displaced the valid one:\n%s", block)
+	}
+	if strings.Contains(block, "withheld at T") {
+		t.Errorf("a row closed before T is listed:\n%s", block)
 	}
 }
 
@@ -327,150 +354,6 @@ func sessionValiditySection(block, content string) string {
 		return ""
 	}
 	return ""
-}
-
-// TestRenderSessionContextAtWindowEditedAfterTIsNotJudgedAtT is the case the
-// borrow is worst for: a memory that existed at T whose validity window was set
-// AFTER T. memory_history records no window, so the block can only show today's —
-// and it must not present that as a verdict about T.
-func TestRenderSessionContextAtWindowEditedAfterTIsNotJudgedAtT(t *testing.T) {
-	past := time.Date(2026, 10, 5, 22, 20, 24, 0, time.UTC)
-	afterT := past.Add(24 * time.Hour)
-	future := past.Add(72 * time.Hour)
-	stampLayout := memory.StoredStampLayout
-
-	xdgHome := t.TempDir()
-	ghostDir := filepath.Join(xdgHome, "ghost")
-	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
-		t.Fatalf("mkdir ghostDir: %v", err)
-	}
-	dbPath := filepath.Join(ghostDir, "ghost.db")
-	dir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	db, err := memory.OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
-		"histproj", dir, "histproj"); err != nil {
-		t.Fatalf("insert project: %v", err)
-	}
-	// The version is recorded before T (so the memory existed then), while the
-	// row's updated_at is after T and its window opens after T: the window was
-	// set after the instant the block reads at.
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"mem1", "histproj", "fact", "a window set after T", "manual",
-		future.Format(stampLayout), future.Add(48*time.Hour).Format(stampLayout),
-		past.Add(-72*time.Hour).Format(stampLayout), afterT.Format(stampLayout),
-	); err != nil {
-		t.Fatalf("insert mem1: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mem1", "histproj", "fact", "a window set after T", "manual",
-		past.Add(-24*time.Hour).Format(stampLayout), "save",
-	); err != nil {
-		t.Fatalf("insert mem1 history: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	t.Setenv("XDG_DATA_HOME", xdgHome)
-
-	block := RenderSessionContextAt(dir, &past)
-	if block == "" {
-		t.Fatal("the historical block is empty")
-	}
-	// The row existed at T, so it is shown, with the current window...
-	section := sessionValiditySection(block, "a window set after T")
-	if !strings.Contains(section, "valid from") {
-		t.Errorf("the row's current window is not shown: %q\n%s", section, block)
-	}
-	// ...but NOT with the verdict the current window would produce at T. The
-	// window opens after T, so a T-judgement would say "not yet valid"; the
-	// window was set after T and nothing may report it as a fact about T.
-	if strings.Contains(section, "not yet valid") {
-		t.Errorf("the window was set after T but the block judged it at T: %q", section)
-	}
-	if !strings.Contains(block, "CURRENT one") {
-		t.Errorf("the block does not say the window is the current one:\n%s", block)
-	}
-}
-
-// TestRenderSessionContextAtKeepsTheClockIndependentUnverifiedMarker pins the
-// half of the state a historical read MAY draw: whether the window was ever
-// verified is a fact about the current row, not about the instant the block
-// names, so the marker survives while the clock-dependent expired /
-// not-yet-valid verdicts do not.
-func TestRenderSessionContextAtKeepsTheClockIndependentUnverifiedMarker(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	past := now.Add(-48 * time.Hour)
-	stampLayout := memory.StoredStampLayout
-
-	xdgHome := t.TempDir()
-	ghostDir := filepath.Join(xdgHome, "ghost")
-	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
-		t.Fatalf("mkdir ghostDir: %v", err)
-	}
-	dbPath := filepath.Join(ghostDir, "ghost.db")
-	dir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	db, err := memory.OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
-		"histproj", dir, "histproj"); err != nil {
-		t.Fatalf("insert project: %v", err)
-	}
-	// mem1: a window open now and never verified. mem2: one that has since
-	// closed, also never verified.
-	for _, m := range []struct{ id, content, from, until string }{
-		{"mem1", "open window never verified", now.Add(-24 * time.Hour).Format(stampLayout), ""},
-		{"mem2", "closed window never verified", now.Add(-72 * time.Hour).Format(stampLayout), now.Add(-24 * time.Hour).Format(stampLayout)},
-	} {
-		var until any
-		if m.until != "" {
-			until = m.until
-		}
-		if _, err := db.Exec(
-			`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.id, "histproj", "fact", m.content, "manual",
-			m.from, until, past.Add(-24*time.Hour).Format(stampLayout), past.Add(-12*time.Hour).Format(stampLayout),
-		); err != nil {
-			t.Fatalf("insert %s: %v", m.id, err)
-		}
-		if _, err := db.Exec(
-			`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			m.id, "histproj", "fact", m.content, "manual", past.Format(stampLayout), "save",
-		); err != nil {
-			t.Fatalf("insert %s history: %v", m.id, err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	t.Setenv("XDG_DATA_HOME", xdgHome)
-
-	block := RenderSessionContextAt(dir, &past)
-	if block == "" {
-		t.Fatal("the historical block is empty")
-	}
-	if got := sessionValiditySection(block, "open window never verified"); !strings.Contains(got, "unverified") {
-		t.Errorf("the historical block dropped the clock-independent unverified marker: %q\n%s", got, block)
-	}
-	closed := sessionValiditySection(block, "closed window never verified")
-	if !strings.Contains(closed, "unverified") {
-		t.Errorf("the historical block dropped unverified on a never-verified window: %q", closed)
-	}
-	if strings.Contains(closed, "expired") {
-		t.Errorf("the historical block judged the borrowed window expired: %q", closed)
-	}
 }
 
 // saveHistoricalGlobal writes a _global row through the store — so it has a

@@ -25,9 +25,10 @@ consume a stdout hook response.
 since, and without memories that did not exist yet. Tasks, decisions and
 learned context are not versioned, so they are omitted rather than shown as
 they are now; a memory row's tags, scope, pin, confidence, agent, source_ref
-and validity window are not versioned either, so they are the current row's,
-no clock-dependent validity verdict is drawn from them, and a window nobody
-verified still prints unverified because that is a fact about the current row.
+and validity window are not versioned either, so they are the current row's.
+A row's validity window is judged at the instant, as ghost_memory_search judges
+it: a memory whose window had closed or not yet opened then is left out, and one
+valid then is shown as valid even if its window has closed since.
 No session is counted — a past reading is a diagnostic, not a session start.
 
 --audit reports on what retrieval ACTUALLY did (issue #646). It is the other

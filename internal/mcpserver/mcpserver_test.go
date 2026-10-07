@@ -756,101 +756,147 @@ func TestFormatMemories_EdgeCases(t *testing.T) {
 	}
 }
 
-// TestFormatMemoriesAsOf_WindowIsTheCurrentOneNotAVerdictAtT fixes the honesty
-// property of a historical listing: memory_history never recorded
-// valid_from/valid_until/verified_at, so a historical row's window is read from
-// the CURRENT row (AsOfRow's doc says so). The listing may SHOW that window, but
-// it must not draw a verdict from it at T — a window opened, moved or closed
-// after T would then read as a past fact it never was — and it must say the
-// window is the current one.
-func TestFormatMemoriesAsOf_WindowIsTheCurrentOneNotAVerdictAtT(t *testing.T) {
-	// Use a time with zero nanoseconds to match the StoredStampLayout precision
-	base := time.Date(2026, 10, 5, 22, 20, 24, 0, time.UTC)
-	past := base
-	future := base.Add(48 * time.Hour)
+// TestFormatMemoriesAtJudgesValidityAtTheRequestedInstant fixes the rule a
+// historical listing shares with ghost_memory_search (#899): validity is judged AT
+// the requested instant. A row valid at T and closed since is shown as valid at
+// T; a row whose window had closed, or not yet opened, at T is withheld; a bound
+// exactly at T is inside the window; an open-ended or unreadable-bound row is
+// kept with no verdict.
+func TestFormatMemoriesAtJudgesValidityAtTheRequestedInstant(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	stamp := func(d time.Duration) *string { return strPtr(at.Add(d).Format(f)) }
+	verified := stamp(-time.Hour)
 
-	// Use the stamp layout that the validity parser accepts (SQLite datetime format)
-	stampLayout := memory.StoredStampLayout
-
-	// Memory valid at T (past) but expired since (valid_until = past)
-	validAtPastExpiredNow := memory.Memory{
-		ID:         "mem1",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "valid at T, expired since",
-		ValidFrom:  strPtr(past.Add(-48 * time.Hour).Format(stampLayout)),
-		ValidUntil: strPtr(past.Format(stampLayout)),
+	mk := func(id, content string, from, until, ver *string) memory.Memory {
+		return memory.Memory{ID: id, Category: "fact", Importance: 0.7, Content: content, ValidFrom: from, ValidUntil: until, VerifiedAt: ver}
 	}
-
-	// Memory not yet valid at T (valid_from = future)
-	notYetValidAtPast := memory.Memory{
-		ID:         "mem2",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "not yet valid at T",
-		ValidFrom:  strPtr(future.Format(stampLayout)),
-		ValidUntil: strPtr(future.Add(48 * time.Hour).Format(stampLayout)),
+	mems := []memory.Memory{
+		mk("mem1", "valid at T, closed since", stamp(-48*time.Hour), stamp(24*time.Hour), verified),
+		mk("mem2", "opens after T", stamp(24*time.Hour), stamp(72*time.Hour), verified),
+		mk("mem3", "closed before T", stamp(-72*time.Hour), stamp(-time.Hour), verified),
+		mk("mem4", "open ended", nil, nil, nil),
+		mk("mem5", "ends exactly at T", stamp(-48*time.Hour), stamp(0), verified),
+		mk("mem6", "starts exactly at T", stamp(0), stamp(48*time.Hour), verified),
+		mk("mem7", "unreadable bound", nil, strPtr("not a date"), nil),
+		mk("mem8", "unverified window", stamp(-time.Hour), nil, nil),
 	}
+	result := formatMemoriesAt(mems, at)
 
-	// Open-ended memory (no validity window)
-	openEnded := memory.Memory{
-		ID:         "mem3",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "open ended",
+	if !strings.Contains(result, "Validity judged at "+at.Format(time.RFC3339)) {
+		t.Errorf("the listing does not say validity was judged at T:\n%s", result)
 	}
-
-	// Memory with T exactly at valid_until boundary
-	atBoundary := memory.Memory{
-		ID:         "mem4",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "at boundary",
-		ValidFrom:  strPtr(past.Add(-48 * time.Hour).Format(stampLayout)),
-		ValidUntil: strPtr(past.Format(stampLayout)),
+	for _, id := range []string{"`mem2`", "`mem3`"} {
+		if memoryMetaGroup(result, id) != "" {
+			t.Errorf("%s is outside its window at T but is listed:\n%s", id, result)
+		}
 	}
-
-	mems := []memory.Memory{validAtPastExpiredNow, notYetValidAtPast, openEnded, atBoundary}
-
-	// No verdict is drawn from the window at T, for a window that had closed, one
-	// that had not opened, or one that sat on the boundary: the window shown is
-	// the current row's and does not describe T (AsOfValidityNote). The content
-	// strings deliberately spell "expired" and "not yet valid", so each row's
-	// metadata group is what gets checked, not the block's text.
-	result := formatMemoriesAt(mems, past)
-
-	if strings.Contains(result, "Validity judged at") {
-		t.Errorf("the listing still claims validity was judged at T: %s", result)
+	for _, id := range []string{"`mem1`", "`mem5`", "`mem6`"} {
+		got := memoryMetaGroup(result, id)
+		if got == "" {
+			t.Errorf("%s is inside its window at T but is missing:\n%s", id, result)
+		}
+		if strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") || strings.Contains(got, "unverified") {
+			t.Errorf("%s is valid at T but is labelled %q", id, got)
+		}
 	}
-	if !strings.Contains(result, "CURRENT one") || !strings.Contains(result, past.UTC().Format(time.RFC3339)) {
-		t.Errorf("the listing does not say the validity window is the current one: %s", result)
-	}
-
-	// mem1: window closed now, open at T -> still shown as a window, no verdict.
 	if got := memoryMetaGroup(result, "`mem1`"); !strings.Contains(got, "until") {
-		t.Errorf("mem1's window was dropped rather than shown without a verdict: %q", got)
-	} else if strings.Contains(got, "expired") {
-		t.Errorf("mem1's window is the current row's, not T's, so it must not read expired: %q", got)
+		t.Errorf("the window of a row valid at T is not shown: %q", got)
+	}
+	for _, id := range []string{"`mem4`", "`mem7`"} {
+		got := memoryMetaGroup(result, id)
+		if !strings.Contains(result, id) {
+			t.Errorf("%s states no readable window but is missing", id)
+		}
+		for _, bad := range []string{"valid from", "until", "expired", "not yet valid", "unverified"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s carries a validity claim %q: %q", id, bad, got)
+			}
+		}
+	}
+	if got := memoryMetaGroup(result, "`mem8`"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window lost its marker: %q", got)
+	}
+}
+
+// TestWithholdInvalidAtMatchesTheListingFormatter: the handler withholds before
+// the limit and the formatter withholds again defensively; both go through
+// memory.ValidityAt, so they must not disagree on which rows survive.
+func TestWithholdInvalidAtMatchesTheListingFormatter(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	open := strPtr(at.Add(24 * time.Hour).Format(f))
+	closed := strPtr(at.Add(-24 * time.Hour).Format(f))
+	rows := []memory.AsOfRow{
+		{Memory: memory.Memory{ID: "keep", Category: "fact", Content: "kept", ValidUntil: open}},
+		{Memory: memory.Memory{ID: "drop", Category: "fact", Content: "dropped", ValidUntil: closed}},
+		{Memory: memory.Memory{ID: "future", Category: "fact", Content: "later", ValidFrom: open}},
+	}
+	kept := withholdInvalidAt(rows, at)
+	if len(kept) != 1 || kept[0].ID != "keep" {
+		t.Fatalf("withholdInvalidAt kept %v, want only keep", kept)
+	}
+	mems := make([]memory.Memory, 0, len(rows))
+	for _, r := range rows {
+		mems = append(mems, r.Memory)
+	}
+	out := formatMemoriesAt(mems, at)
+	if !strings.Contains(out, "kept") || strings.Contains(out, "dropped") || strings.Contains(out, "later") {
+		t.Errorf("the formatter disagrees with withholdInvalidAt:\n%s", out)
+	}
+}
+
+// TestProjectContextAsOfAgreesWithSearchAtTheSameInstant: the two as_of surfaces
+// judge the same rows the same way (#899). Rows are saved through the tools with
+// windows placed around T, then both ghost_project_context and ghost_memory_search
+// are asked at T: each row listed by one is listed by the other, and the rows
+// outside their window at T are listed by neither.
+func TestProjectContextAsOfAgreesWithSearchAtTheSameInstant(t *testing.T) {
+	_, session := newCapSession(t)
+	const at = "2035-01-01T00:00:00Z"
+	rows := []struct {
+		content    string
+		from, till string
+		inWindow   bool
+	}{
+		{"zebra valid across T", "2034-06-01T00:00:00Z", "2036-01-01T00:00:00Z", true},
+		{"zebra closed before T", "", "2034-06-01T00:00:00Z", false},
+		{"zebra opens after T", "2036-01-01T00:00:00Z", "", false},
+		{"zebra ends exactly at T", "", at, true},
+		{"zebra starts exactly at T", at, "2036-06-01T00:00:00Z", true},
+		{"zebra open ended", "", "", true},
+	}
+	for _, r := range rows {
+		args := map[string]any{"project_id": "test-project", "content": r.content, "category": "fact"}
+		if r.from != "" {
+			args["valid_from"] = r.from
+		}
+		if r.till != "" {
+			args["valid_until"] = r.till
+		}
+		if res := callTool(t, session, "ghost_memory_save", args); res.IsError {
+			t.Fatalf("save %q: %s", r.content, resultText(res))
+		}
 	}
 
-	// mem2: window opens after T -> still shown as a window, no verdict at T.
-	if got := memoryMetaGroup(result, "`mem2`"); !strings.Contains(got, "valid from") {
-		t.Errorf("mem2's window was dropped rather than shown without a verdict: %q", got)
-	} else if strings.Contains(got, "not yet valid") {
-		t.Errorf("mem2's window opens after T but the listing judged the current window at T: %q", got)
+	listing := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": at,
+	}))
+	search := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project", "query": "zebra", "as_of": at,
+	}))
+	if !strings.Contains(listing, "Validity judged at "+at) {
+		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)
 	}
-
-	// mem3: open-ended -> no window and no verdict.
-	if got := memoryMetaGroup(result, "`mem3`"); strings.Contains(got, "valid from") || strings.Contains(got, "until") ||
-		strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") {
-		t.Errorf("mem3 is open-ended but carries a validity claim: %q", got)
-	}
-
-	// mem4: a window ending exactly at T is still a window, no verdict.
-	if got := memoryMetaGroup(result, "`mem4`"); !strings.Contains(got, "until") {
-		t.Errorf("mem4's window was dropped rather than shown without a verdict: %q", got)
-	} else if strings.Contains(got, "expired") {
-		t.Errorf("mem4 must not read expired from the current window: %q", got)
+	for _, r := range rows {
+		inListing := strings.Contains(listing, r.content)
+		inSearch := strings.Contains(search, r.content)
+		if inListing != inSearch {
+			t.Errorf("%q: listing=%v search=%v, the two as_of surfaces disagree\nlisting:\n%s\nsearch:\n%s", r.content, inListing, inSearch, listing, search)
+		}
+		if inListing != r.inWindow {
+			t.Errorf("%q: listed=%v, want %v (inside its window at T)", r.content, inListing, r.inWindow)
+		}
 	}
 }
 
@@ -892,59 +938,28 @@ func TestFormatMemoriesAsOf_EmptyListingCarriesNoDisclosure(t *testing.T) {
 	}
 }
 
-// TestFormatMemoriesAsOf_KeepsTheClockIndependentUnverifiedMarker pins the half
-// of the state a historical read MAY draw: whether the window was ever verified
-// is a fact about the current row the window comes from, not about the instant
-// the listing names, so the marker survives while the clock-dependent expired /
-// not-yet-valid verdicts do not.
-func TestFormatMemoriesAsOf_KeepsTheClockIndependentUnverifiedMarker(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	at := now.Add(-48 * time.Hour)
-	stampLayout := memory.StoredStampLayout
-
-	// A window that is open now and was never verified.
-	openUnverified := memory.Memory{
-		ID:         "memopen",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "open window, never verified",
-		ValidFrom:  strPtr(now.Add(-24 * time.Hour).Format(stampLayout)),
+// TestFormatMemoriesAtLabelsAnUnverifiedWindowAtT: verified_at is a flag rather
+// than a predicate, so a window that is inside T but was never verified is
+// listed and marked unverified, while one outside T is withheld whether or not it
+// was verified.
+func TestFormatMemoriesAtLabelsAnUnverifiedWindowAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	insideUnverified := memory.Memory{
+		ID: "meminside", Category: "fact", Importance: 0.7, Content: "inside, never verified",
+		ValidFrom: strPtr(at.Add(-24 * time.Hour).Format(f)),
 	}
-	// A window that has since closed, also never verified: its expiry is a
-	// clock-dependent verdict the historical read must not draw.
-	expiredUnverified := memory.Memory{
-		ID:         "memexpired",
-		Category:   "fact",
-		Importance: 0.7,
-		Content:    "closed window, never verified",
-		ValidFrom:  strPtr(now.Add(-72 * time.Hour).Format(stampLayout)),
-		ValidUntil: strPtr(now.Add(-24 * time.Hour).Format(stampLayout)),
+	closedUnverified := memory.Memory{
+		ID: "memclosed", Category: "fact", Importance: 0.7, Content: "closed before T, never verified",
+		ValidFrom:  strPtr(at.Add(-72 * time.Hour).Format(f)),
+		ValidUntil: strPtr(at.Add(-24 * time.Hour).Format(f)),
 	}
-	mems := []memory.Memory{openUnverified, expiredUnverified}
-
-	historical := formatMemoriesAt(mems, at)
-	living := formatMemories(mems)
-
-	// The open, never-verified window reads unverified on BOTH surfaces: the
-	// historical listing must not disagree with the current one about a fact
-	// that did not change.
-	if got := memoryMetaGroup(historical, "`memopen`"); !strings.Contains(got, "unverified") {
-		t.Errorf("the historical listing dropped the clock-independent unverified marker: %q", got)
+	out := formatMemoriesAt([]memory.Memory{insideUnverified, closedUnverified}, at)
+	if got := memoryMetaGroup(out, "`meminside`"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window inside T lost its marker: %q", got)
 	}
-	if got := memoryMetaGroup(living, "`memopen`"); !strings.Contains(got, "unverified") {
-		t.Errorf("the current listing must show unverified on this window: %q", got)
-	}
-
-	// A window that has since closed keeps the clock-independent marker: the
-	// row was never verified, and that did not change when the window closed.
-	// The current surface marks it expired as well.
-	if got := memoryMetaGroup(historical, "`memexpired`"); !strings.Contains(got, "unverified") {
-		t.Errorf("the historical listing dropped unverified on a never-verified window: %q", got)
-	} else if strings.Contains(got, "expired") {
-		t.Errorf("the historical listing judged the borrowed window expired: %q", got)
-	}
-	if got := memoryMetaGroup(living, "`memexpired`"); !strings.Contains(got, "expired") {
-		t.Errorf("the current listing must show expired on this window: %q", got)
+	if strings.Contains(out, "memclosed") {
+		t.Errorf("a window closed before T is listed:\n%s", out)
 	}
 }
 
