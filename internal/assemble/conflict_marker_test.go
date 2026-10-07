@@ -166,3 +166,32 @@ func TestItemLineRendersConflictsWith(t *testing.T) {
 		t.Errorf("an unpaired row is marked: %q", it.Line())
 	}
 }
+
+// TestScopeConflictingPairIsNeitherMarkedNorNoted: production and development
+// rows are two true claims about two places, so a contradicts edge between them
+// is the one every other reader already ignores (memory.ScopesConflict).
+func TestScopeConflictingPairIsNeitherMarkedNorNoted(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "the database is postgres", 0.9)
+	a.Scope = map[string]string{"environment": "production"}
+	b := candidate("B1", "proj", "fact", "the database is sqlite", 0.8)
+	b.Scope = map[string]string{"environment": "development"}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	res := run(t, &fakeRetriever{set: contradictingSet(a, b)}, req)
+	if got := itemIDs(res.Items); !eq(got, []string{"A1", "B1"}) {
+		t.Fatalf("precondition: both rows rendered, got %v", got)
+	}
+	if strings.Contains(res.Response, "conflicts_with") {
+		t.Errorf("a scope-conflicting pair is marked:\n%s", res.Response)
+	}
+	if hasNote(res.Notes, "contradicts pair recorded") {
+		t.Errorf("a scope-conflicting pair is noted: %v", res.Notes)
+	}
+
+	// Compatible scopes (one silent) still conflict.
+	b.Scope = nil
+	res = run(t, &fakeRetriever{set: contradictingSet(a, b)}, req)
+	if !strings.Contains(lineOf(t, res.Response, "A1"), "conflicts_with=`B1`") {
+		t.Errorf("a scoped row against an unscoped one must still be marked:\n%s", res.Response)
+	}
+}

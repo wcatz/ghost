@@ -303,8 +303,10 @@ func runConflicts(p *pipeline) {
 	// retriever is an interface, and the rule is cheaper to state than to assume.
 	if len(p.items) > 0 && p.set.EdgesStatus.Status != "err" {
 		admitted := make(map[string]bool, len(p.items))
+		scopes := make(map[string]map[string]string, len(p.items))
 		for _, it := range p.items {
 			admitted[it.ID] = true
+			scopes[it.ID] = it.Scope
 		}
 		// "unavailable" means the read found nothing, and that is a claim about
 		// the whole candidate set only when one query covered it. The read is
@@ -333,6 +335,13 @@ func runConflicts(p *pipeline) {
 		seen := make(map[[2]string]bool, len(p.set.Edges))
 		for _, e := range p.set.Edges {
 			if e.Relation != "contradicts" || !admitted[e.From] || !admitted[e.To] {
+				continue
+			}
+			// Two rows that name different values for a shared scope key are two
+			// true claims about two places, so the edge is not a conflict. Every
+			// other reader of a link applies this same rule (memory.ScopesConflict),
+			// and a pair recorded here would be marked and noted on every surface.
+			if memory.ScopesConflict(scopes[e.From], scopes[e.To]) {
 				continue
 			}
 			pair := [2]string{e.From, e.To}
