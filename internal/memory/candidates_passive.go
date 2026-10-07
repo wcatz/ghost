@@ -50,16 +50,32 @@ const stampLayoutForSQL = "2006-01-02 15:04:05"
 // `9999-99-99`, which Go's parser rejects, and this predicate would then COMPARE
 // an unreadable bound where ValidityState treats it as no claim.
 //
-// The two formats are tried in StampLayouts' order. A stored bound carrying a
-// fractional second (`...12:00:00.000`) parses in Go but not through this round
-// trip, so SQL treats it as unreadable and keeps the row; stage 2 is the
-// authority and still drops it if its window has closed. That asymmetry can only
-// admit a row the assembler then withholds, never drop one it would keep.
+// The two formats are tried in StampLayouts' order. Go's time.Parse also accepts
+// a fractional second after the seconds field of the first layout (`.000`, `.5`,
+// `,5`: a separator then one or more digits and nothing else), so the first
+// branch tests the leading 19 characters and then the shape of the rest. A row
+// with such a bound is read exactly as Go reads it, and is compared through
+// stampComparableSQL.
 func readableStampSQL(col string) string {
-	seconds := "strftime('%Y-%m-%d %H:%M:%S', " + col + ")"
+	lead := "substr(" + col + ", 1, 19)"
+	seconds := "strftime('%Y-%m-%d %H:%M:%S', " + lead + ")"
 	day := "strftime('%Y-%m-%d', " + col + ")"
-	return "((" + seconds + " IS NOT NULL AND " + col + " = " + seconds + ")" +
+	fraction := "(length(" + col + ") = 19 OR (length(" + col + ") >= 21" +
+		" AND substr(" + col + ", 20, 1) IN ('.', ',')" +
+		" AND substr(" + col + ", 21) NOT GLOB '*[^0-9]*'))"
+	return "((" + seconds + " IS NOT NULL AND " + lead + " = " + seconds + " AND " + fraction + ")" +
 		" OR (" + day + " IS NOT NULL AND " + col + " = " + day + "))"
+}
+
+// stampComparableSQL is the column as it is compared against a bound whole-second
+// instant. A fractional part that is all zeros adds nothing to the instant Go
+// reads, so it is cut off: raw `12:00:00.000 <= 12:00:00` is false (the longer
+// string sorts later) while Go reads the two as the same instant. A non-zero
+// fraction is left as stored, where the raw comparison already gives Go's answer
+// for a whole-second now (`12:00:00.5` is after `12:00:00`).
+func stampComparableSQL(col string) string {
+	return "CASE WHEN length(" + col + ") > 19 AND substr(" + col + ", 21) NOT GLOB '*[1-9]*'" +
+		" THEN substr(" + col + ", 1, 19) ELSE " + col + " END"
 }
 
 // validityMatchesSQL is the SQL form of memory.ValidityState's window test: a row
@@ -74,8 +90,8 @@ func readableStampSQL(col string) string {
 // `until.Before(now)`.
 func validityMatchesSQL() string {
 	until, from := readableStampSQL("valid_until"), readableStampSQL("valid_from")
-	return "(valid_until IS NULL OR NOT " + until + " OR valid_until >= ?)" +
-		" AND (valid_from IS NULL OR NOT " + from + " OR valid_from <= ?)"
+	return "(valid_until IS NULL OR NOT " + until + " OR " + stampComparableSQL("valid_until") + " >= ?)" +
+		" AND (valid_from IS NULL OR NOT " + from + " OR " + stampComparableSQL("valid_from") + " <= ?)"
 }
 
 // maxPassiveOverFetch is the ceiling on one bucket's passive window.

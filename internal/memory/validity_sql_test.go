@@ -139,6 +139,69 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 			validFrom: strPtr(past), validUntil: strPtr("2026-02-30"), verifiedAt: nil,
 			wantValid: true, wantGoState: ValidityUnverified,
 		},
+		// Fractional-second bounds. Go's time.Parse accepts a separator and one or
+		// more digits after the seconds field, so these are READABLE and must be
+		// judged, not treated as no claim.
+		{
+			name:      "fractional valid_until .000 in the past -> expired, dropped",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.000"), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityExpired,
+		},
+		{
+			name:      "fractional valid_until .5 in the past -> expired, dropped",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.5"), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityExpired,
+		},
+		{
+			name:      "fractional valid_until ,5 (comma) in the past -> expired, dropped",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00,5"), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityExpired,
+		},
+		{
+			name:      "fractional valid_until just before now (11:59:59.9) -> expired, dropped",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:59:59.9"), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityExpired,
+		},
+		{
+			name:      "fractional valid_until .000 exactly at now -> kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.000"), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		{
+			name:      "fractional valid_until .5 after now's second -> kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.5"), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		{
+			name:      "fractional valid_from .000 exactly at now -> kept",
+			validFrom: strPtr("2026-09-27 12:00:00.000"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		{
+			name:      "fractional valid_from .5 after now -> future, dropped",
+			validFrom: strPtr("2026-09-27 12:00:00.5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityFuture,
+		},
+		{
+			name:      "fractional valid_from in the future (,5) -> future, dropped",
+			validFrom: strPtr("2026-09-28 12:00:00,5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
+			wantValid: false, wantGoState: ValidityFuture,
+		},
+		{
+			name:      "fractional valid_from in the past -> kept",
+			validFrom: strPtr("2026-09-27 11:00:00.5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		{
+			name:      "fractional valid_until with trailing text is unreadable -> no claim, kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.5x"), verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnverified,
+		},
+		{
+			name:      "valid_until with a bare separator and no digits is unreadable -> kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00."), verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnverified,
+		},
 		{
 			name:      "unreadable valid_until, readable window -> valid, kept",
 			validFrom: strPtr(past), validUntil: strPtr("9999-99-99"), verifiedAt: strPtr(stamp),
@@ -281,6 +344,123 @@ func TestPassiveReadAdmitsExactlyTheValidRows(t *testing.T) {
 	for id := range got {
 		if !want[id] {
 			t.Errorf("a row Go's rule drops was returned by the passive read: %s", id)
+		}
+	}
+}
+
+// TestPassiveWindowIsNotFilledByExpiredRows is the reproduction from #892 against
+// the real store: more expired, high-importance rows than the over-fetch sits
+// AHEAD of one valid, low-importance row in the ranking. Filtering validity after
+// the LIMIT would fill the whole window with the expired rows and return nothing;
+// the valid row has to be the one that comes back. The count is larger than the
+// over-fetch on purpose, so a window that merely happens to be big enough cannot
+// pass this by accident.
+func TestPassiveWindowIsNotFilledByExpiredRows(t *testing.T) {
+	s, ctx := newDedupStore(t)
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
+	future := now.Add(24 * time.Hour).Format(StoredStampLayout)
+
+	const overFetch = 20
+	for i := 0; i < overFetch+10; i++ {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "expired-" + itoa(i), Source: "manual", Importance: 0.9,
+		})
+		if err != nil {
+			t.Fatalf("Create expired %d: %v", i, err)
+		}
+		setRawValidity(t, s, ctx, id, strPtr(past), strPtr(past), nil)
+	}
+	validID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the one valid row", Source: "manual", Importance: 0.1,
+	})
+	if err != nil {
+		t.Fatalf("Create valid: %v", err)
+	}
+	setRawValidity(t, s, ctx, validID, strPtr(past), strPtr(future), nil)
+
+	pol := projectPassivePolicy()
+	pol.Bucket = testProject
+	pol.OverFetch = overFetch
+	req := passiveRequest(testProject, pol)
+	req.Now = now
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	ids := passiveIDs(set)
+	if len(ids) != 1 || ids[0] != validID {
+		t.Fatalf("passive window = %v; want exactly the valid row %s (expired rows must not spend the over-fetch)", ids, validID)
+	}
+	if set.ValidityExcluded != 0 {
+		t.Errorf("ValidityExcluded = %d on a non-empty window; the probe runs only for an empty bucket", set.ValidityExcluded)
+	}
+}
+
+// TestPassiveValidityExcludedCountsAnEntirelyInvalidBucket pins the verdict input
+// for the two surfaces that have to say "withheld as out of date" rather than
+// "nothing was saved": a project bucket and a `_global` bucket whose every row
+// the validity predicate removed. It is called directly, and through Candidates,
+// because the count is only worth anything if the set carries it.
+func TestPassiveValidityExcludedCountsAnEntirelyInvalidBucket(t *testing.T) {
+	s, ctx := newDedupStore(t)
+	if err := s.EnsureProject(ctx, GlobalProjectID, "", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
+	future := now.Add(24 * time.Hour).Format(StoredStampLayout)
+
+	// Two buckets, each entirely invalid: one expired row and one not yet open.
+	for _, bucket := range []string{testProject, GlobalProjectID} {
+		for name, win := range map[string][2]string{"expired": {past, past}, "future": {future, future}} {
+			id, err := s.Create(ctx, bucket, Memory{
+				Category: "fact", Content: bucket + "-" + name, Source: "manual", Importance: 0.7,
+			})
+			if err != nil {
+				t.Fatalf("Create(%s,%s): %v", bucket, name, err)
+			}
+			setRawValidity(t, s, ctx, id, strPtr(win[0]), strPtr(win[1]), nil)
+		}
+	}
+	// A resolved row and a row in another bucket must not be counted as exclusions.
+	other, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "resolved", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create resolved: %v", err)
+	}
+	setRawValidity(t, s, ctx, other, strPtr(past), strPtr(past), nil)
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET resolved_at = ? WHERE id = ?`, past, other); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	cols, err := passiveColumnsFor(s)
+	if err != nil {
+		t.Fatalf("passiveColumnsFor: %v", err)
+	}
+	for _, pol := range []SlicePolicy{projectPassivePolicy(), globalPassivePolicy()} {
+		pol.Bucket = map[string]string{"proj": testProject, "_global": GlobalProjectID}[pol.Bucket]
+		req := passiveRequest(testProject, pol)
+		req.Now = now
+
+		n, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+		if err != nil {
+			t.Fatalf("passiveValidityExcluded(%s): %v", pol.Bucket, err)
+		}
+		if n != 2 {
+			t.Errorf("passiveValidityExcluded(%s) = %d; want 2 (the expired and the not-yet-open row)", pol.Bucket, n)
+		}
+
+		set, err := s.Candidates(ctx, req)
+		if err != nil {
+			t.Fatalf("Candidates(%s): %v", pol.Bucket, err)
+		}
+		if len(set.Rows) != 0 {
+			t.Errorf("Candidates(%s) returned %d rows; every row is out of its window", pol.Bucket, len(set.Rows))
+		}
+		if set.ValidityExcluded != 2 {
+			t.Errorf("CandidateSet.ValidityExcluded(%s) = %d; want 2", pol.Bucket, set.ValidityExcluded)
 		}
 	}
 }
