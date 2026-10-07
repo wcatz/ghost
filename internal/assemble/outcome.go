@@ -178,17 +178,32 @@ func (p *pipeline) emptyReason() string {
 		return reasonRetrievalFailed
 	}
 	if p.passive {
+		// The validity predicate runs in SQL on this path, before the window closes,
+		// so a bucket whose every row is outside its window comes back empty with
+		// NO stage having run — and the empty window below would call that
+		// `no_memories`, whose sentence is a census of absence and whose callers
+		// keep the never-saved verdict. It is not the same fact: rows were found and
+		// withheld. The retriever states how many its predicate removed, and a
+		// non-zero count is `all_invalid`, the same reason stage 2 produces when it
+		// is the one dropping them, so every surface reads one reason for one fact.
+		//
+		// It sits BELOW the two leg checks deliberately, which is what the block
+		// above says in its own terms: a leg fact is only reached when no stage
+		// removed rows, and a validity exclusion is a stage's removal — done early,
+		// in SQL, but the same removal. It sits ABOVE `no_memories` for the reason
+		// this branch exists.
+		if p.set.ValidityExcluded > 0 {
+			return reasonAllInvalid
+		}
 		// The last line, and the only one the passive path changes. Reaching here
 		// means no stage removed anything and no leg fact explains the emptiness, so
 		// the window itself is what was empty — and `no_candidates` would claim a
 		// QUERY matched nothing, which is a sentence about a search that never ran.
 		// A passive empty is `no_memories`.
 		//
-		// It sits BELOW the two leg checks deliberately, which is what the block
-		// above says in its own terms: a stage that removed rows is the cause the
-		// caller can act on, and a leg fact is only reached when no stage did. The
-		// two leg reasons are real facts on a passive set — a retriever can report a
-		// leg applicable-but-not-run — so they are kept, not duplicated above.
+		// The two leg reasons are real facts on a passive set — a retriever can
+		// report a leg applicable-but-not-run — so they are kept, not duplicated
+		// above.
 		return reasonNoMemories
 	}
 	return reasonNoCandidates

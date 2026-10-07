@@ -43,6 +43,10 @@ type BucketTally struct {
 	// doing, not the ranking's cut. Set by CountedAgainst, and not part of
 	// RankedOut or Withheld.
 	Deduped int
+	// Excluded is how many of Withheld never entered the window: rows the fetch's
+	// own validity predicate removed before the LIMIT, so no stage ever decided
+	// on them and the trace holds nothing for them. Set by CountedAgainst.
+	Excluded int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
@@ -53,7 +57,7 @@ type BucketTally struct {
 // this bucket: everything the stages saw, shown or not. It is NOT the number of
 // rows the store holds; Total is that.
 func (t BucketTally) Window() int {
-	return t.Shown + t.RankedOut + t.Withheld + t.Deduped - t.Beyond
+	return t.Shown + t.RankedOut + t.Withheld + t.Deduped - t.Beyond - t.Excluded
 }
 
 // Total is every eligible row in the bucket: the window's rows plus the rows
@@ -64,31 +68,46 @@ func (t BucketTally) Total() int {
 	return t.Shown + t.RankedOut + t.Withheld + t.Deduped
 }
 
-// CountedAgainst folds in the number of eligible rows the store holds for the
-// bucket, counted with the SAME predicates the retrieval's window uses (so a row
-// a stage withheld is already among them and is not counted twice), and the
-// window's over-fetch limit. The eligible rows past that limit were cut by the
-// ranking before any stage saw them, so they are ranked out. Rows inside the
-// limit that the trace never recorded were removed by the bucket policy as
-// near-duplicate losers, and are Deduped: neither the ranking's cut nor a
-// stage's withholding.
+// CountedAgainst folds in what the store holds for the bucket: `eligible` rows
+// counted over the same population the retrieval's fetch draws from, of which
+// `excluded` were removed by the fetch's own validity predicate before its LIMIT
+// (so no stage saw them), and the window's `overFetch` limit.
+//
+//   - excluded rows are withheld, and are counted once: they are inside
+//     `eligible` and in no trace decision.
+//   - the rest of the eligible rows past the over-fetch were cut by the ranking
+//     before any stage saw them, so they are ranked out (Beyond).
+//   - rows inside the limit that the trace never recorded were removed by the
+//     bucket policy as near-duplicate losers (Deduped): neither the ranking's cut
+//     nor a stage's withholding.
 //
 // A negative eligible count means the count could not be read and changes
 // nothing; a count smaller than what the tally already holds (a write raced the
 // two reads) never shrinks the tally.
-func (t BucketTally) CountedAgainst(eligible, overFetch int) BucketTally {
-	if eligible < 0 || eligible <= t.Total() {
+func (t BucketTally) CountedAgainst(eligible, excluded, overFetch int) BucketTally {
+	if eligible < 0 || excluded < 0 || excluded > eligible || eligible < t.Total() {
 		return t
 	}
-	fetched := eligible
-	if overFetch > 0 && overFetch < eligible {
+	known := t.Total()
+	inWindow := eligible - excluded
+	fetched := inWindow
+	if overFetch > 0 && overFetch < inWindow {
 		fetched = overFetch
 	}
-	if beyond := eligible - fetched; beyond > 0 {
+	if beyond := inWindow - fetched; beyond > 0 {
 		t.RankedOut += beyond
 		t.Beyond += beyond
 	}
-	if gone := fetched - t.Window(); gone > 0 {
+	if excluded > 0 {
+		t.Withheld += excluded
+		t.Excluded += excluded
+		if t.Reason == "" {
+			// A predicate-withheld row has no decision to name its cause; the two
+			// validity states share one sentence, so either names it.
+			t.Reason = validityExpired
+		}
+	}
+	if gone := fetched - known; gone > 0 {
 		t.Deduped += gone
 	}
 	return t

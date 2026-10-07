@@ -260,16 +260,16 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	// trace made it (the header then describes the window, which is the most it
 	// can honestly say).
 	for _, sl := range budget.Slices {
-		n, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, cfg.Injection.SessionScope)
+		n, excluded, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, now, cfg.Injection.SessionScope)
 		if err != nil {
 			slog.Warn("ghost: session-start eligible count failed, so the header counts the retrieval window", "bucket", sl.Bucket, "error", err)
 			continue
 		}
 		switch sl.Bucket {
 		case projectID:
-			tally.project = tally.project.CountedAgainst(n, sl.OverFetch)
+			tally.project = tally.project.CountedAgainst(n, excluded, sl.OverFetch)
 		case memory.GlobalProjectID:
-			tally.globals = tally.globals.CountedAgainst(n, sl.OverFetch)
+			tally.globals = tally.globals.CountedAgainst(n, excluded, sl.OverFetch)
 		}
 	}
 	if tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {

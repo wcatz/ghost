@@ -199,7 +199,7 @@ func TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow(t *testing.T) {
 // ranking cut before any stage saw them. They are ranked out, and the total is
 // the eligible count, not the window's size.
 func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
-	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60, 45)
+	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60, 0, 45)
 	if tally.Total() != 60 {
 		t.Errorf("Total = %d, want 60 (the eligible rows, not the 45 the window held)", tally.Total())
 	}
@@ -211,12 +211,36 @@ func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
 	}
 	// A count that came back smaller than the window (a write raced it) never
 	// shrinks the tally below what the window held.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10, 45); got.Total() != 45 || got.RankedOut != 30 {
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10, 0, 45); got.Total() != 45 || got.RankedOut != 30 {
 		t.Errorf("a stale count changed the tally: %+v", got)
 	}
 	// A negative count means "unknown" and changes nothing.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1, 45); got.Total() != 45 {
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1, 0, 45); got.Total() != 45 {
 		t.Errorf("an unknown count changed the tally: %+v", got)
+	}
+}
+
+// TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce: the fetch's SQL
+// validity predicate removes closed-window rows before the LIMIT, so they are in
+// the eligible count, in no trace decision, and are the withholding's doing. They
+// are withheld, counted once, and are not beyond the window.
+func TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce(t *testing.T) {
+	// 3 eligible: 1 live row shown, 2 removed by the predicate.
+	tally := BucketTally{Shown: 1}.CountedAgainst(3, 2, 45)
+	if tally.Total() != 3 || tally.Withheld != 2 || tally.RankedOut != 0 || tally.Beyond != 0 {
+		t.Errorf("tally = %+v, want total 3 with 2 withheld and nothing ranked out", tally)
+	}
+	if tally.Reason != validityExpired {
+		t.Errorf("Reason = %q, want %q: a predicate-withheld row has no trace decision to name its cause", tally.Reason, validityExpired)
+	}
+	if tally.Window() != 1 {
+		t.Errorf("Window = %d, want 1 (the withheld rows were never in the window)", tally.Window())
+	}
+	// 60 eligible, 45 of them excluded, over-fetch 45: the 15 live rows all fit
+	// the window, so nothing is beyond it.
+	big := BucketTally{Shown: 15}.CountedAgainst(60, 45, 45)
+	if big.Beyond != 0 || big.Total() != 60 || big.Withheld != 45 {
+		t.Errorf("big = %+v, want 15 shown + 45 withheld and nothing beyond", big)
 	}
 }
 
@@ -227,7 +251,7 @@ func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
 // header cannot hand it to the ranking.
 func TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates(t *testing.T) {
 	// 11 eligible globals, a window of 16 that held them all, the trace saw 10.
-	tally := BucketTally{Shown: 8, RankedOut: 2}.CountedAgainst(11, 16)
+	tally := BucketTally{Shown: 8, RankedOut: 2}.CountedAgainst(11, 0, 16)
 	if tally.Total() != 11 {
 		t.Errorf("Total = %d, want 11", tally.Total())
 	}
@@ -245,7 +269,7 @@ func TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates(t *testing.T) {
 // note must render; only rows the ranking cut INSIDE the window mean the bucket
 // is not wholly withheld.
 func TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt(t *testing.T) {
-	beyond := BucketTally{Shown: 0, Withheld: 45, Reason: validityExpired}.CountedAgainst(60, 45)
+	beyond := BucketTally{Shown: 0, Withheld: 45, Reason: validityExpired}.CountedAgainst(60, 0, 45)
 	if beyond.WithheldNote() == "" {
 		t.Errorf("a window withheld whole, with rows behind it, lost the note: %+v", beyond)
 	}

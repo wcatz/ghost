@@ -176,6 +176,13 @@ type CandidateSet struct {
 	// they are counted here because a shorter set that says nothing about the gap
 	// reads as the whole truth. Zero on every current read.
 	Unrecorded int
+	// ValidityExcluded counts the passive window's rows the validity predicate
+	// removed in SQL, before the LIMIT, so a bucket that came back empty can say
+	// whether it was empty of valid rows or EMPTY of rows. It is only set by the
+	// passive path, and only for a bucket whose fetch returned nothing; a fusion
+	// read leaves it zero because its validity filtering happens in the assembler,
+	// where the removed rows are counted per stage as usual.
+	ValidityExcluded int
 }
 
 // Candidate is one hydrated row with the scoring facts fusion produced for it.

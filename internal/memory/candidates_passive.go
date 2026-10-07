@@ -39,6 +39,63 @@ const (
 // it.
 const stampLayoutForSQL = "2006-01-02 15:04:05"
 
+// readableStampSQL is the SQL boolean for "memory.ParseStamp could read this
+// column", and it is a ROUND TRIP rather than a shape check: strftime returns
+// NULL for a value no layout parses AND for one whose fields are out of range
+// (`2026-02-30`), and the equality rejects a value SQLite would normalize to a
+// different string. That is the same set ParseStamp accepts over StampLayouts:
+// `2006-01-02 15:04:05` and `2006-01-02`.
+//
+// A GLOB per layout would be wrong in the direction that loses rows: it accepts
+// `9999-99-99`, which Go's parser rejects, and this predicate would then COMPARE
+// an unreadable bound where ValidityState treats it as no claim.
+//
+// The two formats are tried in StampLayouts' order. Go's time.Parse also accepts
+// a fractional second after the seconds field of the first layout (`.000`, `.5`,
+// `,5`: a separator then one or more digits and nothing else), so the first
+// branch tests the leading 19 characters and then the shape of the rest. A row
+// with such a bound is read exactly as Go reads it, and is compared through
+// stampComparableSQL.
+func readableStampSQL(col string) string {
+	lead := "substr(" + col + ", 1, 19)"
+	seconds := "strftime('%Y-%m-%d %H:%M:%S', " + lead + ")"
+	day := "strftime('%Y-%m-%d', " + col + ")"
+	fraction := "(length(" + col + ") = 19 OR (length(" + col + ") >= 21" +
+		" AND substr(" + col + ", 20, 1) IN ('.', ',')" +
+		" AND substr(" + col + ", 21) NOT GLOB '*[^0-9]*'))"
+	return "((" + seconds + " IS NOT NULL AND " + lead + " = " + seconds + " AND " + fraction + ")" +
+		" OR (" + day + " IS NOT NULL AND " + col + " = " + day + "))"
+}
+
+// stampComparableSQL is the column as it is compared against the bound Now, which
+// is bound at WHOLE-SECOND precision (stampLayoutForSQL truncates it). A stored
+// fraction is cut off so both sides are whole seconds, and the comparison is
+// inclusive on both ends. That makes the SQL predicate a SUPERSET of Go's rule:
+// truncation can only pull a bound toward the same second as Now, never across
+// it, so any row Go keeps (`until >= now`, `from <= now`, at full precision) is
+// kept here. It may admit a row Go then drops at stage 2 (from `12:00:00.5` with
+// a Now of `12:00:00.3`); that costs one LIMIT slot and nothing else. It never
+// drops a row Go calls valid, whatever sub-second part Now carries.
+func stampComparableSQL(col string) string {
+	return "CASE WHEN length(" + col + ") > 19 THEN substr(" + col + ", 1, 19) ELSE " + col + " END"
+}
+
+// validityMatchesSQL is the SQL form of memory.ValidityState's window test: a row
+// is admitted when its window contains the bound Now (valid_from <= now AND
+// valid_until >= now). It returns the fragment with TWO ? placeholders, bound in
+// text order — valid_until then valid_from — both to the same now stamp.
+//
+// A NULL bound is open, and a bound no layout reads is treated as no claim, which
+// is the one rule the two forms must share (see readableStampSQL). A readable
+// bound is compared directly, so `valid_until` exactly equal to now is KEPT (the
+// rule is a closed window, not an open one), matching ValidityState's
+// `until.Before(now)`.
+func validityMatchesSQL() string {
+	until, from := readableStampSQL("valid_until"), readableStampSQL("valid_from")
+	return "(valid_until IS NULL OR NOT " + until + " OR " + stampComparableSQL("valid_until") + " >= ?)" +
+		" AND (valid_from IS NULL OR NOT " + from + " OR " + stampComparableSQL("valid_from") + " <= ?)"
+}
+
 // maxPassiveOverFetch is the ceiling on one bucket's passive window.
 //
 // It is a refusal rather than a clamp because the two disagree about what the
@@ -140,6 +197,18 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		if err != nil {
 			return nil, err
 		}
+		// A bucket that came back empty is the only case the reason can be reported
+		// on, and the only case the probe has to run: if any bucket returned rows
+		// the set is non-empty and the assembler never reads this count. Probing the
+		// empty bucket and summing reports the exclusions of a union of two empty
+		// buckets, which is what the verdict describes.
+		if len(fetched) == 0 {
+			excluded, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+			if err != nil {
+				return nil, err
+			}
+			set.ValidityExcluded += excluded
+		}
 		rows = append(rows, fetched...)
 	}
 	set.Rows = rows
@@ -224,64 +293,13 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
 }
 
-// passiveWhere is the ONE statement of which rows a passive bucket may read: the
-// bucket (unioned with `_global` when the policy says so), unresolved, and inside
-// the session's scope. The window's fetch and PassiveEligibleCount both splice
-// it, so the count the session-start header divides by is over exactly the rows
-// the window draws from — two spellings of the predicate would let the header
-// describe a population the block was not assembled from.
-func passiveWhere(pol SlicePolicy, scope map[string]string, cols passiveColumns) string {
-	scopeClause := ""
-	if cols.HasScope && len(scope) > 0 {
-		scopeClause = " AND " + ScopeMatchesSQL("scope", scope)
-	}
-
-	// The project predicate: the POLICY'S BUCKET, unioned with `_global` when the
-	// policy says so. It is spelled here rather than borrowed from
-	// CandidateRequest.Mode, because Mode is a property of the REQUEST and this is
-	// a property of the BUCKET — a request can carry both a project bucket and a
-	// `_global` bucket, and only the first of those may admit globals, since the
-	// second would read the same rows a second time. That request is refused (see
-	// validatePassivePolicies) rather than served twice.
-	//
-	// PARENTHESISED, and that is not decoration. `AND` binds tighter than `OR` in
-	// SQL, so an unbracketed `project_id = ? OR project_id = '_global' AND
-	// resolved_at IS NULL` reads as `project_id = ? OR (… AND resolved_at IS NULL)`
-	// — every row of the requesting project escapes the resolved filter, and the
-	// scope clause below it is scoped to the `_global` half alone. The block then
-	// renders resolved rows, and a scope filter that was set does nothing to the
-	// rows that matter. The goldens' resolved-row guard is what caught it.
-	projectClause := "project_id = ?"
-	if pol.IncludeGlobal {
-		projectClause = "(" + projectClause + " OR project_id = '" + GlobalProjectID + "')"
-	}
-	return projectClause + " AND resolved_at IS NULL" + scopeClause
-}
-
-// PassiveEligibleCount is how many rows the policy's bucket could ever put in its
-// window: the same predicates the fetch applies, with no LIMIT and no validity
-// stage (a row a stage withholds is eligible, and is already among the window's
-// rows when the window reaches it). A session-start header uses it to say how
-// many rows the store holds against the over-fetch's window, so a bucket larger
-// than the window does not read as if it held only the window.
-func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, scope map[string]string) (int, error) {
-	cols, err := passiveColumnsFor(s)
-	if err != nil {
-		return 0, err
-	}
-	var n int
-	err = s.queryDB().QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM memories WHERE "+passiveWhere(pol, scope, cols), pol.Bucket).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
-	}
-	return n, nil
-}
-
-// passiveFetchSQL builds one policy's read and its bindings TOGETHER, because a
-// mismatch between an ORDER BY and its argument list is not an error — it binds
-// the clock to the wrong column, and a fully decayed row then reads as a fresh
-// one with no complaint anywhere.
+// passivePopulationSQL is the WHERE half a bucket's fetch and the validity probe
+// that counts what the filter removed from it SHARE: the policy's project
+// predicate with its bucket binding, `resolved_at IS NULL`, and the scope
+// predicate where the store has the column. It is one function so the two
+// statements cannot disagree about which rows the window is over — a probe run
+// over a different population would report exclusions the fetch never
+// considered, and the difference is exactly the row set the verdict describes.
 //
 // The project predicate is the POLICY'S BUCKET, and `CandidateRequest.Mode` does
 // not apply here. That is the whole shape of a passive read: one statement per
@@ -291,27 +309,64 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, scope
 // become — and which is why nothing here merges a project row and a global row in
 // one result set for the assembler to have to separate.
 //
-// The bindings are the bucket, then the clock for the decay order only, then the
-// limit. The scope predicate contributes none: ScopeMatchesSQL embeds the
-// requested values as a quoted JSON literal, so a value holding a quote is
-// escaped rather than allowed to end the statement early.
+// PARENTHESISED on the global half, and that is not decoration. `AND` binds
+// tighter than `OR` in SQL, so an unbracketed `project_id = ? OR project_id =
+// '_global' AND resolved_at IS NULL` reads as `project_id = ? OR (… AND
+// resolved_at IS NULL)` — every row of the requesting project escapes the
+// resolved filter, and the scope clause is scoped to the `_global` half alone.
+// The block then renders resolved rows, and a scope filter that was set does
+// nothing to the rows that matter. The goldens' resolved-row guard is what caught
+// it.
+//
+// The scope predicate contributes NO bindings: ScopeMatchesSQL embeds the
+// requested values as a quoted JSON literal, so a value holding a quote is escaped
+// rather than allowed to end the statement early. Its own guard is the
+// session-start loaders': on a store below the scope floor the column is not
+// there, and every row carries no scope, so an unscoped row never conflicts with a
+// session scope — the substitution shows the rows that store has, which is the
+// block it produced before scope was read.
+func passivePopulationSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
+	projectClause := "project_id = ?"
+	if pol.IncludeGlobal {
+		projectClause = "(" + projectClause + " OR project_id = '" + GlobalProjectID + "')"
+	}
+	where := projectClause + " AND resolved_at IS NULL"
+	if cols.HasScope && len(req.Scope) > 0 {
+		where += " AND " + ScopeMatchesSQL("scope", req.Scope)
+	}
+	return where, []any{pol.Bucket}
+}
+
+// passiveFetchSQL builds one policy's read and its bindings TOGETHER, because a
+// mismatch between an ORDER BY and its argument list is not an error — it binds
+// the clock to the wrong column, and a fully decayed row then reads as a fresh
+// one with no complaint anywhere.
+//
+// The validity predicate is applied HERE, in SQL, rather than only in the
+// assembler's stage 2. The over-fetch chooses which rows are read at all, so a row
+// whose validity window has closed or has not opened must not spend any of the
+// window: filtering it afterwards would fill the window with rows the caller
+// cannot use and then cut them, and a window that small reaches a weaker block.
+// It is GATED on the column existing, because on a store below the validity floor
+// the predicate names columns that are not there and the whole fetch would fail
+// with "no such column: valid_from". The rows the block then shows are the ones
+// that store has, labelled without a validity window — the block it produced
+// before validity was read.
+//
+// The bindings are in TEXT order: the bucket, then the validity stamps when the
+// predicate is present, then the clock for the decay order, then the limit. The
+// validity stamps are bound rather than interpolated, so the same clock value the
+// decay ranking and the selection use is the one the window is filtered against.
 func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
-	// The scope predicate is applied HERE, in SQL, rather than only in the
-	// assembler's stage 3. The over-fetch chooses which rows are read at all, so
-	// a row the session excluded must not spend any of the window: filtering it
-	// afterwards would fill the window with rows the caller rejected and then cut
-	// them, and a window that small reaches a weaker block.
-	//
-	// GATED on the column existing, which is the same guard the session-start
-	// loaders apply and for the same reason: on a store below the scope floor the
-	// predicate names a column that is not there, and the whole fetch would fail
-	// with `no such column: scope` — where the loaders it replaces render an
-	// unscoped block. Suppressing it is correct rather than merely safe: every row
-	// in such a store carries no scope, and ScopesConflict over an empty scope has
-	// no keys, so an unscoped row never conflicts with a session scope. The rows
-	// the block then shows are the ones that store has, labelled without a scope —
-	// which is exactly the block it produced before scope was read.
-	where := passiveWhere(pol, req.Scope, cols)
+	where, args := passivePopulationSQL(pol, req, cols)
+	if cols.HasValidity {
+		// The clock is bound to the same instant the decay ranking uses, so the
+		// window, the decay score derived from it in selectPassive, and the row
+		// ages the trace reports are all made against the same clock.
+		stamp := req.Now.UTC().Format(stampLayoutForSQL)
+		where += " AND " + validityMatchesSQL()
+		args = append(args, stamp, stamp)
+	}
 
 	// The `_global` order carries a trailing `id` that the shipped loader's query
 	// does not. It is a divergence from the specification and a deliberate one: a
@@ -322,7 +377,6 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	// comparison across machines needs. It can only ever REORDER rows the loader
 	// left unordered, never move a row past one it ranked.
 	orderBy := "pinned DESC, importance DESC, updated_at DESC, id"
-	args := []any{pol.Bucket}
 	if pol.Order == "" || pol.Order == OrderDecay {
 		// The rank expression takes a BOUND instant rather than julianday('now'),
 		// so the window, the decay score derived from it in selectPassive, and
@@ -343,7 +397,7 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	//
 	// The predicate is a FRAGMENT spliced in, not a bind, because it is built from
 	// a policy field and the constant `_global` — never from caller text. The one
-	// caller-supplied value, the bucket, is bound below and is never interpolated.
+	// caller-supplied value, the bucket, is bound in passivePopulationSQL.
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM memories
@@ -351,6 +405,82 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 		ORDER BY %s
 		LIMIT ?`, cols.list, where, orderBy)
 	return query, append(args, pol.OverFetch)
+}
+
+// PassiveEligibleCount is how many rows the policy's bucket holds that the
+// window's fetch could ever draw from, and how many of those the fetch's own
+// validity predicate removes before the LIMIT. Both come from ONE statement over
+// passivePopulationSQL, the population the fetch and the validity probe already
+// share, so the count and the window cannot disagree about which rows are in
+// play and a validity-excluded row is counted once: inside `eligible`, and again
+// as `validityExcluded`, never as a second row. `eligible - validityExcluded` is
+// the number of rows the window could hold if it had no LIMIT.
+//
+// A session-start header uses it to say how many rows the store holds against the
+// over-fetch's window, so a bucket larger than the window does not read as if it
+// held only the window, and rows the predicate withheld are reported as withheld
+// rather than ranked out. A store below the validity floor has no predicate:
+// validityExcluded is zero.
+func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, err error) {
+	cols, err := passiveColumnsFor(s)
+	if err != nil {
+		return 0, 0, err
+	}
+	where, popArgs := passivePopulationSQL(pol, CandidateRequest{Scope: scope, Now: now}, cols)
+	if !cols.HasValidity {
+		err = s.queryDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM memories WHERE "+where, popArgs...).Scan(&eligible)
+		if err != nil {
+			return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+		}
+		return eligible, 0, nil
+	}
+	stamp := now.UTC().Format(stampLayoutForSQL)
+	// The select list's placeholders come first in the statement's text, so the
+	// stamps are bound before the population's bucket.
+	args := append([]any{stamp, stamp}, popArgs...)
+	query := "SELECT COUNT(*), COALESCE(SUM(CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END), 0) FROM memories WHERE " + where
+	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible, &validityExcluded); err != nil {
+		return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+	}
+	return eligible, validityExcluded, nil
+}
+
+// passiveValidityExcluded counts the rows in one bucket's window that the validity
+// predicate removed BEFORE the LIMIT — the rows that would have been fetched had
+// they been in their window. It exists because filtering in SQL leaves the
+// assembler a set that is empty with no stage having run, and "the window came
+// back empty" (no_memories) and "rows were found and withheld as out of date"
+// (all_invalid) are different facts a caller acts on differently; the census
+// surface may claim absence only for the first.
+//
+// The probe is run only for a bucket whose fetch came back empty, so a session
+// start that reads anything pays nothing for it. It asks the same population the
+// fetch does, through passivePopulationSQL, so a row excluded by scope or by
+// resolved_at is not counted as a validity exclusion.
+//
+// Every counted row is one Go also calls invalid, because the predicate is a
+// superset of Go's verdict (see stampComparableSQL); the count is a LOWER BOUND on
+// what stage 2 would have withheld (a row admitted only by second-truncation is
+// not counted), never an overcount.
+//
+// A store below the validity floor has no predicate to have excluded anything:
+// zero, not an error.
+func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, error) {
+	if !cols.HasValidity {
+		return 0, nil
+	}
+	where, args := passivePopulationSQL(pol, req, cols)
+	stamp := req.Now.UTC().Format(stampLayoutForSQL)
+	// NOT (validityMatchesSQL()) is "the predicate would have dropped this row".
+	// The two ? placeholders are bound in the predicate's own text order (until,
+	// then from), after the population's bucket.
+	args = append(args, stamp, stamp)
+	query := `SELECT COUNT(*) FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `)`
+	var n int
+	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
+	}
+	return n, nil
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the
@@ -679,9 +809,10 @@ func decayRankingSQLAt(now time.Time, hasTier bool) (string, []any) {
 // retention" on a store below the tier floor, where the loader it replaces
 // renders the block perfectly well.
 type passiveColumns struct {
-	list     string
-	HasTier  bool
-	HasScope bool
+	list        string
+	HasTier     bool
+	HasScope    bool
+	HasValidity bool
 	// HasProvenance gates the EVIDENCE read, which is not a column in the memories
 	// table at all: `memory_provenance` is a table migrateV18 creates, so a store
 	// below that floor has never had it. Unlike the demotion lookups, which degrade
@@ -704,13 +835,19 @@ type passiveColumns struct {
 	ProvenanceKnown bool
 }
 
-// The schema versions that added memories.scope and memories.retention. They are
-// the same floors the session-start loaders apply, stated here rather than
-// imported: a column cannot be selected on a store that does not have it, and a
-// decay order cannot multiply by one that is not there.
+// The schema versions at which the columns this reader depends on arrived on
+// memories: scope at v12, the validity triple (valid_from, valid_until,
+// verified_at) at v10 through phase1aProvenanceColumns, retention and expires_at
+// at v19. Each is stated here rather than imported because a column cannot be
+// selected on a store that does not have it, and a decay order cannot multiply by
+// one that is not there. The floor is the version the migration STAMPS, not a
+// later version that happened to rebuild the table with the same columns:
+// migrateV10 introduced them and rebuildMemoriesV15 only carried them across, so
+// a v12 store is read with the validity predicate exactly as a current one is.
 const (
 	passiveScopeColumnFloor     = 12
 	passiveRetentionColumnFloor = 19
+	passiveValidityColumnFloor  = 10
 	// memory_provenance is a TABLE rather than a column, so it needs its own floor:
 	// the SELECT list cannot express "this table may not exist" the way a column
 	// can be replaced by a NULL literal.
@@ -731,7 +868,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// not have is substituted for, so a path that fails to set one loses a label
 	// rather than failing the read. The error branch below leaves them false on
 	// purpose, and says why.
-	var hasScope, hasTier, hasProvenance bool
+	var hasScope, hasTier, hasValidity, hasProvenance bool
 	var versionKnown bool
 
 	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
@@ -744,10 +881,11 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 		hasScope = version >= passiveScopeColumnFloor
 		hasTier = version >= passiveRetentionColumnFloor
 		hasProvenance = version >= passiveProvenanceColumnFloor
+		hasValidity = version >= passiveValidityColumnFloor
 	} else {
 		// Warn, and the reason is what the substitutions below are FOR: a version
 		// this cannot read means every flag stays false, so the fetch silently
-		// drops its scope filter, its tier label and its expiry window and the
+		// drops its scope filter, its tier label and its expiry window, its validity window and the
 		// block renders as an unscoped, undated one. The session-start loaders
 		// this replaced printed exactly this diagnosis on stderr and said why it
 		// had to be loud: the fallbacks keep working, which is what makes the loss
@@ -764,9 +902,18 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// detail: the scanner binds it as a plain string and resolves `""` to
 	// `RetentionProject` itself ("a row whose tier reads empty is a row a query did
 	// not select, not a fourth tier"). A NULL here is a Scan error — "converting
-	// NULL to string is unsupported" — which is how this was found. `scope` and
-	// `expires_at` take NULL because those ARE bound as sql.NullString, and NULL is
-	// the honest value for "no scope stated" and "no expiry claimed".
+	// NULL to string is unsupported" — which is how this was found. `scope`,
+	// `expires_at` and the validity triple take NULL because those ARE bound as
+	// sql.NullString, and NULL is the honest value for "no scope stated", "no
+	// expiry claimed" and "no validity window stated".
+	//
+	// The validity substitution is what makes the validity floor honest: gating
+	// only the WHERE predicate leaves the SELECT list naming `valid_from`, so a
+	// store below v10 fails the read with `no such column: valid_from` before the
+	// predicate is ever reached. A store that predates validity has no window for
+	// any row, which is exactly `NULL`. This is a deliberate second mention of the
+	// triple (the first is the predicate in passiveFetchSQL), and
+	// TestEveryVerifiedAtMentionIsClassified classifies it as the reader it is.
 	names := append([]string(nil), memoryColumnNames...)
 	for i, c := range names {
 		switch {
@@ -776,12 +923,19 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 			names[i] = "'' AS retention"
 		case c == "expires_at" && !hasTier:
 			names[i] = "NULL AS expires_at"
+		case c == "valid_from" && !hasValidity:
+			names[i] = "NULL AS valid_from"
+		case c == "valid_until" && !hasValidity:
+			names[i] = "NULL AS valid_until"
+		case c == "verified_at" && !hasValidity:
+			names[i] = "NULL AS verified_at"
 		}
 	}
 	return passiveColumns{
 		list:            qualifyColumnsFrom(names, ""),
 		HasTier:         hasTier,
 		HasScope:        hasScope,
+		HasValidity:     hasValidity,
 		HasProvenance:   hasProvenance,
 		ProvenanceKnown: versionKnown,
 	}, nil
