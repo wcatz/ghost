@@ -97,13 +97,16 @@ func AsOfUnversionedNote() string {
 // the fact: memory_history records a memory's STATE in exactly content, category,
 // importance, resolved_at, source and project_id (AsOfRow's doc says so). Its
 // other columns — agent, session_id, related_id, recorded_at and phase — describe
-// the WRITE, not the memory's state, so they too are not a version of the fields
-// a row line renders. The triple a historical row carries is therefore read from
-// the live row, as are its tags, scope, pin, confidence and provenance columns. A
-// surface that worded the borrow itself would let the two drift, and a drift here
-// is not cosmetic — it is the difference between a reader taking a present-day
-// window for the window that held at the instant the block is a reading of, and
-// knowing it is not.
+// the WRITE. The agent column names the PERFORMER of each write and is filled
+// only by the paths that carry a provenance (save, merge, import, update); it is
+// NULL on the lifecycle writes (reflect, resolve, supersede, delete), so it is
+// not a per-version record of the row's own harness — a save version's value
+// coincides with it, a resolve version's does not. The triple a historical row
+// carries is therefore read from the live row, as are its tags, scope, pin,
+// confidence and provenance columns. A surface that worded the borrow itself
+// would let the two drift, and a drift here is not cosmetic — it is the
+// difference between a reader taking a present-day window for the window that
+// held at the instant the block is a reading of, and knowing it is not.
 //
 // The note names the full borrowed set rather than the window alone, and it does
 // NOT say "the rest of the line is the version's": that would be false, because
@@ -116,9 +119,11 @@ func AsOfUnversionedNote() string {
 func AsOfValidityNote(at time.Time) string {
 	return "A memory row's validity window, and its tags, scope, pin, confidence, agent and source_ref, are read " +
 		"from the current row rather than the version the row's content and category come from: memory_history " +
-		"versions none of them as part of a memory's state, and its agent column records who performed the write, " +
-		"not the row's own harness. The window shown is the CURRENT one, not the window the memory held at " +
-		at.UTC().Format(time.RFC3339) + ", so no expiry or future-start verdict is drawn from it."
+		"versions none of them as part of a memory's state. Its agent column names the performer of each individual " +
+		"write — filled by the writers that carry a provenance (save, merge, import, update) and NULL on the " +
+		"lifecycle writes (reflect, resolve, supersede, delete) an as_of read often selects — so it does not track " +
+		"the row's own harness across the memory's life. The window shown is the CURRENT one, not the window the " +
+		"memory held at " + at.UTC().Format(time.RFC3339) + ", so no expiry or future-start verdict is drawn from it."
 }
 
 // AsOfValidityState is the validity state a HISTORICAL listing may draw from a
