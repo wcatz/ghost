@@ -1096,16 +1096,35 @@ anywhere in the read, and no inference: it is a selection.
   shorter set that says nothing about the gap reads as the whole truth.
 - **Which columns are historical.** `content`, `category`, `importance`,
   `resolved_at`, `source` and `project_id` come from the version row. Tags,
-  scope, pin, access count, provenance and the validity triple were never
-  versioned, so they are read from the row as it stands, and a deleted memory has
-  no row at all — those fields are zero for it, which is the honest reading rather
-  than a guess. `valid_from` / `valid_until` are the sharpest case: nothing
-  writes them yet ([#575](https://github.com/wcatz/ghost/issues/575), and the
-  assembler validity work in parallel), so an `as_of` read's validity window is
-  the current one and only the current one. One imprecision is recorded rather
-  than worked around: a promotion **rewrites** the history rows' `project_id` (it
-  has to, or the project-delete cascade takes a memory's past with it), so a
-  pre-promotion instant reports a promoted memory under `_global`.
+  scope, pin, access count, confidence, provenance and the validity triple were
+  never versioned, so they are read from the row as it stands, and a deleted
+  memory has no row at all — those fields are zero for it, which is the honest
+  reading rather than a guess. `valid_from` / `valid_until` / `verified_at` are the sharpest
+  case: [#575](https://github.com/wcatz/ghost/issues/575) ships the writers, but
+  the change log still records no validity, so an `as_of` read takes the window's
+  bounds from the current row. It judges them **at T**, the way
+  `ghost_memory_search` does when it binds the assembler's clock to `as_of`: a
+  row whose window had closed or had not yet opened at T is withheld, and a row
+  valid at T is shown as valid at T even if its window has closed since. The two
+  `as_of` **listing** surfaces — `ghost_project_context`'s `as_of` branch and the
+  `ghost context --as-of` session block — and search all reach that verdict
+  through one helper, `memory.ValidityAt` (stage 2 drops on the same
+  `memory.ValidityWithheld`). The two listings apply it before the limit so a
+  withheld row takes no slot, and state `memory.AsOfValidityNote` once at block
+  level, saying that validity was judged at T, how many rows it withheld
+  (counted, so an all-withheld block is not mistaken for a project that held
+  nothing) and that the bounds, like the row's other unversioned fields, are the
+  current row's. Search reaches the same verdict through stage 2 but does not
+  state that note or a count. A bound exactly at T is inside the window, and an unreadable
+  bound is no bound, as in stage 2. The `unverified` marker is drawn as on any
+  line, because `verified_at` is a flag rather than a predicate. One imprecision
+  is recorded rather than worked around: because the bounds are the current
+  row's, a window edited after T is judged as the edited one, so a row can be
+  withheld from (or kept in) a past answer on the strength of a bound that was
+  not set then ([#910](https://github.com/wcatz/ghost/issues/910)); and a
+  promotion **rewrites** the history rows' `project_id` (it has to, or the
+  project-delete cascade takes a memory's past with it), so a pre-promotion
+  instant reports a promoted memory under `_global`.
 - **Which timestamp the age is measured from.** The row's own `created_at`, which
   is what the current read decays on, whenever it can answer — it is set on
   INSERT and never rewritten (a snapshot restore carries the snapshot's

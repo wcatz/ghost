@@ -756,6 +756,237 @@ func TestFormatMemories_EdgeCases(t *testing.T) {
 	}
 }
 
+// TestFormatMemoriesAtJudgesValidityAtTheRequestedInstant fixes the rule a
+// historical listing shares with ghost_memory_search (#899): validity is judged AT
+// the requested instant. A row valid at T and closed since is shown as valid at
+// T; a row whose window had closed, or not yet opened, at T is withheld; a bound
+// exactly at T is inside the window; an open-ended or unreadable-bound row is
+// kept with no verdict.
+func TestFormatMemoriesAtJudgesValidityAtTheRequestedInstant(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	stamp := func(d time.Duration) *string { return strPtr(at.Add(d).Format(f)) }
+	verified := stamp(-time.Hour)
+
+	mk := func(id, content string, from, until, ver *string) memory.Memory {
+		return memory.Memory{ID: id, Category: "fact", Importance: 0.7, Content: content, ValidFrom: from, ValidUntil: until, VerifiedAt: ver}
+	}
+	mems := []memory.Memory{
+		mk("mem1", "valid at T, closed since", stamp(-48*time.Hour), stamp(24*time.Hour), verified),
+		mk("mem2", "opens after T", stamp(24*time.Hour), stamp(72*time.Hour), verified),
+		mk("mem3", "closed before T", stamp(-72*time.Hour), stamp(-time.Hour), verified),
+		mk("mem4", "open ended", nil, nil, nil),
+		mk("mem5", "ends exactly at T", stamp(-48*time.Hour), stamp(0), verified),
+		mk("mem6", "starts exactly at T", stamp(0), stamp(48*time.Hour), verified),
+		mk("mem7", "unreadable bound", nil, strPtr("not a date"), nil),
+		mk("mem8", "unverified window", stamp(-time.Hour), nil, nil),
+	}
+	result := formatMemoriesAt(mems, at)
+
+	for _, id := range []string{"`mem2`", "`mem3`"} {
+		if memoryMetaGroup(result, id) != "" {
+			t.Errorf("%s is outside its window at T but is listed:\n%s", id, result)
+		}
+	}
+	for _, id := range []string{"`mem1`", "`mem5`", "`mem6`"} {
+		got := memoryMetaGroup(result, id)
+		if got == "" {
+			t.Errorf("%s is inside its window at T but is missing:\n%s", id, result)
+		}
+		if strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") || strings.Contains(got, "unverified") {
+			t.Errorf("%s is valid at T but is labelled %q", id, got)
+		}
+	}
+	if got := memoryMetaGroup(result, "`mem1`"); !strings.Contains(got, "until") {
+		t.Errorf("the window of a row valid at T is not shown: %q", got)
+	}
+	for _, id := range []string{"`mem4`", "`mem7`"} {
+		got := memoryMetaGroup(result, id)
+		if !strings.Contains(result, id) {
+			t.Errorf("%s states no readable window but is missing", id)
+		}
+		for _, bad := range []string{"valid from", "until", "expired", "not yet valid", "unverified"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s carries a validity claim %q: %q", id, bad, got)
+			}
+		}
+	}
+	if got := memoryMetaGroup(result, "`mem8`"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window lost its marker: %q", got)
+	}
+}
+
+// TestWithholdInvalidAtMatchesTheListingFormatter: the handler withholds before
+// the limit and the formatter withholds again defensively; both go through
+// memory.ValidityAt, so they must not disagree on which rows survive.
+func TestWithholdInvalidAtMatchesTheListingFormatter(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	open := strPtr(at.Add(24 * time.Hour).Format(f))
+	closed := strPtr(at.Add(-24 * time.Hour).Format(f))
+	rows := []memory.AsOfRow{
+		{Memory: memory.Memory{ID: "keep", Category: "fact", Content: "kept", ValidUntil: open}},
+		{Memory: memory.Memory{ID: "drop", Category: "fact", Content: "dropped", ValidUntil: closed}},
+		{Memory: memory.Memory{ID: "future", Category: "fact", Content: "later", ValidFrom: open}},
+	}
+	kept := withholdInvalidAt(rows, at)
+	if len(kept) != 1 || kept[0].ID != "keep" {
+		t.Fatalf("withholdInvalidAt kept %v, want only keep", kept)
+	}
+	mems := make([]memory.Memory, 0, len(rows))
+	for _, r := range rows {
+		mems = append(mems, r.Memory)
+	}
+	out := formatMemoriesAt(mems, at)
+	if !strings.Contains(out, "kept") || strings.Contains(out, "dropped") || strings.Contains(out, "later") {
+		t.Errorf("the formatter disagrees with withholdInvalidAt:\n%s", out)
+	}
+}
+
+// TestProjectContextAsOfAgreesWithSearchAtTheSameInstant: the two as_of surfaces
+// judge the same rows the same way (#899). Rows are saved through the tools with
+// windows placed around T, then both ghost_project_context and ghost_memory_search
+// are asked at T: each row listed by one is listed by the other, and the rows
+// outside their window at T are listed by neither.
+func TestProjectContextAsOfAgreesWithSearchAtTheSameInstant(t *testing.T) {
+	_, session := newCapSession(t)
+	const at = "2035-01-01T00:00:00Z"
+	rows := []struct {
+		content    string
+		from, till string
+		inWindow   bool
+	}{
+		{"zebra valid across T", "2034-06-01T00:00:00Z", "2036-01-01T00:00:00Z", true},
+		{"zebra closed before T", "", "2034-06-01T00:00:00Z", false},
+		{"zebra opens after T", "2036-01-01T00:00:00Z", "", false},
+		{"zebra ends exactly at T", "", at, true},
+		{"zebra starts exactly at T", at, "2036-06-01T00:00:00Z", true},
+		{"zebra open ended", "", "", true},
+	}
+	for _, r := range rows {
+		args := map[string]any{"project_id": "test-project", "content": r.content, "category": "fact"}
+		if r.from != "" {
+			args["valid_from"] = r.from
+		}
+		if r.till != "" {
+			args["valid_until"] = r.till
+		}
+		if res := callTool(t, session, "ghost_memory_save", args); res.IsError {
+			t.Fatalf("save %q: %s", r.content, resultText(res))
+		}
+	}
+
+	listing := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": at,
+	}))
+	search := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project", "query": "zebra", "as_of": at,
+	}))
+	if !strings.Contains(listing, "Validity judged at "+at) {
+		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)
+	}
+	for _, r := range rows {
+		inListing := strings.Contains(listing, r.content)
+		inSearch := strings.Contains(search, r.content)
+		if inListing != inSearch {
+			t.Errorf("%q: listing=%v search=%v, the two as_of surfaces disagree\nlisting:\n%s\nsearch:\n%s", r.content, inListing, inSearch, listing, search)
+		}
+		if inListing != r.inWindow {
+			t.Errorf("%q: listed=%v, want %v (inside its window at T)", r.content, inListing, r.inWindow)
+		}
+	}
+}
+
+// memoryMetaGroup returns the parenthesized metadata group on the result line
+// whose id marker appears in marker — the text from the last '(' before the «
+// data delimiter to the first ')' after it, which is where formatMemoriesInternal
+// puts importance, the scope label and the validity window.
+func memoryMetaGroup(result, marker string) string {
+	for _, line := range strings.Split(result, "\n") {
+		if !strings.Contains(line, marker) {
+			continue
+		}
+		if idx := strings.LastIndex(line, "("); idx >= 0 {
+			if end := strings.Index(line[idx:], ")"); end >= 0 {
+				return line[idx : idx+end+1]
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// TestFormatMemoriesAsOf_EmptyListingCarriesNoDisclosure is the empty half of
+// the same property: projectContextSection writes a heading only for a non-empty
+// body, so a disclosure appended to no rows would render a heading over nothing
+// — an empty `## Global (applies to all projects)` reads as a claim about the
+// project's cross-project rows. An empty listing is therefore empty, not a
+// disclosure.
+func TestFormatMemoriesAsOf_EmptyListingCarriesNoDisclosure(t *testing.T) {
+	at := time.Date(2026, 10, 5, 22, 20, 24, 0, time.UTC)
+	if got := formatMemoriesAt(nil, at); got != "" {
+		t.Errorf("formatMemoriesAt with no rows = %q, want empty: a disclosure here is a heading over no rows", got)
+	}
+	// And through the section writer, which is where the heading is decided.
+	var sb strings.Builder
+	projectContextSection(&sb, globalSectionHeading, formatMemoriesAt(nil, at))
+	if strings.Contains(sb.String(), globalSectionHeading) {
+		t.Errorf("an empty historical half rendered %q, want no heading:\n%s", globalSectionHeading, sb.String())
+	}
+}
+
+// TestFormatMemoriesAtLabelsAnUnverifiedWindowAtT: verified_at is a flag rather
+// than a predicate, so a window that is inside T but was never verified is
+// listed and marked unverified, while one outside T is withheld whether or not it
+// was verified.
+func TestFormatMemoriesAtLabelsAnUnverifiedWindowAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	insideUnverified := memory.Memory{
+		ID: "meminside", Category: "fact", Importance: 0.7, Content: "inside, never verified",
+		ValidFrom: strPtr(at.Add(-24 * time.Hour).Format(f)),
+	}
+	closedUnverified := memory.Memory{
+		ID: "memclosed", Category: "fact", Importance: 0.7, Content: "closed before T, never verified",
+		ValidFrom:  strPtr(at.Add(-72 * time.Hour).Format(f)),
+		ValidUntil: strPtr(at.Add(-24 * time.Hour).Format(f)),
+	}
+	out := formatMemoriesAt([]memory.Memory{insideUnverified, closedUnverified}, at)
+	if got := memoryMetaGroup(out, "`meminside`"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window inside T lost its marker: %q", got)
+	}
+	if strings.Contains(out, "memclosed") {
+		t.Errorf("a window closed before T is listed:\n%s", out)
+	}
+}
+
+// TestFormatMemoriesAsOf_CurrentReadStillUsesWallClock ensures that without asOf,
+// formatMemories still uses the wall clock (backward compatibility).
+func TestFormatMemoriesAsOf_CurrentReadStillUsesWallClock(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-24 * time.Hour)
+
+	// Use the stamp layout that the validity parser accepts (SQLite datetime format)
+	stampLayout := memory.StoredStampLayout
+
+	// Memory expired now (valid_until = past)
+	expiredNow := memory.Memory{
+		ID:         "mem1",
+		Category:   "fact",
+		Importance: 0.7,
+		Content:    "expired now",
+		ValidFrom:  strPtr(past.Add(-48 * time.Hour).Format(stampLayout)),
+		ValidUntil: strPtr(past.Format(stampLayout)),
+	}
+
+	result := formatMemories([]memory.Memory{expiredNow})
+
+	// Without asOf, should use wall clock and show "expired"
+	if !strings.Contains(result, "expired") {
+		t.Errorf("formatMemories without asOf should use wall clock and show 'expired': %s", result)
+	}
+}
+
 func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -2450,5 +2681,43 @@ func TestGhostProjectDelete_DryRunDoesNotNotify(t *testing.T) {
 	case got := <-updated:
 		t.Fatalf("expected no notification on dry-run, got %q", got)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestProjectContextAsOfSaysWhenEveryRowWasWithheldAtT: a block whose every row
+// was out of window at T must not read like a project that held nothing then.
+// The count is the number of rows withheld, and a project with no rows at that
+// instant keeps its current output with no validity note.
+func TestProjectContextAsOfSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
+	_, session := newCapSession(t)
+	const at = "2035-01-01T00:00:00Z"
+	for _, content := range []string{"quokka closed one", "quokka closed two"} {
+		args := map[string]any{
+			"project_id": "test-project", "content": content, "category": "fact",
+			"valid_until": "2034-06-01T00:00:00Z",
+		}
+		if res := callTool(t, session, "ghost_memory_save", args); res.IsError {
+			t.Fatalf("save: %s", resultText(res))
+		}
+	}
+	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": at,
+	}))
+	if strings.Contains(out, "quokka closed") {
+		t.Errorf("a row out of window at T is listed:\n%s", out)
+	}
+	if !strings.Contains(out, "Validity judged at "+at) || !strings.Contains(out, "2 memories were withheld") {
+		t.Errorf("an all-withheld block does not say 2 rows were withheld at T:\n%s", out)
+	}
+	if strings.Count(out, "Validity judged at") != 1 {
+		t.Errorf("the validity note is not stated once at block level:\n%s", out)
+	}
+
+	// No rows at that instant at all: nothing was withheld, so no note.
+	empty := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": asOfToolPast,
+	}))
+	if strings.Contains(empty, "Validity judged at") || strings.Contains(empty, "withheld") {
+		t.Errorf("a project with no rows at T gained a validity note:\n%s", empty)
 	}
 }

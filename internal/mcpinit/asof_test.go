@@ -179,6 +179,183 @@ func TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched(t *testing.T)
 	}
 }
 
+// validityRow is one memory a historical-validity fixture writes: its content,
+// the three validity columns (empty means NULL) and nothing else, because the
+// rest of the row is not what these tests are about.
+type validityRow struct {
+	id, content, from, until, verified string
+}
+
+// validityStore builds a store holding the given rows, each with one recorded
+// version before t, and returns the project directory. The validity columns live
+// on the memories table only (memory_history never versioned them).
+func validityStore(t *testing.T, at time.Time, rows []validityRow) string {
+	t.Helper()
+	stampLayout := memory.StoredStampLayout
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghostDir: %v", err)
+	}
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`, "histproj", dir, "histproj"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	nullable := func(s string) any {
+		if s == "" {
+			return nil
+		}
+		return s
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, verified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.id, "histproj", "fact", r.content, "manual", nullable(r.from), nullable(r.until), nullable(r.verified),
+			at.Add(-72*time.Hour).Format(stampLayout), at.Add(-24*time.Hour).Format(stampLayout),
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			r.id, "histproj", "fact", r.content, "manual", at.Add(-24*time.Hour).Format(stampLayout), "save",
+		); err != nil {
+			t.Fatalf("insert %s history: %v", r.id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	return dir
+}
+
+// TestRenderSessionContextAtJudgesValidityAtTheRequestedInstant fixes the rule
+// the block shares with ghost_memory_search and ghost_project_context: validity
+// is judged AT the requested instant (#899). A row valid at T and closed since
+// is shown as valid at T; a row whose window had closed or not yet opened at T
+// is withheld; a bound exactly at T is inside the window; an open-ended or
+// unreadable-bound row is kept with no verdict.
+func TestRenderSessionContextAtJudgesValidityAtTheRequestedInstant(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	stamp := func(d time.Duration) string { return at.Add(d).Format(f) }
+	verified := stamp(-time.Hour)
+
+	dir := validityStore(t, at, []validityRow{
+		{id: "m-closed-since", content: "valid at T closed since", from: stamp(-48 * time.Hour), until: stamp(24 * time.Hour), verified: verified},
+		{id: "m-future", content: "opens after T", from: stamp(24 * time.Hour), until: stamp(72 * time.Hour), verified: verified},
+		{id: "m-expired", content: "closed before T", from: stamp(-72 * time.Hour), until: stamp(-time.Hour), verified: verified},
+		{id: "m-open", content: "open ended row"},
+		{id: "m-until-at-t", content: "ends exactly at T", from: stamp(-48 * time.Hour), until: stamp(0), verified: verified},
+		{id: "m-from-at-t", content: "starts exactly at T", from: stamp(0), until: stamp(48 * time.Hour), verified: verified},
+		{id: "m-unreadable", content: "unreadable bound row", until: "not a date"},
+		{id: "m-unverified", content: "unverified window row", from: stamp(-time.Hour)},
+	})
+
+	block := RenderSessionContextAt(dir, &at)
+	if block == "" {
+		t.Fatal("the historical block is empty")
+	}
+
+	// The block says validity was judged at T.
+	if !strings.Contains(block, "Validity judged at "+at.Format(time.RFC3339)) {
+		t.Errorf("the block does not say validity was judged at T:\n%s", block)
+	}
+
+	// Withheld at T: closed before T, and not yet open at T.
+	for _, content := range []string{"closed before T", "opens after T"} {
+		if strings.Contains(block, content) {
+			t.Errorf("%q is outside its window at T but the block lists it:\n%s", content, block)
+		}
+	}
+
+	// Shown, and never labelled with the clock's verdict on the current window.
+	for _, content := range []string{"valid at T closed since", "ends exactly at T", "starts exactly at T"} {
+		got := sessionValiditySection(block, content)
+		if got == "" || !strings.Contains(block, content) {
+			t.Errorf("%q is inside its window at T but is missing:\n%s", content, block)
+			continue
+		}
+		if strings.Contains(got, "expired") || strings.Contains(got, "not yet valid") || strings.Contains(got, "unverified") {
+			t.Errorf("%q is valid at T but is labelled %q", content, got)
+		}
+	}
+	if got := sessionValiditySection(block, "valid at T closed since"); !strings.Contains(got, "until") {
+		t.Errorf("the window of a row valid at T is not shown: %q", got)
+	}
+
+	// An open-ended row and one with an unreadable bound carry no claim.
+	for _, content := range []string{"open ended row", "unreadable bound row"} {
+		if !strings.Contains(block, content) {
+			t.Errorf("%q states no readable window but is missing:\n%s", content, block)
+			continue
+		}
+		got := sessionValiditySection(block, content)
+		for _, bad := range []string{"valid from", "until", "expired", "not yet valid", "unverified"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%q carries a validity claim %q: %q", content, bad, got)
+			}
+		}
+	}
+
+	// A readable window nobody verified keeps its unverified marker.
+	if got := sessionValiditySection(block, "unverified window row"); !strings.Contains(got, "unverified") {
+		t.Errorf("an unverified window lost its marker: %q", got)
+	}
+}
+
+// TestRenderSessionContextAtCapsAfterWithholdingAtT: a row withheld at T must not
+// take a slot from a valid one, or a block would show fewer rows than the store
+// holds for that instant.
+func TestRenderSessionContextAtCapsAfterWithholdingAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	rows := []validityRow{{id: "m-valid", content: "the only valid row"}}
+	for i := 0; i < sessionMemoriesCap+2; i++ {
+		rows = append(rows, validityRow{
+			id: "m-gone-" + strings.Repeat("x", i+1), content: "withheld at T " + strings.Repeat("y", i+1),
+			until: at.Add(-time.Hour).Format(f),
+		})
+	}
+	dir := validityStore(t, at, rows)
+	block := RenderSessionContextAt(dir, &at)
+	if !strings.Contains(block, "the only valid row") {
+		t.Errorf("a withheld row displaced the valid one:\n%s", block)
+	}
+	if strings.Contains(block, "withheld at T") {
+		t.Errorf("a row closed before T is listed:\n%s", block)
+	}
+}
+
+// sessionValiditySection returns the parenthesized metadata group of the block
+// line whose content is content — the group assemble.Item.Line renders the
+// importance, scope and validity window in, between the backtick-quoted id and
+// the « data delimiter.
+func sessionValiditySection(block, content string) string {
+	for _, line := range strings.Split(block, "\n") {
+		if !strings.Contains(line, content) {
+			continue
+		}
+		if idx := strings.Index(line, "«"); idx >= 0 {
+			beforeContent := line[:idx]
+			open := strings.Index(beforeContent, "(")
+			close := strings.LastIndex(beforeContent, ")")
+			if open >= 0 && close > open {
+				return strings.TrimSpace(beforeContent[open+1 : close])
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
 // saveHistoricalGlobal writes a _global row through the store — so it has a
 // recorded version, and a historical read renders it instead of reporting it as a
 // gap — and backdates that version to before the instant the tests read at. The
@@ -233,5 +410,36 @@ func TestRenderSessionContextAtWithNoInstantIsTheCurrentPath(t *testing.T) {
 	}
 	if !strings.Contains(block, "**Session #1**") {
 		t.Errorf("a nil instant did not count the session, so the current path lost a side effect:\n%s", block)
+	}
+}
+
+// TestRenderSessionContextAtSaysWhenEveryRowWasWithheldAtT: every row out of
+// window at T must read as withheld, with a count, rather than as a project that
+// held nothing then; a project with no rows at T keeps its output.
+func TestRenderSessionContextAtSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	dir := validityStore(t, at, []validityRow{
+		{id: "m-a", content: "closed one", until: at.Add(-time.Hour).Format(f)},
+		{id: "m-b", content: "opens later", from: at.Add(time.Hour).Format(f)},
+	})
+	block := RenderSessionContextAt(dir, &at)
+	if block == "" {
+		t.Fatal("an all-withheld block is empty")
+	}
+	if strings.Contains(block, "closed one") || strings.Contains(block, "opens later") {
+		t.Errorf("a row out of window at T is listed:\n%s", block)
+	}
+	if !strings.Contains(block, "Validity judged at "+at.Format(time.RFC3339)) || !strings.Contains(block, "2 memories were withheld") {
+		t.Errorf("an all-withheld block does not say 2 rows were withheld at T:\n%s", block)
+	}
+	if strings.Count(block, "Validity judged at") != 1 {
+		t.Errorf("the validity note is not stated once at block level:\n%s", block)
+	}
+
+	empty := validityStore(t, at, nil)
+	got := RenderSessionContextAt(empty, &at)
+	if strings.Contains(got, "Validity judged at") || strings.Contains(got, "withheld") {
+		t.Errorf("a project with no rows at T gained a validity note:\n%s", got)
 	}
 }

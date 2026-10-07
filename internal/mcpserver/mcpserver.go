@@ -2140,7 +2140,11 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return nil, nil, fmt.Errorf("read memories as of %s: %w", asOf.Format(time.RFC3339), err)
 			}
-			live := set.Live()
+			// Validity is judged at the requested instant BEFORE the limit, so a
+			// withheld row does not take a slot a valid one should have.
+			inScope := set.Live()
+			live := withholdInvalidAt(inScope, *asOf)
+			withheldAtT := len(inScope) - len(live)
 			if len(live) > args.Limit {
 				live = live[:args.Limit]
 			}
@@ -2157,13 +2161,19 @@ func (s *Server) registerTools() {
 				// `## Learned Context` and the learned/learned sections stay omitted
 				// for the reason above, and the Global section is the ONLY thing this
 				// adds: it reads the same rows, renders the same fields through the
-				// same `formatMemories`, and says which instant it read.
+				// same `formatMemoriesAt`, and says which instant it read.
 				own, globals := splitMemoriesByProject(live)
-				projectContextSection(&sb, memorySectionHeading, formatMemories(own))
-				projectContextSection(&sb, globalSectionHeading, formatMemories(globals))
+				projectContextSection(&sb, memorySectionHeading, formatMemoriesAt(own, *asOf))
+				projectContextSection(&sb, globalSectionHeading, formatMemoriesAt(globals, *asOf))
 			}
 			if note := set.UnknownNote(); note != "" {
 				sb.WriteString("\n" + note + "\n")
+			}
+			// Said once, at block level, and counted rather than inferred: a block
+			// whose every row was out of window at T must not read as a project
+			// that held nothing then. A set with no rows at all says nothing.
+			if len(inScope) > 0 {
+				sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf, withheldAtT) + ")\n")
 			}
 			sb.WriteString("\n(" + memory.AsOfUnversionedNote() + ")\n")
 			return &mcp.CallToolResult{
@@ -4073,56 +4083,72 @@ func truncateUTF8(s string, maxBytes int) string {
 	return memory.TruncateUTF8(s, maxBytes)
 }
 
-func formatMemories(memories []memory.Memory) string {
+// formatMemoriesInternal is the shared implementation for formatting memories.
+// A nil asOf is a current read: each row's validity window is judged against the
+// wall clock. A non-nil asOf is a historical read and the window is judged AT
+// that instant, which is what ghost_memory_search does when it binds the
+// assembler's clock to as_of: a row whose window had closed or not yet opened at
+// T is withheld (memory.ValidityAt), and a row valid at T is shown as valid at T
+// even if it has expired since. The disclosure (AsOfValidityNote) is NOT written
+// here: an empty body is what tells projectContextSection to write no heading at
+// all, so a note inside a section body would print a heading over nothing. The
+// caller states it once at block level, with the count of rows withheld.
+func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 	var sb strings.Builder
-	// One clock for the whole listing, read once and passed to every row, so two
-	// memories in the same answer cannot be judged against different instants —
-	// a window that closed between two rows would otherwise show one as current
-	// and one as retired with nothing in the output to explain the difference.
 	now := time.Now().UTC()
 	for _, m := range memories {
 		pin := ""
 		if m.Pinned {
 			pin = " [pinned]"
 		}
-		// The tag list through assemble.TagsLabel, for the reason every other
-		// renderer on this line is assemble's: the label is printed OUTSIDE the
-		// «...» data delimiters and json.Marshal does not escape « or », so a tag
-		// holding one opened a data block of its own mid-metadata (#811). This was
-		// the second copy of that label, and the untested one.
 		tags := assemble.TagsLabel(m.Tags)
-		// Content is wrapped in «...» data delimiters: it is free text the
-		// agent itself (or an indirect-injection source it summarized) wrote —
-		// stored data, not a new instruction, however imperative it reads.
 		resolved := ""
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		// assemble's renderer, not a second one: ghost_memory_search goes through
-		// assemble.Item.Line, and this listing is the same field set for the
-		// surfaces that have not moved to the assembler yet. Two renderers would
-		// let the same row read differently depending on which tool the caller
-		// reached for, which is the one thing "one renderer, one field set" is
-		// there to prevent.
-		//
-		// The state is computed here, not inherited: this surface has not run
-		// stage 2, so a row whose window has closed is about to be printed in
-		// full.
-		//
-		// The id goes through assemble.Token, the renderer assemble.Item.Line
-		// uses for the same field on the same line. The id is printed OUTSIDE
-		// the «...» data delimiters, inside backticks, so a stored id holding a
-		// newline forges a second row that reads as Ghost's own (#791) — and
-		// `ghost import` writes an artifact's ids verbatim, so the value is
-		// whatever a file said. A 32-hex id is written bare and renders
-		// byte-identically to every golden.
+		var verdict string
+		if asOf == nil {
+			verdict = assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
+		} else {
+			state, withheld := memory.ValidityAt(m.ValidFrom, m.ValidUntil, m.VerifiedAt, *asOf)
+			if withheld {
+				continue
+			}
+			verdict = state
+		}
+		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
 		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
-			assemble.ValidityLabel(assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now), m.ValidFrom, m.ValidUntil, m.VerifiedAt),
+			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
 			sourceLabelForMemory(m), quoteData(m.Content))
 	}
 	return sb.String()
+}
+
+// withholdInvalidAt drops the rows whose validity window had closed or had not
+// yet opened at t, with the same rule ghost_memory_search applies when it binds
+// its clock to as_of (memory.ValidityAt).
+func withholdInvalidAt(rows []memory.AsOfRow, t time.Time) []memory.AsOfRow {
+	out := make([]memory.AsOfRow, 0, len(rows))
+	for _, r := range rows {
+		if _, withheld := memory.ValidityAt(r.ValidFrom, r.ValidUntil, r.VerifiedAt, t); withheld {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// formatMemories formats memories using the wall clock for validity evaluation.
+func formatMemories(memories []memory.Memory) string {
+	return formatMemoriesInternal(memories, nil)
+}
+
+// formatMemoriesAt formats a past read's rows, judging each row's validity
+// window at the given instant — see formatMemoriesInternal.
+func formatMemoriesAt(memories []memory.Memory, asOf time.Time) string {
+	return formatMemoriesInternal(memories, &asOf)
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first

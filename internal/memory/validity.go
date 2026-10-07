@@ -81,15 +81,11 @@ const (
 func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (string, []string) {
 	var unreadable []string
 	read := func(s *string) (*time.Time, bool) {
-		if s == nil {
-			return nil, false
-		}
-		t, ok := ParseStamp(*s)
-		if !ok {
+		t, ok := parseStoredStamp(s)
+		if !ok && s != nil {
 			unreadable = append(unreadable, *s)
-			return nil, false
 		}
-		return &t, true
+		return t, ok
 	}
 	from, _ := read(validFrom)
 	until, _ := read(validUntil)
@@ -107,4 +103,41 @@ func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (st
 	default:
 		return ValidityValid, unreadable
 	}
+}
+
+// parseStoredStamp parses a stored stamp, reporting the instant only when a
+// layout could read it. It is ValidityState's own reader, factored out so a
+// caller that needs the readability question alone asks it the same way rather
+// than through a second parser — the same reason this file owns the state rule.
+func parseStoredStamp(s *string) (*time.Time, bool) {
+	if s == nil {
+		return nil, false
+	}
+	t, ok := ParseStamp(*s)
+	if !ok {
+		return nil, false
+	}
+	return &t, true
+}
+
+// ValidityWithheld reports whether a state names a row the retrieval path
+// does not return: a window that has closed or has not opened. It is the one
+// predicate stage 2 of the assembler drops on, and every historical listing
+// withholds on it too, so a row search leaves out at an instant is a row the
+// listing leaves out at that instant. unverified and unset are kept, because
+// verified_at is a flag rather than a predicate.
+func ValidityWithheld(state string) bool {
+	return state == ValidityExpired || state == ValidityFuture
+}
+
+// ValidityAt judges a stored validity triple at the instant t and reports
+// whether the row is withheld there. It is ValidityState with the clock named:
+// an as_of read binds the assembler's Now to the requested instant, so a
+// surface that does not run the assembler passes that same instant here and
+// reaches the same verdict on the same inputs, boundaries and unreadable bounds
+// included. A bound equal to t is inside the window: a window is expired only
+// when its end is before t, and future only when its start is after t.
+func ValidityAt(validFrom, validUntil, verifiedAt *string, t time.Time) (state string, withheld bool) {
+	state, _ = ValidityState(validFrom, validUntil, verifiedAt, t)
+	return state, ValidityWithheld(state)
 }

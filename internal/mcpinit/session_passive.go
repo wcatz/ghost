@@ -117,6 +117,11 @@ type sessionTally struct {
 	// row was seen) shaped the verdict, so the reason it names is the project's.
 	// It is what ghost_project_context prints for the same state.
 	emptyNote string
+	// asOfWithheld counts the rows a historical read left out because their
+	// validity window had closed or not yet opened at the requested instant
+	// (project and globals together). It is counted, not inferred, and it is
+	// zero on every current read.
+	asOfWithheld int
 }
 
 // loadSessionPassive assembles the session-start block's memory rows: the

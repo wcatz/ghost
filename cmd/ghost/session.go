@@ -24,8 +24,12 @@ consume a stdout hook response.
 (issue #647): the wording each memory held then, including memories deleted
 since, and without memories that did not exist yet. Tasks, decisions and
 learned context are not versioned, so they are omitted rather than shown as
-they are now, and no session is counted — a past reading is a diagnostic, not
-a session start.
+they are now; a memory row's tags, scope, pin, confidence, agent, source_ref
+and validity window are not versioned either, so they are the current row's.
+A row's validity window is judged at the instant, as ghost_memory_search judges
+it: a memory whose window had closed or not yet opened then is left out, and one
+valid then is shown as valid even if its window has closed since.
+No session is counted — a past reading is a diagnostic, not a session start.
 
 --audit reports on what retrieval ACTUALLY did (issue #646). It is the other
 mode of this command and shares almost nothing with the block above: it opens

@@ -149,6 +149,13 @@ func TestProjectContextAsOfRendersTheHistoricalBlock(t *testing.T) {
 	if strings.Contains(out, "## Learned Context") {
 		t.Errorf("the historical block carries a learned context derived from today's memories:\n%s", out)
 	}
+	// The global half is empty (the fixture saved no _global row), so it renders
+	// no heading at all: a disclosure appended to the empty half would turn it
+	// into a heading over nothing, which reads as a claim about the project's
+	// cross-project rows.
+	if strings.Contains(out, globalSectionHeading) {
+		t.Errorf("the historical block rendered an empty %q section:\n%s", globalSectionHeading, out)
+	}
 
 	// A current listing is unchanged: no historical note, and no omission notice
 	// either — both of those are statements about a past reading.

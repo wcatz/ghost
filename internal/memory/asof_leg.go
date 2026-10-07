@@ -73,9 +73,41 @@ func AsOfSourceNote(t time.Time) string {
 // provenance of the rows, and both surfaces that read a past set have to say it:
 // a block that disclosed its instant and then printed today's tasks under it
 // would be contradicted by its own second half.
+//
+// It carves out every field a historical row line DOES carry from the current
+// row — tags, scope, pin, confidence, agent, source_ref and the validity window,
+// which are exactly the fields a row line renders that the history table does
+// not version — because "nothing in this block is a claim about the present"
+// would be false about them. AsOfValidityNote is where the window's judgement at
+// T and the borrow of its bounds are stated beside the rows; this sentence names
+// the whole set too, so the two notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
-		"than shown as they are now — nothing in this block is a claim about the present."
+		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
+		"window are not versioned either, and where shown they are the current row's. Apart from those, nothing in " +
+		"this block is a claim about the present."
+}
+
+// AsOfValidityNote is the sentence stating how a historical listing judged
+// validity and, when withheld is positive, how many rows it withheld, and it is the same sentence on every surface that renders one.
+//
+// Validity is judged AT the requested instant, the way ghost_memory_search with
+// as_of judges it (the assembler binds its clock to that instant): a row whose
+// window had closed or had not yet opened at T is withheld, and a row valid at T
+// is shown as valid at T even if its window has closed since. memory_history never
+// versioned the window itself, so the bounds are read from the current row, and
+// the note says so rather than letting the verdict read as more than it is.
+func AsOfValidityNote(at time.Time, withheld int) string {
+	note := "Validity judged at " + at.UTC().Format(time.RFC3339) + ": a memory whose validity window had closed " +
+		"or had not yet opened at that instant is withheld. The window's bounds, like the row's tags, scope, pin, " +
+		"confidence, agent and source_ref, are read from the current row, because the history table does not version them."
+	switch {
+	case withheld == 1:
+		note += " 1 memory was withheld for that reason, so it is out of window at that instant rather than absent from the store."
+	case withheld > 1:
+		note += fmt.Sprintf(" %d memories were withheld for that reason, so they are out of window at that instant rather than absent from the store.", withheld)
+	}
+	return note
 }
 
 // asOfLeg is a query term prepared for matching against text, rather than for
