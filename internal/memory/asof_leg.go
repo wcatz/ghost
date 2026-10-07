@@ -77,7 +77,7 @@ func AsOfSourceNote(t time.Time) string {
 // It carves out every field a historical row line DOES carry from the current
 // row — tags, scope, pin, confidence, agent, source_ref and the validity window,
 // which are exactly the fields a row line renders that the history table does
-// not record — because "nothing in this block is a claim about the present"
+// not version — because "nothing in this block is a claim about the present"
 // would be false about them. AsOfValidityNote is where the window's borrow is
 // stated beside the rows; this sentence names the whole set too, so the two
 // notes cannot read as a contradiction.
@@ -94,13 +94,16 @@ func AsOfUnversionedNote() string {
 // renders one.
 //
 // It lives here, beside the other two historical notes, because the store owns
-// the fact: memory_history records exactly content, category, importance,
-// resolved_at, source and project_id (AsOfRow's doc says so), so the triple a
-// historical row carries is read from the live row, as are its tags, scope, pin,
-// confidence and provenance columns. A surface that worded the borrow itself
-// would let the two drift, and a drift here is not cosmetic — it is the
-// difference between a reader taking a present-day window for the window that
-// held at the instant the block is a reading of, and knowing it is not.
+// the fact: memory_history records a memory's STATE in exactly content, category,
+// importance, resolved_at, source and project_id (AsOfRow's doc says so). Its
+// other columns — agent, session_id, related_id, recorded_at and phase — describe
+// the WRITE, not the memory's state, so they too are not a version of the fields
+// a row line renders. The triple a historical row carries is therefore read from
+// the live row, as are its tags, scope, pin, confidence and provenance columns. A
+// surface that worded the borrow itself would let the two drift, and a drift here
+// is not cosmetic — it is the difference between a reader taking a present-day
+// window for the window that held at the instant the block is a reading of, and
+// knowing it is not.
 //
 // The note names the full borrowed set rather than the window alone, and it does
 // NOT say "the rest of the line is the version's": that would be false, because
@@ -113,7 +116,8 @@ func AsOfUnversionedNote() string {
 func AsOfValidityNote(at time.Time) string {
 	return "A memory row's validity window, and its tags, scope, pin, confidence, agent and source_ref, are read " +
 		"from the current row rather than the version the row's content and category come from: memory_history " +
-		"records none of them. The window shown is the CURRENT one, not the window the memory held at " +
+		"versions none of them as part of a memory's state, and its agent column records who performed the write, " +
+		"not the row's own harness. The window shown is the CURRENT one, not the window the memory held at " +
 		at.UTC().Format(time.RFC3339) + ", so no expiry or future-start verdict is drawn from it."
 }
 
