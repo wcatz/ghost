@@ -1619,6 +1619,12 @@ case "$1" in
       printf '%s' "${STUB_API_STDERR:-}" >&2
       exit "$STUB_API_EXIT"
     fi
+    # A caller can answer with a raw JSON body instead of a content field, to
+    # exercise a response the workflow must reject rather than decode.
+    if [ -n "${STUB_CONTENTS_RAW:-}" ]; then
+      printf '%s' "$STUB_CONTENTS_RAW"
+      exit 0
+    fi
     if [ -z "${STUB_CONTENTS_B64:-}" ]; then
       printf 'stub gh: api called with no STUB_CONTENTS_B64\n' >&2
       exit 64
@@ -1696,6 +1702,18 @@ func runCatalogPRStep(t *testing.T, step workflowStep, stubEnv map[string]string
 	env["GITHUB_OUTPUT"] = output
 	code, out := sb.runStep(t, step, map[string]string{"pin.BRANCH": pinBranch}, env)
 	return code, out, readStepOutputs(t, output)
+}
+
+// runCatalogPRStepForExit runs the PR step without reading GITHUB_OUTPUT, for
+// the paths that must FAIL: a step that exits non-zero does so before writing
+// outputs, so there is no file to read, and failing the test on the missing
+// file would report the harness rather than the behaviour under test.
+func runCatalogPRStepForExit(t *testing.T, step workflowStep, stubEnv map[string]string) (int, string) {
+	t.Helper()
+	sb := newPluginStepSandbox(t)
+	env := sb.env(stubEnv)
+	env["GITHUB_OUTPUT"] = filepath.Join(sb.scratch, "github-output")
+	return sb.runStep(t, step, map[string]string{"pin.BRANCH": pinBranch}, env)
 }
 
 // TestCatalogPRStepToleratesARefusedPullRequest is the behaviour #888 is
@@ -1841,6 +1859,47 @@ func TestCatalogPRStepReportsAPullRequestItCanOpen(t *testing.T) {
 			t.Errorf("PR_URL = %q", got)
 		}
 	})
+}
+
+// TestCatalogPRStepFailsOnANonRefusalCreateError is the other side of the
+// refusal tolerance. Tolerating `gh pr create` failing means tolerating THIS
+// repository's refusal — the message that says Actions may not create pull
+// requests — and nothing else. A 5xx, an expired token, a network error or a
+// bad base is a defect in this run: it must end the job red with the create
+// log on screen, because the operator still has to open the pin PR by hand
+// and a green job that merely said "the repository does not let GitHub
+// Actions open the catalog PR" tells them the opposite of what happened.
+//
+// Both messages are failures of gh, and only one of them is the refusal, so
+// the test asserts on the exit code first (the thing the workflow must get
+// right) and on the wording second (the thing that misleads).
+func TestCatalogPRStepFailsOnANonRefusalCreateError(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	step := findPluginStep(t, wf, catalogPRStepName)
+
+	for _, tc := range []struct {
+		name   string
+		stderr string
+	}{
+		{"a 502 from the API", "HTTP 502 Bad Gateway"},
+		{"a 401 from an expired token", "HTTP 401 Unauthorized (Bad credentials)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := runCatalogPRStepForExit(t, step, map[string]string{
+				"STUB_PR_CREATE_EXIT":   "1",
+				"STUB_PR_CREATE_STDERR": tc.stderr,
+			})
+			if code == 0 {
+				t.Errorf("the PR step exited 0 when `gh pr create` failed with %q, so the release job goes green without a pin PR:\n%s", tc.stderr, out)
+			}
+			if !strings.Contains(out, tc.stderr) {
+				t.Errorf("the create log was not printed on the failing path — the operator is told the job failed with nothing to read:\n%s", out)
+			}
+			if strings.Contains(out, "does not let GitHub Actions open the catalog PR") {
+				t.Errorf("a %q failure is reported as the repository's refusal, sending the operator to the compare link for a job that actually broke:\n%s", tc.stderr, out)
+			}
+		})
+	}
 }
 
 // runSummaryStep executes the summary step with the PR step's outputs
@@ -2025,4 +2084,71 @@ func TestTheCatalogVerificationRunsAfterARefusedPullRequest(t *testing.T) {
 	if code != 0 {
 		t.Errorf("the verification step exited %d after a refused PR:\n%s", code, out)
 	}
+}
+
+// TestTheCatalogVerificationFailsWhenItCannotVerify is the guard on the
+// verification step itself. The step exists because the pin branch is written
+// by the job and then read back — so the one claim it must never make is
+// "verified" when the read-back did not match what was written. Every way
+// that can happen has to end the job red:
+//
+//   - the branch holds bytes other than the pinned copy (a stale branch, a
+//     partially applied pin, a concurrent write);
+//   - the contents API never answers (the retries exhaust);
+//   - the response carries no usable `.content` field to decode.
+//
+// Each subtest is written against the mutation it exists for: `exit 0` at the
+// top of the step — or any short-circuit that skips the comparison — passes
+// the single matching-case test that already existed (TestTheCatalog
+// VerificationRunsAfterARefusedPullRequest) and these must not.
+//
+// The mismatch and no-answer cases take the full retry loop: three attempts,
+// two 10s sleeps, because the workflow really does wait for eventual
+// consistency and the test runs that same script rather than a faster copy.
+func TestTheCatalogVerificationFailsWhenItCannotVerify(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	verify := findPluginStep(t, wf, verifyCatalogStepName)
+
+	// The success claim is the thing being denied, so every case asserts it
+	// did not happen, on top of the exit code the runner keys on.
+	assertRed := func(t *testing.T, code int, out string) {
+		t.Helper()
+		if code == 0 {
+			t.Errorf("the verification step exited 0 without verifying anything, so a bad pin ships with a green job:\n%s", out)
+		}
+		if strings.Contains(out, "verified against the pinned copy") {
+			t.Errorf("the verification step claims success it cannot have reached:\n%s", out)
+		}
+	}
+
+	t.Run("the branch holds bytes that are not the pinned copy", func(t *testing.T) {
+		sb := newPluginStepSandbox(t)
+		code, out := sb.runStep(t, verify, map[string]string{"pin.BRANCH": pinBranch},
+			sb.env(map[string]string{
+				"STUB_CONTENTS_B64": base64.StdEncoding.EncodeToString([]byte(`{"plugins":[]}`)),
+			}))
+		assertRed(t, code, out)
+	})
+
+	t.Run("the contents API never answers within the retries", func(t *testing.T) {
+		sb := newPluginStepSandbox(t)
+		code, out := sb.runStep(t, verify, map[string]string{"pin.BRANCH": pinBranch},
+			sb.env(map[string]string{
+				"STUB_API_EXIT":   "1",
+				"STUB_API_STDERR": "HTTP 502 Bad Gateway",
+			}))
+		assertRed(t, code, out)
+		if !strings.Contains(out, "could not fetch marketplace.json") {
+			t.Errorf("the no-answer path does not say what failed:\n%s", out)
+		}
+	})
+
+	t.Run("the response carries no usable .content", func(t *testing.T) {
+		sb := newPluginStepSandbox(t)
+		code, out := sb.runStep(t, verify, map[string]string{"pin.BRANCH": pinBranch},
+			sb.env(map[string]string{
+				"STUB_CONTENTS_RAW": `{"sha":"deadbeef","type":"file"}`,
+			}))
+		assertRed(t, code, out)
+	})
 }

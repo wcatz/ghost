@@ -602,14 +602,20 @@ jobs:
         # looks stalled, because the PR is open and its checks are queued with
         # nothing explaining why.
         #
-        # A refused `gh pr create` is an outcome, not a failure. This
-        # repository does not let GitHub Actions create or approve pull
-        # requests (run 37497108475 logged `GraphQL: GitHub Actions is not
-        # permitted to create or approve pull requests`), and that is a
-        # repository setting no workflow change can turn on. So the step
-        # captures the refusal, writes the compare link a human opens
+        # A refused `gh pr create` is an outcome, not a failure — but ONLY
+        # this repository's refusal. It does not let GitHub Actions create
+        # or approve pull requests (run 37497108475 logged `GraphQL: GitHub
+        # Actions is not permitted to create or approve pull requests`), and
+        # that is a repository setting no workflow change can turn on. So the
+        # step captures the refusal, writes the compare link a human opens
         # instead, and lets the job go green: the pin branch is already
         # written, and the summary reports the link as the manual step.
+        #
+        # The refusal is identified by its text, not by "gh failed". Matching
+        # anything would turn a 5xx or an expired token into a green job that
+        # tells the operator to open the compare link — for a branch nobody
+        # knows to be pinnable. Any other failure exits 1 with the create log
+        # printed.
         if: steps.pin.outputs.SKIPPED == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -665,7 +671,8 @@ jobs:
             # Capture, don't run: under `set -e` a refused create would end
             # the job here, and with it the summary and verification steps
             # after this one. The refusal is the expected route in this
-            # repository, so it is reported, not fatal.
+            # repository, so it is reported, not fatal — and the `case` below
+            # is what keeps that tolerance scoped to the refusal alone.
             if CREATE_LOG="$(gh pr create --base main --head "$BRANCH" \
                 --title "chore(release): pin plugin archives for ${GITHUB_REF_NAME}" \
                 --body-file /tmp/pr-body.md 2>&1)"; then
@@ -677,7 +684,22 @@ jobs:
               PR_HELD_FOR_APPROVAL="yes"
             else
               printf '%s\n' "$CREATE_LOG"
-              echo "::notice::the repository does not let GitHub Actions open the catalog PR; open ${COMPARE_URL} by hand — the summary below reports it as the manual step"
+              # Tolerate ONE failure: this repository's refusal, matched on the
+              # text GitHub sends (run 37497108475). Every other failure — a
+              # 5xx, an expired token, a network error, a bad base — is a
+              # defect in this run, and reporting it as the refusal would tell
+              # the operator to open the compare link for a job that simply
+              # broke. So the message decides: the refusal is an outcome, and
+              # anything else ends the job red with the log already printed.
+              case "$CREATE_LOG" in
+                *"GitHub Actions is not permitted to create or approve pull requests"*)
+                  echo "::notice::the repository does not let GitHub Actions open the catalog PR; open ${COMPARE_URL} by hand — the summary below reports it as the manual step"
+                  ;;
+                *)
+                  echo "::error::gh pr create failed for a reason other than this repository's refusal; the create log is above. Open ${COMPARE_URL} by hand once the cause is fixed"
+                  exit 1
+                  ;;
+              esac
             fi
           fi
           # Assign first, then write. A command substitution that fails inside a
@@ -719,9 +741,11 @@ jobs:
               echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
               echo "2. Merge once the three required checks pass"
             else
-              # The usual route in this repository: GitHub does not let
-              # Actions create pull requests, so the PR step could not open
-              # one. The compare link opens the pre-filled PR form against
+              # The usual route in this repository: GitHub refuses to let
+              # Actions create pull requests, so the PR step tolerated the
+              # refusal and opened none. (Any other create failure ends the
+              # step red, so reaching here means the refusal specifically.)
+              # The compare link opens the pre-filled PR form against
               # main — the same PR the step would have opened. A human
               # opening that PR means the three required checks start
               # immediately; there is no 'Approve workflows to run' hold
