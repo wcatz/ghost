@@ -296,7 +296,7 @@ func globalOriginGuidance(globals []sessionMemory) string {
 			continue
 		}
 		seen[label] = true
-		labels = append(labels, label)
+		labels = append(labels, assemble.Token(label))
 	}
 	sort.Strings(labels)
 	if len(labels) == 0 {

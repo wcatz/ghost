@@ -397,8 +397,10 @@ func isTokenRune(r rune) bool {
 // MCP listings each had their own copy of this rule before, and a copy is how
 // a rule drifts — the copy that is not tested is the one that ships the bug.
 // The delimiters are the reader's contract, not the caller's: text between «
-// and » is DATA, so a newline inside the block is still data and a line that
-// begins "- [" inside it is not Ghost's own output.
+// and » is DATA. The delimiters are not the only defence: a reader that goes
+// line by line never tracks them, so every line break in the text is also folded
+// to LineBreakEscape (#911) and a memory is always ONE physical line, whatever
+// it holds.
 //
 // It is the ONE delimiter renderer in this package, and it reaches
 // `neutralizeDelimiters` rather than building its own substitution: that is the
