@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -86,7 +87,7 @@ func (i Item) Line() string {
 	// own project id precisely so this renderer does not have to guess.
 	origin := ""
 	if _, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(i.ProjectID, i.Source, i.Content)); label != "" {
-		origin = " source=" + label
+		origin = SourceLabel(label)
 	}
 	// A field on the same physical line, never a line of its own: a memory is one
 	// line, and a marker on a second one would read as a second memory.
@@ -109,6 +110,19 @@ func ConflictsLabel(ids []string) string {
 		toks[i] = "`" + Token(id) + "`"
 	}
 	return " conflicts_with=" + strings.Join(toks, ",")
+}
+
+// SourceLabel renders a row's origin label as ` source=<label>`. The label is
+// stored text — an unrecognised value is printed rather than refused — so it goes
+// through Token like every other identifier on the line and cannot carry a line
+// break or a delimiter (#911). The known vocabulary (mcp, reflection, builtin,
+// import:…) is all bare-token characters and renders unchanged. Callers pass the
+// label memory.OriginClass returned, and "" renders as nothing.
+func SourceLabel(label string) string {
+	if label == "" {
+		return ""
+	}
+	return " source=" + Token(label)
 }
 
 // AgentLabel renders the writing harness, or "" when the row records none.
@@ -364,7 +378,9 @@ func labelNeedsEscaping(s string) bool {
 // whichever comes first drops the CR of a CRLF pair too, since s[:i] ends
 // immediately before it (#791).
 func PreviewLine(s string, max int) string {
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+	// The same set Data folds (isLineBreak), so a preview and a memory line agree
+	// on what ends a line (#911): U+2028, U+0085, VT, FF and FS/GS/RS too.
+	if i := strings.IndexFunc(s, isLineBreak); i >= 0 {
 		s = s[:i]
 	}
 	r := []rune(s)
@@ -404,15 +420,71 @@ func isTokenRune(r rune) bool {
 // MCP listings each had their own copy of this rule before, and a copy is how
 // a rule drifts — the copy that is not tested is the one that ships the bug.
 // The delimiters are the reader's contract, not the caller's: text between «
-// and » is DATA, so a newline inside the block is still data and a line that
-// begins "- [" inside it is not Ghost's own output.
+// and » is DATA. The delimiters are not the only defence: a reader that goes
+// line by line never tracks them, so every line break in the text is also folded
+// to LineBreakEscape (#911) and a memory is always ONE physical line, whatever
+// it holds.
 //
 // It is the ONE delimiter renderer in this package, and it reaches
 // `neutralizeDelimiters` rather than building its own substitution: that is the
 // same rule the tag label (#811) needs, and two spellings of a substitution a
 // reader parses visually is two things to keep in step.
 func Data(s string) string {
-	return "«" + neutralizeDelimiters(s) + "»"
+	return "«" + foldLineBreaks(neutralizeDelimiters(s)) + "»"
+}
+
+// LineBreakEscape is what a stored line break is printed as: every memory
+// occupies exactly ONE physical line on every surface (#911), the way Token
+// already guarantees for an identifier, so a stored newline followed by
+// "- [decision] …" cannot start a line shaped like a memory line for a reader
+// that goes line by line rather than tracking «...».
+//
+// It is a glyph rather than a backslash escape for two reasons. A literal `\n`
+// is ambiguous with stored text that really contains a backslash and an n, and
+// the backslash is also what Token and Label emit for their own escapes, so a
+// reader could not tell which renderer spoke. And ⏎ (U+23CE RETURN SYMBOL) is
+// none of the characters a line is built from — not « or », a backtick, a quote,
+// a bracket, a parenthesis, a hyphen or whitespace — and not a line break to any
+// reader, so it can neither close a construct nor start a line. Text that
+// genuinely contains ⏎ is indistinguishable from a folded break; that is the
+// price of a one-way display fold, and the stored value is never touched.
+const LineBreakEscape = "⏎"
+
+// foldLineBreaks replaces every line break a terminal or a line-splitting
+// reader honours with LineBreakEscape: LF, VT, FF, CR, FS, GS, RS (the last
+// three split lines in Python's str.splitlines), NEL (U+0085), LS (U+2028) and
+// PS (U+2029). A CRLF pair is ONE break, so it folds to one escape. Text with
+// no line break is returned unchanged, which is what keeps every golden
+// byte-identical.
+func foldLineBreaks(s string) string {
+	if !strings.ContainsFunc(s, isLineBreak) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+			b.WriteString(LineBreakEscape)
+			i += 2
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError && isLineBreak(r) {
+			b.WriteString(LineBreakEscape)
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
+}
+
+func isLineBreak(r rune) bool {
+	switch r {
+	case '\n', '\v', '\f', '\r', 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029:
+		return true
+	}
+	return false
 }
 
 // TagsLabel renders a row's tag list as the ` tags:[…]` label a memory line

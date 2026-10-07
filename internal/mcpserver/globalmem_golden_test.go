@@ -168,9 +168,9 @@ func goldenGlobalMemoriesStore(t *testing.T) *Server {
 	//
 	// gmem04 takes the labels and the delimiters: a `convention` row is otherwise
 	// unremarkable, and the delimiter case is the one that has to be here rather
-	// than reasoned about, because `assemble.Data` and `mcpserver.quoteData` are
-	// two separate implementations of the SAME neutralisation and the golden is the
-	// only thing that can say they agree. gmem06 takes the non-manual source,
+	// than reasoned about, because the golden is what pins the
+	// neutralisation's bytes on this surface (formatMemories renders through
+	// `assemble.Data`, the one implementation, since #911). gmem06 takes the non-manual source,
 	// because `source=` is the ORIGIN label — the one field whose value is computed
 	// from `project_id` and `source` TOGETHER through
 	// `memory.CanonicalOriginSourceForProject`, so it is the field most likely to

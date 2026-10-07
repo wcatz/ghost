@@ -381,6 +381,12 @@ Return ONLY the JSON object, no other text.`)
 // quoteData wraps untrusted stored text in «...» data delimiters, first
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
+//
+// It does NOT fold line breaks, unlike assemble.Data (#911), on purpose: this
+// prompt asks the model to REWRITE and MERGE memory content and that output is
+// STORED. Showing a visible escape instead of the real line break would teach the
+// model to copy the escape into merged memories and corrupt the stored text.
+// TestTheReflectionPromptCarriesAStoredNewlineUnchanged pins it.
 func quoteData(s string) string {
 	return "«" + neutralizeDelimiters(s) + "»"
 }
