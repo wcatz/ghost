@@ -509,14 +509,44 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// behind the cut so a demoted one can be backfilled, and bounding the pool at
 	// the cap itself would leave it nothing to trade. Rows the pool excludes are
 	// still returned, behind the selection, as the assembler's backfill supply.
-	chosen, rest := passiveSelect(scored, pol)
+	//
+	// Validity is judged BEFORE the selection and the demotions. A row outside its
+	// window is withheld by stage 2 whatever happens here, so it must not fill a
+	// pool slot, outrank a live row, or be the winner of an edge that demotes or
+	// (on a bucket that drops losers) removes one: a row stage 2 is about to drop
+	// would cost a live row its place and leave nothing in exchange (#893). The
+	// fetch states the same window in SQL, so this is normally a no-op; it is the
+	// order that is the invariant, and it holds for rows that reach this function
+	// by any other route. Withheld rows are still returned, behind everything
+	// eligible, because stage 2 is the authority on dropping them and reports it.
+	eligible, withheld := passiveEligible(scored, now)
+	chosen, rest := passiveSelect(eligible, pol)
 	chosen = s.passiveDemote(ctx, chosen, pol)
+	rest = append(rest, withheld...)
 
 	out := make([]Candidate, 0, len(scored))
 	for _, r := range append(chosen, rest...) {
 		out = append(out, passiveCandidate(r, fetchedBy))
 	}
 	return out, nil
+}
+
+// passiveEligible splits rows into those inside their validity window at now and
+// those outside it, each in its input order. The rule is ValidityState's, the
+// same call stage 2 makes, so a row withheld here is a row stage 2 would drop:
+// only an expired or not-yet-valid state is withheld, and an unreadable bound is
+// no claim.
+func passiveEligible(rows []passiveRow, now time.Time) (eligible, withheld []passiveRow) {
+	eligible = make([]passiveRow, 0, len(rows))
+	for _, r := range rows {
+		switch state, _ := ValidityState(r.mem.ValidFrom, r.mem.ValidUntil, r.mem.VerifiedAt, now); state {
+		case ValidityExpired, ValidityFuture:
+			withheld = append(withheld, r)
+		default:
+			eligible = append(eligible, r)
+		}
+	}
+	return eligible, withheld
 }
 
 // passiveRow is one fetched row with the facts the passive order and the
