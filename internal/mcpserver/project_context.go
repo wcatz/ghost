@@ -508,18 +508,7 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 // reason the count may be skipped: not because their verdict is sharper, but
 // because there is nothing to reconcile it against.
 func projectContextEmptyNote(res assemble.Result) string {
-	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
-		return ""
-	}
-	note := res.Abstention
-	if note == "" {
-		// Unreachable while every reason below renders a sentence, and falling
-		// back to the census would reintroduce the lie this function exists to
-		// prevent — so the fallback states the fact in the fewest words that
-		// cannot be wrong.
-		return "Ghost holds memories for this project, but none of them is current."
-	}
-	return note + " Call ghost_memories_list to see them, still marked with the window they carry."
+	return assemble.EmptyNote(res)
 }
 
 // projectContextOwnRowsNote is the SAME census, moved off the gate it was on.

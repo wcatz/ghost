@@ -124,12 +124,12 @@ func TestBenchInjectionBudget(t *testing.T) {
 	representativeCorpus(t, db, "p1")
 	_ = db.Close()
 
-	projectID, project, memories, _, _, _, _, _, totalMemoryCount, totalKnown, _, _ := loadSessionContext(projDir, config.LoadForHook())
+	projectID, project, memories, _, _, _, _, _, tally := loadSessionContext(projDir, config.LoadForHook())
 	if project != "myproj" {
 		t.Fatalf("project = %q, want myproj", project)
 	}
-	if !totalKnown {
-		t.Fatalf("expected total memory count to be known")
+	if tally.project.Window() <= sessionMemoriesCap {
+		t.Fatalf("expected the trace total to exceed the cap so the block's count line renders, got %d", tally.project.Window())
 	}
 	if len(memories) != sessionMemoriesCap {
 		t.Fatalf("expected %d selected memories, got %d", sessionMemoriesCap, len(memories))
@@ -176,7 +176,7 @@ func TestBenchInjectionBudget(t *testing.T) {
 	// number this prints is the figure docs/benchmarks.md records for the
 	// session-injection budget, and the budget below is what stops it drifting
 	// upward unnoticed.
-	block := formatSessionContext(projectID, project, nil, memories, "", nil, nil, 1, totalMemoryCount, totalKnown, nil, 0, false)
+	block := formatSessionContext(projectID, project, nil, memories, "", nil, nil, 1, nil, tally)
 	if len(block) > sessionBlockByteBudget {
 		t.Errorf("injected block grew past its budget: %d bytes > %d bytes\n%s", len(block), sessionBlockByteBudget, block)
 	}

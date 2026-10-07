@@ -407,6 +407,44 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	return query, append(args, pol.OverFetch)
 }
 
+// PassiveEligibleCount is how many rows the policy's bucket holds that the
+// window's fetch could ever draw from, and how many of those the fetch's own
+// validity predicate removes before the LIMIT. Both come from ONE statement over
+// passivePopulationSQL, the population the fetch and the validity probe already
+// share, so the count and the window cannot disagree about which rows are in
+// play and a validity-excluded row is counted once: inside `eligible`, and again
+// as `validityExcluded`, never as a second row. `eligible - validityExcluded` is
+// the number of rows the window could hold if it had no LIMIT.
+//
+// A session-start header uses it to say how many rows the store holds against the
+// over-fetch's window, so a bucket larger than the window does not read as if it
+// held only the window, and rows the predicate withheld are reported as withheld
+// rather than ranked out. A store below the validity floor has no predicate:
+// validityExcluded is zero.
+func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, err error) {
+	cols, err := passiveColumnsFor(s)
+	if err != nil {
+		return 0, 0, err
+	}
+	where, popArgs := passivePopulationSQL(pol, CandidateRequest{Scope: scope, Now: now}, cols)
+	if !cols.HasValidity {
+		err = s.queryDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM memories WHERE "+where, popArgs...).Scan(&eligible)
+		if err != nil {
+			return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+		}
+		return eligible, 0, nil
+	}
+	stamp := now.UTC().Format(stampLayoutForSQL)
+	// The select list's placeholders come first in the statement's text, so the
+	// stamps are bound before the population's bucket.
+	args := append([]any{stamp, stamp}, popArgs...)
+	query := "SELECT COUNT(*), COALESCE(SUM(CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END), 0) FROM memories WHERE " + where
+	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible, &validityExcluded); err != nil {
+		return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+	}
+	return eligible, validityExcluded, nil
+}
+
 // passiveValidityExcluded counts the rows in one bucket's window that the validity
 // predicate removed BEFORE the LIMIT — the rows that would have been fetched had
 // they been in their window. It exists because filtering in SQL leaves the

@@ -303,7 +303,7 @@ func TestSessionStartSelectionIsUnchangedByAScopeThatExcludesNothing(t *testing.
 	// reaches the loader the way it reaches it in a real session.
 	selected := func() []string {
 		t.Helper()
-		_, _, memories, _, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+		_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 		ids := make([]string, 0, len(memories))
 		for _, m := range memories {
 			ids = append(ids, m.ID)

@@ -141,7 +141,7 @@ func runValidity(p *pipeline) {
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = v.state
 			p.droppedBy[stageValidity]++
-			p.trace.decide(c.ID, stageValidity, v.state, c.Score)
+			p.trace.decide(c.ID, c.ProjectID, stageValidity, v.state, c.Score)
 			continue
 		}
 		if len(v.unparseable) > 0 {
@@ -150,7 +150,7 @@ func runValidity(p *pipeline) {
 			// (dropped); recording a kept decision for it too would leave two
 			// contradictory entries for the same row at the same stage, which is
 			// the one thing the Decision record is documented not to hold.
-			p.trace.keep(c.ID, stageValidity, "validity_unparseable", c.Score)
+			p.trace.keep(c.ID, c.ProjectID, stageValidity, "validity_unparseable", c.Score)
 		}
 		it := itemOf(c)
 		it.ValidityState = v.state
@@ -193,21 +193,21 @@ func runPredicates(p *pipeline) {
 			p.dropped[c.ID] = "category_mismatch"
 			p.droppedBy[stagePredicates]++
 			p.droppedBy[dropCategory]++
-			p.trace.decide(c.ID, stagePredicates, "category_mismatch", c.Score)
+			p.trace.decide(c.ID, c.ProjectID, stagePredicates, "category_mismatch", c.Score)
 			continue
 		case p.req.Retention != "" && c.Retention != p.req.Retention:
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = "retention_mismatch"
 			p.droppedBy[stagePredicates]++
 			p.droppedBy[dropRetention]++
-			p.trace.decide(c.ID, stagePredicates, "retention_mismatch", c.Score)
+			p.trace.decide(c.ID, c.ProjectID, stagePredicates, "retention_mismatch", c.Score)
 			continue
 		case !sig.ScopeMatched:
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = "scope_contradiction"
 			p.droppedBy[stagePredicates]++
 			p.droppedBy[dropScope]++
-			p.trace.decide(c.ID, stagePredicates, "scope_contradiction", c.Score)
+			p.trace.decide(c.ID, c.ProjectID, stagePredicates, "scope_contradiction", c.Score)
 			continue
 		}
 		kept = append(kept, c)
@@ -512,7 +512,7 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 			dropped = append(dropped, rows[i].ID)
 			p.dropped[rows[i].ID] = reason
 			p.droppedBy[stageBudget]++
-			p.trace.decide(rows[i].ID, stageBudget, reason, rows[i].Score)
+			p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)
 			continue
 		}
 		keptRows = append(keptRows, rows[i])

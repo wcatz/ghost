@@ -1507,7 +1507,22 @@ Axis interaction rules:
 > (`internal/mcpinit/session_passive.go`), so the selection, the caps, the order
 > and the near-duplicate pass are the assembler's rather than a second
 > implementation of them, while the per-item PREVIEW budget stayed with the
-> renderer that has to say a line was cut. It therefore renders and applies
+> renderer that has to say a line was cut. The header's totals are the
+> assembler's too rather than a second census of the store: the shown, ranked-out
+> and withheld counts come from the same retrieval's trace, and "of M total" is
+> the trace plus ONE count (`Store.PassiveEligibleCount`) over the window's own
+> predicates (`passiveWhere`, shared with the fetch), so M is every eligible row
+> the store holds and not the over-fetched window's size. A row a stage withheld
+> is inside the window and so is not counted twice; eligible rows the over-fetch
+> never read are ranked out, because the window is ordered by the ranking and cut
+> at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
+> that split). A row the retriever fetched and then removed as a near-duplicate
+> loser never reaches the trace; it is `Deduped`, counted in the total and
+> reported with the withheld rows, never as the ranking's cut. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> is the ranking's and which a stage withheld; when every row was withheld, the
+> block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
+> prints for that state
+> ([#897](https://github.com/wcatz/ghost/issues/897)). It therefore renders and applies
 > `memories.scope` from the shared label and the shared rule
 > ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
 > the conflict and diversity stages are pass-throughs, and `explain: true` still
