@@ -112,6 +112,11 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 type sessionTally struct {
 	project assemble.BucketTally
 	globals assemble.BucketTally
+	// emptyNote is assemble.EmptyNote of the retrieval's own result, set only
+	// when the project's rows were all withheld and nothing else (no `_global`
+	// row was seen) shaped the verdict, so the reason it names is the project's.
+	// It is what ghost_project_context prints for the same state.
+	emptyNote string
 }
 
 // loadSessionPassive assembles the session-start block's memory rows: the
@@ -147,6 +152,7 @@ type sessionTally struct {
 // because the branch with no project to attribute the call to must pass nil and
 // record nothing. See sessionRecordSink.
 func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink) (memories, globals []sessionMemory, tally sessionTally) {
+	budget := sessionPassiveBudget(cfg, projectID)
 	res, err := assemble.Run(ctx, store, assemble.Request{
 		ProjectID: projectID,
 		// The empty Query IS the passive shape. It is not a placeholder: it is
@@ -157,7 +163,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		Condition: assemble.CondHybrid,
 		Now:       now,
 		Scope:     cfg.Injection.SessionScope,
-		Budget:    sessionPassiveBudget(cfg, projectID),
+		Budget:    budget,
 		// The retrieval record (#850), on the seam #646 built, and the same fields
 		// ghost_memory_search sets. It is the ASSEMBLER that writes the row, so
 		// nothing about its shape is re-derived here and the verdicts it carries
@@ -247,6 +253,27 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	tally = sessionTally{
 		project: assemble.CountsFor(res.Trace, projectID, len(memories)),
 		globals: assemble.CountsFor(res.Trace, memory.GlobalProjectID, len(globals)),
+	}
+	// The window is an over-fetch, so the trace counts only the rows it fetched.
+	// One count per bucket, over the same predicates the window's fetch uses,
+	// supplies the rows behind it; an unreadable count leaves the tally as the
+	// trace made it (the header then describes the window, which is the most it
+	// can honestly say).
+	for _, sl := range budget.Slices {
+		n, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, cfg.Injection.SessionScope)
+		if err != nil {
+			slog.Warn("ghost: session-start eligible count failed, so the header counts the retrieval window", "bucket", sl.Bucket, "error", err)
+			continue
+		}
+		switch sl.Bucket {
+		case projectID:
+			tally.project = tally.project.CountedAgainst(n)
+		case memory.GlobalProjectID:
+			tally.globals = tally.globals.CountedAgainst(n)
+		}
+	}
+	if tally.project.Window() > 0 && tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {
+		tally.emptyNote = assemble.EmptyNote(res)
 	}
 	return memories, globals, tally
 }

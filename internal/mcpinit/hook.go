@@ -390,7 +390,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		} else {
 			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** cross-project memories from mixed origins. %s\n", globalOriginGuidance(globals))
 		}
-		if tally.globals.Window() > len(globals) {
+		if tally.globals.Total() > len(globals) {
 			fmt.Fprintf(&gsb, "(%s)\n", sessionCountsLine(tally.globals, globalsRankPhrase, globalsToolPhrase))
 		}
 		for _, m := range globals {
@@ -449,9 +449,16 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		// says so in the assembler's own words, pointing at the tool that still
 		// shows the rows with the window they carry. A count-line header would
 		// attribute a number to a block with nothing shown.
-		if tally.project.Shown == 0 && tally.project.Withheld > 0 {
+		if tally.project.WithheldNote() != "" {
 			fmt.Fprintf(&sb, "**Memories:**\n")
-			fmt.Fprintf(&sb, "%s\n", tally.project.WithheldNote())
+			// The assembler's own note when it spoke for this state (the
+			// same bytes ghost_project_context prints), else the bucket's
+			// WithheldNote, which asks the same abstention for the cause.
+			note := tally.emptyNote
+			if note == "" {
+				note = tally.project.WithheldNote()
+			}
+			fmt.Fprintf(&sb, "%s\n", note)
 		} else {
 			if counts := sessionCountsLine(tally.project, projectRankPhrase, projectToolPhrase); counts != "" {
 				fmt.Fprintf(&sb, "**Memories (%s):**\n", counts)
@@ -538,7 +545,7 @@ const (
 // "(N shown)" heading — "N shown of N total" would assert a comparison the block
 // makes no claim about.
 func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
-	shown, total := tally.Shown, tally.Window()
+	shown, total := tally.Shown, tally.Total()
 	switch {
 	case tally.Withheld > 0 && tally.RankedOut > 0:
 		return fmt.Sprintf("%d shown of %d total — %d not shown: %d ranked out by %s, %d withheld rather than ranked out; use %s for the rest",

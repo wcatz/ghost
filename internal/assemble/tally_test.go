@@ -137,3 +137,95 @@ func TestWithheldNoteNamesTheCause(t *testing.T) {
 		t.Errorf("an uncatalogued cause must still say the rows were withheld: %q", other)
 	}
 }
+
+// TestWithheldNoteIsTheAssemblersOwnEmptyNote pins issue #897's second review
+// finding: a wholly-withheld project bucket at session start and the
+// assembler's own verdict for the same state must print the SAME sentence. The
+// states are driven through assemble.Run (not through a hand-built pipeline) so
+// the comparison is against what a caller of Run receives as Result.Abstention,
+// the bytes ghost_project_context prints through EmptyNote.
+func TestWithheldNoteIsTheAssemblersOwnEmptyNote(t *testing.T) {
+	expired := projectCandidate("p_exp", 0.9)
+	expired.ValidUntil = stampPtr("2026-01-01 00:00:00")
+
+	future := projectCandidate("p_fut", 0.9)
+	future.ValidFrom = stampPtr("2999-01-01 00:00:00")
+
+	scoped := projectCandidate("p_scope", 0.9)
+	scoped.Scope = map[string]string{"environment": "development"}
+
+	for _, tc := range []struct {
+		name  string
+		row   memory.Candidate
+		scope map[string]string
+	}{
+		{name: "expired", row: expired},
+		{name: "not yet valid", row: future},
+		{name: "out of scope", row: scoped, scope: map[string]string{"environment": "production"}},
+	} {
+		req := passiveRequest()
+		req.Scope = tc.scope
+		res := run(t, &fakeRetriever{set: passiveSet(tc.row)}, req)
+		if res.Outcome != OutcomeEmpty {
+			t.Fatalf("%s: outcome = %q, want empty (precondition: the whole block is withheld)", tc.name, res.Outcome)
+		}
+		want := EmptyNote(res)
+		if want == "" {
+			t.Fatalf("%s: EmptyNote is empty for a withheld result (reason %q)", tc.name, res.Reason)
+		}
+		got := CountsFor(res.Trace, "proj", 0).WithheldNote()
+		if got != want {
+			t.Errorf("%s: the session-start note and the assembler's note differ:\n got %q\nwant %q", tc.name, got, want)
+		}
+	}
+}
+
+// TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow: the note exists for rows
+// that were found and withheld; an answerable block and a window that came back
+// empty (`no_memories`, an absence) have none.
+func TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow(t *testing.T) {
+	answer := run(t, &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}, passiveRequest())
+	if got := EmptyNote(answer); got != "" {
+		t.Errorf("an answerable block has an empty note %q", got)
+	}
+	absent := run(t, &fakeRetriever{set: passiveSet()}, passiveRequest())
+	if got := EmptyNote(absent); got != "" {
+		t.Errorf("an empty window is an absence, not a withholding, got %q", got)
+	}
+}
+
+// TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking: the window is an
+// over-fetch, so a store with more eligible rows than it fetched has rows the
+// ranking cut before any stage saw them. They are ranked out, and the total is
+// the eligible count, not the window's size.
+func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
+	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60)
+	if tally.Total() != 60 {
+		t.Errorf("Total = %d, want 60 (the eligible rows, not the 45 the window held)", tally.Total())
+	}
+	if tally.RankedOut != 45 {
+		t.Errorf("RankedOut = %d, want 45 (30 cut by the budget + 15 beyond the window)", tally.RankedOut)
+	}
+	if tally.Window() != 45 {
+		t.Errorf("Window = %d, want 45 (what the retrieval actually fetched)", tally.Window())
+	}
+	// A count that came back smaller than the window (a write raced it) never
+	// shrinks the tally below what the window held.
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10); got.Total() != 45 || got.RankedOut != 30 {
+		t.Errorf("a stale count changed the tally: %+v", got)
+	}
+	// A negative count means "unknown" and changes nothing.
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1); got.Total() != 45 {
+		t.Errorf("an unknown count changed the tally: %+v", got)
+	}
+}
+
+// TestWithheldNoteNeedsNoRowsBeyondTheWindow: a bucket with ranked-out rows
+// behind the withheld ones is not wholly withheld, and a sentence saying the
+// answer is withheld would hide the rows the ranking cut.
+func TestWithheldNoteNeedsNoRowsBeyondTheWindow(t *testing.T) {
+	tally := BucketTally{Shown: 0, Withheld: 2, Reason: validityExpired}.CountedAgainst(9)
+	if got := tally.WithheldNote(); got != "" {
+		t.Errorf("a bucket with live rows beyond the window rendered the all-withheld note %q", got)
+	}
+}

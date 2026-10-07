@@ -224,6 +224,60 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
 }
 
+// passiveWhere is the ONE statement of which rows a passive bucket may read: the
+// bucket (unioned with `_global` when the policy says so), unresolved, and inside
+// the session's scope. The window's fetch and PassiveEligibleCount both splice
+// it, so the count the session-start header divides by is over exactly the rows
+// the window draws from — two spellings of the predicate would let the header
+// describe a population the block was not assembled from.
+func passiveWhere(pol SlicePolicy, scope map[string]string, cols passiveColumns) string {
+	scopeClause := ""
+	if cols.HasScope && len(scope) > 0 {
+		scopeClause = " AND " + ScopeMatchesSQL("scope", scope)
+	}
+
+	// The project predicate: the POLICY'S BUCKET, unioned with `_global` when the
+	// policy says so. It is spelled here rather than borrowed from
+	// CandidateRequest.Mode, because Mode is a property of the REQUEST and this is
+	// a property of the BUCKET — a request can carry both a project bucket and a
+	// `_global` bucket, and only the first of those may admit globals, since the
+	// second would read the same rows a second time. That request is refused (see
+	// validatePassivePolicies) rather than served twice.
+	//
+	// PARENTHESISED, and that is not decoration. `AND` binds tighter than `OR` in
+	// SQL, so an unbracketed `project_id = ? OR project_id = '_global' AND
+	// resolved_at IS NULL` reads as `project_id = ? OR (… AND resolved_at IS NULL)`
+	// — every row of the requesting project escapes the resolved filter, and the
+	// scope clause below it is scoped to the `_global` half alone. The block then
+	// renders resolved rows, and a scope filter that was set does nothing to the
+	// rows that matter. The goldens' resolved-row guard is what caught it.
+	projectClause := "project_id = ?"
+	if pol.IncludeGlobal {
+		projectClause = "(" + projectClause + " OR project_id = '" + GlobalProjectID + "')"
+	}
+	return projectClause + " AND resolved_at IS NULL" + scopeClause
+}
+
+// PassiveEligibleCount is how many rows the policy's bucket could ever put in its
+// window: the same predicates the fetch applies, with no LIMIT and no validity
+// stage (a row a stage withholds is eligible, and is already among the window's
+// rows when the window reaches it). A session-start header uses it to say how
+// many rows the store holds against the over-fetch's window, so a bucket larger
+// than the window does not read as if it held only the window.
+func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, scope map[string]string) (int, error) {
+	cols, err := passiveColumnsFor(s)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.queryDB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM memories WHERE "+passiveWhere(pol, scope, cols), pol.Bucket).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+	}
+	return n, nil
+}
+
 // passiveFetchSQL builds one policy's read and its bindings TOGETHER, because a
 // mismatch between an ORDER BY and its argument list is not an error — it binds
 // the clock to the wrong column, and a fully decayed row then reads as a fresh
@@ -257,30 +311,7 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	// no keys, so an unscoped row never conflicts with a session scope. The rows
 	// the block then shows are the ones that store has, labelled without a scope —
 	// which is exactly the block it produced before scope was read.
-	scopeClause := ""
-	if cols.HasScope && len(req.Scope) > 0 {
-		scopeClause = " AND " + ScopeMatchesSQL("scope", req.Scope)
-	}
-
-	// The project predicate: the POLICY'S BUCKET, unioned with `_global` when the
-	// policy says so. It is spelled here rather than borrowed from
-	// CandidateRequest.Mode, because Mode is a property of the REQUEST and this is
-	// a property of the BUCKET — a request can carry both a project bucket and a
-	// `_global` bucket, and only the first of those may admit globals, since the
-	// second would read the same rows a second time. That request is refused (see
-	// validatePassivePolicies) rather than served twice.
-	//
-	// PARENTHESISED, and that is not decoration. `AND` binds tighter than `OR` in
-	// SQL, so an unbracketed `project_id = ? OR project_id = '_global' AND
-	// resolved_at IS NULL` reads as `project_id = ? OR (… AND resolved_at IS NULL)`
-	// — every row of the requesting project escapes the resolved filter, and the
-	// scope clause below it is scoped to the `_global` half alone. The block then
-	// renders resolved rows, and a scope filter that was set does nothing to the
-	// rows that matter. The goldens' resolved-row guard is what caught it.
-	projectClause := "project_id = ?"
-	if pol.IncludeGlobal {
-		projectClause = "(" + projectClause + " OR project_id = '" + GlobalProjectID + "')"
-	}
+	where := passiveWhere(pol, req.Scope, cols)
 
 	// The `_global` order carries a trailing `id` that the shipped loader's query
 	// does not. It is a divergence from the specification and a deliberate one: a
@@ -316,9 +347,9 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM memories
-		WHERE %s AND resolved_at IS NULL%s
+		WHERE %s
 		ORDER BY %s
-		LIMIT ?`, cols.list, projectClause, scopeClause, orderBy)
+		LIMIT ?`, cols.list, where, orderBy)
 	return query, append(args, pol.OverFetch)
 }
 

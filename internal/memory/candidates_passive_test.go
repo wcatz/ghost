@@ -1351,3 +1351,47 @@ func TestPassiveColumnsEvidenceReadModeIsThreeStates(t *testing.T) {
 		}
 	}
 }
+
+// TestPassiveEligibleCountUsesTheWindowsOwnPredicates: the count is over exactly
+// the rows the fetch draws from, so a resolved row is not eligible, a validity
+// window is not a predicate (a stage withholds it, inside the window) and the
+// over-fetch's LIMIT does not cap it.
+func TestPassiveEligibleCountUsesTheWindowsOwnPredicates(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global','_global','g'),('p','/p','p')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p', 'fact', 'c', 'manual', 0.5)`, "m"+string(rune('a'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, valid_until) VALUES ('exp','p','fact','c','manual',0.5,'2001-01-01 00:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, resolved_at) VALUES ('res','p','fact','c','manual',0.5,'2026-01-01 00:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('g1','_global','fact','c','manual',0.5)`); err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(db, nil)
+	got, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", OverFetch: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 8 {
+		t.Errorf("count = %d, want 8 (7 live + 1 expired; the resolved row and the global row are not this bucket's)", got)
+	}
+	mixed, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", IncludeGlobal: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mixed != 9 {
+		t.Errorf("mixed count = %d, want 9", mixed)
+	}
+}

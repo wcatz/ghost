@@ -33,18 +33,49 @@ type BucketTally struct {
 	Shown     int
 	RankedOut int
 	Withheld  int
+	// Beyond is how many of RankedOut were never fetched: eligible rows past the
+	// over-fetch's LIMIT, which the ranking cut before any stage saw them. It is
+	// set by CountedAgainst and is already part of RankedOut.
+	Beyond int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
 	Reason string
 }
 
-// Window is the number of rows the assembler's window held for this bucket:
-// everything the stages saw, shown or not. It is the "of M total" the block's
-// header divides by, and taking it from the trace rather than a second COUNT
-// is what keeps the header consistent with the rows the block is made of.
+// Window is the number of rows the retrieval's over-fetched window held for
+// this bucket: everything the stages saw, shown or not. It is NOT the number of
+// rows the store holds; Total is that.
 func (t BucketTally) Window() int {
+	return t.Shown + t.RankedOut + t.Withheld - t.Beyond
+}
+
+// Total is every eligible row in the bucket: the window's rows plus the rows
+// beyond it. It is the "of M total" the block's header divides by, and it
+// answers for the store (rows passing the retrieval's own SQL predicates), so
+// a project holding sixty live rows reads "of 60", not "of 45".
+func (t BucketTally) Total() int {
 	return t.Shown + t.RankedOut + t.Withheld
+}
+
+// CountedAgainst folds in the number of eligible rows the store holds for the
+// bucket, counted with the SAME predicates the retrieval's window uses (so a row
+// a stage withheld is already among them and is not counted twice). The rows
+// beyond what the window held are ranked out: the over-fetch is ordered by the
+// ranking and cut at its limit, so the cut is the ranking's doing.
+//
+// A negative eligible count means the count could not be read and changes
+// nothing; a count smaller than the window (a write raced the two reads) never
+// shrinks the tally below what the window held.
+func (t BucketTally) CountedAgainst(eligible int) BucketTally {
+	if eligible < 0 {
+		return t
+	}
+	if extra := eligible - t.Total(); extra > 0 {
+		t.RankedOut += extra
+		t.Beyond += extra
+	}
+	return t
 }
 
 // CountsFor tallies one bucket's fate from a trace. `shown` is the caller's own
@@ -93,25 +124,52 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 // WithheldNote is the sentence for a block whose project half was entirely
 // withheld: the cause, in the assembler's words, and the pointer to the rows
 // that still carry it. It answers only that one question — a block that shows
-// rows has its header accounting for the withheld half, and one with nothing
-// withheld has nothing to explain — so anything else gets "".
+// rows has its header accounting for the withheld and ranked-out halves, and one
+// with nothing withheld has nothing to explain — so anything else gets "". A
+// bucket with rows ranked out behind the withheld ones is not wholly withheld
+// either.
+//
+// The sentence is the assembler's own abstention for the cause, not a table of
+// this type's: see withheldSentence.
 func (t BucketTally) WithheldNote() string {
-	if t.Shown != 0 || t.Withheld == 0 {
+	if t.Shown != 0 || t.Withheld == 0 || t.RankedOut != 0 {
 		return ""
 	}
 	return withheldSentence(t.Reason) + WithheldPointer
 }
 
-// withheldSentence maps a withheld cause to its sentence. The two validity
-// states share the out-of-date wording the passive abstention uses; scope is
-// the other withholding a session start can hit; anything else keeps the
-// withholding honest without inventing a cause the tally did not observe.
+// EmptyNote is the one note for a result whose rows were found and withheld, so
+// the whole block came back empty: the assembler's own abstention plus the
+// pointer to the rows that still carry their window. "" for an answer and for
+// `no_memories`, an empty window that may describe absence. ghost_project_context
+// and the session-start block both print it, so they say the same sentence for
+// the same state.
+func EmptyNote(res Result) string {
+	if res.Outcome != OutcomeEmpty || res.Reason == ReasonNoMemories {
+		return ""
+	}
+	note := res.Abstention
+	if note == "" {
+		// Unreachable while every reason renders a sentence; the fallback states
+		// the fact in the fewest words that cannot be wrong, rather than
+		// reintroducing the census's lie.
+		return "Ghost holds memories for this project, but none of them is current."
+	}
+	return note + WithheldPointer
+}
+
+// withheldSentence is the assembler's own abstention for a withheld bucket's
+// dominant cause. There is no sentence table here: the cause is mapped to the
+// reason `abstention` renders and the sentence is asked of it, so the two cannot
+// drift. Only a cause the assembler has no passive sentence for falls to the
+// generic line, which claims nothing the tally did not observe.
 func withheldSentence(reason string) string {
+	p := &pipeline{passive: true}
 	switch reason {
 	case validityExpired, validityFuture:
-		return passiveAllInvalidSentence
+		return p.abstention(OutcomeEmpty, reasonAllInvalid)
 	case "scope_contradiction":
-		return "No sufficiently trustworthy memory found: nothing found matched the requested scope."
+		return p.abstention(OutcomeEmpty, reasonAllOutOfScope)
 	default:
 		return "No sufficiently trustworthy memory found: the candidates this block was assembled from were " +
 			"withheld before the answer was assembled."

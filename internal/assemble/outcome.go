@@ -540,6 +540,13 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "No sufficiently trustworthy memory found: nothing found was in the requested retention tier " +
 				"(" + p.req.Retention + ")." + p.stageNote()
 		case reasonAllOutOfScope:
+			// The per-stage pointer is dropped on a passive block for the reason the
+			// all_invalid branch above drops it: the surfaces that print a passive
+			// abstention as the whole answer render no notes, so the promise would
+			// point at a breakdown that is not in the payload.
+			if p.passive {
+				return "No sufficiently trustworthy memory found: nothing found matched the requested scope."
+			}
 			return "No sufficiently trustworthy memory found: nothing found matched the requested scope." +
 				p.stageNote()
 		case reasonAllOverBudget:

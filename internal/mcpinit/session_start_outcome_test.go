@@ -178,3 +178,35 @@ func TestSessionStartWithNoRowsKeepsTheAbsentSection(t *testing.T) {
 		t.Errorf("a project with no rows must not claim rows were withheld — nothing was assembled:\n%s", got)
 	}
 }
+
+// TestSessionStartTotalIsTheStoreNotTheOverFetchWindow: the retrieval reads an
+// over-fetched window (three times the cap), so a project holding more rows than
+// the window used to read "15 shown of 45 total". The header's total is the
+// rows the project holds that the retrieval could draw from, and the rows
+// behind the window are ranked out.
+func TestSessionStartTotalIsTheStoreNotTheOverFetchWindow(t *testing.T) {
+	got := renderSessionStart(t, outcomeSession(t, 60, 0))
+
+	want := "**Memories (15 shown of 60 total — 45 not shown, ranked by a composite score of importance, " +
+		"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**"
+	if !strings.Contains(got, want) {
+		t.Errorf("the header understates the store:\n want %q\n got:\n%s", want, got)
+	}
+	if strings.Contains(got, "of 45 total") {
+		t.Errorf("the header reports the over-fetch window as the store:\n%s", got)
+	}
+}
+
+// TestSessionStartTotalCountsWithheldRowsOnceBesideRowsBeyondTheWindow: the
+// withheld rows sit inside the window and the count shares the window's
+// predicates, so the two never count the same row twice.
+func TestSessionStartTotalCountsWithheldRowsOnceBesideRowsBeyondTheWindow(t *testing.T) {
+	got := renderSessionStart(t, outcomeSession(t, 60, 3))
+
+	want := "**Memories (15 shown of 63 total — 48 not shown: 45 ranked out by a composite score of importance, " +
+		"pinned status, and category-aware recency decay, 3 withheld rather than ranked out; " +
+		"use ghost_memories_list or ghost_memory_search for the rest):**"
+	if !strings.Contains(got, want) {
+		t.Errorf("the mixed header double counts or understates:\n want %q\n got:\n%s", want, got)
+	}
+}
