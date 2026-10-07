@@ -48,7 +48,7 @@ func TestSessionContextDisplayCapIndependentOfStoreCap(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, mems, _, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+	_, _, mems, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 	if len(mems) != 1 {
 		t.Fatalf("expected 1 injected memory, got %d", len(mems))
 	}

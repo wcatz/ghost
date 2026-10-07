@@ -6684,22 +6684,34 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 	return count, err
 }
 
-// CountActiveMemories counts the project's memories the way a RETRIEVAL window sees
-// them: `resolved_at IS NULL`, and nothing else. It is not CountMemories with a
-// filter applied for tidiness — the two answer different questions, and the
-// difference is the whole of what each is for.
+// CountActiveMemories counts the project's memories that pass the one predicate
+// every retrieval window binds regardless of caller: `resolved_at IS NULL`. It is
+// not CountMemories with a filter applied for tidiness — the two answer different
+// questions, and the difference is the whole of what each is for.
 //
 // A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
 // listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
 // of every window a ranking surface reads, because `passiveFetchSQL` and the query
 // path both bind `resolved_at IS NULL`. So "how many does this project hold" and
-// "how many of its rows can a block have been assembled from" are different counts,
-// and a caller that needs the second cannot derive it from the first.
+// "how many of its rows a window could even consider" are different counts, and a
+// caller that needs the second cannot derive it from the first.
 //
-// It is deliberately not `CountMemories` minus something: the exclusion is in the
-// SQL the window uses, and duplicating that predicate here is what keeps the two in
-// step. A caller that wants the WINDOW's population should be counting what the
-// window admits.
+// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveFetchSQL`,
+// and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
+// whether an exclusion verdict may be rendered as a claim about the requested
+// project: a validity-invalid row of that project's own IS the cause the validity
+// abstention names, so it has to be counted here or the gate is inert for exactly
+// the case it was written for. A row withdrawn by `ghost resolve` is excluded,
+// because then the exclusion the verdict describes belongs to somebody else (the
+// `_global` half of the union) and naming this project would be the misattribution
+// the count exists to prevent.
+//
+// A caller must therefore not infer two things this count is not. It is not the
+// number of rows a block can render: a validity-invalid row is counted here and
+// withheld from the block. And it is not filtered by the request's session scope,
+// which only the window can apply. It is the population a window could CONSIDER
+// before validity and scope — which is what a cause-naming sentence is reconciled
+// against.
 func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

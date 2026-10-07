@@ -1114,6 +1114,69 @@ func TestCandidatesPassiveReadsAStoreBelowTheTierFloor(t *testing.T) {
 	}
 }
 
+// TestCandidatesPassiveReadsAStoreBelowTheValidityFloor is the validity sibling of
+// the tier-floor case above, and it exists for the same reason: the validity
+// predicate runs in the fetch SQL, so a non-migrating handle has to know whether
+// the columns are there before it names them. The triple arrived at v10
+// (migrateV10, phase1aProvenanceColumns), not at the v15 table rebuild that only
+// carried it across, so a v10..v18 store is read WITH the predicate and a store
+// below v10 must be read without it.
+func TestCandidatesPassiveReadsAStoreBelowTheValidityFloor(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+
+	// No index reads the validity columns, so they drop cleanly. The steps FAIL
+	// LOUDLY rather than skipping: a skip would leave the substitution path with no
+	// coverage while the test reported nothing wrong.
+	for _, col := range []string{"valid_from", "valid_until", "verified_at"} {
+		if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN ` + col); err != nil {
+			t.Fatalf("drop %s to build a pre-v10 store: %v", col, err)
+		}
+	}
+	if _, err := st.db.Exec(`PRAGMA user_version = 9`); err != nil {
+		t.Fatalf("stamp an old schema version: %v", err)
+	}
+
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("resolve the store's shape: %v", err)
+	}
+	if cols.HasValidity {
+		t.Error("a store stamped below the validity floor must not report the validity columns as present")
+	}
+
+	// A pinned-order policy, so the only bindings are the bucket and the limit: a
+	// validity stamp bound but not consumed (or the reverse) shows up as a
+	// placeholder count that does not match the argument list.
+	pol := projectPassivePolicy()
+	pol.Order = OrderPinnedImportanceUpdated
+	q, args := passiveFetchSQL(pol, passiveRequest("proj"), cols)
+	// The PREDICATE is what must be absent. The SELECT list still carries
+	// `NULL AS valid_from` — that substitution is what keeps the read working — so
+	// asserting on the column NAME would be asserting the wrong thing.
+	if strings.Contains(q, "strftime") || strings.Contains(q, validityMatchesSQL()) {
+		t.Errorf("the validity predicate is present in a statement for a store with no validity columns; it names columns that are not there, "+
+			"which is `no such column: valid_from` at run time: %s", q)
+	}
+	if len(args) != 2 {
+		t.Errorf("args = %d, want 2 (bucket and limit) with no validity stamp bound on a pre-validity store", len(args))
+	}
+
+	set, err := st.Candidates(ctx, passiveRequest("proj", projectPassivePolicy()))
+	if err != nil {
+		t.Fatalf("a pre-validity store must still be read, not refused: %v", err)
+	}
+	if len(set.Rows) == 0 {
+		t.Fatal("the pre-validity read returned no rows; the NULL substitutions dropped everything")
+	}
+	for _, r := range set.Rows {
+		if r.ValidFrom != nil || r.ValidUntil != nil || r.VerifiedAt != nil {
+			t.Errorf("row %s: validity bounds hydrated from a store that has no validity columns: from=%v until=%v verified=%v",
+				r.ID, r.ValidFrom, r.ValidUntil, r.VerifiedAt)
+		}
+	}
+}
+
 // TestCandidatesPassiveSchemaVersionIsReadThroughTheSnapshot is a DEADLOCK
 // guard, and it is the kind of bug that shows up as a hung test rather than a
 // failed one.
@@ -1349,5 +1412,50 @@ func TestPassiveColumnsEvidenceReadModeIsThreeStates(t *testing.T) {
 		if got := tc.cols.evidenceReadMode(); got != tc.want {
 			t.Errorf("%s: got mode %d, want %d — an unknown version must never take the skipping branch", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestPassiveEligibleCountUsesTheWindowsOwnPredicates: the count is over exactly
+// the rows the fetch draws from, so a resolved row is not eligible, a validity
+// window is not a predicate (a stage withholds it, inside the window) and the
+// over-fetch's LIMIT does not cap it.
+func TestPassiveEligibleCountUsesTheWindowsOwnPredicates(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global','_global','g'),('p','/p','p')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p', 'fact', 'c', 'manual', 0.5)`, "m"+string(rune('a'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, valid_until) VALUES ('exp','p','fact','c','manual',0.5,'2001-01-01 00:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, resolved_at) VALUES ('res','p','fact','c','manual',0.5,'2026-01-01 00:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('g1','_global','fact','c','manual',0.5)`); err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(db, nil)
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	got, excluded, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", OverFetch: 3}, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 8 || excluded != 1 {
+		t.Errorf("count = %d/%d, want 8/1 (7 live + 1 expired, which the fetch's validity predicate removes; the resolved row and the global row are not this bucket's)", got, excluded)
+	}
+	mixed, _, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", IncludeGlobal: true}, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mixed != 9 {
+		t.Errorf("mixed count = %d, want 9", mixed)
 	}
 }

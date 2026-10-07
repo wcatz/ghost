@@ -131,7 +131,7 @@ func sessionStartOn(tb testing.TB, n, runs int) (time.Duration, int, int) {
 	var rows, globals int
 	for i := 0; i < runs; i++ {
 		total += measureSessionStart(tb, projectPath)
-		projectID, _, mems, g, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+		projectID, _, mems, g, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 		if projectID == "" {
 			tb.Fatalf("fixture project did not resolve at n=%d", n)
 		}
