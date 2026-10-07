@@ -37,10 +37,11 @@ import (
 // The rest of the embedded Memory is the CURRENT row. That is not an oversight
 // and it is bounded: memory_history records exactly the five state columns
 // above plus the event's other end, so tags, scope, pin, access count,
-// provenance and the validity triple were never versioned. They are read from
-// the row as it stands, and the doc on this type says so where a reader of the
-// value will see it. A deleted memory has no row at all, so those fields are
-// zero for it — the honest reading, since nothing records what they held.
+// confidence, provenance and the validity triple were never versioned. They are
+// read from the row as it stands, and the doc on this type says so where a
+// reader of the value will see it. A deleted memory has no row at all, so those
+// fields are zero for it — the honest reading, since nothing records what they
+// held.
 //
 // CreatedAt is the exception, and it is the one field here the decay measures an
 // age from: it is the row's own when that column can answer, and the version

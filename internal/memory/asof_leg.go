@@ -74,40 +74,47 @@ func AsOfSourceNote(t time.Time) string {
 // a block that disclosed its instant and then printed today's tasks under it
 // would be contradicted by its own second half.
 //
-// It carves out the fields a historical row DOES carry from the current row —
-// the validity window, scope and pin — because "nothing in this block is a claim
-// about the present" would be false about them. AsOfValidityNote is where that
-// borrow is stated beside the rows; this sentence names it too, so the two notes
-// cannot read as a contradiction.
+// It carves out every field a historical row line DOES carry from the current
+// row — tags, scope, pin, confidence, agent, source_ref and the validity window,
+// which are exactly the fields a row line renders that the history table does
+// not record — because "nothing in this block is a claim about the present"
+// would be false about them. AsOfValidityNote is where the window's borrow is
+// stated beside the rows; this sentence names the whole set too, so the two
+// notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
-		"than shown as they are now; a memory row's validity window, scope and pin are not versioned either, and " +
-		"where shown they are the current row's. Apart from those, nothing in this block is a claim about the present."
+		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
+		"window are not versioned either, and where shown they are the current row's. Apart from those, nothing in " +
+		"this block is a claim about the present."
 }
 
-// AsOfValidityNote is the sentence stating that the validity window, scope and
-// pin a historical read renders come from the CURRENT row rather than the version
-// the rest of the line comes from, and it is the same sentence on every surface
-// that renders one.
+// AsOfValidityNote is the sentence stating that the validity window a historical
+// read renders — like the row's other unversioned fields — comes from the CURRENT
+// row rather than the version, and it is the same sentence on every surface that
+// renders one.
 //
 // It lives here, beside the other two historical notes, because the store owns
 // the fact: memory_history records exactly content, category, importance,
 // resolved_at, source and project_id (AsOfRow's doc says so), so the triple a
-// historical row carries is read from the live row. A surface that worded the
-// borrow itself would let the two drift, and a drift here is not cosmetic — it is
-// the difference between a reader taking a present-day window for the window that
+// historical row carries is read from the live row, as are its tags, scope, pin,
+// confidence and provenance columns. A surface that worded the borrow itself
+// would let the two drift, and a drift here is not cosmetic — it is the
+// difference between a reader taking a present-day window for the window that
 // held at the instant the block is a reading of, and knowing it is not.
 //
-// The instant is named because the note's whole point is what it is NOT a claim
-// about; the block's AsOfSourceNote names the same instant, and a reader who
-// meets either line first has met it. The note says in as many words that no
-// verdict is drawn from the window, because a verdict at the instant would be
-// exactly the claim the borrow makes false.
+// The note names the full borrowed set rather than the window alone, and it does
+// NOT say "the rest of the line is the version's": that would be false, because
+// the same row line prints the current row's tags, confidence and provenance
+// beside the window. The instant is named because the note's whole point is what
+// it is NOT a claim about; the block's AsOfSourceNote names the same instant, and
+// a reader who meets either line first has met it. The note says in as many words
+// that no verdict is drawn from the window, because a verdict at the instant
+// would be exactly the claim the borrow makes false.
 func AsOfValidityNote(at time.Time) string {
-	return "A memory row's validity window, scope and pin are read from the current row, not the version the " +
-		"rest of the line comes from: memory_history records none of them. The window shown is the CURRENT one, " +
-		"not the window the memory held at " + at.UTC().Format(time.RFC3339) + ", so no expiry or future-start " +
-		"verdict is drawn from it."
+	return "A memory row's validity window, and its tags, scope, pin, confidence, agent and source_ref, are read " +
+		"from the current row rather than the version the row's content and category come from: memory_history " +
+		"records none of them. The window shown is the CURRENT one, not the window the memory held at " +
+		at.UTC().Format(time.RFC3339) + ", so no expiry or future-start verdict is drawn from it."
 }
 
 // AsOfValidityState is the validity state a HISTORICAL listing may draw from a

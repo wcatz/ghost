@@ -1053,19 +1053,19 @@ anywhere in the read, and no inference: it is a selection.
   shorter set that says nothing about the gap reads as the whole truth.
 - **Which columns are historical.** `content`, `category`, `importance`,
   `resolved_at`, `source` and `project_id` come from the version row. Tags,
-  scope, pin, access count, provenance and the validity triple were never
-  versioned, so they are read from the row as it stands, and a deleted memory has
-  no row at all — those fields are zero for it, which is the honest reading rather
-  than a guess. `valid_from` / `valid_until` / `verified_at` are the sharpest
+  scope, pin, access count, confidence, provenance and the validity triple were
+  never versioned, so they are read from the row as it stands, and a deleted
+  memory has no row at all — those fields are zero for it, which is the honest
+  reading rather than a guess. `valid_from` / `valid_until` / `verified_at` are the sharpest
   case: [#575](https://github.com/wcatz/ghost/issues/575) ships the writers, but
   the change log still records no validity, so an `as_of` read's window is the
   current one and only the current one. It therefore draws **no** clock-dependent
   verdict from that window: the two `as_of` **listing** surfaces —
   `ghost_project_context`'s `as_of` branch and the `ghost context --as-of` session
   block — render the window with no `expired` / `not yet valid` marker and append
-  `memory.AsOfValidityNote`, saying plainly that the window — with scope and pin —
-  is the current row's, because a verdict at T would be a claim the borrowed window
-  cannot support. The clock-independent `unverified` marker is still drawn
+  `memory.AsOfValidityNote`, saying plainly that the window — like the row's
+  other unversioned fields — is the current row's, because a verdict at T would be
+  a claim the borrowed window cannot support. The clock-independent `unverified` marker is still drawn
   (`memory.AsOfValidityState`): whether the window was ever verified is a fact
   about the current row rather than about when it is read, so a historical line and
   a current one agree about it. Two imprecisions are recorded rather than worked
