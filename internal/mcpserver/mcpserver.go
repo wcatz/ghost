@@ -4121,7 +4121,7 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 			assemble.ScopeLabel(m.Scope),
 			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
-			sourceLabelForMemory(m), quoteData(m.Content))
+			sourceLabelForMemory(m), assemble.Data(m.Content))
 	}
 	return sb.String()
 }
@@ -4155,7 +4155,9 @@ func formatMemoriesAt(memories []memory.Memory, asOf time.Time) string {
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
 func quoteData(s string) string {
-	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
+	// One renderer (#911): delimiters neutralised and stored line breaks folded,
+	// so a stored newline cannot start a line shaped like a record.
+	return assemble.Data(s)
 }
 
 // dataDelimiterNote is the sentence that tells a reader what the «...»
@@ -4187,7 +4189,7 @@ func sourceLabel(source string) string {
 	if label == "" {
 		return ""
 	}
-	return " source=" + label
+	return assemble.SourceLabel(label)
 }
 
 // repairInstructions renders the follow-up for ONE project's repairable targets:

@@ -33,7 +33,8 @@ func CanonicalOriginSourceForProject(projectID, source, content string) string {
 // SessionStart banner and MCP listings from growing different trust rules for
 // the same row. `manual` is the direct-user marker; `builtin` is deliberately
 // separate so Ghost-shipped rules cannot inherit that trust. An unknown value
-// is treated as non-user material and rendered verbatim rather than being
+// is treated as non-user material, and printed through assemble.SourceLabel
+// (a quoted token when it is not a plain identifier) rather than being
 // silently granted trust if a newer writer slips past the schema check.
 func OriginClass(source string) (own bool, label string) {
 	if source == "manual" {

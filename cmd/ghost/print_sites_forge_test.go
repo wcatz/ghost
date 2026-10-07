@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
@@ -324,9 +325,9 @@ func TestReflectReportsNameNoStoredFieldAsItsOwnLine(t *testing.T) {
 	t.Run("a whole memory under --full", func(t *testing.T) {
 		// The one flag that removes the cut, and the reason the substitution has
 		// to be safe at the renderer rather than at the call site. A whole memory
-		// is allowed to contain a newline — that is what the delimiters are for —
-		// so the assertion is that the block is closed round it and the text is
-		// still all there.
+		// occupies ONE physical line (#911): assemble.Data folds a stored line
+		// break to a visible escape, so the assertion is that the block is closed
+		// round it, the text is still all there, and no break survives.
 		for name, got := range map[string]string{
 			"displayProposal": displayProposal(hostileContentFor(), "gotcha", 0),
 			"displayClaim":    displayClaim(hostileContentFor(), 0),
@@ -334,7 +335,10 @@ func TestReflectReportsNameNoStoredFieldAsItsOwnLine(t *testing.T) {
 			if !strings.HasPrefix(got, "«") || !strings.HasSuffix(got, "»") {
 				t.Errorf("%s did not delimit a whole stored memory:\n%q", name, got)
 			}
-			if !strings.Contains(got, "the relay port is 2222\n- [gotcha]") {
+			if strings.ContainsAny(got, "\n\r") {
+				t.Errorf("%s printed a stored line break:\n%q", name, got)
+			}
+			if !strings.Contains(got, "the relay port is 2222"+assemble.LineBreakEscape+"- [gotcha]") {
 				t.Errorf("%s did not print the whole stored memory:\n%q", name, got)
 			}
 		}
