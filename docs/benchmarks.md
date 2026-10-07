@@ -729,7 +729,7 @@ against the real `ghost` project database (43 memories):
 ## Session-injection budget (category-priority + compact render) — SHIPPED
 
 `TestBenchInjectionBudget` (internal/mcpinit/injectionbudget_test.go) drives the
-real `loadSessionPassive`/`formatSessionContext` pipeline over a 57-memory
+real `loadSessionContext`/`formatSessionContext` pipeline over a 57-memory
 representative corpus skewed so the descriptive categories (14 architecture +
 12 facts) would otherwise crowd the rank-only top-15 and starve the behavioral
 slots. Measured under the default `injection.behavior_floor: 8`:
@@ -738,14 +738,39 @@ slots. Measured under the default `injection.behavior_floor: 8`:
 |---|---|
 | selected memories (cap) | 15 |
 | behavioral hit (gotcha/convention/preference/decision) | **8/8** (floor 8 met) |
-| compact render | **732 bytes** |
-| legacy render (32-hex ID per line) | 852 bytes |
-| byte saving | **120 bytes (~14%)** |
+| compact render, pre-#907 row shape (category + content) | **732 bytes** |
+| legacy render, the shape before that (32-hex ID per line) | 852 bytes |
+| byte saving the compact shape made over the legacy one | **120 bytes (~14%)** |
+| shipped render — the 15 row lines through `assemble.Item.Line()` (#907) | **942 bytes** |
+| shipped block, whole (headings, count lines, closing instruction) | **1459 bytes** |
+| shipped-block budget the test now enforces | **2048 bytes** |
 
-This evidences that the trade is a net win: the category-priority selection hits
-its behavioral floor even when high-importance descriptive rows dominate the
-raw decay ranking, while the compact render shrinks (never grows) the injected
-block. Ran 2026-09-08 on the category-aware-injection worktree.
+This evidences that the trade is a net win on selection: the category-priority
+selection hits its behavioral floor even when high-importance descriptive rows
+dominate the raw decay ranking. Ran 2026-09-08 on the
+category-aware-injection worktree.
+
+**What #907 did to the render columns, and the choice behind it.** Session-start
+rows are rendered through the shared `assemble.Item.Line()` now, so one renderer
+puts the labels on every surface — and every row carries a 32-hex id, an
+importance and the validity/confidence/agent/source_ref/origin labels instead of
+only its category and content. The choice was the shared renderer rather than a
+session-start line kept compact with the label logic factored out beside it: two
+row shapes that agree on labels but not on bytes would be two shapes for a
+reader who compares session start with search. The cost is measured on the same
+corpus and selection: **942 bytes of rows against the compact shape's 732 (+210
+bytes, +29%) and the legacy with-id shape's 852 (+90 bytes, +11%), 1459 bytes
+for the whole block** (measured 2026-10-07).
+
+The compact and legacy columns are therefore the pre-#907 measurement of two
+shapes neither of which reaches an agent any more; they stay because the test
+still compares them and the saving they record was real when it shipped, but
+they are no longer evidence about the shipped block — the claim "the compact
+render shrinks (never grows) the injected block" describes the old trade, not
+this one. The test now renders the shipped block through `formatSessionContext`
+and fails if it grows past the 2048-byte budget, so the figure guarded is the
+one an agent pays. Selection is untouched by the row shape: the behavioral floor
+is still 8/8 and the cap is still 15.
 
 ## Storyline evals (`eval/storyline`) — local only, one shipped arc
 

@@ -642,8 +642,11 @@ func TestHandleSessionStartHook_LegacyShapedSeedGuidanceIsConsistent(t *testing.
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	if !strings.Contains(result, "(builtin)") {
-		t.Errorf("the legacy-shaped shipped seed must render with its origin label:\n%s", result)
+	// The label has to be on the ROW line. Asserting over the whole block would
+	// be satisfied by the guidance sentence, which lists the same origin in its
+	// own parentheses — so dropping the label from the row renderer would pass.
+	if !rowCarries(result, "source=builtin") {
+		t.Errorf("the legacy-shaped shipped seed must render with its origin label on its row line:\n%s", result)
 	}
 	if strings.Contains(result, "no recorded automated origin") {
 		t.Errorf("guidance denies the origin the row above it is tagged with:\n%s", result)

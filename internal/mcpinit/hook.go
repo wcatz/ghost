@@ -663,28 +663,39 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 			continue
 		}
 		// AsOfRow embeds Memory, so all Memory fields are promoted.
-		// Parse time strings to time.Time for the renderer.
+		// Parse time strings to time.Time for the renderer using the repo's
+		// one reader for stored stamps, memory.ParseStamp. An unreadable value
+		// means the validity rule treats it as unset (no bound), which is the
+		// same behaviour the validity state machine expects.
 		var createdAt time.Time
 		if row.CreatedAt != "" {
-			createdAt, _ = time.Parse(memory.StoredStampLayout, row.CreatedAt)
+			createdAt, _ = memory.ParseStamp(row.CreatedAt)
 		}
 		var resolvedAt *time.Time
 		if row.ResolvedAt != nil {
-			t, _ := time.Parse(memory.StoredStampLayout, *row.ResolvedAt)
-			resolvedAt = &t
+			t, ok := memory.ParseStamp(*row.ResolvedAt)
+			if ok {
+				resolvedAt = &t
+			}
 		}
 		var validFrom, validUntil, verifiedAt *time.Time
 		if row.ValidFrom != nil {
-			t, _ := time.Parse(memory.StoredStampLayout, *row.ValidFrom)
-			validFrom = &t
+			t, ok := memory.ParseStamp(*row.ValidFrom)
+			if ok {
+				validFrom = &t
+			}
 		}
 		if row.ValidUntil != nil {
-			t, _ := time.Parse(memory.StoredStampLayout, *row.ValidUntil)
-			validUntil = &t
+			t, ok := memory.ParseStamp(*row.ValidUntil)
+			if ok {
+				validUntil = &t
+			}
 		}
 		if row.VerifiedAt != nil {
-			t, _ := time.Parse(memory.StoredStampLayout, *row.VerifiedAt)
-			verifiedAt = &t
+			t, ok := memory.ParseStamp(*row.VerifiedAt)
+			if ok {
+				verifiedAt = &t
+			}
 		}
 		// ValidityState is computed at render time from the parsed timestamps.
 		// We pass the parsed timestamps and let the renderer compute the state.
