@@ -158,3 +158,31 @@ func TestSelectPassiveDemotionsIgnoreRowsOutsideTheirWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestPassiveNearDuplicateWinnerExpiredWithinTheSameSecond reaches the demotion
+// through Store.Candidates on the one route where the SQL predicate and stage 2
+// disagree. The SQL window compares at whole-second precision, so it is a
+// superset of ValidityState: a winner whose valid_until is the second the
+// request clock is already part-way through is kept by SQL and expired by Go.
+// Without the validity-first order that winner removes the live loser on the
+// _global bucket and is then dropped itself.
+func TestPassiveNearDuplicateWinnerExpiredWithinTheSameSecond(t *testing.T) {
+	s, ctx, now := passiveDemoteValidityFixture(t)
+	until := now.Format(StoredStampLayout)
+	winner := createPassiveRow(t, s, ctx, "_global", "winner expiring this second", 0.99)
+	live := createPassiveRow(t, s, ctx, "_global", "live restatement", 0.5)
+	setRawValidity(t, s, ctx, winner, nil, strPtr(until), nil)
+	if err := s.CreateLink(ctx, live, winner, "related", 0.95, "manual"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	req := passiveRequest(testProject, globalPassivePolicy())
+	req.Now = now.Add(500 * time.Millisecond)
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	ids := passiveIDs(set)
+	if !containsStr(ids, live) {
+		t.Errorf("the live row was removed by an edge to a winner that is expired at the request clock: %v", ids)
+	}
+}
