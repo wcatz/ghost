@@ -333,7 +333,7 @@ line renders it (`` `id` ``, comma-separated when there are several). It is a fi
 the memory's one line, on `ghost_memory_search`, `ghost_project_context`, the
 session-start block and the `ghost://memories/global` resource alike. Both rows stay and
 the ranking is unchanged; the marker says only that the two disagree. A pair with one
-side absent from the answer, or whose edge was withdrawn, is not marked.
+side absent from the answer, or whose edge was withdrawn, is not marked, nor is a pair whose scopes conflict (`memory.ScopesConflict`: `environment=production` against `environment=development`).
 
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
