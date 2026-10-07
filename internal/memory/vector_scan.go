@@ -203,8 +203,8 @@ func (v *vectorRows) embed(sp vecSpan) []byte { return v.embeds[sp.off : sp.off+
 // of the mutex — but the lock still says what the statement is, and every other
 // reader in this package takes it. query is the caller's own SQL (the
 // project-scoped leg and the cross-project leg differ only in their WHERE
-// clause) and is run against queryDB, so ExplainSearch's trace store still
-// reads its snapshot transaction.
+// clause) and is run against queryDB, so the snapshot store Candidates builds still
+// reads its transaction.
 func (s *Store) snapshotVectors(ctx context.Context, query string, args []any, queryVec []float32, identity string, v *vectorRows) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -507,7 +507,7 @@ func cosineFromBytes(query []float32, blob []byte) float32 {
 const maxRetainedVectorBytes = 32 << 20
 
 // borrowVectorRows takes a scratch snapshot from the store's pool, or makes one.
-// A store built as a literal (ExplainSearch's trace store) has no pool
+// A store built as a literal (the snapshot store Candidates builds) has no pool
 // function, so the nil case is a real one rather than a bug to assert away.
 func (s *Store) borrowVectorRows() *vectorRows {
 	// A store literal built without scratch gets a fresh snapshot rather than a nil

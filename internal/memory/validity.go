@@ -14,8 +14,8 @@ import (
 //     browsing surfaces use, having run no stages; ValidityLabel renders the
 //     state onto a listing. All three are in internal/assemble/validity.go and all
 //     three call here.
-//   - explain mode, which reports the state of a row the search returned
-//     (internal/memory/explain.go).
+//   - the explain projection, which reports the state of every candidate it
+//     describes (internal/assemble/explain.go).
 //
 // A second copy would be a second answer to "may this row be used", free to
 // drift from the first the moment either is edited: a search that explains a row

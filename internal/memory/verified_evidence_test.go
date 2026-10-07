@@ -493,14 +493,6 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// as_of value before the stages run, so this read carrying the present's
 		// boundaries is a documented decision rather than an oversight.
 		"asof.go:ReadMemoriesAsOf": true,
-		// #583's explain reads the whole triple, verified_at included, to NAME
-		// the row's validity state in the payload — the one rule
-		// ValidityState applies, which the assembler's validity stage also reads
-		// through. It writes nothing and stamps nothing: the state is a statement
-		// about the row, and validity_penalty is 0 because the search ranking
-		// applies no validity term at all. A reader, which is why it sits here
-		// rather than in writesMemory.
-		"explain.go:ExplainSearchScoped": true,
 		// The exported seam the live writers reach verified_at THROUGH, so its own
 		// body names no column and the scan cannot see it either. Listed so a future
 		// writer that only calls the seam is a known shape, not a silent one.
