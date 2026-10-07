@@ -265,6 +265,14 @@ once, because a reader who was never told the convention cannot be expected to
 honour it, and a second copy of the explanation reads as a stray duplicate rather
 than as emphasis.
 
+**Every memory is one physical line.** A line break in stored text (LF, CR, CRLF,
+VT, FF, U+0085, U+2028, U+2029) is printed as `⏎` inside the delimiters, so a
+content, `agent=` or `source_ref=` value holding a newline followed by
+`- [decision] …` cannot print a second line shaped like a memory line for a reader
+that goes line by line. The stored text is unchanged; only its display is folded.
+The `source=` origin label is printed as a quoted token when it is not a plain
+identifier, not verbatim.
+
 Two more fields are printed outside the delimiters *undelimited*, and both earn it
 by being short labels rather than prose. A row's **`tags:[…]`** label is a JSON
 array, so `json.Marshal` already escapes a newline, a quote and a backslash and a

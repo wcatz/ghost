@@ -4230,7 +4230,7 @@ func formatMemories(memories []memory.Memory) string {
 			assemble.ScopeLabel(m.Scope),
 			assemble.ValidityLabel(assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now), m.ValidFrom, m.ValidUntil, m.VerifiedAt),
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
-			sourceLabelForMemory(m), quoteData(m.Content))
+			sourceLabelForMemory(m), assemble.Data(m.Content))
 	}
 	return sb.String()
 }
@@ -4271,7 +4271,7 @@ func sourceLabel(source string) string {
 	if label == "" {
 		return ""
 	}
-	return " source=" + label
+	return assemble.SourceLabel(label)
 }
 
 // repairInstructions renders the follow-up for ONE project's repairable targets:
