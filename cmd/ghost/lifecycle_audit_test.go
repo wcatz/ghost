@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
@@ -108,6 +109,7 @@ func writeAuditSidecar(t *testing.T, dir string) string {
 	s := audit.NewWithHasher(hasher)
 	// The session the fixture's call was made in: a run judges only that session's calls.
 	s.SetSessionID("s1")
+	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse("the scratch directory is reaped before the lifecycle run begins")
 	path, err := audit.WriteSidecar(dir, s)
 	if err != nil {

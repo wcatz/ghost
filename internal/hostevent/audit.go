@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
 )
@@ -94,8 +95,45 @@ func ScanAudit(format string, r io.Reader, h audit.Hasher) (*audit.Signals, bool
 func finish(sig *audit.Signals, err error) (*audit.Signals, error) {
 	if err != nil {
 		sig.MarkDegraded(fmt.Sprintf("scan transcript: stopped before the end (%v)", err))
+	} else if n := sig.Unplaced(); n > 0 {
+		// Text with no instant is carried but is never evidence for any call (a call is
+		// judged only against what was written after it), so an `ignored` verdict from
+		// this scan is a claim about the text that could be placed.
+		sig.MarkDegraded(fmt.Sprintf("scan transcript: %d entries carried no timestamp and cannot be placed after a call", n))
 	}
 	return sig, err
+}
+
+// parseStamp reads a host's line timestamp: RFC 3339 as Claude Code and codex write it,
+// or a Unix instant in milliseconds as opencode writes it. Anything else is the zero
+// time, which places nothing.
+func parseStamp(raw json.RawMessage) time.Time {
+	if len(raw) == 0 {
+		return time.Time{}
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, str); err == nil {
+			return t
+		}
+		return time.Time{}
+	}
+	var ms int64
+	if err := json.Unmarshal(raw, &ms); err == nil && ms > 0 {
+		return time.UnixMilli(ms)
+	}
+	return time.Time{}
+}
+
+// firstStamp is the first of the given instants that is readable, for a part that names
+// its own and a message that names one for all its parts.
+func firstStamp(raws ...json.RawMessage) time.Time {
+	for _, r := range raws {
+		if t := parseStamp(r); !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // toolArgText renders a tool call's arguments as the text of the agent's own
@@ -179,8 +217,9 @@ func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
 // shape rather than about a session. The remaining types (tool_result lives under
 // a user turn and is never reached here) are the harness's, not the agent's.
 type claudeAuditLine struct {
-	Type    string `json:"type"`
-	Message struct {
+	Type      string          `json:"type"`
+	Timestamp json.RawMessage `json:"timestamp"`
+	Message   struct {
 		Content []struct {
 			Type  string          `json:"type"`
 			Name  string          `json:"name"`
@@ -204,6 +243,7 @@ func AuditScanClaudeJSONL(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
 		if err := json.Unmarshal(line, &l); err != nil || l.Type != "assistant" {
 			return
 		}
+		sig.SetAt(parseStamp(l.Timestamp))
 		for _, c := range l.Message.Content {
 			switch c.Type {
 			case "text":
@@ -226,13 +266,22 @@ func AuditScanClaudeJSONL(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
 type opencodeAuditLine struct {
 	Info struct {
 		Role string `json:"role"`
+		Time struct {
+			Created json.RawMessage `json:"created"`
+		} `json:"time"`
 	} `json:"info"`
 	Parts []struct {
-		Type  string `json:"type"`
-		Tool  string `json:"tool"`
-		Text  string `json:"text"`
+		Type string `json:"type"`
+		Tool string `json:"tool"`
+		Text string `json:"text"`
+		Time struct {
+			Start json.RawMessage `json:"start"`
+		} `json:"time"`
 		State struct {
 			Input json.RawMessage `json:"input"`
+			Time  struct {
+				Start json.RawMessage `json:"start"`
+			} `json:"time"`
 		} `json:"state"`
 	} `json:"parts"`
 }
@@ -248,6 +297,10 @@ func AuditScanOpencodeMessages(r io.Reader, h audit.Hasher) (*audit.Signals, err
 			return
 		}
 		for _, p := range l.Parts {
+			// The part's own start, else the message's creation: a part is written
+			// after its message begins, so the message instant is a time the text
+			// cannot predate.
+			sig.SetAt(firstStamp(p.Time.Start, p.State.Time.Start, l.Info.Time.Created))
 			switch p.Type {
 			case "text":
 				sig.AddProse(p.Text)
@@ -270,11 +323,17 @@ func AuditScanOpencodeMessages(r io.Reader, h audit.Hasher) (*audit.Signals, err
 // the comparison's precedence would then hand the verdict to whichever it
 // happened to test first.
 type opencodeV2AuditLine struct {
-	Type    string `json:"type"`
+	Type string `json:"type"`
+	Time struct {
+		Created json.RawMessage `json:"created"`
+	} `json:"time"`
 	Content []struct {
-		Type  string `json:"type"`
-		Name  string `json:"name"`
-		Text  string `json:"text"`
+		Type string `json:"type"`
+		Name string `json:"name"`
+		Text string `json:"text"`
+		Time struct {
+			Created json.RawMessage `json:"created"`
+		} `json:"time"`
 		State struct {
 			Input    json.RawMessage `json:"input"`
 			Metadata struct {
@@ -301,6 +360,7 @@ func AuditScanOpencodeV2Messages(r io.Reader, h audit.Hasher) (*audit.Signals, e
 			return
 		}
 		for _, c := range l.Content {
+			sig.SetAt(firstStamp(c.Time.Created, l.Time.Created))
 			switch c.Type {
 			case "text":
 				sig.AddProse(c.Text)
@@ -326,8 +386,9 @@ func AuditScanOpencodeV2Messages(r io.Reader, h audit.Hasher) (*audit.Signals, e
 // STRING, so they are decoded once more before being read — a second decode that
 // is what makes a codex save a save, since the content lives inside that string.
 type codexAuditLine struct {
-	Type    string `json:"type"`
-	Payload struct {
+	Type      string          `json:"type"`
+	Timestamp json.RawMessage `json:"timestamp"`
+	Payload   struct {
 		Type      string  `json:"type"`
 		Name      string  `json:"name"`
 		Namespace *string `json:"namespace"`
@@ -360,6 +421,7 @@ func AuditScanCodexRollout(r io.Reader, h audit.Hasher) (*audit.Signals, error) 
 		if err := json.Unmarshal(line, &l); err != nil || l.Type != "response_item" {
 			return
 		}
+		sig.SetAt(parseStamp(l.Timestamp))
 		switch l.Payload.Type {
 		case "message":
 			if l.Payload.Role != "assistant" {

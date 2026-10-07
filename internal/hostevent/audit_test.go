@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
 )
@@ -348,5 +349,65 @@ func TestAScanWithNoKeyProducesNoTokens(t *testing.T) {
 	if !sig.Empty() {
 		t.Error("a keyless scan reported evidence; it must produce nothing rather than " +
 			"tokens nobody can verify")
+	}
+}
+
+// TestEveryAuditScannerStampsWhenTheAgentWrote: a call is judged only against text written
+// after it, so each scanner has to put an instant on what it reads. The fixture has the
+// memory's wording said once at 09:00 and unrelated text at 10:00; a cutoff between them
+// must leave the memory unused, and a cutoff before both must leave it used. A line with no
+// timestamp is carried but never counts for any cutoff, and the scan says so.
+func TestEveryAuditScannerStampsWhenTheAgentWrote(t *testing.T) {
+	early := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+	late := early.Add(time.Hour)
+	iso := func(t time.Time) string { return t.Format(time.RFC3339Nano) }
+	ms := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
+	const other = "an unrelated remark about the weather"
+
+	cases := map[string]struct {
+		format     string
+		transcript func(wording, other, unplaced string) string
+	}{
+		"claude": {FormatClaudeJSONL, func(w, o, u string) string {
+			return strings.Join([]string{
+				`{"type":"assistant","timestamp":"` + iso(early) + `","message":{"content":[{"type":"text","text":"` + w + `"}]}}`,
+				`{"type":"assistant","timestamp":"` + iso(late) + `","message":{"content":[{"type":"text","text":"` + o + `"}]}}`,
+				`{"type":"assistant","message":{"content":[{"type":"text","text":"` + u + `"}]}}`, ""}, "\n")
+		}},
+		"codex": {FormatCodexRollout, func(w, o, u string) string {
+			return strings.Join([]string{
+				`{"timestamp":"` + iso(early) + `","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"` + w + `"}]}}`,
+				`{"timestamp":"` + iso(late) + `","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"` + o + `"}]}}`,
+				`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"` + u + `"}]}}`, ""}, "\n")
+		}},
+		"opencode": {FormatOpencodeMessages, func(w, o, u string) string {
+			return strings.Join([]string{
+				`{"info":{"role":"assistant","time":{"created":` + ms(early) + `}},"parts":[{"type":"text","text":"` + w + `"}]}`,
+				`{"info":{"role":"assistant","time":{"created":` + ms(early) + `}},"parts":[{"type":"text","time":{"start":` + ms(late) + `},"text":"` + o + `"}]}`,
+				`{"info":{"role":"assistant"},"parts":[{"type":"text","text":"` + u + `"}]}`, ""}, "\n")
+		}},
+		"opencode-v2": {FormatOpencodeV2Messages, func(w, o, u string) string {
+			return strings.Join([]string{
+				`{"type":"assistant","time":{"created":` + ms(early) + `},"content":[{"type":"text","text":"` + w + `"}]}`,
+				`{"type":"assistant","time":{"created":` + ms(early) + `},"content":[{"type":"text","time":{"created":` + ms(late) + `},"text":"` + o + `"}]}`,
+				`{"type":"assistant","content":[{"type":"text","text":"` + u + `"}]}`, ""}, "\n")
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			sig := scanAudit(t, tc.format, tc.transcript(agentText, other, "unplaced words about the opencode plugin materializes mkdtemp sidecar"))
+			if !usedBySignals(t, sig.Since(early.Add(-time.Minute))) {
+				t.Error("a cutoff before the wording did not leave it used: the scanner stamped no instant at all")
+			}
+			if usedBySignals(t, sig.Since(early.Add(30*time.Minute))) {
+				t.Error("the wording was written before the cutoff and still counted as used")
+			}
+			if sig.Unplaced() == 0 {
+				t.Error("the line with no timestamp was not counted as unplaced")
+			}
+			if reason, ok := sig.Degraded(); !ok || !strings.Contains(reason, "no timestamp") {
+				t.Errorf("degraded = %q, %v; an unplaced line must be named on the scan", reason, ok)
+			}
+		})
 	}
 }

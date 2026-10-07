@@ -598,7 +598,7 @@ retrieves from `memory_history` and runs no vector leg. See
 ### Retrieval audit: which session a verdict is about
 
 A verdict says "this session did or did not use this memory", so it can only be filed
-for a call and a session that belong together. Three pieces make that hold
+for a call and a session that belong together. Four pieces make that hold
 ([#648](https://github.com/wcatz/ghost/issues/648)).
 
 - **The call names its session.** `retrieval_record.session_id` (no schema change; the
@@ -610,7 +610,7 @@ for a call and a session that belong together. Three pieces make that hold
   server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
   record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
-  signals and the sidecar (header v3, a `session` line). `audit.Run` judges only what
+  signals and the sidecar (a `session` line; header v4 since the order below). `audit.Run` judges only what
   `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
   the `CallWindow` limit, and an empty id judges nothing. When that read finds nothing it
   makes one more bounded, project-wide read, only to count the recent calls that carry no
@@ -622,19 +622,37 @@ for a call and a session that belong together. Three pieces make that hold
   `UsefulnessByMemory` skips audit rows with no session; the reports count them as
   `Unscoped` (named, in no figure). Nothing is removed from the store.
 
-What this does not fix: a call is still judged against the whole scanned session. The
-signals carry no order or timestamp, so text written before the call counts, and the
-bodies of Edit, Write and Bash tool arguments are in the token set, which clears the
-token bar (three shared distinctive words and a third of the memory's words) on ordinary
-development text. On the test fixture (about 10,000 words, twenty memories from the
-session's own domain, in a call of that session) 10 of 20 are judged `used`;
-twenty memories from another domain are mostly `ignored`. The follow-up is an order or
-timestamp on each signal, so a call is judged only against text after it, and a decision
-on whether tool arguments should feed the token arm at all;
-`TestRunDoesNotJudgeCallsBeforeTheSessionBegins` is skipped until then. Known limits that
-all fail toward unjudged: a session id that changes inside one long-lived server process
-keeps the old id, and subagent calls are attributed to whatever session id their server
-process carries (not verified either way).
+- **A call is judged only against text written after it.** Every scanner stamps what it
+  reads with the line's own instant (Claude and codex `timestamp`, opencode part or
+  message `time`), the signals keep the latest instant of each fingerprint and id, and the
+  sidecar (header v4) carries them; v3, v2 and v1 are refused by name. `Run` takes a
+  call's `recorded_at` as the end of its second (the store stamps to the second, a line to
+  the millisecond, so a same-second line may predate the call) and judges it against
+  `Signals.Since(that instant)`, for all four arms. Anything unplaced can never make a
+  memory `used`: an entry with no instant never counts, a scan with none judges nothing
+  (`Summary.NoOrder`), a call with an empty or unreadable `recorded_at` is skipped
+  (`Summary.UnorderedCalls`), and a scan that carried unplaced lines is marked degraded.
+  `SweepSidecars` removes stale sidecars of any version.
+
+What this does not fix: the bodies of Edit, Write and Bash tool arguments are still in the
+token set, which clears the token bar (three shared distinctive words and a third of the
+memory's words) on ordinary development text. Measured on the test fixture (about 10,000
+words, twenty memories from the session's own domain, all in one call of that session),
+`TestSameDomainResidualWithTheOrderInPlace`:
+
+| the call comes | `used` of 20, bodies feed the token arm (shipped) | `used` of 20, bodies do not (variant, not shipped) |
+|---|---|---|
+| before turn 0 of 40 (session start) | 10 | 9 |
+| before turn 20 | 10 | 9 |
+| before turn 36 | 10 | 5 |
+| after the last turn | 0 | 0 |
+
+Ordering helps only for a call made late; a session-start injection still sees the whole
+session. Excluding the bodies changes little on this fixture, because its narrative turns
+are themselves in the memories' domain, so the evidence does not support removing them
+from the token arm. Known limits that all fail toward unjudged: a session id that changes
+inside one long-lived server process keeps the old id, and subagent calls are attributed
+to whatever session id their server process carries (not verified either way).
 
 ### Memory history
 

@@ -39,6 +39,10 @@ func newTestSignals(t *testing.T) *Signals {
 	t.Helper()
 	s := NewWithHasher(testHasher)
 	s.SetSessionID(testSession)
+	// Text written an hour from now is after every call a test records, so a fixture that
+	// is not about ORDER is judged exactly as it was before signals carried an instant. A
+	// test about order calls SetAt itself.
+	s.SetAt(time.Now().Add(time.Hour))
 	return s
 }
 

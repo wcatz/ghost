@@ -29,9 +29,21 @@ const (
 	// session it is would be judged against every call in the project, which is the
 	// defect v3 closes. A v2 file parses and would carry no session, so the audit
 	// would silently judge nothing from it; refusing the version says so instead.
-	SidecarHeader = "# ghost-audit-signals v3"
+	//
+	// v4 because every signal now carries WHEN it was written (#648): a call is judged
+	// only against the text written after it, so a fingerprint with no instant cannot be
+	// placed on either side of a call. A v3 file parses and would carry no instants, so
+	// every one of its signals would be unplaceable and the audit would judge nothing
+	// from it; refusing the version says so instead, and costs that turn's audit.
+	SidecarHeader = "# ghost-audit-signals v4"
+	sidecarV3     = "# ghost-audit-signals v3"
 	sidecarV2     = "# ghost-audit-signals v2"
 	sidecarV1     = "# ghost-audit-signals v1"
+
+	// sidecarHeaderPrefix is the part of the header every version shares, which is what
+	// the sweep tests: a file of ANY version this package wrote is this package's to
+	// delete once it is stale, and only the current one is ever readable.
+	sidecarHeaderPrefix = "# ghost-audit-signals v"
 
 	// sidecarStaleAfter is how long an unclaimed sidecar survives before
 	// SweepSidecars reaps it. The detached lifecycle child deletes its own; this
@@ -65,6 +77,18 @@ type Signals struct {
 	ids   []string
 	prose []string
 	saves []string
+	// idsAt, proseAt and savesAt run parallel to the lists above: the LATEST instant
+	// (Unix milliseconds) the same entry was written. Latest rather than every one,
+	// because a call asks "does this text appear at or after me", and an entry appears
+	// at or after a cutoff exactly when its latest occurrence does. 0 means the scanner
+	// could not place the text, and such an entry is never evidence for any call.
+	idsAt   []int64
+	proseAt []int64
+	savesAt []int64
+	// at is the instant (Unix milliseconds) the scanner is currently reading, set with
+	// SetAt before each line and stamped on everything added until it changes. 0 until
+	// set, which places nothing.
+	at int64
 	// negated holds one entry per agent-authored sentence that carried a denial
 	// cue, so a contradiction can be attributed to the sentence it happened in
 	// rather than to the whole transcript.
@@ -83,6 +107,125 @@ func (s *Signals) SetSessionID(id string) { s.session = id }
 
 // SessionID is the session these signals were scanned from, or "".
 func (s *Signals) SessionID() string { return s.session }
+
+// SetAt names the instant of the text the scanner is about to add: every Add* call
+// until the next SetAt stamps it. The zero time (a line with no usable timestamp)
+// clears it, and what is added then is unplaced: it is carried, so the scan is not
+// silently smaller, and it is never evidence for any call, which is the direction
+// that cannot produce a false `used`.
+func (s *Signals) SetAt(t time.Time) {
+	if t.IsZero() || t.UnixMilli() <= 0 {
+		s.at = 0
+		return
+	}
+	s.at = t.UnixMilli()
+}
+
+// Unplaced counts the entries no instant could be put on. A scanner reports them as a
+// degradation, so a verdict filed from a partly unplaced scan says so.
+func (s *Signals) Unplaced() int {
+	n := 0
+	for _, at := range s.idsAt {
+		if at <= 0 {
+			n++
+		}
+	}
+	for _, at := range s.proseAt {
+		if at <= 0 {
+			n++
+		}
+	}
+	for _, at := range s.savesAt {
+		if at <= 0 {
+			n++
+		}
+	}
+	for _, seg := range s.negated {
+		if seg.at <= 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// Ordered reports whether anything in these signals has an instant. A scan with none
+// cannot be compared against any call, and judging it would file every memory as
+// `ignored` on the strength of text that was never placed.
+func (s *Signals) Ordered() bool {
+	for _, at := range s.idsAt {
+		if at > 0 {
+			return true
+		}
+	}
+	for _, at := range s.proseAt {
+		if at > 0 {
+			return true
+		}
+	}
+	for _, at := range s.savesAt {
+		if at > 0 {
+			return true
+		}
+	}
+	for _, seg := range s.negated {
+		if seg.at > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Since returns the signals written at or after cutoff, which is what a call recorded
+// at cutoff can have been used in: text written before a retrieval cannot be a use of
+// what the retrieval returned. Entries with no instant are left out, so anything the
+// scanner could not place can never produce a `used` (it may leave a memory `ignored` on
+// a scan the caller has marked degraded). A zero cutoff
+// returns an empty view for the same reason: a call with no instant has no "after".
+func (s *Signals) Since(cutoff time.Time) *Signals {
+	out := &Signals{h: s.h, degraded: s.degraded, session: s.session}
+	if cutoff.IsZero() {
+		return out
+	}
+	from := cutoff.UnixMilli()
+	keep := func(vals []string, ats []int64, dst *[]string, dstAt *[]int64) {
+		for i, v := range vals {
+			if i < len(ats) && ats[i] > 0 && ats[i] >= from {
+				*dst = append(*dst, v)
+				*dstAt = append(*dstAt, ats[i])
+			}
+		}
+	}
+	keep(s.ids, s.idsAt, &out.ids, &out.idsAt)
+	keep(s.prose, s.proseAt, &out.prose, &out.proseAt)
+	keep(s.saves, s.savesAt, &out.saves, &out.savesAt)
+	for _, seg := range s.negated {
+		if seg.at > 0 && seg.at >= from {
+			out.negated = append(out.negated, seg)
+		}
+	}
+	return out
+}
+
+// addAt appends the values dst does not hold, stamping them with the scanner's current
+// instant, and moves the instant of one it already holds forward when this occurrence
+// is later. The lists and their instants stay the same length by construction.
+func (s *Signals) addAt(dst *[]string, dstAt *[]int64, vals []string) {
+	index := make(map[string]int, len(*dst)+len(vals))
+	for i, f := range *dst {
+		index[f] = i
+	}
+	for _, f := range vals {
+		if i, ok := index[f]; ok {
+			if s.at > (*dstAt)[i] {
+				(*dstAt)[i] = s.at
+			}
+			continue
+		}
+		index[f] = len(*dst)
+		*dst = append(*dst, f)
+		*dstAt = append(*dstAt, s.at)
+	}
+}
 
 // New returns an empty Signals keyed by the per-install key.
 //
@@ -131,6 +274,8 @@ func (s *Signals) Hasher() Hasher { return s.h }
 // in tokens.go) and fps is the
 // sentence's own vocabulary, which the token bar is measured against.
 type negSegment struct {
+	// at is when the sentence was written, Unix milliseconds, 0 when unplaced.
+	at     int64
 	fps    []string
 	cueFps []string
 	cueIDs []string
@@ -179,13 +324,7 @@ func (n negSegment) deniesByWording(toks []string) bool {
 // comparison upper-cases both sides, because a hex id has exactly one
 // case-insensitive spelling and a host that lower-cases one named the same memory.
 func (s *Signals) AddID(id string) {
-	upper := strings.ToUpper(id)
-	for _, ex := range s.ids {
-		if ex == upper {
-			return
-		}
-	}
-	s.ids = append(s.ids, upper)
+	s.addAt(&s.ids, &s.idsAt, []string{strings.ToUpper(id)})
 }
 
 // addWords records text as the agent's own words without drawing any negation
@@ -194,7 +333,7 @@ func (s *Signals) AddID(id string) {
 // the token arm's floor of three is what stops a lone id from standing in for a
 // memory's own wording — TestAddProseKeepsIDsOutOfTheTokenSet pins that.
 func (s *Signals) addWords(text string) {
-	addUnseen(&s.prose, s.h.DistinctTokens(text))
+	s.addAt(&s.prose, &s.proseAt, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
@@ -245,6 +384,7 @@ func (s *Signals) AddProse(text string) {
 			}
 		}
 		n := negSegment{
+			at:     s.at,
 			fps:    s.h.distinctTokens(words),
 			cueFps: s.h.distinctTokens(boundWords),
 		}
@@ -260,7 +400,7 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 func (s *Signals) AddSaveArgs(text string) {
-	addUnseen(&s.saves, s.h.DistinctTokens(text))
+	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
@@ -374,17 +514,21 @@ func WriteSidecar(dir string, s *Signals) (string, error) {
 	var buf bytes.Buffer
 	buf.WriteString(SidecarHeader)
 	buf.WriteByte('\n')
-	for _, id := range s.ids {
-		buf.WriteString("id " + id + "\n")
+	for i, id := range s.ids {
+		buf.WriteString("id " + id + " " + atField(s.idsAt, i) + "\n")
 	}
-	for _, fp := range s.prose {
-		buf.WriteString("prose " + fp + "\n")
+	for i, fp := range s.prose {
+		buf.WriteString("prose " + fp + " " + atField(s.proseAt, i) + "\n")
 	}
-	for _, fp := range s.saves {
-		buf.WriteString("save " + fp + "\n")
+	for i, fp := range s.saves {
+		buf.WriteString("save " + fp + " " + atField(s.savesAt, i) + "\n")
 	}
 	for _, seg := range s.negated {
-		buf.WriteString("neg " + seg.field() + "\n")
+		line := "neg " + strconv.FormatInt(seg.at, 10)
+		if f := seg.field(); f != "" {
+			line += " " + f
+		}
+		buf.WriteString(line + "\n")
 	}
 	if s.degraded != "" {
 		buf.WriteString("degraded " + strconv.QuoteToASCII(s.degraded) + "\n")
@@ -428,8 +572,8 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 		// file beside it is not necessarily one this package wrote, so the error
 		// names the formats rather than echoing whatever the file's first line
 		// says.
-		return nil, fmt.Errorf("audit: sidecar header is not %s (%s and %s are previous formats this build cannot read)",
-			SidecarHeader, sidecarV2, sidecarV1)
+		return nil, fmt.Errorf("audit: sidecar header is not %s (%s, %s and %s are previous formats this build cannot read)",
+			SidecarHeader, sidecarV3, sidecarV2, sidecarV1)
 	}
 	s := &Signals{h: h}
 	for i, line := range bytes.Split(rest, []byte("\n")) {
@@ -442,24 +586,39 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 		}
 		switch string(kind) {
 		case "id":
-			s.AddID(string(value))
-		case "prose":
-			fp, ok := unhex64(string(value))
-			if !ok {
-				return nil, fmt.Errorf("audit: sidecar line %d: %q is not a token fingerprint", i+1, value)
-			}
-			s.prose = append(s.prose, fp)
-		case "save":
-			fp, ok := unhex64(string(value))
-			if !ok {
-				return nil, fmt.Errorf("audit: sidecar line %d: %q is not a token fingerprint", i+1, value)
-			}
-			s.saves = append(s.saves, fp)
-		case "neg":
-			seg, err := parseNegSegment(string(value))
+			id, at, err := cutAt(string(value))
 			if err != nil {
 				return nil, fmt.Errorf("audit: sidecar line %d: %w", i+1, err)
 			}
+			s.ids = append(s.ids, strings.ToUpper(id))
+			s.idsAt = append(s.idsAt, at)
+		case "prose", "save":
+			text, at, err := cutAt(string(value))
+			if err != nil {
+				return nil, fmt.Errorf("audit: sidecar line %d: %w", i+1, err)
+			}
+			fp, ok := unhex64(text)
+			if !ok {
+				return nil, fmt.Errorf("audit: sidecar line %d: %q is not a token fingerprint", i+1, text)
+			}
+			if string(kind) == "prose" {
+				s.prose = append(s.prose, fp)
+				s.proseAt = append(s.proseAt, at)
+			} else {
+				s.saves = append(s.saves, fp)
+				s.savesAt = append(s.savesAt, at)
+			}
+		case "neg":
+			head, rest, _ := strings.Cut(string(value), " ")
+			at, err := strconv.ParseInt(head, 10, 64)
+			if err != nil || at < 0 {
+				return nil, fmt.Errorf("audit: sidecar line %d: %q is not an instant", i+1, head)
+			}
+			seg, err := parseNegSegment(rest)
+			if err != nil {
+				return nil, fmt.Errorf("audit: sidecar line %d: %w", i+1, err)
+			}
+			seg.at = at
 			s.negated = append(s.negated, seg)
 		case "degraded":
 			unquoted, err := strconv.Unquote(string(value))
@@ -478,6 +637,28 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 		}
 	}
 	return s, nil
+}
+
+// atField renders entry i's instant for the sidecar, 0 when the list has none.
+func atField(ats []int64, i int) string {
+	if i < len(ats) {
+		return strconv.FormatInt(ats[i], 10)
+	}
+	return "0"
+}
+
+// cutAt splits "<value> <unix ms>" and refuses a line that has no instant, because a
+// field that cannot be placed is not one to guess at.
+func cutAt(v string) (string, int64, error) {
+	text, raw, ok := strings.Cut(v, " ")
+	if !ok {
+		return "", 0, fmt.Errorf("%q carries no instant", text)
+	}
+	at, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || at < 0 {
+		return "", 0, fmt.Errorf("%q is not an instant", raw)
+	}
+	return text, at, nil
 }
 
 // cueMark prefixes a fingerprint a cue is bound to on the `neg` line.
@@ -597,7 +778,7 @@ func IsSidecarPath(path string) bool {
 // SweepSidecars removes sidecars in dir older than maxAge, and reports how many
 // it took.
 //
-// Scoped twice — by NAME and by header — because the directory is the OS temp
+// Scoped twice — by NAME and by header, of any version — because the directory is the OS temp
 // dir, shared with every other process on the machine, and a sweep that removed
 // anything matching a glob there would be a bug waiting for a collision. A file
 // that merely shares the prefix is left alone.
@@ -625,7 +806,10 @@ func SweepSidecars(dir string, maxAge time.Duration) (int, error) {
 			continue
 		}
 		raw, err := os.ReadFile(path)
-		if err != nil || !bytes.HasPrefix(raw, []byte(SidecarHeader)) {
+		// ANY version's header, not only the current one: a file an older build wrote can
+		// never be read again (ReadSidecar refuses it by name), so a sweep that matched
+		// only the current header left every one of them behind for good.
+		if err != nil || !bytes.HasPrefix(raw, []byte(sidecarHeaderPrefix)) {
 			continue
 		}
 		if err := os.Remove(path); err == nil {

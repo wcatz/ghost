@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/memory"
@@ -174,7 +175,8 @@ func judgeEveryProject(t *testing.T, store *memory.Store, projects int) {
 	for i := range projects {
 		id := fmt.Sprintf("p%02d", i)
 		s := audit.NewWithHasher(hasher)
-		s.SetSessionID("s1") // the session the fixture's calls were made in
+		s.SetSessionID("s1")               // the session the fixture's calls were made in
+		s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 		s.AddProse(retrievalHealthContent)
 		if _, err := audit.Run(context.Background(), store, id, s); err != nil {
 			t.Fatalf("audit.Run(%s): %v", id, err)

@@ -33,7 +33,9 @@ import (
 const auditTranscriptMemoryID = "D20E133860CC4AFE38B485AD5371BA59"
 
 func auditProseLine(text string) string {
-	return fmt.Sprintf(`{"type":"assistant","message":{"content":[{"type":"text","text":%q}]}}`, text)
+	// Stamped, as every line a real host writes is: an unstamped line cannot be placed
+	// after a call, so the scan would carry it as unplaced and degraded.
+	return fmt.Sprintf(`{"type":"assistant","timestamp":"2026-08-24T09:00:00.000Z","message":{"content":[{"type":"text","text":%q}]}}`, text)
 }
 
 // captureLifecycleChild replaces the spawn with a recorder for the duration of
