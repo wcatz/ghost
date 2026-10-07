@@ -528,9 +528,7 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 				// satisfy a sentence. What carries the reason without the notes is
 				// the clause above it: "withheld as out of date, their validity
 				// windows having closed or not yet opened".
-				return "No sufficiently trustworthy memory found: the candidates this block was assembled from were " +
-					"withheld as out of date, their validity windows having closed or not yet opened." +
-					" The block was not empty before that — the answer is withheld, not absent."
+				return passiveAllInvalidSentence
 			}
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
 				"of date, their validity windows having closed or not yet opened." + p.stageNote() + " The query was " +
@@ -932,7 +930,7 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 			}
 			p.dropped[lowest.ID] = reasonBudgetDropped
 			p.droppedBy[stageResponseFit]++
-			p.trace.decide(lowest.ID, stageResponseFit, reasonBudgetDropped, lowest.Score)
+			p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reasonBudgetDropped, lowest.Score)
 			dropped = append(dropped, lowest.ID)
 		case len(res.Notes) > 0:
 			// Cut from the end, which is where boundNotes already puts the

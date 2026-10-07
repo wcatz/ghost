@@ -121,10 +121,19 @@ type StageTrace struct {
 // contributions it writes are zero, so Before is still the row's final score.
 // Whichever stage first does either has to add the field here, because a Decision
 // that carries an unset one is indistinguishable from a stage that judged it.
+//
+// ProjectID is the row's own project, recorded because a trace is read per
+// bucket: the session-start block keys its "N shown of M total" line on it, and
+// a decision that named no project could not be told apart from another bucket's
+// row (a `_global` row dropped beside this project's is that bucket's fate, not
+// this one's).
 type Decision struct {
-	ID, Stage, Reason string
-	Kept              bool
-	Before            float64
+	ID        string
+	ProjectID string
+	Stage     string
+	Reason    string
+	Kept      bool
+	Before    float64
 }
 
 // stage names, in pipeline order.
@@ -193,10 +202,11 @@ func (t *Trace) record(stage string, in, out int, dropped []string, notes ...str
 	})
 }
 
-// decide records one row's exclusion, with the reason the stage gives.
-func (t *Trace) decide(id, stage, reason string, before float64) {
+// decide records one row's exclusion, with the project the row belongs to and
+// the reason the stage gives.
+func (t *Trace) decide(id, projectID, stage, reason string, before float64) {
 	t.Decisions = append(t.Decisions, Decision{
-		ID: id, Stage: stage, Reason: reason, Kept: false, Before: before,
+		ID: id, ProjectID: projectID, Stage: stage, Reason: reason, Kept: false, Before: before,
 	})
 }
 
@@ -205,8 +215,8 @@ func (t *Trace) decide(id, stage, reason string, before float64) {
 // value is reported, and the row is kept, so the two facts have to be recorded
 // separately. Recording a kept row through decide would tell a consumer of the
 // trace that a row in the answer was excluded from it.
-func (t *Trace) keep(id, stage, reason string, before float64) {
+func (t *Trace) keep(id, projectID, stage, reason string, before float64) {
 	t.Decisions = append(t.Decisions, Decision{
-		ID: id, Stage: stage, Reason: reason, Kept: true, Before: before,
+		ID: id, ProjectID: projectID, Stage: stage, Reason: reason, Kept: true, Before: before,
 	})
 }

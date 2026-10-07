@@ -266,35 +266,25 @@ func mustHookConfig(t *testing.T) *config.Config {
 }
 
 // passiveGlobals runs the session-start passive retrieval against the store at
-// dbPath and returns only the `_global` rows, plus the total the block's "N of M"
-// line is built from.
+// dbPath and returns only the `_global` rows, beside the tally the block's
+// count lines are built from.
 //
 // It replaces the direct `loadGlobalMemories` call these tests used to make. The
 // global bucket is now ONE slice of one budget, so there is no longer a function
 // that returns "the globals" on its own: a test that wants them asks the passive
 // retrieval for the project's rows and gets the globals in the other half of the
 // same answer, which is also what proves the two buckets cannot drift into
-// disagreeing about the same store.
-func passiveGlobals(t *testing.T, db *sql.DB, projectID string) (globals []sessionMemory) {
+// disagreeing about the same store. The tally is the same trace's count of the
+// bucket, so a test that asserts on "the total the header divides by" reads the
+// one number the block actually renders.
+func passiveGlobals(t *testing.T, db *sql.DB, projectID string) (globals []sessionMemory, tally sessionTally) {
 	t.Helper()
 	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// nil sink: this helper reads a handle the test owns and asserts on the rows,
 	// so the record would be a write into a database the assertions do not expect
 	// to change. The recording path is covered by passive_record_test.go.
-	_, globals = loadSessionPassive(context.Background(), store, config.LoadForHook(), projectID, time.Now(), nil)
-	return globals
-}
-
-// globalTotal is the count the block's not-shown line divides by. It calls the
-// hook's own function rather than repeating the query, so a test cannot pass
-// against a count the block does not actually render.
-func globalTotal(t *testing.T, db *sql.DB) (total int, known bool) {
-	t.Helper()
-	total, known = globalCount(db)
-	if !known {
-		t.Fatal("the global count did not read; the fixture store is broken")
-	}
-	return total, known
+	_, globals, tally = loadSessionPassive(context.Background(), store, config.LoadForHook(), projectID, time.Now(), nil)
+	return globals, tally
 }
 
 // TestPassiveGlobalsReturnOnlyTheGlobalProject: the passive retrieval returns
@@ -330,8 +320,7 @@ func TestPassiveGlobalsReturnOnlyTheGlobalProject(t *testing.T) {
 		t.Fatalf("insert project-scoped seed text: %v", err)
 	}
 
-	globals := passiveGlobals(t, db, "abc123")
-	total, totalKnown := globalTotal(t, db)
+	globals, tally := passiveGlobals(t, db, "abc123")
 	if len(globals) != 1 {
 		t.Fatalf("expected 1 global memory, got %d (%+v)", len(globals), globals)
 	}
@@ -347,8 +336,8 @@ func TestPassiveGlobalsReturnOnlyTheGlobalProject(t *testing.T) {
 	if globals[0].Content != "never push to main" {
 		t.Errorf("content: got %q, want 'never push to main'", globals[0].Content)
 	}
-	if !totalKnown || total != 1 {
-		t.Errorf("total: got known=%v total=%d, want known=true total=1 — a project row must not be counted as global", totalKnown, total)
+	if got := tally.globals.Window(); got != 1 {
+		t.Errorf("total: got %d, want 1 — a project row must not be counted as global", got)
 	}
 }
 
@@ -396,7 +385,7 @@ func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, memories, _, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 	if len(memories) != 1 {
 		t.Fatalf("expected 1 project memory, got %d", len(memories))
 	}
@@ -420,12 +409,12 @@ func TestSessionStartOnAMissingDBCreatesNoPhantom(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dbPath := filepath.Join(xdgHome, "ghost", "ghost.db")
 
-	projectID, _, memories, globals, _, _, _, _, _, _, total, _ := loadSessionContext(t.TempDir(), config.LoadForHook())
+	projectID, _, memories, globals, _, _, _, _, tally := loadSessionContext(t.TempDir(), config.LoadForHook())
 	if projectID != "" || memories != nil || globals != nil {
 		t.Errorf("a missing store must resolve nothing, got project=%q memories=%v globals=%v", projectID, memories, globals)
 	}
-	if total != 0 {
-		t.Errorf("a missing store must report no total, got %d", total)
+	if tally.project.Window() != 0 || tally.globals.Window() != 0 {
+		t.Errorf("a missing store must report no totals, got %+v", tally)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Errorf("the session hook must not create %s (err=%v)", dbPath, err)
@@ -458,7 +447,7 @@ func TestPassiveGlobalsDedupNearDuplicates(t *testing.T) {
 		t.Fatalf("insert link: %v", err)
 	}
 
-	globals := passiveGlobals(t, db, "p-nodup")
+	globals, _ := passiveGlobals(t, db, "p-nodup")
 	var sawOriginal, sawRestated bool
 	for _, m := range globals {
 		if strings.Contains(m.Content, "ORIGINAL") {
@@ -501,13 +490,12 @@ func TestPassiveGlobalsExcludeResolved(t *testing.T) {
 		t.Fatalf("insert live global: %v", err)
 	}
 
-	globals := passiveGlobals(t, db, "p-resolved")
-	total, totalKnown := globalTotal(t, db)
+	globals, tally := passiveGlobals(t, db, "p-resolved")
 	if len(globals) != 1 || globals[0].ID != "glive0001" {
 		t.Fatalf("resolved global must be excluded from fetch, got %+v", globals)
 	}
-	if !totalKnown || total != 1 {
-		t.Errorf("resolved global must be excluded from total count: got known=%v total=%d, want known=true total=1", totalKnown, total)
+	if got := tally.globals.Window(); got != 1 {
+		t.Errorf("resolved global must be excluded from total count: got %d, want 1", got)
 	}
 }
 

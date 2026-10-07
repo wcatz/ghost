@@ -114,7 +114,7 @@ type sessionBlock struct {
 // that passed on an empty block would prove nothing about either side.
 func renderSessionStartBlock(t *testing.T, projDir string) sessionBlock {
 	t.Helper()
-	projectID, _, memories, globals, _, _, _, _, _, _, _, _ := loadSessionContext(projDir, config.LoadForHook())
+	projectID, _, memories, globals, _, _, _, _, _ := loadSessionContext(projDir, config.LoadForHook())
 	if projectID != "p1" {
 		t.Fatalf("project = %q, want p1 — the fixture's directory did not resolve, so nothing below is exercising a "+
 			"session start", projectID)
@@ -374,7 +374,7 @@ func TestASessionStartInAnUnknownDirectoryRecordsNothing(t *testing.T) {
 	unknown := filepath.Join(t.TempDir(), "nowhere")
 
 	logged := captureStderr(t, func() {
-		projectID, _, _, globals, _, _, _, _, _, _, _, _ := loadSessionContext(unknown, config.LoadForHook())
+		projectID, _, _, globals, _, _, _, _, _ := loadSessionContext(unknown, config.LoadForHook())
 		if projectID != "" {
 			t.Fatalf("project = %q, want \"\" — this directory is supposed to match no project", projectID)
 		}

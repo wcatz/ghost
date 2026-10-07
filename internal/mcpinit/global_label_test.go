@@ -99,8 +99,8 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := formatSessionContext(
-				"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
-				tc.globals, len(tc.globals), true,
+				"p1", "ghost", nil, nil, "", nil, nil, 1,
+				tc.globals, shownOnly(0, len(tc.globals)),
 			)
 
 			const claim = "the user's own saved cross-project preferences"
@@ -121,9 +121,9 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 // row is global by construction, so it carries the global project as its own.
 func TestSessionContextDoesNotClaimLegacyShapedBuiltinSeed(t *testing.T) {
 	out := formatSessionContext(
-		"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
+		"p1", "ghost", nil, nil, "", nil, nil, 1,
 		[]sessionMemory{{ID: "1", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"}},
-		1, true,
+		shownOnly(0, 1),
 	)
 	if strings.Contains(out, "the user's own saved cross-project preferences") {
 		t.Errorf("legacy-shaped builtin seed was presented as user-authored:\n%s", out)
@@ -172,7 +172,7 @@ func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, 0, true, tc.globals, len(tc.globals), true)
+			out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, tc.globals, shownOnly(0, len(tc.globals)))
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("guidance must name %q:\n%s", tc.want, out)
 			}
@@ -196,12 +196,12 @@ func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
 // through assemble.Item.Line(), matching the search and project-context surfaces.
 func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	out := formatSessionContext(
-		"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
+		"p1", "ghost", nil, nil, "", nil, nil, 1,
 		[]sessionMemory{
 			{ID: "1", Category: "fact", Content: "Reflection derived this.", Source: "reflection"},
 			{ID: "2", Category: "fact", Content: "An agent saved this.", Source: "mcp"},
 		},
-		2, true,
+		shownOnly(0, 2),
 	)
 
 	for _, want := range []string{"source=reflection", "source=mcp"} {
@@ -235,7 +235,7 @@ func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
 	}
 	globals = append(globals, sessionMemory{ID: "z", Category: "preference", Content: "user row", Source: "manual"})
 
-	out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
+	out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, globals, shownOnly(0, len(globals)))
 	for _, source := range sources {
 		// The guidance must name the origin...
 		if !strings.Contains(out, source) {

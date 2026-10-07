@@ -1507,7 +1507,12 @@ Axis interaction rules:
 > (`internal/mcpinit/session_passive.go`), so the selection, the caps, the order
 > and the near-duplicate pass are the assembler's rather than a second
 > implementation of them, while the per-item PREVIEW budget stayed with the
-> renderer that has to say a line was cut. It therefore renders and applies
+> renderer that has to say a line was cut. The header's totals are the
+> assembler's too rather than a second census of the store: the "N of M" counts
+> come from the same retrieval's trace, so a header cannot describe a store the
+> block was not assembled from, and the sentence after them names which half of
+> the difference is the ranking's and which a stage withheld
+> ([#897](https://github.com/wcatz/ghost/issues/897)). It therefore renders and applies
 > `memories.scope` from the shared label and the shared rule
 > ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
 > the conflict and diversity stages are pass-throughs, and `explain: true` still

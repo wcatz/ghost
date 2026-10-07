@@ -391,6 +391,13 @@ Save new discoveries with ghost_memory_save during work.
 // — is the diff a reviewer reads line by line. TestSessionStartBlockGolden
 // compares the live render to THIS constant and fails if the recorded BEFORE is
 // ever overwritten with it.
+//
+// The one non-row line difference from the recorded BEFORE is the globals count
+// line, and it is the #897 arithmetic taking over: the "11 total — 3 not shown"
+// of the recorded BEFORE came from a second COUNT of the store, while this
+// branch renders the trace's own window — 10 live globals, because the
+// near-duplicate loser (gmem03) is dropped by the bucket policy before the
+// trace is counted, and the 8-slot cap ranks 2 of the remaining 10 out.
 
 const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"Use project_id: \"goldproj\" for all ghost_* tool calls.\n" +
@@ -414,7 +421,7 @@ const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"- [pattern] `pmem14` (0.2) «project memory 14 content for the golden block»\n" +
 	"\n" +
 	"**Global (applies to all projects):** the user's own saved cross-project preferences.\n" +
-	"(8 shown of 11 total — 3 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n" +
+	"(8 shown of 10 total — 2 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n" +
 	"- [preference] `gmem00` (0.1 [pinned]) «global memory 00 content for the golden block»\n" +
 	"- [preference] `gmem01` (0.9 scope{area=payments}) «global memory 01 content for the golden block»\n" +
 	"- [preference] `gmem02` (0.8) «global memory 02 content for the golden block»\n" +

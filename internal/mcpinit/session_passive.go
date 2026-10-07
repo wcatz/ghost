@@ -104,6 +104,16 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 	return assemble.Budget{Slices: slices}
 }
 
+// sessionTally is the two buckets' fates as the session-start block needs them,
+// counted from the assembler's trace rather than from a second COUNT of the
+// store. It is the block's own arithmetic: the totals it divides by come from
+// the same retrieval that produced the rows, so a header cannot describe a
+// store the block was not assembled from.
+type sessionTally struct {
+	project assemble.BucketTally
+	globals assemble.BucketTally
+}
+
 // loadSessionPassive assembles the session-start block's memory rows: the
 // project's own and `_global`'s, selected by the retriever's passive policies and
 // shaped by the assembler's stages, in one call.
@@ -136,7 +146,7 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 // the one the reads use — those are read-only (memory.OpenReadDB, mode=ro) — and
 // because the branch with no project to attribute the call to must pass nil and
 // record nothing. See sessionRecordSink.
-func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink) (memories, globals []sessionMemory) {
+func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink) (memories, globals []sessionMemory, tally sessionTally) {
 	res, err := assemble.Run(ctx, store, assemble.Request{
 		ProjectID: projectID,
 		// The empty Query IS the passive shape. It is not a placeholder: it is
@@ -186,7 +196,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		// Debug line here would have been a diagnostic that never fires, while
 		// the block below it renders with no memories and nothing saying why.
 		slog.Warn("ghost: session-start assembly failed, so the block has no memory rows", "error", err)
-		return nil, nil
+		return nil, nil, sessionTally{}
 	}
 	// The buckets are separated by the row's OWN project rather than by the order
 	// it arrived in: the retriever interleaves nothing, but a caller that ordered
@@ -228,22 +238,17 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		row.Content = truncateUTF8(row.Content, sessionDisplayBytes)
 		memories = append(memories, row)
 	}
-	return memories, globals
-}
-
-// globalCount is the count the block's "N of M" line divides by for the global
-// section, read the way both callers read it: one COUNT over the live rows of the
-// global project. A failed count is reported as UNKNOWN rather than as zero,
-// because "0 of 0" is a claim that there is nothing and "total unknown" is a
-// claim that the count did not run — and the block's wording for the second is
-// the honest one.
-func globalCount(db *sql.DB) (total int, known bool) {
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, memory.GlobalProjectID,
-	).Scan(&total); err == nil {
-		return total, true
+	// The tally is the trace's own split of each bucket into shown, ranked-out
+	// and withheld rows, and it is computed HERE rather than in the renderer
+	// because the trace travels with the result: a caller rendering an answer
+	// must not reconstruct what the stages saw. CountsFor is nil-safe against a
+	// trace that never ran, so an error path that already returned above is not
+	// the only place this can be reached.
+	tally = sessionTally{
+		project: assemble.CountsFor(res.Trace, projectID, len(memories)),
+		globals: assemble.CountsFor(res.Trace, memory.GlobalProjectID, len(globals)),
 	}
-	return 0, false
+	return memories, globals, tally
 }
 
 // sessionStore is the ONE construction of the store the session-start read runs

@@ -519,7 +519,7 @@ func projectContextEmptyNote(res assemble.Result) string {
 		// cannot be wrong.
 		return "Ghost holds memories for this project, but none of them is current."
 	}
-	return note + " Call ghost_memories_list to see them, still marked with the window they carry."
+	return note + assemble.WithheldPointer
 }
 
 // projectContextOwnRowsNote is the SAME census, moved off the gate it was on.
