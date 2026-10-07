@@ -157,9 +157,9 @@ type ExplainRow struct {
 	// from a field that is absent.
 	Confidence             *float64 `json:"confidence,omitempty"`
 	ConfidenceContribution float64  `json:"confidence_contribution"`
-	// ProvenanceWeight is the weight the assembler's provenance stage recorded
-	// ("1.0", pinned: no score is multiplied by it), or "off" for a row withheld
-	// before that stage ran. See ExplainProvenanceOff.
+	// ProvenanceWeight is "off": no score anywhere is multiplied by provenance
+	// (the assembler's provenance stage pins an inert weight and the payload does
+	// not publish it as one). See ExplainProvenanceOff.
 	ProvenanceWeight string `json:"provenance_weight"`
 	// ProvenanceContribution is 0 for the same reason as
 	// ConfidenceContribution.

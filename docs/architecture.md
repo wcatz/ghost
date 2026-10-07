@@ -412,7 +412,8 @@ Which stage records what:
 | `demoteStatus` | the fused base and the status factor — the two sides of the one multiplication, so a reader can perform it |
 | `scopeEligiblePool` | the scope verdict, for the dropped candidates as well as the survivors |
 | `selectWindow` | the keyword reservation, naming both the promoted row and the row whose slot it took |
-| `decayRank` | the decay factor and the age at the ranking's own clock; a candidate it never ordered carries the factor it would have |
+| `decayRank` | the decay factor and the age at the ranking's own clock, for the rows it orders |
+| `Candidates` (explain request) | the factor a row `decayRank` never ordered (the window's tail, the excluded pool, the floor drops) would have carried, at the request's own clock |
 | `runCandidateLegs` | the vector floor's per-candidate verdict (which vector contribution it cut, and the cosine), and the candidates only the floor removed |
 | `supersedeVerdicts` / `nearDuplicateVerdicts` | the penalty count and the id of the memory that decided it |
 | `assemble` validity, predicates, provenance | the validity state, the scope verdict, the provenance weight and the two contributions, per row |
@@ -1552,10 +1553,11 @@ Axis interaction rules:
 > renderer that has to say a line was cut. It therefore renders and applies
 > `memories.scope` from the shared label and the shared rule
 > ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
-> the conflict and diversity stages are pass-throughs. `explain: true` is a
-> projection of the same `assemble.Run` as the formatted answer
+> the conflict and diversity stages are pass-throughs. (`explain: true` is no
+> longer on that list: it is a projection of the same `assemble.Run` as the
+> formatted answer
 > ([#898](https://github.com/wcatz/ghost/issues/898), which closed the deferral to
-> [#583](https://github.com/wcatz/ghost/issues/583) and [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
+> [#583](https://github.com/wcatz/ghost/issues/583) and [#571](https://github.com/wcatz/ghost/issues/571)).) The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
 
 What exists now:
