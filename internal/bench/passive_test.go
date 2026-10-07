@@ -234,7 +234,7 @@ func TestPassiveCorpusGradesAreConsistent(t *testing.T) {
 			}
 			// Two withheld rows may tie: neither is ever shown, so their order
 			// is not an order anything is measured by.
-			if o, ok := owner[r.Importance]; ok && o.Kind != r.Kind && !(o.Grade(true) == GradeWithheld && r.Grade(true) == GradeWithheld) {
+			if o, ok := owner[r.Importance]; ok && o.Kind != r.Kind && (o.Grade(true) != GradeWithheld || r.Grade(true) != GradeWithheld) {
 				t.Errorf("%s: importance %.3f is shared by a %s row and a %s row, so their order is a tie", p, r.Importance, o.Kind, r.Kind)
 			}
 			owner[r.Importance] = r
