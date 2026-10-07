@@ -440,8 +440,10 @@ historical one. It is refused without a query for the same reason (a passive
 retrieval scores no candidate). An explain call writes **no retrieval record**: the
 record counts answers delivered to a caller, and an explanation is a diagnostic of
 one, which also keeps the audit's denominator what it was before explain went
-through `Run`. A failed retrieval leg is reported in the payload's notes rather
-than converted to an error, because the caller asked for the diagnosis of this run.
+through `Run`. A retrieval leg that failed while another answered is reported in the payload's
+notes rather than converted to an error, because the caller asked for the diagnosis
+of this run; a run in which every applicable leg failed is still the retrieval error
+the formatted path returns, because nothing was searched.
 
 ### Signals the ranking does not apply
 
