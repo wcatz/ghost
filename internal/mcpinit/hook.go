@@ -239,7 +239,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// halves are the same session. A broken config therefore reports once, not
 	// once per half.
 	cfg := config.LoadForHook()
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContext(cwd, cfg)
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -276,7 +276,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown))
+	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally))
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
@@ -366,7 +366,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 // which instant it is a reading of, and its closing instruction is the historical
 // one, because "save new discoveries" is an instruction about the present and
 // this block is not about the present.
-func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, globals []sessionMemory, totalGlobalCount int, totalGlobalCountKnown bool) string {
+func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, globals []sessionMemory, tally sessionTally) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
 		// Only claim these are the user's preferences when they are. A global
@@ -390,8 +390,8 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		} else {
 			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** cross-project memories from mixed origins. %s\n", globalOriginGuidance(globals))
 		}
-		if totalGlobalCountKnown && totalGlobalCount > len(globals) {
-			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
+		if tally.globals.Total() > len(globals) {
+			fmt.Fprintf(&gsb, "(%s)\n", sessionCountsLine(tally.globals, globalsRankPhrase, globalsToolPhrase))
 		}
 		for _, m := range globals {
 			it := sessionMemoryToItem(m, asOf)
@@ -443,17 +443,32 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		fmt.Fprintf(&sb, "**Summary:** %s\n\n", quoteData(learned))
 	}
 
-	if len(memories) > 0 {
-		if !totalCountKnown {
-			fmt.Fprintf(&sb, "**Memories (%d shown; total unknown — count lookup failed, more may be available; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories))
-		} else if totalMemoryCount > len(memories) {
-			fmt.Fprintf(&sb, "**Memories (%d shown of %d total — %d not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories), totalMemoryCount, totalMemoryCount-len(memories))
+	if len(memories) > 0 || tally.project.Withheld > 0 {
+		// A wholly-withheld project half: the rows were seen and refused — not
+		// absent, and not ranked out — so the section keeps its heading and
+		// says so in the assembler's own words, pointing at the tool that still
+		// shows the rows with the window they carry. A count-line header would
+		// attribute a number to a block with nothing shown.
+		if tally.project.WithheldNote() != "" {
+			fmt.Fprintf(&sb, "**Memories:**\n")
+			// The assembler's own note when it spoke for this state (the
+			// same bytes ghost_project_context prints), else the bucket's
+			// WithheldNote, which asks the same abstention for the cause.
+			note := tally.emptyNote
+			if note == "" {
+				note = tally.project.WithheldNote()
+			}
+			fmt.Fprintf(&sb, "%s\n", note)
 		} else {
-			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
-		}
-		for _, m := range memories {
-			it := sessionMemoryToItem(m, asOf)
-			fmt.Fprintf(&sb, "%s\n", it.Line())
+			if counts := sessionCountsLine(tally.project, projectRankPhrase, projectToolPhrase); counts != "" {
+				fmt.Fprintf(&sb, "**Memories (%s):**\n", counts)
+			} else {
+				fmt.Fprintf(&sb, "**Memories (%d shown):**\n", tally.project.Shown)
+			}
+			for _, m := range memories {
+				it := sessionMemoryToItem(m, asOf)
+				fmt.Fprintf(&sb, "%s\n", it.Line())
+			}
 		}
 	}
 
@@ -500,6 +515,67 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 	}
 	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
 	return sb.String()
+}
+
+// The two rank phrases and the two tool pointers are the session-start block's
+// own wording for each bucket, kept beside the helper that splices them: the
+// project line and the globals line rank by different rules, and a header that
+// named the wrong one for the bucket it describes would be a lie about the
+// ranking the rows actually arrived in.
+const (
+	projectRankPhrase = "a composite score of importance, pinned status, and category-aware recency decay"
+	projectToolPhrase = "ghost_memories_list or ghost_memory_search"
+	globalsRankPhrase = "pinned status, then importance, then most-recently-updated"
+	globalsToolPhrase = "ghost_search_all"
+)
+
+// sessionCountsLine renders the "(N shown of M total ...)" parenthetical for one
+// bucket's header, from the bucket's tally. The tally already split the rows
+// into what the ranking cut and what a stage withheld, and the three branches
+// are the three truths that split produces:
+//
+//   - nothing withheld: today's exact bytes — "N not shown, ranked by ...",
+//     where the ranking's cut is the whole of what is missing.
+//   - withheld, nothing ranked out: the missing rows were NOT the ranking's
+//     doing, and calling them ranked out would be the lie issue #897 was filed
+//     about.
+//   - both: one header names both fates, because they are different authority.
+//
+// A bucket with nothing missing gets "" and the caller renders the plain
+// "(N shown)" heading — "N shown of N total" would assert a comparison the block
+// makes no claim about.
+func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
+	shown, total := tally.Shown, tally.Total()
+	// Rows the bucket policy removed as near-duplicate losers are not the
+	// ranking's cut either, so they ride with the withheld rows: one count of
+	// "not the ranking's doing".
+	withheld := tally.Withheld + tally.Deduped
+	switch {
+	case withheld > 0 && tally.RankedOut > 0:
+		return fmt.Sprintf("%d shown of %d total — %d not shown: %d ranked out by %s, %d withheld rather than ranked out; use %s for the rest",
+			shown, total, tally.RankedOut+withheld, tally.RankedOut, rankPhrase, withheld, toolPhrase)
+	case withheld > 0:
+		return fmt.Sprintf("%d shown of %d total — %d withheld rather than ranked out; use %s for the rest",
+			shown, total, withheld, toolPhrase)
+	case tally.RankedOut > 0:
+		return fmt.Sprintf("%d shown of %d total — %d not shown, ranked by %s; use %s for the rest",
+			shown, total, tally.RankedOut, rankPhrase, toolPhrase)
+	default:
+		return ""
+	}
+}
+
+// shownOnly synthesizes the tally for a rendering that never assembled — the
+// historical path, whose rows come from a recorded set rather than from the
+// assembler — so every row the renderer holds was shown. The zero
+// RankedOut/Withheld halves are what make the historical block byte-identical
+// to today's: nothing was cut by a cap and nothing was withheld by a stage, and
+// a header that claimed either would be describing work that never ran.
+func shownOnly(projectShown, globalsShown int) sessionTally {
+	return sessionTally{
+		project: assemble.BucketTally{Shown: projectShown},
+		globals: assemble.BucketTally{Shown: globalsShown},
+	}
 }
 
 // RenderSessionContext is the context renderer backing the `ghost context`
@@ -555,7 +631,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	ensureObsidianSyncRunning()
 
 	cfg := config.LoadForHook()
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContext(cwd, cfg)
 	if projectID != "" {
 		// The same fail-open as the Claude Code session start above, for
 		// opencode's equivalent render.
@@ -569,7 +645,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	if projectID == "" && len(globals) == 0 {
 		return ""
 	}
-	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown)
+	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
 }
 
 // SessionBlockAt renders the block a session start (and `ghost context`) emits for
@@ -584,11 +660,11 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // configuration rather than reading the wall clock and the user's config files.
 // `ghost bench --passive` is its only caller.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now })
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now })
 	if projectID == "" && len(globals) == 0 {
 		return ""
 	}
-	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown)
+	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
 }
 
 // renderHistoricalSessionContext is the as_of half of RenderSessionContextAt. It
@@ -648,7 +724,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	if projectID == "" && len(globals) == 0 {
 		return ""
 	}
-	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, len(memories), true, globals, len(globals), true)
+	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, globals, shownOnly(len(memories), len(globals)))
 	if readErr != "" {
 		block += "\n\n(" + readErr + ")"
 	}
@@ -792,7 +868,17 @@ type sessionMemory struct {
 // passive retrieval — two slices of one budget, separated here for the renderer
 // and nowhere else. Before this, each half was read by its own loader, which
 // left the two halves of a single selection policy in two different files.
-func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, totalGlobalCount int, totalGlobalCountKnown bool) {
+//
+// The tally is the last return because it is the block's own arithmetic: it is
+// counted from the trace of the retrieval this function performs, so a caller
+// that renders the block renders the retrieval it got, not a second reading of
+// the store. There is no separate "total" return anymore: the two COUNTs this
+// function used to run against the memories table were a different census from
+// the rows the assembler saw (they counted every live row, including ones the
+// over-fetched window never held), and a header built from one while the rows
+// came from the other is exactly how a block ended up saying rows were "ranked
+// out" when a stage had withheld them.
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
@@ -805,7 +891,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 // fixed instant so a block can be measured rather than merely run. Nothing else
 // differs between the two, which is the point of the split — a bench that
 // re-implemented this would be measuring its own copy.
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, totalGlobalCount int, totalGlobalCountKnown bool) {
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -844,8 +930,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		// start records nothing — and silently, because a store that cannot record must
 		// not print a refusal on every session a user opens in a directory Ghost has
 		// never seen. The block still renders, which is the half that must not change.
-		_, globals = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil)
-		totalGlobalCount, totalGlobalCountKnown = globalCount(db)
+		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil)
 		return
 	}
 
@@ -863,16 +948,6 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// scope the passive request carries, the behavioral floor and category
 	// weights the project's bucket policy states, and the demotion threshold
 	// both policies state.
-
-	// Total count (pre-truncation) so the rendered context can flag how many
-	// memories weren't shown instead of silently dropping them — see the
-	// "N not shown" line in runSessionStart. A failed COUNT is reported
-	// as "unknown" rather than silently treated as zero/no-truncation.
-	if err := db.QueryRow(`
-		SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL
-	`, projectID).Scan(&totalMemoryCount); err == nil {
-		totalCountKnown = true
-	}
 
 	// The memory rows: the project's own AND `_global`'s, selected in ONE
 	// passive retrieval rather than by a private query per bucket.
@@ -895,9 +970,8 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// would be a cost this function pays for nothing. A missing store makes it a nil
 	// sink with a no-op close, so there is no error path here to write.
 	record, closeRecord := sessionRecordSink(dbPath)
-	memories, globals = loadSessionPassive(context.Background(), store, cfg, projectID, now, record)
+	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record)
 	closeRecord()
-	totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 
 	// Get open tasks
 	taskRows, err := db.Query(`

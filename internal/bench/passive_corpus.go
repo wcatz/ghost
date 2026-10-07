@@ -13,8 +13,9 @@ package bench
 // has accumulated, most of it not meant to be shown). This corpus is that
 // population, built so each thing a passive block must do has a row that tests it:
 //
-//   - rows that must be SHOWN (the live, high-importance ones, and a pinned row
-//     whose importance and age would otherwise bury it);
+//   - rows that must be SHOWN (the live, high-importance ones), and a pinned row
+//     whose importance and age would otherwise bury it, on the surfaces whose
+//     selection reads the pin (session start; see PassiveSurfaceSpec.PinOptional);
 //   - rows that must NEVER be shown: resolved, expired (valid_until in 2020) and
 //     not yet valid (valid_from in 2099);
 //   - rows whose only fault is their scope, which a surface withholds only when it
@@ -47,9 +48,13 @@ const (
 	// room for it, and the corpus keeps each bucket's expected set under that
 	// bucket's cap so "has room" is true.
 	KindLive PassiveKind = "live"
-	// KindPinned is a pinned row with low importance and an old created_at. It is
-	// expected, and it is the row a ranking that ignored the pin would bury under
-	// the filler.
+	// KindPinned is a pinned row with low importance and an old created_at, in a
+	// DECAYING category (gotcha), because a pin only exempts a row from decay and
+	// the never-decay categories (preference, convention, fact) are exempt anyway:
+	// a pinned convention row would test nothing. It is expected on session start.
+	// On the project-context union read (OrderDecay, no two-pass, no pinned-first,
+	// deliberately as GetTopMemories was) a pin is not a documented slot guarantee,
+	// so the row is optional there and the bench asserts nothing about it.
 	KindPinned PassiveKind = "pinned"
 	// KindFiller is live, valid and unremarkable: low importance, so it is what a
 	// budget cut removes. It is optional — showing it is not wrong, only
@@ -143,6 +148,15 @@ func (r PassiveRow) Grade(scoped bool) PassiveGrade {
 	}
 }
 
+// gradeOn is Grade as the given surface reads it: a pinned row is optional on a
+// surface whose selection makes no promise about pins.
+func (r PassiveRow) gradeOn(spec PassiveSurfaceSpec) PassiveGrade {
+	if r.Kind == KindPinned && spec.PinOptional {
+		return GradeOptional
+	}
+	return r.Grade(spec.Scoped)
+}
+
 // eligible reports whether a read at the corpus instant could legitimately admit
 // the row: it is neither resolved, outside its window, nor out of the read's
 // scope. It is the fixture's own statement of which rows are in play, derived from
@@ -152,12 +166,12 @@ func (r PassiveRow) eligible(scoped bool) bool {
 	return r.Grade(scoped) != GradeWithheld
 }
 
-// withheldByAStage reports whether the row is unresolved and was withheld by a
-// stage (validity, or scope when the read carries one) rather than by the SQL's
-// own resolved_at predicate. It is the population a header's "withheld" count is
-// about, as opposed to a resolved row, which the window never contained.
-func (r PassiveRow) withheldByAStage(scoped bool) bool {
-	return !r.Resolved && r.Grade(scoped) == GradeWithheld
+// withheldByAStage reports whether the row is unresolved and was withheld by the
+// validity stage, which is the population a header's "withheld" count is about. A
+// resolved row never reached the window, and an out-of-scope row is excluded by
+// the scope clause in the fetch, so neither is counted in a window total.
+func (r PassiveRow) withheldByAStage() bool {
+	return !r.Resolved && (r.Kind == KindExpired || r.Kind == KindFuture)
 }
 
 // PassiveProjects are the projects the corpus holds, besides `_global`. Three,
@@ -287,10 +301,10 @@ func projectRows(p string) []PassiveRow {
 		rows = append(rows, r)
 	}
 
-	// The pinned row: low importance, old. A pin is the one signal the caller gave
-	// the ranking directly, so the block must carry it.
+	// The pinned row: low importance, old, in a decaying category so the pin is what
+	// keeps its score.
 	rows = append(rows, PassiveRow{
-		Project: p, Key: "pinned-00", Kind: KindPinned, Category: "convention",
+		Project: p, Key: "pinned-00", Kind: KindPinned, Category: "gotcha",
 		Content:    fmt.Sprintf("%s: never ship without the %s checklist (pinned)", p, themes[0]),
 		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})
@@ -382,7 +396,7 @@ func globalRows() []PassiveRow {
 		})
 	}
 	rows = append(rows, PassiveRow{
-		Project: g, Key: "pinned-00", Kind: KindPinned, Category: "preference",
+		Project: g, Key: "pinned-00", Kind: KindPinned, Category: "gotcha",
 		Content:    "all projects: ask before deleting anything (global pinned)",
 		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})

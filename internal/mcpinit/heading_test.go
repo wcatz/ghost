@@ -29,7 +29,7 @@ func TestTheSessionStartHeadingCannotForgeALine(t *testing.T) {
 		"a name carrying a guillemet":       "pwned«x»\nmore",
 	} {
 		t.Run(name, func(t *testing.T) {
-			block := formatSessionContext("p1", project, nil, nil, "", nil, nil, 0, 0, true, nil, 0, true)
+			block := formatSessionContext("p1", project, nil, nil, "", nil, nil, 0, nil, sessionTally{})
 			// The heading must still be there and still name the project, or a
 			// reader has lost the one line that says which project this is.
 			if !strings.Contains(block, "## Ghost context: ") {
@@ -72,7 +72,7 @@ func TestTheSessionStartHeadingCannotForgeALine(t *testing.T) {
 		"non-ascii":        "日本語",
 	} {
 		t.Run("unchanged/"+name, func(t *testing.T) {
-			block := formatSessionContext("p1", project, nil, nil, "", nil, nil, 0, 0, true, nil, 0, true)
+			block := formatSessionContext("p1", project, nil, nil, "", nil, nil, 0, nil, sessionTally{})
 			if !strings.Contains(block, "## Ghost context: "+project+"\n") {
 				t.Errorf("the heading does not carry the name verbatim:\n%s", block)
 			}

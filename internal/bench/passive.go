@@ -74,6 +74,10 @@ type PassiveSurfaceSpec struct {
 	// ProjectCap, with GlobalCap 0 and Union true).
 	ProjectCap, GlobalCap int
 	Union                 bool
+	// PinOptional grades the pinned row optional: the union read (OrderDecay with no
+	// two-pass, behaviour floor or pinned-first) does not promise a pin a slot, and
+	// whether it should is a separate question the bench does not answer.
+	PinOptional bool
 	// Header is whether the block prints "N shown of M total" counts for the
 	// honesty check to read.
 	Header bool
@@ -110,13 +114,13 @@ func PassiveSurfaces() []PassiveSurfaceSpec {
 			},
 		},
 		{
-			Name: "ghost_project_context (limit 20)", ProjectCap: passiveToolLimit, Union: true,
+			Name: "ghost_project_context (limit 20)", PinOptional: true, ProjectCap: passiveToolLimit, Union: true,
 			Read: func(ctx context.Context, e *PassiveEnv, p string) (string, error) {
 				return mcpserver.ProjectContextAt(ctx, e.Store, p, passiveToolLimit, e.At)
 			},
 		},
 		{
-			Name: "project resource / recall_project", ProjectCap: passiveResourceCap, GlobalCap: passiveResourceGlobalCap,
+			Name: "project resource / recall_project", PinOptional: true, ProjectCap: passiveResourceCap, GlobalCap: passiveResourceGlobalCap,
 			Read: func(ctx context.Context, e *PassiveEnv, p string) (string, error) {
 				return mcpserver.ProjectResourceAt(ctx, e.Store, p, e.At)
 			},
@@ -298,7 +302,7 @@ func measurePassiveBlock(sr *PassiveSurfaceReport, spec PassiveSurfaceSpec, c Pa
 			continue
 		}
 		shown := rendered[r.ID()]
-		switch r.Grade(spec.Scoped) {
+		switch r.gradeOn(spec) {
 		case GradeWithheld:
 			withheld++
 			if shown {
@@ -423,7 +427,13 @@ func checkSessionHeaders(sr *PassiveSurfaceReport, spec PassiveSurfaceSpec, c Pa
 			}
 		}
 		shown := len(renderedIDs(bucket.text))
-		var eligible, withheld int
+		// demotable is the rows the `_global` policy may DROP rather than leave to
+		// the cap (DropDemotedLosers): a superseded or duplicate loser removed by a
+		// stage is a withheld row to the product and a cut row to this fixture, and
+		// either attribution is honest, so the header may name between none and all
+		// of them as withheld. Only the global bucket drops; the project bucket
+		// reorders them and leaves the drop to the cap.
+		var eligible, withheld, demotable int
 		for _, r := range c.Rows {
 			if r.Project != bucket.owner {
 				continue
@@ -431,10 +441,16 @@ func checkSessionHeaders(sr *PassiveSurfaceReport, spec PassiveSurfaceSpec, c Pa
 			if r.Resolved {
 				continue // the window never held it, so no count is about it
 			}
-			if r.withheldByAStage(spec.Scoped) {
+			if r.Kind == KindScoped && spec.Scoped {
+				continue // excluded by the scope clause in the fetch, so never in the window
+			}
+			if r.withheldByAStage() {
 				withheld++
 			} else {
 				eligible++
+				if bucket.name == "global" && (r.Kind == KindSuperseded || r.Kind == KindDuplicate) {
+					demotable++
+				}
 			}
 		}
 		cut := eligible - shown
@@ -454,17 +470,21 @@ func checkSessionHeaders(sr *PassiveSurfaceReport, spec PassiveSurfaceSpec, c Pa
 		if n := atoi(hdrShownRE, header); n != shown {
 			problems = append(problems, fmt.Sprintf("says %d shown, block renders %d", n, shown))
 		}
+		cutWant := cut
 		if hdrWithheldRE.MatchString(header) {
-			if n := atoi(hdrWithheldRE, header); n != withheld {
-				problems = append(problems, fmt.Sprintf("says %d withheld, corpus withheld %d", n, withheld))
+			n := atoi(hdrWithheldRE, header)
+			if n < withheld || n > withheld+demotable {
+				problems = append(problems, fmt.Sprintf("says %d withheld, corpus withheld %d (and up to %d more may be policy drops)", n, withheld, demotable))
+			} else {
+				cutWant = cut - (n - withheld) // rows moved to withheld are not also cut
 			}
 		} else if withheld > 0 {
 			problems = append(problems, fmt.Sprintf("%d rows were withheld by a stage and the header does not name them", withheld))
 		}
 		switch {
 		case hdrRankedOutRE.MatchString(header):
-			if n := atoi(hdrRankedOutRE, header); n != cut {
-				problems = append(problems, fmt.Sprintf("says %d ranked out, ranking cut %d", n, cut))
+			if n := atoi(hdrRankedOutRE, header); n != cutWant {
+				problems = append(problems, fmt.Sprintf("says %d ranked out, ranking cut %d", n, cutWant))
 			}
 		case hdrNotShownRE.MatchString(header):
 			if n := atoi(hdrNotShownRE, header); n != cut {
