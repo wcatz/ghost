@@ -37,6 +37,12 @@ type BucketTally struct {
 	// over-fetch's LIMIT, which the ranking cut before any stage saw them. It is
 	// set by CountedAgainst and is already part of RankedOut.
 	Beyond int
+	// Deduped is how many rows the retriever fetched and then removed as
+	// near-duplicate losers (a bucket policy's DropDemotedLosers). They never
+	// reach the trace, so they are in no other fate; they are the policy's
+	// doing, not the ranking's cut. Set by CountedAgainst, and not part of
+	// RankedOut or Withheld.
+	Deduped int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
@@ -47,7 +53,7 @@ type BucketTally struct {
 // this bucket: everything the stages saw, shown or not. It is NOT the number of
 // rows the store holds; Total is that.
 func (t BucketTally) Window() int {
-	return t.Shown + t.RankedOut + t.Withheld - t.Beyond
+	return t.Shown + t.RankedOut + t.Withheld + t.Deduped - t.Beyond
 }
 
 // Total is every eligible row in the bucket: the window's rows plus the rows
@@ -55,25 +61,35 @@ func (t BucketTally) Window() int {
 // answers for the store (rows passing the retrieval's own SQL predicates), so
 // a project holding sixty live rows reads "of 60", not "of 45".
 func (t BucketTally) Total() int {
-	return t.Shown + t.RankedOut + t.Withheld
+	return t.Shown + t.RankedOut + t.Withheld + t.Deduped
 }
 
 // CountedAgainst folds in the number of eligible rows the store holds for the
 // bucket, counted with the SAME predicates the retrieval's window uses (so a row
-// a stage withheld is already among them and is not counted twice). The rows
-// beyond what the window held are ranked out: the over-fetch is ordered by the
-// ranking and cut at its limit, so the cut is the ranking's doing.
+// a stage withheld is already among them and is not counted twice), and the
+// window's over-fetch limit. The eligible rows past that limit were cut by the
+// ranking before any stage saw them, so they are ranked out. Rows inside the
+// limit that the trace never recorded were removed by the bucket policy as
+// near-duplicate losers, and are Deduped: neither the ranking's cut nor a
+// stage's withholding.
 //
 // A negative eligible count means the count could not be read and changes
-// nothing; a count smaller than the window (a write raced the two reads) never
-// shrinks the tally below what the window held.
-func (t BucketTally) CountedAgainst(eligible int) BucketTally {
-	if eligible < 0 {
+// nothing; a count smaller than what the tally already holds (a write raced the
+// two reads) never shrinks the tally.
+func (t BucketTally) CountedAgainst(eligible, overFetch int) BucketTally {
+	if eligible < 0 || eligible <= t.Total() {
 		return t
 	}
-	if extra := eligible - t.Total(); extra > 0 {
-		t.RankedOut += extra
-		t.Beyond += extra
+	fetched := eligible
+	if overFetch > 0 && overFetch < eligible {
+		fetched = overFetch
+	}
+	if beyond := eligible - fetched; beyond > 0 {
+		t.RankedOut += beyond
+		t.Beyond += beyond
+	}
+	if gone := fetched - t.Window(); gone > 0 {
+		t.Deduped += gone
 	}
 	return t
 }
@@ -126,13 +142,14 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 // that still carry it. It answers only that one question — a block that shows
 // rows has its header accounting for the withheld and ranked-out halves, and one
 // with nothing withheld has nothing to explain — so anything else gets "". A
-// bucket with rows ranked out behind the withheld ones is not wholly withheld
-// either.
+// bucket with rows the ranking cut INSIDE the window is not wholly withheld; rows
+// merely beyond the window do not change the answer, because the assembler
+// answers about the window (ghost_project_context says the same).
 //
 // The sentence is the assembler's own abstention for the cause, not a table of
 // this type's: see withheldSentence.
 func (t BucketTally) WithheldNote() string {
-	if t.Shown != 0 || t.Withheld == 0 || t.RankedOut != 0 {
+	if t.Shown != 0 || t.Withheld == 0 || t.RankedOut-t.Beyond != 0 {
 		return ""
 	}
 	return withheldSentence(t.Reason) + WithheldPointer

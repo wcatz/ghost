@@ -199,33 +199,58 @@ func TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow(t *testing.T) {
 // ranking cut before any stage saw them. They are ranked out, and the total is
 // the eligible count, not the window's size.
 func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
-	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60)
+	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60, 45)
 	if tally.Total() != 60 {
 		t.Errorf("Total = %d, want 60 (the eligible rows, not the 45 the window held)", tally.Total())
 	}
-	if tally.RankedOut != 45 {
-		t.Errorf("RankedOut = %d, want 45 (30 cut by the budget + 15 beyond the window)", tally.RankedOut)
+	if tally.RankedOut != 45 || tally.Beyond != 15 {
+		t.Errorf("RankedOut/Beyond = %d/%d, want 45/15 (30 cut by the budget + 15 beyond the window)", tally.RankedOut, tally.Beyond)
 	}
 	if tally.Window() != 45 {
 		t.Errorf("Window = %d, want 45 (what the retrieval actually fetched)", tally.Window())
 	}
 	// A count that came back smaller than the window (a write raced it) never
 	// shrinks the tally below what the window held.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10); got.Total() != 45 || got.RankedOut != 30 {
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10, 45); got.Total() != 45 || got.RankedOut != 30 {
 		t.Errorf("a stale count changed the tally: %+v", got)
 	}
 	// A negative count means "unknown" and changes nothing.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1); got.Total() != 45 {
+	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1, 45); got.Total() != 45 {
 		t.Errorf("an unknown count changed the tally: %+v", got)
 	}
 }
 
-// TestWithheldNoteNeedsNoRowsBeyondTheWindow: a bucket with ranked-out rows
-// behind the withheld ones is not wholly withheld, and a sentence saying the
-// answer is withheld would hide the rows the ranking cut.
-func TestWithheldNoteNeedsNoRowsBeyondTheWindow(t *testing.T) {
-	tally := BucketTally{Shown: 0, Withheld: 2, Reason: validityExpired}.CountedAgainst(9)
-	if got := tally.WithheldNote(); got != "" {
-		t.Errorf("a bucket with live rows beyond the window rendered the all-withheld note %q", got)
+// TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates: a row the
+// retriever fetched and then removed as a near-duplicate loser never reaches the
+// trace, so it is in the eligible count and in none of the trace's fates. It is
+// neither beyond the over-fetch nor ranked out; it has its own count, so the
+// header cannot hand it to the ranking.
+func TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates(t *testing.T) {
+	// 11 eligible globals, a window of 16 that held them all, the trace saw 10.
+	tally := BucketTally{Shown: 8, RankedOut: 2}.CountedAgainst(11, 16)
+	if tally.Total() != 11 {
+		t.Errorf("Total = %d, want 11", tally.Total())
+	}
+	if tally.Deduped != 1 {
+		t.Errorf("Deduped = %d, want 1 (fetched, then removed by the bucket policy)", tally.Deduped)
+	}
+	if tally.RankedOut != 2 || tally.Beyond != 0 {
+		t.Errorf("RankedOut/Beyond = %d/%d, want 2/0: nothing was beyond the window and the loser was not ranked", tally.RankedOut, tally.Beyond)
+	}
+}
+
+// TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt: a
+// project holding more rows than the over-fetch whose entire window is withheld
+// is the same state ghost_project_context answers with the abstention, so the
+// note must render; only rows the ranking cut INSIDE the window mean the bucket
+// is not wholly withheld.
+func TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt(t *testing.T) {
+	beyond := BucketTally{Shown: 0, Withheld: 45, Reason: validityExpired}.CountedAgainst(60, 45)
+	if beyond.WithheldNote() == "" {
+		t.Errorf("a window withheld whole, with rows behind it, lost the note: %+v", beyond)
+	}
+	inside := BucketTally{Shown: 0, Withheld: 2, RankedOut: 3, Reason: validityExpired}
+	if got := inside.WithheldNote(); got != "" {
+		t.Errorf("rows ranked out inside the window mean the bucket is not wholly withheld, got %q", got)
 	}
 }

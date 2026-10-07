@@ -210,3 +210,19 @@ func TestSessionStartTotalCountsWithheldRowsOnceBesideRowsBeyondTheWindow(t *tes
 		t.Errorf("the mixed header double counts or understates:\n want %q\n got:\n%s", want, got)
 	}
 }
+
+// TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow: the
+// wholly-withheld sentence must not depend on the project fitting under the
+// over-fetch. Sixty expired rows fill the 45-row window with withheld rows and
+// leave fifteen behind it; the block still says the rows were withheld rather
+// than printing a "0 shown" count header over nothing.
+func TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow(t *testing.T) {
+	got := renderSessionStart(t, outcomeSession(t, 0, 60))
+
+	if !strings.Contains(got, "**Memories:**\nNo sufficiently trustworthy memory found") {
+		t.Errorf("a project whose whole window is withheld lost the withheld sentence; got:\n%s", got)
+	}
+	if strings.Contains(got, "**Memories (") {
+		t.Errorf("a block with nothing shown rendered a count-line header; got:\n%s", got)
+	}
+}

@@ -1515,7 +1515,10 @@ Axis interaction rules:
 > the store holds and not the over-fetched window's size. A row a stage withheld
 > is inside the window and so is not counted twice; eligible rows the over-fetch
 > never read are ranked out, because the window is ordered by the ranking and cut
-> at its limit. The sentence after the counts names which half of the difference
+> at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
+> that split). A row the retriever fetched and then removed as a near-duplicate
+> loser never reaches the trace; it is `Deduped`, counted in the total and
+> reported with the withheld rows, never as the ranking's cut. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state

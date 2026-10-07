@@ -267,12 +267,12 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		}
 		switch sl.Bucket {
 		case projectID:
-			tally.project = tally.project.CountedAgainst(n)
+			tally.project = tally.project.CountedAgainst(n, sl.OverFetch)
 		case memory.GlobalProjectID:
-			tally.globals = tally.globals.CountedAgainst(n)
+			tally.globals = tally.globals.CountedAgainst(n, sl.OverFetch)
 		}
 	}
-	if tally.project.Window() > 0 && tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {
+	if tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {
 		tally.emptyNote = assemble.EmptyNote(res)
 	}
 	return memories, globals, tally

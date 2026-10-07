@@ -546,13 +546,17 @@ const (
 // makes no claim about.
 func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
 	shown, total := tally.Shown, tally.Total()
+	// Rows the bucket policy removed as near-duplicate losers are not the
+	// ranking's cut either, so they ride with the withheld rows: one count of
+	// "not the ranking's doing".
+	withheld := tally.Withheld + tally.Deduped
 	switch {
-	case tally.Withheld > 0 && tally.RankedOut > 0:
+	case withheld > 0 && tally.RankedOut > 0:
 		return fmt.Sprintf("%d shown of %d total — %d not shown: %d ranked out by %s, %d withheld rather than ranked out; use %s for the rest",
-			shown, total, tally.RankedOut+tally.Withheld, tally.RankedOut, rankPhrase, tally.Withheld, toolPhrase)
-	case tally.Withheld > 0:
+			shown, total, tally.RankedOut+withheld, tally.RankedOut, rankPhrase, withheld, toolPhrase)
+	case withheld > 0:
 		return fmt.Sprintf("%d shown of %d total — %d withheld rather than ranked out; use %s for the rest",
-			shown, total, tally.Withheld, toolPhrase)
+			shown, total, withheld, toolPhrase)
 	case tally.RankedOut > 0:
 		return fmt.Sprintf("%d shown of %d total — %d not shown, ranked by %s; use %s for the rest",
 			shown, total, tally.RankedOut, rankPhrase, toolPhrase)
