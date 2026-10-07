@@ -73,9 +73,76 @@ func AsOfSourceNote(t time.Time) string {
 // provenance of the rows, and both surfaces that read a past set have to say it:
 // a block that disclosed its instant and then printed today's tasks under it
 // would be contradicted by its own second half.
+//
+// It carves out the fields a historical row DOES carry from the current row —
+// the validity window, scope and pin — because "nothing in this block is a claim
+// about the present" would be false about them. AsOfValidityNote is where that
+// borrow is stated beside the rows; this sentence names it too, so the two notes
+// cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
-		"than shown as they are now — nothing in this block is a claim about the present."
+		"than shown as they are now; a memory row's validity window, scope and pin are not versioned either, and " +
+		"where shown they are the current row's. Apart from those, nothing in this block is a claim about the present."
+}
+
+// AsOfValidityNote is the sentence stating that the validity window, scope and
+// pin a historical read renders come from the CURRENT row rather than the version
+// the rest of the line comes from, and it is the same sentence on every surface
+// that renders one.
+//
+// It lives here, beside the other two historical notes, because the store owns
+// the fact: memory_history records exactly content, category, importance,
+// resolved_at, source and project_id (AsOfRow's doc says so), so the triple a
+// historical row carries is read from the live row. A surface that worded the
+// borrow itself would let the two drift, and a drift here is not cosmetic — it is
+// the difference between a reader taking a present-day window for the window that
+// held at the instant the block is a reading of, and knowing it is not.
+//
+// The instant is named because the note's whole point is what it is NOT a claim
+// about; the block's AsOfSourceNote names the same instant, and a reader who
+// meets either line first has met it. The note says in as many words that no
+// verdict is drawn from the window, because a verdict at the instant would be
+// exactly the claim the borrow makes false.
+func AsOfValidityNote(at time.Time) string {
+	return "A memory row's validity window, scope and pin are read from the current row, not the version the " +
+		"rest of the line comes from: memory_history records none of them. The window shown is the CURRENT one, " +
+		"not the window the memory held at " + at.UTC().Format(time.RFC3339) + ", so no expiry or future-start " +
+		"verdict is drawn from it."
+}
+
+// AsOfValidityState is the validity state a HISTORICAL listing may draw from a
+// row's borrowed window, and it is what the as_of surfaces pass to ValidityLabel.
+//
+// It is ValidityState's answer with its clock-dependent half taken out. expired
+// and future measure a clock against the window, and the window is the current
+// row's rather than the version the line comes from (AsOfRow's doc says so, and
+// AsOfValidityNote is where a surface states the borrow), so neither is drawn.
+// What is left is the clock-independent fact about the row: unset when it states
+// no validity at all, unverified when it states a window nobody ever verified,
+// and valid when the window carries a readable verification stamp (ValidityLabel
+// prints the stamp itself and renders no word for valid). A window that is
+// currently closed or not yet open therefore still reads unverified when no
+// verification was recorded — that the claim was never checked is a fact about
+// the row the window came from, not about when it is read — and reads with no
+// marker when it was verified.
+//
+// now is the current clock, named because ValidityState takes one; the answer
+// does not depend on it, which is the point of dropping the states that do.
+func AsOfValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) string {
+	state, _ := ValidityState(validFrom, validUntil, verifiedAt, now)
+	switch state {
+	case ValidityExpired, ValidityFuture:
+		// The verdict is dropped; the verification fact is not. A readable
+		// window with no readable verification stamp is unverified whatever the
+		// clock says about the window, and a verified window needs no marker
+		// here because ValidityLabel prints the stamp itself.
+		if _, ok := parseStoredStamp(verifiedAt); !ok {
+			return ValidityUnverified
+		}
+		return ""
+	default:
+		return state
+	}
 }
 
 // asOfLeg is a query term prepared for matching against text, rather than for

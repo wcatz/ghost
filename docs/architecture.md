@@ -1056,13 +1056,26 @@ anywhere in the read, and no inference: it is a selection.
   scope, pin, access count, provenance and the validity triple were never
   versioned, so they are read from the row as it stands, and a deleted memory has
   no row at all — those fields are zero for it, which is the honest reading rather
-  than a guess. `valid_from` / `valid_until` are the sharpest case: nothing
-  writes them yet ([#575](https://github.com/wcatz/ghost/issues/575), and the
-  assembler validity work in parallel), so an `as_of` read's validity window is
-  the current one and only the current one. One imprecision is recorded rather
-  than worked around: a promotion **rewrites** the history rows' `project_id` (it
-  has to, or the project-delete cascade takes a memory's past with it), so a
-  pre-promotion instant reports a promoted memory under `_global`.
+  than a guess. `valid_from` / `valid_until` / `verified_at` are the sharpest
+  case: [#575](https://github.com/wcatz/ghost/issues/575) ships the writers, but
+  the change log still records no validity, so an `as_of` read's window is the
+  current one and only the current one. It therefore draws **no** clock-dependent
+  verdict from that window: the two `as_of` **listing** surfaces —
+  `ghost_project_context`'s `as_of` branch and the `ghost context --as-of` session
+  block — render the window with no `expired` / `not yet valid` marker and append
+  `memory.AsOfValidityNote`, saying plainly that the window — with scope and pin —
+  is the current row's, because a verdict at T would be a claim the borrowed window
+  cannot support. The clock-independent `unverified` marker is still drawn
+  (`memory.AsOfValidityState`): whether the window was ever verified is a fact
+  about the current row rather than about when it is read, so a historical line and
+  a current one agree about it. Two imprecisions are recorded rather than worked
+  around: `ghost_memory_search` with `as_of` is not one of those listing surfaces
+  and still runs the borrowed window through stage 2 against T, so a row whose
+  current window has since closed or not yet opened is dropped from an answer it
+  was valid for ([#910](https://github.com/wcatz/ghost/issues/910)); and a
+  promotion **rewrites** the history rows' `project_id` (it has to, or the
+  project-delete cascade takes a memory's past with it), so a pre-promotion
+  instant reports a promoted memory under `_global`.
 - **Which timestamp the age is measured from.** The row's own `created_at`, which
   is what the current read decays on, whenever it can answer — it is set on
   INSERT and never rewritten (a snapshot restore carries the snapshot's

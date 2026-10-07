@@ -2155,10 +2155,10 @@ func (s *Server) registerTools() {
 				// `## Learned Context` and the learned/learned sections stay omitted
 				// for the reason above, and the Global section is the ONLY thing this
 				// adds: it reads the same rows, renders the same fields through the
-				// same `formatMemories`, and says which instant it read.
+				// same `formatMemoriesAt`, and says which instant it read.
 				own, globals := splitMemoriesByProject(live)
-				projectContextSection(&sb, memorySectionHeading, formatMemories(own))
-				projectContextSection(&sb, globalSectionHeading, formatMemories(globals))
+				projectContextSection(&sb, memorySectionHeading, formatMemoriesAt(own, *asOf))
+				projectContextSection(&sb, globalSectionHeading, formatMemoriesAt(globals, *asOf))
 			}
 			if note := set.UnknownNote(); note != "" {
 				sb.WriteString("\n" + note + "\n")
@@ -4183,56 +4183,67 @@ func truncateUTF8(s string, maxBytes int) string {
 	return memory.TruncateUTF8(s, maxBytes)
 }
 
-func formatMemories(memories []memory.Memory) string {
+// formatMemoriesInternal is the shared implementation for formatting memories.
+// A nil asOf is a current read: each row's validity window is judged against the
+// wall clock. A non-nil asOf is a historical read, and the ONE thing it changes
+// is the verdict — memory_history never recorded valid_from, valid_until or
+// verified_at, so a historical row's window is the current row's, and a verdict
+// against it would describe an instant the window does not hold at. Only the
+// clock-dependent states are dropped (memory.AsOfValidityState): the window is
+// shown with whatever verdict reads off the row itself, and AsOfValidityNote is
+// appended once, below the rows, and only when a window was actually shown: an
+// empty body is what tells projectContextSection to write no heading at all, so a
+// disclosure appended to an empty listing would print a heading over nothing.
+func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 	var sb strings.Builder
-	// One clock for the whole listing, read once and passed to every row, so two
-	// memories in the same answer cannot be judged against different instants —
-	// a window that closed between two rows would otherwise show one as current
-	// and one as retired with nothing in the output to explain the difference.
 	now := time.Now().UTC()
+	showedWindow := false
 	for _, m := range memories {
 		pin := ""
 		if m.Pinned {
 			pin = " [pinned]"
 		}
-		// The tag list through assemble.TagsLabel, for the reason every other
-		// renderer on this line is assemble's: the label is printed OUTSIDE the
-		// «...» data delimiters and json.Marshal does not escape « or », so a tag
-		// holding one opened a data block of its own mid-metadata (#811). This was
-		// the second copy of that label, and the untested one.
 		tags := assemble.TagsLabel(m.Tags)
-		// Content is wrapped in «...» data delimiters: it is free text the
-		// agent itself (or an indirect-injection source it summarized) wrote —
-		// stored data, not a new instruction, however imperative it reads.
 		resolved := ""
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		// assemble's renderer, not a second one: ghost_memory_search goes through
-		// assemble.Item.Line, and this listing is the same field set for the
-		// surfaces that have not moved to the assembler yet. Two renderers would
-		// let the same row read differently depending on which tool the caller
-		// reached for, which is the one thing "one renderer, one field set" is
-		// there to prevent.
-		//
-		// The state is computed here, not inherited: this surface has not run
-		// stage 2, so a row whose window has closed is about to be printed in
-		// full.
-		//
-		// The id goes through assemble.Token, the renderer assemble.Item.Line
-		// uses for the same field on the same line. The id is printed OUTSIDE
-		// the «...» data delimiters, inside backticks, so a stored id holding a
-		// newline forges a second row that reads as Ghost's own (#791) — and
-		// `ghost import` writes an artifact's ids verbatim, so the value is
-		// whatever a file said. A 32-hex id is written bare and renders
-		// byte-identically to every golden.
+		verdict := ""
+		if asOf == nil {
+			verdict = assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
+		} else {
+			// Historical read: the clock-independent part of the state only —
+			// unverified survives, because it is a fact about the current row,
+			// while expired and future would be claims about T the borrowed
+			// window cannot support (see memory.AsOfValidityState).
+			verdict = memory.AsOfValidityState(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
+		}
+		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
+		if validity != "" {
+			showedWindow = true
+		}
 		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
-			assemble.ValidityLabel(assemble.ValidityStateOf(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now), m.ValidFrom, m.ValidUntil, m.VerifiedAt),
+			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
 			sourceLabelForMemory(m), quoteData(m.Content))
 	}
+	if asOf != nil && showedWindow {
+		sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf) + ")\n")
+	}
 	return sb.String()
+}
+
+// formatMemories formats memories using the wall clock for validity evaluation.
+func formatMemories(memories []memory.Memory) string {
+	return formatMemoriesInternal(memories, nil)
+}
+
+// formatMemoriesAt formats a past read's rows. The instant is not a clock to
+// judge the validity window against — see formatMemoriesInternal — but the
+// instant the disclosure says the window does NOT hold at.
+func formatMemoriesAt(memories []memory.Memory, asOf time.Time) string {
+	return formatMemoriesInternal(memories, &asOf)
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first

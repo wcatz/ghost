@@ -306,9 +306,11 @@ func globalOriginGuidance(globals []sessionMemory) string {
 }
 
 // sessionMemoryToItem converts a sessionMemory to an assemble.Item for rendering.
-// If asOf is non-nil (historical read), it computes the ValidityState from the
-// stored timestamps against that instant. For the passive (current) read, asOf
-// is nil and the ValidityState is already populated by the assembler's stage 2.
+// If asOf is non-nil (historical read), it derives the ValidityState from the
+// stored timestamps with memory.AsOfValidityState — the clock-independent part
+// only, because the window is the current row's and does not describe the
+// requested instant. For the passive (current) read, asOf is nil and the
+// ValidityState is already populated by the assembler's stage 2.
 func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 	it := assemble.Item{
 		ID:            m.ID,
@@ -330,9 +332,12 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 		Agent:         m.Agent,
 		SourceRef:     m.SourceRef,
 	}
-	// For historical reads, compute ValidityState from the parsed timestamps
-	// against the asOf instant. The passive path already has this set from
-	// the assembler's stage 2.
+	// For historical reads, derive ValidityState from the parsed timestamps. A
+	// clock-dependent verdict (expired / not yet valid) at the requested instant
+	// would be a claim the borrowed window cannot support, so
+	// memory.AsOfValidityState drops it and keeps only the clock-independent
+	// fact (unverified / valid). The passive path already has this set from the
+	// assembler's stage 2.
 	if asOf != nil && it.ValidityState == "" {
 		var fromStr, untilStr, verifiedStr *string
 		if it.ValidFrom != nil {
@@ -347,7 +352,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 			s := it.VerifiedAt.Format(memory.StoredStampLayout)
 			verifiedStr = &s
 		}
-		it.ValidityState = assemble.ValidityStateOf(fromStr, untilStr, verifiedStr, *asOf)
+		it.ValidityState = memory.AsOfValidityState(fromStr, untilStr, verifiedStr, *asOf)
 	}
 	return it
 }
@@ -393,9 +398,16 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		if totalGlobalCountKnown && totalGlobalCount > len(globals) {
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
+		showedGlobalWindow := false
 		for _, m := range globals {
 			it := sessionMemoryToItem(m, asOf)
+			if it.ValidFrom != nil || it.ValidUntil != nil || it.VerifiedAt != nil {
+				showedGlobalWindow = true
+			}
 			fmt.Fprintf(&gsb, "%s\n", it.Line())
+		}
+		if asOf != nil && showedGlobalWindow {
+			fmt.Fprintf(&gsb, "\n(%s)\n", memory.AsOfValidityNote(*asOf))
 		}
 	}
 	globalSection := gsb.String()
@@ -451,9 +463,19 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		} else {
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
+		showedWindow := false
 		for _, m := range memories {
 			it := sessionMemoryToItem(m, asOf)
+			if it.ValidFrom != nil || it.ValidUntil != nil || it.VerifiedAt != nil {
+				showedWindow = true
+			}
 			fmt.Fprintf(&sb, "%s\n", it.Line())
+		}
+		// Only a historical read states the borrow, and only when a window was
+		// actually drawn: a listing of undated rows carries no line about
+		// windows it does not have.
+		if asOf != nil && showedWindow {
+			fmt.Fprintf(&sb, "\n(%s)\n", memory.AsOfValidityNote(*asOf))
 		}
 	}
 

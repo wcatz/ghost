@@ -81,15 +81,11 @@ const (
 func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (string, []string) {
 	var unreadable []string
 	read := func(s *string) (*time.Time, bool) {
-		if s == nil {
-			return nil, false
-		}
-		t, ok := ParseStamp(*s)
-		if !ok {
+		t, ok := parseStoredStamp(s)
+		if !ok && s != nil {
 			unreadable = append(unreadable, *s)
-			return nil, false
 		}
-		return &t, true
+		return t, ok
 	}
 	from, _ := read(validFrom)
 	until, _ := read(validUntil)
@@ -107,4 +103,19 @@ func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (st
 	default:
 		return ValidityValid, unreadable
 	}
+}
+
+// parseStoredStamp parses a stored stamp, reporting the instant only when a
+// layout could read it. It is ValidityState's own reader, factored out so a
+// caller that needs the readability question alone asks it the same way rather
+// than through a second parser — the same reason this file owns the state rule.
+func parseStoredStamp(s *string) (*time.Time, bool) {
+	if s == nil {
+		return nil, false
+	}
+	t, ok := ParseStamp(*s)
+	if !ok {
+		return nil, false
+	}
+	return &t, true
 }
