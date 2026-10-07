@@ -280,8 +280,10 @@ func runProvenance(p *pipeline) {
 // the retriever's window already carries the supersede demotion it applies
 // today. `contradicts` is recorded rather than acted on: the product contract is
 // that a contradicted row survives while a duplicate restatement sinks, so
-// removing the weaker endpoint would reverse tested behaviour. A v1 pass-through
-// keeps the stage in the pipeline, in order, without changing membership.
+// removing the weaker endpoint would reverse tested behaviour. The stage changes
+// no membership. The pairs it records are what markConflicts turns into the
+// `conflicts_with` marker on both rendered lines; separating a pair is not built
+// and is tracked under #581.
 func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string

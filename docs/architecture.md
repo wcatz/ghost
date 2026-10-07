@@ -1545,7 +1545,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
-| **Lifecycle** | Is this memory still current, what replaced it, and how long is it wanted? | `memories.resolved_at`, `memories.pinned`, `memories.retention` + `expires_at` (schema v19), the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — retention/ownership tiers landed in v19 ([#587](https://github.com/wcatz/ghost/issues/587)): three tiers, a `persistent` tier every automated pass spares, a bounded decay for `session` rows, and a `ghost prune` that is dry-run by default and never runs on a timer (see [Retention tiers](#retention-tiers)). `memory_history` records every state change and who made it, and an `as_of` read consumes it for liveness and content (see [Historical retrieval](#historical-retrieval-as_of)), but a current retrieval still does not. Still no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Lifecycle** | Is this memory still current, what replaced it, and how long is it wanted? | `memories.resolved_at`, `memories.pinned`, `memories.retention` + `expires_at` (schema v19), the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — retention/ownership tiers landed in v19 ([#587](https://github.com/wcatz/ghost/issues/587)): three tiers, a `persistent` tier every automated pass spares, a bounded decay for `session` rows, and a `ghost prune` that is dry-run by default and never runs on a timer (see [Retention tiers](#retention-tiers)). `memory_history` records every state change and who made it, and an `as_of` read consumes it for liveness and content (see [Historical retrieval](#historical-retrieval-as_of)), but a current retrieval still does not. No transition model across the axes is documented beyond the per-writer rules in this file and [Retention tiers](#retention-tiers) |
 | **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memories_list` and `ghost_search_all` still show a closed window, marked `expired` rather than withheld, because they browse rather than filter — every surface that ASSEMBLES a context withholds it, which is now `ghost_memory_search`, the session-start block, `ghost_project_context` and the `ghost://memories/global` resource (see the assembler section below for the list). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record in `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest, and it counts over records that CARRY a stamp rather than over `verified` rows. Which mechanism is in play differs per writer — a live save appends a `verified` row, an import stamps its own `imported` row, a restore reinstates a re-created row's records and deliberately leaves an in-place row's alone, and the corpus route records no stamp at all — so [Evidence provenance](#evidence-provenance) enumerates the set in its writer table rather than this cell, which is a summary, and a summary of four per-writer mechanisms is a fourth claim site. (Named by link rather than by direction: this cell also points at the assembler section below, so a reader told to look below for both finds one and not the other.) Where a record IS written its stamp is the store's clock and never the caller's — a verifier that could date its own check could date it before the thing it checked, and the import holds to that too rather than copying a date in from a file — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated. An `as_of` read is filtered too, and against the instant it asked for rather than the wall clock: `assemble.Run` moves `Now` to the `as_of` value before the stages run, so stage 2 judges the window at T and a row that was true at T but has since expired is kept for that question ([#683](https://github.com/wcatz/ghost/pull/683)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate), and the assembler's conflict stage (which would otherwise mark both rows `conflicts_with` and note a pair that is two true claims) |
 | **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. The history has three readers: `ghost history <memory-id>`, `Store.MemoryHistory`, and the `as_of` read, which consults it for content and liveness but not for confidence. The evidence table has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
@@ -1553,7 +1553,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
 - **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
-- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)). Until then the pair is MARKED rather than separated (issue #895, [#895](https://github.com/wcatz/ghost/issues/895)): when both rows of a live `contradicts` edge are in the rendered answer, each line carries `conflicts_with=` followed by the other row's rendered id (`assemble.Token`), on the same physical line. Nothing is removed or reordered. **Marking does not satisfy "must never appear together"**: that stays open under [#581](https://github.com/wcatz/ghost/issues/581). A pair with one side withheld, cut by a budget, or whose edge was withdrawn says nothing, and neither does a pair whose scopes conflict (`memory.ScopesConflict`, the rule every other reader of a link applies: `environment=production` and `environment=development` are two true claims, not a contradiction), which is also not noted. A pair split across an edge-read chunk boundary (`edgeChunkIDs`) is never read, so it is not marked either; the `edges_partial` note already says so.
+- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change, which is the remaining work under [#581](https://github.com/wcatz/ghost/issues/581). Until then the pair is MARKED rather than separated: when both rows of a live `contradicts` edge are in the rendered answer, each line carries `conflicts_with=` followed by the other row's rendered id (`assemble.Token`), on the same physical line. Nothing is removed or reordered. **Marking does not satisfy "must never appear together"**: that stays open under [#581](https://github.com/wcatz/ghost/issues/581). A pair with one side withheld, cut by a budget, or whose edge was withdrawn says nothing, and neither does a pair whose scopes conflict (`memory.ScopesConflict`, the rule every other reader of a link applies: `environment=production` and `environment=development` are two true claims, not a contradiction), which is also not noted. A pair split across an edge-read chunk boundary (`edgeChunkIDs`) is never read, so it is not marked either; the `edges_partial` note already says so.
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow before their window (`SearchVectorScoped`, in Go over the scan rather than inside a statement, so its top-k is the limit and there is no statement to fold the rule into), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. The rule is decided where the rows are read, in whichever form that read allows. Search applies it in Go over the widened pool `Store.Candidates` returns — both legs have already run by then, and fusion narrows the fused pool, so a SQL form there would narrow nothing it still had to decide about — and the assembler keeps it in Go over the same set. A reader whose candidate set *is* a statement's own `LIMIT` has no rows left to decide over once the cut is taken, and no corpus scan to decide them with, so it carries a SQL statement instead: `memory.ScopeMatchesSQL`, bound by the store's passive fetch. A test runs that form and the Go one over the same rows, and a second test pins the single divergence between them — a stored scope value that is not a string. The cosine writers in the bullet above are that difference made concrete: a brute-force pass over the corpus can decide before its own top-k, in Go, and backfill to fill it.
 - **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but none of them is a ranking input, and a confidence value is not a verdict anything computes. `memory_provenance` ([#673](https://github.com/wcatz/ghost/issues/673)) now keeps every observation rather than the last, and the assembler reports the count; it still does not rank on it. (Write-time authorship, the change log and the evidence records are three different things; see [Memory history](#memory-history) and [Evidence provenance](#evidence-provenance).)
@@ -1563,8 +1563,7 @@ Axis interaction rules:
 > **Partly built.** The seam exists (`internal/assemble`, `assemble.Run`, and
 > `Store.Candidates` behind it), the formatted `ghost_memory_search` path runs on
 > it with both filters applied before the window closes, a derived abstention
-> outcome and a response-fit byte cap
-> ([#580](https://github.com/wcatz/ghost/issues/580)), and the session-start
+> outcome and a response-fit byte cap, and the session-start
 > injector now runs on it too — a PASSIVE request through `loadSessionPassive`
 > (`internal/mcpinit/session_passive.go`), so the selection, the caps, the order
 > and the near-duplicate pass are the assembler's rather than a second
@@ -1593,15 +1592,15 @@ Axis interaction rules:
 > test for a future passive explain surface. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
-> prints for that state
-> ([#897](https://github.com/wcatz/ghost/issues/897)). It therefore renders and applies
-> `memories.scope` from the shared label and the shared rule
-> ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
-> the conflict and diversity stages are pass-throughs. (`explain: true` is no
-> longer on that list: it is a projection of the same `assemble.Run` as the
-> formatted answer
-> ([#898](https://github.com/wcatz/ghost/issues/898), which closed the deferral to
-> [#583](https://github.com/wcatz/ghost/issues/583) and [#571](https://github.com/wcatz/ghost/issues/571)).) The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
+> prints for that state. It therefore renders and applies
+> `memories.scope` from the shared label and the shared rule, and renders every
+> line through `assemble.Item.Line` (`internal/mcpinit/hook.go`), so the
+> contradiction marker reaches it too. `explain: true` is a projection of the same
+> `assemble.Run` as the formatted answer. What does not exist yet: stage 5 does not
+> SEPARATE a `contradicts` pair — it records the pair and the renderer marks both
+> lines, which is not the same as keeping them apart — and stage 7 (diversity) is a
+> pass-through. The plan to converge the surfaces, and the remaining work above, is
+> [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
 
 What exists now:
@@ -1630,8 +1629,8 @@ What exists now:
   `OpenReadDB` refuses `:memory:`; in-memory and bench stores run the snapshot on
   the handle they already hold, which has no concurrent writer.
 - **Stage 3 is where category and scope verdicts live**, and both run over the
-  widened set. That is [#573](https://github.com/wcatz/ghost/issues/573)'s
-  mechanism closed: a post-filter over a closed window can only remove from the
+  widened set. That closes the
+  mechanism behind the old scope post-filter: a post-filter over a closed window can only remove from the
   answer, so a matching row the window cut was invisible and the tool reported
   absence while the memory existed. Project membership stays in SQL and is
   recorded as a per-row verdict, never applied as a second drop.
@@ -1793,12 +1792,14 @@ What exists now:
 
 - **The session-start surface shows and applies scope.** Its rows come from one
   `assemble.Run` — a PASSIVE request, a no-query retrieval with its own bucket
-  policies, never `weak`, and an empty window reported as `no_memories` rather than
-  as a claim about the store ([#758](https://github.com/wcatz/ghost/pull/758)) —
-  and the block prints each row's scope with `assemble.ScopeLabel`, the same label
+  policies, never `weak` ([#758](https://github.com/wcatz/ghost/pull/758)). The
+  verdict of that run (`answerable`/`not_applicable`, or `empty` with a reason such
+  as `no_memories`, a claim about the over-fetched window and not about the store)
+  is NOT rendered on this surface: it reaches the trace and the retrieval record,
+  and the block prints only the header's counts and, when every project row was
+  withheld, `assemble.EmptyNote`. The block prints each row's scope with `assemble.ScopeLabel`, the same label
   a search line carries, so the two cannot spell one scope differently. It applies
-  `injection.session_scope` when the key is set
-  ([#577](https://github.com/wcatz/ghost/issues/577)), and the filter is
+  `injection.session_scope` when the key is set, and the filter is
   `memory.ScopeMatchesSQL`, the SQL statement of the rule stage 3 applies in Go
   through `assemble.ScopeContradicts`, held to the Go form by a test that runs
   both over the same rows. It has to be decided in SQL for the reason
@@ -1809,8 +1810,7 @@ What exists now:
   never reach an eligible one ranked below the cut. With the key unset the clause
   is absent, so the query and the ranking are the ones that shipped — the label is
   not part of that, and is deliberately new: a row that carries scope is labelled
-  on its line whether or not a session scope is configured, which is half of what
-  [#577](https://github.com/wcatz/ghost/issues/577) asked for. The SELECTION is the
+  on its line whether or not a session scope is configured, so the label does not depend on the filter. The SELECTION is the
   one that shipped for every branch the golden fixture exercises, and not for
   `_global`'s supersede demotion, which the old global loader never ran and the
   assembler's passive demotion runs for every bucket: a `supersedes` edge between
@@ -1850,8 +1850,8 @@ What exists now:
   per-row decisions and the exact floors that were evaluated. `explain: true`
   projects it, together with the per-candidate ranking facts the retriever records
   when asked (see "Explain is a record of the ranking").
-- **Abstention is derived, and it is an outcome rather than an empty list**
-  ([#580](https://github.com/wcatz/ghost/issues/580)). Every block carries
+- **Abstention is derived, and it is an outcome rather than an empty list.**
+  Every block carries
   `answerable`, `weak` or `empty` with a reason from a closed vocabulary, and
   `ghost_memory_search` renders the verdict as a machine line
   (`[ghost:outcome=… reason=… floor_fts_rank=… abstain_cosine=… candidates=…
@@ -1868,9 +1868,10 @@ What exists now:
   (supersede, then near-duplicate, which drops its losers on `_global`) run after
   validity as well: `selectPassive` sets aside any row outside its window before the
   selection and the demotions, so an expired row can neither demote nor remove a
-  live one (#893), and it trails the eligible rows for stage 2 to drop. And
-  the line reports `abstain_cosine=not_applied` because the surface has no vector
-  arm for a reader to configure. `weak` withholds no row — only the response-fit pass may
+  live one, and it trails the eligible rows for stage 2 to drop. And
+  the machine line a passive result carries (`Result.Machine`, which no passive
+  surface prints) reports `abstain_cosine=not_applied` because the surface has no
+  vector arm for a reader to configure. `weak` withholds no row — only the response-fit pass may
   remove one — so a caller can see the weak candidates and judge them; what it
   gets is the instruction not to. Arm A (a keyword rank of 0-3) is on; **arm B
   (a vector cosine) ships OFF**, because the bench no-answer report shows the
@@ -1949,8 +1950,9 @@ and whose vector leg then failed.)
   callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
 What the remaining stages will add, in pipeline order: conflict separation
-(stage 5, where `contradicts` is recorded and not acted on) and diversity (7, off
-by default). Stage 6 already records the near-duplicate losers the retriever
+(stage 5, where a `contradicts` pair is recorded and its two rendered lines are
+marked, but neither row is removed or moved) and diversity (7, off by default and
+a pass-through). Both are tracked under [#581](https://github.com/wcatz/ghost/issues/581). Stage 6 already records the near-duplicate losers the retriever
 removed, with the row each lost to; it does not decide them.
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
@@ -1961,10 +1963,12 @@ query
   2. validity       drop or bound rows outside valid_from/valid_until, flag unverified
   3. scope          machine-readable memories.scope match, project membership
   4. provenance     bounded penalty for unattributed or low-confidence rows
-  5. conflicts      suppress superseded rows; never emit a contradicts pair together
+  5. conflicts      records a contradicts pair (both rows stay; the renderer marks both lines);
+                    separating the pair is not built. Supersede demotion is the retriever's.
   6. dedup          collapse duplicate/near-duplicate links to one representative
                     (the retriever's removed losers are recorded here, with their winner)
   7. diversity      cap per-source share so one project cannot crowd out the rest
+                    (designed, not built: today a recorded pass-through)
   8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context
        → outcome    answerable | weak | empty, with a reason from a closed set
@@ -1993,11 +1997,11 @@ Rules the pipeline must hold:
   same four in the same order), so what those moves changed was the selection and
   the stages rather than the rendering — which is why their goldens are
   byte-identical while their one behavioural difference is not in them at all.
-- **The trace is the explain payload.** `explain:true` ([#898](https://github.com/wcatz/ghost/issues/898), after [#583](https://github.com/wcatz/ghost/issues/583)) is a projection of the same `Run` the formatted answer comes from, so explain and the answer cannot disagree about what a row was or why it was withheld.
-- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
+- **The trace is the explain payload.** `explain:true` is a projection of the same `Run` the formatted answer comes from, so explain and the answer cannot disagree about what a row was or why it was withheld.
+- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through. An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
 - **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
 - **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
-- **The pipeline is measurable.** Bench gains context precision, contamination rate, budget adherence, diversity, and token cost ([#582](https://github.com/wcatz/ghost/issues/582)), and contamination classification reuses the production exclusion reasons so the two cannot drift.
+- **The pipeline is measurable.** `ghost bench --context` measures context precision, contamination rate, budget adherence, diversity, and token cost, and `ghost bench --passive` measures the passive surfaces (see [Benchmarks](benchmarks.md)); contamination classification reuses the production exclusion reasons so the two cannot drift.
 
 ## Concurrency contract
 
