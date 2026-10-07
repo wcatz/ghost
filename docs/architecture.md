@@ -1774,7 +1774,11 @@ What exists now:
   is `all_invalid` and carries the exclusion wording: passive validity runs in
   `passiveFetchSQL` before the `LIMIT` (so an expired row cannot spend the window),
   the store counts what it removed into `CandidateSet.ValidityExcluded`, and
-  assemble stage 2 stays the authority and must agree. And
+  assemble stage 2 stays the authority and must agree. The passive demotions
+  (supersede, then near-duplicate, which drops its losers on `_global`) run after
+  validity as well: `selectPassive` sets aside any row outside its window before the
+  selection and the demotions, so an expired row can neither demote nor remove a
+  live one (#893), and it trails the eligible rows for stage 2 to drop. And
   the line reports `abstain_cosine=not_applied` because the surface has no vector
   arm for a reader to configure. `weak` withholds no row — only the response-fit pass may
   remove one — so a caller can see the weak candidates and judge them; what it

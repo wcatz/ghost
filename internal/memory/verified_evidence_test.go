@@ -540,6 +540,10 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// there. It writes nothing, and the substitution is the validity sibling of
 		// the scope and tier substitutions beside it.
 		"candidates_passive.go:passiveColumnsFor": true,
+		// passiveEligible hands a row's validity triple to ValidityState to decide
+		// whether the row is inside its window before the passive demotions run
+		// (#893). A reader of the hydrated struct: no SQL, no write.
+		"candidates_passive.go:passiveEligible": true,
 	}
 
 	found := scanVerifiedAtMentions(t)
