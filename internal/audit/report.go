@@ -198,6 +198,13 @@ type SourceReport struct {
 	// It is therefore NOT a way Scored can exceed Kept — the report never reports a
 	// numerator above its denominator.
 	Unattributed int
+	// Unscoped is how many of this source's verdicts name a call but no SESSION.
+	// Every verdict filed before the audit was session-scoped is one: the run that
+	// filed it compared the call with whichever session the stop hook had scanned,
+	// not the session that made the call, so it says nothing about the call it
+	// names. Counted and named, in no figure above (Scored, Used, Ignored and the
+	// rest), and never deleted from the store.
+	Unscoped int
 	// Detached is how many of this source's verdicts were LEFT OUT because the call
 	// they belong to is not one this report counts: outside the window, or no longer
 	// held (the call cap evicts at 5000 rows while the verdict cap holds 50000, and
@@ -391,6 +398,9 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 		case row.RecordRowID <= 0:
 			s.Unattributed++
 			continue
+		case row.SessionID == "":
+			s.Unscoped++
+			continue
 		case !counted[row.RecordRowID]:
 			s.Detached++
 			continue
@@ -564,6 +574,7 @@ func BuildStoreReport(ctx context.Context, store *memory.Store, opts ReportOptio
 			DegradedVerdicts: t.DegradedVerdicts,
 			DegradedReasons:  t.DegradedReasons,
 			Unattributed:     t.Unattributed,
+			Unscoped:         t.Unscoped,
 			Detached:         t.Detached,
 		}
 	}
@@ -747,6 +758,11 @@ func (s SourceReport) attributionNotes() string {
 			"    %d verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
 			s.Unattributed)
 	}
+	if s.Unscoped > 0 {
+		fmt.Fprintf(&b,
+			"    %d verdict(s) carry no session, so they are counted here and in no figure above: they were filed before the audit was session-scoped, by a run that compared the call with a session that may not be the one that made it\n",
+			s.Unscoped)
+	}
 	return b.String()
 }
 
@@ -763,6 +779,17 @@ func (r Report) AttributionTotals() (detached, unattributed int) {
 		unattributed += src.Unattributed
 	}
 	return detached, unattributed
+}
+
+// UnscopedTotal is the count of verdicts, summed over the sources, that name a call but
+// no session and so sit in none of the figures. Separate from AttributionTotals so that
+// function's two-value shape, which its callers destructure, does not change.
+func (r Report) UnscopedTotal() int {
+	n := 0
+	for _, src := range r.Sources {
+		n += src.Unscoped
+	}
+	return n
 }
 
 // labelDegraded mirrors health_retrieval.labelReasons: each stored reason goes

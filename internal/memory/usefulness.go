@@ -516,7 +516,14 @@ func (s *Store) usefulnessRows(ctx context.Context, projectID string) ([]usefuln
 //
 // The predicates are the four the audit branch has always had — the project, the
 // non-empty memory id, the absence of the scanner's degraded caveat, and one of
-// the two negative outcomes — and the flag branch repeats the two that belong to
+// the two negative outcomes — plus a fifth: the verdict names a SESSION. A verdict
+// filed with an empty session was judged by a run that matched calls to the session
+// it had scanned by project alone, so it compares a call with text written in
+// another session and says nothing about the call it names; every verdict filed
+// before the audit was session-scoped is of that kind. It is skipped here rather
+// than deleted, so the table is untouched and the reader errs toward silence. The
+// flag branch is NOT subject to it: a flag is an explicit act, not a comparison.
+// The flag branch repeats the two that belong to
 // it (project, non-empty id) and names its own closed vocabulary of kinds. The
 // two vocabularies are bound parameters for the reason retrieval_totals states:
 // a hand-spelled spelling is one more place a stored value can be misspelled,
@@ -531,7 +538,8 @@ func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]use
 	query := `
 		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash, 'audit' AS source
 		FROM retrieval_audit
-		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND outcome IN (?, ?)
+		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND session_id <> ''
+		  AND outcome IN (?, ?)
 		UNION ALL
 		SELECT rowid, memory_id, kind, session_id, recorded_at, content_hash, 'flag' AS source
 		FROM memory_flags

@@ -156,7 +156,7 @@ type sessionTally struct {
 // the one the reads use — those are read-only (memory.OpenReadDB, mode=ro) — and
 // because the branch with no project to attribute the call to must pass nil and
 // record nothing. See sessionRecordSink.
-func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink) (memories, globals []sessionMemory, tally sessionTally) {
+func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink, sessionID string) (memories, globals []sessionMemory, tally sessionTally) {
 	budget := sessionPassiveBudget(cfg, projectID)
 	res, err := assemble.Run(ctx, store, assemble.Request{
 		ProjectID: projectID,
@@ -177,6 +177,11 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		// nil on the branch with no project to attribute the call to (see
 		// loadSessionContext), and the assembler treats nil as "record nothing".
 		Record: record,
+		// SessionID is the hook payload's own session id, "" for a caller with no
+		// payload (`ghost context`, opencode's plugin). It is what lets the audit match
+		// this block's record to the stop hook's scan of the same session; a record
+		// with none is left unjudged. `source` still tells the block from a search.
+		SessionID: sessionID,
 		// The hook's own stderr logger, and for the reason the search path passes
 		// one rather than letting emit fall back to the process default: nothing in
 		// Ghost calls slog.SetDefault, so a dropped record would be routed to a
@@ -193,12 +198,6 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		// denominator. The leg failure itself lives in the trace, which the record
 		// does not carry; that is the same division of labour the search path
 		// relies on.
-		//
-		// SessionID is left empty on purpose. The column is the transport's own id,
-		// and over stdio — the transport Ghost ships — it is "" here and on the
-		// search path alike, so the two agree. `source` is the exact discriminator:
-		// it is what puts this row in the session_start denominator instead of the
-		// search one, which is the whole of what #850 asks for.
 	})
 	if err != nil {
 		// Warn, not Debug, and the reason the default handler is enough: nothing

@@ -475,12 +475,33 @@ func (s *Store) RetrievalAudits(ctx context.Context, projectID, outcome string) 
 // Ordered by rowid rather than recorded_at, and limited the same way
 // RetrievalRecords limits — see the precision reason there.
 func (s *Store) RetrievalRecordsForProject(ctx context.Context, projectID string, limit int) ([]RetrievalRecord, error) {
-	return s.retrievalRecords(ctx, projectID, limit)
+	return s.retrievalRecords(ctx, projectID, "", false, limit)
+}
+
+// RetrievalRecordsForSession returns the calls one session made against a project,
+// newest first, at most `limit` of them.
+//
+// The session predicate is in the SQL and not applied to RetrievalRecordsForProject's
+// result, because the limit is applied AFTER the WHERE: a project's newest `limit`
+// calls can all belong to other sessions, and a Go filter over that window would find
+// this session's calls evicted from it by calls that are not its own.
+//
+// An EMPTY session id reads NOTHING, and that is the load-bearing line rather than a
+// guard. `session_id = ”` is exactly what every legacy row and every call from a host
+// whose server cannot name its session holds, so an empty argument matched literally
+// would hand the audit every call that cannot be attributed to any session, to be
+// judged against a session record that none of them belongs to. A call with no session
+// is left unjudged, never guessed.
+func (s *Store) RetrievalRecordsForSession(ctx context.Context, projectID, sessionID string, limit int) ([]RetrievalRecord, error) {
+	if projectID == "" || sessionID == "" {
+		return nil, nil
+	}
+	return s.retrievalRecords(ctx, projectID, sessionID, true, limit)
 }
 
 // retrievalRecords is the one decode behind both readers, so a row's fields are
 // read the same way whichever reader asked for it.
-func (s *Store) retrievalRecords(ctx context.Context, projectID string, limit int) ([]RetrievalRecord, error) {
+func (s *Store) retrievalRecords(ctx context.Context, projectID, sessionID string, scoped bool, limit int) ([]RetrievalRecord, error) {
 	if limit <= 0 {
 		limit = retrievalRecordRowsCap
 	}
@@ -496,10 +517,18 @@ func (s *Store) retrievalRecords(ctx context.Context, projectID string, limit in
 		SELECT rowid, project_id, session_id, source, query_hash, as_of, outcome, reason,
 		       verdicts, recorded_at
 		FROM retrieval_record`
+	var where []string
 	var args []interface{}
 	if projectID != "" {
-		query += ` WHERE project_id = ?`
+		where = append(where, `project_id = ?`)
 		args = append(args, projectID)
+	}
+	if scoped {
+		where = append(where, `session_id = ?`)
+		args = append(args, sessionID)
+	}
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, " AND ")
 	}
 	query += ` ORDER BY rowid DESC LIMIT ?`
 	args = append(args, limit)

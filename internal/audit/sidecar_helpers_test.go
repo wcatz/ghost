@@ -32,10 +32,18 @@ func mustHasher(key []byte) Hasher {
 }
 
 // newTestSignals is the Signals every test here starts from, keyed.
+//
+// It names testSession, because a run judges only the calls its session made and a
+// Signals that named none would judge nothing at all.
 func newTestSignals(t *testing.T) *Signals {
 	t.Helper()
-	return NewWithHasher(testHasher)
+	s := NewWithHasher(testHasher)
+	s.SetSessionID(testSession)
+	return s
 }
+
+// testSession is the session id the fixtures' calls and signals share.
+const testSession = "sess-test"
 
 // testTokens is DistinctTokens under the test key, for a test that wants a
 // memory's own tokens.

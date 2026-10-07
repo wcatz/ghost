@@ -88,6 +88,10 @@ func recordTestLogger() *slog.Logger {
 // store holds: the block is what the agent was given, and a record naming a row the
 // block withheld would be a "used" verdict for a memory nobody saw.
 func TestProjectContextRecordsTheCallItRendered(t *testing.T) {
+	// The server records the host's session id from its environment, and a suite run
+	// under a host that sets one would otherwise change what this asserts. Pinned empty:
+	// what a host that names a session records is TestProjectContextRecordsTheHostsSessionID.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	st, _ := projectRecordStore(t)
 	_, session := validityServerFor(t, st)
 	id := saveValidityRow(t, session, projectContextSentinel, nil)
@@ -119,7 +123,7 @@ func TestProjectContextRecordsTheCallItRendered(t *testing.T) {
 			"constant on every listing", got.QueryHash)
 	}
 	if got.SessionID != "" {
-		t.Errorf("session_id = %q, want empty: Ghost serves stdio, whose connection reports no session id", got.SessionID)
+		t.Errorf("session_id = %q, want empty: Ghost serves stdio, whose connection reports no session id, and this fixture's host names none", got.SessionID)
 	}
 	if got.AsOf != "" {
 		t.Errorf("as_of = %q, want empty for a current read", got.AsOf)

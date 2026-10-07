@@ -204,6 +204,12 @@ func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
 	if sig == nil || sig.Empty() {
 		return nil
 	}
+	// The session these words were written in, from the hook payload and never
+	// constructed. The comparison judges only the calls this session made, so a
+	// sidecar that did not name it would be judged against every call in the project.
+	// "" is passed through as it is: a payload with no id yields signals that judge
+	// nothing, which is the safe direction.
+	sig.SetSessionID(p.SessionID)
 	return sig
 }
 

@@ -601,5 +601,5 @@ func (s *Store) DigestQuery(query string) (string, error) { return QueryDigest(q
 // rather than failing the read — see retrievalRecords, which owns the decode and
 // the reason.
 func (s *Store) RetrievalRecords(ctx context.Context, limit int) ([]RetrievalRecord, error) {
-	return s.retrievalRecords(ctx, "", limit)
+	return s.retrievalRecords(ctx, "", "", false, limit)
 }

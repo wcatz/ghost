@@ -49,11 +49,12 @@ var (
 // rather than adding to them, so a long session's table grows with its calls
 // rather than with its turns.
 //
-// The window is bounded rather than "everything", because the transcript the
-// signals come from is one turn's: a memory from a call the agent made before
-// the transcript begins has no evidence either way, and judging it against
-// words the agent wrote afterwards would be a claim about a conversation that is
-// not the one this verdict belongs to.
+// The window is bounded rather than "everything", and it counts THIS SESSION's
+// calls: the read is scoped to the scanned session before the limit applies, so a
+// call from another session is never in the window and cannot push one of this
+// session's out of it. A call the session made before the scanned text begins is
+// still judged against the whole of it, which is the known gap (the signals carry no
+// order); see docs/architecture.md.
 var CallWindow = 50
 
 // Summary is what one run found, in a form a report can print without reading
@@ -94,6 +95,10 @@ type Summary struct {
 	// in this run is about the transcript as far as it was read, so this rides
 	// with the run and with each stored row.
 	Degraded string
+	// NoSession is true when the scanned session carried no id, so no call could be
+	// judged. Said on the summary because a run that judged nothing and a run that was
+	// never able to match anything look the same in a count.
+	NoSession bool
 }
 
 // placed is one verdict this run reached, with the call it belongs to and the
@@ -153,7 +158,18 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 		res.Degraded = reason
 	}
 
-	records, err := store.RetrievalRecordsForProject(ctx, projectID, CallWindow)
+	// ONLY the calls the scanned session made. A verdict compares what a call kept
+	// with what the agent wrote, so it is a claim about one session; judging the
+	// project's newest calls whatever session made them filed 615 verdicts on a real
+	// store, every one of them `used`, across four different days. A scan that cannot
+	// name its session judges nothing: "" is also what every call from a host that
+	// cannot name its session holds, and matching the two would judge exactly the calls
+	// nobody can attribute. The read applies the window after the session predicate.
+	if s.SessionID() == "" {
+		res.NoSession = true
+		return res, nil
+	}
+	records, err := store.RetrievalRecordsForSession(ctx, projectID, s.SessionID(), CallWindow)
 	if err != nil {
 		return res, fmt.Errorf("audit: read retrieval records: %w", err)
 	}
@@ -375,6 +391,10 @@ func (r Summary) String() string {
 	// report project id with TestTheAuditScopeLineRendersTheProjectAsALabel
 	// pinning it — and half of this function was the inconsistency.
 	fmt.Fprintf(&b, "retrieval audit for %s\n", assemble.Label(r.ProjectID))
+	if r.NoSession {
+		b.WriteString("  the scanned session carried no session id, so no call could be matched to it " +
+			"and none was judged\n")
+	}
 	for _, src := range r.Sources {
 		// The source column through assemble.Label, for the reason report.go's two
 		// renderers do it and says: retrieval_record.source is plain TEXT with no

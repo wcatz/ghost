@@ -82,6 +82,7 @@ func judgeRetrievalHealth(t *testing.T, store *memory.Store, degraded bool) {
 		t.Fatalf("NewHasher: %v", err)
 	}
 	s := audit.NewWithHasher(hasher)
+	s.SetSessionID("s1") // the session the fixture's calls were made in
 	s.AddProse(retrievalHealthContent)
 	if degraded {
 		s.MarkDegraded("transcript truncated")
@@ -150,6 +151,7 @@ func TestHealthReportsRetrievalFiguresPerSource(t *testing.T) {
 		t.Fatalf("NewHasher: %v", err)
 	}
 	s := audit.NewWithHasher(hasher)
+	s.SetSessionID("s1") // the session the fixture's calls were made in
 	s.AddProse(retrievalHealthContent)
 	if _, err := audit.Run(ctx, store, "abc123", s); err != nil {
 		t.Fatalf("audit.Run: %v", err)
@@ -334,6 +336,36 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	// And the note says so in words, not merely by printing a different number.
 	if !strings.Contains(text, "no call to be one of") {
 		t.Errorf("ghost_health does not say the unattributed verdict is out of the figures rather than lost:\n%s", text)
+	}
+}
+
+// TestHealthNamesVerdictsThatCarryNoSession: a verdict filed with no session (all of them,
+// before the audit was session-scoped) is out of every figure and named, not hidden.
+func TestHealthNamesVerdictsThatCarryNoSession(t *testing.T) {
+	store, _ := testStoreWithPath(t)
+	seedRetrievalHealth(t, store)
+	recs, err := store.RetrievalRecordsForProject(context.Background(), "abc123", 0)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
+	}
+	var keeper int64
+	for _, r := range recs {
+		if len(r.Verdicts) > 0 {
+			keeper = r.RowID
+		}
+	}
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: "abc123", SessionID: "", Source: "search", MemoryID: retrievalHealthMemory,
+		Outcome: "used", Signal: "token", RecordRowID: keeper,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+	_, text := retrievalHealthServer(t, store)
+	if !strings.Contains(text, "carry no session") {
+		t.Errorf("ghost_health does not name the unscoped verdict:\n%s", text)
+	}
+	if strings.Contains(text, "% used (1 of 1 scored)") {
+		t.Errorf("ghost_health counted a verdict with no session in a figure:\n%s", text)
 	}
 }
 

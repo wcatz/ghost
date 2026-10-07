@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -477,13 +478,20 @@ func (s *Server) recordSink() assemble.RecordSink {
 // The value is a name, not a claim: it is the transport's own id, recorded as
 // given, and the record's Source column is what tells an injection from a search
 // when this is empty.
-func sessionIDFor(req *mcp.CallToolRequest) string {
-	if req == nil || req.Session == nil {
-		return ""
+//
+// The transport's own id wins when it has one. Over stdio it never does, and then the
+// host's id from the process environment is the best key there is (hostSessionIDFromEnv):
+// it is the one id the stop hook's payload also carries, which is what lets the audit
+// judge this call against that session's text. It is never constructed.
+func (s *Server) sessionIDFor(req *mcp.CallToolRequest) string {
+	if req != nil && req.Session != nil {
+		// ID() is "" unless the underlying connection assigns session ids; see
+		// provenanceFor's note on why that is the answer rather than a problem.
+		if id := req.Session.ID(); id != "" {
+			return id
+		}
 	}
-	// ID() is "" unless the underlying connection assigns session ids; see
-	// provenanceFor's note on why that is the answer rather than a problem.
-	return req.Session.ID()
+	return s.hostSessionID
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -654,7 +662,29 @@ type Server struct {
 	// wall clock, which is every Server New builds; ProjectContextAt sets it so a
 	// block can be measured at a fixed instant.
 	clock func() time.Time
+	// hostSessionID is the id of the host session this server process was started
+	// under, read ONCE from the environment at construction (see hostSessionIDFromEnv).
+	// It is a field rather than a read at each call so the environment is touched in
+	// one place and a test sets it before New. "" for every host that does not put one
+	// there, and then the retrieval record carries none and the audit leaves it alone.
+	hostSessionID string
 }
+
+// hostSessionEnv is the environment variable Claude Code sets, on the processes it
+// starts (the MCP servers among them), to the id of the session. It is the same id that
+// arrives as `session_id` in every hook payload and names the session's own record, so
+// the retrieval record and the stop hook's scan can be matched on it. No other host's
+// variable is listed because none has been observed: codex, opencode and goose servers
+// record no session, and their calls are left unjudged rather than guessed.
+const hostSessionEnv = "CLAUDE_CODE_SESSION_ID"
+
+// hostSessionIDFromEnv is the session the host says it started this process under, or "".
+//
+// The limits are real and all of them fail toward "unjudged": the id is fixed when the
+// host starts the server, so a session that changes id inside one process (a clear) keeps
+// recording the old one, and the call then matches no scan; a server behind a bridge that
+// does not forward the host's environment records none.
+func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
 
 // searchResponseCap is one formatted search response's byte cap: the field's
 // value where it was set, and the shipped default where it was not.
@@ -765,6 +795,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		store:          store,
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
+		hostSessionID:  hostSessionIDFromEnv(),
 	}
 
 	// Resolve the retrieval record's per-install key now, at construction, so the
@@ -1734,7 +1765,7 @@ func (s *Server) registerTools() {
 			// as "record nothing". A provider that cannot be audited is a gap in a
 			// report, not a failed search.
 			Record:    s.recordSink(),
-			SessionID: sessionIDFor(req),
+			SessionID: s.sessionIDFor(req),
 			// The server's own logger, not the process default: nothing in Ghost
 			// calls slog.SetDefault, so a diagnostic the assembler sent there would
 			// reach a handler nobody reads and a failed record would be silent in

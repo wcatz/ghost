@@ -106,6 +106,8 @@ func writeAuditSidecar(t *testing.T, dir string) string {
 		t.Fatalf("NewHasher: %v", err)
 	}
 	s := audit.NewWithHasher(hasher)
+	// The session the fixture's call was made in: a run judges only that session's calls.
+	s.SetSessionID("s1")
 	s.AddProse("the scratch directory is reaped before the lifecycle run begins")
 	path, err := audit.WriteSidecar(dir, s)
 	if err != nil {

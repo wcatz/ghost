@@ -205,12 +205,16 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 	// reached. The leg failure itself is in the trace, which the record does not
 	// carry; that is the same division of labour the search path relies on.
 	//
-	// SessionID is left empty on purpose. The column is the transport's own id, and
-	// over stdio — the transport Ghost ships — it is "" here and on the search path
-	// alike, so the two agree; what tells a listing from a search in the audit is
-	// `source`, which is exact. Threading an *mcp.CallToolRequest down to reach it
-	// would also have to invent a value for the resource and prompt callers, which
-	// have none — and a session id on two of three surfaces is worse than none.
+	// SessionID is the host's, set here for the same reason the sink is: all four
+	// surfaces reach the assembler through this function, and the resource and prompt
+	// callers have no tool request to read a transport id from. A process-level id
+	// covers them all alike, which is what the old "an id on two of three surfaces is
+	// worse than none" argument asked for. Over stdio it is "" unless the host named
+	// the session in the server's environment (hostSessionIDFromEnv), and then the
+	// audit can judge these calls; a caller that set one already keeps it.
+	if req.SessionID == "" {
+		req.SessionID = s.hostSessionID
+	}
 	return assemble.Run(ctx, candidates, req)
 }
 

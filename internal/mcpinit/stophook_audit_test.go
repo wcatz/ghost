@@ -388,3 +388,39 @@ func stopInputIn(t *testing.T, cwd, transcriptPath, format string) string {
 		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":%q,"stop_hook_active":false}`,
 			transcriptPath, cwd))
 }
+
+// TestTheStopHookNamesTheSessionInTheSidecar: the verdicts a run files are about one
+// session's text, so the file the child reads must say which session that is, taken from
+// the hook payload's own session_id. Without it the child can only judge the project's
+// recent calls whatever session made them.
+func TestTheStopHookNamesTheSessionInTheSidecar(t *testing.T) {
+	_, projDir := auditHookRun(t)
+	spawned := captureLifecycleChild(t)
+
+	transcript := writeTranscript(t, lineUser,
+		auditProseLine("the transcript under mkdtemp holds "+auditTranscriptMemoryID), lineGhostSave)
+	RunHostEvent("stop", "claude-code",
+		strings.NewReader(stopInputIn(t, projDir, transcript, "claude-jsonl")),
+		&bytes.Buffer{}, io.Discard)
+
+	if len(*spawned) != 1 {
+		t.Fatalf("the hook started %d child(ren), want 1", len(*spawned))
+	}
+	path := sidecarPathFrom(t, (*spawned)[0])
+	sig, err := audit.ReadSidecar(path, mustAuditHasher(t))
+	if err != nil {
+		t.Fatalf("ReadSidecar: %v", err)
+	}
+	if sig.SessionID() != "s1" {
+		t.Errorf("sidecar session = %q, want the payload's session_id %q", sig.SessionID(), "s1")
+	}
+}
+
+func mustAuditHasher(t *testing.T) audit.Hasher {
+	t.Helper()
+	h, err := audit.NewHasher(auditTestKey(t))
+	if err != nil {
+		t.Fatalf("NewHasher: %v", err)
+	}
+	return h
+}
