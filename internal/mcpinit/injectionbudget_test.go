@@ -18,6 +18,14 @@ import (
 // formatSessionContext pipeline over a real store — the actual code the hook
 // runs — instead of a reconstruction. See docs/benchmarks.md ("Injection
 // budget").
+//
+// Three renders are measured over one selection: the two pre-migration row
+// shapes (compact, and the same rows with a 32-hex id) kept for their
+// comparison, and the SHIPPED block that formatSessionContext now emits, whose
+// rows come out of assemble.Item.Line() with the id, the importance and the
+// validity/confidence/agent/source_ref/origin labels on every line. The shipped
+// block is the one bounded by sessionBlockByteBudget, because that is the block
+// an agent actually reads.
 
 // representativeCorpus builds a ghost-project-like corpus (57 memories across
 // every category, skewed importance so the descriptive categories would crowd
@@ -116,7 +124,7 @@ func TestBenchInjectionBudget(t *testing.T) {
 	representativeCorpus(t, db, "p1")
 	_ = db.Close()
 
-	_, project, memories, _, _, _, _, _, _, _, _, totalKnown := loadSessionContext(projDir, config.LoadForHook())
+	projectID, project, memories, _, _, _, _, _, totalMemoryCount, totalKnown, _, _ := loadSessionContext(projDir, config.LoadForHook())
 	if project != "myproj" {
 		t.Fatalf("project = %q, want myproj", project)
 	}
@@ -149,7 +157,9 @@ func TestBenchInjectionBudget(t *testing.T) {
 
 	// Compact render must not grow the budget: rendering the same selected
 	// set, dropping the 32-hex ID per line (plus the backtick pair) strictly
-	// shrinks the block. This is the byte-neutrality evidence for the trade.
+	// shrinks the block. This is the byte-neutrality evidence for the trade,
+	// over the two row shapes session start used BEFORE this migration — the
+	// shipped shape is measured below.
 	newRender := formatMemoriesMarkdown(memories)
 	idRender := formatMemoriesMarkdownWithID(memories)
 	if len(newRender) > len(idRender) {
@@ -157,10 +167,41 @@ func TestBenchInjectionBudget(t *testing.T) {
 	}
 	t.Logf("injection budget: %d memories, behavioral hit %d/%d (floor %d), compact %d bytes vs legacy-with-ID %d bytes",
 		len(memories), hit, floor, floor, len(newRender), len(idRender))
+
+	// The SHIPPED block, over the same selection. formatSessionContext renders
+	// every row through assemble.Item.Line(), so a 32-hex id, an importance and
+	// the validity/confidence/agent/source_ref/origin labels ride on each line:
+	// this is the shape that reaches the agent, and the two renders measured
+	// above are the pre-migration local helpers kept for their comparison. The
+	// number this prints is the figure docs/benchmarks.md records for the
+	// session-injection budget, and the budget below is what stops it drifting
+	// upward unnoticed.
+	block := formatSessionContext(projectID, project, nil, memories, "", nil, nil, 1, totalMemoryCount, totalKnown, nil, 0, false)
+	if len(block) > sessionBlockByteBudget {
+		t.Errorf("injected block grew past its budget: %d bytes > %d bytes\n%s", len(block), sessionBlockByteBudget, block)
+	}
+	// The row lines only, for a like-for-like comparison with the two renders
+	// above: those measure rows, while the block also carries its headings, the
+	// count lines and the closing instruction.
+	shippedRows := 0
+	for _, line := range rowLines(block) {
+		shippedRows += len(line) + 1 // the row plus its newline
+	}
+	t.Logf("shipped render: %d bytes of rows (Item.Line) vs compact %d bytes, legacy-with-ID %d bytes; whole block %d bytes, budget %d bytes",
+		shippedRows, len(newRender), len(idRender), len(block), sessionBlockByteBudget)
 }
 
-// formatMemoriesMarkdown renders the session memory lines in the current
-// compact form (no ID).
+// sessionBlockByteBudget is the ceiling for the block the hook injects over the
+// representative corpus above: the shipped Item.Line() render measured at the
+// time of the assembler migration, rounded up so an incidental label edit is not
+// a failure but a real growth of the injected block is. It is a byte budget
+// because bytes are what the block costs the context window — there is no
+// tokenizer in this package.
+const sessionBlockByteBudget = 2048
+
+// formatMemoriesMarkdown renders the session memory lines in the compact shape
+// session start used before the assembler migration: category and content, no
+// id, no labels. Kept as the recorded 732-byte figure in docs/benchmarks.md.
 func formatMemoriesMarkdown(memories []sessionMemory) string {
 	var sb strings.Builder
 	for _, m := range memories {
@@ -169,8 +210,10 @@ func formatMemoriesMarkdown(memories []sessionMemory) string {
 	return sb.String()
 }
 
-// formatMemoriesMarkdownWithID renders the same lines the historical way
-// (32-hex ID in backticks) so the budget test can quantify the format saving.
+// formatMemoriesMarkdownWithID renders the same lines in the shape before that
+// one (32-hex ID in backticks) so the budget test can quantify the saving the
+// compact form once made. Both are historical now: the shipped row is
+// assemble.Item.Line(), measured through formatSessionContext above.
 func formatMemoriesMarkdownWithID(memories []sessionMemory) string {
 	var sb strings.Builder
 	for _, m := range memories {
