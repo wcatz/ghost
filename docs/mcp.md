@@ -121,12 +121,16 @@ this, and it is here rather than in a tool of its own because every caller
 already fetches `ghost_health` — the count is 23 with `ghost_memory_flag`, and
 this block does not change it.
 
-Five things the block is careful about, each because the cheaper version is a
+Six things the block is careful about, each because the cheaper version is a
 confident wrong answer:
 
 - **Per source, never pooled.** A search asks whether the agent used what it
   looked up; an injection asks whether it used what it was handed. There is no
   total, so there is nothing here that can be quoted as "the" precision.
+- **Verdicts with no session are NAMED, not counted.** Verdicts filed before the audit
+  was session-scoped were judged against whichever session the hook had scanned, so
+  they are in no figure; a `⚠ N verdict(s) carry no session` line says how many, and
+  nothing is deleted from the store.
 - **Empty sources are NAMED.** A source with no rows says so rather than
   reporting 0% used, which would read as a verdict on a source that has never run
   here. `session_start` and `project_context` record their own retrievals, so they

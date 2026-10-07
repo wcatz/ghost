@@ -83,19 +83,26 @@ type RetrievalSourceTotals struct {
 	// value the write accepts for a verdict about a session rather than about one
 	// call).
 	Unattributed int
+	// Unscoped is how many verdicts name a call but no SESSION. Every verdict filed
+	// before the audit was session-scoped is one: it was judged against whichever
+	// session the stop hook had scanned, whichever session made the call, so it is
+	// not evidence about the call it names. Counted and named, in no figure above and
+	// never deleted.
+	Unscoped int
 	// Detached is how many name a call this report does not count: outside the
 	// window, or no longer held (the call cap evicts at 5000 rows while the verdict cap
 	// holds 50000, and a history purge removes a call's rows — #857).
 	Detached int
 }
 
-// The three attributions of a verdict, as the aggregate reports them. Spelled as SQL
+// The four attributions of a verdict, as the aggregate reports them. Spelled as SQL
 // literals in the query because a CASE arm cannot take a bound parameter in SQLite,
 // and named here so the query's numbers can be read against these.
 const (
 	unattributedVerdict = 0
 	attributedVerdict   = 1
 	detachedVerdict     = 2
+	unscopedVerdict     = 3
 )
 
 // RetrievalSourceTotals aggregates both retrieval tables per source over the whole
@@ -151,6 +158,9 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 			continue
 		case detachedVerdict:
 			t.Detached += v.n
+			continue
+		case unscopedVerdict:
+			t.Unscoped += v.n
 			continue
 		}
 		t.Scored += v.n
@@ -465,11 +475,12 @@ func verdictAttribution(floor time.Time) (string, []any) {
 	attribution := fmt.Sprintf(`
 		CASE
 			WHEN a.record_rowid <= 0 THEN %d
+			WHEN a.session_id = '' THEN %d
 			WHEN a.record_rowid IN (
 				SELECT r.rowid FROM retrieval_record r WHERE %s
 			) THEN %d
 			ELSE %d
-		END`, unattributedVerdict, callPredicate, attributedVerdict, detachedVerdict)
+		END`, unattributedVerdict, unscopedVerdict, callPredicate, attributedVerdict, detachedVerdict)
 	return attribution, append(append([]any{}, callArgs...), auditArgs...)
 }
 

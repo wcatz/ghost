@@ -174,6 +174,7 @@ func judgeEveryProject(t *testing.T, store *memory.Store, projects int) {
 	for i := range projects {
 		id := fmt.Sprintf("p%02d", i)
 		s := audit.NewWithHasher(hasher)
+		s.SetSessionID("s1") // the session the fixture's calls were made in
 		s.AddProse(retrievalHealthContent)
 		if _, err := audit.Run(context.Background(), store, id, s); err != nil {
 			t.Fatalf("audit.Run(%s): %v", id, err)

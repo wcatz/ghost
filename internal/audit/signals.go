@@ -23,7 +23,14 @@ const (
 	// would silently go unfound; refusing the version says so out loud instead,
 	// and costs that turn's audit, which is what a sidecar this build cannot read
 	// is already worth.
-	SidecarHeader = "# ghost-audit-signals v2"
+	//
+	// v3 because the sidecar now names the SESSION it was scanned from (#648): a run
+	// judges only the calls that session made, so a file that does not say which
+	// session it is would be judged against every call in the project, which is the
+	// defect v3 closes. A v2 file parses and would carry no session, so the audit
+	// would silently judge nothing from it; refusing the version says so instead.
+	SidecarHeader = "# ghost-audit-signals v3"
+	sidecarV2     = "# ghost-audit-signals v2"
 	sidecarV1     = "# ghost-audit-signals v1"
 
 	// sidecarStaleAfter is how long an unclaimed sidecar survives before
@@ -63,7 +70,19 @@ type Signals struct {
 	// rather than to the whole transcript.
 	negated  []negSegment
 	degraded string
+	// session is the host's id for the session this text was written in, and "" when
+	// the scan could not name one. It travels with the signals because a verdict is a
+	// claim about ONE session's text: Run judges only the calls recorded under this id,
+	// and an empty one judges none (see Run).
+	session string
 }
+
+// SetSessionID names the session these signals were scanned from. Set once by the
+// scanner's caller, from the hook payload's own session id; never constructed.
+func (s *Signals) SetSessionID(id string) { s.session = id }
+
+// SessionID is the session these signals were scanned from, or "".
+func (s *Signals) SessionID() string { return s.session }
 
 // New returns an empty Signals keyed by the per-install key.
 //
@@ -370,6 +389,9 @@ func WriteSidecar(dir string, s *Signals) (string, error) {
 	if s.degraded != "" {
 		buf.WriteString("degraded " + strconv.QuoteToASCII(s.degraded) + "\n")
 	}
+	if s.session != "" {
+		buf.WriteString("session " + strconv.QuoteToASCII(s.session) + "\n")
+	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
@@ -406,8 +428,8 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 		// file beside it is not necessarily one this package wrote, so the error
 		// names the formats rather than echoing whatever the file's first line
 		// says.
-		return nil, fmt.Errorf("audit: sidecar header is not %s (%s is a previous format this build cannot read)",
-			SidecarHeader, sidecarV1)
+		return nil, fmt.Errorf("audit: sidecar header is not %s (%s and %s are previous formats this build cannot read)",
+			SidecarHeader, sidecarV2, sidecarV1)
 	}
 	s := &Signals{h: h}
 	for i, line := range bytes.Split(rest, []byte("\n")) {
@@ -445,6 +467,12 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 				return nil, fmt.Errorf("audit: sidecar line %d: degraded reason is not quoted: %w", i+1, err)
 			}
 			s.degraded = unquoted
+		case "session":
+			unquoted, err := strconv.Unquote(string(value))
+			if err != nil {
+				return nil, fmt.Errorf("audit: sidecar line %d: session id is not quoted: %w", i+1, err)
+			}
+			s.session = unquoted
 		default:
 			return nil, fmt.Errorf("audit: sidecar line %d has unknown field %q", i+1, kind)
 		}

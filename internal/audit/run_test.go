@@ -62,6 +62,7 @@ func recordCall(t *testing.T, store *memory.Store, projectID, source string, kep
 	}
 	if err := store.RecordRetrieval(context.Background(), memory.RetrievalRecord{
 		ProjectID: projectID,
+		SessionID: testSession,
 		Source:    source,
 		Outcome:   "answerable",
 		Verdicts:  verdicts,
@@ -207,6 +208,7 @@ func TestRunDoesNotJudgeDroppedRows(t *testing.T) {
 	seedMemory(t, store, projectID, "DROPPED", memContent)
 	if err := store.RecordRetrieval(context.Background(), memory.RetrievalRecord{
 		ProjectID: projectID,
+		SessionID: testSession,
 		Source:    "search",
 		Outcome:   "answerable",
 		Verdicts: []memory.RowVerdict{
@@ -322,7 +324,7 @@ func TestRunReplacesOnlyTheCallsItJudged(t *testing.T) {
 
 	// A later run whose window covers only the newest call.
 	if err := store.RecordRetrieval(context.Background(), memory.RetrievalRecord{
-		ProjectID: projectID, Source: "search", Outcome: "answerable",
+		ProjectID: projectID, SessionID: testSession, Source: "search", Outcome: "answerable",
 		Verdicts: []memory.RowVerdict{{ID: "M1", Kept: true, Stage: "fit", Reason: "fit_response"}},
 	}); err != nil {
 		t.Fatalf("RecordRetrieval: %v", err)

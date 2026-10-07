@@ -183,6 +183,10 @@ func bumpSessionCount(dbPath, projectID string) int {
 }
 
 type sessionStartInput struct {
+	// SessionID is the host's id for the session being opened. It reaches nothing but
+	// the retrieval record of the block, so the audit can match that call to the
+	// session whose stop hook scans the text.
+	SessionID string `json:"session_id"`
 	CWD       string `json:"cwd"`
 	Source    string `json:"source"`
 	AgentID   string `json:"agent_id"`
@@ -239,7 +243,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// halves are the same session. A broken config therefore reports once, not
 	// once per half.
 	cfg := config.LoadForHook()
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFor(cwd, cfg, input.SessionID)
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -671,7 +675,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // configuration rather than reading the wall clock and the user's config files.
 // `ghost bench --passive` is its only caller.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now })
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "")
 	if projectID == "" && len(globals) == 0 {
 		return ""
 	}
@@ -912,11 +916,19 @@ type sessionMemory struct {
 // came from the other is exactly how a block ended up saying rows were "ranked
 // out" when a stage had withheld them.
 func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+	return loadSessionContextFor(cwd, cfg, "")
+}
+
+// loadSessionContextFor is loadSessionContext for a session the host named: the
+// block's retrieval record carries sessionID, so the audit can judge that call against
+// the text of the session it opened. "" is a caller with no hook payload (`ghost
+// context`, opencode's plugin) and records none, which the audit leaves unjudged.
+func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
 	}
-	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now)
+	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now, sessionID)
 }
 
 // loadSessionContextFrom is loadSessionContext's body for a store at dbPath, with
@@ -924,7 +936,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 // fixed instant so a block can be measured rather than merely run. Nothing else
 // differs between the two, which is the point of the split — a bench that
 // re-implemented this would be measuring its own copy.
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -963,7 +975,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		// start records nothing — and silently, because a store that cannot record must
 		// not print a refusal on every session a user opens in a directory Ghost has
 		// never seen. The block still renders, which is the half that must not change.
-		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil)
+		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil, "")
 		return
 	}
 
@@ -1003,7 +1015,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// would be a cost this function pays for nothing. A missing store makes it a nil
 	// sink with a no-op close, so there is no error path here to write.
 	record, closeRecord := sessionRecordSink(dbPath)
-	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record)
+	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record, sessionID)
 	closeRecord()
 
 	// Get open tasks

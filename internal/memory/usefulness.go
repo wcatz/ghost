@@ -214,8 +214,8 @@ func boundSessionID(id string) string {
 // project's corpus. An empty project id would pool both, so it is refused here
 // rather than defaulted.
 //
-// Read-only, ONE deferred read transaction carrying TWO bounded reads. Three
-// filters narrow the answer, and all three err toward SILENCE rather than
+// Read-only, ONE deferred read transaction carrying TWO bounded reads. Five
+// filters narrow the answer, and all five err toward SILENCE rather than
 // toward a wrong annotation: a
 // memory with no qualifying evidence is simply not in the map, which is exactly
 // how it read before the audit existed. (1) the outcome is one of the two
@@ -224,14 +224,17 @@ func boundSessionID(id string) string {
 // read's caveat is not silently dropped; (3) the row still describes the
 // content the memory holds NOW, which is the filter #879 rebuilt and is spelled
 // out on verdictDescribes below and which a flag is judged by for the same
-// reason. The outcome filter is a bound parameter, for
+// reason; (4) the project, and the non-empty memory id; (5) an audit verdict names
+// a SESSION (#648), because a verdict filed with none was judged against a session
+// that may not have made the call, and it is skipped, never deleted — the same
+// direction as the rest. The outcome filter is a bound parameter, for
 // the reason retrieval_totals states: a hand-spelled `outcome = 'contradicted'`
 // is one more place a stored value can be misspelled, and it would miss silently
 // — the read returns no rows, so the map is empty and every caller behaves
 // exactly as it does on a store that was never audited.
 //
 // The two reads run inside ONE transaction, and that is what buys the
-// consistency all three filters assume: the verdicts and the content they are
+// consistency all five filters assume: the verdicts and the content they are
 // judged against are read from the same snapshot, so the window a two-statement
 // shape leaves open — a verdict another process deleted between the reads, still
 // counted for one pass — cannot exist here. The second read is keyed on the ids
@@ -239,7 +242,7 @@ func boundSessionID(id string) string {
 // the store no longer holds (or one naming a memory another project owns) has
 // no row to match: it is dropped in Go by the guard below rather than by a join,
 // and that drop is pinned by TestAVerdictWhoseMemoryIsGoneIsDroppedRatherThanCounted.
-// The four predicates are spelled ONCE, in the verdict statement, and the second
+// The five predicates are spelled ONCE, in the verdict statement, and the second
 // statement never restates them — it asks for named ids inside the same project,
 // so the two cannot disagree about what counts. The ids travel as bound
 // parameters, never as pasted text, and each statement is rooted in a literal
@@ -516,7 +519,14 @@ func (s *Store) usefulnessRows(ctx context.Context, projectID string) ([]usefuln
 //
 // The predicates are the four the audit branch has always had — the project, the
 // non-empty memory id, the absence of the scanner's degraded caveat, and one of
-// the two negative outcomes — and the flag branch repeats the two that belong to
+// the two negative outcomes — plus a fifth: the verdict names a SESSION. A verdict
+// filed with an empty session was judged by a run that matched calls to the session
+// it had scanned by project alone, so it compares a call with text written in
+// another session and says nothing about the call it names; every verdict filed
+// before the audit was session-scoped is of that kind. It is skipped here rather
+// than deleted, so the table is untouched and the reader errs toward silence. The
+// flag branch is NOT subject to it: a flag is an explicit act, not a comparison.
+// The flag branch repeats the two that belong to
 // it (project, non-empty id) and names its own closed vocabulary of kinds. The
 // two vocabularies are bound parameters for the reason retrieval_totals states:
 // a hand-spelled spelling is one more place a stored value can be misspelled,
@@ -531,7 +541,8 @@ func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]use
 	query := `
 		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash, 'audit' AS source
 		FROM retrieval_audit
-		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND outcome IN (?, ?)
+		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND session_id <> ''
+		  AND outcome IN (?, ?)
 		UNION ALL
 		SELECT rowid, memory_id, kind, session_id, recorded_at, content_hash, 'flag' AS source
 		FROM memory_flags

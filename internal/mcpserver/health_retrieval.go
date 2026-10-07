@@ -158,6 +158,15 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 		}
 	}
 
+	// Verdicts filed before the audit was session-scoped: judged against a session that
+	// may not have made the call, so they are in no figure above (nothing is deleted).
+	// Absent when there are none, like the two lines above.
+	if unscoped := merged.UnscopedTotal(); unscoped > 0 {
+		fmt.Fprintf(sb,
+			"  ⚠ %d verdict(s) carry no session, so they are counted here and in no figure above: they were judged against a session that may not have made the call\n",
+			unscoped)
+	}
+
 	// The sentence the numbers most invite the reader to get wrong. "80% ignored"
 	// read on its own is a judgement about the store's memory quality, and it is
 	// the one field here that is not a measurement of quality at all: it is the
