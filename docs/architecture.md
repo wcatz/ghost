@@ -1518,7 +1518,7 @@ Axis interaction rules:
 > at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
 > that split). A row the retriever fetched and then removed as a near-duplicate
 > loser never reaches the trace; it is `Deduped`, counted in the total and
-> reported with the withheld rows, never as the ranking's cut. The sentence after the counts names which half of the difference
+> reported with the withheld rows, never as the ranking's cut. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state
