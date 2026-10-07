@@ -27,6 +27,7 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 		{"no flags is the metric table", nil, benchModeResults},
 		{"sweep", []string{"--sweep"}, benchModeSweep},
 		{"context", []string{"--context"}, benchModeContext},
+		{"passive", []string{"--passive"}, benchModePassive},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := benchModeOf(tc.args)
@@ -46,13 +47,14 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 	}
 	// Two modes are two reports over two questions, and honouring both would have
 	// to drop one of them silently.
-	for _, args := range [][]string{{"--sweep", "--context"}, {"--context", "--sweep"}} {
+	for _, args := range [][]string{{"--sweep", "--context"}, {"--context", "--sweep"},
+		{"--passive", "--context"}, {"--sweep", "--passive"}, {"--passive", "--sweep"}} {
 		if _, err := benchModeOf(args); err == nil {
 			t.Errorf("benchModeOf(%v) was accepted, so one of the two reports is dropped without saying so", args)
 		}
 	}
 
-	for _, flag := range []string{"--sweep", "--context"} {
+	for _, flag := range []string{"--sweep", "--context", "--passive"} {
 		if !strings.Contains(benchUsage, flag) {
 			t.Errorf("benchUsage does not mention %s, so the mode is undiscoverable", flag)
 		}

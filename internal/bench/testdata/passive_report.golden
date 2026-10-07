@@ -1,0 +1,82 @@
+passive context: 212 rows, 4 projects + _global, clock 2026-06-01T12:00:00Z
+  the blocks session start, `ghost context` and ghost_project_context hand a model,
+  read through the production entry points at their production budgets
+
+session start / ghost context (4 blocks)
+  withheld leakage       0.000 (0/47)   (must be 0)
+  expected-row recall    1.000 (67/67)
+  cross-project          0.000 (0/88)
+  _global share          0.364 (32/88)
+  budget use             0.957 (88/92)   rows rendered / row caps
+  budget cut             0.642 (158/246)   admissible rows left out
+  duplicate rate         0.045 (4/88)   rendered beside the row they restate or replace
+  block size             mean 3759 B / 940 tok, max 3882 B / 971 tok
+  header honesty         FAIL   (8 of 8 count lines disagree with the rows rendered)
+    alpha/project: 5 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 34 and a stage withheld 5
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    alpha/global: 3 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 14 and a stage withheld 3
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    beta/project: 5 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 34 and a stage withheld 5
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    beta/global: 3 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 14 and a stage withheld 3
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    gamma/project: 5 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 34 and a stage withheld 5
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    gamma/global: 3 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 14 and a stage withheld 3
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    delta/project: 2 rows were withheld by a stage and the header does not name them; says 2 not shown (ranked), ranking cut 0 and a stage withheld 2
+      header: **Memories (11 shown of 13 total — 2 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    delta/global: 3 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 14 and a stage withheld 3
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+
+session start, scope env=production (4 blocks)
+  withheld leakage       0.000 (0/58)   (must be 0)
+  expected-row recall    1.000 (67/67)
+  cross-project          0.000 (0/87)
+  _global share          0.368 (32/87)
+  budget use             0.946 (87/92)   rows rendered / row caps
+  budget cut             0.630 (148/235)   admissible rows left out
+  duplicate rate         0.046 (4/87)   rendered beside the row they restate or replace
+  block size             mean 3588 B / 897 tok, max 3721 B / 931 tok
+  header honesty         FAIL   (8 of 8 count lines disagree with the rows rendered)
+    alpha/project: 7 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 32 and a stage withheld 7
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    alpha/global: 4 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 13 and a stage withheld 4
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    beta/project: 7 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 32 and a stage withheld 7
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    beta/global: 4 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 13 and a stage withheld 4
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    gamma/project: 7 rows were withheld by a stage and the header does not name them; says 39 not shown (ranked), ranking cut 32 and a stage withheld 7
+      header: **Memories (15 shown of 54 total — 39 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    gamma/global: 4 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 13 and a stage withheld 4
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+    delta/project: 3 rows were withheld by a stage and the header does not name them; says 3 not shown (ranked), ranking cut 0 and a stage withheld 3
+      header: **Memories (10 shown of 13 total — 3 not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**
+    delta/global: 4 rows were withheld by a stage and the header does not name them; says 17 not shown (ranked), ranking cut 13 and a stage withheld 4
+      header: (8 shown of 25 total — 17 not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)
+
+ghost_project_context (limit 20) (4 blocks)
+  withheld leakage       0.000 (0/47)   (must be 0)
+  expected-row recall    0.955 (64/67)
+  cross-project          0.000 (0/80)
+  _global share          0.463 (37/80)
+  budget use             1.000 (80/80)   rows rendered / row caps
+  budget cut             0.675 (166/246)   admissible rows left out
+  duplicate rate         0.000 (0/80)   rendered beside the row they restate or replace
+  block size             mean 2633 B / 659 tok, max 2676 B / 669 tok
+  header honesty         n/a    (this surface prints no count line)
+  missed expected rows: 3
+
+project resource / recall_project (4 blocks)
+  withheld leakage       0.000 (0/47)   (must be 0)
+  expected-row recall    0.955 (64/67)
+  cross-project          0.000 (0/103)
+  _global share          0.583 (60/103)
+  budget use             0.736 (103/140)   rows rendered / row caps
+  budget cut             0.581 (143/246)   admissible rows left out
+  duplicate rate         0.000 (0/103)   rendered beside the row they restate or replace
+  block size             mean 3197 B / 800 tok, max 3362 B / 841 tok
+  header honesty         n/a    (this surface prints no count line)
+  missed expected rows: 3
+

@@ -572,6 +572,25 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown)
 }
 
+// SessionBlockAt renders the block a session start (and `ghost context`) emits for
+// the store at dbPath and the project cwd resolves to, reading at the instant now
+// with the configuration cfg.
+//
+// It exists so the passive surface can be MEASURED: it is the same
+// loadSessionContextFrom and formatSessionContext the hook runs, and it differs
+// from RenderSessionContextAt only in what it leaves out — the Obsidian mirror,
+// the session counter and the lifecycle alert, which are side effects of a
+// session starting and not part of the block — and in taking the clock and the
+// configuration rather than reading the wall clock and the user's config files.
+// `ghost bench --passive` is its only caller.
+func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now })
+	if projectID == "" && len(globals) == 0 {
+		return ""
+	}
+	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown)
+}
+
 // renderHistoricalSessionContext is the as_of half of RenderSessionContextAt. It
 // resolves the project the same way, then reads the recorded set through the
 // store rather than the loaders above — the loaders rank the LIVE rows, which is
@@ -778,7 +797,15 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
 	}
-	dbPath := filepath.Join(dataDir, "ghost.db")
+	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now)
+}
+
+// loadSessionContextFrom is loadSessionContext's body for a store at dbPath, with
+// the clock as a parameter: the hook passes time.Now, and SessionBlockAt passes a
+// fixed instant so a block can be measured rather than merely run. Nothing else
+// differs between the two, which is the point of the split — a bench that
+// re-implemented this would be measuring its own copy.
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, totalGlobalCount int, totalGlobalCountKnown bool) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -817,7 +844,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 		// start records nothing — and silently, because a store that cannot record must
 		// not print a refusal on every session a user opens in a directory Ghost has
 		// never seen. The block still renders, which is the half that must not change.
-		_, globals = loadSessionPassive(context.Background(), store, cfg, "", time.Now(), nil)
+		_, globals = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil)
 		totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 		return
 	}
@@ -859,7 +886,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	// session-start path: a bucket policy is the statement of what a bucket
 	// selects, and splitting the two buckets across two entry points left each
 	// half of the same decision in a different file.
-	now := time.Now()
+	now := clock()
 
 	// The retrieval record's handle (#850), opened and closed around the one call
 	// that writes it rather than around this whole function: the write happens

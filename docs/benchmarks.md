@@ -9,6 +9,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories; paired 95% CI over `vector-only` **+0.018** [+0.003, +0.034] |
 | `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.138** (304/2200 rows); the item cap shortened **220/220** queries and dropped **8% of the graded rows it reached**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
+| `ghost bench --passive` | The **passive** blocks — session start, `ghost context`, `ghost_project_context`, the project resource — over a synthetic four-project store that holds resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows | Withheld leakage **0.000** on every surface (and non-zero when a filter is disabled, which the test checks); expected-row recall **1.000** at session start, **0.955** for the tool and the resource; the session-start header's withheld/ranked-out counts **FAIL** the honesty check on this tree (#897) |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000**, fresh@1 **0.521** (0.583 state / 0.458 premise) — the top slot is the stale answer on about half the premise probes |
 | Recency-trap suite | Old-but-correct memory against newer distractors | **0.929** in a never-decay category (invariant under decay, as claimed) and **0.417** in a decaying one — but **1.000** there when the correct memory is pinned |
@@ -265,9 +266,60 @@ Three findings, all from the table above:
 
 **Determinism.** The context report is measured at a **fixed instant** (`bench.ContextInstant()`, 2026-06-01T12:00:00Z) rather than the wall clock, so two runs of one binary print byte-identical output — verified in the PR. The ablation tables deliberately keep their wall-clock seed: pinning that would age the corpus by however long ago the constant was written and move the published NDCG numbers for a reason that has nothing to do with retrieval. The fixed clock also has to sit well clear of every validity boundary the corpus states (its nearest are 2020-06-01 and 2099-01-01); `TestContextInstantSitsInsideEveryGradedWindow` holds a 90-day margin, so a corpus edit that added a window closing next quarter fails loudly instead of quietly restating the table.
 
-**What this does not measure: session-start injection.** The block measured here is the one `ghost_memory_search` assembles. The passive session-start block (`ghost context`, the loader path) is a different assembler and is not covered by this section — see [#581](https://github.com/wcatz/ghost/issues/581). The **cost** figures here do cover the rendered search response in full, framing and verdict line included, because that is what a caller receives and pays for; they do not cover a session-start injection.
+**What this does not measure: session-start injection.** The block measured here is the one `ghost_memory_search` assembles. The passive blocks (session start, `ghost context`, `ghost_project_context`) are a different request shape and are measured by [`ghost bench --passive`](#passive-context-ghost-bench---passive) instead — see [#581](https://github.com/wcatz/ghost/issues/581). The **cost** figures here do cover the rendered search response in full, framing and verdict line included, because that is what a caller receives and pays for; they do not cover a session-start injection.
 
 **CI cost.** The context metrics are measured on the existing graded dataset at report time, not by a new test that reloads the 551-row corpus: the fixture is 8 rows, and `internal/bench`'s test time is unchanged within noise (14.36 s on `98ffe9c5` before this section, 11.7–13.5 s after it over six runs, so within noise; the new tests themselves read 0.17 s).
+
+## Passive context (`ghost bench --passive`)
+
+`ghost bench --context` cannot tell one version of the passive surfaces from another, for two reasons that are both about the corpus. It measures the block `ghost_memory_search` returns, which is a *query* request; the session-start block, `ghost context` and `ghost_project_context` are *passive* requests (no query, a bucket per project, a policy per bucket) built by `assemble.Run` in passive mode. And its 551-row corpus holds one project and no resolved, expired, out-of-window or `_global` row, so every filter a passive surface applies is a no-op on it and its contamination figure is `0.000` whatever the code does. `ghost bench --passive` is the measurement those two facts call for: a synthetic corpus built to discriminate, read through the production entry points.
+
+**The corpus** (`internal/bench/passive_corpus.go`, deterministic, offline, no embedding, no LLM, clock fixed at `bench.ContextInstant()`): four projects and `_global`, 212 rows. Each large project (`alpha`, `beta`, `gamma`) holds 10 live rows (importance 0.95 down to 0.50), one pinned low-importance old row, three superseded rows each beside the row that replaced it, three near-duplicates of live rows (explicit `duplicate` edges, because nothing embeds offline), 30 live low-importance filler rows so every budget cuts, and the rows that must never appear: three `resolved`, three `expired` (`valid_until` in 2020), two `not yet valid` (`valid_from` in 2099) and two scoped to `env=staging`. The withheld rows carry the highest importance and the newest `created_at` in their project, so a filter that stopped working would put them at the top of the block, not somewhere a cap would hide them. `delta` is small on purpose: all of it fits under every cap, so it is the one place a near-duplicate or a superseded row is shown beside what it restates. `_global` carries the same classes. Every validity stamp is in `memory.StoredStampLayout` and asserted to parse, because an unreadable stamp is kept as unset and a fixture of them would show zero leakage for the wrong reason.
+
+Each row is graded **expected** (live and pinned rows), **withheld** (resolved, expired, not yet valid; and out-of-scope rows, but only on a read that carries a scope) or **optional** (filler, superseded, near-duplicate, and out-of-scope rows on a read with no scope — an unscoped request matches every row, which is the documented rule, not a leak). Superseded and near-duplicate rows are optional because the project bucket *reorders* them behind the row that replaced them and leaves the drop to the cap (`DemoteOnlyWhenOverCap`); only `_global` drops them. The duplicate rate is what measures them.
+
+**The surfaces**, each called through the function production calls, at its production budget, at the fixed clock:
+
+| Surface | Entry point | Budget |
+|---|---|---|
+| session start and `ghost context` | `mcpinit.SessionBlockAt` → `loadSessionContextFrom` → `loadSessionPassive` → `assemble.Run` | `sessionPassiveBudget`: 15 project rows + 8 `_global` rows |
+| the same, with `injection.session_scope` = `env=production` | the same | the same, so out-of-scope rows are withheld |
+| `ghost_project_context` | `mcpserver.ProjectContextAt` → `projectContextBlock` → `projectContextMemories` → `assemble.Run` | `projectContextBudget(project, 20)`: one union bucket |
+| `ghost://project/{id}/context`, `recall_project` | `mcpserver.ProjectResourceAt` → `buildProjectContext` | cap 20, plus a second request for `## Global` at 15 |
+
+`SessionBlockAt`, `ProjectContextAt` and `ProjectResourceAt` are the only production changes this bench needed: each is the code the surface already ran, moved behind a function that takes the clock and leaves out the side effects of a session starting (the Obsidian mirror, the session counter, the query-key write). The hook, the CLI and the tool call the same functions as before. The configuration is the compiled defaults with the two knobs the passive budget reads stated in code, so a `GHOST_*` variable on the machine cannot move the report.
+
+**The metrics**, each a fraction of a named population like the context report's:
+
+| Metric | Reads |
+|---|---|
+| withheld leakage | withheld rows rendered / withheld rows within the read's reach. **Must be 0.** |
+| expected-row recall | expected rows rendered / expected rows within the reach |
+| cross-project | rows of another project rendered / rows rendered |
+| `_global` share | `_global` rows rendered / rows rendered |
+| budget use | rows rendered / the row caps the surface's budget states |
+| budget cut | admissible rows left out / admissible rows |
+| duplicate rate | rendered rows that restate, or are replaced by, another rendered row / rows rendered |
+| header honesty | session start only: every `N shown of M total — K not shown …` line against the rows rendered and the corpus's own withheld and ranked-out counts |
+
+Rows are recognised by their backticked id in the rendered text, never by reading `assemble.Result`: a figure read off the result is a statement about a value the caller never received. The honesty check's truth is the fixture's, not the product's: a bucket's *withheld* rows are the unresolved ones its kind says a stage removes, its *cut* rows are the eligible ones the block did not render, and the header is honest when "shown" is the number of lines rendered and "not shown … ranked by" is exactly the cut. The parser reads both the header an unfixed tree prints and the one #897 (PR #912) prints, so the same check runs before and after.
+
+**What it reports on this tree** (`internal/bench/testdata/passive_report.golden`, pinned by `TestPassiveReportIsPinned`):
+
+```text
+surface                               leakage   recall  cross-project  header honesty
+session start / ghost context         0/47      1.000   0/88           FAIL (8 of 8)
+session start, scope env=production   0/58      1.000   0/87           FAIL (8 of 8)
+ghost_project_context (limit 20)      0/47      0.955   0/80           n/a
+project resource / recall_project     0/47      0.955   0/103          n/a
+```
+
+- **No filter leaks on this tree.** Resolved, expired, not-yet-valid and (when asked for a scope) out-of-scope rows are rendered on none of the four surfaces. That is a reading of a corpus that *can* leak, which the contamination arms of `--context` are not. `TestPassiveMeasurementCatchesADisabledFilter` re-seeds the store with the validity windows removed, and then with the withdrawals removed, and the same measurement reports non-zero leakage on every surface, naming only rows of the kind that filter exists for. Deleting stage 2 from `internal/assemble` by hand does the same: session-start leakage went from `0.000 (0/47)` to `0.617 (29/47)`, all of it expired and not-yet-valid rows. `TestPassiveScorerFlagsWhatItIsGiven` plants a violation in a hand-built block to show the scorer is not vacuous.
+- **The session-start header's counts are wrong, and this is the check failing as intended.** Withheld rows are counted into "N not shown, ranked by a composite score": alpha's header says `15 shown of 54 total — 39 not shown, ranked by …` when the ranking cut 34 and a stage withheld 5. The total is a second `COUNT(*) … resolved_at IS NULL`, not the window's own count (#897). The check is reported rather than asserted so the tree stays green; the golden pins the FAIL, and when PR #912 merges the golden changes in exactly that block.
+- **The tool and the resource lose the pinned row.** Recall 0.955 is three misses, one pinned low-importance (0.30), old (400 days) row per large project: the union read fills its 20 slots with rows that rank above it, and a pin does not lift the row over them. Session start shows the pinned row. The bench does not say why the two differ, and whether it is intended is a question it raises, not one it answers.
+- **Near-duplicates and superseded rows are shown only where there is room.** The duplicate rate is `0.045` at session start (4/88: `delta`'s two near-duplicates and its two superseded rows, each beside the row it restates or was replaced by), and `0.000` on the tool and the resource, whose union is full — the rows the project bucket demotes are the rows its cap then cuts.
+
+**Limits.** The corpus is synthetic and small; a figure on it is a statement about these 212 rows. Recall and the budget figures move when the corpus moves, so the golden is the thing to review, not a floor. The out-of-scope row is only withheld where a scope is asked for (`injection.session_scope` ships empty), and `ghost_project_context` carries no scope at all, so on that surface a scoped row is optional by construction. Nothing here ranks relevance — there is no query — so a block can score `1.000` recall and still be the wrong block for a task. The bench is report-only and gates nothing; the leakage test is the one assertion, and it asserts that the figure is zero on a corpus that can make it non-zero.
 
 ## Phase 3 — staleness suite (the flagship)
 

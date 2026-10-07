@@ -15,14 +15,18 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep | --context]
+const benchUsage = `Usage: ghost bench [--sweep | --context | --passive]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
 grid-searches the fusion parameters and prints the ranked table instead.
 --context prints the context-assembly table: what the block ghost_memory_search
 returns costs, how much of it is relevant, and how much of it should never have
-been in it. See docs/benchmarks.md.
+been in it. --passive measures the passive blocks instead — session start,
+ghost context and ghost_project_context — over a synthetic multi-project
+store with resolved, expired, out-of-scope and duplicate rows, and reports
+withheld leakage, recall, contamination and header honesty. See
+docs/benchmarks.md.
 `
 
 // The three things `ghost bench` can print. A mode rather than a pair of bools
@@ -33,6 +37,7 @@ const (
 	benchModeResults = "results"
 	benchModeSweep   = "sweep"
 	benchModeContext = "context"
+	benchModePassive = "passive"
 )
 
 // benchModeOf reads the flags after the command. It is a named function because
@@ -42,20 +47,27 @@ const (
 // not honoured is a mode that prints the wrong table while looking like it worked.
 func benchModeOf(args []string) (string, error) {
 	mode := benchModeResults
+	set := func(next, flag string) error {
+		if mode != benchModeResults && mode != next {
+			return fmt.Errorf("--%s and --%s measure different things and cannot share a run", mode, flag)
+		}
+		mode = next
+		return nil
+	}
 	for _, arg := range args {
+		var err error
 		switch arg {
 		case "--sweep":
-			if mode == benchModeContext {
-				return "", fmt.Errorf("--sweep and --context measure different things and cannot share a run")
-			}
-			mode = benchModeSweep
+			err = set(benchModeSweep, "sweep")
 		case "--context":
-			if mode == benchModeSweep {
-				return "", fmt.Errorf("--sweep and --context measure different things and cannot share a run")
-			}
-			mode = benchModeContext
+			err = set(benchModeContext, "context")
+		case "--passive":
+			err = set(benchModePassive, "passive")
 		default:
 			return "", fmt.Errorf("unknown flag %q", arg)
+		}
+		if err != nil {
+			return "", err
 		}
 	}
 	return mode, nil
@@ -65,13 +77,28 @@ func benchModeOf(args []string) (string, error) {
 // benchmark (three ablations over the embedded dataset, plus the no-answer
 // false-positive table under them) and prints the metric table. With --sweep it
 // instead grid-searches the fusion parameters and prints the ranked table; with
-// --context it prints the context-assembly table. Judge-free, deterministic, no
+// --context it prints the context-assembly table; with --passive the passive
+// context surfaces' table. Judge-free, deterministic, no
 // network. See docs/benchmarks.md.
 func runBench() {
 	mode, err := benchModeOf(os.Args[2:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, benchUsage)
 		os.Exit(1)
+	}
+
+	// The passive mode has its own corpus and its own store (an on-disk one, because
+	// the session-start path opens a read-only handle on a path), so it returns
+	// before the graded dataset is loaded and seeded: nothing below is its input.
+	if mode == benchModePassive {
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		rep, err := bench.RunPassiveTemp(context.Background(), bench.BlindNone)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatPassive(rep))
+		return
 	}
 
 	ds, vecs, err := bench.BuiltinDataset()
