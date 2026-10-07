@@ -251,6 +251,17 @@ func shapeOf(p string) projectShape {
 // corpus with one category would leave that reservation unexercised.
 var passiveCategories = []string{"gotcha", "convention", "decision", "preference", "architecture", "pattern", "dependency", "fact"}
 
+// imp is an importance in hundredths. Every importance in the corpus goes through
+// it, and the reason is arithmetic rather than style: `0.95 - 0.05*float32(i)` is
+// fused into one rounding on arm64 and two on amd64, so a row meant to tie with
+// its neighbour came out one ulp apart on one architecture and not the other. In
+// never-decay categories a near-duplicate pair differs by nothing else, so the
+// ulp decided which of the two the demotion treated as the loser, and the
+// golden moved between a laptop and CI. An integer over 100 is one correctly
+// rounded division on both, and the corpus holds no two rows of different kinds
+// at the same importance, so no order here rests on a tie.
+func imp(hundredths int) float32 { return float32(hundredths) / 100 }
+
 func projectRows(p string) []PassiveRow {
 	themes := projectThemes[p]
 	sh := shapeOf(p)
@@ -265,7 +276,7 @@ func projectRows(p string) []PassiveRow {
 		r := PassiveRow{
 			Project: p, Key: fmt.Sprintf("live-%02d", i), Kind: KindLive, Category: cat(i),
 			Content:    fmt.Sprintf("%s: the %s rule is settled and current (live %02d)", p, themes[i], i),
-			Importance: 0.95 - 0.05*float32(i), AgeDays: 2 + i,
+			Importance: imp(95 - 5*i), AgeDays: 2 + i,
 		}
 		switch i {
 		case 1, 2:
@@ -281,7 +292,7 @@ func projectRows(p string) []PassiveRow {
 	rows = append(rows, PassiveRow{
 		Project: p, Key: "pinned-00", Kind: KindPinned, Category: "convention",
 		Content:    fmt.Sprintf("%s: never ship without the %s checklist (pinned)", p, themes[0]),
-		Importance: 0.30, AgeDays: 400, Pinned: true,
+		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})
 
 	// Superseded rows, each replaced by a live row, and near-duplicates of live
@@ -292,7 +303,7 @@ func projectRows(p string) []PassiveRow {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("old-%02d", i), Kind: KindSuperseded, Category: cat(i + 5),
 			Content:    fmt.Sprintf("%s: the %s rule as it stood before the change (superseded %02d)", p, themes[sh.replaceFrom+i], i),
-			Importance: 0.90, AgeDays: 60 + i,
+			Importance: imp(93), AgeDays: 60 + i,
 		})
 	}
 	for i := 0; i < sh.dups; i++ {
@@ -300,7 +311,7 @@ func projectRows(p string) []PassiveRow {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("dup-%02d", i), Kind: KindDuplicate, Category: cat(of),
 			Content:    fmt.Sprintf("%s: the %s rule is settled and current (live %02d), restated", p, themes[of], of),
-			Importance: 0.80, AgeDays: 20 + i, DuplicateOf: fmt.Sprintf("live-%02d", of),
+			Importance: imp(73), AgeDays: 20 + i, DuplicateOf: fmt.Sprintf("live-%02d", of),
 		})
 	}
 
@@ -309,7 +320,7 @@ func projectRows(p string) []PassiveRow {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("filler-%02d", i), Kind: KindFiller, Category: cat(i + 3),
 			Content:    fmt.Sprintf("%s: minor note %02d about the %s", p, i, themes[i%len(themes)]),
-			Importance: 0.10 + 0.005*float32(i), AgeDays: 30 + 5*i,
+			Importance: float32(100+5*i) / 1000, AgeDays: 30 + 5*i,
 		})
 	}
 
@@ -320,28 +331,28 @@ func projectRows(p string) []PassiveRow {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("resolved-%02d", i), Kind: KindResolved, Category: "decision",
 			Content:    fmt.Sprintf("%s: the %s question was withdrawn and must not be shown (resolved %02d)", p, themes[i], i),
-			Importance: 0.99, AgeDays: 1, Resolved: true,
+			Importance: imp(99), AgeDays: 1, Resolved: true,
 		})
 	}
 	for i := 0; i < sh.expired; i++ {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("expired-%02d", i), Kind: KindExpired, Category: "fact",
 			Content:    fmt.Sprintf("%s: the %s claim stopped being true in 2020 (expired %02d)", p, themes[i], i),
-			Importance: 0.99, AgeDays: 1, ValidFrom: passiveLongAgo, ValidUntil: passiveClosed,
+			Importance: imp(99), AgeDays: 1, ValidFrom: passiveLongAgo, ValidUntil: passiveClosed,
 		})
 	}
 	for i := 0; i < sh.future; i++ {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("future-%02d", i), Kind: KindFuture, Category: "fact",
 			Content:    fmt.Sprintf("%s: the %s claim does not hold until 2099 (future %02d)", p, themes[i], i),
-			Importance: 0.98, AgeDays: 1, ValidFrom: passiveOpens,
+			Importance: imp(98), AgeDays: 1, ValidFrom: passiveOpens,
 		})
 	}
 	for i := 0; i < sh.staged; i++ {
 		rows = append(rows, PassiveRow{
 			Project: p, Key: fmt.Sprintf("staging-%02d", i), Kind: KindScoped, Category: "gotcha",
 			Content:    fmt.Sprintf("%s: the %s override applies to staging only (out of scope %02d)", p, themes[i], i),
-			Importance: 0.97, AgeDays: 1, Scope: passiveStagingScope,
+			Importance: imp(97), AgeDays: 1, Scope: passiveStagingScope,
 		})
 	}
 
@@ -367,52 +378,52 @@ func globalRows() []PassiveRow {
 		rows = append(rows, PassiveRow{
 			Project: g, Key: fmt.Sprintf("live-%02d", i), Kind: KindLive, Category: passiveCategories[(i+1)%len(passiveCategories)],
 			Content:    "all projects: " + text + fmt.Sprintf(" (global %02d)", i),
-			Importance: 0.95 - 0.05*float32(i), AgeDays: 5 + i,
+			Importance: imp(95 - 5*i), AgeDays: 5 + i,
 		})
 	}
 	rows = append(rows, PassiveRow{
 		Project: g, Key: "pinned-00", Kind: KindPinned, Category: "preference",
 		Content:    "all projects: ask before deleting anything (global pinned)",
-		Importance: 0.30, AgeDays: 400, Pinned: true,
+		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})
 	rows = append(rows, PassiveRow{
 		Project: g, Key: "old-00", Kind: KindSuperseded, Category: "preference",
 		Content:    "all projects: commit messages may run long (global, superseded)",
-		Importance: 0.90, AgeDays: 90,
+		Importance: imp(93), AgeDays: 90,
 	})
 	rows = append(rows, PassiveRow{
 		Project: g, Key: "dup-00", Kind: KindDuplicate, Category: "preference",
 		Content:    "all projects: " + prefs[0] + " (global 00), restated",
-		Importance: 0.80, AgeDays: 30, DuplicateOf: "live-00",
+		Importance: imp(73), AgeDays: 30, DuplicateOf: "live-00",
 	})
 	for i := 0; i < 12; i++ {
 		rows = append(rows, PassiveRow{
 			Project: g, Key: fmt.Sprintf("filler-%02d", i), Kind: KindFiller, Category: "fact",
 			Content:    fmt.Sprintf("all projects: minor cross-project note %02d", i),
-			Importance: 0.10 + 0.01*float32(i), AgeDays: 40 + 7*i,
+			Importance: imp(10 + i), AgeDays: 40 + 7*i,
 		})
 	}
 	for i := 0; i < 2; i++ {
 		rows = append(rows, PassiveRow{
 			Project: g, Key: fmt.Sprintf("resolved-%02d", i), Kind: KindResolved, Category: "preference",
 			Content:    fmt.Sprintf("all projects: a withdrawn cross-project preference (global resolved %02d)", i),
-			Importance: 0.99, AgeDays: 1, Resolved: true,
+			Importance: imp(99), AgeDays: 1, Resolved: true,
 		})
 		rows = append(rows, PassiveRow{
 			Project: g, Key: fmt.Sprintf("expired-%02d", i), Kind: KindExpired, Category: "fact",
 			Content:    fmt.Sprintf("all projects: a cross-project claim that lapsed in 2020 (global expired %02d)", i),
-			Importance: 0.99, AgeDays: 1, ValidFrom: passiveLongAgo, ValidUntil: passiveClosed,
+			Importance: imp(99), AgeDays: 1, ValidFrom: passiveLongAgo, ValidUntil: passiveClosed,
 		})
 	}
 	rows = append(rows, PassiveRow{
 		Project: g, Key: "future-00", Kind: KindFuture, Category: "fact",
 		Content:    "all projects: a cross-project claim that begins in 2099 (global future)",
-		Importance: 0.98, AgeDays: 1, ValidFrom: passiveOpens,
+		Importance: imp(98), AgeDays: 1, ValidFrom: passiveOpens,
 	})
 	rows = append(rows, PassiveRow{
 		Project: g, Key: "staging-00", Kind: KindScoped, Category: "gotcha",
 		Content:    "all projects: a cross-project override for staging only (global out of scope)",
-		Importance: 0.97, AgeDays: 1, Scope: passiveStagingScope,
+		Importance: imp(97), AgeDays: 1, Scope: passiveStagingScope,
 	})
 	for i := range rows {
 		if rows[i].Key == "live-04" {

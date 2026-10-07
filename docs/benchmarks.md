@@ -304,7 +304,7 @@ Each row is graded **expected** (live and pinned rows), **withheld** (resolved, 
 
 Rows are recognised by their backticked id in the rendered text, never by reading `assemble.Result`: a figure read off the result is a statement about a value the caller never received. The honesty check's truth is the fixture's, not the product's: a bucket's *withheld* rows are the unresolved ones its kind says a stage removes, its *cut* rows are the eligible ones the block did not render, and the header is honest when "shown" is the number of lines rendered and "not shown … ranked by" is exactly the cut. The parser reads both the header an unfixed tree prints and the one #897 (PR #912) prints, so the same check runs before and after.
 
-**What it reports on this tree** (`internal/bench/testdata/passive_report.golden`, pinned by `TestPassiveReportIsPinned`):
+**What it reports on this tree** (`internal/bench/testdata/passive_report.golden`, pinned by `TestPassiveBaseline/pinned`):
 
 ```text
 surface                               leakage   recall  cross-project  header honesty

@@ -15,15 +15,16 @@ import (
 // it. When #912 merges, this file changes in exactly that block and nowhere else,
 // which is the diff that proves the fix.
 //
-// Regenerate with GHOST_UPDATE_GOLDEN=1 go test ./internal/bench -run TestPassiveReport.
+// Regenerate with GHOST_UPDATE_GOLDEN=1 go test ./internal/bench -run TestPassiveBaseline.
 const passiveGoldenPath = "testdata/passive_report.golden"
 
-func passiveRun(t *testing.T, blind PassiveBlind) PassiveReport {
+// passiveEnv seeds a store and returns the corpus and the environment the surfaces
+// read. The environment is pinned first: the session-start path resolves a default
+// project from the user's config only when a directory matches nothing, which no
+// read here does, but a bench that reads whatever the developer has configured is
+// a bench whose golden is a property of a machine.
+func passiveEnv(t *testing.T, blind PassiveBlind) (PassiveCorpus, *PassiveEnv) {
 	t.Helper()
-	// The session-start path resolves a default project from the user's config
-	// only when a directory matches nothing, which no read here does; the
-	// environment is pinned anyway, because a bench that reads whatever the
-	// developer has configured is a bench whose golden is a property of a machine.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	c, err := NewPassiveCorpus()
@@ -34,7 +35,13 @@ func passiveRun(t *testing.T, blind PassiveBlind) PassiveReport {
 	if err != nil {
 		t.Fatalf("OpenPassiveEnv: %v", err)
 	}
-	defer closeEnv()
+	t.Cleanup(closeEnv)
+	return c, env
+}
+
+func passiveRun(t *testing.T, blind PassiveBlind) PassiveReport {
+	t.Helper()
+	c, env := passiveEnv(t, blind)
 	rep, err := RunPassive(context.Background(), env, c, PassiveSurfaces())
 	if err != nil {
 		t.Fatalf("RunPassive: %v", err)
@@ -42,73 +49,80 @@ func passiveRun(t *testing.T, blind PassiveBlind) PassiveReport {
 	return rep
 }
 
-// TestPassiveReportIsPinned holds the report to its committed text. A change that
-// moves any figure — a ranking change, a filter change, a corpus change — fails
-// here and has to say so in the golden, which is the review surface.
-func TestPassiveReportIsPinned(t *testing.T) {
-	got := FormatPassive(passiveRun(t, BlindNone))
-	if os.Getenv("GHOST_UPDATE_GOLDEN") != "" {
-		if err := os.WriteFile(passiveGoldenPath, []byte(got), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(passiveGoldenPath)
+// TestPassiveBaseline is the report on the corpus as designed, and its subtests
+// share ONE seeded store: each seeding is ~200 writes, and under -race that is the
+// cost of the test, in a package whose CI budget is already the tightest in the
+// tree. The subtests are what the baseline is held to.
+func TestPassiveBaseline(t *testing.T) {
+	c, env := passiveEnv(t, BlindNone)
+	rep, err := RunPassive(context.Background(), env, c, PassiveSurfaces())
 	if err != nil {
-		t.Fatalf("read golden: %v (generate it with GHOST_UPDATE_GOLDEN=1)", err)
+		t.Fatalf("RunPassive: %v", err)
 	}
-	if got != string(want) {
-		t.Errorf("passive report moved.\n--- want\n%s\n--- got\n%s", want, got)
-	}
+
+	// The report is pinned to its committed text. A change that moves any figure —
+	// a ranking change, a filter change, a corpus change — fails here and has to
+	// say so in the golden, which is the review surface.
+	t.Run("pinned", func(t *testing.T) {
+		got := FormatPassive(rep)
+		if os.Getenv("GHOST_UPDATE_GOLDEN") != "" {
+			if err := os.WriteFile(passiveGoldenPath, []byte(got), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		want, err := os.ReadFile(passiveGoldenPath)
+		if err != nil {
+			t.Fatalf("read golden: %v (generate it with GHOST_UPDATE_GOLDEN=1)", err)
+		}
+		if got != string(want) {
+			t.Errorf("passive report moved.\n--- want\n%s\n--- got\n%s", want, got)
+		}
+	})
+
+	// Two runs over two fresh stores print the same bytes, which is what lets a
+	// golden pin them at all. The second store is the cost of this subtest.
+	t.Run("deterministic", func(t *testing.T) {
+		again := FormatPassive(passiveRun(t, BlindNone))
+		if first := FormatPassive(rep); first != again {
+			t.Errorf("two runs differ:\n%s\n---\n%s", first, again)
+		}
+	})
+
+	// The claim the whole bench exists to make, stated as assertions rather than
+	// as a golden: on every surface no must-not-appear row is rendered, no row of
+	// another project is rendered, and the denominators are populations (a zero
+	// over nothing is not a measurement).
+	t.Run("withholds", func(t *testing.T) {
+		if len(rep.Surfaces) != 4 {
+			t.Fatalf("surfaces = %d, want 4 (session start, scoped session start, tool, resource)", len(rep.Surfaces))
+		}
+		for _, s := range rep.Surfaces {
+			if s.Leaked.Num != 0 || len(s.LeakedIDs) != 0 {
+				t.Errorf("%s leaked withheld rows: %v", s.Name, s.LeakedIDs)
+			}
+			if !s.Leaked.Defined() || s.Leaked.Den == 0 {
+				t.Errorf("%s: leakage is over no withheld rows, so its zero measures nothing", s.Name)
+			}
+			if s.Contamination.Num != 0 {
+				t.Errorf("%s rendered %d rows of another project", s.Name, s.Contamination.Num)
+			}
+			if !s.Contamination.Defined() {
+				t.Errorf("%s rendered no rows at all", s.Name)
+			}
+		}
+	})
+
+	// The corpus has to make every budget bite: a block that never has to cut says
+	// nothing about how it cuts. The caps here are the surfaces' own, observed from
+	// the blocks, so a drift between the constants this file states and the
+	// production budgets is a failure too.
+	t.Run("budgets", func(t *testing.T) { checkPassiveBudgets(t, c, env) })
 }
 
-// TestPassiveReportIsDeterministic: two runs over two fresh stores print the same
-// bytes, which is what lets a golden pin them at all.
-func TestPassiveReportIsDeterministic(t *testing.T) {
-	a := FormatPassive(passiveRun(t, BlindNone))
-	b := FormatPassive(passiveRun(t, BlindNone))
-	if a != b {
-		t.Errorf("two runs differ:\n%s\n---\n%s", a, b)
-	}
-}
-
-// TestPassiveWithholdsEverythingItShould is the claim the whole bench exists to
-// make, stated as assertions rather than as a golden: on every surface no
-// must-not-appear row is rendered, no row of another project is rendered, and the
-// denominators are populations (a zero over nothing is not a measurement).
-func TestPassiveWithholdsEverythingItShould(t *testing.T) {
-	rep := passiveRun(t, BlindNone)
-	if len(rep.Surfaces) != 4 {
-		t.Fatalf("surfaces = %d, want 4 (session start, scoped session start, tool, resource)", len(rep.Surfaces))
-	}
-	for _, s := range rep.Surfaces {
-		if s.Leaked.Num != 0 || len(s.LeakedIDs) != 0 {
-			t.Errorf("%s leaked withheld rows: %v", s.Name, s.LeakedIDs)
-		}
-		if !s.Leaked.Defined() || s.Leaked.Den == 0 {
-			t.Errorf("%s: leakage is over no withheld rows, so its zero measures nothing", s.Name)
-		}
-		if s.Contamination.Num != 0 {
-			t.Errorf("%s rendered %d rows of another project", s.Name, s.Contamination.Num)
-		}
-		if !s.Contamination.Defined() {
-			t.Errorf("%s rendered no rows at all", s.Name)
-		}
-	}
-}
-
-// TestPassiveCorpusExercisesEveryBudget fails if the corpus stops making a budget
-// bite: a block that never has to cut says nothing about how it cuts. The caps
-// here are the surfaces' own, observed from the blocks, so a drift between the
-// constants this file states and the production budgets is a failure too.
-func TestPassiveCorpusExercisesEveryBudget(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	c, _ := NewPassiveCorpus()
-	env, closeEnv, err := OpenPassiveEnv(context.Background(), t.TempDir(), c, BlindNone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeEnv()
+// checkPassiveBudgets is the budgets subtest of TestPassiveBaseline.
+func checkPassiveBudgets(t *testing.T, c PassiveCorpus, env *PassiveEnv) {
+	t.Helper()
 	specs := PassiveSurfaces()
 	read := func(i int, project string) string {
 		b, err := specs[i].Read(context.Background(), env, project)
@@ -206,6 +220,24 @@ func TestPassiveCorpusGradesAreConsistent(t *testing.T) {
 			if r.AgeDays != minAge {
 				t.Errorf("%s: withheld row is %d days old, newer rows exist", r.ID(), r.AgeDays)
 			}
+		}
+	}
+	// No two rows of one project share an importance unless they are the same
+	// kind of row, because a tie is an order the product settles by a rounding
+	// the architecture decides (see imp), and a golden that rests on one is a
+	// golden that differs between a laptop and CI.
+	for _, p := range append(append([]string{}, PassiveProjects...), PassiveGlobal) {
+		owner := map[float32]PassiveRow{}
+		for _, r := range c.Rows {
+			if r.Project != p {
+				continue
+			}
+			// Two withheld rows may tie: neither is ever shown, so their order
+			// is not an order anything is measured by.
+			if o, ok := owner[r.Importance]; ok && o.Kind != r.Kind && !(o.Grade(true) == GradeWithheld && r.Grade(true) == GradeWithheld) {
+				t.Errorf("%s: importance %.3f is shared by a %s row and a %s row, so their order is a tie", p, r.Importance, o.Kind, r.Kind)
+			}
+			owner[r.Importance] = r
 		}
 	}
 	// Each bucket's expected set sits under its caps with room for one optional

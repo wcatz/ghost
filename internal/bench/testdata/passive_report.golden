@@ -66,7 +66,7 @@ ghost_project_context (limit 20) (4 blocks)
   duplicate rate         0.000 (0/80)   rendered beside the row they restate or replace
   block size             mean 2633 B / 659 tok, max 2676 B / 669 tok
   header honesty         n/a    (this surface prints no count line)
-  missed expected rows: 3
+  missed expected rows: 3 (bench:alpha:pinned-00, bench:beta:pinned-00, bench:gamma:pinned-00)
 
 project resource / recall_project (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
@@ -78,5 +78,5 @@ project resource / recall_project (4 blocks)
   duplicate rate         0.000 (0/103)   rendered beside the row they restate or replace
   block size             mean 3197 B / 800 tok, max 3362 B / 841 tok
   header honesty         n/a    (this surface prints no count line)
-  missed expected rows: 3
+  missed expected rows: 3 (bench:alpha:pinned-00, bench:beta:pinned-00, bench:gamma:pinned-00)
 

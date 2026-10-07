@@ -531,7 +531,7 @@ func FormatPassive(rep PassiveReport) string {
 			fmt.Fprintf(&b, "  LEAKED: %s\n", strings.Join(s.LeakedIDs, ", "))
 		}
 		if len(s.MissedIDs) > 0 {
-			fmt.Fprintf(&b, "  missed expected rows: %d\n", len(s.MissedIDs))
+			fmt.Fprintf(&b, "  missed expected rows: %d (%s)\n", len(s.MissedIDs), strings.Join(s.MissedIDs, ", "))
 		}
 		b.WriteString("\n")
 	}
