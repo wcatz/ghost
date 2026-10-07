@@ -393,3 +393,41 @@ func checkUnscoped(t *testing.T, name string, rep Report) {
 		t.Errorf("%s: the report does not name the unscoped verdicts:\n%s", name, rep.String())
 	}
 }
+
+// TestARunThatFindsNoSessionOnTheRecordsSaysSo: the mirror of NoSession. A host whose
+// server cannot name its session records "" on every call, so a scan WITH a session id
+// matches none of them, and the summary must not print that as a clean zero: "the agent
+// used nothing" and "this host's calls carry no session, so the audit never ran" are
+// different claims.
+func TestARunThatFindsNoSessionOnTheRecordsSaysSo(t *testing.T) {
+	store, projectID := auditStore(t)
+	seedMemory(t, store, projectID, "NOSESS", memContent)
+	_ = recordCallIn(t, store, projectID, "", "NOSESS")
+	_ = recordCallIn(t, store, projectID, "", "NOSESS")
+
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	res, err := Run(context.Background(), store, projectID, s)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Verdicts != 0 {
+		t.Fatalf("Verdicts = %d, want 0", res.Verdicts)
+	}
+	if res.UnscopedCalls != 2 {
+		t.Errorf("UnscopedCalls = %d, want the 2 calls that name no session", res.UnscopedCalls)
+	}
+	if !strings.Contains(res.String(), "carry no session id") {
+		t.Errorf("the summary prints a confident zero instead of saying the project's calls name no session:\n%s", res)
+	}
+
+	// And a project with no calls at all says nothing of the kind.
+	empty, _ := auditStore(t)
+	res2, err := Run(context.Background(), empty, "p1", s)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res2.UnscopedCalls != 0 || strings.Contains(res2.String(), "carry no session id") {
+		t.Errorf("a project with no calls reported unscoped calls: %+v", res2)
+	}
+}

@@ -99,6 +99,12 @@ type Summary struct {
 	// judged. Said on the summary because a run that judged nothing and a run that was
 	// never able to match anything look the same in a count.
 	NoSession bool
+	// UnscopedCalls counts the project's recent calls that name no session, and is set
+	// only when the scanned session matched NO call. It is the mirror of NoSession: a
+	// host whose server cannot name its session records "" on every call, so a scan that
+	// does carry a session id matches none of them, and a bare zero would read as "the
+	// agent used nothing" when the audit never ran for that host.
+	UnscopedCalls int
 }
 
 // placed is one verdict this run reached, with the call it belongs to and the
@@ -172,6 +178,19 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 	records, err := store.RetrievalRecordsForSession(ctx, projectID, s.SessionID(), CallWindow)
 	if err != nil {
 		return res, fmt.Errorf("audit: read retrieval records: %w", err)
+	}
+	if len(records) == 0 {
+		// Nothing matched this session. Say whether that is because the project's calls
+		// carry no session id at all (one bounded read), so the two states stay apart.
+		recent, err := store.RetrievalRecordsForProject(ctx, projectID, CallWindow)
+		if err != nil {
+			return res, fmt.Errorf("audit: read retrieval records: %w", err)
+		}
+		for _, rec := range recent {
+			if rec.SessionID == "" {
+				res.UnscopedCalls++
+			}
+		}
 	}
 
 	// Judge per call, so a memory's verdict is filed against the call it belongs
@@ -394,6 +413,11 @@ func (r Summary) String() string {
 	if r.NoSession {
 		b.WriteString("  the scanned session carried no session id, so no call could be matched to it " +
 			"and none was judged\n")
+	}
+	if r.UnscopedCalls > 0 {
+		fmt.Fprintf(&b, "  none of this session's calls were found, and %d recent call(s) in this project "+
+			"carry no session id, so they could not be matched to it: the host that made them does "+
+			"not name its session, which is different from the agent having used nothing\n", r.UnscopedCalls)
 	}
 	for _, src := range r.Sources {
 		// The source column through assemble.Label, for the reason report.go's two

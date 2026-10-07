@@ -602,7 +602,7 @@ for a call and a session that belong together. Three pieces make that hold
 ([#648](https://github.com/wcatz/ghost/issues/648)).
 
 - **The call names its session.** `retrieval_record.session_id` (no schema change; the
-  column and `retrieval_audit.session_id` already existed, empty on every real row) is
+  column and `retrieval_audit.session_id` already existed, and were empty on every row written before this change) is
   the host's id for the session. The MCP server over stdio has no transport id, so it
   reads `CLAUDE_CODE_SESSION_ID` from its own environment once at startup, which is the
   id Claude Code also sends in every hook payload as `session_id` and names its session

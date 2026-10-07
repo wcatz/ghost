@@ -95,7 +95,7 @@ type RetrievalSourceTotals struct {
 	Detached int
 }
 
-// The three attributions of a verdict, as the aggregate reports them. Spelled as SQL
+// The four attributions of a verdict, as the aggregate reports them. Spelled as SQL
 // literals in the query because a CASE arm cannot take a bound parameter in SQLite,
 // and named here so the query's numbers can be read against these.
 const (

@@ -464,7 +464,8 @@ func (s *Server) recordSink() assemble.RecordSink {
 	return nil
 }
 
-// sessionIDFor is the session a call arrived on, and ONLY that.
+// sessionIDFor is the session a call arrived on: the transport's own id when the
+// transport has one, and otherwise the host's process-level id (see below).
 //
 // It is separated from provenanceFor because that function's other half is
 // harness detection, which is expensive and belongs on the write paths: with a
@@ -475,9 +476,9 @@ func (s *Server) recordSink() assemble.RecordSink {
 // "" over the stdio transport Ghost actually ships (#746's note on why that is
 // the answer rather than a problem).
 //
-// The value is a name, not a claim: it is the transport's own id, recorded as
-// given, and the record's Source column is what tells an injection from a search
-// when this is empty.
+// The value is a name, not a claim: it is recorded as given, never constructed,
+// and the record's Source column is what tells an injection from a search when
+// this is empty.
 //
 // The transport's own id wins when it has one. Over stdio it never does, and then the
 // host's id from the process environment is the best key there is (hostSessionIDFromEnv):
