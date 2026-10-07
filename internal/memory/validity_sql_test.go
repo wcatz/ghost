@@ -56,6 +56,10 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 		verifiedAt  *string
 		wantValid   bool // true if the SQL predicate should keep the row
 		wantGoState string
+		// sqlOverAdmits marks the one direction the predicate may differ in: it keeps
+		// a row Go drops (a stored fraction cut to the whole second Now is bound at),
+		// which stage 2 then withholds. The reverse is never allowed.
+		sqlOverAdmits bool
 	}{
 		{
 			name:      "no bounds, no verified_at -> unset, kept",
@@ -163,6 +167,11 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 			wantValid: false, wantGoState: ValidityExpired,
 		},
 		{
+			name:      "fractional valid_until .9 after now's second -> kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.9"), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		{
 			name:      "fractional valid_until .000 exactly at now -> kept",
 			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.000"), verifiedAt: strPtr(stamp),
 			wantValid: true, wantGoState: ValidityValid,
@@ -178,9 +187,9 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 			wantValid: true, wantGoState: ValidityValid,
 		},
 		{
-			name:      "fractional valid_from .5 after now -> future, dropped",
+			name:      "fractional valid_from .5 after now -> future, SQL over-admits by truncation",
 			validFrom: strPtr("2026-09-27 12:00:00.5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityFuture,
+			wantValid: false, wantGoState: ValidityFuture, sqlOverAdmits: true,
 		},
 		{
 			name:      "fractional valid_from in the future (,5) -> future, dropped",
@@ -231,15 +240,26 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 			goState, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, now)
 			goValid := goState != ValidityExpired && goState != ValidityFuture
 
-			if sqlValid != c.wantValid {
-				t.Errorf("SQL: want valid=%v, got valid=%v", c.wantValid, sqlValid)
+			wantSQL := c.wantValid || c.sqlOverAdmits
+			if sqlValid != wantSQL {
+				t.Errorf("SQL: want valid=%v, got valid=%v", wantSQL, sqlValid)
 			}
 			if goValid != c.wantValid {
 				t.Errorf("Go: want valid=%v, got valid=%v (state=%s)", c.wantValid, goValid, goState)
 			}
-			if sqlValid != goValid {
+			if sqlValid != goValid && !c.sqlOverAdmits {
 				t.Errorf("SQL and Go disagree: SQL valid=%v, Go valid=%v (state=%s) — the SQL form of "+
 					"the validity rule has drifted from the one rule", sqlValid, goValid, goState)
+			}
+			// Production Now carries a sub-second part, while the SQL binds it
+			// truncated to the second. The SQL must be a SUPERSET of Go's verdict
+			// at any such Now: it may keep a row Go drops, never drop one Go keeps.
+			for _, frac := range []time.Duration{300 * time.Millisecond, 700 * time.Millisecond, 999 * time.Millisecond} {
+				fnow := now.Add(frac)
+				fstate, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, fnow)
+				if fstate != ValidityExpired && fstate != ValidityFuture && !sqlValid {
+					t.Errorf("fractional Now +%s: Go calls the row %s but the SQL drops it", frac, fstate)
+				}
 			}
 			if goState != c.wantGoState {
 				t.Errorf("Go state: want %s, got %s", c.wantGoState, goState)

@@ -67,15 +67,17 @@ func readableStampSQL(col string) string {
 		" OR (" + day + " IS NOT NULL AND " + col + " = " + day + "))"
 }
 
-// stampComparableSQL is the column as it is compared against a bound whole-second
-// instant. A fractional part that is all zeros adds nothing to the instant Go
-// reads, so it is cut off: raw `12:00:00.000 <= 12:00:00` is false (the longer
-// string sorts later) while Go reads the two as the same instant. A non-zero
-// fraction is left as stored, where the raw comparison already gives Go's answer
-// for a whole-second now (`12:00:00.5` is after `12:00:00`).
+// stampComparableSQL is the column as it is compared against the bound Now, which
+// is bound at WHOLE-SECOND precision (stampLayoutForSQL truncates it). A stored
+// fraction is cut off so both sides are whole seconds, and the comparison is
+// inclusive on both ends. That makes the SQL predicate a SUPERSET of Go's rule:
+// truncation can only pull a bound toward the same second as Now, never across
+// it, so any row Go keeps (`until >= now`, `from <= now`, at full precision) is
+// kept here. It may admit a row Go then drops at stage 2 (from `12:00:00.5` with
+// a Now of `12:00:00.3`); that costs one LIMIT slot and nothing else. It never
+// drops a row Go calls valid, whatever sub-second part Now carries.
 func stampComparableSQL(col string) string {
-	return "CASE WHEN length(" + col + ") > 19 AND substr(" + col + ", 21) NOT GLOB '*[1-9]*'" +
-		" THEN substr(" + col + ", 1, 19) ELSE " + col + " END"
+	return "CASE WHEN length(" + col + ") > 19 THEN substr(" + col + ", 1, 19) ELSE " + col + " END"
 }
 
 // validityMatchesSQL is the SQL form of memory.ValidityState's window test: a row
@@ -417,6 +419,11 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 // start that reads anything pays nothing for it. It asks the same population the
 // fetch does, through passivePopulationSQL, so a row excluded by scope or by
 // resolved_at is not counted as a validity exclusion.
+//
+// Every counted row is one Go also calls invalid, because the predicate is a
+// superset of Go's verdict (see stampComparableSQL); the count is a LOWER BOUND on
+// what stage 2 would have withheld (a row admitted only by second-truncation is
+// not counted), never an overcount.
 //
 // A store below the validity floor has no predicate to have excluded anything:
 // zero, not an error.
