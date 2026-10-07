@@ -1067,8 +1067,9 @@ anywhere in the read, and no inference: it is a selection.
   `ghost context --as-of` session block — and search all reach that verdict
   through one helper, `memory.ValidityAt` (stage 2 drops on the same
   `memory.ValidityWithheld`), applied before the limit so a withheld row takes no
-  slot, and they append `memory.AsOfValidityNote`, saying that validity was judged
-  at T and that the bounds, like the row's other unversioned fields, are the
+  slot, and they state `memory.AsOfValidityNote` once at block level, saying that
+  validity was judged at T, how many rows it withheld (counted, so an all-withheld
+  block is not mistaken for a project that held nothing), and that the bounds, like the row's other unversioned fields, are the
   current row's. A bound exactly at T is inside the window, and an unreadable
   bound is no bound, as in stage 2. The `unverified` marker is drawn as on any
   line, because `verified_at` is a flag rather than a predicate. One imprecision

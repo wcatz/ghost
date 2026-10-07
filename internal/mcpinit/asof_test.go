@@ -412,3 +412,34 @@ func TestRenderSessionContextAtWithNoInstantIsTheCurrentPath(t *testing.T) {
 		t.Errorf("a nil instant did not count the session, so the current path lost a side effect:\n%s", block)
 	}
 }
+
+// TestRenderSessionContextAtSaysWhenEveryRowWasWithheldAtT: every row out of
+// window at T must read as withheld, with a count, rather than as a project that
+// held nothing then; a project with no rows at T keeps its output.
+func TestRenderSessionContextAtSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	dir := validityStore(t, at, []validityRow{
+		{id: "m-a", content: "closed one", until: at.Add(-time.Hour).Format(f)},
+		{id: "m-b", content: "opens later", from: at.Add(time.Hour).Format(f)},
+	})
+	block := RenderSessionContextAt(dir, &at)
+	if block == "" {
+		t.Fatal("an all-withheld block is empty")
+	}
+	if strings.Contains(block, "closed one") || strings.Contains(block, "opens later") {
+		t.Errorf("a row out of window at T is listed:\n%s", block)
+	}
+	if !strings.Contains(block, "Validity judged at "+at.Format(time.RFC3339)) || !strings.Contains(block, "2 memories were withheld") {
+		t.Errorf("an all-withheld block does not say 2 rows were withheld at T:\n%s", block)
+	}
+	if strings.Count(block, "Validity judged at") != 1 {
+		t.Errorf("the validity note is not stated once at block level:\n%s", block)
+	}
+
+	empty := validityStore(t, at, nil)
+	got := RenderSessionContextAt(empty, &at)
+	if strings.Contains(got, "Validity judged at") || strings.Contains(got, "withheld") {
+		t.Errorf("a project with no rows at T gained a validity note:\n%s", got)
+	}
+}

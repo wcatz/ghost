@@ -783,9 +783,6 @@ func TestFormatMemoriesAtJudgesValidityAtTheRequestedInstant(t *testing.T) {
 	}
 	result := formatMemoriesAt(mems, at)
 
-	if !strings.Contains(result, "Validity judged at "+at.Format(time.RFC3339)) {
-		t.Errorf("the listing does not say validity was judged at T:\n%s", result)
-	}
 	for _, id := range []string{"`mem2`", "`mem3`"} {
 		if memoryMetaGroup(result, id) != "" {
 			t.Errorf("%s is outside its window at T but is listed:\n%s", id, result)
@@ -2684,5 +2681,43 @@ func TestGhostProjectDelete_DryRunDoesNotNotify(t *testing.T) {
 	case got := <-updated:
 		t.Fatalf("expected no notification on dry-run, got %q", got)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestProjectContextAsOfSaysWhenEveryRowWasWithheldAtT: a block whose every row
+// was out of window at T must not read like a project that held nothing then.
+// The count is the number of rows withheld, and a project with no rows at that
+// instant keeps its current output with no validity note.
+func TestProjectContextAsOfSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
+	_, session := newCapSession(t)
+	const at = "2035-01-01T00:00:00Z"
+	for _, content := range []string{"quokka closed one", "quokka closed two"} {
+		args := map[string]any{
+			"project_id": "test-project", "content": content, "category": "fact",
+			"valid_until": "2034-06-01T00:00:00Z",
+		}
+		if res := callTool(t, session, "ghost_memory_save", args); res.IsError {
+			t.Fatalf("save: %s", resultText(res))
+		}
+	}
+	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": at,
+	}))
+	if strings.Contains(out, "quokka closed") {
+		t.Errorf("a row out of window at T is listed:\n%s", out)
+	}
+	if !strings.Contains(out, "Validity judged at "+at) || !strings.Contains(out, "2 memories were withheld") {
+		t.Errorf("an all-withheld block does not say 2 rows were withheld at T:\n%s", out)
+	}
+	if strings.Count(out, "Validity judged at") != 1 {
+		t.Errorf("the validity note is not stated once at block level:\n%s", out)
+	}
+
+	// No rows at that instant at all: nothing was withheld, so no note.
+	empty := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "test-project", "as_of": asOfToolPast,
+	}))
+	if strings.Contains(empty, "Validity judged at") || strings.Contains(empty, "withheld") {
+		t.Errorf("a project with no rows at T gained a validity note:\n%s", empty)
 	}
 }

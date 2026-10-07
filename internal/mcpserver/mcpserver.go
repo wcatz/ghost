@@ -2140,7 +2140,9 @@ func (s *Server) registerTools() {
 			}
 			// Validity is judged at the requested instant BEFORE the limit, so a
 			// withheld row does not take a slot a valid one should have.
-			live := withholdInvalidAt(set.Live(), *asOf)
+			inScope := set.Live()
+			live := withholdInvalidAt(inScope, *asOf)
+			withheldAtT := len(inScope) - len(live)
 			if len(live) > args.Limit {
 				live = live[:args.Limit]
 			}
@@ -2164,6 +2166,12 @@ func (s *Server) registerTools() {
 			}
 			if note := set.UnknownNote(); note != "" {
 				sb.WriteString("\n" + note + "\n")
+			}
+			// Said once, at block level, and counted rather than inferred: a block
+			// whose every row was out of window at T must not read as a project
+			// that held nothing then. A set with no rows at all says nothing.
+			if len(inScope) > 0 {
+				sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf, withheldAtT) + ")\n")
 			}
 			sb.WriteString("\n(" + memory.AsOfUnversionedNote() + ")\n")
 			return &mcp.CallToolResult{
@@ -4191,14 +4199,13 @@ func truncateUTF8(s string, maxBytes int) string {
 // that instant, which is what ghost_memory_search does when it binds the
 // assembler's clock to as_of: a row whose window had closed or not yet opened at
 // T is withheld (memory.ValidityAt), and a row valid at T is shown as valid at T
-// even if it has expired since. AsOfValidityNote is appended once, below the
-// rows, and only when a row was shown: an empty body is what tells
-// projectContextSection to write no heading at all, so a disclosure appended to
-// an empty listing would print a heading over nothing.
+// even if it has expired since. The disclosure (AsOfValidityNote) is NOT written
+// here: an empty body is what tells projectContextSection to write no heading at
+// all, so a note inside a section body would print a heading over nothing. The
+// caller states it once at block level, with the count of rows withheld.
 func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 	var sb strings.Builder
 	now := time.Now().UTC()
-	shown := false
 	for _, m := range memories {
 		pin := ""
 		if m.Pinned {
@@ -4219,16 +4226,12 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 			}
 			verdict = state
 		}
-		shown = true
 		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
 		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
 			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
 			sourceLabelForMemory(m), quoteData(m.Content))
-	}
-	if asOf != nil && shown {
-		sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf) + ")\n")
 	}
 	return sb.String()
 }
