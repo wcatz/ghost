@@ -24,6 +24,11 @@ import (
 //
 // It is deliberately NOT a second decision path. Nothing reads the trace to
 // decide anything; only explain reads it, and only to report.
+//
+// The store's ranking seam (Candidates) creates the trace for a request whose
+// caller asked for explain, and hands it on in the returned CandidateSet: the
+// rows map becomes CandidateSet.RankFacts and the assembler's projection reads
+// per-candidate facts from there rather than recomputing them.
 type searchTrace struct {
 	// now is the clock the ranking ordered by. Explain reads a row's age and
 	// decay against THIS instant rather than its own, because two clocks in one
@@ -36,27 +41,15 @@ type searchTrace struct {
 	// rows is keyed by memory id. A row is absent from it only when the
 	// ranking path never scored it — the vector floor removed it first, which
 	// is a recorded outcome, not a missing one.
-	rows map[string]*tracedCandidate
-	// keywordOnlyBase says the vector leg contributed nothing to the fused score,
-	// so the base is the UNWEIGHTED keyword term 1/(K+rank+1) rather than a
-	// weighted hybrid sum. It is a fact about the leg rather than about any row, so
-	// it has no per-row home: explain would otherwise call filterVectorFloor a
-	// second time on the same input to learn whether the leg survived at all, which
-	// is the one remaining parallel computation in the file.
-	//
-	// TWO exits set it, for the same reason. searchHybridLegs returns early when
-	// queryVec is nil — no embedder, or an embed failure, which is the common
-	// deployment — and that return happens before any floor is applied, so a
-	// verdict recorded only at the floor is one this path never produces. The
-	// floor site sets it when the floor removed every match. Only searchHybridLegs
-	// writes it, because only it reaches a vector leg; a reader that grows a second
-	// entry point has to stamp it there too, or the flag silently reads false and
-	// the note it drives disappears for that path.
-	keywordOnlyBase bool
+	rows map[string]*RankFact
 }
 
-// tracedCandidate is one candidate's standing as the ranking path left it.
-type tracedCandidate struct {
+// RankFact is one candidate's standing as the ranking path left it. It is the
+// trace's per-row record, exported because the store hands it to the assembler's
+// explain projection in CandidateSet.RankFacts: the projection reads every
+// scoring number from this record rather than recomputing it, so a score it
+// reports is the score the ranking used.
+type RankFact struct {
 	// FTSRank and VectorRank are 0-based within their leg, and -1 when the leg
 	// did not retrieve the row. Rank 0 is a real first place, so an absent leg
 	// must not look like one.
@@ -108,7 +101,7 @@ type tracedCandidate struct {
 	// Decay and AgeDays are recorded for the rows decayRank ordered by. A row
 	// the window cut carries the factor the path WOULD have applied at the
 	// same clock, which is a statement about the row and not about a decision
-	// (see explain.go).
+	// (see Candidates, which fills it for an explain request).
 	Decay, AgeDays float64
 	// SupersedePenalty and NearDuplicatePenalty are the window-scoped counts
 	// demoteResults applied, and SupersededBy / NearDuplicateOf name the
@@ -129,7 +122,7 @@ type tracedCandidate struct {
 // newSearchTrace starts a trace and records the scope keys the narrowing will
 // compare, so the trace is complete before any candidate is scored.
 func newSearchTrace(scope map[string]string) *searchTrace {
-	tr := &searchTrace{rows: map[string]*tracedCandidate{}}
+	tr := &searchTrace{rows: map[string]*RankFact{}}
 	for k := range scope {
 		tr.scopeKeys = append(tr.scopeKeys, k)
 	}
@@ -140,13 +133,13 @@ func newSearchTrace(scope map[string]string) *searchTrace {
 // row returns the trace entry for id, creating it with the sentinels for
 // "this leg did not retrieve the row" (-1), "no demotion was applied" (1.0)
 // and "no scope contradicted this row" (true).
-func (tr *searchTrace) row(id string) *tracedCandidate {
+func (tr *searchTrace) row(id string) *RankFact {
 	if tr == nil {
 		return nil
 	}
 	c, ok := tr.rows[id]
 	if !ok {
-		c = &tracedCandidate{
+		c = &RankFact{
 			FTSRank: -1, VectorRank: -1, VectorScore: -1,
 			StatusFactor: 1.0, ScopeMatched: true,
 		}
@@ -158,7 +151,7 @@ func (tr *searchTrace) row(id string) *tracedCandidate {
 // lookup returns the recorded entry for id, and whether one exists. A missing
 // entry is a real outcome — the row never reached fusion — and callers must
 // distinguish it from a recorded zero.
-func (tr *searchTrace) lookup(id string) (*tracedCandidate, bool) {
+func (tr *searchTrace) lookup(id string) (*RankFact, bool) {
 	if tr == nil {
 		return nil, false
 	}
@@ -177,10 +170,12 @@ func (tr *searchTrace) lookup(id string) (*tracedCandidate, bool) {
 // attribution cap, which is counted the same way for the same reason.
 const maxScopeKeys = 16
 
-// clampScopeKeys bounds how many scope keys one row names and reports how many
-// there really were, so the cut is visible rather than silent.
-func clampScopeKeys(keys []string) ([]string, int) {
-	// The copy is for the same reason clampAttribution makes one: the caller's
+// ClampScopeKeys bounds how many scope keys one row names and reports how many
+// there really were, so the cut is visible rather than silent. Exported because
+// the assembler's explain projection renders the field and must bound it by this
+// rule rather than a copy of it.
+func ClampScopeKeys(keys []string) ([]string, int) {
+	// The copy is for the same reason ClampAttribution makes one: the caller's
 	// slice is the searchTrace's own, so every row in the payload would otherwise
 	// share one backing array.
 	n := min(len(keys), maxScopeKeys)
@@ -189,7 +184,7 @@ func clampScopeKeys(keys []string) ([]string, int) {
 	return out, len(keys)
 }
 
-// clampAttribution bounds how many counterpart ids one row may name. A
+// ClampAttribution bounds how many counterpart ids one row may name. A
 // near-duplicate cluster in a large store can name hundreds, and a supersede
 // chain a dozen; the count beside the list already says how many there are, so
 // cutting the rendered list loses no fact.
@@ -200,7 +195,7 @@ func clampScopeKeys(keys []string) ([]string, int) {
 // to one row's keys in place would silently rewrite every other row's. Copying
 // costs one small allocation per row on a diagnostic path and removes a class of
 // bug that no assertion on the values can catch.
-func clampAttribution(ids []string) []string {
+func ClampAttribution(ids []string) []string {
 	const maxAttributed = 8
 	if len(ids) == 0 {
 		return nil

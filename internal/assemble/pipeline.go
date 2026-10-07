@@ -244,8 +244,9 @@ const maxRenderedConflictPairs = 5
 
 // The cap above bounds Result.Notes only. The trace keeps one note per
 // contradicting edge, so a dense conflict graph is still O(edges) there. That is
-// deliberate for now — the trace exists for diagnosis and nothing projects it in
-// this version — and it is the first thing to revisit when explain does.
+// deliberate for now — the trace exists for diagnosis, and the explain projection
+// reads decisions and signals rather than these per-edge notes — and it is the first
+// thing to revisit if a projection ever renders them.
 
 // runProvenance is stage 4: the weight is pinned and the decision is recorded
 // for every row, so a caller can already see what a future multiplier would act
@@ -635,8 +636,8 @@ func (p *pipeline) notes() []string {
 		// end, so a count placed after them is the first thing dropped under
 		// pressure — and then the answer presents a capped list as the whole
 		// block. A count, not a pointer: the stage record holds every pair, but
-		// nothing projects it to a caller in this version, so promising it would
-		// send an agent looking for something it cannot see.
+		// neither the answer nor the explain payload renders it, so promising it
+		// would send an agent looking for something it cannot see.
 		if held := len(eligible) - maxRenderedConflictPairs; held > 0 {
 			all = append(all, formatNote("%d further contradicting pairs are in this block", held))
 		}

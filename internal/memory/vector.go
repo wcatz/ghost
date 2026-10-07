@@ -426,7 +426,9 @@ type SearchParams struct {
 	// for being global.
 	ProjectID string
 	// trace, when non-nil, receives a per-candidate record of what this ranking
-	// decided. Only ExplainSearchScoped sets it, and only explain reads it, so
+	// decided. The store's ranking seam (Candidates) sets it when the request
+	// asks for explain, and hands it back on the CandidateSet for the explain
+	// projection to read; nothing else sets it, and only explain reads it, so
 	// the production path pays a nil check per stage and allocates nothing.
 	//
 	// It is here, and not an extra argument on every stage, because SearchParams
@@ -492,6 +494,49 @@ func filterVectorFloor(vec []ScoredMemory, floor float32) []ScoredMemory {
 		}
 	}
 	return kept
+}
+
+// stampVectorFloor records the vector floor's per-row verdict in the trace: a
+// row whose VECTOR contribution the floor removed is stamped FloorDropped with
+// the cosine that did it, whether or not the keyword leg also retrieved the
+// row. A dual-leg row goes on to fusion and is scored on its keyword term
+// alone, so without the stamp explain could not tell "your query matched on
+// words but not on meaning" from "the leg never matched" — the two are
+// indistinguishable from a missing vector rank.
+//
+// It is the ONE place the verdict is written, shared by the two ranking paths
+// that apply the floor (searchHybridLegs and the store's candidates path), so
+// a later change to the effective threshold at either site cannot leave explain
+// describing a floor nobody applied.
+//
+// The project travels with the stamp: the row belongs to one whether or not it
+// was eligible, and a floor-dropped row reporting no project at all would be
+// indistinguishable from a row the legs never attributed to one. StatusFactor
+// is deliberately NOT set here. A dual-leg row goes on to fusion and
+// demoteStatus writes the real factor over whatever this left; a row the
+// keyword leg never reached stops with the 1.0 default, which is true of it —
+// no demotion ran on a row nothing scored. Writing a hypothetical factor for
+// the second case would also write one for the first, and it would be a
+// multiplier beside an rrf_score of 0.
+func stampVectorFloor(trace *searchTrace, raw, kept []ScoredMemory, searchProjectID string) {
+	if trace == nil || len(kept) >= len(raw) {
+		return
+	}
+	keptSet := make(map[string]bool, len(kept))
+	for _, v := range kept {
+		keptSet[v.MemoryID] = true
+	}
+	for _, v := range raw {
+		if keptSet[v.MemoryID] {
+			continue
+		}
+		if t := trace.row(v.MemoryID); t != nil {
+			t.FloorDropped = true
+			t.FloorScore = float64(v.Score)
+			t.RowProject = v.ProjectID
+			t.ProjectMatch = searchProjectID == "" || v.ProjectID == searchProjectID
+		}
+	}
 }
 
 // demoteSuperseded reorders results so a superseded memory falls below every
@@ -1110,21 +1155,8 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	legs := hybridLegs{fts: ftsResults}
 
 	// FTS-only is the same selection seam with an empty vector leg. Use an
-	// unweighted keyword score to preserve the historical FTS-only ordering
-	// and explain-mode score contract.
+	// unweighted keyword score to preserve the historical FTS-only ordering.
 	if queryVec == nil {
-		// The verdict is stamped HERE as well as at the floor below, because this
-		// path returns before the floor is ever applied and a verdict recorded only
-		// where the floor runs is a verdict this path never produces. It matters
-		// most here: an absent or failing embedder is the common deployment, and
-		// the note that says rrf_score is the unweighted keyword base is the only
-		// thing telling a reader that a small score is a differently-weighted one
-		// rather than a weak match. Both exits set the same flag for the same
-		// reason — the vector leg contributed nothing to the fused base — so the
-		// reader is told which base it is looking at either way.
-		if p.trace != nil {
-			p.trace.keywordOnlyBase = true
-		}
 		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
 		return final, legs, err
 	}
@@ -1136,56 +1168,9 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	}
 	legs.vec = vecResults
 	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
-	// The floor's own verdict, recorded here because this is the only place it is
-	// applied, and because a verdict recorded only here is one the nil-query-vector
-	// path above never produces. It would otherwise be re-derived in explain by
-	// calling filterVectorFloor a second time on the same input — the parallel
-	// computation this trace exists to remove, since a later change that adjusted
-	// the effective floor HERE would leave explain describing a floor the ranking
-	// no longer applied. The verdict is a fact about the LEG rather than about any
-	// row, so it has no per-row home.
-	//
-	// A candidate the floor removed from the VECTOR leg may still reach fusion on
-	// its keyword term, so nothing downstream can record that its vector
-	// contribution was cut. It is a distinct, diagnosable outcome — "your query
-	// matched the row on words but not closely enough on meaning" — and it is
-	// invisible if only the surviving leg is kept, so the floor's per-row verdict
-	// is stamped here, at the only place that applies it. Explained, not asserted:
-	// explain reports whether the row was floor-dropped rather than inferring it
-	// from a missing vector rank, which is indistinguishable from a leg that never
-	// matched.
-	if p.trace != nil {
-		p.trace.keywordOnlyBase = len(filtered) == 0
-	}
-	if p.trace != nil && len(filtered) < len(vecResults) {
-		kept := make(map[string]bool, len(filtered))
-		for _, v := range filtered {
-			kept[v.MemoryID] = true
-		}
-		for _, v := range vecResults {
-			if kept[v.MemoryID] {
-				continue
-			}
-			if t := p.trace.row(v.MemoryID); t != nil {
-				t.FloorDropped = true
-				t.FloorScore = float64(v.Score)
-				// The project travels with it: the row belongs to one whether or
-				// not it was eligible, and a floor-dropped row reporting no
-				// project at all would be indistinguishable from a row the legs
-				// never attributed to one.
-				//
-				// StatusFactor is deliberately NOT set here. A dual-leg row goes
-				// on to fusion and demoteStatus writes the real factor over
-				// whatever this left; a row the keyword leg never reached stops
-				// here with the 1.0 default, which is true of it — no demotion ran
-				// on a row nothing scored. Writing a hypothetical factor for the
-				// second case would also write one for the first, and it would be
-				// a multiplier beside an rrf_score of 0.
-				t.RowProject = v.ProjectID
-				t.ProjectMatch = p.ProjectID == "" || v.ProjectID == p.ProjectID
-			}
-		}
-	}
+	// The floor's per-row verdict, stamped through the one helper the candidates
+	// path shares, so a trace describes the floor that was applied.
+	stampVectorFloor(p.trace, vecResults, filtered, p.ProjectID)
 
 	// If only FTS worked, return that through the same selection seam.
 	if len(filtered) == 0 {

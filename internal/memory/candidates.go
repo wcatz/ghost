@@ -74,6 +74,30 @@ type CandidateRequest struct {
 	// wider than that, so a predicate can be evaluated over rows the window
 	// would have cut.
 	Fetch Fetch
+	// Explain asks for the retrieval to record the facts that decided it and
+	// carry them back on the CandidateSet — the pre-scope excluded rows, the
+	// vector-floor-dropped rows, the per-candidate ranking facts and the
+	// resolved fusion knobs — so the assembler can render an explanation that
+	// is a projection of THIS ranking rather than a second search.
+	//
+	// It costs nothing when false, and in that shape it is the whole point:
+	// the production path allocates no trace and changes neither its scores
+	// nor its order, byte for byte. Recording happens only here, inside the
+	// store's own ranking seam, so explain cannot drift from the search that
+	// ran — a re-derivation elsewhere would be a second chance to disagree
+	// with it, which is the failure this field exists to remove.
+	//
+	// It is a request, not a knob of SearchParams, because it changes what
+	// the store RETURNS rather than how it ranks: the ranking path is
+	// identical either way, and the trace's stamps land wherever the same
+	// stages already run.
+	//
+	// Explain cannot describe a historical read. The AsOf path keeps its own
+	// row versions and ranks nothing, so there is no ranking to project;
+	// validateCandidateRequest refuses the combination. It likewise demands a
+	// query — a passive retrieval runs no legs and scores no candidate, so
+	// there is nothing to explain.
+	Explain bool
 	// Passive carries the selection policies for an empty query, one per bucket,
 	// and is populated only for passive retrieval. An empty query with NO policy is
 	// refused (ErrPassiveUnsupported) rather than served as an empty set, which
@@ -176,6 +200,65 @@ type CandidateSet struct {
 	// they are counted here because a shorter set that says nothing about the gap
 	// reads as the whole truth. Zero on every current read.
 	Unrecorded int
+
+	// --- explain-only diagnostics. nil/zero unless the request asked for
+	// explain (CandidateRequest.Explain); building them is what that flag
+	// buys, and with it false these fields are never touched, so the plain
+	// retrieval path allocates none of them. They exist so the assembler can
+	// render an explanation that is a PROJECTION of this one ranking —
+	// every row below is a row this retrieval examined or decided over, and
+	// every fact rides on it rather than being recomputed by a second search.
+
+	// Excluded is the pre-scope fused candidate pool the returned set does NOT
+	// carry, in the pool's fused-score order (which Rows is not). It is the
+	// rows scope narrowing removed before window selection, plus the eligible
+	// rows the window and its tail never reached; together with Rows and
+	// FloorDropped it partitions the pool every leg surfaced, so an
+	// explanation can account for every candidate the search saw. A row in it
+	// is explained by the same trace verdict that excluded it: scope_matched
+	// false is the scope complaint, everything else is the result window.
+	Excluded []Memory
+	// FloorDropped is what the vector similarity floor removed from the
+	// VECTOR leg without the keyword leg retrieving the row either — the
+	// candidates the floor cut out of the retrieval entirely, in the raw
+	// vector-leg order the floor saw them. (A dual-leg row the floor cut from
+	// the vector side still reaches fusion on its keyword term and so lives
+	// in Rows or Excluded, with its floor_dropped fact on the trace.) It is
+	// why "your query matched nothing strongly enough" is reported rather
+	// than read as a candidate that never existed. Hydrated, as Rows and
+	// Excluded are, on the same snapshot as the rest of the read.
+	FloorDropped []Memory
+	// RankFacts is the ranking path's own per-candidate record, keyed by
+	// memory id, covering every row in Rows, Excluded and FloorDropped. The
+	// explain projection reads every scoring fact from it — leg ranks, the
+	// pre-status fused base, status factor, scope verdict, reservation
+	// exchange, decay, floor and window-scoped penalties — so the numbers it
+	// reports are the numbers that ranked, not a re-computation. A missing
+	// entry is a row the ranking genuinely never scored.
+	RankFacts map[string]*RankFact
+	// ExplainKnobs is the resolved fusion configuration this ranking ran
+	// under, so the projection can name what the scores mean without
+	// re-deriving the floor or the weights.
+	ExplainKnobs ExplainKnobs
+	// floorDroppedIDs holds the vector-only floor-dropped ids in raw leg
+	// order while the retrieval runs; Candidates hydrates them into
+	// FloorDropped once the read is settled. Unexported because it is
+	// intermediate state, not a fact a caller can act on.
+	floorDroppedIDs []string
+}
+
+// ExplainKnobs is the resolved fusion configuration one ranking ran under. It is
+// carried on the CandidateSet so the explain projection can name what a score
+// MEANS without re-deriving it: every fused base is the sum, over the legs that
+// retrieved the row, of weight/(RRFK+rank+1), with FTSWeight on the keyword leg
+// and VecWeight on the vector leg, and VectorFloor is the cosine the vector leg
+// was cut on. They are the values the fusion and the floor READ, copied from the
+// parameters the ranking ran with, so a number reported against them is the
+// number that decided.
+type ExplainKnobs struct {
+	RRFK                 int
+	FTSWeight, VecWeight float64
+	VectorFloor          float64
 }
 
 // Candidate is one hydrated row with the scoring facts fusion produced for it.
@@ -398,6 +481,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		// not leave an arm holding a value it never compared.
 		return cand.candidatesPassive(ctx, req, set)
 	}
+	// The trace is created before the legs run, so every stamp the
+	// ranking stages write lands in it: the leg ranks in fusion, the scope
+	// verdict in narrowing (for the DROPPED rows too), the reservation
+	// exchange in window selection, the factor and clock in decay, the floor
+	// verdict in the legs, and the penalty counts with their counterparts in
+	// both demotions. Only an explain request pays for it; a nil trace costs
+	// the stages one nil check and allocates nothing, which is what keeps the
+	// production path byte-identical with explain off.
+	if req.Explain {
+		p.trace = newSearchTrace(req.Scope)
+	}
+
 	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
 	// A leg the condition made applicable but the request could not run (a
 	// hybrid search with no query vector) is a skip, not a failure, so it does
@@ -406,9 +501,23 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		return nil, err
 	}
 
-	pool := scopeEligiblePool(fuseCandidatePool(fts.rows, vec.rows, p), p)
+	fused := fuseCandidatePool(fts.rows, vec.rows, p)
+	var preScope []string
+	if req.Explain {
+		// The pool's fused-score order, captured BEFORE scope narrowing
+		// removes the out-of-scope rows: the pre-scope exclusions are reported
+		// in this order because it is the order this ranking actually fused,
+		// not the order the survivors came back in.
+		preScope = poolIDsOf(fused)
+	}
+	pool := scopeEligiblePool(fused, p)
 	if len(pool) == 0 {
 		set.EdgesStatus = EdgeStatus{Status: edgesUnavailable}
+		if req.Explain {
+			if err := cand.fillExplain(ctx, set, req, p, preScope); err != nil {
+				return nil, err
+			}
+		}
 		return set, nil
 	}
 
@@ -443,6 +552,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	set.Rows = rows
 	set.Widened = len(rows) > req.Fetch.Limit
+
+	// The explain fields are filled next, from the same snapshot the ranking
+	// read: the excluded and floor-dropped rows are hydrated here, and the
+	// ranking facts were already stamped by the stages and are carried over
+	// without re-derivation. Distinct from the edge and evidence reads below,
+	// which describe the returned rows; the explain buckets are not part of
+	// them because no caller decides or reports on them past the projection.
+	if req.Explain {
+		if err := cand.fillExplain(ctx, set, req, p, preScope); err != nil {
+			return nil, err
+		}
+	}
 
 	// One id scope for the two reads that need one: the edge load and the evidence
 	// counts ask about the same rows, and edgeScopeIDs is the statement of which
@@ -528,6 +649,17 @@ func validateCandidateRequest(req CandidateRequest) error {
 		if req.AsOf.IsZero() {
 			return errors.New("candidates: AsOf is required to name an instant; the zero time is not one")
 		}
+		if req.Explain {
+			// Refused rather than served with the explain fields silently left
+			// empty. An explanation is a projection of the CURRENT ranking: the
+			// trace records what the ranking did, and a historical read ranks no
+			// current candidate at all — it selects among recorded versions the
+			// scoring path never saw. The assembler refuses the combination
+			// before reaching the store; this is the defence in depth for the
+			// callers that reach Candidates directly.
+			return errors.New("candidates: explain is a projection of the current ranking and cannot describe a " +
+				"historical (as_of) read, whose versions were never ranked — ask for one or the other")
+		}
 		if req.Query == "" {
 			// Refused rather than routed to the historical path, which would
 			// silently DISCARD the passive policies and answer the question with a
@@ -562,6 +694,14 @@ func validateCandidateRequest(req CandidateRequest) error {
 			"fusion path, which reads no policy and sizes its own window — a passive request is the shape that uses them")
 	}
 	if req.Query == "" {
+		if req.Explain {
+			// A passive retrieval runs no legs and scores no candidate, so an
+			// explanation of its ranking has nothing to explain. Refused rather
+			// than silently served with the explain fields empty: serving it
+			// would let a caller believe the returned rows carry ranking facts
+			// that the retrieval never computed.
+			return errors.New("candidates: explain requires a query: a passive retrieval scores no candidate, so there is no ranking to explain")
+		}
 		// A passive request is sized by its policies rather than by Fetch.Limit,
 		// so the window check does not apply to it. What does apply is the
 		// per-policy bound: a passive fetch runs at every session start, and a
@@ -682,6 +822,34 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 				vec.index[sm.MemoryID] = candidateLegFact{rank: i, score: float64(sm.Score)}
 			}
 			vec.rows = kept
+			if req.Explain {
+				// The floor's per-row verdict lands in the trace here, from the
+				// one helper both ranking paths share, so explain reads the
+				// floor the ranking applied rather than re-applying it. The
+				// vector-only drops are also collected for the explain payload
+				// in raw leg order: a candidate the floor cut from the vector
+				// side that the keyword leg never retrieved is out of the
+				// retrieval entirely, and that is a distinct, diagnosable
+				// outcome the survivor list would otherwise hide — "your query
+				// matched no memory strongly enough" must not read as "no such
+				// candidate existed".
+				stampVectorFloor(p.trace, raw, kept, p.ProjectID)
+				if len(kept) < len(raw) {
+					keptSet := make(map[string]bool, len(kept))
+					for _, v := range kept {
+						keptSet[v.MemoryID] = true
+					}
+					for _, v := range raw {
+						if keptSet[v.MemoryID] {
+							continue
+						}
+						if _, inFTS := out.index[v.MemoryID]; inFTS {
+							continue
+						}
+						set.floorDroppedIDs = append(set.floorDroppedIDs, v.MemoryID)
+					}
+				}
+			}
 		}
 	}
 	set.Legs["vector"] = vecStatus
@@ -696,6 +864,101 @@ func poolIDsOf(pool []*hybridCandidate) []string {
 		ids[i] = c.id
 	}
 	return ids
+}
+
+// fillExplain builds the explain-only fields on a candidate set the caller
+// asked to explain. It runs after Rows is final, or instead of window
+// selection when scope narrowed the pool to nothing, and it hydrates the two
+// excluded buckets over the SAME snapshot the ranking read — the explain
+// payload must describe the same database state as the search it explains.
+//
+// The ranking facts are not read at all: the stages stamped them into the
+// trace while they ran, and they are carried over verbatim. An explanation
+// built by re-computing any of those numbers would be a second chance to
+// disagree with the ranking, which is the failure this seam exists to remove.
+func (s *Store) fillExplain(ctx context.Context, set *CandidateSet, req CandidateRequest, p SearchParams, preScope []string) error {
+	// Excluded lives in the pre-scope pool the returned set does not carry,
+	// in fused order: scope-narrowed rows first (in the order the pool fused),
+	// then the eligible rows the window and its tail never reached. The
+	// per-row verdict that decides which reason it carries is on the trace.
+	inRows := make(map[string]bool, len(set.Rows))
+	for _, c := range set.Rows {
+		inRows[c.ID] = true
+	}
+	excludedIDs := make([]string, 0, len(preScope))
+	for _, id := range preScope {
+		if !inRows[id] {
+			excludedIDs = append(excludedIDs, id)
+		}
+	}
+	excluded, err := s.GetByIDs(ctx, excludedIDs)
+	if err != nil {
+		return fmt.Errorf("candidates: hydrate explain exclusions: %w", err)
+	}
+	set.Excluded = orderByIDs(excluded, excludedIDs)
+
+	dropped, err := s.GetByIDs(ctx, set.floorDroppedIDs)
+	if err != nil {
+		return fmt.Errorf("candidates: hydrate explain floor drops: %w", err)
+	}
+	set.FloorDropped = orderByIDs(dropped, set.floorDroppedIDs)
+
+	// decayRank orders only the window, so a row it never ordered carries no
+	// recorded factor (DecayFactor has a 0.15 floor, so a recorded 0.0 is
+	// unambiguously "never ordered"). What it carries instead is the factor it
+	// WOULD have been ordered by: the tail row's own candidate fact, which
+	// candidateOf computed at the ranking's clock, and for a row that never
+	// reached a window the same function over the same clock. It is the one
+	// documented exception to "every number is the one the ranking used" — a
+	// field is better than a gap, and the value is the one the ranking would use.
+	for _, c := range set.Rows {
+		if t := p.trace.row(c.ID); t != nil && t.Decay == 0 {
+			t.Decay, t.AgeDays = c.Decay, c.AgeDays
+		}
+	}
+	for _, bucket := range [][]Memory{set.Excluded, set.FloorDropped} {
+		for _, m := range bucket {
+			if t := p.trace.row(m.ID); t != nil && t.Decay == 0 {
+				t.AgeDays = ageDays(m.CreatedAt, req.Now)
+				t.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, t.AgeDays)
+			}
+		}
+	}
+
+	// The trace IS the record of the ranking: every per-candidate fact the
+	// projection will read was stamped here, at the stage that decided it, so
+	// the projection reads the same numbers the ranking used by construction.
+	set.RankFacts = p.trace.rows
+	// Knobs describe the ranking, so they are the parameters the ranking ran
+	// with — the floor the store actually applied and the weights fusion read —
+	// copied rather than re-resolved.
+	set.ExplainKnobs = ExplainKnobs{
+		RRFK:        p.RRFK,
+		FTSWeight:   p.FTSWeight,
+		VecWeight:   p.VecWeight,
+		VectorFloor: float64(p.MinSimilarity),
+	}
+	return nil
+}
+
+// orderByIDs reorders hydrated rows to match an id list. GetByIDs does not
+// preserve order, and the explain buckets are reported in the order the
+// retrieval saw each row — fused order for the pool, raw leg order for the
+// floor drops — so the two are reconciled here. A row the snapshot no longer
+// holds is absent from the result, exactly as if it had never been a
+// candidate.
+func orderByIDs(hydrated []Memory, ids []string) []Memory {
+	byID := make(map[string]Memory, len(hydrated))
+	for _, m := range hydrated {
+		byID[m.ID] = m
+	}
+	out := make([]Memory, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // hydrateWindow materialises the selected window, falling back to the wider

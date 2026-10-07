@@ -191,9 +191,9 @@ type Store struct {
 	// the identity rather than being a single flag because a long-lived MCP
 	// server can reconfigure twice in one session; the second retirement is a
 	// new diagnosis with its own stored_identity and must warn again. It is a
-	// pointer so ExplainSearch can hand its trace store the same gate (see
-	// explain.go): an explain run must not spend a second warning on rows the
-	// real search already reported.
+	// pointer so the snapshot store Candidates builds shares the same gate: a
+	// retrieval must not spend a second warning on rows the real search already
+	// reported.
 	foreignWarned *foreignWarnGate
 
 	// scratch recycles the per-search corpus snapshot a vector search copies
@@ -202,8 +202,7 @@ type Store struct {
 	// time instead of allocating the whole corpus again per query — see #556.
 	//
 	// A pointer, not a value, because a Store literal standing in for another
-	// store — the snapshot Candidates builds, the trace store ExplainSearch
-	// builds — must share it rather than bring its own. A sync.Pool must not be
+	// store — the snapshot Candidates builds — must share it rather than bring its own. A sync.Pool must not be
 	// copied after use, and a pool of its own on a literal is a pool of one that is
 	// garbage the moment the literal goes out of scope: the corpus snapshot would
 	// be allocated per query and dropped with the store, which is the cost this

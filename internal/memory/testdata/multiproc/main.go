@@ -23,8 +23,8 @@
 //	         hooks and `ghost obsidian` read through.
 //	maint    a lifecycle writer: one ApplyReflection batch, the single
 //	         transaction a reflect pass performs, plus a maintenance_runs row.
-//	snapshot a long read transaction, opened the way ExplainSearchScoped opens
-//	         its diagnostic snapshot, held across the batch commit and required
+//	snapshot a long read transaction, opened the way Candidates opens
+//	         its read snapshot, held across the batch commit and required
 //	         to see the pre-batch state throughout.
 //	poller   a fresh-snapshot sampler that reads the batch's row counts in a
 //	         tight loop across the commit and records every distinct state it
@@ -1001,8 +1001,8 @@ func runMaintenance(ctx context.Context, o options, rep *report, b barriers) err
 // runSnapshot holds a read transaction across the batch commit and requires the
 // pre-batch state to survive it.
 //
-// The transaction is opened exactly the way ExplainSearchScoped opens its
-// diagnostic snapshot — BeginTx with ReadOnly — because that is the production
+// The transaction is opened exactly the way Candidates opens its
+// read snapshot — BeginTx with ReadOnly — because that is the production
 // shape: modernc.org/sqlite issues a plain BEGIN for a read-only transaction
 // even under _txlock=immediate, so this is a WAL read snapshot that does not
 // block the writer, which is the property under test. A write transaction here
