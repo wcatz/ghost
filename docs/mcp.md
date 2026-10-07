@@ -276,10 +276,13 @@ honour it, and a second copy of the explanation reads as a stray duplicate rathe
 than as emphasis.
 
 **Every memory is one physical line.** A line break in stored text (LF, CR, CRLF,
-VT, FF, U+0085, U+2028, U+2029) is printed as `⏎` inside the delimiters, so a
+VT, FF, FS/GS/RS (U+001C to U+001E), U+0085, U+2028, U+2029) is printed as `⏎` inside the delimiters, so a
 content, `agent=` or `source_ref=` value holding a newline followed by
 `- [decision] …` cannot print a second line shaped like a memory line for a reader
-that goes line by line. The stored text is unchanged; only its display is folded.
+that goes line by line. The stored text is unchanged; only its display is folded. A stored literal `⏎`
+renders the same as a folded break, which is the price of a one-way display fold.
+The single-line previews (`ghost_resolve`, `ghost_resolve_mark`, the prune and
+lifecycle listings) cut at the same set of breaks.
 The `source=` origin label is printed as a quoted token when it is not a plain
 identifier, not verbatim.
 

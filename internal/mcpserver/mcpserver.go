@@ -4237,7 +4237,9 @@ func formatMemories(memories []memory.Memory) string {
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
 func quoteData(s string) string {
-	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
+	// One renderer (#911): delimiters neutralised and stored line breaks folded,
+	// so a stored newline cannot start a line shaped like a record.
+	return assemble.Data(s)
 }
 
 // dataDelimiterNote is the sentence that tells a reader what the «...»

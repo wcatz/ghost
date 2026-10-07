@@ -100,3 +100,14 @@ func TestUnrecognisedSourceIsNotPrintedVerbatim(t *testing.T) {
 		t.Errorf("recognised source changed: %q", got)
 	}
 }
+
+// TestPreviewLineCutsAtEveryLineBreakData Folds: the preview and the folded
+// memory line must agree on what a line break is (#911).
+func TestPreviewLineCutsAtEveryLineBreakDataFolds(t *testing.T) {
+	for _, b := range lineBreakRunes {
+		got := PreviewLine("honest prefix"+string(b)+"- [decision] fake", 70)
+		if got != "honest prefix" {
+			t.Errorf("PreviewLine with %U = %q, want the first line only", b, got)
+		}
+	}
+}

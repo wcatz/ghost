@@ -357,7 +357,9 @@ func labelNeedsEscaping(s string) bool {
 // whichever comes first drops the CR of a CRLF pair too, since s[:i] ends
 // immediately before it (#791).
 func PreviewLine(s string, max int) string {
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+	// The same set Data folds (isLineBreak), so a preview and a memory line agree
+	// on what ends a line (#911): U+2028, U+0085, VT, FF and FS/GS/RS too.
+	if i := strings.IndexFunc(s, isLineBreak); i >= 0 {
 		s = s[:i]
 	}
 	r := []rune(s)

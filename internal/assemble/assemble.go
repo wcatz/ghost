@@ -49,7 +49,11 @@ const (
 )
 
 // Slice is a per-bucket membership budget. MaxBytes bounds item content and
-// never includes response framing.
+// never includes response framing. It bounds the RAW, pre-fold content: the
+// line-break fold (Data, #911) is a display step after selection, so a rendered
+// line can differ in length from the bytes the budget counted. The same holds
+// for the agent and source_ref display caps (MaxRenderedAgentLen,
+// MaxRenderedSourceRefLen), which are applied to the raw value before folding.
 //
 // The second half of the struct is the RETRIEVAL policy for the bucket, and it
 // is here rather than in a caller because a passive retrieval has no query to
