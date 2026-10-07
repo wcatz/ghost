@@ -52,8 +52,13 @@ func PassiveInstant() time.Time { return ContextInstant() }
 
 // The caps each surface is measured against, stated here only to compute the
 // budget-use figure. They are NOT what produces the blocks — the production
-// budgets do — and TestPassiveCapsAreTheOnesTheSurfacesUse fails if these drift
-// from them, which a copied constant would otherwise do silently.
+// budgets do. They are transcriptions of unexported production constants, so
+// nothing compares them to those values directly. checkPassiveBudgets (the
+// "budgets" subtest of TestPassiveBaseline) holds part of it: it fails if the
+// session block's project and global row counts, the tool's total or the
+// resource's global count stop equalling the caps below. It does NOT catch
+// passiveResourceCap shrinking, or a cap change that leaves those rendered
+// counts equal; a change to a production cap should update these by hand.
 const (
 	passiveSessionProjectCap = 15 // mcpinit sessionMemoriesCap
 	passiveSessionGlobalCap  = 8  // mcpinit globalsCap
