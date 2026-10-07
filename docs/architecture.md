@@ -360,26 +360,49 @@ their two verdicts separate.
 A cross-project
 search leaves `_global` undemoted (there is no project whose own memories it
 could be padding), and explain mode reports the factor per row
-as `status_factor`, computed by the same `statusDemotionFactor` the ranking
-used.
+as `status_factor`, the one `statusDemotionFactor` recorded when the ranking
+used it.
 
 ## Explain is a record of the ranking, not a second one
 
 `ghost_memory_search` with `explain:true` answers "why did I get this memory"
-by reporting what the ranking path did to each candidate. Every number in the
-payload is read from a trace the ranking stages write as they run
-(`internal/memory/ranktrace.go`), carried on `SearchParams.trace` — an
-unexported pointer that is nil in every production call, so a normal search pays
-a nil check per stage and allocates nothing.
+by projecting the run that produced the answer. The handler builds ONE
+`assemble.Request`, sets `Explain` on it, and calls `assemble.Run` once; the
+formatted answer and the payload are two readings of that one `Result`
+([#898](https://github.com/wcatz/ghost/issues/898), closing the deferral to
+[#583](https://github.com/wcatz/ghost/issues/583) and
+[#571](https://github.com/wcatz/ghost/issues/571)). Before it, explain called a
+second ranking diagnosis (`Store.ExplainSearchScoped`) that was not the
+assembler: it marked an expired row included, applied no category or retention
+filter, and had no budget, so it could report a row as included that the
+formatted answer had withheld. That function is gone; nothing else reached it.
 
-This is the whole design. Before it, explain rebuilt the fused score by summing
-the leg weights itself, rebuilt the status factor from the hydrated row, rebuilt
-the scope verdict with a second `ScopeMatches` call, and rebuilt both
-window-scoped penalties with a second copy of both queries. Each of those is a
-parallel re-derivation: it agrees with the ranking only until somebody edits the
-ranking, and then an agent debugging a bad result is handed a diagnosis of a
-search that did not happen. The trace is a byproduct, not a decision path —
-nothing reads it to decide anything.
+Two things make the projection honest.
+
+**Membership is the answer's.** A row is `included` exactly when it is in
+`Result.Items`, after the validity stage, the category, retention and scope
+predicates, the item budget and the response-fit pass against the byte cap. An
+excluded row carries the reason the stage that withheld it gave (`p.dropped`), or,
+for a candidate the retriever saw and did not return, the ranking fact that left it
+out: the vector floor, scope narrowing, or the retrieval window. Rows come from the
+candidate set's own account of what the ranking saw: `Rows` (the window and its
+tail), `Excluded` (the pool candidates the returned set does not carry, in fused
+order) and `FloorDropped` (the candidates the vector floor removed outright).
+
+**Every ranking number is recorded where it is computed.** Asked to explain,
+`Store.Candidates` creates the ranking's trace (`internal/memory/ranktrace.go`,
+carried on `SearchParams.trace`, an unexported pointer that is nil on every
+request that did not ask) before the legs run, and hands the per-candidate
+`RankFact` map and the fusion knobs back on the `CandidateSet`. The flag is a
+request to RECORD: it changes what the retriever returns and nothing about how it
+ranks, scopes or windows, and
+`TestCandidatesExplainChangesNothingAboutTheRetrieval` holds the rows, their
+order and scores, the leg statuses and the edges equal with it on and off. The
+assembler adds the facts only it knows: the validity state at the run's clock, the
+scope verdict its predicate stage reached, and the weight its provenance stage
+pinned. The trace is a byproduct, not a decision path: nothing reads it to decide
+anything, and a projection that re-derived a number would be a second chance to
+disagree with the ranking.
 
 Which stage records what:
 
@@ -389,49 +412,69 @@ Which stage records what:
 | `demoteStatus` | the fused base and the status factor — the two sides of the one multiplication, so a reader can perform it |
 | `scopeEligiblePool` | the scope verdict, for the dropped candidates as well as the survivors |
 | `selectWindow` | the keyword reservation, naming both the promoted row and the row whose slot it took |
-| `decayRank` | the decay factor, the age, and the clock it was measured against |
-| `searchHybridLegs` | the vector floor's verdict: per-candidate, which vector contribution it cut, plus the leg-level fact that the floor let no match through at all |
+| `decayRank` | the decay factor and the age at the ranking's own clock, for the rows it orders |
+| `Candidates` (explain request) | the factor a row `decayRank` never ordered (the window's tail, the excluded pool, the floor drops) would have carried, at the request's own clock |
+| `runCandidateLegs` | the vector floor's per-candidate verdict (which vector contribution it cut, and the cosine), and the candidates only the floor removed |
 | `supersedeVerdicts` / `nearDuplicateVerdicts` | the penalty count and the id of the memory that decided it |
+| `assemble` validity, predicates, provenance | the validity state, the scope verdict, the provenance weight and the two contributions, per row |
 
 Recording the scope verdict inside `scopeEligiblePool` — for the rows it drops as
 well as the rows it keeps — is the structural fix for [#571](https://github.com/wcatz/ghost/issues/571),
 where explain reported rows the tool would exclude because the filter ran after
 the ranking had already described them. There is no longer a second place that
-decides whether a row is in scope.
+decides whether a row is in scope. The two penalty functions each return the count
+and the counterpart ids from ONE edge read, so the id explain attributes a demotion
+to is the id the demotion actually chose.
 
-The two penalty functions each return the count and the counterpart ids from ONE
-edge read, so the id explain attributes a demotion to is the id the demotion
-actually chose; deciding the loser twice is how an explanation ends up
-contradicting the order it is explaining.
+**Every stored string is rendered as the formatted answer renders it.** Content is
+`assemble.Data` over its 120-rune snippet; ids, the project, scope keys and
+values, the keyword-reservation and demotion counterparts and a leg's error text go
+through `assemble.Token` or `assemble.Data`. The payload is JSON, which escapes a
+newline and a quote but not « or », and an agent reads the string rather than the
+bytes, so a stored delimiter or forged verdict line cannot reconstruct itself in it.
+
+**One request, no second budget.** `explain` shares the answer's budget, filters,
+clock and byte cap. It is refused with `as_of`: an `as_of` read selects among
+recorded versions and ranks nothing, so there is no ranking to project, and
+answering it with the current ranking would be a payload that cannot be told from a
+historical one. It is refused without a query for the same reason (a passive
+retrieval scores no candidate). An explain call writes **no retrieval record**: the
+record counts answers delivered to a caller, and an explanation is a diagnostic of
+one, which also keeps the audit's denominator what it was before explain went
+through `Run`. A retrieval leg that failed while another answered is reported in the payload's
+notes rather than converted to an error, because the caller asked for the diagnosis
+of this run; a run in which every applicable leg failed is still the retrieval error
+the formatted path returns, because nothing was searched.
 
 ### Signals the ranking does not apply
 
-Four fields report a contribution the search ranking does not act on:
-`confidence_contribution`, `provenance_contribution` and `validity_penalty` are
-`0`, and `provenance_weight` is `"off"` — a multiplier that does not exist
-reported as `1.0` would read as "weighed and found neutral". Beside them,
-`confidence`, `provenance` and `validity_state` report the row's own stored
-values, which is a different thing: those are readable, not applied. One note per
-payload says which is which.
+Fields that report a contribution the ranking does not act on say so with a zero
+rather than an invented value. `confidence_contribution`,
+`provenance_contribution` and `validity_penalty` are `0`, read from the signals the
+assembler's stages recorded. `provenance_weight` is `"off"`: stage 4 pins an inert
+`1.0` that no score is multiplied by, and publishing it would read as "weighed and
+found neutral". Beside them, `confidence`, `provenance` and `validity_state` report the
+row's own stored values, which is a different thing: those are readable, not
+applied. One note per payload says which is which.
 
-That is a deliberate choice, not a gap. A multiplier that does not exist reported
-as `1.0` reads as "provenance was weighed and found neutral", and a contribution
-invented to fill a field is a ranking factor nobody measured. Validity is the
-clearest case: the search ranking does not read validity at all, so an expired
-row is returned like any other and the state is the useful thing to report; the
-context assembler is what drops such a row, and it DROPS it rather than ranking
-it lower, which is why `validity_penalty` is 0 rather than a fraction. A
-multiplier here needs a measured threshold first, the same bar the evidence
-weight cleared before it shipped.
+That is a deliberate choice, not a gap. A contribution invented to fill a field is
+a ranking factor nobody measured. Validity is the clearest case: the assembler's
+validity stage DROPS an expired or not-yet-valid row rather than ranking it lower,
+so such a row is excluded with its reason and `validity_penalty` is 0 rather than a
+fraction. A multiplier here needs a measured threshold first, the same bar the
+evidence weight cleared before it shipped. The validity state is read through
+`memory.ValidityState`, the one rule in the tree.
 
-The validity state itself is read through `memory.ValidityState`, the one rule in
-the tree. `internal/assemble` delegates to it rather than keeping its own copy:
-a row that is `valid` in an explanation and `expired` in an assembled block is
-the #571 class of bug one layer up.
+`rrf_score` is the fused base before status demotion: the sum, over the legs that
+retrieved the row, of `weight/(RRFK+rank+1)`, with the weights and the floor the
+ranking ran with named in a note (`CandidateSet.ExplainKnobs`, copied from the
+parameters, not re-resolved). A request with no usable vector leg fuses with the
+configured keyword weight, which is what the answer was ranked on.
 
 ### Size budget
 
-An explanation is bounded at 150 CANDIDATE rows (`explainMaxRows`) — the answer is
+An explanation is bounded at 150 CANDIDATE rows (`memory.ExplainMaxRows`) and each
+content snippet at 120 runes (`memory.ExplainSnippetRunes`) — the answer is
 not part of the budget, because a caller that asked for a window needs it back. The
 candidate set is the
 union of both legs' results, so it grows with the caller's limit rather than with
@@ -489,8 +532,8 @@ absence for an eligible row that was retrieved but not selected. The hydration
 backfill after the cut draws from that same narrowed pool, so a row that
 disappears between the leg queries and hydration is replaced by the next
 strongest *in-scope* candidate rather than shortening the result. Explain
-mode calls the same scoped selection entry point, so its included rows and
-scope-exclusion reasons describe the store result rather than an unscoped
+mode is a reading of the same run, so its included rows and
+scope-exclusion reasons describe the answer rather than an unscoped
 ranking. Ordering is deterministic (ties broken by ID), because the demotion
 penalties applied downstream depend on order.
 
@@ -1116,7 +1159,7 @@ table a later migration has not created yet — answers an `as_of` read in full
 | | current | `as_of` |
 |---|---|---|
 | keyword leg | FTS5 over `memories_fts` | term match over the versions' own text — `memories_fts` holds current content only |
-| vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded, and so is `explain` with `as_of` (`explain` is the store's `ExplainSearchScoped`, a diagnosis of the current ranking, and it runs before the assembler — so a historical request would otherwise have come back as a present-day payload with nothing to say so). The two refusals live at different layers, and the difference matters to anyone auditing the contract: the `explain` one is on an input the tool accepts and is **advertised in the tool's own `as_of` and `explain` argument descriptions**, while the `vector_only` one is a store-level guard on `CandidateRequest.Condition` — a condition `ghost_memory_search` never sets, because its handler hardcodes `Condition: assemble.CondHybrid`. The tool's published schema therefore has no argument that can trigger it |
+| vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded, and so is `explain` with `as_of` (`explain` is a projection of the current ranking, and an `as_of` read ranks nothing — so a historical request would otherwise have come back as a present-day payload with nothing to say so; the handler refuses the pair with a message naming both, and `assemble.Run` and `Store.Candidates` refuse it too, as defence in depth for a caller that reaches them directly). The two refusals live at different layers, and the difference matters to anyone auditing the contract: the `explain` one is on an input the tool accepts and is **advertised in the tool's own `as_of` and `explain` argument descriptions**, while the `vector_only` one is a store-level guard on `CandidateRequest.Condition` — a condition `ghost_memory_search` never sets, because its handler hardcodes `Condition: assemble.CondHybrid`. The tool's published schema therefore has no argument that can trigger it |
 | ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order. The window and the tail are cut the way the current path cuts them, tail included, so a set is at most about twice the window however many versions matched |
 | link graph | supersede and near-duplicate demotion, `contradicts` edges | **not read** — `memory_links` records when an edge was invalidated, never what the graph looked like at T. The supersede demotion uses the recorded sequence instead, and the edge status is `not_applicable` so the conflict stage makes no claim in either direction |
 | evidence counts (`memory_provenance`, v18) | read on the same snapshot as the rows, recorded in the trace | **not read** — an evidence record is one *observation* of a memory, not a version of it, so nothing in that table can be placed at an instant and a count taken now would be a present-day claim about a past memory. The counts therefore stay zero, and a zero renders as "no recorded evidence", which is why the `as_of` disclosure says the counts were not read rather than leaving that phrase to stand as a claim |
@@ -1178,9 +1221,9 @@ process that reconfigures twice warns about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it
-produces becomes a `related` edge or a `supersedes` candidate. The derived store
-`ExplainSearch` runs on inherits the identity too, or the trace would report a
-ranking the search did not produce. A retired vector never hides its memory: the
+produces becomes a `related` edge or a `supersedes` candidate. The derived snapshot store
+`Candidates` runs on inherits the identity too, or an explain request's recorded
+facts would describe a ranking the search did not produce. A retired vector never hides its memory: the
 text stays in the keyword leg until the row is rewritten.
 
 ### Evidence provenance
@@ -1397,7 +1440,7 @@ in a caller is a second answer to "which columns does this store have".
 
 A reader that is *handed ids* takes the protection from its caller instead, which is
 what `DemotionPenalties` already did and what `SupersedePenalties` does now: both
-demotion lookups are called on a read-only handle (`GetTopMemories`, `explain`, and
+demotion lookups are called on a read-only handle (`GetTopMemories`, the `Candidates` snapshot an explain request records from, and
 the assembler's near-duplicate stage over a passive bucket), so a statement naming
 `target_mem.retention` fails in full —
 a superseded memory outranks its replacement and a spurious diagnostic reaches stderr
@@ -1525,9 +1568,11 @@ Axis interaction rules:
 > ([#897](https://github.com/wcatz/ghost/issues/897)). It therefore renders and applies
 > `memories.scope` from the shared label and the shared rule
 > ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
-> the conflict and diversity stages are pass-throughs, and `explain: true` still
-> calls the store's own diagnosis rather than projecting the assembler's trace
-> ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
+> the conflict and diversity stages are pass-throughs. (`explain: true` is no
+> longer on that list: it is a projection of the same `assemble.Run` as the
+> formatted answer
+> ([#898](https://github.com/wcatz/ghost/issues/898), which closed the deferral to
+> [#583](https://github.com/wcatz/ghost/issues/583) and [#571](https://github.com/wcatz/ghost/issues/571)).) The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
 
 What exists now:
@@ -1774,7 +1819,8 @@ What exists now:
   a query, which is the shape that already widens for it.
 - **The trace is recorded unconditionally**, with per-stage counts, dropped ids,
   per-row decisions and the exact floors that were evaluated. `explain: true`
-  does not read it yet.
+  projects it, together with the per-candidate ranking facts the retriever records
+  when asked (see "Explain is a record of the ranking").
 - **Abstention is derived, and it is an outcome rather than an empty list**
   ([#580](https://github.com/wcatz/ghost/issues/580)). Every block carries
   `answerable`, `weak` or `empty` with a reason from a closed vocabulary, and
@@ -1915,7 +1961,7 @@ Rules the pipeline must hold:
   same four in the same order), so what those moves changed was the selection and
   the stages rather than the rendering — which is why their goldens are
   byte-identical while their one behavioural difference is not in them at all.
-- **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
+- **The trace is the explain payload.** `explain:true` ([#898](https://github.com/wcatz/ghost/issues/898), after [#583](https://github.com/wcatz/ghost/issues/583)) is a projection of the same `Run` the formatted answer comes from, so explain and the answer cannot disagree about what a row was or why it was withheld.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
 - **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
 - **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
@@ -1966,7 +2012,7 @@ What it asserts, beyond "nothing crashed":
 - the write-lock distributions, per write path, reported rather than gated. Every child measures its own store's write transactions and the parent prints p50/p99/max of the hold and of the wait, each hold beside the budget it would be read against (a fraction of the busy timeout the contract's writers actually got, read back from a live connection). Hold and wait are the two halves of #671 and they mean opposite things: the hold is how long the run made every other writer wait, the wait is how long the run was made to wait, and the failure was a large wait beside a small hold. These are REPORTED and not asserted on, because a hold is wall-clock time for a transaction that does real work and scales with how loaded the machine is — the same fleet measured a save's median hold at 1.3 ms idle and 82 ms with three copies of itself on one core, and the 60-row batch at 21-600 ms against 0.5-2.0 s. A gate over those numbers would make this test the one place whose verdict depends on runner speed, which is the dependence #671 asked to remove from it. The ceiling that actually guards a long write transaction is `TestWriteLockHoldLeavesRoomInsideTheBusyTimeout` in `internal/memory`, on a quiet machine, where 250 ms sits above the worst hold this fleet produced under deliberate three-way oversubscription (~200 ms) and 180× above a measured idle hold — so the failure names a real regression rather than a runner, without being loose enough to catch only a catastrophe. A write path the budget table does not name still fails the run, so a new one cannot be measured and have nothing said about it.
 - the load was still writing when the batch committed. Two barriers say so. The batch waits for every writer to report that it has completed its share of writes, so it is triggered by writer progress rather than by a clock; then it announces itself and waits for every writer to report a write issued *after* that announcement, which it cannot do until each has come back around its loop. The batch therefore cannot commit until every writer has written across the announcement. The measurement has to be a file: the batch holds SQLite's write lock for its whole transaction, so a writer cannot commit *during* it, a row count taken either side would measure the two gaps around the lock, and a writer testing a flag on both sides of its own write cannot tell a write that straddled the instant from one that ran entirely after it. Without this the run could pass with the batch landing on an idle file, which is the vacuous case the guard exists to prevent.
 - every row id a process reported creating is present afterwards, read back through a fresh handle. A writer that gave up under contention is a lost memory.
-- a read transaction opened before the batch commits still describes the pre-batch state afterwards, and a new snapshot then sees the whole batch. The transaction is opened the way `ExplainSearchScoped` opens its diagnostic snapshot — `BeginTx` with `ReadOnly`, which issues a plain `BEGIN` even under `_txlock=immediate` and so pins a WAL read snapshot without taking the write lock.
+- a read transaction opened before the batch commits still describes the pre-batch state afterwards, and a new snapshot then sees the whole batch. The transaction is opened the way `Candidates` opens its read snapshot — `BeginTx` with `ReadOnly`, which issues a plain `BEGIN` even under `_txlock=immediate` and so pins a WAL read snapshot without taking the write lock.
 - a second reader, taking a fresh snapshot on every sample straight across the commit, observes the pre-batch state and the post-batch state and nothing between them. A pinned snapshot cannot show this — it shows the pre-batch state whatever the writer did — which is why it takes two readers. It announces its first sample as a barrier, so the batch cannot commit before a pre-commit reading exists, and its tail is counted from that signal rather than from its first sample, because a read that begins while the writer is still finishing its commit can legitimately describe the pre-batch snapshot.
 - no reader sees a row whose content does not contain a term its FTS match claimed, in the CLI and read-only readers, which hold `[]memory.Memory` and check the terms. The MCP readers are not part of this: `ghost_memory_search` returns formatted text, so a row rewritten between its FTS match and the read that hydrates the result is indistinguishable from a stale index entry, and a search is two queries. Their reads establish that the tools answer under contention.
 - `journal_mode`, `foreign_keys`, `busy_timeout`, `SetMaxOpenConns(1)` and a read-only handle that refuses writes are read back from a live connection rather than from the DSN that produced it. The fleet exercises two of the tree's DSN builders: `memory.OpenDB` (the six read-write roles) and `memory.readOnlyDSN` (the four read-only ones), with `busy_timeout` 5000 and 1000 respectively. `foreign_keys` is asserted on the read-write shape only, because that is the shape whose DSN sets it; the contract table above now says so too. It opens neither `mcpinit.rwDSN` nor `mcpinit.roDSN`, nor `cmd/ghost`'s own read-only spelling, so a regression in one of those would still pass this test. `_txlock=immediate` cannot be read back at all — it is a driver parameter — so it is asserted behaviourally, by showing that a write from a second connection is refused while a read-then-write transaction is open on the first, which is what a deferred `BEGIN` would not do.

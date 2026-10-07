@@ -1616,7 +1616,7 @@ func (s *Server) registerTools() {
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
-		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list. Every SCORING number is the one the ranking used, read from a record the ranking path writes as it runs: status_factor and decay_factor are the multipliers that ranking actually applied, and for a candidate the window cut before it applied them decay_factor is the one it would have applied, measured against the ranking's own clock. Per memory: FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor and age, supersede and near-duplicate penalties, which project the row belongs to and whether it matched the searched one, the scope verdict and the scope key set the narrowing compared (capped at 16 named, with scope_keys_compared_total giving the real length), the row's validity state, its stored confidence, the reason each excluded candidate was left out, the id of the specific other memory behind every window-scoped demotion (superseded_by, near_duplicate_of), and keyword_reserved / took_slot_from / displaced_by for a row the keyword reservation admitted past the score cut. Fields the ranking does not act on report 0 or \"off\" rather than an invented contribution: confidence_contribution, provenance_contribution and validity_penalty are always 0 and provenance_weight is \"off\", and the notes say why. When scope is supplied, included membership and scope exclusions reflect the scoped search. The payload is bounded at 150 candidate rows; one that reached the budget carries a truncation object saying how many candidates it omitted, and only excluded candidates are ever dropped, so every row in the answer is present. floor_dropped is about the VECTOR leg: it means the similarity floor cut that row's vector contribution, which for a row the keyword leg also matched leaves it in the answer with a keyword-only rrf_score — check fts_rank to tell that from a row the floor removed outright, and only the latter has rrf_score 0. When the floor removed it outright it also carries status_factor 1.0, because no demotion was applied to a row nothing scored; row_project says whose row it is. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it cannot be combined with as_of."`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list. Every SCORING number is the one the ranking used, read from a record the ranking path writes as it runs: status_factor and decay_factor are the multipliers that ranking actually applied, and for a candidate the window cut before it applied them decay_factor is the one it would have applied, measured against the ranking's own clock. Per memory: FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor and age, supersede and near-duplicate penalties, which project the row belongs to and whether it matched the searched one, the scope verdict and the scope key set the narrowing compared (capped at 16 named, with scope_keys_compared_total giving the real length), the row's validity state, its stored confidence, the reason each excluded candidate was left out, the id of the specific other memory behind every window-scoped demotion (superseded_by, near_duplicate_of), and keyword_reserved / took_slot_from / displaced_by for a row the keyword reservation admitted past the score cut. Fields the ranking does not act on report 0 rather than an invented contribution: confidence_contribution, provenance_contribution and validity_penalty are always 0 (an expired or not-yet-valid memory is excluded with its reason rather than ranked lower), provenance_weight is \"off\", and the notes say why. The payload is a projection of the same run the formatted answer comes from, for the same arguments (scope, category, retention, limit, validity, the byte cap): a row is included exactly when that answer lists it, and an excluded row carries the reason the stage that withheld it gave. Every stored string in it (content snippet, ids, project, scope keys and values, leg errors) is rendered as the formatted answer renders it: content inside «...» delimiters, ids and scope text as quoted tokens. Unlike the formatted answer it writes no retrieval record, and a retrieval leg that failed while another answered is reported in the notes instead of as an error (a run where every applicable leg failed is still the retrieval error). The payload is bounded at 150 candidate rows; one that reached the budget carries a truncation object saying how many candidates it omitted, and only excluded candidates are ever dropped, so every row in the answer is present. floor_dropped is about the VECTOR leg: it means the similarity floor cut that row's vector contribution, which for a row the keyword leg also matched leaves it in the answer with a keyword-only rrf_score — check fts_rank to tell that from a row the floor removed outright, and only the latter has rrf_score 0. When the floor removed it outright it also carries status_factor 1.0, because no demotion was applied to a row nothing scored; row_project says whose row it is. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it is refused with as_of, which ranks nothing."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1744,40 +1744,24 @@ func (s *Server) registerTools() {
 			// so nothing downstream could tell it from a real empty answer.
 			SuppressRecordWhenLegsFailed: true,
 		}
-		// explain returns the store's ranking diagnosis instead of the
-		// formatted list. The explain projection of the assembler's trace
-		// replaces this branch once the stages carry it.
+		// explain is a reading of THIS request's run, not a second search: it sets
+		// one flag on the one request above and takes its payload from the same
+		// assemble.Run call the formatted answer comes from, so the budget, the
+		// filters, the clock and the stages are the answer's own and the rows it
+		// marks included are the rows the answer renders.
+		//
+		// Refused with as_of, not downgraded. An as_of read selects among recorded
+		// versions and ranks nothing, so there is no ranking to project; handing
+		// back the CURRENT ranking for a request that named T would answer "how did
+		// the rows rank at T" with the ranking they have now, the one outcome a
+		// caller cannot detect from the payload.
 		if args.Explain {
-			// Refused with as_of, not downgraded. This branch is the store's own
-			// ExplainSearchScoped: a diagnosis of the CURRENT ranking, over the
-			// FTS5 index and the live vectors. Handing it back for a historical
-			// request would answer "how did the rows rank at T" with the ranking
-			// they have now, under a request that named T — the one outcome a
-			// caller cannot detect from the payload, since it carries no
-			// qualifier and no trace.
 			if asOf != nil {
 				return nil, nil, fmt.Errorf("explain cannot describe a historical (as_of) read: it reports the current ranking, "+
 					"over the search index and the embeddings as they stand now. Drop as_of to diagnose the present ranking, "+
 					"or drop explain to read the store as it stood at %s", asOf.Format(time.RFC3339))
 			}
-			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
-				assemble.RetrievalWindow(searchRequest), scopeFilter)
-			if xErr != nil {
-				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
-			}
-			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
-			}
-			if args.Retention != "" {
-				ex.Notes = append(ex.Notes, "a retention filter is not applied to these rows either: they are the retrieval window the formatted path searches, before the tier filter runs, so a row marked included may not be in that answer")
-			}
-			payload, mErr := json.MarshalIndent(ex, "", "  ")
-			if mErr != nil {
-				return nil, nil, fmt.Errorf("encode explanation: %w", mErr)
-			}
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
-			}, nil, nil
+			searchRequest.Explain = true
 		}
 		// The formatted path goes through the context assembler, which owns
 		// retrieval, scope, category and the window. Both filters are applied
@@ -1809,6 +1793,20 @@ func (s *Server) registerTools() {
 			// is no such memory. The error says which, in the words the caller
 			// needs, and carries the cause so the failure is diagnosable.
 			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
+		}
+		if args.Explain {
+			// The payload, not the formatted answer. A failed leg is reported inside
+			// it (a note and the leg's own row facts) instead of being turned into an
+			// error, because the reader asked for the diagnosis of this run and a
+			// failed leg is part of it. A run where every applicable leg failed never gets
+			// here: Candidates returns that as an error, because nothing was searched.
+			payload, mErr := json.MarshalIndent(result.Explain, "", "  ")
+			if mErr != nil {
+				return nil, nil, fmt.Errorf("encode explanation: %w", mErr)
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
+			}, nil, nil
 		}
 		// A leg that errored makes the search incomplete, but "incomplete" and
 		// "empty" are only the same answer when there is nothing to show. With

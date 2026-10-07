@@ -78,10 +78,13 @@ Ranking is also status-aware. A resolved memory, and a `_global` row when you se
 ### `explain: true` — the signals, and the ones that are off
 
 `explain: true` returns a JSON scoring breakdown instead of the formatted list,
-for when a result looks wrong and you need to know which signal decided it. Every
-number in it is the number the ranking used, read from a record the ranking path
-writes as it runs — it is a description of the search that happened, not a second
-attempt at ranking.
+for when a result looks wrong and you need to know which signal decided it. It is
+a projection of the run that produced the formatted answer for the same arguments,
+not a second search: a row is `included` exactly when that answer lists it, an
+excluded row says why (expired, not yet valid, withheld by a category, retention
+or scope filter, outside the window or the response cap, or dropped by the vector
+floor), and every number in it is the number the ranking recorded as it ran. It
+cannot be combined with `as_of`, and it writes no retrieval record.
 
 Alongside the fusion mechanics (`fts_rank`, `vector_rank`, `vector_score`,
 `rrf_score`, `status_factor`, `decay_factor`, `age_days`) each row carries the
@@ -112,9 +115,9 @@ axes that decide eligibility:
   each window-scoped demotion. The penalty counts beside them say how many, these
   say which.
 - `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. The
-  search does not read validity, so an out-of-window row is returned like any
-  other; this is how you notice. Dropping such a row is the context assembler's
-  job, so ask without `explain` for that answer.
+  assembler drops an expired or not-yet-valid row rather than ranking it lower, so
+  such a row is reported excluded, with that reason, and `validity_penalty` stays
+  `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
 

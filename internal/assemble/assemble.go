@@ -190,7 +190,22 @@ type Request struct {
 	// nobody measured is a relevance verdict, and the bench no-answer report
 	// shows the answerable and no-answer cosine distributions overlap.
 	AbstainCosine float32
-	Explain       bool
+	// Explain asks Run to project the trace of THIS run into Result.Explain, the
+	// ghost_memory_search explain payload. It is a request for a second reading
+	// of the same run and never for a second run: the candidate request, the
+	// stages, the budget and the response are the ones the same Request would get
+	// with Explain false, so the explanation describes the answer the caller would
+	// have been given rather than a neighbouring search. The one thing it asks of
+	// the retriever is to record the facts that decided the ranking
+	// (memory.CandidateRequest.Explain), which changes what the retriever RETURNS
+	// and nothing about how it ranks, scopes or windows.
+	//
+	// It is refused with AsOf (a historical read ranks nothing, so there is no
+	// ranking to explain) and without a query (a passive retrieval scores no
+	// candidate). Run writes no retrieval record for it, because the record
+	// counts answers delivered to a caller and an explanation is not one; see
+	// docs/invariants.md.
+	Explain bool
 	// Record receives one retrieval record per SUCCESSFUL Run: the query as a
 	// digest, the ids this call judged, and each one's kept/dropped verdict with
 	// the stage and reason the stages gave it (#646).
@@ -267,7 +282,10 @@ type Result struct {
 	// empty case and bounds from the end, where a qualifier is the first to go.
 	Qualifiers []string
 	Trace      *Trace
-	Bytes      int // complete rendered response, including framing and outcome
+	// Explain is the explain payload, a projection of Trace and of the retriever's
+	// recorded ranking facts for this one run. nil unless Request.Explain was set.
+	Explain *memory.SearchExplain
+	Bytes   int // complete rendered response, including framing and outcome
 	// Abstention is the human sentence for a non-answerable result: what the
 	// caller should do about it. "" for an answerable one, which withholds
 	// nothing and needs no caveat.
@@ -381,7 +399,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 			maxRetrievalWindow, bound)
 		p.retrievalFailures = append(p.retrievalFailures, note)
 		// The trace gets it too. Trace.Limit reports the window, so a consumer
-		// building a projection from the trace — explain, in the next PR — would
+		// building a projection from the trace — explain, which reports this as a payload note — would
 		// otherwise read a 100 with nothing beside it and no way to tell it from a
 		// caller's 100.
 		p.windowDisclosure = note
@@ -428,7 +446,16 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	// inside: a result that is perfectly valid, and that the CALLER then turns
 	// into an error because a leg failed and nothing was admitted. Recording that
 	// would count a call that delivered no answer.
-	if err == nil && !req.convertsToError(res) {
+	//
+	// An explain run writes nothing. The record counts retrievals a caller was
+	// ANSWERED with — it is the audit's denominator — and an explanation is a
+	// diagnostic of one, so counting it would put calls that delivered no answer
+	// in that denominator. It matches what explain did before it became a
+	// projection of this run: it never reached the sink.
+	if err == nil && req.Explain {
+		res.Explain = p.explainProjection(res)
+	}
+	if err == nil && !req.Explain && !req.convertsToError(res) {
 		emit(ctx, req.Record, req, res)
 	}
 	return res, err
@@ -479,6 +506,10 @@ func candidateRequest(req Request) memory.CandidateRequest {
 		AsOf:    req.AsOf,
 		Fetch:   memory.Fetch{FTSTopK: depth, VectorTopK: depth, Limit: window},
 		Passive: passivePolicies(req),
+		// A request to RECORD, not to change: the store ranks, scopes and windows
+		// identically with it on or off, and hands back the facts the stages
+		// stamped as they decided.
+		Explain: req.Explain,
 	}
 }
 
@@ -662,6 +693,13 @@ func validateRequest(req Request) error {
 	}
 	if req.Condition == CondVectorOnly && len(req.QueryVec) == 0 {
 		return errors.New("assemble: vector-only retrieval requires a query vector")
+	}
+	if req.Explain && req.AsOf != nil {
+		return errors.New("assemble: explain is a projection of the current ranking and cannot describe a historical (as_of) read, " +
+			"whose versions were never ranked — ask for one or the other")
+	}
+	if req.Explain && req.Query == "" {
+		return errors.New("assemble: explain requires a query: a passive retrieval scores no candidate, so there is no ranking to explain")
 	}
 	if req.Source == SourceProjectCtx && req.ProjectID == "" {
 		return errors.New("assemble: project context requires a project")

@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -206,14 +205,8 @@ func TestExplainReportsStatusFactor(t *testing.T) {
 		t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
 	}
 
-	ex, err := store.ExplainSearchScoped(ctx, "test-proj", needle, nil, 10, nil)
-	if err != nil {
-		t.Fatalf("ExplainSearchScoped: %v", err)
-	}
-	rows := make(map[string]ExplainRow, len(ex.Rows))
-	for _, row := range ex.Rows {
-		rows[row.ID] = row
-	}
+	set := explainedCandidates(t, store, ctx, "test-proj", needle, nil, 10, nil)
+	rows := set.RankFacts
 
 	for _, tc := range []struct {
 		name string
@@ -226,27 +219,17 @@ func TestExplainReportsStatusFactor(t *testing.T) {
 	} {
 		row, ok := rows[tc.id]
 		if !ok {
-			t.Fatalf("%s missing from the explanation: %+v", tc.name, ex.Rows)
+			t.Fatalf("%s has no ranking fact", tc.name)
 		}
 		if row.StatusFactor != tc.want {
 			t.Errorf("%s status_factor = %v, want %v", tc.name, row.StatusFactor, tc.want)
 		}
-		if !row.Included {
-			t.Errorf("%s reported excluded at rank %d, want included — the search returned it", tc.name, row.Rank)
+		if _, ok := rowByID(set, tc.id); !ok {
+			t.Errorf("%s was not returned, but the search returns it", tc.name)
 		}
 	}
-	if rows[liveID].Rank != 1 {
-		t.Errorf("live row rank = %d, want 1 — explain must report the same order the demotion produced", rows[liveID].Rank)
-	}
-
-	sawNote := false
-	for _, note := range ex.Notes {
-		if strings.Contains(note, "status_factor") {
-			sawNote = true
-		}
-	}
-	if !sawNote {
-		t.Errorf("explanation demoted rows without disclosing the factor: %v", ex.Notes)
+	if len(set.Rows) == 0 || set.Rows[0].ID != liveID {
+		t.Errorf("first row = %v, want the live row: the demotion must sink the resolved and shared rows below it", set.Rows)
 	}
 }
 
@@ -436,7 +419,7 @@ func contents(results []Memory) string {
 		if i > 0 {
 			out += " | "
 		}
-		out += explainSnippet(m.Content, 40)
+		out += ExplainSnippet(m.Content, 40)
 	}
 	if out == "" {
 		return "<none>"

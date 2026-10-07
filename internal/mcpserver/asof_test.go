@@ -212,12 +212,11 @@ func TestAsOfToolArgumentIsOptional(t *testing.T) {
 	}
 }
 
-// TestSearchExplainRefusedWithAsOf: the explain branch is the store's own
-// ExplainSearchScoped — a diagnosis of the CURRENT ranking, over the search index
-// and the live vectors — and it runs before the assembler. Answering it for a
-// historical request would return a present-day ranking with no qualifier and no
-// trace to say so, which is the one outcome a caller cannot detect from the
-// payload.
+// TestSearchExplainRefusedWithAsOf: explain is a projection of the CURRENT
+// ranking, over the search index and the live vectors, and an as_of read ranks
+// nothing. Answering it for a historical request would return a present-day
+// ranking with no qualifier and no trace to say so, which is the one outcome a
+// caller cannot detect from the payload.
 func TestSearchExplainRefusedWithAsOf(t *testing.T) {
 	_, session := newCapSession(t)
 	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{

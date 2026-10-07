@@ -160,8 +160,8 @@ func demotionVerdicts(pairs []demotionPairs) (map[string]int, map[string][]strin
 
 // Status demotion: multiplicative factors on a candidate's fused score, as
 // opposed to the window-scoped penalty counts below. Both are demotion, and
-// both live here so the ranking seam (fuseCandidatePool) and explain mode
-// (ExplainSearchScoped) read the same constants through one function.
+// both live here so the ranking seam (fuseCandidatePool) and the explain
+// payload (which reports the factor the seam recorded) share one definition.
 const (
 	// resolvedDemotionFactor halves a resolved row: the resolve verdict means
 	// "stop surfacing this first", not "forget it". With RRF k=60 every fused
