@@ -1066,11 +1066,13 @@ anywhere in the read, and no inference: it is a selection.
   `as_of` **listing** surfaces — `ghost_project_context`'s `as_of` branch and the
   `ghost context --as-of` session block — and search all reach that verdict
   through one helper, `memory.ValidityAt` (stage 2 drops on the same
-  `memory.ValidityWithheld`), applied before the limit so a withheld row takes no
-  slot, and they state `memory.AsOfValidityNote` once at block level, saying that
-  validity was judged at T, how many rows it withheld (counted, so an all-withheld
-  block is not mistaken for a project that held nothing), and that the bounds, like the row's other unversioned fields, are the
-  current row's. A bound exactly at T is inside the window, and an unreadable
+  `memory.ValidityWithheld`). The two listings apply it before the limit so a
+  withheld row takes no slot, and state `memory.AsOfValidityNote` once at block
+  level, saying that validity was judged at T, how many rows it withheld
+  (counted, so an all-withheld block is not mistaken for a project that held
+  nothing) and that the bounds, like the row's other unversioned fields, are the
+  current row's. Search reaches the same verdict through stage 2 but does not
+  state that note or a count. A bound exactly at T is inside the window, and an unreadable
   bound is no bound, as in stage 2. The `unverified` marker is drawn as on any
   line, because `verified_at` is a flag rather than a predicate. One imprecision
   is recorded rather than worked around: because the bounds are the current

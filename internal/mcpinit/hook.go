@@ -702,8 +702,9 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 			slog.Debug("historical session context: read failed", "error", err)
 			readErr = "This store's recorded history could not be read, so nothing below is a reading of that instant: " + err.Error()
 		default:
-			memories = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
-			withheldAtT += historicalWithheldCount(set.Live(), projectID, scope, asOf)
+			var w int
+			memories, w = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
+			withheldAtT += w
 			gapNote = set.UnknownNote()
 		}
 	}
@@ -714,8 +715,9 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// per-section error line would imply the project half had succeeded when it
 	// may not have.
 	if gset, err := memory.ReadMemoriesAsOf(context.Background(), db, memory.GlobalOnly, memory.GlobalProjectID, asOf); err == nil {
-		globals = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
-		withheldAtT += historicalWithheldCount(gset.Live(), memory.GlobalProjectID, scope, asOf)
+		var w int
+		globals, w = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
+		withheldAtT += w
 	}
 	if projectID == "" && len(globals) == 0 && withheldAtT == 0 {
 		return ""
@@ -746,7 +748,8 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 // wants would put a scoping decision in the enum every search carries. The
 // version row's own project_id is exact, so the filter is an equality on a value
 // the read already chose.
-func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) []sessionMemory {
+func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]sessionMemory, int) {
+	withheld := 0
 	out := make([]sessionMemory, 0, min(len(rows), cap))
 	for _, row := range rows {
 		if row.ProjectID != projectID {
@@ -758,7 +761,13 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 		// Validity is judged at T before the cap, with the rule search applies
 		// when it binds its clock to as_of: a row whose window had closed or not
 		// yet opened at T is withheld rather than listed.
-		if _, withheld := memory.ValidityAt(row.ValidFrom, row.ValidUntil, row.VerifiedAt, asOf); withheld {
+		if _, outOfWindow := memory.ValidityAt(row.ValidFrom, row.ValidUntil, row.VerifiedAt, asOf); outOfWindow {
+			withheld++
+			continue
+		}
+		// The cap bounds what is shown, not what is counted: the walk goes on
+		// past it so the withheld count covers every row the same narrowing saw.
+		if len(out) >= cap {
 			continue
 		}
 		// AsOfRow embeds Memory, so all Memory fields are promoted.
@@ -818,11 +827,8 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 			Agent:         row.Agent,
 			SourceRef:     row.SourceRef,
 		})
-		if len(out) >= cap {
-			break
-		}
 	}
-	return out
+	return out, withheld
 }
 
 // globalsCap is lower than the project-memories cap (sessionMemoriesCap)
@@ -1030,20 +1036,4 @@ func truncateUTF8(s string, maxBytes int) string {
 		return s
 	}
 	return memory.TruncateUTF8(s, maxBytes) + "…"
-}
-
-// historicalWithheldCount counts the rows historicalSessionMemories would leave
-// out for their validity window at asOf, among the rows that pass the same
-// project and scope narrowing. It counts all of them, before any cap.
-func historicalWithheldCount(rows []memory.AsOfRow, projectID string, scope map[string]string, asOf time.Time) int {
-	n := 0
-	for _, row := range rows {
-		if row.ProjectID != projectID || !memory.ScopeMatches(row.Scope, scope) {
-			continue
-		}
-		if _, withheld := memory.ValidityAt(row.ValidFrom, row.ValidUntil, row.VerifiedAt, asOf); withheld {
-			n++
-		}
-	}
-	return n
 }

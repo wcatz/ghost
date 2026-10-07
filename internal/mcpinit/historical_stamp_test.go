@@ -55,7 +55,7 @@ func TestHistoricalSessionMemoriesUnreadableStampIsNoBound(t *testing.T) {
 		}},
 	}
 
-	got := historicalSessionMemories(rows, "p1", nil, sessionMemoriesCap, time.Now())
+	got, _ := historicalSessionMemories(rows, "p1", nil, sessionMemoriesCap, time.Now())
 	if len(got) != 2 {
 		t.Fatalf("historicalSessionMemories returned %d rows, want 2", len(got))
 	}
