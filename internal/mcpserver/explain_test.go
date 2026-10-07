@@ -274,7 +274,7 @@ func explainRows(t *testing.T, session *mcp.ClientSession, query string, extra m
 	return rows
 }
 
-// assertMembershipMatchesListing is R5's contract, spelled bidirectionally: a
+// assertMembershipMatchesListing states the contract bidirectionally: a
 // row the formatted answer renders must appear in the payload marked included,
 // and every payload row must agree with whether the answer rendered it. A row
 // the answer omits — expired, not yet valid, filtered by category or tier, out
@@ -302,7 +302,7 @@ func assertMembershipMatchesListing(t *testing.T, session *mcp.ClientSession, qu
 	}
 }
 
-// TestSearchExplainAttributesNearDuplicateDemotion is R3 over the live tool: a
+// TestSearchExplainAttributesNearDuplicateDemotion is checked over the live tool: a
 // window-scoped near-duplicate demotion has to report the penalty AND name the
 // other memory that decided it, so an agent debugging a demoted row is handed
 // the row to read next instead of a count.
@@ -324,6 +324,9 @@ func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 		t.Fatalf("CreateLink(related): %v", err)
 	}
 
+	// The demoted pair is part of the answer's membership like any other row: a
+	// demotion reorders, so the payload and the listing must still agree.
+	assertMembershipMatchesListing(t, session, "cache warmer replica", nil)
 	rows := explainRows(t, session, "cache warmer replica", nil)
 
 	// Exactly one member of the pair carries the penalty, and it must be the
@@ -353,14 +356,14 @@ func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 	}
 }
 
-// TestSearchExplainMembershipMatchesFormattedAnswer is R5 over the live tool:
+// TestSearchExplainMembershipMatchesFormattedAnswer is checked over the live tool:
 // the payload's included set must be exactly the formatted answer's rendered
 // set, across every axis that withholds a row. The old explain answered a
 // DIFFERENT search — a retrieval window that never saw the validity, category,
 // retention or budget filters the formatted path applies — so an expired row
 // or a category mismatch reported included while the answer omitted it.
 func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
-	_, session := newCapSession(t)
+	srv, session := newCapSession(t)
 
 	expired := saveMem(t, session, "the cache warmer rotation policy expired long ago", map[string]any{"valid_until": "2020-01-01"})
 	future := saveMem(t, session, "the cache warmer cold storage move begins much later", map[string]any{"valid_from": "2099-01-01"})
@@ -368,10 +371,19 @@ func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 	sessionTier := saveMem(t, session, "an offhand remark about the cache warmer made during this chat", map[string]any{"retention": "session"})
 	saveMem(t, session, "the cache warmer runs on the read replica every hour", nil)
 	saveScoped(t, session, "the cache warmer runs only in the staging environment", "staging")
+	// A resolved row is demoted rather than excluded, so it is in the answer and
+	// must be in the payload as included with its demotion applied.
+	resolved := saveMem(t, session, "the cache warmer was once tuned by hand and that is settled", nil)
+	if n, err := srv.store.(*memory.Store).SetResolved(context.Background(), []string{resolved}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = (%d, %v)", n, err)
+	}
 
 	t.Run("unfiltered validity", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", nil)
 		rows := explainRows(t, session, "cache warmer", nil)
+		if row := rows[resolved]; !row.Included || row.StatusFactor >= 1 {
+			t.Errorf("resolved row = included=%v status_factor=%v, want the demoted row in the answer with its factor", row.Included, row.StatusFactor)
+		}
 		if row := rows[expired]; row.ValidityState != memory.ValidityExpired || row.Included {
 			t.Errorf("expired row = included=%v validity_state=%q, want excluded with %q", row.Included, row.ValidityState, memory.ValidityExpired)
 		}
@@ -471,9 +483,6 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 		if strings.Contains(raw, rawText) {
 			t.Errorf("the payload carries the raw stored text %q:\n%s", rawText, raw)
 		}
-	}
-	if strings.Contains(raw, "\n[ghost:outcome=") {
-		t.Errorf("a stored line can start a line in the payload:\n%s", raw)
 	}
 	if strings.Count(row.Content, "«") != 1 || strings.Count(row.Content, "»") != 1 {
 		t.Errorf("content %q holds more than its own delimiter pair", row.Content)

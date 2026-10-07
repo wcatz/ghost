@@ -661,7 +661,7 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 		// The factor is computed HERE, where the order is taken, rather than by
 		// explain afterwards: this is the multiplier that decided the sequence,
 		// so recording it is the only way a reader can verify the sequence. The
-		// clock travels with it for the same reason — an explanation measured
+		// age travels with it for the same reason — an explanation measured
 		// against its own wall clock reports a different factor than the ranking
 		// used, and the difference shows up only on old rows.
 		if t := p.trace.row(m.ID); t != nil {
@@ -671,9 +671,6 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 			// bounded session decay alike. Recording only the first would report a
 			// factor the sequence never used.
 			t.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, t.AgeDays)
-			if p.trace.now.IsZero() {
-				p.trace.now = now
-			}
 		}
 	}
 

@@ -1,10 +1,5 @@
 package memory
 
-import (
-	"sort"
-	"time"
-)
-
 // searchTrace is the per-candidate record the ranking path writes as it ranks.
 //
 // It exists so explain mode can report what the ranking DID rather than
@@ -30,14 +25,6 @@ import (
 // rows map becomes CandidateSet.RankFacts and the assembler's projection reads
 // per-candidate facts from there rather than recomputing them.
 type searchTrace struct {
-	// now is the clock the ranking ordered by. Explain reads a row's age and
-	// decay against THIS instant rather than its own, because two clocks in one
-	// explanation is one more way for it to describe a search nobody ran.
-	now time.Time
-	// scopeKeys is the requested scope's key set, sorted, as the narrowing
-	// compared it. Sorted because a reader (and a test) comparing two
-	// explanations should not have to care about map order.
-	scopeKeys []string
 	// rows is keyed by memory id. A row is absent from it only when the
 	// ranking path never scored it — the vector floor removed it first, which
 	// is a recorded outcome, not a missing one.
@@ -119,15 +106,12 @@ type RankFact struct {
 	NearDuplicateOf      []string
 }
 
-// newSearchTrace starts a trace and records the scope keys the narrowing will
-// compare, so the trace is complete before any candidate is scored.
-func newSearchTrace(scope map[string]string) *searchTrace {
-	tr := &searchTrace{rows: map[string]*RankFact{}}
-	for k := range scope {
-		tr.scopeKeys = append(tr.scopeKeys, k)
-	}
-	sort.Strings(tr.scopeKeys)
-	return tr
+// newSearchTrace starts an empty trace. The clock a row's age and decay were
+// measured against is not kept here: decayRank records the factor and the age it
+// used on the row, and a candidate it never ordered is filled by Candidates at the
+// request's own clock.
+func newSearchTrace() *searchTrace {
+	return &searchTrace{rows: map[string]*RankFact{}}
 }
 
 // row returns the trace entry for id, creating it with the sentinels for
@@ -146,17 +130,6 @@ func (tr *searchTrace) row(id string) *RankFact {
 		tr.rows[id] = c
 	}
 	return c
-}
-
-// lookup returns the recorded entry for id, and whether one exists. A missing
-// entry is a real outcome — the row never reached fusion — and callers must
-// distinguish it from a recorded zero.
-func (tr *searchTrace) lookup(id string) (*RankFact, bool) {
-	if tr == nil {
-		return nil, false
-	}
-	c, ok := tr.rows[id]
-	return c, ok
 }
 
 // maxScopeKeys bounds how many scope keys one explanation may NAME. The keys come

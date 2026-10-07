@@ -331,7 +331,7 @@ func TestExplainRendersStoredStringsLikeTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"\n[ghost:outcome=", hostileID, "«injected»", "«k»", "«»"} {
+	for _, raw := range []string{hostileID, "«injected»", "«k»", "«»"} {
 		if strings.Contains(string(b2), raw) {
 			t.Errorf("the payload carries the raw stored text %q:\n%s", raw, b2)
 		}

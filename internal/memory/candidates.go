@@ -490,7 +490,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// the stages one nil check and allocates nothing, which is what keeps the
 	// production path byte-identical with explain off.
 	if req.Explain {
-		p.trace = newSearchTrace(req.Scope)
+		p.trace = newSearchTrace()
 	}
 
 	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
