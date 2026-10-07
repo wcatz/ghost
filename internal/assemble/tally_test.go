@@ -244,22 +244,25 @@ func TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce(t *testing.T) {
 	}
 }
 
-// TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates: a row the
-// retriever fetched and then removed as a near-duplicate loser never reaches the
-// trace, so it is in the eligible count and in none of the trace's fates. It is
-// neither beyond the over-fetch nor ranked out; it has its own count, so the
-// header cannot hand it to the ranking.
-func TestCountedAgainstNamesRowsThePolicyRemovedAsNearDuplicates(t *testing.T) {
+// TestCountedAgainstDoesNotGuessNearDuplicateLosers: a near-duplicate loser the
+// retriever removed is a stage 6 decision in the trace, and CountsFor counts it
+// (see TestDedupedTallyComesFromTheTrace). CountedAgainst used to infer them from
+// the rows the trace never saw, which was a second source for the same count; a
+// row inside the window that nothing recorded is now left uncounted instead of
+// being named a fate nobody observed.
+func TestCountedAgainstDoesNotGuessNearDuplicateLosers(t *testing.T) {
 	// 11 eligible globals, a window of 16 that held them all, the trace saw 10.
 	tally := BucketTally{Shown: 8, RankedOut: 2}.CountedAgainst(11, 0, 16)
-	if tally.Total() != 11 {
-		t.Errorf("Total = %d, want 11", tally.Total())
-	}
-	if tally.Deduped != 1 {
-		t.Errorf("Deduped = %d, want 1 (fetched, then removed by the bucket policy)", tally.Deduped)
+	if tally.Deduped != 0 {
+		t.Errorf("Deduped = %d, want 0: only the trace's decisions count a removal", tally.Deduped)
 	}
 	if tally.RankedOut != 2 || tally.Beyond != 0 {
-		t.Errorf("RankedOut/Beyond = %d/%d, want 2/0: nothing was beyond the window and the loser was not ranked", tally.RankedOut, tally.Beyond)
+		t.Errorf("RankedOut/Beyond = %d/%d, want 2/0", tally.RankedOut, tally.Beyond)
+	}
+	// With the loser in the trace the same count agrees with the store.
+	traced := BucketTally{Shown: 8, RankedOut: 2, Deduped: 1}.CountedAgainst(11, 0, 16)
+	if traced.Total() != 11 || traced.Deduped != 1 {
+		t.Errorf("traced tally = %+v, want Total 11 with Deduped 1", traced)
 	}
 }
 

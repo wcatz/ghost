@@ -447,7 +447,12 @@ func TestPassiveGlobalsDedupNearDuplicates(t *testing.T) {
 		t.Fatalf("insert link: %v", err)
 	}
 
-	globals, _ := passiveGlobals(t, db, "p-nodup")
+	globals, tally := passiveGlobals(t, db, "p-nodup")
+	// The header's count and the trace agree: the removed loser is the one Deduped
+	// row, counted from the assembler's own trace rather than inferred (#894).
+	if tally.globals.Deduped != 1 || tally.globals.Total() != 2 {
+		t.Errorf("globals tally = %+v, want Deduped 1 of 2 total", tally.globals)
+	}
 	var sawOriginal, sawRestated bool
 	for _, m := range globals {
 		if strings.Contains(m.Content, "ORIGINAL") {

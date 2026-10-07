@@ -1250,6 +1250,39 @@ func TestCandidatesPassiveAPersistentRowIsNotANearDuplicateLoser(t *testing.T) {
 	}
 }
 
+// TestCandidatesPassiveReportsTheLosersItRemoved (#894): a loser a
+// DropDemotedLosers policy removes is not in Rows, so the set carries it in
+// DroppedLosers with the id of the row it lost to. A policy that only reorders
+// reports none.
+func TestCandidatesPassiveReportsTheLosersItRemoved(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	if err := st.CreateLink(ctx, "gp_mid", "gp_high", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	set, err := st.Candidates(ctx, passiveRequest("proj", globalPassivePolicy()))
+	if err != nil {
+		t.Fatalf("passive Candidates: %v", err)
+	}
+	if containsStr(passiveIDs(set), "gp_mid") {
+		t.Fatalf("the loser is still in Rows: %v", passiveIDs(set))
+	}
+	if len(set.DroppedLosers) != 1 || set.DroppedLosers[0].ID != "gp_mid" ||
+		len(set.DroppedLosers[0].LostTo) != 1 || set.DroppedLosers[0].LostTo[0] != "gp_high" {
+		t.Errorf("DroppedLosers = %+v, want gp_mid lost to gp_high", set.DroppedLosers)
+	}
+	// A reorder-only policy removes nothing and so reports nothing.
+	reorder := globalPassivePolicy()
+	reorder.DropDemotedLosers = false
+	set, err = st.Candidates(ctx, passiveRequest("proj", reorder))
+	if err != nil {
+		t.Fatalf("passive Candidates: %v", err)
+	}
+	if len(set.DroppedLosers) != 0 || !containsStr(passiveIDs(set), "gp_mid") {
+		t.Errorf("a reorder-only policy reported %+v or lost the row", set.DroppedLosers)
+	}
+}
+
 // TestCandidatesPassiveSkipsTheEvidenceReadOnAPreProvenanceStore: the version
 // tolerance covered the SELECT list, and the read AFTER it did not follow.
 //
