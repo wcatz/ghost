@@ -610,9 +610,12 @@ for a call and a session that belong together. Three pieces make that hold
   server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
   record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
-  signals and the sidecar (header v3, a `session` line). `audit.Run` reads only
-  `RetrievalRecordsForSession` for that id, with the predicate in the SQL ahead of the
-  `CallWindow` limit, and an empty id judges nothing. A call with no session id is
+  signals and the sidecar (header v3, a `session` line). `audit.Run` judges only what
+  `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
+  the `CallWindow` limit, and an empty id judges nothing. When that read finds nothing it
+  makes one more bounded, project-wide read, only to count the recent calls that carry no
+  session id (`Summary.UnscopedCalls`) and say so, without asserting why; it never judges
+  from it. A call with no session id is
   unjudged, never guessed.
 - **Old verdicts are set aside, not deleted.** Every verdict filed before this change
   has an empty session and was judged against whichever session the hook had scanned.

@@ -99,11 +99,14 @@ type Summary struct {
 	// judged. Said on the summary because a run that judged nothing and a run that was
 	// never able to match anything look the same in a count.
 	NoSession bool
-	// UnscopedCalls counts the project's recent calls that name no session, and is set
-	// only when the scanned session matched NO call. It is the mirror of NoSession: a
-	// host whose server cannot name its session records "" on every call, so a scan that
-	// does carry a session id matches none of them, and a bare zero would read as "the
-	// agent used nothing" when the audit never ran for that host.
+	// UnscopedCalls counts the project's recent calls that carry no session id, and is
+	// set only when the scanned session matched NO call. It states what was observed and
+	// nothing about why: a scoped read that found nothing, and K recent calls that no
+	// session can claim, are two facts, and the cause is not derivable from them (the
+	// session-start block rendered for `ghost context` or opencode's plugin records no
+	// session beside a host that names its own; the session may simply have made no
+	// call here; its calls may have been purged or evicted). It exists so "the audit can
+	// never judge these" is not printed as a clean zero.
 	UnscopedCalls int
 }
 
@@ -415,9 +418,9 @@ func (r Summary) String() string {
 			"and none was judged\n")
 	}
 	if r.UnscopedCalls > 0 {
-		fmt.Fprintf(&b, "  none of this session's calls were found, and %d recent call(s) in this project "+
-			"carry no session id, so they could not be matched to it: the host that made them does "+
-			"not name its session, which is different from the agent having used nothing\n", r.UnscopedCalls)
+		fmt.Fprintf(&b, "  this session has no recorded calls in this project; %d of the project's recent "+
+			"call(s) carry no session id and cannot be attributed to any session, so the audit can "+
+			"never judge them\n", r.UnscopedCalls)
 	}
 	for _, src := range r.Sources {
 		// The source column through assemble.Label, for the reason report.go's two
