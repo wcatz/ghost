@@ -104,27 +104,55 @@ func TestTheGlobalMemoriesResourceWithholdsARowWhoseWindowHasClosed(t *testing.T
 	}
 }
 
-// TestTheGlobalMemoriesResourceShowsCensusWhenAllRowsExpired verifies that
-// when all global rows are expired, the SQL validity filter removes them before
-// they reach the assembler, so the assembler sees an empty window and the census
-// appears. This is the new behavior with the passive SQL validity filter: expired
-// rows are filtered in SQL and never reach the assembler, so the assembler cannot
-// produce a "withheld as out of date" verdict for them.
-func TestTheGlobalMemoriesResourceShowsCensusWhenAllRowsExpired(t *testing.T) {
-	// A store whose only global row has retired: the census appears because the
-	// assembler sees an empty window (expired rows filtered in SQL).
+// TestTheGlobalMemoriesResourceSaysRowsWereExcludedRatherThanThatNothingWasSaved
+// is the second half of the empty case, and the reason it is asserted in BOTH
+// directions.
+//
+// The census — "No global memories saved yet" — is a claim about ABSENCE, and
+// before the migration it was reached by `len(memories) == 0`, which was the only
+// way to get there. Stage 2 introduces a second: rows found and withheld. On a
+// store whose cross-project rows have all retired, the census becomes a lie of the
+// worst kind for this surface — it tells an agent to go and save preferences it
+// already holds, and names `ghost_save_global` as the place to do it.
+//
+// So the sentence is chosen by the verdict rather than by the length of the item
+// set, through the same `projectContextEmptyNote` every other `_global` read uses.
+// `no_memories` — the window came back empty — keeps the census, because that is
+// the one verdict that may describe absence.
+//
+// A `_global` request needs no project-scoped count to make that sound, and the
+// reason is worth stating because it is the difference from the project-context
+// surface's identical rule: `projectContextGlobalBudget` sets no `IncludeGlobal`,
+// because the bucket IS the population, so an exclusion reason here describes the
+// whole window rather than a mixture of two. There is nothing to reconcile it
+// against.
+//
+// Asserted in both directions because the failure mode this fixes is symmetric:
+// replacing the lie with a silence leaves a caller unable to tell the two cases
+// apart, and an agent that has saved nothing needs the census to know what to do.
+func TestTheGlobalMemoriesResourceSaysRowsWereExcludedRatherThanThatNothingWasSaved(t *testing.T) {
+	// A store whose only global row has retired: the census must not appear.
 	srv, session := newValiditySession(t)
-	saveGlobalValidityRow(t, session, "global: the one cross-project row, long retired",
+	expired := saveGlobalValidityRow(t, session, "global: the one cross-project row, long retired",
 		map[string]any{"valid_from": "2020-01-01", "valid_until": "2021-01-01"})
 
-	census := renderGlobalMemoriesResource(t, srv)
-	if !strings.Contains(census, "No global memories saved yet") {
-		t.Errorf("the census should appear when all global rows are expired (filtered in SQL): %s", census)
+	withheld := renderGlobalMemoriesResource(t, srv)
+	if strings.Contains(withheld, "No global memories saved yet") {
+		t.Errorf("the census claimed nothing had ever been saved, but Ghost holds %s and withheld it as out of date:\n%s", expired, withheld)
+	}
+	// And the abstention points at the surface that still shows it, so the sentence
+	// is actionable rather than merely true. `ghost_memories_list` resolves
+	// `_global` and lists those rows still marked with the window they carry.
+	for _, want := range []string{"ghost_memories_list", "out of date"} {
+		if !strings.Contains(withheld, want) {
+			t.Errorf("the withheld answer does not say %q, so a caller is told what happened with nothing to do about it:\n%s", want, withheld)
+		}
 	}
 
-	// The other direction: a store with no global rows at all still gets the census.
+	// The other direction: a store with no global rows at all still gets the census,
+	// because that is the one verdict that may describe absence.
 	bare, _ := newValiditySession(t)
 	if census := renderGlobalMemoriesResource(t, bare); !strings.Contains(census, "No global memories saved yet") {
-		t.Errorf("a store holding no global rows lost the census: %s", census)
+		t.Errorf("a store holding no global rows lost the census, so an agent that has saved nothing is told nothing to do:\n%s", census)
 	}
 }

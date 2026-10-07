@@ -1,40 +1,49 @@
 package memory
 
 import (
+	"context"
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 )
 
+// setRawValidity writes the three validity columns to exact values through SQL,
+// including shapes the writers would refuse (unreadable stamps), because the rule
+// the two forms must agree on is defined over what the COLUMN can hold, not over
+// what a current writer happens to produce.
+//
+// A NIL bound is written as SQL NULL; a NON-NIL empty string is written as the
+// empty string. Those are different column values and the rule treats them the
+// same (no claim), so collapsing them here would leave the empty-string edge
+// untested while the table claimed to cover it.
+func setRawValidity(t *testing.T, s *Store, ctx context.Context, id string, from, until, verified *string) {
+	t.Helper()
+	ns := func(p *string) sql.NullString {
+		if p == nil {
+			return sql.NullString{}
+		}
+		return sql.NullString{String: *p, Valid: true}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET valid_from = ?, valid_until = ?, verified_at = ? WHERE id = ?`,
+		ns(from), ns(until), ns(verified), id); err != nil {
+		t.Fatalf("set validity(%s): %v", id, err)
+	}
+}
+
 // TestValiditySQLAgreesWithValidityState is the pin for the SQL form of the
 // passive validity rule, the sibling of TestScopeMatchesSQLAgreesWithScopeMatches.
 //
-// The passive fetch SQL includes a validity predicate that keeps rows whose
-// window contains the request's Now (valid_from <= now AND valid_until >= now,
-// with NULL bounds treated as open). Stage 2 in the assembler applies the same
-// rule via ValidityState. This test runs every case the Go rule covers through
-// both forms, so a change to either side the other does not follow fails here.
+// The passive fetch keeps rows whose window contains the request's Now
+// (valid_from <= now AND valid_until >= now, with NULL and unreadable bounds
+// treated as no claim). Stage 2 applies the same rule through ValidityState. This
+// test runs every case through BOTH forms — the SQL through the production
+// builder `validityMatchesSQL`, not a predicate retyped here — so a change to
+// either side the other does not follow fails on the row that changed.
 func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 	s, ctx := newDedupStore(t)
 
-	insertRaw := func(name string, validFrom, validUntil, verifiedAt *string) string {
-		t.Helper()
-		id, err := s.Create(ctx, testProject, Memory{
-			Category: "fact", Content: name, Source: "manual", Importance: 0.7,
-		})
-		if err != nil {
-			t.Fatalf("Create(%s): %v", name, err)
-		}
-		// Use direct UPDATE to set validity columns to exact values,
-		// including shapes the writers would not produce (unreadable stamps).
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE memories SET valid_from = ?, valid_until = ?, verified_at = ? WHERE id = ?`,
-			validFrom, validUntil, verifiedAt, id); err != nil {
-			t.Fatalf("set validity(%s): %v", name, err)
-		}
-		return id
-	}
-
-	// Fixed clock for all cases.
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	stamp := now.Format(StoredStampLayout)
 	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
@@ -49,71 +58,113 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 		wantGoState string
 	}{
 		{
-			name:      "no bounds, no verified_at -> unset, kept by SQL",
+			name:      "no bounds, no verified_at -> unset, kept",
 			validFrom: nil, validUntil: nil, verifiedAt: nil,
 			wantValid: true, wantGoState: ValidityUnset,
 		},
 		{
-			name:      "open window (valid_from only), no verified_at -> unverified, kept by SQL",
-			validFrom: &[]string{past}[0], validUntil: nil, verifiedAt: nil,
+			name:      "open window (valid_from only), no verified_at -> unverified, kept",
+			validFrom: strPtr(past), validUntil: nil, verifiedAt: nil,
 			wantValid: true, wantGoState: ValidityUnverified,
 		},
 		{
-			name:      "open window (valid_until only), no verified_at -> unverified, kept by SQL",
-			validFrom: nil, validUntil: &[]string{future}[0], verifiedAt: nil,
+			name:      "open window (valid_until only), no verified_at -> unverified, kept",
+			validFrom: nil, validUntil: strPtr(future), verifiedAt: nil,
 			wantValid: true, wantGoState: ValidityUnverified,
 		},
 		{
-			name:      "window contains now, no verified_at -> unverified, kept by SQL",
-			validFrom: &[]string{past}[0], validUntil: &[]string{future}[0], verifiedAt: nil,
+			name:      "window contains now, no verified_at -> unverified, kept",
+			validFrom: strPtr(past), validUntil: strPtr(future), verifiedAt: nil,
 			wantValid: true, wantGoState: ValidityUnverified,
 		},
 		{
-			name:      "window contains now, with verified_at -> valid, kept by SQL",
-			validFrom: &[]string{past}[0], validUntil: &[]string{future}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "window contains now, with verified_at -> valid, kept",
+			validFrom: strPtr(past), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
 			wantValid: true, wantGoState: ValidityValid,
 		},
 		{
-			name:      "window closed (valid_until in past) -> expired, DROPPED by SQL",
-			validFrom: &[]string{past}[0], validUntil: &[]string{past}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "window closed (valid_until in past) -> expired, dropped",
+			validFrom: strPtr(past), validUntil: strPtr(past), verifiedAt: strPtr(stamp),
 			wantValid: false, wantGoState: ValidityExpired,
 		},
 		{
-			name:      "window not yet open (valid_from in future) -> future, DROPPED by SQL",
-			validFrom: &[]string{future}[0], validUntil: &[]string{future}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "window not yet open (valid_from in future) -> future, dropped",
+			validFrom: strPtr(future), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
 			wantValid: false, wantGoState: ValidityFuture,
 		},
 		{
-			name:      "expired even with future valid_from -> expired, DROPPED by SQL",
-			validFrom: &[]string{future}[0], validUntil: &[]string{past}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "expired even with future valid_from -> expired, dropped",
+			validFrom: strPtr(future), validUntil: strPtr(past), verifiedAt: strPtr(stamp),
 			wantValid: false, wantGoState: ValidityExpired,
 		},
 		{
-			name:      "exactly at valid_until boundary -> valid, kept by SQL",
-			validFrom: &[]string{past}[0], validUntil: &[]string{stamp}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "valid_until exactly at now -> kept (a closed window)",
+			validFrom: strPtr(past), validUntil: strPtr(stamp), verifiedAt: strPtr(stamp),
 			wantValid: true, wantGoState: ValidityValid,
 		},
 		{
-			name:      "exactly at valid_from boundary -> valid, kept by SQL",
-			validFrom: &[]string{stamp}[0], validUntil: &[]string{future}[0], verifiedAt: &[]string{stamp}[0],
+			name:      "valid_from exactly at now -> kept",
+			validFrom: strPtr(stamp), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
+			wantValid: true, wantGoState: ValidityValid,
+		},
+		// The unreadable-bound direction the reviewer named: an RFC 3339
+		// valid_from sorts AFTER a leading '2', so a raw string comparison drops
+		// it (`valid_from <= now` false) while Go reads it as no claim and keeps
+		// it. The SQL must keep it too.
+		{
+			name:      "unreadable valid_from, RFC 3339, sorts after now -> no claim, kept",
+			validFrom: strPtr("2026-12-31T00:00:00Z"), validUntil: nil, verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnset,
+		},
+		// The other direction: an unreadable valid_until that sorts BEFORE now
+		// (`0000-00-00`) would be dropped by a raw string comparison
+		// (`valid_until >= now` false) while Go treats it as no claim.
+		{
+			name:      "unreadable valid_until, sorts before now -> no claim, kept",
+			validFrom: strPtr(past), validUntil: strPtr("0000-00-00"), verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnverified,
+		},
+		{
+			name:      "unreadable valid_from, not-a-date, sorts after now -> no claim, kept",
+			validFrom: strPtr("not-a-date"), validUntil: nil, verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnset,
+		},
+		{
+			name:      "empty valid_until -> no claim, kept",
+			validFrom: strPtr(past), validUntil: strPtr(""), verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnverified,
+		},
+		{
+			name:      "range-invalid valid_until (2026-02-30) -> no claim, kept",
+			validFrom: strPtr(past), validUntil: strPtr("2026-02-30"), verifiedAt: nil,
+			wantValid: true, wantGoState: ValidityUnverified,
+		},
+		{
+			name:      "unreadable valid_until, readable window -> valid, kept",
+			validFrom: strPtr(past), validUntil: strPtr("9999-99-99"), verifiedAt: strPtr(stamp),
 			wantValid: true, wantGoState: ValidityValid,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			id := insertRaw("case-"+c.name, c.validFrom, c.validUntil, c.verifiedAt)
+			id, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "case-" + c.name, Source: "manual", Importance: 0.7,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			setRawValidity(t, s, ctx, id, c.validFrom, c.validUntil, c.verifiedAt)
 
-			// Test SQL predicate: the same clause used in passiveFetchSQL
-			var gotSQL int
-			query := `SELECT CASE WHEN (valid_until IS NULL OR valid_until >= ?) AND (valid_from IS NULL OR valid_from <= ?) THEN 1 ELSE 0 END
+			// The production predicate, called rather than retyped.
+			var got int
+			query := `SELECT CASE WHEN ` + validityMatchesSQL() + ` THEN 1 ELSE 0 END
 				FROM memories WHERE id = ?`
-			if err := s.db.QueryRowContext(ctx, query, stamp, stamp, id).Scan(&gotSQL); err != nil {
+			if err := s.db.QueryRowContext(ctx, query, stamp, stamp, id).Scan(&got); err != nil {
 				t.Fatalf("validity predicate query: %v", err)
 			}
-			sqlValid := gotSQL == 1
+			sqlValid := got == 1
 
-			// Test Go rule
 			goState, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, now)
 			goValid := goState != ValidityExpired && goState != ValidityFuture
 
@@ -124,7 +175,8 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 				t.Errorf("Go: want valid=%v, got valid=%v (state=%s)", c.wantValid, goValid, goState)
 			}
 			if sqlValid != goValid {
-				t.Errorf("SQL and Go disagree: SQL valid=%v, Go valid=%v (state=%s) — the SQL form of the validity rule has drifted from the Go one", sqlValid, goValid, goState)
+				t.Errorf("SQL and Go disagree: SQL valid=%v, Go valid=%v (state=%s) — the SQL form of "+
+					"the validity rule has drifted from the one rule", sqlValid, goValid, goState)
 			}
 			if goState != c.wantGoState {
 				t.Errorf("Go state: want %s, got %s", c.wantGoState, goState)
@@ -133,63 +185,102 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 	}
 }
 
-// TestValiditySQLIncludesUnreadableBoundsGoAccepts pins the one place the
-// two forms of the rule are known to disagree, rather than leaving it to a
-// comment.
-//
-// Go's ValidityState treats an unreadable stamp as unset (ignores it), so a row
-// with an unreadable bound but otherwise valid window is kept as unverified.
-// The SQL predicate compares the raw string lexicographically. An unreadable
-// value like "not-a-date" sorts AFTER a valid timestamp (since 'n' > '2'),
-// so valid_until >= now evaluates to TRUE and the row is KEPT by SQL.
-//
-// Nothing in Ghost writes an unreadable validity stamp — the writers validate
-// and normalize to StoredStampLayout — so this needs a hand-edited or imported
-// row. The asymmetry is pinned because the predicate is now a user-visible
-// filter rather than a probe's condition.
-func TestValiditySQLIncludesUnreadableBoundsGoAccepts(t *testing.T) {
-	s, ctx := newDedupStore(t)
-
-	id, err := s.Create(ctx, testProject, Memory{
-		Category: "fact", Content: "unreadable bounds", Source: "manual", Importance: 0.7,
-	})
+// TestPassiveFetchSQLUsesTheValidityBuilder stops the fetch from drifting off the
+// builder the pin above calls: the clause has to be in the statement the store
+// actually runs, not merely equal to one a test also runs.
+func TestPassiveFetchSQLUsesTheValidityBuilder(t *testing.T) {
+	s, _ := newDedupStore(t)
+	cols, err := passiveColumnsFor(s)
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("passiveColumnsFor: %v", err)
 	}
+	if !cols.HasValidity {
+		t.Fatalf("fixture: the store must have the validity columns for this to test anything")
+	}
+	q, args := passiveFetchSQL(projectPassivePolicy(), passiveRequest("proj"), cols)
+	if !strings.Contains(q, validityMatchesSQL()) {
+		t.Errorf("the passive fetch does not use validityMatchesSQL, so the pin tests a predicate the "+
+			"fetch does not run:\n%s", q)
+	}
+	// Two bindings for the predicate, plus the bucket: a query whose clause is
+	// present but whose stamps are never bound fails at run time with "missing
+	// argument with index".
+	if !strings.Contains(q, "?") {
+		t.Fatal("the validity predicate carries no placeholder")
+	}
+	if len(args) < 3 {
+		t.Errorf("args = %d; want at least the bucket and the two validity stamps", len(args))
+	}
+}
+
+// TestPassiveReadAdmitsExactlyTheValidRows is the end-to-end form of the pin: the
+// rows the store RETURNS from a passive read are exactly the rows Go's rule keeps,
+// over a set that mixes valid, expired, future and unreadable windows. The
+// direct-builder test above can pass while a wiring mistake (an unbound stamp, the
+// predicate applied to the wrong column) drops or admits the wrong row here.
+func TestPassiveReadAdmitsExactlyTheValidRows(t *testing.T) {
+	s, ctx := newDedupStore(t)
 
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	stamp := now.Format(StoredStampLayout)
+	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
+	future := now.Add(24 * time.Hour).Format(StoredStampLayout)
 
-	// Unreadable valid_until with otherwise valid window
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE memories SET valid_from = ?, valid_until = 'not-a-date', verified_at = ? WHERE id = ?`,
-		now.Add(-48*time.Hour).Format(StoredStampLayout), stamp, id); err != nil {
-		t.Fatalf("set validity: %v", err)
+	cases := []struct {
+		name       string
+		validFrom  *string
+		validUntil *string
+		wantKept   bool
+	}{
+		{"kept-unset", nil, nil, true},
+		{"kept-open-from", strPtr(past), nil, true},
+		{"kept-open-until", nil, strPtr(future), true},
+		{"kept-window", strPtr(past), strPtr(future), true},
+		{"kept-boundary-until", strPtr(past), strPtr(stamp), true},
+		{"dropped-expired", strPtr(past), strPtr(past), false},
+		{"dropped-future", strPtr(future), strPtr(future), false},
+		{"kept-unreadable-from", strPtr("2026-12-31T00:00:00Z"), nil, true},
+		{"kept-unreadable-until", strPtr(past), strPtr("0000-00-00"), true},
 	}
 
-	var gotSQL int
-	query := `SELECT CASE WHEN (valid_until IS NULL OR valid_until >= ?) AND (valid_from IS NULL OR valid_from <= ?) THEN 1 ELSE 0 END
-		FROM memories WHERE id = ?`
-	if err := s.db.QueryRowContext(ctx, query, stamp, stamp, id).Scan(&gotSQL); err != nil {
-		t.Fatalf("validity predicate query: %v", err)
+	want := map[string]bool{}
+	for _, c := range cases {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: c.name, Source: "manual", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", c.name, err)
+		}
+		setRawValidity(t, s, ctx, id, c.validFrom, c.validUntil, nil)
+		if c.wantKept {
+			want[id] = true
+		}
 	}
-	sqlValid := gotSQL == 1
 
-	// Go treats unreadable bound as unset, so valid_from is set, valid_until is unset -> unverified (kept)
-	unreadableUntil := "not-a-date"
-	goState, _ := ValidityState(
-		&[]string{now.Add(-48 * time.Hour).Format(StoredStampLayout)}[0],
-		&unreadableUntil,
-		&stamp,
-		now,
-	)
-	goValid := goState != ValidityExpired && goState != ValidityFuture
-
-	// Both keep it, but for different reasons — Go ignores unreadable, SQL string-compares
-	if !goValid {
-		t.Fatal("test bug: Go should keep a row with unreadable valid_until but valid window")
+	pol := projectPassivePolicy()
+	pol.Bucket = testProject
+	pol.OverFetch = 100
+	req := passiveRequest(testProject, pol)
+	// The request clock is what the SQL predicate and the Go rule are both judged
+	// against, so bind the same instant the cases were built around.
+	req.Now = now
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
 	}
-	if !sqlValid {
-		t.Errorf("SQL says valid=%v; the recorded asymmetry is that it keeps a row Go's parser reads as having an open window (both keep, but for different reasons)", sqlValid)
+
+	got := map[string]bool{}
+	for _, r := range set.Rows {
+		got[r.ID] = true
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("a row Go's rule keeps was not returned by the passive read: %s", id)
+		}
+	}
+	for id := range got {
+		if !want[id] {
+			t.Errorf("a row Go's rule drops was returned by the passive read: %s", id)
+		}
 	}
 }

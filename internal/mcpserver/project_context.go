@@ -581,7 +581,13 @@ func projectContextEmptyNote(res assemble.Result) string {
 // only one of them is about what the project HOLDS. The second is projectWindowRowCount.
 //
 // projectWindowRowCount is how many of the project's OWN rows a retrieval window
-// could have admitted, which is the population the abstention sentence is about.
+// could CONSIDER, which is the population the abstention sentence is reconciled
+// against. It is deliberately not the window's admitted population: the validity
+// predicate runs in the window's SQL (`passiveFetchSQL`), so a validity-invalid row
+// of the project is not admitted — yet it is exactly the cause the validity
+// abstention names, and filtering it out here would make the gate inert for the
+// case it was written for. `CountActiveMemories` applies `resolved_at IS NULL` and
+// stops there for that reason.
 //
 // It is a capability assertion and not `CountMemories`, because the difference
 // between the two counts is the whole of the last review finding on this surface:

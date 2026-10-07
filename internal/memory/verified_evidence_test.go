@@ -525,14 +525,21 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"store.go:SearchFTSAll":                true,
 		"vector.go:GetByIDs":                   true,
 		// #581's passive read reaches the validity triple through the shared
-		// `memoryColumns` list rather than naming it, which is why it has NO entry
-		// here and the scan does not report it: this is the documented residual gap
-		// of the body scan — a column reached only through a package-level slice
-		// is invisible to it — and `store.go:GetTopMemories` above is in exactly the
-		// same position for the same reason. An earlier version of the passive fetch
-		// spelled the columns out and WAS classified; selecting the shared list
-		// instead is what removed the need, and it removed the second statement of
-		// what a Memory is at the same time. The reader is unchanged by either.
+		// `memoryColumns` list rather than naming it, which is why the FETCH has NO
+		// entry here and the scan does not report it: this is the documented
+		// residual gap of the body scan — a column reached only through a
+		// package-level slice is invisible to it — and `store.go:GetTopMemories`
+		// above is in exactly the same position for the same reason. An earlier
+		// version of the passive fetch spelled the columns out and WAS classified;
+		// selecting the shared list instead is what removed the need, and it
+		// removed the second statement of what a Memory is at the same time.
+		//
+		// passiveColumnsFor is the one function in that file the scan DOES see, and
+		// it is a reader: on a store below the validity floor it replaces the
+		// triple with NULL literals so the fetch does not name columns that are not
+		// there. It writes nothing, and the substitution is the validity sibling of
+		// the scope and tier substitutions beside it.
+		"candidates_passive.go:passiveColumnsFor": true,
 	}
 
 	found := scanVerifiedAtMentions(t)
