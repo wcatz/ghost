@@ -55,8 +55,12 @@ const (
 	reasonAllOutOfRetention = "all_out_of_retention"
 	reasonAllOutOfScope     = "all_out_of_scope"
 	reasonAllDedupDropped   = "all_dedup_dropped"
-	reasonAllDiversity      = "all_diversity_capped"
-	reasonAllOverBudget     = "all_over_budget"
+	// reasonNearDuplicate is a stage 6 decision's reason: the retriever removed
+	// the row as the loser of a near-duplicate pair, and Decision.Against names
+	// the row it lost to. A per-row reason, not an outcome one.
+	reasonNearDuplicate = "near_duplicate"
+	reasonAllDiversity  = "all_diversity_capped"
+	reasonAllOverBudget = "all_over_budget"
 	// Results that admitted rows.
 	reasonBelowFloor    = "below_floor"
 	reasonFloorMet      = "floor_met"

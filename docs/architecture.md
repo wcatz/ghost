@@ -1579,8 +1579,18 @@ Axis interaction rules:
 > never read are ranked out, because the window is ordered by the ranking and cut
 > at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
 > that split). A row the retriever fetched and then removed as a near-duplicate
-> loser never reaches the trace; it is `Deduped`, counted in the total and
-> reported with the withheld rows, never as the ranking's cut. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> loser never enters `CandidateSet.Rows`, but the retriever reports it in
+> `CandidateSet.DroppedLosers` with the ids it lost to, and stage 6 files it as a
+> `dedup` / `near_duplicate` decision (`Decision.Against` names the winner). That
+> decision is the one source: `CountsFor` counts it as `Deduped` (counted in the
+> total, reported with the withheld rows, never as the ranking's cut),
+> `BucketTally.CountedAgainst` does not infer losers from the store's count, the
+> retrieval record carries it as a dropped verdict, and explain reports it as not
+> included with `near_duplicate_of` set (and `near_duplicate_penalty` 0, because it was
+> never ranked with a penalty). Today that explain row is EMPTY IN PRACTICE: explain
+> requires a query, query mode carries no passive policies, and so `DroppedLosers` is
+> never filled on a path explain can reach; the projection is pinned by a hand-built
+> test for a future passive explain surface. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state
@@ -1938,9 +1948,10 @@ and whose vector leg then failed.)
   Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
   callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
-What the remaining stages will add, in pipeline order: conflict recording and
-dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on)
-and diversity (7, off by default).
+What the remaining stages will add, in pipeline order: conflict separation
+(stage 5, where `contradicts` is recorded and not acted on) and diversity (7, off
+by default). Stage 6 already records the near-duplicate losers the retriever
+removed, with the row each lost to; it does not decide them.
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
@@ -1952,6 +1963,7 @@ query
   4. provenance     bounded penalty for unattributed or low-confidence rows
   5. conflicts      suppress superseded rows; never emit a contradicts pair together
   6. dedup          collapse duplicate/near-duplicate links to one representative
+                    (the retriever's removed losers are recorded here, with their winner)
   7. diversity      cap per-source share so one project cannot crowd out the rest
   8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context

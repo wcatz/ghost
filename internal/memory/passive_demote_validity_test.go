@@ -140,7 +140,7 @@ func TestSelectPassiveDemotionsIgnoreRowsOutsideTheirWindow(t *testing.T) {
 		mk(expiredSuperseder, 0.3, strPtr(past)),
 	}
 	pol := globalPassivePolicy()
-	got, err := s.selectPassive(ctx, mems, pol, now, pol.Bucket)
+	got, _, err := s.selectPassive(ctx, mems, pol, now, pol.Bucket)
 	if err != nil {
 		t.Fatalf("selectPassive: %v", err)
 	}

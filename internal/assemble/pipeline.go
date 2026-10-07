@@ -73,6 +73,10 @@ type pipeline struct {
 	noteBuf        []string
 	// dropped is every id any stage removed, for the notes.
 	dropped map[string]string
+	// losers is the near-duplicate losers stage 6 recorded, by id: the rows the
+	// retriever removed, with the ids they lost to. explain reads it to report
+	// them as not included with near_duplicate_of set.
+	losers map[string]memory.DroppedLoser
 	// noteCut is how many notes the response-fit post-pass has taken off the end
 	// of the bounded list. It lives here rather than in the post-pass so notes()
 	// stays the one function that produces the list: a second derivation would be
@@ -363,9 +367,15 @@ func runConflicts(p *pipeline) {
 // runDedup is stage 6. The retriever reorders the window by supersede and
 // near-duplicate edges already, and the policy for dropping a demoted loser is
 // the CALLER's — `Slice.DropDemotedLosers`, which reaches the retriever through
-// `passivePolicies` and which the session-start surface sets for `_global` — so
-// the stage reports the policy and nothing else. The stage is a pass-through in
-// v1 and says so in the trace rather than pretending to have deduplicated.
+// `passivePolicies` and which the session-start surface sets for `_global`.
+//
+// The retriever's removals are RECORDED here. A removed loser never enters
+// CandidateSet.Rows, and the pairwise judgement was made over edges this pipeline
+// never saw, so the stage cannot decide it; it takes the verdicts the retriever
+// reported (CandidateSet.DroppedLosers) and files each as a drop at this stage
+// with the ids it lost to. That is what puts the row in the trace, in the
+// retrieval record, in the per-bucket tally and in explain: one source for all
+// four. A set with no removals records the stage as a pass-through.
 func runDedup(p *pipeline) {
 	// The sentence is about what the RETRIEVER did, and a passive bucket can have
 	// had losers removed rather than ranked last — so the old wording ("no source
@@ -381,19 +391,55 @@ func runDedup(p *pipeline) {
 	// nothing, because an operator told to go looking for a dropped row will not
 	// find one and will conclude the block is lying about something else.
 	if p.passive && p.dropsDemotedLosers() {
-		// Stated as a POLICY, not as a removal that happened. The stage cannot know
-		// whether a row was removed — the retriever did it, over a window this
-		// pipeline never saw the edges of — and a note that claims a removal for
-		// every `_global` slice that sets the flag would be a report about a
-		// prediction, on the overwhelmingly common occasion that the window held
-		// no near-duplicate edge at all. Which rows went is in the trace; what this
-		// says is why there is one row of each pair when there is one.
+		// Stated as a POLICY: whether a row was removed is the per-row decisions'
+		// business below, and a note that claimed a removal for every `_global`
+		// slice that sets the flag would be a report about a prediction, on the
+		// overwhelmingly common occasion that the window held no near-duplicate
+		// edge at all.
 		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
 	} else {
 		note += "; no source policy drops losers on this surface yet"
 	}
 	p.blockNotes = append(p.blockNotes, note)
-	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, note)
+
+	in := len(p.rows)
+	notes := []string{note}
+	var dropped []string
+	p.losers = make(map[string]memory.DroppedLoser, len(p.set.DroppedLosers))
+	for _, l := range p.set.DroppedLosers {
+		// A row already in the window is not a removed one: the set's own account
+		// of it (kept or dropped by an earlier stage) stands, and a second verdict
+		// would count one row twice.
+		if _, dup := p.losers[l.ID]; dup || p.droppedAlready(l.ID) || p.inRows(l.ID) {
+			continue
+		}
+		p.losers[l.ID] = l
+		p.trace.Decisions = append(p.trace.Decisions, Decision{
+			ID: l.ID, ProjectID: l.ProjectID, Stage: stageDedup, Reason: reasonNearDuplicate,
+			Before: l.Score, Against: append([]string(nil), l.LostTo...),
+		})
+		p.dropped[l.ID] = reasonNearDuplicate
+		p.droppedBy[stageDedup]++
+		dropped = append(dropped, l.ID)
+	}
+	if len(dropped) > 0 {
+		notes = append(notes, formatNote("%d near-duplicate loser(s) removed by the retriever; each is a decision at this stage naming the row it lost to", len(dropped)))
+	}
+	p.trace.record(stageDedup, in+len(dropped), in, dropped, notes...)
+}
+
+func (p *pipeline) droppedAlready(id string) bool {
+	_, ok := p.dropped[id]
+	return ok
+}
+
+func (p *pipeline) inRows(id string) bool {
+	for _, c := range p.rows {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // dropsDemotedLosers reports whether any bucket in the request ASKS the retriever

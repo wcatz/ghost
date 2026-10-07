@@ -193,10 +193,11 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	}
 	var rows []Candidate
 	for _, pol := range req.Passive {
-		fetched, err := s.passiveBucket(ctx, req, pol, cols)
+		fetched, losers, err := s.passiveBucket(ctx, req, pol, cols)
 		if err != nil {
 			return nil, err
 		}
+		set.DroppedLosers = append(set.DroppedLosers, losers...)
 		// A bucket that came back empty is the only case the reason can be reported
 		// on, and the only case the probe has to run: if any bucket returned rows
 		// the set is non-empty and the assembler never reads this count. Probing the
@@ -279,16 +280,16 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 // for it twice. It is passed down rather than re-read so every bucket's SQL, and
 // every bucket's reading of what its rows carry, agree about which store they are
 // talking to.
-func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, error) {
+func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, []DroppedLoser, error) {
 	query, args := passiveFetchSQL(pol, req, cols)
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
+		return nil, nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
 	}
 	defer func() { _ = rows.Close() }()
 	memories, err := scanMemories(rows)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
 }
@@ -484,8 +485,9 @@ func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateReques
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the
-// selected rows followed by the rest of the window.
-func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SlicePolicy, now time.Time, fetchedBy string) ([]Candidate, error) {
+// selected rows followed by the rest of the window, and separately the
+// near-duplicate losers a DropDemotedLosers policy removed from it.
+func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SlicePolicy, now time.Time, fetchedBy string) ([]Candidate, []DroppedLoser, error) {
 	scored := make([]passiveRow, 0, len(memories))
 	for _, m := range memories {
 		age := ageDays(m.CreatedAt, now)
@@ -521,14 +523,18 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// eligible, because stage 2 is the authority on dropping them and reports it.
 	eligible, withheld := passiveEligible(scored, now)
 	chosen, rest := passiveSelect(eligible, pol)
-	chosen = s.passiveDemote(ctx, chosen, pol)
+	chosen, removed := s.passiveDemote(ctx, chosen, pol)
 	rest = append(rest, withheld...)
 
 	out := make([]Candidate, 0, len(scored))
 	for _, r := range append(chosen, rest...) {
 		out = append(out, passiveCandidate(r, fetchedBy))
 	}
-	return out, nil
+	var losers []DroppedLoser
+	for _, l := range removed {
+		losers = append(losers, DroppedLoser{Candidate: passiveCandidate(l.row, fetchedBy), LostTo: l.lostTo})
+	}
+	return out, losers, nil
 }
 
 // passiveEligible splits rows into those inside their validity window at now and
@@ -547,6 +553,12 @@ func passiveEligible(rows []passiveRow, now time.Time) (eligible, withheld []pas
 		}
 	}
 	return eligible, withheld
+}
+
+// passiveLoser is a row passiveDemote removed, with the ids it lost to.
+type passiveLoser struct {
+	row    passiveRow
+	lostTo []string
 }
 
 // passiveRow is one fetched row with the facts the passive order and the
@@ -682,9 +694,12 @@ func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) []passiveRo
 // REMOVES them — the global bucket, whose cap is tight enough that a
 // near-duplicate restatement would otherwise spend a slot — and one that does
 // not only reorders, leaving the assembler's slice cap to drop the tail.
-func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SlicePolicy) []passiveRow {
+//
+// The second result is the rows a DropDemotedLosers policy removed, each with the
+// winners it lost to, read from the same edge verdicts the removal was decided on.
+func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SlicePolicy) ([]passiveRow, []passiveLoser) {
 	if len(rows) < 2 {
-		return rows
+		return rows, nil
 	}
 	ids := make([]string, len(rows))
 	// TWO protection maps, because the two relations protect different things.
@@ -745,7 +760,7 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// against the old loader would read as a regression when the set is small and
 	// read as nothing at all when the set is large.
 	if pol.DemoteOnlyWhenOverCap && len(rows) <= pol.ItemCap {
-		return rows
+		return rows, nil
 	}
 	// The threshold falls back to the STORE's configured one, which is the same
 	// value demoteNearDuplicates uses on the query path. It has to: a policy that
@@ -760,27 +775,33 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 		threshold = s.demotionThreshold
 		s.mu.RUnlock()
 	}
-	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, nearDupProtected, threshold)
+	// The verdicts, not just the penalty: a dropped loser has to name the row it
+	// lost to, and it is read from the one edge pass that decided the loss.
+	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, nearDupProtected, threshold)
+	penalty, against := demotionVerdicts(pairs)
 	if err != nil {
 		// Warn for the reason the supersede lookup above gives: the near-duplicate
 		// pass decides which member of a pair loses, so a store it cannot read
 		// shows both, as two independent claims.
 		s.logger.Warn("candidates: passive demotion lookup failed", "error", err)
-		return rows
+		return rows, nil
 	}
 	if len(penalty) == 0 {
-		return rows
+		return rows, nil
 	}
 	if pol.DropDemotedLosers {
 		kept := make([]passiveRow, 0, len(rows))
+		var removed []passiveLoser
 		for _, r := range rows {
 			if penalty[r.mem.ID] == 0 {
 				kept = append(kept, r)
+				continue
 			}
+			removed = append(removed, passiveLoser{row: r, lostTo: against[r.mem.ID]})
 		}
-		return kept
+		return kept, removed
 	}
-	return StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty)
+	return StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty), nil
 }
 
 // passiveCandidate materialises one selected row. The rank sentinels are the -1
