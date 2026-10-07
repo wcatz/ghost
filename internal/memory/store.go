@@ -6657,8 +6657,8 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 // listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
 // of every window a ranking surface reads, because `passiveFetchSQL` and the query
 // path both bind `resolved_at IS NULL`. So "how many does this project hold" and
-// "how many of its rows can a block have been assembled from" are different counts,
-// and a caller that needs the second cannot derive it from the first.
+// "how many of its rows a window could even consider" are different counts, and a
+// caller that needs the second cannot derive it from the first.
 //
 // IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveFetchSQL`,
 // and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
