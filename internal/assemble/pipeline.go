@@ -652,6 +652,45 @@ func (p *pipeline) notes() []string {
 	return p.cutNotes(boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes))
 }
 
+// markConflicts sets Item.ConflictsWith on every row that shares a live
+// `contradicts` edge with another row still in the answer. It is the one place
+// the marker is decided, so every surface that renders Item.Line inherits it.
+//
+// It runs from fitResponse, on every pass, and not at stage 5: the response-fit
+// post-pass can drop a row after the stages are done, and a survivor must not
+// keep naming a partner the reader no longer has. Nothing is removed or reordered
+// here — admitting both rows is the documented contract, and this only says so.
+func (p *pipeline) markConflicts() {
+	partners := make(map[string]map[string]bool)
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	for _, pair := range p.contradictPairs {
+		if !present[pair[0]] || !present[pair[1]] {
+			continue
+		}
+		for i := range 2 {
+			if partners[pair[i]] == nil {
+				partners[pair[i]] = map[string]bool{}
+			}
+			partners[pair[i]][pair[1-i]] = true
+		}
+	}
+	for i := range p.items {
+		p.items[i].ConflictsWith = nil
+		if len(partners[p.items[i].ID]) == 0 {
+			continue
+		}
+		// In rank order, so the label is stable and reads the way the block does.
+		for _, other := range p.items {
+			if partners[p.items[i].ID][other.ID] {
+				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, other.ID)
+			}
+		}
+	}
+}
+
 // breakdownLeads reports whether the per-stage removal breakdown heads the note
 // list, which is the only place notes() puts it. It leads because the
 // response-fit pass cuts notes from the TAIL, so the breakdown is the last one
