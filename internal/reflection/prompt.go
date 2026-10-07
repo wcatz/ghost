@@ -2,7 +2,6 @@ package reflection
 
 import (
 	"fmt"
-	"github.com/wcatz/ghost/internal/assemble"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -382,10 +381,14 @@ Return ONLY the JSON object, no other text.`)
 // quoteData wraps untrusted stored text in «...» data delimiters, first
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
+//
+// It does NOT fold line breaks, unlike assemble.Data (#911), on purpose: this
+// prompt asks the model to REWRITE and MERGE memory content and that output is
+// STORED. Showing a visible escape instead of the real line break would teach the
+// model to copy the escape into merged memories and corrupt the stored text.
+// TestTheReflectionPromptCarriesAStoredNewlineUnchanged pins it.
 func quoteData(s string) string {
-	// One renderer (#911): delimiters neutralised and stored line breaks folded,
-	// so a stored newline cannot start a line shaped like a record.
-	return assemble.Data(s)
+	return "«" + neutralizeDelimiters(s) + "»"
 }
 
 // neutralizeDelimiters rewrites the « and » that open and close a data block into
