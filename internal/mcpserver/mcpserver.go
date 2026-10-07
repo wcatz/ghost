@@ -650,6 +650,10 @@ type Server struct {
 	// future constructor would too) would otherwise lose the cap silently and
 	// answer with whatever the corpus holds.
 	searchMaxBytes int
+	// clock is the instant a passive project-context read is made at. nil is the
+	// wall clock, which is every Server New builds; ProjectContextAt sets it so a
+	// block can be measured at a fixed instant.
+	clock func() time.Time
 }
 
 // searchResponseCap is one formatted search response's byte cap: the field's
@@ -2167,122 +2171,10 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		// The unresolved-name case was answered ABOVE, before the as_of return,
-		// because both branches of this handler were handed the empty id and both
-		// mislabelled the cross-project rows. From here on the project resolved.
-		//
-		// So the case is answered, and answered the same way whatever else the
-		// store holds — which is the half the old behaviour varied on.
-		//
-		// `if args.ProjectID != ""` is therefore belt-and-braces on the assemble
-		// rather than the case's guard: the assembler refuses a project context
-		// with no project, and this is the seam that would refuse it if the check
-		// above were ever moved back down here.
-		var memories assemble.Result
-		// The window is a UNION of this project's rows and `_global`'s, and it is
-		// split before it is rendered (#809): a cross-project row listed under
-		// `## Memories` is a row the SessionStart trust guidance — which keys on
-		// `## Global (applies to all projects)` — cannot see. The split partitions
-		// the admitted set and reorders nothing, so `limit` still caps the whole
-		// block and every row the window admitted is still shown.
-		var own, globals []assemble.Item
-		if args.ProjectID != "" {
-			memories, err = s.projectContextMemories(ctx, args.ProjectID, args.Limit)
-			if err != nil {
-				return nil, nil, err
-			}
-			own, globals = projectContextSplit(memories.Items)
-			projectContextSection(&sb, memorySectionHeading, projectContextItems(own))
-			// The tool's Global section is the `_global` half of its own window and
-			// NO second read: `limit` already capped the whole block, and a second
-			// read at the Global section's own cap would return more rows than the
-			// caller asked for. The resource, whose caps are per-section, does run
-			// one — see buildProjectContext.
-			projectContextSection(&sb, globalSectionHeading, projectContextItems(globals))
-		}
-
-		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get learned context: %w", err)
+			return nil, nil, err
 		}
-		if learned != "" {
-			// Quoted and announced, exactly as the session-start block renders
-			// its own Summary line: the summary is written by a reflection pass
-			// reading this project's memories, and a memory can have arrived
-			// from a repository this agent has never checked.
-			sb.WriteString("\n\n## Learned Context\n\n")
-			sb.WriteString(dataDelimiterNote + "\n\n")
-			sb.WriteString(quoteData(learned))
-		}
-
-		text := sb.String()
-		if text == "" {
-			// A block the stages EMPTIED is not an empty project, and the census
-			// below would say it is. So the two are separated by the verdict, and
-			// only an empty over-fetched window may claim absence.
-			//
-			// The note is the SAME function the non-empty branch uses, and that is
-			// the point rather than a deduplication: it is the only place the
-			// project-scoped count and the union-scoped verdict are reconciled, and
-			// a gate that merely permitted the abstention would read that count and
-			// then throw it away — leaving a project whose rows were all withdrawn
-			// by `ghost resolve` (so the FETCH emptied the window while
-			// `CountMemories`, which has no `resolved_at` predicate, still counts
-			// them) with the never-saved census, which is false.
-			if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: note}},
-				}, nil, nil
-			}
-			// `_global` is not a project, and the switch below asks whether a PROJECT
-			// is registered — so for that id the census is false in the same way, and
-			// `projectExists` answers `true` about a bucket, so the "is registered but
-			// has no memories" sentence is the one that ships. The store DOES hold
-			// global rows; stage 2 withheld them.
-			//
-			// So the same branch `buildProjectContext` takes answers here: the
-			// assembler's verdict, which is a fact about the window rather than about
-			// a project. Both surfaces are asserted on the same fixture in
-			// `TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows`, because
-			// fixing one of them and not the other is how this defect survived a round
-			// in the first place.
-			if args.ProjectID == memory.GlobalProjectID {
-				if note := projectContextEmptyNote(memories); note != "" {
-					return &mcp.CallToolResult{
-						Content: []mcp.Content{&mcp.TextContent{Text: note}},
-					}, nil, nil
-				}
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: "No memories found among the cross-project rows."}},
-				}, nil, nil
-			}
-			exists, existsErr := s.projectExists(ctx, args.ProjectID)
-			switch {
-			case existsErr != nil:
-				text = "Project lookup failed — unable to determine whether it is registered. Try again or call ghost_memory_save to create it."
-			case exists:
-				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
-			default:
-				text = projectNotRegistered(asked)
-			}
-		} else if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
-			// A block made entirely of cross-project rows is not this project's
-			// context, and it is only visible from OUTSIDE the empty gate: with
-			// `IncludeGlobal` the section is populated by `_global` whenever the
-			// store holds any, so this case never reached an empty block. Appended
-			// rather than substituted, because there IS an answer above — the
-			// cross-project rows are wanted, they are simply not this project's.
-			//
-			// The other shape that reaches only this branch is a block made of the
-			// sections rendered OUTSIDE the assembler, with an empty memory read
-			// behind it: `## Learned Context` above is exactly that, and for a
-			// project reflection has summarised it means the summary's own source
-			// rows were withheld (#788). The function picks the sentence by the
-			// verdict, so this call site does not ask what kind of non-empty block
-			// it is holding.
-			text += "\n\n" + note
-		}
-
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil

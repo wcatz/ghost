@@ -48,7 +48,7 @@ ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost history compact [--apply]   Remove history versions that changed nothing (bounded by --before)
-ghost bench [--sweep|--context]   Run the built-in benchmark
+ghost bench [--sweep|--context|--passive]   Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
 ```
