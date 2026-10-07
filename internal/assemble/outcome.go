@@ -602,9 +602,10 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "No sufficiently trustworthy memory found: the item budget cut the candidates this search " +
 				"found. Raise the limit to see them." + p.stageNote()
 		}
-		// The dedup and diversity reasons have no sentence yet: their stages are
-		// pass-throughs, so the copy would be unreachable and would drift from
-		// the stage that eventually produces it. The generic sentence is true of
+		// The dedup and diversity reasons have no sentence yet: diversity is a
+		// pass-through and dedup only records the retriever's removals, so the
+		// copy would be unreachable and would drift from the stage that
+		// eventually produces it. The generic sentence is true of
 		// both, and the per-stage breakdown note beside it says which stage ran.
 		return "No sufficiently trustworthy memory found: every candidate this search found was removed before the " +
 			"answer was assembled. " + p.removalBreakdown() + "."
