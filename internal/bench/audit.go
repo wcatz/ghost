@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -167,6 +168,9 @@ type AuditHeadlines struct {
 	// own-domain memories no turn cites, restates, denies or saves, judged used.
 	// It is the figure the audit's own tests logged before the bench existed.
 	UnlabelledUsed, UnlabelledTotal int
+	// SpreadUsed is how many memories whose words are spread over three turns, and
+	// whole in none, the session-start call judged used. The labels expect none.
+	SpreadUsed, SpreadTotal int
 	// CitesCaught is the cited ids the audit filed as used on the identifier arm,
 	// over every pair the labels expect there, in the session-start call alone: it
 	// is the one call every labelled turn follows, so the denominators are the
@@ -191,6 +195,12 @@ func (r AuditReport) Headlines() AuditHeadlines {
 			h.RestatementsTotal++
 			if p.Got == p.Expected {
 				h.RestatementsCaught++
+			}
+		}
+		if p.Domain == "spread" {
+			h.SpreadTotal++
+			if p.Got == ClassUsedIdentifier || p.Got == ClassUsedToken {
+				h.SpreadUsed++
 			}
 		}
 		if p.Domain != "dev" {
@@ -281,6 +291,23 @@ func runAuditCall(ctx context.Context, c AuditCorpus, call AuditCall) (AuditScen
 		}
 	}
 
+	// The signals reach audit.Run the way the stop hook's child receives them: written
+	// to a sidecar and read back under the same key, so the file format is on the path
+	// this bench measures. The file lives in a scratch directory removed on return.
+	dir, err := os.MkdirTemp("", "ghost-bench-audit-")
+	if err != nil {
+		return AuditScenario{}, err
+	}
+	defer os.RemoveAll(dir) //nolint:errcheck
+	path, err := audit.WriteSidecar(dir, s)
+	if err != nil {
+		return AuditScenario{}, fmt.Errorf("write the sidecar: %w", err)
+	}
+	s, err = audit.ReadSidecar(path, h)
+	if err != nil {
+		return AuditScenario{}, fmt.Errorf("read the sidecar back: %w", err)
+	}
+
 	sum, err := audit.Run(ctx, store, auditProject, s)
 	if err != nil {
 		return AuditScenario{}, err
@@ -319,6 +346,7 @@ func FormatAudit(rep AuditReport) string {
 	fmt.Fprintf(&b, "  of which no turn labels them: %d of %d\n", h.UnlabelledUsed, h.UnlabelledTotal)
 	fmt.Fprintf(&b, "cited ids caught: %d of %d\n", h.CitesCaught, h.CitesTotal)
 	fmt.Fprintf(&b, "restatements caught: %d of %d\n", h.RestatementsCaught, h.RestatementsTotal)
+	fmt.Fprintf(&b, "spread across turns, judged used: %d of %d\n", h.SpreadUsed, h.SpreadTotal)
 
 	for _, sc := range rep.Scenarios {
 		fmt.Fprintf(&b, "\nscenario %s: the call is placed before turn %d, source %s, keeps %d memories (%d same-domain)\n",

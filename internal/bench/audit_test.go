@@ -81,8 +81,32 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 		}
 		mem[m.ID] = m
 	}
-	if len(c.Memories) != 40 {
-		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures", len(c.Memories))
+	if len(c.Memories) != 44 {
+		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures and four spread memories", len(c.Memories))
+	}
+	// A spread memory's words are in no single turn at the token bar: the bench's
+	// point is that the union of turns clears it and no one turn does.
+	for _, m := range c.Memories {
+		if m.Domain != "spread" {
+			continue
+		}
+		mw := distinctSet(localWords(m.Content))
+		union := map[string]bool{}
+		for i, turn := range c.Turns {
+			shared := 0
+			for w := range distinctSet(localWords(turn.Text)) {
+				if mw[w] && len(w) >= 4 {
+					shared++
+					union[w] = true
+				}
+			}
+			if shared*3 >= len(mw) {
+				t.Errorf("turn %d holds %d of spread memory %s's %d words: a single turn would restate it", i, shared, m.ID, len(mw))
+			}
+		}
+		if len(union) < 9 {
+			t.Errorf("spread memory %s: the turns hold only %d of its words together", m.ID, len(union))
+		}
 	}
 
 	var cites, restates, denies, saves, plain int
@@ -231,9 +255,48 @@ func TestAuditHeadlinesArePrinted(t *testing.T) {
 		`(?m)^same-domain used at session start: \d+ of 20$`,
 		`(?m)^cited ids caught: \d+ of \d+$`,
 		`(?m)^restatements caught: \d+ of \d+$`,
+		`(?m)^spread across turns, judged used: \d+ of \d+$`,
 	} {
 		if !regexp.MustCompile(re).MatchString(out) {
 			t.Errorf("report lacks a line matching %s:\n%s", re, out)
 		}
+	}
+}
+
+// TestAuditStartRecallIsPinnedSemantically holds the positive classes at recall 1.0
+// in the session-start call, by assertion and not by golden: a golden can be
+// regenerated to accept a regression, and these cannot.
+func TestAuditStartRecallIsPinnedSemantically(t *testing.T) {
+	start := auditRun(t).scenario("start")
+	if len(start.Pairs) == 0 {
+		t.Fatal("no start scenario")
+	}
+	for _, cl := range []AuditClass{ClassUsedIdentifier, ClassUsedToken, ClassContradicted, ClassSuperseded} {
+		r := start.Score.Class[cl].Recall
+		if r.Den == 0 || r.Num != r.Den {
+			t.Errorf("start recall of %s is %s, want 1.000 over a non-empty population", cl, r)
+		}
+	}
+}
+
+// TestAuditSpreadMemoriesAreLabelledIgnored: the corpus expects the spread memories
+// ignored, and the report counts how many the audit called used.
+func TestAuditSpreadMemoriesAreLabelledIgnored(t *testing.T) {
+	rep := auditRun(t)
+	n := 0
+	for _, p := range rep.scenario("start").Pairs {
+		if p.Domain != "spread" {
+			continue
+		}
+		n++
+		if p.Expected != ClassIgnored {
+			t.Errorf("spread memory %s is expected %s, want ignored", p.MemoryID, p.Expected)
+		}
+	}
+	if n < 4 {
+		t.Errorf("%d spread memories, want at least 4", n)
+	}
+	if rep.Headlines().SpreadTotal != n {
+		t.Errorf("headline counts %d spread memories, the scenario holds %d", rep.Headlines().SpreadTotal, n)
 	}
 }

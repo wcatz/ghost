@@ -135,6 +135,29 @@ func auditOpsMemories() []string {
 	}
 }
 
+// auditSpread is a memory whose distinctive words are spread over three turns,
+// three in each, and never all in one. No single turn restates it, so the labels
+// expect it ignored; a comparison that pools the whole session's words reads the
+// union and calls it used. Each memory has at least ten distinctive words, so three
+// in one turn is under a third of it.
+type auditSpread struct {
+	content string
+	turns   [3]string
+}
+
+func auditSpreadMemories() []auditSpread {
+	return []auditSpread{
+		{"Kestrel gateway rotates bearer tokens nightly because upstream proxies cache stale certificates aggressively",
+			[3]string{"Looked at the kestrel gateway rotates entry", "Then bearer tokens nightly in the config", "Upstream proxies cache was the last item"}},
+		{"Quartz scheduler persists cron triggers inside postgres advisory locks preventing duplicate firing during failover events",
+			[3]string{"The quartz scheduler persists setting", "Cron triggers inside the job table", "Postgres advisory locks came next"}},
+		{"Mosaic thumbnails render lazily through worker threads whenever browsers report constrained bandwidth",
+			[3]string{"Mosaic thumbnails render in the gallery", "Lazily worker threads for the grid", "Browsers report constrained values"}},
+		{"Lantern feature flags default dark until product owners sign rollout checklists weekly",
+			[3]string{"Lantern feature flags in the settings page", "Default dark product colours", "Owners sign rollout notes"}},
+	}
+}
+
 func auditNarrative() []string {
 	return []string{
 		"I will read the assembler first and then change how the retrieval record is written by the sink",
@@ -175,6 +198,16 @@ func NewAuditCorpus() AuditCorpus {
 		id := auditID(fmt.Sprintf("ops/%02d", i))
 		ops = append(ops, id)
 		c.Memories = append(c.Memories, AuditMemory{ID: id, Content: content, Domain: "ops"})
+	}
+
+	// Memories whose words are spread over turns (see auditSpread), and the turns that
+	// spread them, in the second half so the middle call follows them too.
+	for i, sp := range auditSpreadMemories() {
+		id := auditID(fmt.Sprintf("spread/%02d", i))
+		c.Memories = append(c.Memories, AuditMemory{ID: id, Content: sp.content, Domain: "spread"})
+		for j, text := range sp.turns {
+			c.Turns = append(c.Turns, AuditTurn{Minute: 21 + 4*j + i%2, Kind: AuditProse, Text: text})
+		}
 	}
 
 	// The narrative base: a prose sentence and a file body in every one of forty
@@ -246,9 +279,9 @@ func NewAuditCorpus() AuditCorpus {
 		Text: "Session scoped reads keep one session's calls apart from another's"})
 
 	c.Calls = []AuditCall{
-		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops"}},
-		{Name: "middle", Source: "search", Before: auditTurnCount / 2, Domains: []string{"dev"}},
-		{Name: "end", Source: "search", Before: auditTurnCount, Domains: []string{"dev"}},
+		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops", "spread"}},
+		{Name: "middle", Source: "search", Before: auditTurnCount / 2, Domains: []string{"dev", "spread"}},
+		{Name: "end", Source: "search", Before: auditTurnCount, Domains: []string{"dev", "spread"}},
 	}
 	return c
 }
