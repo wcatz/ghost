@@ -285,8 +285,8 @@ func projectRows(p string) []PassiveRow {
 	var rows []PassiveRow
 	cat := func(i int) string { return passiveCategories[i%len(passiveCategories)] }
 
-	// Ten live rows, importance 0.95 down to 0.50, newest first. The lowest
-	// two are optional on the union surfaces (see BudgetCutOK). Two of them carry
+	// Ten live rows, importance 0.95 down to 0.50, newest first. One of them
+	// is optional on the union surfaces (see BudgetCutOK). Two of them carry
 	// the production scope and two an open window that contains the clock, so a
 	// block under the production scope still has them and the validity reader sees
 	// `valid` as well as `unset`.
@@ -296,11 +296,11 @@ func projectRows(p string) []PassiveRow {
 			Content:    fmt.Sprintf("%s: the %s rule is settled and current (live %02d)", p, themes[i], i),
 			Importance: imp(95 - 5*i), AgeDays: 2 + i,
 		}
-		// The two lowest-importance live rows of a project with filler: on the shared
-		// 20-row cap the lowest-ranked live row is live-08 (measured), because decay
-		// ranks live-09's category above it, so marking only the last row would mark
-		// the wrong one.
-		r.BudgetCutOK = sh.filler > 0 && i >= sh.live-2
+		// The live row the shared 20-row cap ranks last on the union surfaces:
+		// live-08, not live-09, because decay ranks live-09's category above it.
+		// TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces holds the grade to what
+		// the surfaces render, so it cannot drift from the cap or the ranking.
+		r.BudgetCutOK = sh.filler > 0 && i == sh.live-2
 		switch i {
 		case 1, 2:
 			r.Scope = PassiveScope

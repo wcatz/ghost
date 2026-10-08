@@ -26,7 +26,7 @@ session start, scope env=production (4 blocks)
 
 ghost_project_context (limit 20) (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (61/61)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/80)
   _global share          0.463 (37/80)
   budget use             1.000 (80/80)   rows rendered / row caps
@@ -37,7 +37,7 @@ ghost_project_context (limit 20) (4 blocks)
 
 project resource / recall_project (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (61/61)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/103)
   _global share          0.583 (60/103)
   budget use             0.736 (103/140)   rows rendered / row caps

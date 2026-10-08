@@ -298,3 +298,38 @@ func TestAnUnreadableLinksTableDoesNotEmptyThePassiveRead(t *testing.T) {
 		t.Errorf("the read lost rows: %v", passiveIDs(set))
 	}
 }
+
+// TestAnExpiredOrResolvedReplacementIsNotPulledIn: the replacement fetch uses the
+// window's own population and validity predicate, so a replacement the fetch
+// would withhold is not brought in to hold a slot.
+func TestAnExpiredOrResolvedReplacementIsNotPulledIn(t *testing.T) {
+	st := pinSlotStore(t, 60,
+		pinSlotRow{id: "the_pin", project: "proj", category: "fact", importance: 0.1, pinned: true},
+		pinSlotRow{id: "expired_new", project: "proj", category: "fact", importance: 0.05, validUntil: "2026-01-15 00:00:00"},
+		pinSlotRow{id: "resolved_new", project: "proj", category: "fact", importance: 0.04})
+	if _, err := st.db.Exec(`UPDATE memories SET resolved_at = '2026-01-20 00:00:00' WHERE id = 'resolved_new'`); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	for _, src := range []string{"expired_new", "resolved_new"} {
+		if err := st.CreateLink(context.Background(), src, "the_pin", "supersedes", 1, "manual"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+	}
+	for name, pol := range map[string]SlicePolicy{"session": pinSessionPolicy(), "union": pinUnionPolicy()} {
+		t.Run(name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			for _, id := range []string{"expired_new", "resolved_new"} {
+				if containsStr(passiveIDs(set), id) {
+					t.Errorf("%s was pulled into the window: %v", id, firstN(passiveIDs(set), pol.ItemCap))
+				}
+			}
+			c, _ := pinCandidateByID(set, "the_pin")
+			if len(c.SupersededBy) != 0 {
+				t.Errorf("the pin names a replacement that is not there: %v", c.SupersededBy)
+			}
+		})
+	}
+}
