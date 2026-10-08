@@ -231,6 +231,11 @@ type CandidateSet struct {
 	// can be past it); absent otherwise. It is what lets the assembler say how many
 	// pinned rows a cap cut when it never saw some of them.
 	PinnedBeyond map[string]int
+	// WindowExtra is, per passive bucket, how many rows the set carries beyond the
+	// bucket's over-fetch: the replacements of pinned rows, fetched past the LIMIT
+	// so they can hold a slot. A caller deriving how many eligible rows lie past the
+	// window must count them as inside it, or it counts them twice.
+	WindowExtra map[string]int
 
 	// --- explain-only diagnostics. nil/zero unless the request asked for
 	// explain (CandidateRequest.Explain); building them is what that flag

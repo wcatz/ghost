@@ -281,3 +281,20 @@ func TestTheReplacementOfASupersededPinnedRowGetsASlotToo(t *testing.T) {
 		})
 	}
 }
+
+// TestAnUnreadableLinksTableDoesNotEmptyThePassiveRead: the replacement lookup
+// fails open like the two demotion lookups, so the block loses the replacement
+// reservation and the marker, not every row.
+func TestAnUnreadableLinksTableDoesNotEmptyThePassiveRead(t *testing.T) {
+	st := pinSlotStore(t, 5, pinSlotRow{id: "the_pin", project: "proj", category: "fact", importance: 0.1, pinned: true})
+	if _, err := st.db.Exec(`DROP TABLE memory_links`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	set, err := st.Candidates(context.Background(), passiveRequest("proj", pinUnionPolicy()))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if !containsStr(passiveIDs(set), "the_pin") || len(set.Rows) != 6 {
+		t.Errorf("the read lost rows: %v", passiveIDs(set))
+	}
+}

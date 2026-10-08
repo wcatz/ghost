@@ -198,6 +198,14 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		if err != nil {
 			return nil, err
 		}
+		// Rows the set carries past this bucket's over-fetch are the pinned rows'
+		// replacements; counted so a header does not count them as "beyond" too.
+		if extra := len(fetched) + len(losers) - pol.OverFetch; extra > 0 {
+			if set.WindowExtra == nil {
+				set.WindowExtra = map[string]int{}
+			}
+			set.WindowExtra[pol.Bucket] = extra
+		}
 		set.DroppedLosers = append(set.DroppedLosers, losers...)
 		// A bucket that came back empty is the only case the reason can be reported
 		// on, and the only case the probe has to run: if any bucket returned rows
@@ -307,7 +315,11 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	// was replaced standing without its replacement.
 	replacements, err := s.passiveReplacementsOfPinned(ctx, req, pol, cols, memories)
 	if err != nil {
-		return nil, nil, err
+		// Fail open, as the two demotion lookups on this path do for the same table:
+		// a store whose links cannot be read loses the replacement reservation and
+		// the marker, not every row of the block.
+		s.logger.Warn("candidates: passive replacement lookup for pinned rows failed", "error", err)
+		replacements = nil
 	}
 	memories = append(memories, replacements...)
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)

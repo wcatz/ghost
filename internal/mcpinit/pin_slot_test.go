@@ -150,3 +150,27 @@ func TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacementOnTheSessionStar
 		t.Errorf("the superseded pin is not marked. Got:\n%s", got)
 	}
 }
+
+// TestAReplacementFetchedPastTheWindowIsNotCountedTwiceInTheHeader: 60 rows at
+// 0.9, a pinned row, and its replacement ranked last, so the replacement is
+// fetched past the 45-row window. The header's total is the store's row count.
+func TestAReplacementFetchedPastTheWindowIsNotCountedTwiceInTheHeader(t *testing.T) {
+	path := pinSession(t, 60,
+		pinSessionRow{id: "old-pin01", content: "the old pinned rule", category: "fact", importance: 0.1, pinned: true},
+		pinSessionRow{id: "new-row01", content: "the replacement rule", category: "fact", importance: 0.05})
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('new-row01', 'old-pin01', 'supersedes', 1, 'manual')`); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	_ = db.Close()
+	got := renderSessionStart(t, path)
+	if !strings.Contains(got, "the replacement rule") {
+		t.Fatalf("the replacement is not shown. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "15 shown of 62 total — 47 not shown") {
+		t.Errorf("the header does not count the store's 62 rows once. Got:\n%s", got)
+	}
+}
