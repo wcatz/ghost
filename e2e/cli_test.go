@@ -2045,6 +2045,40 @@ func TestCLIBenchSweepReproducesAcrossProcesses(t *testing.T) {
 	}
 }
 
+// TestCLIBenchAuditPrintsTheHeadlinesAndReproduces: `ghost bench --audit` scores the
+// retrieval audit against a labelled offline session. It must print its three
+// headline lines with real figures, and two processes must print the same bytes: the
+// report reads no clock, no path and no map order.
+func TestCLIBenchAuditPrintsTheHeadlinesAndReproduces(t *testing.T) {
+	t.Parallel()
+	s := newSandbox(t)
+	// A store with a memory in it, so "bench left the data alone" is a statement
+	// about a store that had something to lose.
+	cs := s.mcpSession(t)
+	call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "a memory the audit bench must not touch",
+	})
+	before := snapshotStore(t, s)
+
+	first := s.mustRun("bench", "--audit")
+	second := s.mustRun("bench", "--audit")
+
+	mustMatch(t, "bench --audit (same-domain)", first.stdout, `(?m)^same-domain used at session start: [0-9]+ of 20$`)
+	mustMatch(t, "bench --audit (cites)", first.stdout, `(?m)^cited ids caught: [0-9]+ of [0-9]+$`)
+	mustMatch(t, "bench --audit (restatements)", first.stdout, `(?m)^restatements caught: [0-9]+ of [0-9]+$`)
+	mustMatch(t, "bench --audit (values)", first.stdout, `[0-9]+\.[0-9]+`)
+	if first.stdout != second.stdout {
+		t.Errorf("two processes printed two different audit reports\nfirst:\n%s\nsecond:\n%s", first.stdout, second.stdout)
+	}
+	if after := snapshotStore(t, s); after != before {
+		t.Fatalf("bench --audit changed the store: %s -> %s", before, after)
+	}
+	// Exclusive with the other modes, like every mode.
+	bad := s.mustFail("bench", "--audit", "--passive")
+	mustMatch(t, "bench --audit --passive", bad.stderr, "(?i)cannot share")
+}
+
 // intervalColumnRE matches the interval a sweep row prints: a signed mean and a
 // signed pair of edges, at the four decimals the report and the published table
 // both use. Spelled out here rather than shared with internal/bench because e2e

@@ -15,7 +15,7 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep | --context | --passive]
+const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
@@ -25,11 +25,14 @@ returns costs, how much of it is relevant, and how much of it should never have
 been in it. --passive measures the passive blocks instead — session start,
 ghost context and ghost_project_context — over a synthetic multi-project
 store with resolved, expired, out-of-scope and duplicate rows, and reports
-withheld leakage, recall, contamination and header honesty. See
+withheld leakage, recall, contamination and header honesty. --audit scores the
+retrieval audit instead: a scripted offline session with hand-written labels
+(ids cited, memories restated, denied or saved) is judged by the audit's own
+comparison, and the verdicts are scored against the labels per outcome. See
 docs/benchmarks.md.
 `
 
-// The three things `ghost bench` can print. A mode rather than a pair of bools
+// The things `ghost bench` can print. A mode rather than a pair of bools
 // because they are not independent: a sweep and a context measurement are two
 // different reports over two different questions, and a caller asking for both
 // gets neither rather than one of them.
@@ -38,6 +41,7 @@ const (
 	benchModeSweep   = "sweep"
 	benchModeContext = "context"
 	benchModePassive = "passive"
+	benchModeAudit   = "audit"
 )
 
 // benchModeOf reads the flags after the command. It is a named function because
@@ -63,6 +67,8 @@ func benchModeOf(args []string) (string, error) {
 			err = set(benchModeContext, "context")
 		case "--passive":
 			err = set(benchModePassive, "passive")
+		case "--audit":
+			err = set(benchModeAudit, "audit")
 		default:
 			return "", fmt.Errorf("unknown flag %q", arg)
 		}
@@ -98,6 +104,19 @@ func runBench() {
 			os.Exit(1)
 		}
 		fmt.Print(bench.FormatPassive(rep))
+		return
+	}
+
+	// The audit mode has its own corpus and its own scratch stores, so it returns
+	// before the graded dataset is loaded too.
+	if mode == benchModeAudit {
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		rep, err := bench.RunAuditTemp(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatAudit(rep))
 		return
 	}
 
