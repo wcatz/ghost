@@ -297,14 +297,18 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 // worst of the two failures: a provenance value pointing at a session that
 // never existed, indistinguishable afterwards from a real one.
 //
-// This is deliberately NARROWER than a retrieval record's session id. A record
-// carries sessionIDFor's value — the transport's when the connection assigns one,
-// else the host environment's own — because the stop hook's payload carries that
-// same id and the audit matches the record to the scan that judged it on it
-// (#922). Provenance does not borrow it: a provenance row claims what the
-// transport said and nothing inferred. So under Claude Code a save (and the
+// This is deliberately NARROWER than a retrieval record's session id, which has
+// three sources rather than one rule. The search tool takes sessionIDFor's value
+// — the transport's when the connection assigns one, else the host environment's
+// own — because the stop hook's payload carries that same id and the audit
+// matches the record to the scan that judged it (#922); the project-context
+// surfaces (tool, resource, prompt) can only reach the host environment's id,
+// since they have no tool request to read a transport id from; and a session
+// start carries the hook payload's own id, which sessionIDFor never produces.
+// Provenance borrows none of them: a provenance row claims what the transport
+// said and nothing inferred. So under Claude Code a save (and the
 // `ghost_memory_flag` row filed through this function) records no session while
-// the retrieval records beside them carry the host's id — the asymmetry is the
+// the retrieval records beside them carry a session id — the asymmetry is the
 // design, not a gap: one side is an attribution, the other is a match key.
 //
 // SourceRef is left empty here because it is the caller's to state — the save
