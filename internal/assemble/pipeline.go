@@ -283,7 +283,7 @@ func runProvenance(p *pipeline) {
 // removing the weaker endpoint would reverse tested behaviour. The stage changes
 // no membership. The pairs it records are what markConflicts turns into the
 // `conflicts_with` marker on both rendered lines; separating a pair is not built
-// and is tracked under #581.
+// and is tracked under #925.
 func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
