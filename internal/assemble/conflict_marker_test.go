@@ -96,6 +96,44 @@ func TestContradictsMarkerNamesEveryPartner(t *testing.T) {
 	}
 }
 
+// TestContradictsMarkerBoundsWithheldPartners: a dense component must not spend
+// the response budget on one line. The survivor names the first
+// maxRenderedConflictPartners withheld partners in rank order and counts the
+// rest, so one line costs a bounded number of bytes however large the component
+// is.
+func TestContradictsMarkerBoundsWithheldPartners(t *testing.T) {
+	center := candidate("A1", "proj", "fact", "the database is postgres", 0.9)
+	center.Pinned = true
+	leaves := []string{"B1", "C1", "D1", "E1", "F1", "G1", "H1", "I1", "J1", "K1", "L1"}
+	rows := []memory.Candidate{center}
+	edges := make([]memory.LinkEdge, 0, len(leaves))
+	for _, id := range leaves {
+		rows = append(rows, candidate(id, "proj", "fact", "conflicting claim "+id, 0.5))
+		edges = append(edges, memory.LinkEdge{From: "A1", To: id, Relation: "contradicts", Strength: 1})
+	}
+	set := setOf(rows...)
+	set.Edges = edges
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	req := baseRequest()
+	req.Budget.MaxItems = 20
+	res := run(t, &fakeRetriever{set: set}, req)
+	if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("the pinned center must be the one survivor: %v", got)
+	}
+	line := lineOf(t, res.Response, "A1")
+	// Ranks are [A1, B1 … L1] and the component is walked in rank order, so the
+	// first maxRenderedConflictPartners withheld partners are B1 through I1.
+	if !strings.Contains(line, "conflicts_with=`B1`,`C1`,`D1`,`E1`,`F1`,`G1`,`H1`,`I1`") {
+		t.Errorf("the line must name the first eight withheld partners in rank order: %q", line)
+	}
+	if !strings.Contains(line, "(+3 more)") {
+		t.Errorf("the line must count the three partners it did not name: %q", line)
+	}
+	if strings.Contains(line, "`L1`") {
+		t.Errorf("the line named a partner past the bound: %q", line)
+	}
+}
+
 // TestContradictsMarkerNeedsBothSidesRendered: a side an earlier stage withheld
 // means the pair never reached stage 5, so the survivor says nothing. A side the
 // final budget cut DID reach stage 5, and the survivor names it.

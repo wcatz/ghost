@@ -47,9 +47,10 @@ type pipeline struct {
 	contradictPairs [][2]string
 	// separations are the withheld rows stage 5 recorded, in rank order, each
 	// with the side it lost to. markConflicts reads them: the winner's line names
-	// every row it was separated from, in rank order, including the ones it
-	// shares no direct edge with (a three-row component keeps one winner and its
-	// line names the other two).
+	// the rows it was separated from, in rank order, including the ones it shares
+	// no direct edge with (a three-row component keeps one winner and its line
+	// names the other two). ConflictsLabel bounds how many of them a dense
+	// component can render on one line.
 	separations []contradictionSeparation
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
@@ -304,9 +305,9 @@ type contradictionSeparation struct {
 // A component is separated, not each edge: a three-row chain keeps one winner and
 // withholds the two others, which pairwise separation of the edges would leave
 // two rows standing. The withheld rows are dropped here with Decision.Against
-// naming the kept side, the kept line names every row it was separated from, and
-// the recorded pairs are what notes() renders against the rows the answer finally
-// holds.
+// naming the kept side, the kept line names the rows it was separated from (bounded
+// by ConflictsLabel), and the recorded pairs are what notes() renders against the
+// rows the answer finally holds.
 func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
@@ -898,18 +899,20 @@ func (p *pipeline) notes() []string {
 }
 
 // markConflicts sets Item.ConflictsWith on every winner a live `contradicts`
-// edge caused stage 5 to keep: the winner's line names every row the stage
-// withheld against it. It is the one place the marker is decided, so every
-// surface that renders Item.Line inherits it.
+// edge caused stage 5 to keep: the winner's line names the rows the stage
+// withheld against it, with ConflictsLabel bounding how many a dense component
+// renders at once. It is the one place the marker is decided, so every surface
+// that renders Item.Line inherits it.
 //
 // It runs from fitResponse, on every pass, and not at stage 5: the response-fit
 // post-pass can drop a row after the stages are done, and a survivor must not
 // keep naming a partner the reader no longer has. The withheld rows are already
 // gone from p.items when this runs, so the marker is rebuilt from the
 // separations stage 5 recorded rather than projected from the edges: the winner
-// names every row it was separated from, in rank order, including one it shares
+// stores every row it was separated from, in rank order, including one it shares
 // no direct edge with (a three-row component keeps one winner whose line names
-// the other two). Nothing is removed or reordered here.
+// the other two). The stored list is whole; ConflictsLabel is what bounds the
+// rendered line. Nothing is removed or reordered here.
 func (p *pipeline) markConflicts() {
 	present := make(map[string]bool, len(p.items))
 	for _, it := range p.items {

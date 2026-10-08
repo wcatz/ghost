@@ -338,22 +338,33 @@ real one. A row's
 `tool`, `mcp`, `onboarding`, `decision_log`, `builtin`), so it is printed bare.
 A row kept out of a live `contradicts` component carries **`conflicts_with=`** followed
 by the rows it was separated from, each rendered the way that row's own line would render
-it (`` `id` ``, comma-separated, in the rank order the window holds them). It is a field
-on the memory's one line, on `ghost_memory_search`, `ghost_project_context`, the
-session-start block and the `ghost://memories/global` resource alike. The two rows do
-**not** both remain: stage 5 keeps exactly one row from each connected component of live
-edges and withholds the rest, so a three-row chain keeps one winner and drops two. The
-winner is decided by one documented tie-break, in order — pinned beats unpinned; a later
-`verified_at` beats an earlier or absent one; a later `updated_at` (or `created_at` when
-`updated_at` is unset) beats an earlier one; and an exact tie falls to the rank the window
-already holds, because relevance rank is not evidence that a row is true. The withheld
-side is an ordinary stage-5 drop with reason `contradiction_separated`, naming the kept
-side, and the surviving line names every row it was separated from — including one it
-shares no direct edge with, because the component has one winner. A pair with one side
-absent from the answer, or whose edge was withdrawn, is not marked, nor is a
-`contradicts` edge whose endpoints' scopes conflict (`memory.ScopesConflict`:
-`environment=production` against `environment=development`) — that is two true claims
-about two places, so it is not a conflict and is neither separated nor marked.
+it (`` `id` ``, comma-separated, in the rank order stage 5 walked the component). The list
+is bounded: at most eight partners are named, and any remainder is reported as a trailing
+count (`` (+N more)``), so a dense component cannot spend one line's share of the
+response budget. It is a field on the memory's one line, on `ghost_memory_search`,
+`ghost_project_context`, the session-start block and the `ghost://memories/global`
+resource alike. The two rows do **not** both remain: stage 5 keeps exactly one row from
+each connected component of live edges and withholds the rest, so a three-row chain keeps
+one winner and drops two. The winner is decided by one documented tie-break, in order —
+pinned beats unpinned; a later `verified_at` beats an earlier or absent one; a later
+`updated_at` (or `created_at` when `updated_at` is unset) beats an earlier one; and an
+exact tie falls to the rank the window already holds, because relevance rank is not
+evidence that a row is true. The withheld side is an ordinary stage-5 drop with reason
+`contradiction_separated`, naming the kept side, and the surviving line names the rows it
+was separated from — including one it shares no direct edge with, because the component
+has one winner.
+
+The marker is **decided against the answer that finally ships**, not against what stage 5
+saw, and that is the source of three different silences. A pair whose other side an
+**earlier stage withheld** (an expired row, an out-of-scope one) was never a pair stage 5
+could read, so nothing is marked. A **side stage 5 itself withheld** is named even when
+the budget or the response-fit pass later drops an unrelated row, because the survivor
+records what it was separated from and not what happened to be rendered beside it. A pair
+whose **winner** the budget later cut names nothing, since neither endpoint is in the
+block. An edge that was withdrawn is likewise not marked, and neither is a `contradicts`
+edge whose endpoints' scopes conflict (`memory.ScopesConflict`: `environment=production`
+against `environment=development`) — that is two true claims about two places, so it is
+not a conflict and is neither separated nor marked.
 
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory

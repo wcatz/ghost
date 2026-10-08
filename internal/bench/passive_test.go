@@ -316,9 +316,10 @@ func TestPassiveCorpusSeparatesAContradictsPair(t *testing.T) {
 // the filter reads each row as live. The leakage figure must go non-zero on every
 // surface, and name rows of the kind the filter exists for — and nothing else.
 //
-// This is the in-test half. The source half — deleting stage 2 from
-// internal/assemble and watching the same figure move — was run by hand for the
-// PR that added this file; it cannot be a test, because it edits the product.
+// The mutation has to be seeded rather than made by deleting the assembler's
+// stage-2 drop: the passive fetch excludes a closed window in SQL before the
+// window closes (passiveFetchSQL), so a row stage 2 would drop never reaches it
+// and removing the stage alone moves no figure on any surface.
 func TestPassiveMeasurementCatchesADisabledFilter(t *testing.T) {
 	for _, tc := range []struct {
 		blind PassiveBlind

@@ -58,7 +58,8 @@ type Item struct {
 	// ConflictsWith lists the ids of the other rows in the SAME rendered answer
 	// that this one is joined to by a live `contradicts` edge. It is set in one
 	// place, after the last stage that can remove a row (markConflicts), so a row
-	// is never marked against a partner the reader cannot see.
+	// is never marked against a partner the reader cannot see. The list is held
+	// whole; ConflictsLabel bounds what the line renders of it.
 	ConflictsWith []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
 	// replaced this one through a live `supersedes` edge. It is set only for a
@@ -106,17 +107,41 @@ func (i Item) Line() string {
 		") " + Data(i.Content)
 }
 
+// maxRenderedConflictPartners bounds how many withheld ids one kept line names
+// in `conflicts_with=`. A dense contradiction component can name dozens, and
+// each id costs ~35 bytes on one physical line of a response with a 16000-byte
+// ceiling, so an unbounded list lets one line spend the budget the response-fit
+// pass needs for the admitted rows below it. Naming the first
+// maxRenderedConflictPartners (in the rank order markConflicts builds them, so
+// the cut is stable across reads) and counting the rest costs a bounded number
+// of bytes and still tells the reader the block was thinned. It is the same
+// shape as memory.ClampAttribution, which bounds the counterpart ids one row
+// may name in the explain projection.
+const maxRenderedConflictPartners = 8
+
 // ConflictsLabel renders the rows a memory contradicts, as they are rendered on
-// their own lines (Token), or "" when it contradicts none in this answer.
+// their own lines (Token), or "" when it contradicts none in this answer. At
+// most maxRenderedConflictPartners are named; any remainder is reported as a
+// trailing count, so a large component cannot spend the response budget on one
+// line. Item.ConflictsWith keeps the full list — only the rendering is bounded.
 func ConflictsLabel(ids []string) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	toks := make([]string, len(ids))
-	for i, id := range ids {
+	shown, more := ids, 0
+	if len(shown) > maxRenderedConflictPartners {
+		more = len(shown) - maxRenderedConflictPartners
+		shown = shown[:maxRenderedConflictPartners]
+	}
+	toks := make([]string, len(shown))
+	for i, id := range shown {
 		toks[i] = "`" + Token(id) + "`"
 	}
-	return " conflicts_with=" + strings.Join(toks, ",")
+	label := " conflicts_with=" + strings.Join(toks, ",")
+	if more > 0 {
+		label += " (+" + strconv.Itoa(more) + " more)"
+	}
+	return label
 }
 
 // SupersededByLabel renders the rows that replaced a memory, as they are
