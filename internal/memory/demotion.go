@@ -126,7 +126,12 @@ func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pro
 			loser, winner = b, a
 		}
 		if protected[loser] && !protected[winner] {
-			loser = winner
+			// The protection flips BOTH sides of the verdict: the unprotected
+			// row absorbs the penalty and the protected row is the one it lost
+			// to. Flipping only the loser would leave loser == winner, and the
+			// caller would then file an attribution of a row having lost to
+			// itself — lostTo and near_duplicate_of carry these ids verbatim.
+			loser, winner = winner, loser
 		}
 		pairs = append(pairs, demotionPairs{loser: loser, winner: winner})
 	}

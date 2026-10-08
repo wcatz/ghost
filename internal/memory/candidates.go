@@ -603,19 +603,41 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// a near-duplicate cluster whose members straddle the window and the pool
 	// would otherwise return two rows of one group (window [A], tail [C] of a
 	// cluster the window removed B from). The removal runs once more over the
-	// combined rows, window first: every tail row ranks after every window row,
-	// so the representative the window already chose wins and only the tail can
-	// lose. The survivors keep their order, so the representative's rank, score
-	// and position are untouched by this pass.
+	// combined rows, window first, so every pair spans the two halves in rank
+	// order and the trace says which row each loss went to.
+	//
+	// The survivors are partitioned by MEMBERSHIP, never by index: position
+	// picks the loser, but the demotion rules FLIP that decision when the
+	// positioned loser is pinned or retention-exempt and the winner is not
+	// (demoteResults' protected rule), so a protected tail row can beat the
+	// window's own representative. A slice at len(selected) would then keep the
+	// loser in Rows while filing it as dropped, and cut the real winner out of
+	// the answer with no verdict anywhere — both the row-accounting loss and
+	// the contradiction DroppedLosers exists to prevent. Each half keeps its
+	// own order either way, so the representative's rank, score and position
+	// are untouched by this pass.
 	if len(tail) > 0 {
 		combined := append(append([]Memory{}, selected...), tail...)
-		keptAll, tailLosers, lostToTail := cand.dropNearDuplicates(ctx, combined, p)
-		if len(tailLosers) > 0 {
-			tail = keptAll[len(selected):]
-			for _, m := range tailLosers {
+		keptAll, passLosers, lostToPass := cand.dropNearDuplicates(ctx, combined, p)
+		if len(passLosers) > 0 {
+			inWindow := make(map[string]bool, len(selected))
+			for _, m := range selected {
+				inWindow[m.ID] = true
+			}
+			keptWindow := make([]Memory, 0, len(selected))
+			keptTail := make([]Memory, 0, len(tail))
+			for _, m := range keptAll {
+				if inWindow[m.ID] {
+					keptWindow = append(keptWindow, m)
+				} else {
+					keptTail = append(keptTail, m)
+				}
+			}
+			selected, tail = keptWindow, keptTail
+			for _, m := range passLosers {
 				removed = append(removed, m)
 				droppedIDs = append(droppedIDs, m.ID)
-				lostTo[m.ID] = lostToTail[m.ID]
+				lostTo[m.ID] = lostToPass[m.ID]
 			}
 		}
 	}
