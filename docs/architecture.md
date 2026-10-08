@@ -648,7 +648,7 @@ call before turn 20, and 0 for a call after the last turn, while every labelled 
 restatement is caught.
 
 Ordering helps only for a call made late; a session-start injection still sees the whole
-session. Excluding the bodies changes little on this fixture, because its narrative turns
+session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 9 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
 are themselves in the memories' domain, so the evidence does not support removing them
 from the token arm. Known limits that all fail toward unjudged: a session id that changes
 inside one long-lived server process keeps the old id, and subagent calls are attributed
@@ -661,8 +661,8 @@ positive verdict feeds is the operator-facing figure in `ghost context --audit`,
 `ghost_health` and the lifecycle summary, and that figure is split by `retrieval_audit.signal`
 ([#930](https://github.com/wcatz/ghost/issues/930)): the precision is the share of scored
 verdicts proved by a cited id (`signal = identifier`), and a `used` proved by wording
-overlap is printed beside it as `restated by wording (heuristic)`. The table above shows
-why: the same-domain residual is entirely the wording arm. An unknown or empty signal on a
+overlap is printed beside it as `restated by wording (heuristic)`. The bench's golden shows
+why (its `used/token` rows against its `used/identifier` rows): the same-domain residual is entirely the wording arm. An unknown or empty signal on a
 `used` row is counted as wording, the weaker claim. No schema change.
 
 ### Memory history

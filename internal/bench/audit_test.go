@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -13,14 +14,23 @@ import (
 // GHOST_UPDATE_GOLDEN=1 go test ./internal/bench -run TestAuditBaseline.
 const auditGoldenPath = "testdata/audit_report.golden"
 
+// auditRun is the report, built ONCE and shared: every run opens three scratch
+// stores and seeds forty-four memories into each, and this package's CI budget is
+// the tightest in the tree. The report is read-only to its callers.
 func auditRun(t *testing.T) AuditReport {
 	t.Helper()
-	rep, err := RunAuditTemp(context.Background())
-	if err != nil {
-		t.Fatalf("RunAuditTemp: %v", err)
+	auditOnce.Do(func() { auditShared, auditSharedErr = RunAuditTemp(context.Background()) })
+	if auditSharedErr != nil {
+		t.Fatalf("RunAuditTemp: %v", auditSharedErr)
 	}
-	return rep
+	return auditShared
 }
+
+var (
+	auditOnce      sync.Once
+	auditShared    AuditReport
+	auditSharedErr error
+)
 
 // TestAuditBaseline pins the report to its committed text. A change to the
 // comparison, a threshold or a scanner that moves any figure fails here and has to
@@ -45,7 +55,11 @@ func TestAuditBaseline(t *testing.T) {
 // TestAuditReportIsStableAcrossRuns: two runs print the same bytes, which is what
 // makes the golden a property of the code and not of a machine or a second.
 func TestAuditReportIsStableAcrossRuns(t *testing.T) {
-	if a, b := FormatAudit(auditRun(t)), FormatAudit(auditRun(t)); a != b {
+	second, err := RunAuditTemp(context.Background())
+	if err != nil {
+		t.Fatalf("RunAuditTemp: %v", err)
+	}
+	if a, b := FormatAudit(auditRun(t)), FormatAudit(second); a != b {
 		t.Errorf("two runs differ\n--- first\n%s\n--- second\n%s", a, b)
 	}
 }
