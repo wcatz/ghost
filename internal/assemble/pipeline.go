@@ -570,6 +570,13 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 			dropped = append(dropped, rows[i].ID)
 			p.dropped[rows[i].ID] = reason
 			p.droppedBy[stageBudget]++
+			if p.passive && rows[i].Pinned {
+				bucket := rows[i].FetchedBy
+				if bucket == "" {
+					bucket = rows[i].ProjectID
+				}
+				p.trace.addPinnedCut(bucket, 1)
+			}
 			p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)
 			continue
 		}

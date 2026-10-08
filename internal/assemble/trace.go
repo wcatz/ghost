@@ -33,6 +33,12 @@ type Trace struct {
 	Stages    []StageTrace
 	Decisions []Decision
 	Floors    Floors
+	// PinnedCut is, per passive bucket, how many pinned rows the bucket's cap left
+	// out: the pinned rows stage 8 cut plus the ones the retriever reported past
+	// its window. A pin is a slot guarantee, so a non-zero count means the pinned
+	// rows alone exceeded the cap, and it is a subset of what the bucket ranked out.
+	// Empty for a query-mode read, which promises a pin nothing.
+	PinnedCut map[string]int
 }
 
 // Floors records the exact thresholds a relevance floor used. FTSRankMax is the
@@ -201,6 +207,11 @@ func newTrace(req Request, set *memory.CandidateSet) *Trace {
 	if req.AsOf != nil {
 		t.AsOf = req.AsOf.UTC().Format(time.RFC3339)
 	}
+	for bucket, n := range set.PinnedBeyond {
+		if n > 0 {
+			t.addPinnedCut(bucket, n)
+		}
+	}
 	return t
 }
 
@@ -231,4 +242,12 @@ func (t *Trace) keep(id, projectID, stage, reason string, before float64) {
 	t.Decisions = append(t.Decisions, Decision{
 		ID: id, ProjectID: projectID, Stage: stage, Reason: reason, Kept: true, Before: before,
 	})
+}
+
+// addPinnedCut counts n pinned rows cut from a bucket.
+func (t *Trace) addPinnedCut(bucket string, n int) {
+	if t.PinnedCut == nil {
+		t.PinnedCut = map[string]int{}
+	}
+	t.PinnedCut[bucket] += n
 }

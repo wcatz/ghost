@@ -849,3 +849,63 @@ func TestAPassiveAbstentionPromisesNoNoteItCannotSend(t *testing.T) {
 		t.Errorf("control: the search response promises a breakdown and then does not send one:\n%s", sres.Response)
 	}
 }
+
+func pinnedCandidate(c memory.Candidate) memory.Candidate {
+	c.Pinned = true
+	return c
+}
+
+// TestRunPassiveCountsThePinnedRowsACapCut: more pinned rows than the slice cap
+// are cut by the budget stage like any other row, and the trace says how many of
+// the cut rows were pinned, so a surface can report the pin's slot guarantee
+// running out rather than leave the loss to read as ranking.
+func TestRunPassiveCountsThePinnedRowsACapCut(t *testing.T) {
+	var rows []memory.Candidate
+	for _, id := range []string{"p1", "p2", "p3", "p4", "p5"} {
+		c := projectCandidate(id, 0.5)
+		c.FetchedBy = "proj"
+		rows = append(rows, pinnedCandidate(c))
+	}
+	u := projectCandidate("u1", 0.9)
+	u.FetchedBy = "proj"
+	rows = append(rows, u)
+	f := &fakeRetriever{set: passiveSet(rows...)}
+	res := run(t, f, passiveRequest())
+	if got := res.Trace.PinnedCut["proj"]; got != 2 {
+		t.Errorf("PinnedCut[proj] = %d, want 2 (5 pinned rows against a cap of 3)", got)
+	}
+	if got := res.Trace.PinnedCut["_global"]; got != 0 {
+		t.Errorf("PinnedCut[_global] = %d, want 0", got)
+	}
+}
+
+// TestRunPassiveAddsThePinnedRowsBeyondTheWindow: pinned rows the retriever's
+// window never held are cut too, and the retriever's own count of them joins the
+// trace's.
+func TestRunPassiveAddsThePinnedRowsBeyondTheWindow(t *testing.T) {
+	var rows []memory.Candidate
+	for _, id := range []string{"p1", "p2", "p3", "p4"} {
+		c := projectCandidate(id, 0.5)
+		c.FetchedBy = "proj"
+		rows = append(rows, pinnedCandidate(c))
+	}
+	set := passiveSet(rows...)
+	set.PinnedBeyond = map[string]int{"proj": 3}
+	res := run(t, &fakeRetriever{set: set}, passiveRequest())
+	if got := res.Trace.PinnedCut["proj"]; got != 4 {
+		t.Errorf("PinnedCut[proj] = %d, want 4 (1 cut in the window, 3 beyond it)", got)
+	}
+	if got := CountsFor(res.Trace, "proj", 3).PinnedCut; got != 4 {
+		t.Errorf("BucketTally.PinnedCut = %d, want 4", got)
+	}
+}
+
+// TestRunPassiveReportsNoPinnedCutWhenEveryPinnedRowFits.
+func TestRunPassiveReportsNoPinnedCutWhenEveryPinnedRowFits(t *testing.T) {
+	c := projectCandidate("p1", 0.5)
+	c.FetchedBy = "proj"
+	res := run(t, &fakeRetriever{set: passiveSet(pinnedCandidate(c), projectCandidate("u1", 0.9), projectCandidate("u2", 0.8), projectCandidate("u3", 0.7))}, passiveRequest())
+	if len(res.Trace.PinnedCut) != 0 {
+		t.Errorf("PinnedCut = %v, want none", res.Trace.PinnedCut)
+	}
+}

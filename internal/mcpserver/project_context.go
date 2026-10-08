@@ -238,6 +238,26 @@ func projectContextItems(items []assemble.Item) string {
 	return sb.String()
 }
 
+// projectContextPinnedCut is the line a project-context block ends its memories
+// with when the pinned rows alone exceeded the cap, and "" otherwise. A pin is a
+// slot guarantee, so a pinned row is only ever cut when there are more of them
+// than the cap holds; the rows shown are then the best-ranked of the pinned ones,
+// and the count is the trace's (the cap's cuts plus the rows past the window).
+func projectContextPinnedCut(res assemble.Result) string {
+	if res.Trace == nil {
+		return ""
+	}
+	n := 0
+	for _, c := range res.Trace.PinnedCut {
+		n += c
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("(%d pinned memories cut: the pinned rows alone exceed the cap, and the ones shown are the "+
+		"best-ranked of them. Call ghost_memories_list to see the rest.)\n", n)
+}
+
 // projectContextSplit separates an admitted window into the requested project's
 // own rows and the `_global` ones, by the row's OWN project rather than by the
 // order it arrived in (#809).
@@ -799,7 +819,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 			return "", err
 		}
 		own, globals = projectContextSplit(memories.Items)
-		projectContextSection(&sb, memorySectionHeading, projectContextItems(own))
+		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+projectContextPinnedCut(memories))
 		// The tool's Global section is the `_global` half of its own window and
 		// NO second read: `limit` already capped the whole block, and a second
 		// read at the Global section's own cap would return more rows than the

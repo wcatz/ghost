@@ -1,48 +1,48 @@
-passive context: 212 rows, 4 projects + _global, clock 2026-06-01T12:00:00Z
+passive context: 209 rows, 4 projects + _global, clock 2026-06-01T12:00:00Z
   the blocks session start, `ghost context` and ghost_project_context hand a model,
   read through the production entry points at their production budgets
 
 session start / ghost context (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (67/67)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/88)
   _global share          0.364 (32/88)
   budget use             0.957 (88/92)   rows rendered / row caps
-  budget cut             0.642 (158/246)   admissible rows left out
+  budget cut             0.638 (155/243)   admissible rows left out
   duplicate rate         0.045 (4/88)   rendered beside the row they restate or replace
-  block size             mean 3807 B / 952 tok, max 3958 B / 990 tok
+  block size             mean 3795 B / 949 tok, max 3942 B / 986 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 session start, scope env=production (4 blocks)
   withheld leakage       0.000 (0/58)   (must be 0)
-  expected-row recall    1.000 (67/67)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/87)
   _global share          0.368 (32/87)
   budget use             0.946 (87/92)   rows rendered / row caps
-  budget cut             0.630 (148/235)   admissible rows left out
+  budget cut             0.625 (145/232)   admissible rows left out
   duplicate rate         0.046 (4/87)   rendered beside the row they restate or replace
-  block size             mean 3636 B / 909 tok, max 3797 B / 950 tok
+  block size             mean 3625 B / 907 tok, max 3784 B / 946 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 ghost_project_context (limit 20) (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (59/59)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/80)
   _global share          0.463 (37/80)
   budget use             1.000 (80/80)   rows rendered / row caps
-  budget cut             0.675 (166/246)   admissible rows left out
+  budget cut             0.671 (163/243)   admissible rows left out
   duplicate rate         0.000 (0/80)   rendered beside the row they restate or replace
-  block size             mean 2628 B / 657 tok, max 2672 B / 668 tok
+  block size             mean 2635 B / 659 tok, max 2679 B / 670 tok
   header honesty         n/a    (this surface prints no count line)
 
 project resource / recall_project (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (59/59)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/103)
   _global share          0.583 (60/103)
   budget use             0.736 (103/140)   rows rendered / row caps
-  budget cut             0.581 (143/246)   admissible rows left out
+  budget cut             0.576 (140/243)   admissible rows left out
   duplicate rate         0.000 (0/103)   rendered beside the row they restate or replace
-  block size             mean 3192 B / 798 tok, max 3358 B / 840 tok
+  block size             mean 3198 B / 800 tok, max 3365 B / 842 tok
   header honesty         n/a    (this surface prints no count line)
 

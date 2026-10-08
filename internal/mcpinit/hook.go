@@ -560,6 +560,20 @@ const (
 // "(N shown)" heading — "N shown of N total" would assert a comparison the block
 // makes no claim about.
 func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
+	line := sessionCountsBase(tally, rankPhrase, toolPhrase)
+	if line == "" || tally.PinnedCut == 0 {
+		return line
+	}
+	// A pin is a slot guarantee, so pinned rows are the last to be cut and only
+	// the cap itself can cut one. Said apart from the ranking's cut, because
+	// those rows were not outranked: there were more of them than the bucket has
+	// places for, and the ones shown are the best-ranked of the pinned rows.
+	return fmt.Sprintf("%s; %d pinned memories cut: the pinned rows alone exceed the cap, and the ones shown are the best-ranked of them",
+		line, tally.PinnedCut)
+}
+
+// sessionCountsBase is the count line before the pinned-row clause.
+func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
 	shown, total := tally.Shown, tally.Total()
 	// Rows the bucket policy removed as near-duplicate losers are not the
 	// ranking's cut either, so they ride with the withheld rows: one count of

@@ -15,7 +15,7 @@ package bench
 //
 //   - rows that must be SHOWN (the live, high-importance ones), and a pinned row
 //     whose importance and age would otherwise bury it, on the surfaces whose
-//     selection reads the pin (session start; see PassiveSurfaceSpec.PinOptional);
+//     selection reads the pin (every passive surface, #924);
 //   - rows that must NEVER be shown: resolved, expired (valid_until in 2020) and
 //     not yet valid (valid_from in 2099);
 //   - rows whose only fault is their scope, which a surface withholds only when it
@@ -51,10 +51,8 @@ const (
 	// KindPinned is a pinned row with low importance and an old created_at, in a
 	// DECAYING category (gotcha), because a pin only exempts a row from decay and
 	// the never-decay categories (preference, convention, fact) are exempt anyway:
-	// a pinned convention row would test nothing. It is expected on session start.
-	// On the project-context union read (OrderDecay, no two-pass, no pinned-first,
-	// deliberately as GetTopMemories was) a pin is not a documented slot guarantee,
-	// so the row is optional there and the bench asserts nothing about it.
+	// a pinned convention row would test nothing. It is expected on every passive
+	// surface: a pin is a slot guarantee (#924), whatever the row's rank.
 	KindPinned PassiveKind = "pinned"
 	// KindFiller is live, valid and unremarkable: low importance, so it is what a
 	// budget cut removes. It is optional — showing it is not wrong, only
@@ -148,12 +146,9 @@ func (r PassiveRow) Grade(scoped bool) PassiveGrade {
 	}
 }
 
-// gradeOn is Grade as the given surface reads it: a pinned row is optional on a
-// surface whose selection makes no promise about pins.
+// gradeOn is Grade as the given surface reads it. Every passive surface promises
+// a pinned row a slot (#924), so no surface grades the pin differently.
 func (r PassiveRow) gradeOn(spec PassiveSurfaceSpec) PassiveGrade {
-	if r.Kind == KindPinned && spec.PinOptional {
-		return GradeOptional
-	}
 	return r.Grade(spec.Scoped)
 }
 
@@ -257,7 +252,7 @@ func shapeOf(p string) projectShape {
 	if p == "delta" {
 		return projectShape{live: 5, supers: 2, dups: 2, filler: 0, resolved: 1, expired: 1, future: 1, staged: 1, replaceFrom: 0, dupFrom: 2}
 	}
-	return projectShape{live: 10, supers: 3, dups: 3, filler: 30, resolved: 3, expired: 3, future: 2, staged: 2, replaceFrom: 5, dupFrom: 0}
+	return projectShape{live: 9, supers: 3, dups: 3, filler: 30, resolved: 3, expired: 3, future: 2, staged: 2, replaceFrom: 5, dupFrom: 0}
 }
 
 // categories rotate over the behavioural ones first, because those are the
@@ -282,7 +277,7 @@ func projectRows(p string) []PassiveRow {
 	var rows []PassiveRow
 	cat := func(i int) string { return passiveCategories[i%len(passiveCategories)] }
 
-	// Ten live rows, importance 0.95 down to 0.50, newest first. Two of them carry
+	// Nine live rows (ten before a pin became a slot guarantee on the union surfaces, #924, which made the pinned row one more expected row under a 20-row cap), importance 0.95 down to 0.55, newest first. Two of them carry
 	// the production scope and two an open window that contains the clock, so a
 	// block under the production scope still has them and the validity reader sees
 	// `valid` as well as `unset`.

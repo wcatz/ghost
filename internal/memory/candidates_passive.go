@@ -210,6 +210,14 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 			}
 			set.ValidityExcluded += excluded
 		}
+		if beyond, err := s.passivePinnedBeyond(ctx, req, pol, cols, fetched); err != nil {
+			return nil, err
+		} else if beyond > 0 {
+			if set.PinnedBeyond == nil {
+				set.PinnedBeyond = map[string]int{}
+			}
+			set.PinnedBeyond[pol.Bucket] = beyond
+		}
 		rows = append(rows, fetched...)
 	}
 	set.Rows = rows
@@ -386,7 +394,14 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 		// here would reintroduce the drift a bound Now exists to remove, at a
 		// moment when the two reads can straddle a second boundary.
 		rank, clock := decayRankingSQLAt(req.Now, cols.HasTier)
-		orderBy = fmt.Sprintf("(%s) DESC, importance DESC, created_at DESC, id", rank)
+		// `pinned DESC` leads, and it is the half of the pin's slot guarantee that
+		// decides whether a pinned row is in the window AT ALL: the LIMIT cuts the
+		// window by this order, and a pinned row at importance 0.1 ranks behind
+		// every 0.9 row the bucket holds, so a window of N rows full of better ones
+		// never contains it. The decay score keeps ordering the pinned rows among
+		// themselves (a pin exempts a row from decay, not from importance), and
+		// ordering the rest exactly as it did.
+		orderBy = fmt.Sprintf("pinned DESC, (%s) DESC, importance DESC, created_at DESC, id", rank)
 		args = append(args, clock...)
 	}
 
@@ -406,6 +421,37 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 		ORDER BY %s
 		LIMIT ?`, cols.list, where, orderBy)
 	return query, append(args, pol.OverFetch)
+}
+
+// passivePinnedBeyond counts the pinned rows the window's LIMIT left unread. The
+// fetch orders pinned rows first, so a pinned row can only be past the LIMIT when
+// the whole window is pinned; any other window already holds every pinned row the
+// population has, and the count is not run. It asks the same population and the
+// same validity predicate the fetch does, so a row the fetch withholds is not
+// counted as one the window missed.
+func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, fetched []Candidate) (int, error) {
+	if len(fetched) == 0 || len(fetched) < pol.OverFetch {
+		return 0, nil
+	}
+	for _, c := range fetched {
+		if !c.Pinned {
+			return 0, nil
+		}
+	}
+	where, args := passivePopulationSQL(pol, req, cols)
+	if cols.HasValidity {
+		stamp := req.Now.UTC().Format(stampLayoutForSQL)
+		where += " AND " + validityMatchesSQL()
+		args = append(args, stamp, stamp)
+	}
+	var n int
+	if err := s.queryDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM memories WHERE "+where+" AND pinned = 1", args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("candidates: passive pinned count for bucket %q: %w", pol.Bucket, err)
+	}
+	if beyond := n - len(fetched); beyond > 0 {
+		return beyond, nil
+	}
+	return 0, nil
 }
 
 // PassiveEligibleCount is how many rows the policy's bucket holds that the
@@ -522,8 +568,19 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// by any other route. Withheld rows are still returned, behind everything
 	// eligible, because stage 2 is the authority on dropping them and reports it.
 	eligible, withheld := passiveEligible(scored, now)
+	// The pin's slot guarantee, ahead of ranking. The selection runs over every
+	// eligible row exactly as before, so a pinned row still counts toward the
+	// behavioural floor it belongs to; any pinned row the pool left out is then
+	// brought in, and the pinned rows lead the set the demotions run over, so they
+	// are never outside the selection and never the loser of a near-duplicate pair.
 	chosen, rest := passiveSelect(eligible, pol)
+	chosen, rest = passiveReservePinned(chosen, rest)
 	chosen, removed := s.passiveDemote(ctx, chosen, pol)
+	// A demotion is a reorder, and a supersede may push a pinned row behind its
+	// replacement; the final partition puts every pinned row back ahead of the
+	// unpinned ones, in the order the demotion left them. A pin beats a supersede:
+	// the row keeps its slot, ranked behind the pinned rows that replace it.
+	chosen = passivePinnedFirst(chosen)
 	rest = append(rest, withheld...)
 
 	out := make([]Candidate, 0, len(scored))
@@ -535,6 +592,35 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 		losers = append(losers, DroppedLoser{Candidate: passiveCandidate(l.row, fetchedBy), LostTo: l.lostTo})
 	}
 	return out, losers, nil
+}
+
+// passivePinnedSplit separates the pinned rows from the rest, each in its input
+// order. The input order is the window's, which ranks the pinned rows among
+// themselves by the decay composite, so the split is a partition and not a
+// selection.
+func passivePinnedSplit(rows []passiveRow) (pinned, unpinned []passiveRow) {
+	for _, r := range rows {
+		if r.mem.Pinned {
+			pinned = append(pinned, r)
+		} else {
+			unpinned = append(unpinned, r)
+		}
+	}
+	return pinned, unpinned
+}
+
+// passiveReservePinned moves every pinned row the selection left in the tail into
+// the selected set and puts the pinned rows first, each group in its own order.
+func passiveReservePinned(chosen, rest []passiveRow) (newChosen, newRest []passiveRow) {
+	tailPinned, tailRest := passivePinnedSplit(rest)
+	return passivePinnedFirst(append(chosen, tailPinned...)), tailRest
+}
+
+// passivePinnedFirst is a stable partition: pinned rows first, then the rest,
+// each in the order it arrived.
+func passivePinnedFirst(rows []passiveRow) []passiveRow {
+	pinned, unpinned := passivePinnedSplit(rows)
+	return append(pinned, unpinned...)
 }
 
 // passiveEligible splits rows into those inside their validity window at now and
