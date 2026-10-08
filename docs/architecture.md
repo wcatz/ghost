@@ -1671,7 +1671,7 @@ Axis interaction rules:
 > lines, which is not the same as keeping them apart — and stage 7 (diversity) is a
 > pass-through. The plan to converge the surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
-> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), query-mode near-duplicate collapse, [#926](https://github.com/wcatz/ghost/issues/926), and diversity, [#927](https://github.com/wcatz/ghost/issues/927); a pinned memory always getting a slot is [#924](https://github.com/wcatz/ghost/issues/924).
+> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), query-mode near-duplicate collapse, [#926](https://github.com/wcatz/ghost/issues/926), and diversity, [#927](https://github.com/wcatz/ghost/issues/927).
 
 What exists now:
 
