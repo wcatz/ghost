@@ -181,7 +181,17 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 }
 
 // matches reports whether the agent's own words repeat enough of a memory's
-// distinctive wording to count as having used it.
+// distinctive wording to count as having used it — inside ONE turn.
+//
+// The unit is the turn and not the session (#932). A restatement is local: the
+// agent that used a memory said its words together, in the turn it used them in,
+// and judging the union of everything written after the call let domain
+// vocabulary spread over forty turns clear a bar no single turn came near —
+// reported to the operator as a memory the agent had used when no instant of the
+// session was about it. The negation arm had been local from the start, for the
+// same reason (see negSegment), and this brings the token arm to the same
+// question. A view cut by Since carries the turns at or after its cutoff, so a
+// turn written before the call cannot answer for one written after it.
 //
 // Both directions of the threshold are deliberate. Too high and a faithful
 // paraphrase of a long memory is reported as ignored — a false negative an
@@ -190,7 +200,17 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 // lockfile" claims every memory about lockfiles. The floor and the fraction are
 // the compromise, and both are asserted in the tests rather than only here.
 func (s *Signals) matches(toks []string) bool {
-	return clearsTokenBar(sharedTokens(s.prose, toks), len(toks))
+	for _, tn := range s.turns {
+		// An unplaced turn is carried, never evidence: the scanner could not say
+		// when it was written, so it cannot be after any call.
+		if tn.at <= 0 {
+			continue
+		}
+		if clearsTokenBar(sharedTokens(tn.fps, toks), len(toks)) {
+			return true
+		}
+	}
+	return false
 }
 
 // clearsTokenBar is the threshold, in one place, because the two arms that use it

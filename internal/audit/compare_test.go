@@ -1,6 +1,10 @@
 package audit
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 // compareOne runs Compare over a single judged memory and returns its verdict,
 // so each case below reads as one sentence about one bucket.
@@ -138,6 +142,86 @@ func TestCompareTokenArmNeedsEnoughOfTheMemory(t *testing.T) {
 	s.AddProse("and " + memWords[2])
 	if !s.matches(toks) {
 		t.Error("three matching fingerprints did not satisfy the token arm")
+	}
+}
+
+// nineWords is a memory of nine distinctive words: memContent's own eight plus
+// "sweep", whose tokens are the fixture's and one more.
+func nineWords() []string {
+	return append(append([]string{}, memWords...), "sweep")
+}
+
+// TestTheTokenArmNeedsTheWordsInOneTurn pins the arm's unit of judgement
+// (wcatz/ghost#932): the bar is cleared by the words that arrived in ONE turn,
+// never by their union across the session. A session-start call that sees
+// domain vocabulary spread over forty turns must not be told the agent used a
+// memory no single turn was about.
+//
+// The issue's example — three turns each carrying three of a nine-word memory
+// — is arithmetically a use under the unchanged thresholds: three shared words
+// is the floor and nine is a third of nine, so ANY turn carrying three of nine
+// clears the bar on its own and it would be used/token whichever way the arm
+// read the text. The split that distinguishes the two readings has to be
+// thinner than the bar at every instant, so the cases below are six-of-nine over
+// three turns of two (the union clears, the best turn is under the floor) and
+// nine-of-twelve over three turns of three (the union clears the fraction, no
+// turn reaches a third of twelve). Both are ignored, the one-turn forms of the
+// same words are used/token, and the thresholds themselves are untouched.
+func TestTheTokenArmNeedsTheWordsInOneTurn(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	turns := []time.Time{now, now.Add(time.Minute), now.Add(2 * time.Minute)}
+
+	// Six of the memory's nine words, two per turn: the union clears the bar,
+	// no single turn reaches the floor of three.
+	nine := nineWords()
+	toks := testTokens(strings.Join(nine, " "))
+	if len(toks) != 9 {
+		t.Fatalf("fixture = %d tokens, want 9", len(toks))
+	}
+	s := NewWithHasher(testHasher)
+	for i, at := range turns {
+		s.SetAt(at)
+		s.AddProse(nine[i*2] + " " + nine[i*2+1])
+	}
+	if !clearsTokenBar(sharedTokens(s.prose, toks), len(toks)) {
+		t.Fatalf("precondition: the union of the three turns clears the bar, so a union would call this used")
+	}
+	if s.matches(toks) {
+		t.Errorf("two words in each of three turns judged used/%s: the arm read the union, not one turn", SignalToken)
+	}
+
+	// Twelve words, three per turn: the union of nine clears the fraction, and
+	// no turn reaches a third of twelve.
+	long := append(append([]string{}, nine...), "migration", "assembler", "verdicts")
+	longToks := testTokens(strings.Join(long, " "))
+	if len(longToks) != 12 {
+		t.Fatalf("fixture = %d tokens, want 12", len(longToks))
+	}
+	s = NewWithHasher(testHasher)
+	for i, at := range turns {
+		s.SetAt(at)
+		s.AddProse(long[i*3] + " " + long[i*3+1] + " " + long[i*3+2])
+	}
+	if !clearsTokenBar(sharedTokens(s.prose, longToks), len(longToks)) {
+		t.Fatalf("precondition: the union of nine of twelve clears the bar, so a union would call this used")
+	}
+	if s.matches(longToks) {
+		t.Errorf("three words in each of three turns judged used/%s: the arm read the union, not one turn", SignalToken)
+	}
+
+	// One turn carrying the words clears, whichever memory is judged: this is
+	// the use the arm exists to catch, and the split must not cost it.
+	s = NewWithHasher(testHasher)
+	s.SetAt(now)
+	s.AddProse(nine[0] + " " + nine[1] + " " + nine[2])
+	if !s.matches(toks) {
+		t.Errorf("three of the nine words in one turn judged ignored: one turn must clear the bar")
+	}
+	s = NewWithHasher(testHasher)
+	s.SetAt(now)
+	s.AddProse(strings.Join(long, " "))
+	if !s.matches(longToks) {
+		t.Errorf("the whole memory in one turn judged ignored")
 	}
 }
 
