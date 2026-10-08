@@ -4,8 +4,8 @@ retrieval audit: 40 memories, 110 scripted turn items, 3 calls
 
 same-domain used at session start: 17 of 20
   of which no turn labels them: 11 of 11
-cited ids caught: 4 of 4
-restatements caught: 6 of 6
+cited ids caught: 3 of 3
+restatements caught: 4 of 4
 
 scenario start: the call is placed before turn 0, source session_start, keeps 40 memories (20 same-domain)
   outcome                expected   got  precision        recall          

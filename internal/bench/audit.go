@@ -168,10 +168,12 @@ type AuditHeadlines struct {
 	// It is the figure the audit's own tests logged before the bench existed.
 	UnlabelledUsed, UnlabelledTotal int
 	// CitesCaught is the cited ids the audit filed as used on the identifier arm,
-	// over every pair the labels expect there.
+	// over every pair the labels expect there, in the session-start call alone: it
+	// is the one call every labelled turn follows, so the denominators are the
+	// corpus's own cites and restatements and one source is never pooled with another.
 	CitesCaught, CitesTotal int
 	// RestatementsCaught is the restatements the audit filed as used on the token
-	// arm, over every pair the labels expect there.
+	// arm, over every pair the labels expect there, in the session-start call alone.
 	RestatementsCaught, RestatementsTotal int
 }
 
@@ -179,6 +181,18 @@ type AuditHeadlines struct {
 func (r AuditReport) Headlines() AuditHeadlines {
 	var h AuditHeadlines
 	for _, p := range r.scenario("start").Pairs {
+		switch p.Expected {
+		case ClassUsedIdentifier:
+			h.CitesTotal++
+			if p.Got == p.Expected {
+				h.CitesCaught++
+			}
+		case ClassUsedToken:
+			h.RestatementsTotal++
+			if p.Got == p.Expected {
+				h.RestatementsCaught++
+			}
+		}
 		if p.Domain != "dev" {
 			continue
 		}
@@ -191,22 +205,6 @@ func (r AuditReport) Headlines() AuditHeadlines {
 			h.UnlabelledTotal++
 			if used {
 				h.UnlabelledUsed++
-			}
-		}
-	}
-	for _, sc := range r.Scenarios {
-		for _, p := range sc.Pairs {
-			switch p.Expected {
-			case ClassUsedIdentifier:
-				h.CitesTotal++
-				if p.Got == p.Expected {
-					h.CitesCaught++
-				}
-			case ClassUsedToken:
-				h.RestatementsTotal++
-				if p.Got == p.Expected {
-					h.RestatementsCaught++
-				}
 			}
 		}
 	}
