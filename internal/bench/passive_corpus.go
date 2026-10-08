@@ -15,7 +15,7 @@ package bench
 //
 //   - rows that must be SHOWN (the live, high-importance ones), and a pinned row
 //     whose importance and age would otherwise bury it, on the surfaces whose
-//     selection reads the pin (session start; see PassiveSurfaceSpec.PinOptional);
+//     selection reads the pin (every passive surface, #924);
 //   - rows that must NEVER be shown: resolved, expired (valid_until in 2020) and
 //     not yet valid (valid_from in 2099);
 //   - rows whose only fault is their scope, which a surface withholds only when it
@@ -51,10 +51,8 @@ const (
 	// KindPinned is a pinned row with low importance and an old created_at, in a
 	// DECAYING category (gotcha), because a pin only exempts a row from decay and
 	// the never-decay categories (preference, convention, fact) are exempt anyway:
-	// a pinned convention row would test nothing. It is expected on session start.
-	// On the project-context union read (OrderDecay, no two-pass, no pinned-first,
-	// deliberately as GetTopMemories was) a pin is not a documented slot guarantee,
-	// so the row is optional there and the bench asserts nothing about it.
+	// a pinned convention row would test nothing. It is expected on every passive
+	// surface: a pin is a slot guarantee (#924), whatever the row's rank.
 	KindPinned PassiveKind = "pinned"
 	// KindFiller is live, valid and unremarkable: low importance, so it is what a
 	// budget cut removes. It is optional — showing it is not wrong, only
@@ -121,6 +119,11 @@ type PassiveRow struct {
 	Supersedes string
 	// DuplicateOf is the key of the row this one restates.
 	DuplicateOf string
+	// BudgetCutOK marks a live row that a surface with a shared row cap may leave
+	// out: the project-context surfaces fit the project's rows, the globals and the
+	// pinned rows under one 20-row cap, so the lowest-ranked live row losing its
+	// slot there is the budget working, not a miss.
+	BudgetCutOK bool
 }
 
 // ID is the id the row is stored under.
@@ -148,10 +151,10 @@ func (r PassiveRow) Grade(scoped bool) PassiveGrade {
 	}
 }
 
-// gradeOn is Grade as the given surface reads it: a pinned row is optional on a
-// surface whose selection makes no promise about pins.
+// gradeOn is Grade as the given surface reads it. Every passive surface promises
+// a pinned row a slot (#924), so no surface grades the pin differently.
 func (r PassiveRow) gradeOn(spec PassiveSurfaceSpec) PassiveGrade {
-	if r.Kind == KindPinned && spec.PinOptional {
+	if r.BudgetCutOK && spec.CutLowestLiveOK {
 		return GradeOptional
 	}
 	return r.Grade(spec.Scoped)
@@ -282,7 +285,8 @@ func projectRows(p string) []PassiveRow {
 	var rows []PassiveRow
 	cat := func(i int) string { return passiveCategories[i%len(passiveCategories)] }
 
-	// Ten live rows, importance 0.95 down to 0.50, newest first. Two of them carry
+	// Ten live rows, importance 0.95 down to 0.50, newest first. One of them
+	// is optional on the union surfaces (see BudgetCutOK). Two of them carry
 	// the production scope and two an open window that contains the clock, so a
 	// block under the production scope still has them and the validity reader sees
 	// `valid` as well as `unset`.
@@ -292,6 +296,11 @@ func projectRows(p string) []PassiveRow {
 			Content:    fmt.Sprintf("%s: the %s rule is settled and current (live %02d)", p, themes[i], i),
 			Importance: imp(95 - 5*i), AgeDays: 2 + i,
 		}
+		// The live row the shared 20-row cap ranks last on the union surfaces:
+		// live-08, not live-09, because decay ranks live-09's category above it.
+		// TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces holds the grade to what
+		// the surfaces render, so it cannot drift from the cap or the ranking.
+		r.BudgetCutOK = sh.filler > 0 && i == sh.live-2
 		switch i {
 		case 1, 2:
 			r.Scope = PassiveScope

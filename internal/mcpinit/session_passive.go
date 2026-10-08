@@ -233,6 +233,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 			Agent:         it.Agent,
 			SourceRef:     it.SourceRef,
 			ConflictsWith: it.ConflictsWith,
+			SupersededBy:  it.SupersededBy,
 		}
 		if it.ProjectID == memory.GlobalProjectID {
 			// 300 bytes here vs. 200 below is deliberate, not drift: globals are
@@ -272,9 +273,9 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		}
 		switch sl.Bucket {
 		case projectID:
-			tally.project = tally.project.CountedAgainst(n, excluded, sl.OverFetch)
+			tally.project = tally.project.CountedAgainst(n, excluded, sl.OverFetch+windowExtra(res.Trace, sl.Bucket))
 		case memory.GlobalProjectID:
-			tally.globals = tally.globals.CountedAgainst(n, excluded, sl.OverFetch)
+			tally.globals = tally.globals.CountedAgainst(n, excluded, sl.OverFetch+windowExtra(res.Trace, sl.Bucket))
 		}
 	}
 	if tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {
@@ -380,4 +381,14 @@ func sessionRecordSink(dbPath string) (assemble.RecordSink, func()) {
 		_ = db.Close()
 		memory.TightenPermissions(dbPath)
 	}
+}
+
+// windowExtra is how many rows the retrieval carried past a bucket's over-fetch
+// (the replacements of pinned rows), which the eligible count must treat as inside
+// the window.
+func windowExtra(trace *assemble.Trace, bucket string) int {
+	if trace == nil {
+		return 0
+	}
+	return trace.WindowExtra[bucket]
 }

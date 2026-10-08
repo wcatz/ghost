@@ -47,6 +47,12 @@ type BucketTally struct {
 	// own validity predicate removed before the LIMIT, so no stage ever decided
 	// on them and the trace holds nothing for them. Set by CountedAgainst.
 	Excluded int
+	// PinnedCut is how many pinned rows the bucket's cap left out, because the
+	// pinned rows alone exceeded it. It is a SUBSET of RankedOut (a cut row is a
+	// ranked-out one), never added to Total, and it is what lets a header say the
+	// pin's slot guarantee ran out rather than leave those rows to read as ranking.
+	// Set by CountsFor from the trace.
+	PinnedCut int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
@@ -123,6 +129,7 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 	if trace == nil {
 		return t
 	}
+	t.PinnedCut = trace.PinnedCut[bucket]
 	// The withheld causes counted in first-seen order, so the tie-break can
 	// name the reason a reader of Decisions would have met first rather than
 	// the last one to arrive.

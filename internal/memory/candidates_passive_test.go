@@ -151,12 +151,12 @@ func TestCandidatesServesPassiveRetrieval(t *testing.T) {
 		t.Fatalf("passive Candidates: %v", err)
 	}
 	// The order is the point, and it is not the decay order: the two-pass
-	// reservation lifts pp_beh_a (gotcha, weighted 1.2) from third to second, and
-	// the pinned row stays LAST because the exemption gives it its raw importance
-	// of 0.10 rather than a decayed one. A pinned row is exempt from decay, not
-	// promoted above every unpinned row — reading the exemption as a promotion is
-	// the mistake this expectation exists to catch.
-	assertIDs(t, passiveIDs(set), []string{"pp_beh_b", "pp_beh_a", "pp_non_b", "pp_non_a", "pp_beh_c", "pp_pin"})
+	// reservation lifts pp_beh_a (gotcha, weighted 1.2) from third to second among
+	// the unpinned rows, and the pinned row is FIRST: a pin is a slot guarantee on
+	// the passive surfaces (#924), reserved ahead of ranking, so its low importance
+	// of 0.10 no longer decides where it sits. The pin exempts a row from decay and
+	// reserves it a slot; the unpinned rows are ordered exactly as before.
+	assertIDs(t, passiveIDs(set), []string{"pp_pin", "pp_beh_b", "pp_beh_a", "pp_non_b", "pp_non_a", "pp_beh_c"})
 }
 
 // TestCandidatesPassiveExcludesResolvedInSQL: a resolved row is excluded by the
@@ -199,7 +199,7 @@ func TestCandidatesPassiveTwoPassReservesBehavioralSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("passive Candidates: %v", err)
 	}
-	assertIDs(t, passiveIDs(set), []string{"pp_beh_b", "pp_beh_a", "pp_non_b", "pp_non_a"})
+	assertIDs(t, passiveIDs(set), []string{"pp_pin", "pp_beh_b", "pp_beh_a", "pp_non_b"})
 }
 
 // TestCandidatesPassiveTwoPassCapStopsOneCategoryTakingEverySlot: with a cap of
@@ -226,6 +226,12 @@ func TestCandidatesPassiveTwoPassCapStopsOneCategoryTakingEverySlot(t *testing.T
 		t.Fatalf("passive Candidates: %v", err)
 	}
 	got := passiveIDs(set)
+	// The pinned row holds the first slot (#924); the behavioural reservation is
+	// asserted over the rows behind it.
+	if got[0] != "pp_pin" {
+		t.Fatalf("the pinned row must lead the set: %v", got)
+	}
+	got = got[1:]
 	// The second reserved slot is the convention row, NOT the second gotcha.
 	if got[1] != "pp_beh_b" {
 		t.Errorf("reserved slots: got %v; the per-category cap must push the second gotcha out of the reservation", got[:2])
@@ -326,13 +332,16 @@ func TestCandidatesPassiveReturnsTheTailBehindThePool(t *testing.T) {
 	if len(got) < 2*pol.ItemCap {
 		t.Fatalf("precondition: %d rows is not enough to hold a pool of %d and a tail", len(got), 2*pol.ItemCap)
 	}
+	// The fixture's one pinned row is inside the pool the selection fills, and it
+	// leads it (#924).
+	const pinned = 1
 	pool, tail := got[:2*pol.ItemCap], got[2*pol.ItemCap:]
 	if len(tail) == 0 {
 		t.Fatalf("precondition: the window is exactly the pool, so there is no tail and this test proves nothing")
 	}
 	// The reserved gotcha is lifted to the front of the pool even though the
 	// window ranks it third, which is the reordering the tail is defined against.
-	if pool[0] != "pp_beh_a" {
+	if pool[pinned] != "pp_beh_a" {
 		t.Errorf("pool = %v, want the weighted gotcha first: the reservation is what makes the pool differ from the "+
 			"window, so a test that could not see that difference would not be testing the tail", pool)
 	}
@@ -409,7 +418,7 @@ func TestCandidatesPassiveNarrowsByScope(t *testing.T) {
 	// over-fetch is the window, so it must not appear here at all — and every
 	// other row does, including the unscoped ones, because an unscoped row is
 	// eligible for every session.
-	assertIDs(t, got, []string{"pp_beh_b", "pp_non_b", "pp_beh_a", "pp_beh_c", "pp_pin"})
+	assertIDs(t, got, []string{"pp_pin", "pp_beh_b", "pp_non_b", "pp_beh_a", "pp_beh_c"})
 }
 
 func containsStr(hay []string, needle string) bool {
@@ -770,8 +779,11 @@ func TestCandidatesPassiveRejectsAnUnknownOrder(t *testing.T) {
 func TestCandidatesPassiveNearDuplicateDemotionIsSkippedUnderTheCap(t *testing.T) {
 	st := passiveFixture(t)
 	ctx := context.Background()
-	// pA carries the duplicate edge and is unpinned; pB is its pinned target.
-	if err := st.CreateLink(ctx, "pp_beh_a", "pp_pin", "duplicate", 1, "manual"); err != nil {
+	// pp_non_b is the later-ranked end of the pair, so it is the loser and the
+	// demotion moves it to the back. The pair is two UNPINNED rows: a pinned row
+	// is reserved ahead of ranking (#924), so it can only ever win a pair and
+	// cannot show whether the gate ran.
+	if err := st.CreateLink(ctx, "pp_beh_b", "pp_non_b", "duplicate", 1, "manual"); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 
@@ -786,8 +798,8 @@ func TestCandidatesPassiveNearDuplicateDemotionIsSkippedUnderTheCap(t *testing.T
 		t.Fatalf("under the cap: %v", err)
 	}
 	underIDs := passiveIDs(set)
-	if indexOf(underIDs, "pp_beh_a") > indexOf(underIDs, "pp_pin") {
-		t.Errorf("under the cap the demotion must be skipped, but the loser moved behind its target: %v", underIDs)
+	if underIDs[len(underIDs)-1] == "pp_non_b" {
+		t.Errorf("under the cap the demotion must be skipped, but the loser moved to the back: %v", underIDs)
 	}
 
 	// Over the cap: the gate is on, and the same pair reorders.
@@ -798,11 +810,11 @@ func TestCandidatesPassiveNearDuplicateDemotionIsSkippedUnderTheCap(t *testing.T
 		t.Fatalf("over the cap: %v", err)
 	}
 	overIDs := passiveIDs(set)
-	if indexOf(overIDs, "pp_beh_a") < 0 || indexOf(overIDs, "pp_pin") < 0 {
+	if indexOf(overIDs, "pp_beh_b") < 0 || indexOf(overIDs, "pp_non_b") < 0 {
 		t.Fatalf("over the cap both endpoints must be in the window: %v", overIDs)
 	}
-	if indexOf(overIDs, "pp_beh_a") < indexOf(overIDs, "pp_pin") {
-		t.Errorf("over the cap the demotion must run, but the loser still outranks its target: %v", overIDs)
+	if overIDs[len(overIDs)-1] != "pp_non_b" {
+		t.Errorf("over the cap the demotion must run, but the loser was not moved to the back: %v", overIDs)
 	}
 }
 
@@ -826,10 +838,10 @@ func TestCandidatesPassiveNearDuplicateDemotionIsSkippedUnderTheCap(t *testing.T
 func TestTheOverCapGateIsExactAtTheItemCap(t *testing.T) {
 	st := passiveFixture(t)
 	ctx := context.Background()
-	// pp_beh_a carries the duplicate edge and is unpinned; pp_pin is its pinned
-	// target, so nearDuplicatePenaltyRows makes the EARLIER row the loser and the
-	// demotion has something real to move.
-	if err := st.CreateLink(ctx, "pp_beh_a", "pp_pin", "duplicate", 1, "manual"); err != nil {
+	// pp_non_b is the later-ranked end of an unpinned pair, so it is the loser and
+	// the demotion has something real to move. A pinned row is reserved ahead of
+	// ranking (#924) and cannot show whether the gate ran.
+	if err := st.CreateLink(ctx, "pp_beh_b", "pp_non_b", "duplicate", 1, "manual"); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 	pol := projectPassivePolicy()
@@ -858,11 +870,10 @@ func TestTheOverCapGateIsExactAtTheItemCap(t *testing.T) {
 				t.Fatalf("ItemCap %d: window rows = %d, want the over-fetch of %d; the gate is decided on the "+
 					"SELECTED set and the fixture is what sizes it", tc.itemCap, len(ids), p.OverFetch)
 			}
-			loser, target := indexOf(ids, "pp_beh_a"), indexOf(ids, "pp_pin")
-			if loser < 0 || target < 0 {
+			if indexOf(ids, "pp_beh_b") < 0 || indexOf(ids, "pp_non_b") < 0 {
 				t.Fatalf("both endpoints must be in the window: %v", ids)
 			}
-			if moved := loser > target; moved != tc.wantMoved {
+			if moved := ids[len(ids)-1] == "pp_non_b"; moved != tc.wantMoved {
 				t.Errorf("the near-duplicate loser moved = %v, want %v: on a set of %d selected rows against a cap "+
 					"of %d the reorder runs only when the set is WIDER than the cap, and %v is the order either way",
 					moved, tc.wantMoved, len(ids), tc.itemCap, ids)

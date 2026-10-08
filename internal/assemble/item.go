@@ -60,6 +60,12 @@ type Item struct {
 	// place, after the last stage that can remove a row (markConflicts), so a row
 	// is never marked against a partner the reader cannot see.
 	ConflictsWith []string
+	// SupersededBy lists the ids of the rows in the SAME rendered answer that
+	// replaced this one through a live `supersedes` edge. It is set only for a
+	// pinned row on a passive read (markSuperseded): a pin guarantees a slot and
+	// not a rank above the row that replaced it, so the row is ordered behind its
+	// superseder and says so. A superseder that is not in the answer is not named.
+	SupersededBy []string
 }
 
 // Line renders the shared item prefix: the one line shape both surfaces emit for
@@ -96,6 +102,7 @@ func (i Item) Line() string {
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts +
+		SupersededByLabel(i.SupersededBy) +
 		") " + Data(i.Content)
 }
 
@@ -110,6 +117,19 @@ func ConflictsLabel(ids []string) string {
 		toks[i] = "`" + Token(id) + "`"
 	}
 	return " conflicts_with=" + strings.Join(toks, ",")
+}
+
+// SupersededByLabel renders the rows that replaced a memory, as they are
+// rendered on their own lines (Token), or "" when none is in this answer.
+func SupersededByLabel(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	toks := make([]string, len(ids))
+	for i, id := range ids {
+		toks[i] = "`" + Token(id) + "`"
+	}
+	return " superseded_by=" + strings.Join(toks, ",")
 }
 
 // SourceLabel renders a row's origin label as ` source=<label>`. The label is

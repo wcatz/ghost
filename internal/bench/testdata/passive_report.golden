@@ -26,23 +26,23 @@ session start, scope env=production (4 blocks)
 
 ghost_project_context (limit 20) (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (59/59)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/80)
   _global share          0.463 (37/80)
   budget use             1.000 (80/80)   rows rendered / row caps
   budget cut             0.675 (166/246)   admissible rows left out
   duplicate rate         0.000 (0/80)   rendered beside the row they restate or replace
-  block size             mean 2628 B / 657 tok, max 2672 B / 668 tok
+  block size             mean 2637 B / 660 tok, max 2681 B / 671 tok
   header honesty         n/a    (this surface prints no count line)
 
 project resource / recall_project (4 blocks)
   withheld leakage       0.000 (0/47)   (must be 0)
-  expected-row recall    1.000 (59/59)
+  expected-row recall    1.000 (64/64)
   cross-project          0.000 (0/103)
   _global share          0.583 (60/103)
   budget use             0.736 (103/140)   rows rendered / row caps
   budget cut             0.581 (143/246)   admissible rows left out
   duplicate rate         0.000 (0/103)   rendered beside the row they restate or replace
-  block size             mean 3192 B / 798 tok, max 3358 B / 840 tok
+  block size             mean 3200 B / 800 tok, max 3367 B / 842 tok
   header honesty         n/a    (this surface prints no count line)
 

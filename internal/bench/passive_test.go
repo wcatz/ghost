@@ -403,3 +403,41 @@ func TestPassiveHonestyCheckReadsBothHeaderShapes(t *testing.T) {
 		t.Errorf("a header claiming 5 shown over 3 rendered rows was not caught: %v", liar.Findings)
 	}
 }
+
+// TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces holds the optional grade on the
+// shared-cap surfaces to what they render. A row graded cut-OK that IS rendered
+// means the grade has drifted from the cap or the ranking (it is excusing a row
+// the surface can show); a surface that renders every one means the grade
+// excuses nothing and should go. Either way the grade is no longer evidence.
+func TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces(t *testing.T) {
+	c, env := passiveEnv(t, BlindNone)
+	marked := 0
+	for _, r := range c.Rows {
+		if r.BudgetCutOK {
+			marked++
+		}
+	}
+	if marked == 0 {
+		t.Fatal("no row is graded BudgetCutOK, so the grade is untested")
+	}
+	for _, spec := range PassiveSurfaces() {
+		if !spec.CutLowestLiveOK {
+			continue
+		}
+		for _, p := range PassiveProjects {
+			block, err := spec.Read(context.Background(), env, p)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", spec.Name, p, err)
+			}
+			rendered := map[string]bool{}
+			for _, id := range renderedIDs(block) {
+				rendered[id] = true
+			}
+			for _, r := range c.Rows {
+				if r.Project == p && r.BudgetCutOK && rendered[r.ID()] {
+					t.Errorf("%s/%s: %s is graded optional for a budget cut but the surface rendered it", spec.Name, p, r.ID())
+				}
+			}
+		}
+	}
+}

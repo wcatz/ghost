@@ -337,6 +337,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 		Agent:         m.Agent,
 		SourceRef:     m.SourceRef,
 		ConflictsWith: m.ConflictsWith,
+		SupersededBy:  m.SupersededBy,
 	}
 	// For historical reads, judge the window at T. The passive path already has
 	// the state set from the assembler's stage 2.
@@ -560,6 +561,20 @@ const (
 // "(N shown)" heading — "N shown of N total" would assert a comparison the block
 // makes no claim about.
 func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
+	line := sessionCountsBase(tally, rankPhrase, toolPhrase)
+	if line == "" || tally.PinnedCut == 0 {
+		return line
+	}
+	// A pin is a slot guarantee, so pinned rows are the last to be cut and only
+	// the cap itself can cut one. Said apart from the ranking's cut, because
+	// those rows were not outranked: there were more of them than the bucket has
+	// places for, and the ones shown are the best-ranked of the pinned rows.
+	return fmt.Sprintf("%s; %d pinned memories cut: the pinned rows alone exceed the cap, and the ones shown are the best-ranked of them",
+		line, tally.PinnedCut)
+}
+
+// sessionCountsBase is the count line before the pinned-row clause.
+func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
 	shown, total := tally.Shown, tally.Total()
 	// Rows the bucket policy removed as near-duplicate losers are not the
 	// ranking's cut either, so they ride with the withheld rows: one count of
@@ -895,6 +910,9 @@ type sessionMemory struct {
 	// ConflictsWith is the assembler's marker, carried through unchanged: the
 	// rows this one contradicts in the same block (assemble.Item.ConflictsWith).
 	ConflictsWith []string
+	// SupersededBy is the assembler's marker for a pinned row whose replacement is
+	// in the same block (assemble.Item.SupersededBy), carried through unchanged.
+	SupersededBy []string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

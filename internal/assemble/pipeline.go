@@ -570,6 +570,13 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 			dropped = append(dropped, rows[i].ID)
 			p.dropped[rows[i].ID] = reason
 			p.droppedBy[stageBudget]++
+			if p.passive && rows[i].Pinned {
+				// Keyed on the row's OWN project, the key the decision below and
+				// CountsFor use, so the count is a subset of the same bucket's RankedOut
+				// even when a union bucket admits `_global` rows.
+				bucket := rows[i].ProjectID
+				p.trace.addPinnedCut(bucket, 1)
+			}
 			p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)
 			continue
 		}
@@ -743,6 +750,35 @@ func (p *pipeline) markConflicts() {
 		for _, other := range p.items {
 			if partners[p.items[i].ID][other.ID] {
 				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, other.ID)
+			}
+		}
+	}
+}
+
+// markSuperseded sets Item.SupersededBy on each pinned row of a passive read whose
+// superseder is still in the answer. The retriever names the superseders (it owns
+// the edge rules); this keeps only the ones the reader can see, and runs from
+// fitResponse beside markConflicts for the same reason: a response-fit drop can
+// remove the superseder after the stages are done.
+func (p *pipeline) markSuperseded() {
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	named := make(map[string][]string)
+	for _, c := range p.set.Rows {
+		if len(c.SupersededBy) > 0 {
+			named[c.ID] = c.SupersededBy
+		}
+	}
+	for i := range p.items {
+		p.items[i].SupersededBy = nil
+		if !p.passive || !p.items[i].Pinned {
+			continue
+		}
+		for _, id := range named[p.items[i].ID] {
+			if present[id] {
+				p.items[i].SupersededBy = append(p.items[i].SupersededBy, id)
 			}
 		}
 	}

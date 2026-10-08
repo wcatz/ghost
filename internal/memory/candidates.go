@@ -224,6 +224,18 @@ type CandidateSet struct {
 	// read leaves it zero because its validity filtering happens in the assembler,
 	// where the removed rows are counted per stage as usual.
 	ValidityExcluded int
+	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
+	// entered the window: the window is a LIMIT, and a bucket holding more pinned
+	// rows than the window has places reads only the first of them. Set only for
+	// a bucket whose whole window is pinned (the only case in which a pinned row
+	// can be past it); absent otherwise. It is what lets the assembler say how many
+	// pinned rows a cap cut when it never saw some of them.
+	PinnedBeyond map[string]int
+	// WindowExtra is, per passive bucket, how many rows the set carries beyond the
+	// bucket's over-fetch: the replacements of pinned rows, fetched past the LIMIT
+	// so they can hold a slot. A caller deriving how many eligible rows lie past the
+	// window must count them as inside it, or it counts them twice.
+	WindowExtra map[string]int
 
 	// --- explain-only diagnostics. nil/zero unless the request asked for
 	// explain (CandidateRequest.Explain); building them is what that flag
@@ -308,6 +320,12 @@ type Candidate struct {
 	// removes, and it is why the cap is keyed on the retriever's answer rather
 	// than re-derived from the row.
 	FetchedBy string
+	// SupersededBy is, for a PINNED passive row, the ids of the rows in the same
+	// window that supersede it through a live `supersedes` edge. A pin guarantees a
+	// slot and not a rank above the row that replaced it, so such a row is ordered
+	// directly behind its superseder and the assembler says so on its line. Empty
+	// for every other row and on every query-mode read.
+	SupersededBy []string
 	// Base is the fused score the window was cut on, after status demotion.
 	// Decay is the category-and-age multiplier, and Score is the product the
 	// decay order ranked on. Supersede and near-duplicate demotion is a

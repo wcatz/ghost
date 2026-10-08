@@ -241,7 +241,7 @@ The second cause of the same 143 was the KEEP veto itself, which protects a phra
   `Store.fuseAndRank` delegating to `selectWindow` (see
   [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
 - Category-aware time-decay ordering
-- Pinned and near-duplicate handling
+- Pinned and near-duplicate handling. A pin is a SLOT GUARANTEE on every passive surface (session start, `ghost_project_context`, the project and global resources), reserved ahead of ranking by the passive slice policy: the fetch orders pinned rows first, so a pinned row is in the window whatever it ranks, and the selection puts the pinned rows at the head of the set the demotions run over, so they are never outside the pool and never the loser of a near-duplicate pair. Validity, scope and resolution still withhold a pinned row. A pin guarantees a slot, not a rank above the row that replaced it: a pinned row with a live `supersedes` edge keeps its slot but is ordered directly behind its superseder, the superseder is reserved a slot too (and fetched into the window if rank left it out), and the line carries `superseded_by=` naming it. Search sinks a pinned superseded row as well, so the passive surfaces and search now agree. When pinned rows exceed a bucket's cap they are ranked among themselves, the cap cuts the rest, and the block reports how many pinned rows were cut.
 - Directed memory links
 - Snapshots, audit history, tasks, decisions, and usage data
 
@@ -1671,7 +1671,7 @@ Axis interaction rules:
 > lines, which is not the same as keeping them apart — and stage 7 (diversity) is a
 > pass-through. The plan to converge the surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
-> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), query-mode near-duplicate collapse, [#926](https://github.com/wcatz/ghost/issues/926), and diversity, [#927](https://github.com/wcatz/ghost/issues/927); a pinned memory always getting a slot is [#924](https://github.com/wcatz/ghost/issues/924).
+> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), query-mode near-duplicate collapse, [#926](https://github.com/wcatz/ghost/issues/926), and diversity, [#927](https://github.com/wcatz/ghost/issues/927).
 
 What exists now:
 
