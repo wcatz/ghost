@@ -144,10 +144,13 @@ type SourceSummary struct {
 	Calls int
 	// Used, Ignored, Superseded and Contradicted count VERDICTS, not calls: one
 	// call can keep twenty memories, so these do not sum to Calls.
-	Used         int
-	Ignored      int
-	Superseded   int
-	Contradicted int
+	Used int
+	// UsedByID and UsedByWording split Used by Verdict.Signal and sum to it.
+	UsedByID      int
+	UsedByWording int
+	Ignored       int
+	Superseded    int
+	Contradicted  int
 	// KeptNothing counts the calls this source made that admitted no memory at
 	// all. For a source where the AGENT chose to look it is the detectable half of
 	// the issue's "missed": a lookup that returned nothing it could use. For an
@@ -286,7 +289,7 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 			res.VerdictList = append(res.VerdictList, v)
 			kept = append(kept, placed{verdict: v, record: rec.RowID, source: rec.Source, sess: rec.SessionID,
 				hash: memory.ContentHash(content[v.MemoryID])})
-			sum.count(v.Outcome)
+			sum.count(v)
 		}
 	}
 
@@ -352,10 +355,15 @@ func recordedInstant(stamp string) (time.Time, bool) {
 }
 
 // count files one verdict under its bucket.
-func (s *SourceSummary) count(o Outcome) {
-	switch o {
+func (s *SourceSummary) count(v Verdict) {
+	switch v.Outcome {
 	case OutcomeUsed:
 		s.Used++
+		if v.Signal == SignalIdentifier {
+			s.UsedByID++
+		} else {
+			s.UsedByWording++
+		}
 	case OutcomeIgnored:
 		s.Ignored++
 	case OutcomeSuperseded:
@@ -368,10 +376,15 @@ func (s *SourceSummary) count(o Outcome) {
 // uncount takes one back out, and is count's exact inverse. A verdict the store
 // refused was counted here before the write and is not in the table after it, so
 // leaving it would make this bucket a figure about a row that does not exist.
-func (s *SourceSummary) uncount(o Outcome) {
-	switch o {
+func (s *SourceSummary) uncount(v Verdict) {
+	switch v.Outcome {
 	case OutcomeUsed:
 		s.Used--
+		if v.Signal == SignalIdentifier {
+			s.UsedByID--
+		} else {
+			s.UsedByWording--
+		}
 	case OutcomeIgnored:
 		s.Ignored--
 	case OutcomeSuperseded:
@@ -424,7 +437,7 @@ func (r *Summary) dropUnfiled(kept []placed, bySource map[string]*SourceSummary,
 		}
 		dropped[i] = true
 		if sum := bySource[p.source]; sum != nil {
-			sum.uncount(p.verdict.Outcome)
+			sum.uncount(p.verdict)
 		}
 	}
 	// Kept in order, because VerdictList's order is the order the calls were read
@@ -488,9 +501,18 @@ func (r Summary) String() string {
 		// because `ghost lifecycle` writes it to stderr as the phase tail an
 		// operator reads in lifecycle.log. keptNothingName gets the RAW value: it
 		// compares against a known source name, and an escaped one is not that name.
-		fmt.Fprintf(&b, "  %s: %d call(s), %d used, %d ignored, %d superseded in session, "+
+		// The same phrasing as SourceReport.line: a cited-by-id share over this run's
+		// scored verdicts when there are any, and the wording count beside it named a
+		// heuristic.
+		fmt.Fprintf(&b, "  %s: %d call(s), ", assemble.Label(src.Source), src.Calls)
+		if scored := src.Used + src.Ignored + src.Superseded + src.Contradicted; scored > 0 {
+			fmt.Fprintf(&b, "%d%% cited by id (%d of %d scored), ", src.UsedByID*100/scored, src.UsedByID, scored)
+		} else {
+			b.WriteString("no verdict this run, ")
+		}
+		fmt.Fprintf(&b, "%d restated by wording (heuristic), %d ignored, %d superseded in session, "+
 			"%d contradicted, %d %s\n",
-			assemble.Label(src.Source), src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted,
+			src.UsedByWording, src.Ignored, src.Superseded, src.Contradicted,
 			src.KeptNothing, keptNothingName(src.Source))
 	}
 	if len(r.Sources) > 1 {
@@ -519,8 +541,7 @@ func (r Summary) String() string {
 		fmt.Fprintf(&b, "  the transcript was only partly read (%s), so an ignored verdict is a claim "+
 			"about the text that was read\n", assemble.Label(r.Degraded))
 	}
-	b.WriteString("  \"ignored\" means the agent's own words never mentioned the memory; " +
-		"it is not a relevance or usefulness score\n")
+	b.WriteString("  " + LimitsSentence + "\n")
 	b.WriteString("  a fact the agent re-derived in-session that was never injected is not counted: " +
 		"no heuristic can tell one from a fact it worked out, so only searches that kept " +
 		"nothing are reported as missed\n")

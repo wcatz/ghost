@@ -323,6 +323,66 @@ func TestTheStoreWideAggregateMapsEveryOutcomeTheComparerCanStore(t *testing.T) 
 	}
 }
 
+// TestTheStoreWideAggregateSplitsUsedByItsSignal: of the `used` rows, only a verdict
+// proved by a cited id is UsedByID; every other signal, an empty one and one this build
+// has never heard of included, is the weaker claim and lands in UsedByWording. The two
+// sum to Used, so no used verdict is in neither.
+func TestTheStoreWideAggregateSplitsUsedByItsSignal(t *testing.T) {
+	if string(SignalIdentifier) != memory.VerdictSignalIdentifier {
+		t.Fatalf("the comparer's identifier signal %q and the store's %q are two spellings of one claim", SignalIdentifier, memory.VerdictSignalIdentifier)
+	}
+	signals := []string{string(SignalIdentifier), string(SignalToken), string(SignalNegation), "", "from-a-later-build"}
+	for _, sig := range signals {
+		t.Run("signal="+sig, func(t *testing.T) {
+			store, projectID, _ := reportStore(t)
+			call := recordCall(t, store, projectID, "search", "USEDID")
+			fileVerdict(t, store, memory.RetrievalAuditRow{
+				ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
+				Outcome: string(OutcomeUsed), Signal: sig, RecordRowID: call,
+			})
+			totals, err := store.RetrievalSourceTotals(context.Background(), time.Time{})
+			if err != nil {
+				t.Fatalf("RetrievalSourceTotals: %v", err)
+			}
+			var search memory.RetrievalSourceTotals
+			for _, s := range totals {
+				if s.Source == "search" {
+					search = s
+				}
+			}
+			wantID, wantWording := 0, 1
+			if sig == string(SignalIdentifier) {
+				wantID, wantWording = 1, 0
+			}
+			if search.Used != 1 || search.UsedByID != wantID || search.UsedByWording != wantWording {
+				t.Errorf("signal %q: Used/UsedByID/UsedByWording = %d/%d/%d, want 1/%d/%d",
+					sig, search.Used, search.UsedByID, search.UsedByWording, wantID, wantWording)
+			}
+			if search.UsedByID+search.UsedByWording != search.Used {
+				t.Errorf("the two strengths sum to %d against Used %d", search.UsedByID+search.UsedByWording, search.Used)
+			}
+		})
+	}
+	// A non-used row never touches either field, whatever signal it carries.
+	t.Run("an ignored row carrying an identifier signal", func(t *testing.T) {
+		store, projectID, _ := reportStore(t)
+		call := recordCall(t, store, projectID, "search", "IGNID")
+		fileVerdict(t, store, memory.RetrievalAuditRow{
+			ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "IGNID",
+			Outcome: string(OutcomeIgnored), Signal: string(SignalIdentifier), RecordRowID: call,
+		})
+		totals, err := store.RetrievalSourceTotals(context.Background(), time.Time{})
+		if err != nil {
+			t.Fatalf("RetrievalSourceTotals: %v", err)
+		}
+		for _, s := range totals {
+			if s.Source == "search" && (s.UsedByID != 0 || s.UsedByWording != 0 || s.Used != 0) {
+				t.Errorf("an ignored row counted as used: %+v", s)
+			}
+		}
+	})
+}
+
 // outcomeBuckets reads the four outcome buckets of one source's figures, keyed by the
 // outcome VALUE rather than by the field name.
 //

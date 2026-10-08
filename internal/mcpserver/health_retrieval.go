@@ -177,7 +177,6 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 	// fresh store — and a fresh store carrying a warning glyph is how an agent
 	// learns to skip the warnings that matter.
 	if scored {
-		sb.WriteString("  \"ignored\" is the residual, not a relevance or usefulness score: " +
-			"it means the agent's own words never mentioned the memory\n")
+		sb.WriteString("  " + audit.LimitsSentence + "\n")
 	}
 }

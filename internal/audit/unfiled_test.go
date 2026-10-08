@@ -44,7 +44,7 @@ func TestTheSummaryCountsOnlyTheVerdictsThatWereFiled(t *testing.T) {
 	res := Summary{ProjectID: "p1", Verdicts: len(kept)}
 	for _, p := range kept {
 		res.VerdictList = append(res.VerdictList, p.verdict)
-		bySource[p.source].count(p.verdict.Outcome)
+		bySource[p.source].count(p.verdict)
 	}
 	for _, name := range []string{"search", "session_start"} {
 		res.Sources = append(res.Sources, *bySource[name])

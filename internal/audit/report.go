@@ -159,10 +159,15 @@ type SourceReport struct {
 	// Used, Ignored, Superseded and Contradicted partition Scored. They do not sum
 	// to Calls, for Kept's reason, and they do not necessarily sum to Kept, for
 	// Scored's.
-	Used         int
-	Ignored      int
-	Superseded   int
-	Contradicted int
+	Used int
+	// UsedByID and UsedByWording split Used by what proved it and sum to it: a cited
+	// id (signal = identifier) against anything weaker, a token overlap or a signal
+	// this build cannot classify. Precision is the first.
+	UsedByID      int
+	UsedByWording int
+	Ignored       int
+	Superseded    int
+	Contradicted  int
 	// KeptNothing counts calls from this source that admitted no memory at all.
 	// It is the DETECTABLE half of "missed" — but only for a source where the
 	// AGENT chose to look, which is what makes the renderer name it per source
@@ -247,7 +252,14 @@ func (s SourceReport) Unscored() int {
 	return s.Kept - s.Scored
 }
 
-// Precision is used over SCORED, and ok is false when nothing was scored.
+// LimitsSentence is the caveat every surface that prints these figures carries, spelled
+// once so the report, the run summary and ghost_health cannot drift apart.
+const LimitsSentence = "\"ignored\" means the agent's own words never mentioned the memory, " +
+	"and \"restated by wording\" is a token-overlap heuristic; neither is a relevance or usefulness score"
+
+// Precision is the share of SCORED verdicts whose `used` was proved by a cited id
+// (signal = identifier), and ok is false when nothing was scored. Wording overlap is
+// reported beside it as a heuristic and is never in this figure.
 //
 // ok is the second result rather than a sentinel like -1 or a 0%, because both of
 // those are answers: "0% of nothing were used" and "-1" are claims a caller can
@@ -256,7 +268,7 @@ func (s SourceReport) Precision() (percent int, ok bool) {
 	if s.Scored == 0 {
 		return 0, false
 	}
-	return s.Used * 100 / s.Scored, true
+	return s.UsedByID * 100 / s.Scored, true
 }
 
 // PrecisionPercent is Precision for callers that have already established the
@@ -409,6 +421,11 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 		switch Outcome(row.Outcome) {
 		case OutcomeUsed:
 			s.Used++
+			if row.Signal == string(SignalIdentifier) {
+				s.UsedByID++
+			} else {
+				s.UsedByWording++
+			}
 		case OutcomeIgnored:
 			s.Ignored++
 		case OutcomeSuperseded:
@@ -567,6 +584,8 @@ func BuildStoreReport(ctx context.Context, store *memory.Store, opts ReportOptio
 			KeptNothing:      t.KeptNothing,
 			Scored:           t.Scored,
 			Used:             t.Used,
+			UsedByID:         t.UsedByID,
+			UsedByWording:    t.UsedByWording,
 			Ignored:          t.Ignored,
 			Superseded:       t.Superseded,
 			Contradicted:     t.Contradicted,
@@ -600,7 +619,8 @@ func (s SourceReport) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %d call(s), %d kept, ", label, s.Calls, s.Kept)
 	if percent, ok := s.Precision(); ok {
-		fmt.Fprintf(&b, "%d%% used (%d of %d scored), ", percent, s.Used, s.Scored)
+		fmt.Fprintf(&b, "%d%% cited by id (%d of %d scored), %d restated by wording (heuristic), ",
+			percent, s.UsedByID, s.Scored, s.UsedByWording)
 	} else {
 		fmt.Fprintf(&b, "no verdict recorded yet for the %d kept, ", s.Kept)
 	}
@@ -669,8 +689,7 @@ func (r Report) String() string {
 		b.WriteString("  figures are per source and are never pooled: a search and an injection " +
 			"answer different questions\n")
 	}
-	b.WriteString("  \"ignored\" means the agent's own words never mentioned the memory; " +
-		"it is not a relevance or usefulness score\n")
+	b.WriteString("  " + LimitsSentence + "\n")
 	// The NOT MEASURED half, said as such. It is the line most likely to be
 	// misread as a number, because every other line here is one.
 	b.WriteString("  missed: searches that kept nothing are counted above; the other half of \"missed\" " +
@@ -719,7 +738,8 @@ func (s SourceReport) line() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  %s: %d call(s), %d kept, ", label, s.Calls, s.Kept)
 	if percent, ok := s.Precision(); ok {
-		fmt.Fprintf(&b, "%d%% used (%d of %d scored), ", percent, s.Used, s.Scored)
+		fmt.Fprintf(&b, "%d%% cited by id (%d of %d scored), %d restated by wording (heuristic), ",
+			percent, s.UsedByID, s.Scored, s.UsedByWording)
 	} else {
 		fmt.Fprintf(&b, "no verdict recorded yet for the %d kept, ", s.Kept)
 	}

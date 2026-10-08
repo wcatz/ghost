@@ -524,6 +524,32 @@ func TestTheRunSummaryNamesTheEmptyCallCountAfterItsSource(t *testing.T) {
 	}
 }
 
+// TestTheRunSummarySplitsUsedByItsSignal: the lifecycle summary says what proved each
+// positive verdict, in the same phrasing the report prints, and carries the same caveat.
+func TestTheRunSummarySplitsUsedByItsSignal(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	_ = recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+
+	s := newTestSignals(t)
+	s.AddID("USEDID")
+	s.AddProse("the v20 migration runs before the pre-migration backup")
+	res, err := Run(context.Background(), store, projectID, s)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	src := res.Sources[0]
+	if src.Used != 2 || src.UsedByID != 1 || src.UsedByWording != 1 {
+		t.Fatalf("Used/UsedByID/UsedByWording = %d/%d/%d, want 2/1/1", src.Used, src.UsedByID, src.UsedByWording)
+	}
+	line := sourceLine(t, res.String(), "search")
+	if !strings.Contains(line, "33% cited by id (1 of 3 scored), 1 restated by wording (heuristic), 1 ignored") {
+		t.Errorf("the summary line does not split used by its signal:\n%s", line)
+	}
+	if !strings.Contains(res.String(), LimitsSentence) {
+		t.Errorf("the summary does not carry the caveat sentence:\n%s", res.String())
+	}
+}
+
 // TestTheRunSummaryRendersItsSourceThroughLabel: the lifecycle summary prints one
 // line per source, and `src.Source` is the retrieval_record.source column verbatim —
 // plain TEXT with no CHECK, validated by nothing, and as ordinary a thing to receive
