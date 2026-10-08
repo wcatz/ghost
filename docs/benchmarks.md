@@ -10,6 +10,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories; paired 95% CI over `vector-only` **+0.018** [+0.003, +0.034] |
 | `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.138** (304/2200 rows); the item cap shortened **220/220** queries and dropped **8% of the graded rows it reached**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
 | `ghost bench --passive` | The **passive** blocks — session start, `ghost context`, `ghost_project_context`, the project resource — over a synthetic four-project store that holds resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows | Withheld leakage **0.000** on every surface (and non-zero when a filter is disabled, which the test checks); expected-row recall **1.000** on every surface; the session-start count lines **PASS** the honesty check (8 of 8, after #897) |
+| `ghost bench --audit` | The **retrieval audit** itself: its verdicts against a labelled offline session | Same-domain memories judged `used` at session start **17 of 20** (11 of the 11 that no turn restates); cited ids caught **4 of 4**, restatements **6 of 6**; token-arm precision **0.267** (4/15) at session start; a call after the last turn judges **0** `used` |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000**, fresh@1 **0.521** (0.583 state / 0.458 premise) — the top slot is the stale answer on about half the premise probes |
 | Recency-trap suite | Old-but-correct memory against newer distractors | **0.929** in a never-decay category (invariant under decay, as claimed) and **0.417** in a decaying one — but **1.000** there when the correct memory is pinned |
@@ -320,6 +321,33 @@ project resource / recall_project     0/47      1.000   0/103          n/a
 - **Near-duplicates and superseded rows are shown only where there is room.** The duplicate rate is `0.045` at session start (4/88: `delta`'s two near-duplicates and its two superseded rows, each beside the row it restates or was replaced by), and `0.000` on the tool and the resource, whose union is full — the rows the project bucket demotes are the rows its cap then cuts.
 
 **Limits.** The corpus is synthetic and small; a figure on it is a statement about these 212 rows. Recall and the budget figures move when the corpus moves, so the golden is the thing to review, not a floor. The out-of-scope row is only withheld where a scope is asked for (`injection.session_scope` ships empty), and `ghost_project_context` carries no scope at all, so on that surface a scoped row is optional by construction. Nothing here ranks relevance — there is no query — so a block can score `1.000` recall and still be the wrong block for a task. The bench is report-only and gates nothing; the leakage test is the one assertion, and it asserts that the figure is zero on a corpus that can make it non-zero.
+
+## Retrieval audit (`ghost bench --audit`)
+
+The retrieval audit (`internal/audit`, [#648](https://github.com/wcatz/ghost/issues/648)) files one verdict per memory a call kept — `used` (by its id or by repeated wording), `superseded_in_session`, `contradicted` or `ignored` — and until this bench nothing measured it. The two tests that logged its same-domain figure pinned no number, and no figure measured the other side at all: a change that judged everything `ignored` would have looked like an improvement on every number we had.
+
+**The corpus** (`internal/bench/audit_corpus.go`, Go literals, offline, no embedding, no LLM, no network, no real store): forty memories with deterministic 32-hex ids — twenty about the code the session edits (`dev`) and twenty about something else (`ops`), the forty sentences of the audit package's own realistic-session fixtures — and a scripted session of 110 items: forty minutes of narrative plus an Edit/Write-shaped file body each (the same base the audit's tests use), twenty plain turns that restate nothing, and the labelled turns. Every labelled turn names, by hand, the memory ids it **cites** (the full id is in the text), **restates** (its wording repeats the memory within that one turn), **denies** (a denial cue bound to the wording or the id) or **saves** (a save's arguments restate it): three cites, four restatements, two denials and one save. The memories those labels name are ones the unlabelled base does not already match on words, so every positive label is a pair the audit has to find.
+
+**The scenarios**, one scratch store each: `start` (the call is placed before turn 0, source `session_start`, keeps all forty), `middle` (before turn 20, source `search`, keeps the twenty `dev`) and `end` (after the last turn, source `search`, keeps the twenty `dev`). The store stamps a call with its own clock, so a call's position is set by placing the turns around the instant it was recorded; no figure depends on when the run happened. Signals are built over `audit.NewHasher` with a fixed key written in the bench, and `audit.Run` is called unchanged.
+
+**The labels decide the expected outcome**: for a call, only turns at or after it count, with the comparison's own precedence — contradicted, then used by identifier, then used by token, then superseded by a save, else ignored. A memory no later turn mentions is expected `ignored`, which is how the same-domain false positives are counted.
+
+**What it prints**: three headline lines (`same-domain used at session start: N of 20`, `cited ids caught: a of b`, `restatements caught: c of d`), then per scenario the expected and judged counts with precision and recall per outcome (`used` split by the identifier and token arms, and pooled), and a 5x5 confusion table. Identifier-arm precision is `1.000` by construction. The golden is `internal/bench/testdata/audit_report.golden`, pinned by `TestAuditBaseline` and regenerated with `GHOST_UPDATE_GOLDEN=1 go test ./internal/bench -run TestAuditBaseline`.
+
+**What it reports on this tree:**
+
+```text
+scenario  call placed       used/token precision   used/identifier   expected-used recall
+start     before turn 0     0.267 (4/15)           1.000 (3/3)       1.000 (7/7)
+middle    before turn 20    0.154 (2/13)           1.000 (1/1)       1.000 (3/3)
+end       after the last    n/a (nothing judged)   n/a               n/a
+```
+
+- **The recall side is whole on this corpus**: every labelled cite and restatement is caught, the two denials are filed `contradicted` and the save is filed `superseded_in_session` (the save restates a memory no prose touches, because a restatement that prose also matches is filed `used` by the precedence).
+- **The precision side is the known residual**: of the twenty same-domain memories at session start, 17 are judged `used`, and 11 of those are memories no turn restates — the token arm cannot tell session text that mentions a memory's words because the session edits the code the memory describes from a use of the memory. Twenty unrelated (`ops`) memories come out `ignored` apart from the labelled ones.
+- **A call after the last turn judges nothing `used`**, which the test `TestAuditBenchACallAfterTheLastTurnIsNeverUsed` holds.
+
+Report-only: the numbers gate nothing but their own tests. A change to the comparison, a threshold or a scanner moves the golden, and the golden's diff is the review surface.
 
 ## Phase 3 — staleness suite (the flagship)
 

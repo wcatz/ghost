@@ -1343,6 +1343,7 @@ ghost bench
 ghost bench --sweep
 ghost bench --context
 ghost bench --passive
+ghost bench --audit
 ```
 
 Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then three things beneath it: the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
@@ -1352,6 +1353,8 @@ Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) o
 `--context` is a third report, and the only one that measures the **block** rather than the ranking: it assembles one context block per graded query through the same path `ghost_memory_search` takes, at that tool's own budget (10 items, 16000 response bytes), and reports how much of each block is graded-relevant, how much of it is contamination, whether it fit the budget, how the rows are spread across buckets and what the block costs in bytes and estimated tokens per answered query. It is report-only, and it prints only this section. The two flags cannot be combined — they are two reports over two questions — and the report is measured at a fixed instant rather than the wall clock so two runs of one binary print the same bytes. See [Benchmarks and methodology](benchmarks.md#context-assembly-ghost-bench---context).
 
 `--passive` is a fourth report and measures the other half of what a model is handed: the **passive** blocks — session start (and `ghost context`, which renders the same block), `ghost_project_context` and the `ghost://project/{id}/context` resource. It builds a synthetic four-project store plus `_global` in a temporary directory (resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows, and enough low-importance rows that every budget cuts), reads each surface through the function production calls at its production budget and a fixed clock, and prints per surface: withheld leakage (must be 0), expected-row recall, cross-project contamination, `_global` share, budget use and cut, duplicate rate, and — for session start — whether the header's shown/ranked-out/withheld counts agree with the rows rendered. It is report-only, touches no data directory, and cannot be combined with `--sweep` or `--context`. See [Benchmarks and methodology](benchmarks.md#passive-context-ghost-bench---passive).
+
+`--audit` is a fifth report and scores the retrieval audit (`ghost lifecycle`'s used/ignored/superseded/contradicted verdicts) instead of retrieval. It builds a labelled offline session — forty memories, a scripted run of turns with hand-written labels for the ids a turn cites, the memories it restates, denies or saves — judges it through `audit.Run` in scratch stores, and prints per-outcome precision and recall (with `used` split by the identifier and token arms), a confusion table and three headline lines. It needs no model, network or data directory, and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#retrieval-audit-ghost-bench---audit).
 
 ## Scratch hygiene
 
