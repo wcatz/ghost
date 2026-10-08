@@ -79,6 +79,10 @@ type PassiveSurfaceSpec struct {
 	// ProjectCap, with GlobalCap 0 and Union true).
 	ProjectCap, GlobalCap int
 	Union                 bool
+	// CutLowestLiveOK grades each project's lowest-importance live row optional:
+	// the two project-context surfaces share one row cap between the project, the
+	// globals and the pinned rows, so a budget cut of that row is expected there.
+	CutLowestLiveOK bool
 	// Header is whether the block prints "N shown of M total" counts for the
 	// honesty check to read.
 	Header bool
@@ -115,13 +119,13 @@ func PassiveSurfaces() []PassiveSurfaceSpec {
 			},
 		},
 		{
-			Name: "ghost_project_context (limit 20)", ProjectCap: passiveToolLimit, Union: true,
+			Name: "ghost_project_context (limit 20)", CutLowestLiveOK: true, ProjectCap: passiveToolLimit, Union: true,
 			Read: func(ctx context.Context, e *PassiveEnv, p string) (string, error) {
 				return mcpserver.ProjectContextAt(ctx, e.Store, p, passiveToolLimit, e.At)
 			},
 		},
 		{
-			Name: "project resource / recall_project", ProjectCap: passiveResourceCap, GlobalCap: passiveResourceGlobalCap,
+			Name: "project resource / recall_project", CutLowestLiveOK: true, ProjectCap: passiveResourceCap, GlobalCap: passiveResourceGlobalCap,
 			Read: func(ctx context.Context, e *PassiveEnv, p string) (string, error) {
 				return mcpserver.ProjectResourceAt(ctx, e.Store, p, e.At)
 			},

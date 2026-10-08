@@ -119,6 +119,11 @@ type PassiveRow struct {
 	Supersedes string
 	// DuplicateOf is the key of the row this one restates.
 	DuplicateOf string
+	// BudgetCutOK marks a live row that a surface with a shared row cap may leave
+	// out: the project-context surfaces fit the project's rows, the globals and the
+	// pinned rows under one 20-row cap, so the lowest-ranked live row losing its
+	// slot there is the budget working, not a miss.
+	BudgetCutOK bool
 }
 
 // ID is the id the row is stored under.
@@ -149,6 +154,9 @@ func (r PassiveRow) Grade(scoped bool) PassiveGrade {
 // gradeOn is Grade as the given surface reads it. Every passive surface promises
 // a pinned row a slot (#924), so no surface grades the pin differently.
 func (r PassiveRow) gradeOn(spec PassiveSurfaceSpec) PassiveGrade {
+	if r.BudgetCutOK && spec.CutLowestLiveOK {
+		return GradeOptional
+	}
 	return r.Grade(spec.Scoped)
 }
 
@@ -252,7 +260,7 @@ func shapeOf(p string) projectShape {
 	if p == "delta" {
 		return projectShape{live: 5, supers: 2, dups: 2, filler: 0, resolved: 1, expired: 1, future: 1, staged: 1, replaceFrom: 0, dupFrom: 2}
 	}
-	return projectShape{live: 9, supers: 3, dups: 3, filler: 30, resolved: 3, expired: 3, future: 2, staged: 2, replaceFrom: 5, dupFrom: 0}
+	return projectShape{live: 10, supers: 3, dups: 3, filler: 30, resolved: 3, expired: 3, future: 2, staged: 2, replaceFrom: 5, dupFrom: 0}
 }
 
 // categories rotate over the behavioural ones first, because those are the
@@ -277,7 +285,8 @@ func projectRows(p string) []PassiveRow {
 	var rows []PassiveRow
 	cat := func(i int) string { return passiveCategories[i%len(passiveCategories)] }
 
-	// Nine live rows, importance 0.95 down to 0.55 (ten before #924: with the pinned row expected on the union surfaces the tenth, live-08, was measured missed on both, recall 0.955, because the pin takes one of the union's 20 slots; a corpus whose expected set the surface cannot hold measures the cap, not the pin), newest first. Two of them carry
+	// Ten live rows, importance 0.95 down to 0.50, newest first. The lowest
+	// two are optional on the union surfaces (see BudgetCutOK). Two of them carry
 	// the production scope and two an open window that contains the clock, so a
 	// block under the production scope still has them and the validity reader sees
 	// `valid` as well as `unset`.
@@ -287,6 +296,11 @@ func projectRows(p string) []PassiveRow {
 			Content:    fmt.Sprintf("%s: the %s rule is settled and current (live %02d)", p, themes[i], i),
 			Importance: imp(95 - 5*i), AgeDays: 2 + i,
 		}
+		// The two lowest-importance live rows of a project with filler: on the shared
+		// 20-row cap the lowest-ranked live row is live-08 (measured), because decay
+		// ranks live-09's category above it, so marking only the last row would mark
+		// the wrong one.
+		r.BudgetCutOK = sh.filler > 0 && i >= sh.live-2
 		switch i {
 		case 1, 2:
 			r.Scope = PassiveScope

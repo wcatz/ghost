@@ -930,6 +930,7 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		// floor may be the row that was just dropped, and a verdict that
 		// outlived its evidence is a claim about rows the answer no longer has.
 		p.markConflicts()
+		p.markSuperseded()
 		res.Items = p.items
 		res.Notes = p.notes()
 		res.Tokens = totalTokens(p.items)

@@ -201,21 +201,83 @@ func TestPinnedRowsInsideTheWindowReportNothingBeyond(t *testing.T) {
 	}
 }
 
-// TestASupersededPinnedRowKeepsItsSlot: a supersede demotion may move a pinned
-// row behind its replacement, but never out of the admitted head. The pin beats
-// the supersede.
-func TestASupersededPinnedRowKeepsItsSlot(t *testing.T) {
+// candidateRows returns the set's rows by id, for a test that reads a field.
+func pinCandidateByID(set *CandidateSet, id string) (Candidate, bool) {
+	for _, r := range set.Rows {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return Candidate{}, false
+}
+
+// TestASupersededPinnedRowKeepsItsSlotButRanksAfterItsReplacement: a pin
+// guarantees a slot, not a rank above the row that replaced it. The superseded
+// pinned row stays in the admitted head, directly behind its superseder, and the
+// retriever names the superseder on it.
+func TestASupersededPinnedRowKeepsItsSlotButRanksAfterItsReplacement(t *testing.T) {
+	// A second pin that outranks the superseded one puts a reserved row ahead of
+	// it, so the order cannot hold by the two simply being adjacent.
 	st := pinSlotStore(t, 30,
-		pinSlotRow{id: "the_pin", project: "proj", category: "fact", importance: 0.1, pinned: true})
-	if err := st.CreateLink(context.Background(), "hi_000", "the_pin", "supersedes", 1, "manual"); err != nil {
+		pinSlotRow{id: "the_pin", project: "proj", category: "fact", importance: 0.1, pinned: true},
+		pinSlotRow{id: "other_pin", project: "proj", category: "fact", importance: 0.5, pinned: true},
+		pinSlotRow{id: "second_pin", project: "proj", category: "fact", importance: 0.2, pinned: true})
+	// Two superseded pins, so the demotion's habit of sinking a row to the back
+	// cannot leave each one behind its own replacement by accident.
+	for _, l := range [][2]string{{"hi_000", "the_pin"}, {"hi_001", "second_pin"}} {
+		if err := st.CreateLink(context.Background(), l[0], l[1], "supersedes", 1, "manual"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+	}
+	for name, pol := range map[string]SlicePolicy{"session": pinSessionPolicy(), "union": pinUnionPolicy()} {
+		t.Run(name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			ids := passiveIDs(set)
+			head := firstN(ids, pol.ItemCap)
+			if !containsStr(head, "the_pin") {
+				t.Fatalf("a superseded pinned row lost its slot: %v", head)
+			}
+			if got, want := indexOf(ids, "the_pin"), indexOf(ids, "hi_000")+1; got != want {
+				t.Errorf("the superseded pin is at %d, want directly behind its replacement at %d: %v", got, want, head)
+			}
+			if got, want := indexOf(ids, "second_pin"), indexOf(ids, "hi_001")+1; got != want {
+				t.Errorf("the second superseded pin is at %d, want directly behind its replacement at %d: %v", got, want, head)
+			}
+			c, _ := pinCandidateByID(set, "the_pin")
+			if len(c.SupersededBy) != 1 || c.SupersededBy[0] != "hi_000" {
+				t.Errorf("SupersededBy = %v, want [hi_000]", c.SupersededBy)
+			}
+		})
+	}
+}
+
+// TestTheReplacementOfASupersededPinnedRowGetsASlotToo: the replacement ranks
+// last among 60 rows at 0.9, so a cap would cut it; because the pinned row it
+// replaced holds a slot, the replacement takes one ahead of unpinned rows.
+func TestTheReplacementOfASupersededPinnedRowGetsASlotToo(t *testing.T) {
+	st := pinSlotStore(t, 60,
+		pinSlotRow{id: "the_pin", project: "proj", category: "fact", importance: 0.1, pinned: true},
+		pinSlotRow{id: "the_new", project: "proj", category: "fact", importance: 0.05})
+	if err := st.CreateLink(context.Background(), "the_new", "the_pin", "supersedes", 1, "manual"); err != nil {
 		t.Fatalf("link: %v", err)
 	}
-	pol := pinUnionPolicy()
-	set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if head := firstN(passiveIDs(set), pol.ItemCap); !containsStr(head, "the_pin") {
-		t.Fatalf("a superseded pinned row lost its slot: %v", head)
+	for name, pol := range map[string]SlicePolicy{"session": pinSessionPolicy(), "union": pinUnionPolicy()} {
+		t.Run(name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			ids := passiveIDs(set)
+			head := firstN(ids, pol.ItemCap)
+			if !containsStr(head, "the_new") || !containsStr(head, "the_pin") {
+				t.Fatalf("the replacement and the superseded pin must both hold slots: %v", head)
+			}
+			if indexOf(ids, "the_pin") != indexOf(ids, "the_new")+1 {
+				t.Errorf("the superseded pin must sit directly behind its replacement: %v", head)
+			}
+		})
 	}
 }

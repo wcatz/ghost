@@ -337,6 +337,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 		Agent:         m.Agent,
 		SourceRef:     m.SourceRef,
 		ConflictsWith: m.ConflictsWith,
+		SupersededBy:  m.SupersededBy,
 	}
 	// For historical reads, judge the window at T. The passive path already has
 	// the state set from the assembler's stage 2.
@@ -909,6 +910,9 @@ type sessionMemory struct {
 	// ConflictsWith is the assembler's marker, carried through unchanged: the
 	// rows this one contradicts in the same block (assemble.Item.ConflictsWith).
 	ConflictsWith []string
+	// SupersededBy is the assembler's marker for a pinned row whose replacement is
+	// in the same block (assemble.Item.SupersededBy), carried through unchanged.
+	SupersededBy []string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

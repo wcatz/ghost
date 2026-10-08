@@ -755,6 +755,35 @@ func (p *pipeline) markConflicts() {
 	}
 }
 
+// markSuperseded sets Item.SupersededBy on each pinned row of a passive read whose
+// superseder is still in the answer. The retriever names the superseders (it owns
+// the edge rules); this keeps only the ones the reader can see, and runs from
+// fitResponse beside markConflicts for the same reason: a response-fit drop can
+// remove the superseder after the stages are done.
+func (p *pipeline) markSuperseded() {
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	named := make(map[string][]string)
+	for _, c := range p.set.Rows {
+		if len(c.SupersededBy) > 0 {
+			named[c.ID] = c.SupersededBy
+		}
+	}
+	for i := range p.items {
+		p.items[i].SupersededBy = nil
+		if !p.passive || !p.items[i].Pinned {
+			continue
+		}
+		for _, id := range named[p.items[i].ID] {
+			if present[id] {
+				p.items[i].SupersededBy = append(p.items[i].SupersededBy, id)
+			}
+		}
+	}
+}
+
 // breakdownLeads reports whether the per-stage removal breakdown heads the note
 // list, which is the only place notes() puts it. It leads because the
 // response-fit pass cuts notes from the TAIL, so the breakdown is the last one

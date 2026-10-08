@@ -315,6 +315,12 @@ type Candidate struct {
 	// removes, and it is why the cap is keyed on the retriever's answer rather
 	// than re-derived from the row.
 	FetchedBy string
+	// SupersededBy is, for a PINNED passive row, the ids of the rows in the same
+	// window that supersede it through a live `supersedes` edge. A pin guarantees a
+	// slot and not a rank above the row that replaced it, so such a row is ordered
+	// directly behind its superseder and the assembler says so on its line. Empty
+	// for every other row and on every query-mode read.
+	SupersededBy []string
 	// Base is the fused score the window was cut on, after status demotion.
 	// Decay is the category-and-age multiplier, and Score is the product the
 	// decay order ranked on. Supersede and near-duplicate demotion is a

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -301,7 +302,49 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	if err != nil {
 		return nil, nil, err
 	}
+	// The replacement of a pinned row holds a slot too, so it has to be in the
+	// window to be given one: a window cut by rank would leave a pinned row that
+	// was replaced standing without its replacement.
+	replacements, err := s.passiveReplacementsOfPinned(ctx, req, pol, cols, memories)
+	if err != nil {
+		return nil, nil, err
+	}
+	memories = append(memories, replacements...)
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
+}
+
+// passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
+// window and are not in it, from the same population and under the same validity
+// predicate as the fetch, so a replacement the fetch would withhold is not
+// brought in. It costs one statement, and only when the window holds a pinned row.
+func (s *Store) passiveReplacementsOfPinned(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, window []Memory) ([]Memory, error) {
+	var pinnedIDs, windowIDs []any
+	for _, m := range window {
+		windowIDs = append(windowIDs, m.ID)
+		if m.Pinned {
+			pinnedIDs = append(pinnedIDs, m.ID)
+		}
+	}
+	if len(pinnedIDs) == 0 {
+		return nil, nil
+	}
+	where, args := passivePopulationSQL(pol, req, cols)
+	if cols.HasValidity {
+		stamp := req.Now.UTC().Format(stampLayoutForSQL)
+		where += " AND " + validityMatchesSQL()
+		args = append(args, stamp, stamp)
+	}
+	marks := func(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
+	where += " AND id IN (SELECT source_id FROM memory_links WHERE relation = 'supersedes' AND invalidated_at IS NULL AND target_id IN (" +
+		marks(len(pinnedIDs)) + ")) AND id NOT IN (" + marks(len(windowIDs)) + ")"
+	args = append(args, pinnedIDs...)
+	args = append(args, windowIDs...)
+	rows, err := s.queryDB().QueryContext(ctx, "SELECT "+cols.list+" FROM memories WHERE "+where, args...)
+	if err != nil {
+		return nil, fmt.Errorf("candidates: passive replacements of pinned rows for bucket %q: %w", pol.Bucket, err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
 }
 
 // passivePopulationSQL is the WHERE half a bucket's fetch and the validity probe
@@ -588,22 +631,29 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	eligible, withheld := passiveEligible(scored, now)
 	// The pin's slot guarantee, ahead of ranking. The selection runs over every
 	// eligible row exactly as before, so a pinned row still counts toward the
-	// behavioural floor it belongs to; any pinned row the pool left out is then
-	// brought in, and the pinned rows lead the set the demotions run over, so they
-	// are never outside the selection and never the loser of a near-duplicate pair.
+	// behavioural floor it belongs to. The reserved rows are then brought in from
+	// the tail and lead the set the demotions run over, so they are never outside
+	// the selection and never the loser of a near-duplicate pair.
+	//
+	// A pin is a slot, not a rank above the row that replaced it: a pinned row with
+	// a live `supersedes` edge keeps its slot but is ordered directly behind its
+	// superseder, and the superseder is reserved too, because a cap that cut it
+	// would leave the pinned row standing alone on a page that says it was replaced.
+	supersededBy := s.passivePinnedSupersededBy(ctx, eligible)
 	chosen, rest := passiveSelect(eligible, pol)
-	chosen, rest = passiveReservePinned(chosen, rest)
+	chosen, rest = passiveReserve(chosen, rest, supersededBy)
 	chosen, removed := s.passiveDemote(ctx, chosen, pol)
-	// A demotion is a reorder, and a supersede may push a pinned row behind its
-	// replacement; the final partition puts every pinned row back ahead of the
-	// unpinned ones, in the order the demotion left them. A pin beats a supersede:
-	// the row keeps its slot, ranked behind the pinned rows that replace it.
-	chosen = passivePinnedFirst(chosen)
+	// A demotion is a reorder and sinks a superseded row; the final arrangement
+	// puts the reserved rows back at the head, in the order the demotion left them,
+	// each superseded pin directly behind its superseder.
+	chosen = passiveArrange(chosen, supersededBy)
 	rest = append(rest, withheld...)
 
 	out := make([]Candidate, 0, len(scored))
 	for _, r := range append(chosen, rest...) {
-		out = append(out, passiveCandidate(r, fetchedBy))
+		c := passiveCandidate(r, fetchedBy)
+		c.SupersededBy = supersededBy[r.mem.ID]
+		out = append(out, c)
 	}
 	var losers []DroppedLoser
 	for _, l := range removed {
@@ -612,33 +662,136 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	return out, losers, nil
 }
 
-// passivePinnedSplit separates the pinned rows from the rest, each in its input
-// order. The input order is the window's, which ranks the pinned rows among
-// themselves by the decay composite, so the split is a partition and not a
-// selection.
-func passivePinnedSplit(rows []passiveRow) (pinned, unpinned []passiveRow) {
-	for _, r := range rows {
+// passivePinnedSupersededBy reads, for each PINNED eligible row, the ids of the
+// eligible rows that supersede it. The edge rules are the demotion's own
+// (supersedePenaltyRows: the scope exemption, and a persistent-retention target
+// is never sunk), so a row is named here exactly when the demotion would sink it.
+// A failed read is logged and means no row is named, which leaves the pins first
+// and unmarked — the order before the marker existed.
+func (s *Store) passivePinnedSupersededBy(ctx context.Context, rows []passiveRow) map[string][]string {
+	ids := make([]string, len(rows))
+	protected := make(map[string]bool, len(rows))
+	pinned := make(map[string]bool, len(rows))
+	for i, r := range rows {
+		ids[i] = r.mem.ID
+		if RetentionExempt(r.mem) {
+			protected[r.mem.ID] = true
+		}
 		if r.mem.Pinned {
-			pinned = append(pinned, r)
-		} else {
-			unpinned = append(unpinned, r)
+			pinned[r.mem.ID] = true
 		}
 	}
-	return pinned, unpinned
+	against, err := supersedePenaltyRows(ctx, s.queryDB(), ids, protected)
+	if err != nil {
+		s.logger.Warn("candidates: passive supersede lookup for pinned rows failed", "error", err)
+		return nil
+	}
+	out := map[string][]string{}
+	for target, sources := range against {
+		if !pinned[target] {
+			continue
+		}
+		sorted := append([]string(nil), sources...)
+		sort.Strings(sorted)
+		out[target] = sorted
+	}
+	return out
 }
 
-// passiveReservePinned moves every pinned row the selection left in the tail into
-// the selected set and puts the pinned rows first, each group in its own order.
-func passiveReservePinned(chosen, rest []passiveRow) (newChosen, newRest []passiveRow) {
-	tailPinned, tailRest := passivePinnedSplit(rest)
-	return passivePinnedFirst(append(chosen, tailPinned...)), tailRest
+// passiveReserved reports whether a row holds a reserved slot: a pinned row, or
+// the replacement of one.
+func passiveReserved(r passiveRow, replacements map[string]bool) bool {
+	return r.mem.Pinned || replacements[r.mem.ID]
 }
 
-// passivePinnedFirst is a stable partition: pinned rows first, then the rest,
-// each in the order it arrived.
-func passivePinnedFirst(rows []passiveRow) []passiveRow {
-	pinned, unpinned := passivePinnedSplit(rows)
-	return append(pinned, unpinned...)
+func passiveReplacements(supersededBy map[string][]string) map[string]bool {
+	out := map[string]bool{}
+	for _, srcs := range supersededBy {
+		for _, id := range srcs {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// passiveReserve moves every reserved row the selection left in the tail into
+// the selected set and arranges the reserved rows at its head.
+func passiveReserve(chosen, rest []passiveRow, supersededBy map[string][]string) (newChosen, newRest []passiveRow) {
+	repl := passiveReplacements(supersededBy)
+	var tailReserved []passiveRow
+	for _, r := range rest {
+		if passiveReserved(r, repl) {
+			tailReserved = append(tailReserved, r)
+		} else {
+			newRest = append(newRest, r)
+		}
+	}
+	return passiveArrange(append(chosen, tailReserved...), supersededBy), newRest
+}
+
+// passiveArrange is a stable partition with one exception. The reserved rows
+// (pinned rows and the replacements of pinned rows) come first, each group in the
+// order it arrived — except a superseded pinned row, which is taken out of the
+// reserved run and placed directly behind its first-ranked superseder, so a pin
+// never outranks the row that replaced it. The unpinned, unreplaced rows follow.
+func passiveArrange(rows []passiveRow, supersededBy map[string][]string) []passiveRow {
+	repl := passiveReplacements(supersededBy)
+	var head, tail []passiveRow
+	var behind []passiveRow
+	for _, r := range rows {
+		switch {
+		case len(supersededBy[r.mem.ID]) > 0:
+			behind = append(behind, r)
+		case passiveReserved(r, repl):
+			head = append(head, r)
+		default:
+			tail = append(tail, r)
+		}
+	}
+	// Each superseded pin goes behind its first-ranked superseder in the head; one
+	// whose superseders are all themselves superseded pins (a chain) goes behind
+	// the last placed of them, so iterate until nothing more can be placed.
+	for len(behind) > 0 {
+		var still []passiveRow
+		placed := false
+		for _, r := range behind {
+			at := -1
+			for i, h := range head {
+				if containsString(supersededBy[r.mem.ID], h.mem.ID) {
+					at = i
+					break
+				}
+			}
+			if at < 0 {
+				still = append(still, r)
+				continue
+			}
+			// Behind any rows already sitting directly behind that superseder.
+			at++
+			for at < len(head) && len(supersededBy[head[at].mem.ID]) > 0 && containsString(supersededBy[head[at].mem.ID], head[at-1].mem.ID) {
+				at++
+			}
+			head = append(head[:at], append([]passiveRow{r}, head[at:]...)...)
+			placed = true
+		}
+		behind = still
+		if !placed {
+			// A superseder that is not in the arranged set (it was cut by validity or
+			// never fetched): the row keeps its slot at the end of the reserved run.
+			head = append(head, behind...)
+			break
+		}
+	}
+	return append(head, tail...)
+}
+
+func containsString(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // passiveEligible splits rows into those inside their validity window at now and

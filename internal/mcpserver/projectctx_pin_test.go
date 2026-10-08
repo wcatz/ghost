@@ -289,3 +289,33 @@ func TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading(t *testing
 		t.Errorf("the project's own cut (25 pinned, 20 shown) is not reported. Got:\n%s", got)
 	}
 }
+
+// TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacement: on the tool and
+// the resource the pin keeps a slot behind the row that replaced it, and the
+// line names the replacement.
+func TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacement(t *testing.T) {
+	st, db := newPinStore(t)
+	seedPinContext(t, db, 5,
+		pinCtxRow{id: "old-pin01", project: "vproj", content: "the old pinned rule", importance: 0.1, pinned: true},
+		pinCtxRow{id: "new-row01", project: "vproj", content: "the replacement rule", importance: 0.05})
+	if err := st.CreateLink(context.Background(), "new-row01", "old-pin01", "supersedes", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	tool, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	res, err := ProjectResourceAt(context.Background(), st, "vproj", pinCtxNow)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	for name, got := range map[string]string{"tool": tool, "resource": res} {
+		newAt, oldAt := strings.Index(got, "the replacement rule"), strings.Index(got, "the old pinned rule")
+		if newAt < 0 || oldAt < 0 || oldAt < newAt {
+			t.Errorf("%s: want both rows with the replacement first. Got:\n%s", name, got)
+		}
+		if !strings.Contains(got, "superseded_by=`new-row01`") {
+			t.Errorf("%s: the superseded pin is not marked. Got:\n%s", name, got)
+		}
+	}
+}

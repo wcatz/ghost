@@ -122,3 +122,31 @@ func TestTheSessionStartSaysHowManyPinnedRowsItCut(t *testing.T) {
 		t.Errorf("pinned rule 04 ranks 16th of 20 and should have been cut. Got:\n%s", got)
 	}
 }
+
+// TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacementOnTheSessionStart:
+// a pin keeps its slot, directly behind the row that replaced it, and the line
+// names the replacement.
+func TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacementOnTheSessionStart(t *testing.T) {
+	path := pinSession(t, 5,
+		pinSessionRow{id: "old-pin01", content: "the old pinned rule", category: "fact", importance: 0.1, pinned: true},
+		pinSessionRow{id: "new-row01", content: "the replacement rule", category: "fact", importance: 0.05})
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('new-row01', 'old-pin01', 'supersedes', 1, 'manual')`); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	_ = db.Close()
+	got := renderSessionStart(t, path)
+	newAt, oldAt := strings.Index(got, "the replacement rule"), strings.Index(got, "the old pinned rule")
+	if newAt < 0 || oldAt < 0 {
+		t.Fatalf("both rows must be on the block. Got:\n%s", got)
+	}
+	if oldAt < newAt {
+		t.Errorf("the superseded pin outranks its replacement. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "superseded_by=`new-row01`") {
+		t.Errorf("the superseded pin is not marked. Got:\n%s", got)
+	}
+}
