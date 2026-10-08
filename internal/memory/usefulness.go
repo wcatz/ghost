@@ -137,13 +137,17 @@ func (e UsefulnessEvidence) Line() string {
 	// maximum).
 	//
 	// That ceiling is a constant whether or not a store can currently reach it, and
-	// on the SHIPPED transport it cannot: the auditor copies the retrieval record's
-	// own session id (audit/run.go), that comes from assemble.Request.SessionID, and
-	// over stdio — which is what Ghost serves — the transport reports no session id,
-	// so LastSession is always "" and Line takes the `case e.LastAt != ""` branch
-	// instead. A transport that DOES assign one (streamable HTTP) records it
-	// verbatim with no character validation on the way in, so this is the bound that
-	// holds when such a value exists, not one currently exercised. It is kept
+	// on the SHIPPED transport it does: the auditor copies the retrieval record's
+	// own session id (audit/run.go), that comes from assemble.Request.SessionID,
+	// and the MCP server fills it through sessionIDFor — the transport's id when
+	// the connection assigns one, else the host environment's own
+	// (CLAUDE_CODE_SESSION_ID under Claude Code, #922) — so under Claude Code
+	// LastSession is the host's id and Line takes the
+	// `case e.LastSession != "" && e.LastAt != ""` branch, which is the branch that
+	// renders the id this bound and this quoting are about. A transport that DOES
+	// assign ids (streamable HTTP) records its value verbatim with no character
+	// validation on the way in, and a host that names no session records "", so
+	// this is the bound that holds for either kind of value. It is kept
 	// because the reader has to be safe for the store it will be given, and a bound
 	// that waited for a hostile value to arrive would be a bound added after the
 	// fact.

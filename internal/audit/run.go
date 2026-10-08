@@ -53,9 +53,13 @@ var (
 // The window is bounded rather than "everything", and it counts THIS SESSION's
 // calls: the read is scoped to the scanned session before the limit applies, so a
 // call from another session is never in the window and cannot push one of this
-// session's out of it. A call the session made before the scanned text begins is
-// still judged against the whole of it, which is the known gap (the signals carry no
-// order); see docs/architecture.md.
+// session's out of it. The order is asked PER CALL rather than over the window:
+// Run cuts one Since(cutoff) view of the scan for each call it judges (the call's
+// own recorded instant as the cutoff), so a call the session made before the
+// scanned text begins is judged against all of it — all of it follows the call —
+// while a call made mid-session sees only what was written after it, and a scan
+// that carries text but no order is refused outright (Summary.NoOrder) rather
+// than judged against everything; see docs/architecture.md.
 var CallWindow = 50
 
 // Summary is what one run found, in a form a report can print without reading

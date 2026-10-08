@@ -83,7 +83,8 @@ func recordTestLogger() *slog.Logger {
 // the audit's denominators are split by — a row recorded as `search` here would be
 // counted as a search and would quietly change what every precision figure in the
 // report means. An empty query_hash is the honest value for a call that carried no
-// question, and an empty session_id is the truth over stdio. The kept ids are
+// question, and an empty session_id is this fixture's own: it pins the host's
+// CLAUDE_CODE_SESSION_ID empty below, and its transport assigns no id either. The kept ids are
 // compared with the memory the tool actually RENDERED rather than with the rows the
 // store holds: the block is what the agent was given, and a record naming a row the
 // block withheld would be a "used" verdict for a memory nobody saw.
@@ -123,7 +124,8 @@ func TestProjectContextRecordsTheCallItRendered(t *testing.T) {
 			"constant on every listing", got.QueryHash)
 	}
 	if got.SessionID != "" {
-		t.Errorf("session_id = %q, want empty: Ghost serves stdio, whose connection reports no session id, and this fixture's host names none", got.SessionID)
+		t.Errorf("session_id = %q, want empty: this fixture pins CLAUDE_CODE_SESSION_ID empty with t.Setenv, and the "+
+			"server reads it once at construction, so the id it records is \"\"; the fixture's transport assigns no id either", got.SessionID)
 	}
 	if got.AsOf != "" {
 		t.Errorf("as_of = %q, want empty for a current read", got.AsOf)
