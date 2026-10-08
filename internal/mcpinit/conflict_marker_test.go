@@ -87,15 +87,40 @@ func blockLine(t *testing.T, block, id string) string {
 	return found[0]
 }
 
-func TestSessionStartMarksAContradictingPair(t *testing.T) {
+// hasBlockLine reports whether id renders anywhere in the block. The withheld
+// side of a separated pair renders no line at all, which blockLine cannot report.
+func hasBlockLine(block, id string) bool {
+	for _, l := range strings.Split(block, "\n") {
+		if strings.HasPrefix(l, "- [") && strings.Contains(l, "`"+id+"` (") {
+			return true
+		}
+	}
+	return false
+}
+
+// wantSessionStartSeparatedPair asserts the pair is separated in the session-start
+// block: exactly one side renders, and its line names the other as withheld.
+func wantSessionStartSeparatedPair(t *testing.T, block, a, b string) {
+	t.Helper()
+	la, lb := hasBlockLine(block, a), hasBlockLine(block, b)
+	switch {
+	case la && !lb:
+		if l := blockLine(t, block, a); !strings.Contains(l, "conflicts_with=`"+b+"`") {
+			t.Errorf("%s does not name the withheld %s: %q", a, b, l)
+		}
+	case lb && !la:
+		if l := blockLine(t, block, b); !strings.Contains(l, "conflicts_with=`"+a+"`") {
+			t.Errorf("%s does not name the withheld %s: %q", b, a, l)
+		}
+	default:
+		t.Errorf("a separated pair rendered a=%v b=%v, want exactly one side rendered", la, lb)
+	}
+}
+
+func TestSessionStartSeparatesAContradictingPair(t *testing.T) {
 	got := renderSessionStart(t, conflictStore(t, false))
 	for _, p := range [][2]string{{"cfpa01", "cfpb01"}, {"cfga01", "cfgb01"}} {
-		if l := blockLine(t, got, p[0]); !strings.Contains(l, "conflicts_with=`"+p[1]+"`") {
-			t.Errorf("%s does not name %s: %q", p[0], p[1], l)
-		}
-		if l := blockLine(t, got, p[1]); !strings.Contains(l, "conflicts_with=`"+p[0]+"`") {
-			t.Errorf("%s does not name %s: %q", p[1], p[0], l)
-		}
+		wantSessionStartSeparatedPair(t, got, p[0], p[1])
 	}
 	if l := blockLine(t, got, "cfpc01"); strings.Contains(l, "conflicts_with") {
 		t.Errorf("an unlinked row is marked: %q", l)

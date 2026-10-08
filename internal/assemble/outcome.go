@@ -59,8 +59,15 @@ const (
 	// the row as the loser of a near-duplicate pair, and Decision.Against names
 	// the row it lost to. A per-row reason, not an outcome one.
 	reasonNearDuplicate = "near_duplicate"
-	reasonAllDiversity  = "all_diversity_capped"
-	reasonAllOverBudget = "all_over_budget"
+	// reasonContradictionSeparated is a stage 5 decision's reason: the row lost a
+	// contradiction to the side stage 5 kept, and Decision.Against names that
+	// side. It is the near-duplicate reason's counterpart at the conflict stage —
+	// a per-row reason, not an outcome one — and it is deliberately not named by
+	// dominantRemoval: the stage always keeps one side, so it can never be the
+	// cause of an empty answer, only of a withheld row the budget may then cut.
+	reasonContradictionSeparated = "contradiction_separated"
+	reasonAllDiversity           = "all_diversity_capped"
+	reasonAllOverBudget          = "all_over_budget"
 	// Results that admitted rows.
 	reasonBelowFloor    = "below_floor"
 	reasonFloorMet      = "floor_met"

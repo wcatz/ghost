@@ -134,12 +134,12 @@ type StageTrace struct {
 // stage that starts re-scoring has to add the field, because a Decision that
 // carries an unset one is indistinguishable from a stage that judged it.
 //
-// The row a decision was made AGAINST is Against, and only stage 6 sets it. The
-// pairwise judgement is the retriever's, made over a window this pipeline never
-// saw the edges of, so stage 6 does not decide it: it records the verdict the
-// retriever reported (CandidateSet.DroppedLosers), the winner ids included. Every
-// other stage leaves it empty, and stage 5 records a `contradicts` pair without
-// separating it, so no other decision names a counterpart.
+// The row a decision was made AGAINST is Against, and two stages set it. Stage 6
+// is the retriever's verdict, made over a window this pipeline never saw the
+// edges of, so stage 6 does not decide it: it records what the retriever reported
+// (CandidateSet.DroppedLosers), the winner ids included. Stage 5 decides its own:
+// a `contradicts` component is separated, and the withheld row's decision names
+// the one row the component kept. Every other stage leaves it empty.
 //
 // ProjectID is the row's own project, recorded because a trace is read per
 // bucket: the session-start block keys its "N shown of M total" line on it, and
@@ -153,8 +153,9 @@ type Decision struct {
 	Reason    string
 	Kept      bool
 	Before    float64
-	// Against is the ids of the rows this one lost to, sorted. Set only by a
-	// stage 6 near_duplicate drop; empty on every other decision.
+	// Against is the ids of the rows this one lost to. Set by a stage 6
+	// near_duplicate drop and by a stage 5 contradiction separation; empty on
+	// every other decision.
 	Against []string
 }
 

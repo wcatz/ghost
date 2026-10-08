@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/memref"
@@ -37,11 +38,19 @@ type pipeline struct {
 	blockNotes []string
 	// contradictPairs are the 'contradicts' pairs stage 5 recorded, keyed
 	// unordered and once each. notes() renders them after the window closes,
-	// against the rows the answer actually holds, so "both remain in the block"
-	// cannot outlive one of them. The stage's own copy of the fact goes to the
+	// against the rows the answer actually holds: a separated pair has exactly
+	// one endpoint admitted, and the sentence names that side kept and the other
+	// withheld, so a pair whose winner the budget later cut is not described as
+	// if both were in the block. The stage's own copy of the fact goes to the
 	// trace rather than here: a note true at stage 5 is not always true of the
 	// answer, and one sentence cannot serve both readers.
 	contradictPairs [][2]string
+	// separations are the withheld rows stage 5 recorded, in rank order, each
+	// with the side it lost to. markConflicts reads them: the winner's line names
+	// every row it was separated from, in rank order, including the ones it
+	// shares no direct edge with (a three-row component keeps one winner and its
+	// line names the other two).
+	separations []contradictionSeparation
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
 	// the stages run and belongs to the stage that acts on it: stage 8 is what
@@ -239,18 +248,18 @@ const (
 
 const provenanceWeight = "1.0"
 
-// maxRenderedConflictPairs bounds how many contradicting pairs the answer names.
-// The pairs are a record of a stage that deliberately changes nothing, so a
-// handful is enough for a reader to know the block contains them; a graph with
-// dozens must not be able to spend the note budget that the leg-failure
-// disclosure and the per-row diagnostics need.
+// maxRenderedConflictPairs bounds how many separated pairs the answer names.
+// Each pair names a row stage 5 withheld, so a handful is enough for a reader to
+// know the block was thinned and which rows went; a graph with dozens must not be
+// able to spend the note budget that the leg-failure disclosure and the per-row
+// diagnostics need.
 const maxRenderedConflictPairs = 5
 
-// The cap above bounds Result.Notes only. The trace keeps one note per
-// contradicting edge, so a dense conflict graph is still O(edges) there. That is
-// deliberate for now — the trace exists for diagnosis, and the explain projection
-// reads decisions and signals rather than these per-edge notes — and it is the first
-// thing to revisit if a projection ever renders them.
+// The cap above bounds Result.Notes only. The trace keeps one note per withheld
+// loser, so a dense conflict graph is still O(rows) there. That is deliberate for
+// now — the trace exists for diagnosis, and the explain projection reads decisions
+// and signals rather than these per-separation notes — and it is the first thing
+// to revisit if a projection ever renders them.
 
 // runProvenance is stage 4: the weight is pinned and the decision is recorded
 // for every row, so a caller can already see what a future multiplier would act
@@ -276,14 +285,28 @@ func runProvenance(p *pipeline) {
 		"provenance weight is pinned at 1.0: no measured threshold justifies scoring confidence yet")
 }
 
-// runConflicts is stage 5. Supersede and contradiction handling belong here, and
-// the retriever's window already carries the supersede demotion it applies
-// today. `contradicts` is recorded rather than acted on: the product contract is
-// that a contradicted row survives while a duplicate restatement sinks, so
-// removing the weaker endpoint would reverse tested behaviour. The stage changes
-// no membership. The pairs it records are what markConflicts turns into the
-// `conflicts_with` marker on both rendered lines; separating a pair is not built
-// and is tracked under #925.
+// contradictionSeparation is one row stage 5 withheld and the side it lost to.
+type contradictionSeparation struct {
+	withheld, kept string
+}
+
+// runConflicts is stage 5. Supersede handling belongs here and the retriever's
+// window already carries the supersede demotion it applies today. `contradicts`
+// is SEPARATED here (#925): the rows joined by live, non-scope-conflicting
+// `contradicts` edges form connected components, and each component keeps exactly
+// one row and withholds the rest against it. The tie-break is stated in order in
+// docs/architecture.md: pinned beats unpinned; a later verified_at beats an
+// earlier or absent one; a later updated_at (created_at when updated_at is unset)
+// beats an earlier one; and an exact tie falls to the rank the window already
+// holds. Relevance rank decides nothing until every other key has tied, because a
+// row that ranks higher is not therefore the row that is true.
+//
+// A component is separated, not each edge: a three-row chain keeps one winner and
+// withholds the two others, which pairwise separation of the edges would leave
+// two rows standing. The withheld rows are dropped here with Decision.Against
+// naming the kept side, the kept line names every row it was separated from, and
+// the recorded pairs are what notes() renders against the rows the answer finally
+// holds.
 func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
@@ -310,6 +333,12 @@ func runConflicts(p *pipeline) {
 	if len(p.items) > 0 && p.set.EdgesStatus.Status != "err" {
 		admitted := make(map[string]bool, len(p.items))
 		scopes := make(map[string]map[string]string, len(p.items))
+		candByID := make(map[string]memory.Candidate, len(p.rows))
+		rank := make(map[string]int, len(p.rows))
+		for i, c := range p.rows {
+			candByID[c.ID] = c
+			rank[c.ID] = i
+		}
 		for _, it := range p.items {
 			admitted[it.ID] = true
 			scopes[it.ID] = it.Scope
@@ -327,18 +356,13 @@ func runConflicts(p *pipeline) {
 		case p.set.EdgesStatus.Status == "unavailable":
 			notes = append(notes, "edges_unavailable: no link joins two of these candidates")
 		}
-		// A contradiction pair is recorded, never removed. The pair is kept, not
-		// rendered into the user-facing notes: stage 8 can still cut one endpoint,
-		// and notes() renders it against the rows the answer finally holds. The
-		// stage record below gets its own statement, which is true of this stage
-		// — the two audiences get different sentences, not the same one twice.
-		//
 		// memory_links is keyed on (source, target, relation) and normalises the
 		// order only for the symmetric 'related' relation, so a contradicts pair
 		// may be stored either way round and both rows are legal. They are one
-		// fact, so they are keyed unordered and once here: reporting both would
-		// name the same pair twice and inflate the count notes() prints.
+		// fact, so they are keyed unordered and once here: recording both would
+		// name the same pair twice in the answer and inflate its count.
 		seen := make(map[[2]string]bool, len(p.set.Edges))
+		adj := make(map[string][]string, len(p.items))
 		for _, e := range p.set.Edges {
 			if e.Relation != "contradicts" || !admitted[e.From] || !admitted[e.To] {
 				continue
@@ -346,7 +370,10 @@ func runConflicts(p *pipeline) {
 			// Two rows that name different values for a shared scope key are two
 			// true claims about two places, so the edge is not a conflict. Every
 			// other reader of a link applies this same rule (memory.ScopesConflict),
-			// and a pair recorded here would be marked and noted on every surface.
+			// and such a pair is neither separated, marked nor noted. The exemption
+			// is per-edge, as every other reader states it, so a component joined
+			// through other rows can still co-separate two scope-conflicting rows
+			// that share no direct edge; that boundary is tracked as #945.
 			if memory.ScopesConflict(scopes[e.From], scopes[e.To]) {
 				continue
 			}
@@ -359,11 +386,141 @@ func runConflicts(p *pipeline) {
 			}
 			seen[pair] = true
 			p.contradictPairs = append(p.contradictPairs, pair)
-			stageNotes = append(stageNotes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", ShortID(pair[0]), ShortID(pair[1])))
+			adj[e.From] = append(adj[e.From], e.To)
+			adj[e.To] = append(adj[e.To], e.From)
+		}
+		// Walk the components in rank order, so the winner selection is
+		// deterministic and the tie-break's last key — the rank the window holds —
+		// is well defined.
+		visited := make(map[string]bool, len(adj))
+		withheld := make(map[string]bool, len(dropped))
+		for _, c := range p.rows {
+			if visited[c.ID] || len(adj[c.ID]) == 0 {
+				continue
+			}
+			component := p.conflictComponent(c.ID, adj, visited, rank)
+			if len(component) < 2 {
+				continue
+			}
+			winner := p.conflictWinner(component, candByID)
+			for _, loser := range component {
+				if loser == winner {
+					continue
+				}
+				dropped = append(dropped, loser)
+				withheld[loser] = true
+				p.dropped[loser] = reasonContradictionSeparated
+				p.droppedBy[stageConflicts]++
+				p.separations = append(p.separations, contradictionSeparation{withheld: loser, kept: winner})
+				p.trace.Decisions = append(p.trace.Decisions, Decision{
+					ID:        loser,
+					ProjectID: candByID[loser].ProjectID,
+					Stage:     stageConflicts,
+					Reason:    reasonContradictionSeparated,
+					Before:    candByID[loser].Score,
+					Against:   []string{winner},
+				})
+				stageNotes = append(stageNotes, formatNote(
+					"contradicts pair recorded and separated: %s and %s were both candidates at this stage; %s kept, %s withheld",
+					ShortID(winner), ShortID(loser), ShortID(winner), ShortID(loser)))
+			}
+		}
+		// Remove the withheld rows, preserving rank order. A fresh slice, not
+		// p.rows[:0]: the candidate set is the retriever's return value and the
+		// contract says it is the widened untrimmed result, so compacting into
+		// its backing array would leave the caller holding stale rows.
+		if len(dropped) > 0 {
+			keptRows := make([]memory.Candidate, 0, len(p.rows)-len(dropped))
+			keptItems := make([]Item, 0, len(p.items)-len(dropped))
+			for i, c := range p.rows {
+				if withheld[c.ID] {
+					continue
+				}
+				keptRows = append(keptRows, c)
+				keptItems = append(keptItems, p.items[i])
+			}
+			p.rows, p.items = keptRows, keptItems
 		}
 	}
 	p.blockNotes = append(p.blockNotes, notes...)
 	p.trace.record(stageConflicts, in, len(p.rows), dropped, append(append([]string(nil), stageNotes...), notes...)...)
+}
+
+// conflictComponent returns the connected component of the contradicts graph
+// containing start, in rank order. Every member is marked visited so the walk over
+// p.rows reaches each component once. Adjacency holds only the rows stage 5
+// recorded a pair for, so an isolated row is never a member.
+func (p *pipeline) conflictComponent(start string, adj map[string][]string, visited map[string]bool, rank map[string]int) []string {
+	var component []string
+	stack := []string{start}
+	visited[start] = true
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		component = append(component, id)
+		for _, next := range adj[id] {
+			if !visited[next] {
+				visited[next] = true
+				stack = append(stack, next)
+			}
+		}
+	}
+	sort.Slice(component, func(i, j int) bool { return rank[component[i]] < rank[component[j]] })
+	return component
+}
+
+// conflictWinner picks the one row a contradiction component keeps. The order is
+// the documented tie-break, and the last key is the rank the component is already
+// in: conflictComponent returns members in rank order, so a strict comparison that
+// only replaces on a decided key leaves the earliest-ranked row holding an exact
+// tie.
+func (p *pipeline) conflictWinner(component []string, candByID map[string]memory.Candidate) string {
+	winner := component[0]
+	for _, id := range component[1:] {
+		if contradictionBeats(candByID[id], candByID[winner]) {
+			winner = id
+		}
+	}
+	return winner
+}
+
+// contradictionBeats reports whether a should win the contradiction tie-break
+// against b. The keys are compared in the documented order and the first that
+// differs decides; an exact tie reports false, which leaves b (the earlier-ranked
+// row) as the winner.
+func contradictionBeats(a, b memory.Candidate) bool {
+	if a.Pinned != b.Pinned {
+		return a.Pinned
+	}
+	if av, bv := contradictionVerifiedAt(a), contradictionVerifiedAt(b); !av.Equal(bv) {
+		return av.After(bv)
+	}
+	if at, bt := contradictionStamp(a), contradictionStamp(b); !at.Equal(bt) {
+		return at.After(bt)
+	}
+	return false
+}
+
+// contradictionVerifiedAt is a row's verified_at as a comparable instant. An
+// absent stamp is the zero time, so any real stamp beats it — a stamp somebody
+// checked beats a stamp nobody did.
+func contradictionVerifiedAt(c memory.Candidate) time.Time {
+	if c.VerifiedAt == nil {
+		return time.Time{}
+	}
+	t, _ := memory.ParseStamp(*c.VerifiedAt)
+	return t
+}
+
+// contradictionStamp is the freshness key: updated_at when the row has one, and
+// created_at when it does not. An unparseable value is read as ancient, which is
+// how the rest of the assembler treats a stamp it cannot read and stops a bad
+// value from winning.
+func contradictionStamp(c memory.Candidate) time.Time {
+	if c.UpdatedAt != "" {
+		return parseStamp(c.UpdatedAt)
+	}
+	return parseStamp(c.CreatedAt)
 }
 
 // runDedup is stage 6. The retriever reorders the window by supersede and
@@ -395,14 +552,14 @@ func runDedup(p *pipeline) {
 	// per-row outcome: whether this particular window held a pair is the
 	// per-row decisions below' business.
 	if !p.passive {
-		note = "near-duplicate losers are REMOVED by the retriever, so the answer holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
+		note = "near-duplicate losers are REMOVED by the retriever, so the answer holds one row of every pair the removal did not veto (a row stage 5 separated as a contradiction is already out of the block)"
 	} else if p.dropsDemotedLosers() {
 		// Stated as a POLICY: whether a row was removed is the per-row decisions'
 		// business below, and a note that claimed a removal for every `_global`
 		// slice that sets the flag would be a report about a prediction, on the
 		// overwhelmingly common occasion that the window held no near-duplicate
 		// edge at all.
-		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
+		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of every pair the removal did not veto (a row stage 5 separated as a contradiction is already out of the block)"
 	} else {
 		note += "; no source policy drops losers on this surface yet"
 	}
@@ -686,19 +843,39 @@ func (p *pipeline) notes() []string {
 	if len(p.items) > 0 {
 		all = append(all, p.blockNotes...)
 		// Rendered here rather than at stage 5: the pair was recorded when both
-		// endpoints were candidates, and the sentence says both are in the
-		// answer, so it is only true of the rows the answer still holds. Capped,
-		// because a graph with many contradicting pairs would otherwise spend the
-		// whole note budget on conflicts and drop the rows' own diagnostics.
+		// endpoints were candidates, and stage 5 separated it, so exactly one
+		// endpoint is in the answer. The sentence names that side kept and the
+		// other withheld, which is true of the rows the answer actually holds —
+		// where the stage's own sentence, that both were candidates there, is not.
+		// A pair whose winner the budget later cut is not described: neither side
+		// is in the block, so "kept" would name a row the reader cannot see.
+		// Capped, because a graph with many contradicting pairs would otherwise
+		// spend the whole note budget on conflicts and drop the rows' own
+		// diagnostics.
 		admitted := make(map[string]bool, len(p.items))
 		for _, it := range p.items {
 			admitted[it.ID] = true
 		}
-		eligible := make([][2]string, 0, len(p.contradictPairs))
+		var eligible [][2]string
 		for _, pair := range p.contradictPairs {
-			if admitted[pair[0]] && admitted[pair[1]] {
-				eligible = append(eligible, pair)
+			kept, withheld := pair[0], pair[1]
+			switch {
+			case admitted[kept] && admitted[withheld]:
+				// Both endpoints survived: not a separated pair, so nothing to
+				// report. This cannot arise while separation always removes one
+				// side, and is stated rather than assumed so a future stage that
+				// leaves both is silent here instead of claiming a separation.
+				continue
+			case admitted[kept]:
+			case admitted[withheld]:
+				kept, withheld = withheld, kept
+			default:
+				// Neither endpoint is in the block: the pair is no claim about
+				// the answer, and naming its winner would send the reader to a
+				// row they cannot see.
+				continue
 			}
+			eligible = append(eligible, [2]string{kept, withheld})
 		}
 		// The count leads the pairs it qualifies. Bounding truncates from the
 		// end, so a count placed after them is the first thing dropped under
@@ -713,49 +890,47 @@ func (p *pipeline) notes() []string {
 			if i == maxRenderedConflictPairs {
 				break
 			}
-			all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", ShortID(pair[0]), ShortID(pair[1])))
+			all = append(all, formatNote("contradicts pair recorded and separated: %s kept, %s withheld", ShortID(pair[0]), ShortID(pair[1])))
 		}
 	}
 	all = append(all, p.noteBuf...)
 	return p.cutNotes(boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes))
 }
 
-// markConflicts sets Item.ConflictsWith on every row that shares a live
-// `contradicts` edge with another row still in the answer. It is the one place
-// the marker is decided, so every surface that renders Item.Line inherits it.
+// markConflicts sets Item.ConflictsWith on every winner a live `contradicts`
+// edge caused stage 5 to keep: the winner's line names every row the stage
+// withheld against it. It is the one place the marker is decided, so every
+// surface that renders Item.Line inherits it.
 //
 // It runs from fitResponse, on every pass, and not at stage 5: the response-fit
 // post-pass can drop a row after the stages are done, and a survivor must not
-// keep naming a partner the reader no longer has. Nothing is removed or reordered
-// here — admitting both rows is the documented contract, and this only says so.
+// keep naming a partner the reader no longer has. The withheld rows are already
+// gone from p.items when this runs, so the marker is rebuilt from the
+// separations stage 5 recorded rather than projected from the edges: the winner
+// names every row it was separated from, in rank order, including one it shares
+// no direct edge with (a three-row component keeps one winner whose line names
+// the other two). Nothing is removed or reordered here.
 func (p *pipeline) markConflicts() {
-	partners := make(map[string]map[string]bool)
 	present := make(map[string]bool, len(p.items))
 	for _, it := range p.items {
 		present[it.ID] = true
 	}
-	for _, pair := range p.contradictPairs {
-		if !present[pair[0]] || !present[pair[1]] {
+	partners := make(map[string][]string)
+	for _, sep := range p.separations {
+		// The withheld side is out of the answer by construction; the guard is
+		// the response-fit drop of the winner, which leaves its line with no
+		// partner to name.
+		if !present[sep.kept] || present[sep.withheld] {
 			continue
 		}
-		for i := range 2 {
-			if partners[pair[i]] == nil {
-				partners[pair[i]] = map[string]bool{}
-			}
-			partners[pair[i]][pair[1-i]] = true
-		}
+		partners[sep.kept] = append(partners[sep.kept], sep.withheld)
 	}
 	for i := range p.items {
 		p.items[i].ConflictsWith = nil
 		if len(partners[p.items[i].ID]) == 0 {
 			continue
 		}
-		// In rank order, so the label is stable and reads the way the block does.
-		for _, other := range p.items {
-			if partners[p.items[i].ID][other.ID] {
-				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, other.ID)
-			}
-		}
+		p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, partners[p.items[i].ID]...)
 	}
 }
 

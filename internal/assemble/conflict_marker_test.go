@@ -31,42 +31,50 @@ func contradictingSet(rows ...memory.Candidate) *memory.CandidateSet {
 	return set
 }
 
-// TestContradictsPairIsMarkedOnBothLines: both rows stay, neither is reordered,
-// and each line names the other by the id it renders.
-func TestContradictsPairIsMarkedOnBothLines(t *testing.T) {
+// TestContradictsPairRendersTheWinnerNamingTheWithheldPartner: the pair is
+// separated, so one row renders and its line names the side stage 5 withheld.
+func TestContradictsPairRendersTheWinnerNamingTheWithheldPartner(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "the database is postgres", 0.9)
 	b := candidate("B1", "proj", "fact", "the database is mysql", 0.8)
 	req := baseRequest()
 	req.Budget.MaxItems = 10
 	res := run(t, &fakeRetriever{set: contradictingSet(a, b)}, req)
-	if got := itemIDs(res.Items); !eq(got, []string{"A1", "B1"}) {
-		t.Fatalf("both rows must stay, in rank order: %v", got)
+	if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("the winner alone must stay: %v", got)
 	}
-	la, lb := lineOf(t, res.Response, "A1"), lineOf(t, res.Response, "B1")
-	if !strings.Contains(la, "conflicts_with=`B1`") {
-		t.Errorf("A1 does not say it conflicts with B1: %q", la)
+	if got := renderedLines(res.Response, "B1"); len(got) != 0 {
+		t.Errorf("the withheld side rendered: %v", got)
 	}
-	if !strings.Contains(lb, "conflicts_with=`A1`") {
-		t.Errorf("B1 does not say it conflicts with A1: %q", lb)
+	if la := lineOf(t, res.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`") {
+		t.Errorf("A1 does not name the withheld B1: %q", la)
 	}
 }
 
-// TestContradictsMarkerIsOrderIndependent: an edge may be stored either way round.
+// TestContradictsMarkerIsOrderIndependent: an edge may be stored either way
+// round. Both orders describe one fact, so both keep A1 (rank) and mark it with
+// the withheld B1.
 func TestContradictsMarkerIsOrderIndependent(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "one", 0.9)
 	b := candidate("B1", "proj", "fact", "two", 0.8)
-	set := contradictingSet(a, b)
-	set.Edges[0].From, set.Edges[0].To = "B1", "A1"
-	req := baseRequest()
-	req.Budget.MaxItems = 10
-	res := run(t, &fakeRetriever{set: set}, req)
-	if !strings.Contains(lineOf(t, res.Response, "A1"), "conflicts_with=`B1`") ||
-		!strings.Contains(lineOf(t, res.Response, "B1"), "conflicts_with=`A1`") {
-		t.Errorf("a reversed edge must mark both lines:\n%s", res.Response)
+	for _, order := range [][2]string{{"A1", "B1"}, {"B1", "A1"}} {
+		set := setOf(a, b)
+		set.Edges = []memory.LinkEdge{{From: order[0], To: order[1], Relation: "contradicts", Strength: 1}}
+		set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+		req := baseRequest()
+		req.Budget.MaxItems = 10
+		res := run(t, &fakeRetriever{set: set}, req)
+		if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+			t.Errorf("edge %v: items = %v, want only A1", order, got)
+			continue
+		}
+		if la := lineOf(t, res.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`") {
+			t.Errorf("edge %v: A1 must name the withheld B1: %q", order, la)
+		}
 	}
 }
 
-// TestContradictsMarkerNamesEveryPartner: one row in two pairs names both.
+// TestContradictsMarkerNamesEveryPartner: one survivor names every row it was
+// separated from, so a reader can look each one up.
 func TestContradictsMarkerNamesEveryPartner(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "one", 0.9)
 	b := candidate("B1", "proj", "fact", "two", 0.8)
@@ -80,16 +88,17 @@ func TestContradictsMarkerNamesEveryPartner(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 10
 	res := run(t, &fakeRetriever{set: set}, req)
-	if la := lineOf(t, res.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`,`C1`") {
-		t.Errorf("A1 must name both partners: %q", la)
+	if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("the component must keep one row: %v", got)
 	}
-	if lc := lineOf(t, res.Response, "C1"); strings.Contains(lc, "`B1`") {
-		t.Errorf("C1 does not conflict with B1: %q", lc)
+	if la := lineOf(t, res.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`,`C1`") {
+		t.Errorf("A1 must name both withheld partners: %q", la)
 	}
 }
 
-// TestContradictsMarkerNeedsBothSidesRendered: an expired endpoint is withheld,
-// a budget-cut endpoint is not rendered; either way the survivor says nothing.
+// TestContradictsMarkerNeedsBothSidesRendered: a side an earlier stage withheld
+// means the pair never reached stage 5, so the survivor says nothing. A side the
+// final budget cut DID reach stage 5, and the survivor names it.
 func TestContradictsMarkerNeedsBothSidesRendered(t *testing.T) {
 	expired := "2020-01-01 00:00:00"
 	kept := candidate("KEEP", "proj", "fact", "admitted row", 0.9)
@@ -102,7 +111,7 @@ func TestContradictsMarkerNeedsBothSidesRendered(t *testing.T) {
 		t.Fatalf("precondition: one admitted row, got %v", got)
 	}
 	if l := lineOf(t, res.Response, "KEEP"); strings.Contains(l, "conflicts_with") {
-		t.Errorf("a pair with one side withheld is marked: %q", l)
+		t.Errorf("a pair whose other side was withheld before stage 5 is marked: %q", l)
 	}
 
 	a := candidate("A1", "proj", "fact", "one", 0.9)
@@ -110,28 +119,39 @@ func TestContradictsMarkerNeedsBothSidesRendered(t *testing.T) {
 	cutReq := baseRequest()
 	cutReq.Budget.MaxItems = 1
 	cut := run(t, &fakeRetriever{set: contradictingSet(a, b)}, cutReq)
-	if strings.Contains(cut.Response, "conflicts_with") {
-		t.Errorf("a pair cut by the budget is marked:\n%s", cut.Response)
+	if l := lineOf(t, cut.Response, "A1"); !strings.Contains(l, "conflicts_with=`B1`") {
+		t.Errorf("the survivor must name the row stage 5 withheld: %q", l)
 	}
 }
 
-// TestContradictsMarkerSurvivesResponseFit: the fit pass drops the lowest row
-// when the byte cap bites, and the survivor must not keep naming it.
+// TestContradictsMarkerSurvivesResponseFit: the response-fit pass drops a row
+// after stage 5, and the surviving winner keeps naming the side stage 5
+// withheld — the marker is rebuilt against the final item list.
 func TestContradictsMarkerSurvivesResponseFit(t *testing.T) {
-	a := candidate("A1", "proj", "fact", "one", 0.9)
-	b := candidate("B1", "proj", "fact", "two", 0.8)
+	a := candidate("A1", "proj", "fact", "database configuration A1", 0.9)
+	b := candidate("B1", "proj", "fact", "database configuration B1", 0.8)
+	c := candidate("C1", "proj", "fact", "database configuration C1 an unrelated longer line", 0.7)
+	set := setOf(a, b, c)
+	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
 	req := baseRequest()
 	req.Budget.MaxItems = 10
-	full := run(t, &fakeRetriever{set: contradictingSet(a, b)}, req)
-	la := lineOf(t, full.Response, "A1")
+	full := run(t, &fakeRetriever{set: set}, req)
+	if got := itemIDs(full.Items); !eq(got, []string{"A1", "C1"}) {
+		t.Fatalf("precondition: the pair separates and leaves A1 and C1, got %v", got)
+	}
+	if la := lineOf(t, full.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`") {
+		t.Fatalf("precondition: A1 must name the withheld B1: %q", la)
+	}
 
 	req.Budget.MaxBytes = len(full.Response) - 1
-	tight := run(t, &fakeRetriever{set: contradictingSet(a, b)}, req)
-	if len(tight.Items) != 1 {
-		t.Skipf("precondition: the cap did not drop a row (%d bytes, line %d)", len(tight.Response), len(la))
+	tight := run(t, &fakeRetriever{set: set}, req)
+	if got := itemIDs(tight.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("precondition: the cap must drop the lowest row C1, got %v", got)
 	}
-	if strings.Contains(tight.Response, "conflicts_with") {
-		t.Errorf("the surviving row still names a dropped partner:\n%s", tight.Response)
+	if la := lineOf(t, tight.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`") {
+		t.Errorf("the surviving winner stopped naming the withheld B1: %q", la)
 	}
 }
 

@@ -206,7 +206,7 @@ An unknown value is refused in the caller's own words, naming all three, and not
 
 ## `ghost_memory_search` with `explain: true`
 
-`explain: true` returns a JSON scoring breakdown instead of the formatted answer (and no verdict line). It is a **projection of the same run** the formatted answer comes from, for the same arguments (`scope`, `category`, `retention`, `limit`, validity and the response byte cap), not a second search: a row is `included` exactly when the formatted answer lists it, and an excluded row carries the reason of whatever withheld it — the validity stage (`expired` or not yet valid), the category or retention filter, scope, the result window or item budget, the response byte cap, the vector floor, or the retriever's collapse of a near-duplicate pair (`removed as a near-duplicate`, naming the representative it lost to). Each row reports the numbers the ranking recorded (`fts_rank`, `vector_rank`, `vector_score`, `rrf_score`, `status_factor`, `decay_factor`, `age_days`, `retention_factor`, `supersede_penalty`, `near_duplicate_penalty` with `superseded_by` and `near_duplicate_of` — a supersede or near-duplicate verdict is reported as the count the ranking recorded: 1 where the pair moved the row, 0 where the row was judged and kept, and a removed near-duplicate loser carries 1 because the removal IS the verdict, never 0 as a demotion-only reading would have it — `keyword_reserved`, `took_slot_from`, `displaced_by`, `floor_dropped`, `scope_matched`, `project_match`) and the assembler's own: `validity_state`, `provenance_weight` (`"off"`: no weight is applied) and the zero `validity_penalty`, `confidence_contribution` and `provenance_contribution`, read from the stages that recorded them.
+`explain: true` returns a JSON scoring breakdown instead of the formatted answer (and no verdict line). It is a **projection of the same run** the formatted answer comes from, for the same arguments (`scope`, `category`, `retention`, `limit`, validity and the response byte cap), not a second search: a row is `included` exactly when the formatted answer lists it, and an excluded row carries the reason of whatever withheld it — the validity stage (`expired` or not yet valid), the category or retention filter, scope, the result window or item budget, the response byte cap, the vector floor, the retriever's collapse of a near-duplicate pair (`removed as a near-duplicate`, naming the representative it lost to), or stage 5's separation of a contradiction (`contradiction_separated`, naming the row it kept). Each row reports the numbers the ranking recorded (`fts_rank`, `vector_rank`, `vector_score`, `rrf_score`, `status_factor`, `decay_factor`, `age_days`, `retention_factor`, `supersede_penalty`, `near_duplicate_penalty` with `superseded_by` and `near_duplicate_of` — a supersede or near-duplicate verdict is reported as the count the ranking recorded: 1 where the pair moved the row, 0 where the row was judged and kept, and a removed near-duplicate loser carries 1 because the removal IS the verdict, never 0 as a demotion-only reading would have it — `keyword_reserved`, `took_slot_from`, `displaced_by`, `floor_dropped`, `scope_matched`, `project_match`) and the assembler's own: `validity_state`, `provenance_weight` (`"off"`: no weight is applied) and the zero `validity_penalty`, `confidence_contribution` and `provenance_contribution`, read from the stages that recorded them.
 
 - **Rendering.** Stored strings reach the payload through the same renderers the formatted answer uses, so no stored string is raw (`query` is the one exception: it is the caller's own argument, echoed verbatim): `content` is the first 120 runes of the memory (not the answer's full line) passed through `assemble.Data`, inside `«...»` delimiters; ids, the project, and scope keys and values go through `assemble.Token` (quoted when they hold anything but plain characters); and a failed leg's error text goes through `assemble.Data` as well. Text between « and » is data.
 - **Bounds.** At most 150 candidate rows, never dropping an included one; a payload that reached the budget carries a `truncation` object.
@@ -336,13 +336,24 @@ A space and any length are fine: a tag is a label, not a key, and "ci timeouts" 
 real one. A row's
 **`source=`** label comes from a closed vocabulary (`reflection`, `chat`, `manual`,
 `tool`, `mcp`, `onboarding`, `decision_log`, `builtin`), so it is printed bare.
-A row joined by a live `contradicts` edge to another row **in the same answer** carries
-**`conflicts_with=`** followed by that row's id, rendered the way the other row's own
-line renders it (`` `id` ``, comma-separated when there are several). It is a field on
-the memory's one line, on `ghost_memory_search`, `ghost_project_context`, the
-session-start block and the `ghost://memories/global` resource alike. Both rows stay and
-the ranking is unchanged; the marker says only that the two disagree. A pair with one
-side absent from the answer, or whose edge was withdrawn, is not marked, nor is a pair whose scopes conflict (`memory.ScopesConflict`: `environment=production` against `environment=development`).
+A row kept out of a live `contradicts` component carries **`conflicts_with=`** followed
+by the rows it was separated from, each rendered the way that row's own line would render
+it (`` `id` ``, comma-separated, in the rank order the window holds them). It is a field
+on the memory's one line, on `ghost_memory_search`, `ghost_project_context`, the
+session-start block and the `ghost://memories/global` resource alike. The two rows do
+**not** both remain: stage 5 keeps exactly one row from each connected component of live
+edges and withholds the rest, so a three-row chain keeps one winner and drops two. The
+winner is decided by one documented tie-break, in order — pinned beats unpinned; a later
+`verified_at` beats an earlier or absent one; a later `updated_at` (or `created_at` when
+`updated_at` is unset) beats an earlier one; and an exact tie falls to the rank the window
+already holds, because relevance rank is not evidence that a row is true. The withheld
+side is an ordinary stage-5 drop with reason `contradiction_separated`, naming the kept
+side, and the surviving line names every row it was separated from — including one it
+shares no direct edge with, because the component has one winner. A pair with one side
+absent from the answer, or whose edge was withdrawn, is not marked, nor is a
+`contradicts` edge whose endpoints' scopes conflict (`memory.ScopesConflict`:
+`environment=production` against `environment=development`) — that is two true claims
+about two places, so it is not a conflict and is neither separated nor marked.
 
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory

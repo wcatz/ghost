@@ -18,6 +18,10 @@ package bench
 //     selection reads the pin (every passive surface, #924);
 //   - rows that must NEVER be shown: resolved, expired (valid_until in 2020) and
 //     not yet valid (valid_from in 2099);
+//   - the losing side of a `contradicts` pair (#925), which stage 5 withholds
+//     against the pinned row it contradicts: the pin wins the documented
+//     tie-break, so the pair is one shown row (the pin, whose line names the
+//     withheld id) and one row that must not appear;
 //   - rows whose only fault is their scope, which a surface withholds only when it
 //     is asked for a scope;
 //   - rows the ranking demotes rather than withholds: a superseded row beside the
@@ -78,6 +82,14 @@ const (
 	// KindDuplicate restates a live row and carries a `duplicate` edge to it.
 	// Optional for the same reason, and measured by the same rate.
 	KindDuplicate PassiveKind = "duplicate"
+	// KindContradictsWithheld is a live, valid, unpinned row a `contradicts` edge
+	// joins to the project's pinned row. Stage 5 separates the pair and the pin
+	// wins the documented tie-break (pinned beats unpinned), so this row is
+	// withheld against the pin and the pin's line names it. It carries the
+	// highest importance and the newest created_at in its project, like every
+	// other withheld row, so a separation that stopped running would surface it
+	// at the top of the block rather than hide it under a cap.
+	KindContradictsWithheld PassiveKind = "contradicts_withheld"
 )
 
 // PassiveGrade is what a block is allowed to do with a row.
@@ -119,6 +131,10 @@ type PassiveRow struct {
 	Supersedes string
 	// DuplicateOf is the key of the row this one restates.
 	DuplicateOf string
+	// Contradicts is the key of the row in this project this one is recorded as
+	// contradicting. The pair is separated by stage 5, and the corpus's grades
+	// say which side must survive.
+	Contradicts string
 	// BudgetCutOK marks a live row that a surface with a shared row cap may leave
 	// out: the project-context surfaces fit the project's rows, the globals and the
 	// pinned rows under one 20-row cap, so the lowest-ranked live row losing its
@@ -137,7 +153,7 @@ func (r PassiveRow) ID() string { return corpusID(r.Project, r.Key) }
 // (empty by default), and ghost_project_context carries no scope at all.
 func (r PassiveRow) Grade(scoped bool) PassiveGrade {
 	switch r.Kind {
-	case KindResolved, KindExpired, KindFuture:
+	case KindResolved, KindExpired, KindFuture, KindContradictsWithheld:
 		return GradeWithheld
 	case KindScoped:
 		if scoped {
@@ -169,12 +185,14 @@ func (r PassiveRow) eligible(scoped bool) bool {
 	return r.Grade(scoped) != GradeWithheld
 }
 
-// withheldByAStage reports whether the row is unresolved and was withheld by the
-// validity stage, which is the population a header's "withheld" count is about. A
-// resolved row never reached the window, and an out-of-scope row is excluded by
-// the scope clause in the fetch, so neither is counted in a window total.
+// withheldByAStage reports whether the row is unresolved and was withheld by a
+// stage, which is the population a header's "withheld" count is about. It covers
+// the validity stage (an expired or not-yet-open window) and the conflicts stage
+// (#925: the losing side of a `contradicts` pair). A resolved row never reached
+// the window, and an out-of-scope row is excluded by the scope clause in the
+// fetch, so neither is counted in a window total.
 func (r PassiveRow) withheldByAStage() bool {
-	return !r.Resolved && (r.Kind == KindExpired || r.Kind == KindFuture)
+	return !r.Resolved && (r.Kind == KindExpired || r.Kind == KindFuture || r.Kind == KindContradictsWithheld)
 }
 
 // PassiveProjects are the projects the corpus holds, besides `_global`. Three,
@@ -318,6 +336,18 @@ func projectRows(p string) []PassiveRow {
 		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})
 
+	// The contradiction loser: a live, valid, unpinned row a `contradicts` edge
+	// joins to the pinned row above. Stage 5 separates the pair, and the pin wins
+	// the documented tie-break (pinned beats unpinned), so this row is withheld
+	// and the pin's line names it. It is unpinned with the highest importance in
+	// the project so a separation that stopped running would surface it, not bury
+	// it.
+	rows = append(rows, PassiveRow{
+		Project: p, Key: "contradict-00", Kind: KindContradictsWithheld, Category: "gotcha",
+		Content:    fmt.Sprintf("%s: the %s rule is no longer what the pinned checklist says (contradicts pinned-00)", p, themes[0]),
+		Importance: imp(100), AgeDays: 1, Contradicts: "pinned-00",
+	})
+
 	// Superseded rows, each replaced by a live row, and near-duplicates of live
 	// rows (see projectShape for which).
 	// The old and the duplicate carry high importance on purpose: a ranking that
@@ -410,6 +440,11 @@ func globalRows() []PassiveRow {
 		Importance: imp(30), AgeDays: 400, Pinned: true,
 	})
 	rows = append(rows, PassiveRow{
+		Project: g, Key: "contradict-00", Kind: KindContradictsWithheld, Category: "gotcha",
+		Content:    "all projects: the pre-delete check is optional (global, contradicts pinned-00)",
+		Importance: imp(100), AgeDays: 1, Contradicts: "pinned-00",
+	})
+	rows = append(rows, PassiveRow{
 		Project: g, Key: "old-00", Kind: KindSuperseded, Category: "preference",
 		Content:    "all projects: commit messages may run long (global, superseded)",
 		Importance: imp(93), AgeDays: 90,
@@ -480,7 +515,7 @@ func (c PassiveCorpus) validate() error {
 		}
 	}
 	for _, r := range c.Rows {
-		for _, ref := range []string{r.Supersedes, r.DuplicateOf} {
+		for _, ref := range []string{r.Supersedes, r.DuplicateOf, r.Contradicts} {
 			if ref == "" {
 				continue
 			}
@@ -578,7 +613,10 @@ func SeedPassive(ctx context.Context, store *memory.Store, db *sql.DB, c Passive
 	// The edges, after every row exists. A supersedes edge points from the newer
 	// row to the older, and a duplicate edge from the copy to the original, which
 	// is the direction the demotion's rank rule expects the loser to be the
-	// lower-ranked end of.
+	// lower-ranked end of. A contradicts edge points from the row the corpus
+	// grades withheld to the side that survives; the relation is directional but
+	// stage 5 reads both endpoints, so the corpus's grades, not the arrow, say
+	// which side must remain.
 	for _, r := range c.Rows {
 		if r.Supersedes != "" {
 			if err := store.CreateLink(ctx, r.ID(), corpusID(r.Project, r.Supersedes), "supersedes", 1.0, "llm"); err != nil {
@@ -588,6 +626,11 @@ func SeedPassive(ctx context.Context, store *memory.Store, db *sql.DB, c Passive
 		if r.DuplicateOf != "" {
 			if err := store.CreateLink(ctx, r.ID(), corpusID(r.Project, r.DuplicateOf), "duplicate", 1.0, "llm"); err != nil {
 				return stamp.instant(), fmt.Errorf("link %s duplicates %s: %w", r.ID(), r.DuplicateOf, err)
+			}
+		}
+		if r.Contradicts != "" {
+			if err := store.CreateLink(ctx, r.ID(), corpusID(r.Project, r.Contradicts), "contradicts", 1.0, "llm"); err != nil {
+				return stamp.instant(), fmt.Errorf("link %s contradicts %s: %w", r.ID(), r.Contradicts, err)
 			}
 		}
 	}

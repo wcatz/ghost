@@ -1047,10 +1047,11 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// The verdicts, not just the penalty: a dropped loser has to name the row it
 	// lost to, and it is read from the one edge pass that decided the loss.
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, nearDupProtected, threshold)
-	// The contradicts veto is a DROP rule: removal hides the conflict the
-	// contradiction marker exists to show, and a passive block can only mark a
-	// `contradicts` pair when both rows are in it (pipeline.markConflicts). It is
-	// read only on the drop path for the same reason as the query path.
+	// The contradicts veto is a DROP rule: a near-duplicate removal would take one
+	// side out of the window before stage 5 sees it, so the pair would be judged
+	// by the near-duplicate verdict instead of stage 5's contradiction tie-break,
+	// and the survivor would carry no marker naming what it was separated from.
+	// It is read only on the drop path for the same reason as the query path.
 	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
 		var contradicted map[string]bool
 		contradicted, err = contradictingIDs(ctx, s.queryDB(), ids)
