@@ -610,7 +610,7 @@ func TestPrintContextAuditStatesItsLimits(t *testing.T) {
 	if err := printContextAudit(&sb, audit.Report{
 		ProjectID: "projx",
 		Sources: []audit.SourceReport{
-			{Source: "search", Calls: 2, Kept: 3, Scored: 3, Used: 1, Ignored: 2, KeptNothing: 1},
+			{Source: "search", Calls: 2, Kept: 3, Scored: 3, Used: 2, UsedByID: 1, UsedByWording: 1, Ignored: 1, KeptNothing: 1},
 			{Source: "session_start"},
 			{Source: "project_context"},
 		},
@@ -621,7 +621,8 @@ func TestPrintContextAuditStatesItsLimits(t *testing.T) {
 	for _, want := range []string{
 		"projx",
 		"never pooled",
-		"not a relevance or usefulness score",
+		"neither is a relevance or usefulness score",
+		"33% cited by id (1 of 3 scored), 1 restated by wording (heuristic)",
 		"not measured",
 		"session_start: no rows",
 		"project_context: no rows",
