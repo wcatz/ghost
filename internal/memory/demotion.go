@@ -515,8 +515,10 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // can easily carry both because opposing claims share their wording ("the
 // cache is redis" / "the cache is memcached"). Ranking one below the other
 // keeps both claims on screen; removing one hides the conflict the
-// contradiction marker exists to show. The veto is read only when the window
-// actually holds a near-duplicate pair, and a veto read that fails stops the
+// contradiction marker exists to show; the passive bucket's DropDemotedLosers
+// path applies the same veto so the two surfaces agree. The veto is read only
+// when the window actually holds a near-duplicate pair, and a veto read that
+// fails stops the
 // removal for the same reason a penalty read that fails does: removals are
 // decided on evidence, and "I could not check for a hidden contradiction" is
 // not evidence that there is none.

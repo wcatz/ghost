@@ -498,10 +498,17 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 func TestSearchExplainKeepsItsBounds(t *testing.T) {
 	_, session := newCapSession(t)
 	for i := 0; i < 40; i++ {
-		// Lexically distinct beyond the shared leading words, so the rows are
-		// separate memories rather than near-duplicates folded on save.
-		body := strings.Repeat(string(rune('a'+i%26))+string(rune('a'+(i/3)%26))+"q ", 100)
-		saveMem(t, session, "bounded corpus entry number "+string(rune('A'+i%26))+string(rune('A'+i/26))+" "+body, nil)
+		// Each row carries seven tokens of its own (the prefix pair plus six
+		// body tokens) over the four shared leading words, which puts every
+		// pair below BOTH save-time merge gates — Jaccard 4/18 and overlap
+		// 4/11, under the 0.5 bars — so the rows are separate memories with no
+		// `duplicate` edge among them rather than one near-duplicate cluster
+		// the retriever would collapse to a single representative.
+		var body strings.Builder
+		for k := 0; k < 6; k++ {
+			fmt.Fprintf(&body, "w%02dx%02d ", i, k)
+		}
+		saveMem(t, session, "bounded corpus entry number "+string(rune('A'+i%26))+string(rune('A'+i/26))+" "+strings.Repeat(body.String(), 15), nil)
 	}
 	ex, raw := explainPayload(t, session, map[string]any{"query": "bounded corpus entry", "limit": 20})
 	if len(ex.Rows) > memory.ExplainMaxRows {

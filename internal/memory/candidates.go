@@ -599,6 +599,27 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		return nil, err
 	}
 
+	// The tail is the pool's next rows, which the window removal did not see:
+	// a near-duplicate cluster whose members straddle the window and the pool
+	// would otherwise return two rows of one group (window [A], tail [C] of a
+	// cluster the window removed B from). The removal runs once more over the
+	// combined rows, window first: every tail row ranks after every window row,
+	// so the representative the window already chose wins and only the tail can
+	// lose. The survivors keep their order, so the representative's rank, score
+	// and position are untouched by this pass.
+	if len(tail) > 0 {
+		combined := append(append([]Memory{}, selected...), tail...)
+		keptAll, tailLosers, lostToTail := cand.dropNearDuplicates(ctx, combined, p)
+		if len(tailLosers) > 0 {
+			tail = keptAll[len(selected):]
+			for _, m := range tailLosers {
+				removed = append(removed, m)
+				droppedIDs = append(droppedIDs, m.ID)
+				lostTo[m.ID] = lostToTail[m.ID]
+			}
+		}
+	}
+
 	rows := make([]Candidate, 0, len(selected)+len(tail))
 	for _, m := range append(selected, tail...) {
 		rows = append(rows, candidateOf(m, scores, fts, vec, req.Now))
@@ -1067,11 +1088,9 @@ func hydrateWindow(ctx context.Context, s *Store, window HybridWindow, pool []*h
 // backfill and would fill the very slot its removal freed. Excluding it is what
 // hands that slot to the next distinct row.
 //
-// The tail is ordered but not demoted. Supersede and near-duplicate demotion
-// are window-scoped reorders that production applies to the rows it returns;
-// widening them here would change the order of rows the window already fixed,
-// and deciding them over the assembler's final membership is the conflict and
-// dedup stages' job.
+// The tail is ordered but not demoted in the sense of a reorder; the
+// retriever's removal runs over the combined set (window + tail) in the
+// candidates path after hydration, so the returned membership is decided there.
 func (s *Store) hydrateTail(ctx context.Context, pool []*hybridCandidate, selected []Memory, dropped []string, scores map[string]float64, limit int, now time.Time) ([]Memory, error) {
 	taken := make(map[string]bool, len(selected)+len(dropped))
 	for _, m := range selected {

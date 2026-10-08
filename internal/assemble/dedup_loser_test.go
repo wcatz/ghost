@@ -292,6 +292,103 @@ func TestQueryModeCollapseIsInTheRetrievalRecord(t *testing.T) {
 	}
 }
 
+// TestQueryModeCollapseSpansTheWindowAndTheTail (#926, review of #940): a
+// near-duplicate cluster whose members STRADDLE the window and the pool's tail
+// used to return two rows of one group — the window removed one member, the
+// tail backfill reintroduced another that the window removal never saw. The
+// fixture is a three-member cluster where bm25 ranks the short pair into the
+// 2-row window and the longer third member below it, so the tail hydrates C
+// beside the surviving representative.
+//
+// The assertions are deliberately invariant to WHICH member the window picked
+// as representative: exactly one cluster member survives, and both losers —
+// the one the window removed and the one the tail pass removed — are reported
+// with the representative they lost to, on every surface.
+func TestQueryModeCollapseSpansTheWindowAndTheTail(t *testing.T) {
+	s, dupA, dupB, distinct := queryCollapseStore(t)
+	ctx := context.Background()
+	// The third cluster member: same vocabulary as the pair but longer, so
+	// bm25 ranks it below the pair (into the tail) and above nothing that
+	// matters. It is linked to both pair members, so whichever of the pair the
+	// window keeps, the tail pass sees an edge and removes it.
+	dupC, err := s.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Source: "manual", Importance: 0.7,
+		Content: "database configuration of the standby snapshot replica runs nightly for the refresh cycle",
+	})
+	if err != nil {
+		t.Fatalf("Create(dupC): %v", err)
+	}
+	for _, pair := range [][2]string{{dupA, dupC}, {dupB, dupC}} {
+		if err := s.CreateLink(ctx, pair[0], pair[1], "related", 0.95, "auto"); err != nil {
+			t.Fatalf("CreateLink(%s,%s): %v", pair[0], pair[1], err)
+		}
+	}
+
+	res := run(t, s, collapseRequest())
+	ids := itemIDs(res.Items)
+
+	cluster := []string{dupA, dupB, dupC}
+	survivors := []string{}
+	for _, id := range cluster {
+		if hasID(ids, id) {
+			survivors = append(survivors, id)
+		}
+	}
+	if len(survivors) != 1 {
+		t.Fatalf("items = %v, want exactly ONE row of the 3-member cluster (%s, %s, %s); the tail "+
+			"backfill must not reintroduce a member the window removed", ids, dupA, dupB, dupC)
+	}
+	rep := survivors[0]
+
+	// Both losers are reported: the window's own removal and the tail pass's,
+	// each naming the representative they lost to.
+	losers := collectLosers(t, res)
+	if len(losers) != 2 {
+		t.Fatalf("the trace holds %d dropped cluster members, want 2 (window removal + tail removal): %+v", len(losers), res.Trace.Decisions)
+	}
+	for _, l := range losers {
+		if l.ID == rep {
+			t.Errorf("the representative %s is reported as a dropped loser", rep)
+		}
+		if l.Stage != stageDedup || l.Reason != reasonNearDuplicate || l.Kept {
+			t.Errorf("decision for %s = %+v, want a dropped %s/%s decision", l.ID, l, stageDedup, reasonNearDuplicate)
+		}
+		if !reflect.DeepEqual(l.Against, []string{rep}) {
+			t.Errorf("decision for %s has Against = %v, want [%s] — the one representative of the group", l.ID, l.Against, rep)
+		}
+	}
+
+	// Explain is the same run projected: both losers excluded with the
+	// representative named, the representative included.
+	for _, l := range losers {
+		row := explainRowByID(t, res.Explain, l.ID)
+		if row.Included {
+			t.Errorf("the removed cluster member %s is marked included", l.ID)
+		}
+		if !reflect.DeepEqual(row.NearDuplicateOf, []string{rep}) {
+			t.Errorf("row %s: near_duplicate_of = %v, want [%s]", l.ID, row.NearDuplicateOf, rep)
+		}
+	}
+	if !explainRowByID(t, res.Explain, rep).Included {
+		t.Errorf("the representative %s is not included", rep)
+	}
+	if !hasID(ids, distinct) {
+		t.Errorf("items = %v, want the distinct row still admitted", ids)
+	}
+}
+
+// collectLosers returns the trace's dropped near-duplicate decisions.
+func collectLosers(t *testing.T, res Result) []Decision {
+	t.Helper()
+	var out []Decision
+	for _, d := range res.Trace.Decisions {
+		if d.Stage == stageDedup && d.Reason == reasonNearDuplicate && !d.Kept {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // queryDedupNote pulls stage 6's sentence out of a QUERY-mode run's notes, so
 // the assertion is on that sentence rather than on a neighbour sharing a word.
 // It matches on "near-duplicate" rather than on the passive sentence's own
@@ -322,7 +419,7 @@ func TestQueryModeDedupNoteSaysTheLosersAreRemoved(t *testing.T) {
 	if !strings.Contains(note, "losers are REMOVED by the retriever") {
 		t.Errorf("a query-mode note must say the retriever removes the loser: %q", note)
 	}
-	if !strings.Contains(note, "one row of each pair") {
+	if !strings.Contains(note, "one row of every pair") {
 		t.Errorf("the note must say what the removal leaves the window holding: %q", note)
 	}
 	if strings.Contains(note, "no source policy drops losers") {

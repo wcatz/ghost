@@ -395,14 +395,14 @@ func runDedup(p *pipeline) {
 	// per-row outcome: whether this particular window held a pair is the
 	// per-row decisions below' business.
 	if !p.passive {
-		note = "near-duplicate losers are REMOVED by the retriever, so the window holds one row of each pair"
+		note = "near-duplicate losers are REMOVED by the retriever, so the answer holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
 	} else if p.dropsDemotedLosers() {
 		// Stated as a POLICY: whether a row was removed is the per-row decisions'
 		// business below, and a note that claimed a removal for every `_global`
 		// slice that sets the flag would be a report about a prediction, on the
 		// overwhelmingly common occasion that the window held no near-duplicate
 		// edge at all.
-		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
+		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
 	} else {
 		note += "; no source policy drops losers on this surface yet"
 	}
