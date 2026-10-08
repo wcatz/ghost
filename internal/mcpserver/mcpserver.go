@@ -297,6 +297,16 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 // worst of the two failures: a provenance value pointing at a session that
 // never existed, indistinguishable afterwards from a real one.
 //
+// This is deliberately NARROWER than a retrieval record's session id. A record
+// carries sessionIDFor's value — the transport's when the connection assigns one,
+// else the host environment's own — because the stop hook's payload carries that
+// same id and the audit matches the record to the scan that judged it on it
+// (#922). Provenance does not borrow it: a provenance row claims what the
+// transport said and nothing inferred. So under Claude Code a save (and the
+// `ghost_memory_flag` row filed through this function) records no session while
+// the retrieval records beside them carry the host's id — the asymmetry is the
+// design, not a gap: one side is an attribution, the other is a match key.
+//
 // SourceRef is left empty here because it is the caller's to state — the save
 // arguments carry it (validity.go's writeFields), and only the caller knows what
 // it read.

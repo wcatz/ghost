@@ -16,6 +16,12 @@ package audit
 // mentions it afterwards, so use outranks the save restatement. The order is
 // therefore: contradiction, identifier, token overlap, save restatement, and
 // anything that matches nothing at all is ignored.
+//
+// Where a verdict GOES is the other half of that boundary: a positive one feeds
+// the reports and nothing else — `ghost_health`, `ghost context --audit` and the
+// lifecycle summary, split by signal since #930 — while `contradicted` and
+// `superseded_in_session` are the only outcomes UsefulnessByMemory reads, so a
+// verdict that a memory was used reaches no decision at all.
 
 import (
 	"fmt"
@@ -113,12 +119,17 @@ type Verdict struct {
 //
 // Both, because either alone is wrong in a direction that matters. A fraction
 // alone lets three matched words claim a memory of ninety — a coincidence, and a
-// false "used" is the one error this audit cannot afford, because a memory filed
-// as used is a memory nobody looks at again. An absolute floor alone is the same
-// mistake scaled: three matched words out of a three-word memory is the whole
-// memory, while three out of ninety is noise. So a memory is claimed when the
-// agent repeated at least a third of its distinctive words AND at least three of
-// them.
+// false "used" is the one error this audit cannot afford, though its cost is not
+// where this comment once put it: a `used` reaches NO decision, because
+// UsefulnessByMemory's read keeps only `contradicted` and `superseded_in_session`
+// and filters `used` out in SQL (usefulness.go's file comment says why — a memory
+// retrieved often must not start to look reliable for being retrieved often), so
+// what a false `used` buys is a wrong figure in `ghost_health` and
+// `ghost context --audit`, and since #930 a wrong `restated by wording` count
+// beside the precision. An absolute floor alone is the same mistake scaled: three
+// matched words out of a three-word memory is the whole memory, while three out
+// of ninety is noise. So a memory is claimed when the agent repeated at least a
+// third of its distinctive words AND at least three of them.
 //
 // The rule is pinned by TestCompareTokenArmNeedsEnoughOfTheMemory and
 // TestCompareTokenArmNeedsEveryTokenOfAShortMemory rather than only stated here,

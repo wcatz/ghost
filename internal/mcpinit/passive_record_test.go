@@ -298,7 +298,8 @@ func TestSessionStartRecordsTheCallItRendered(t *testing.T) {
 		t.Errorf("project_id = %q, want %q — the row must name the project whose session this was", rec.projectID, block.projectID)
 	}
 	if rec.sessionID != "" {
-		t.Errorf("session_id = %q, want empty: Ghost serves stdio, whose connection reports no session id", rec.sessionID)
+		t.Errorf("session_id = %q, want empty: this fixture drives loadSessionContext, the caller with no hook payload, "+
+			"so no session id was ever named for the record to carry", rec.sessionID)
 	}
 	if rec.queryHash != "" {
 		t.Errorf("query_hash = %q, want empty — a session start carries no question, and the digest of \"\" would be the "+
