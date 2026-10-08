@@ -303,9 +303,11 @@ func assertMembershipMatchesListing(t *testing.T, session *mcp.ClientSession, qu
 }
 
 // TestSearchExplainAttributesNearDuplicateDemotion is checked over the live tool: a
-// window-scoped near-duplicate demotion has to report the penalty AND name the
-// other memory that decided it, so an agent debugging a demoted row is handed
-// the row to read next instead of a count.
+// window-scoped near-duplicate verdict has to report the penalty AND name the
+// other memory that decided it, so an agent debugging the row is handed the row
+// to read next instead of a count — and since #926 the losing member is
+// REMOVED from the answer, so the payload has to carry it as a row that was not
+// included, with the same attribution, rather than dropping it silently.
 func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 	srv, session := newCapSession(t)
 	store, ok := srv.store.(*memory.Store)
@@ -324,32 +326,34 @@ func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 		t.Fatalf("CreateLink(related): %v", err)
 	}
 
-	// The demoted pair is part of the answer's membership like any other row: a
-	// demotion reorders, so the payload and the listing must still agree.
+	// The pair is one row of the answer and one removed row, so the payload and
+	// the listing must still agree: the loser is on neither.
 	assertMembershipMatchesListing(t, session, "cache warmer replica", nil)
 	rows := explainRows(t, session, "cache warmer replica", nil)
 
-	// Exactly one member of the pair carries the penalty, and it must be the
-	// one the search demoted, not an arbitrary one.
-	loser := ""
+	// Exactly one member of the pair survived, and it must be the one the search
+	// kept, not an arbitrary one: the removed one is the row the payload carries
+	// as not included.
+	loser, winner := "", ""
 	for _, id := range []string{dupA, dupB} {
-		if rows[id].NearDuplicatePenalty == 0 {
-			continue
+		if rows[id].Included {
+			winner = id
+		} else {
+			loser = id
 		}
-		if loser != "" {
-			t.Fatalf("both members of the pair carry a penalty (%s and %s): the attribution disagrees with the demotion, which sinks exactly one", loser, id)
-		}
-		loser = id
 	}
-	if loser == "" {
-		t.Fatalf("no member of the near-duplicate pair carries the penalty: %+v", rows)
+	if loser == "" || winner == "" {
+		t.Fatalf("exactly one member of the pair must be the removed row: included %s/%s (%s kept, %s removed)",
+			dupA, dupB, winner, loser)
 	}
-	winner := map[string]string{dupA: dupB, dupB: dupA}[loser]
 	if rows[loser].NearDuplicatePenalty != 1 {
-		t.Errorf("near_duplicate_penalty = %d, want 1", rows[loser].NearDuplicatePenalty)
+		t.Errorf("near_duplicate_penalty = %d, want 1: the penalty is the verdict that removed the row", rows[loser].NearDuplicatePenalty)
 	}
 	if len(rows[loser].NearDuplicateOf) != 1 || rows[loser].NearDuplicateOf[0] != winner {
-		t.Errorf("the demoted duplicate names %v, want the winner it lost to (%s)", rows[loser].NearDuplicateOf, winner)
+		t.Errorf("the removed duplicate names %v, want the winner it lost to (%s)", rows[loser].NearDuplicateOf, winner)
+	}
+	if !strings.Contains(rows[loser].Reason, "near-duplicate") {
+		t.Errorf("the removed row's reason = %q, want the stage 6 verdict naming it a near-duplicate", rows[loser].Reason)
 	}
 	if rows[winner].NearDuplicatePenalty != 0 || len(rows[winner].NearDuplicateOf) > 0 {
 		t.Errorf("the winner carries a penalty %d / attribution %v, want neither: only the demoted row moves", rows[winner].NearDuplicatePenalty, rows[winner].NearDuplicateOf)
@@ -494,10 +498,17 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 func TestSearchExplainKeepsItsBounds(t *testing.T) {
 	_, session := newCapSession(t)
 	for i := 0; i < 40; i++ {
-		// Lexically distinct beyond the shared leading words, so the rows are
-		// separate memories rather than near-duplicates folded on save.
-		body := strings.Repeat(string(rune('a'+i%26))+string(rune('a'+(i/3)%26))+"q ", 100)
-		saveMem(t, session, "bounded corpus entry number "+string(rune('A'+i%26))+string(rune('A'+i/26))+" "+body, nil)
+		// Each row carries seven tokens of its own (the prefix pair plus six
+		// body tokens) over the four shared leading words, which puts every
+		// pair below BOTH save-time merge gates — Jaccard 4/18 and overlap
+		// 4/11, under the 0.5 bars — so the rows are separate memories with no
+		// `duplicate` edge among them rather than one near-duplicate cluster
+		// the retriever would collapse to a single representative.
+		var body strings.Builder
+		for k := 0; k < 6; k++ {
+			fmt.Fprintf(&body, "w%02dx%02d ", i, k)
+		}
+		saveMem(t, session, "bounded corpus entry number "+string(rune('A'+i%26))+string(rune('A'+i/26))+" "+strings.Repeat(body.String(), 15), nil)
 	}
 	ex, raw := explainPayload(t, session, map[string]any{"query": "bounded corpus entry", "limit": 20})
 	if len(ex.Rows) > memory.ExplainMaxRows {

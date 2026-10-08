@@ -57,9 +57,13 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 
 	_, session := newCapSession(t)
 
+	// The two contents are worded to be lexically distinct: the save path links
+	// a restatement as a `duplicate` edge at save time and #926 collapses such
+	// a pair in query mode, which would hide one of these two saves from the
+	// search below and take this test's evidence of one shared project with it.
 	for i, args := range []map[string]any{
-		{"project_id": checkoutA, "content": "saved from the first checkout", "category": "fact"},
-		{"project_id": checkoutB, "content": "saved from the second checkout", "category": "fact"},
+		{"project_id": checkoutA, "content": "saved from checkout on the feature branch", "category": "fact"},
+		{"project_id": checkoutB, "content": "saved from checkout after moving to main", "category": "fact"},
 	} {
 		res := callTool(t, session, "ghost_memory_save", args)
 		if res.IsError {
@@ -75,7 +79,7 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 		"query":      "saved from checkout",
 		"limit":      10,
 	}))
-	for _, want := range []string{"saved from the first checkout", "saved from the second checkout"} {
+	for _, want := range []string{"saved from checkout on the feature branch", "saved from checkout after moving to main"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("search from the first checkout did not return %q — the two checkouts became separate projects:\n%s", want, out)
 		}
@@ -87,7 +91,7 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 		"query":      "saved from checkout",
 		"limit":      10,
 	}))
-	for _, want := range []string{"saved from the first checkout", "saved from the second checkout"} {
+	for _, want := range []string{"saved from checkout on the feature branch", "saved from checkout after moving to main"} {
 		if !strings.Contains(back, want) {
 			t.Errorf("search from the second checkout did not return %q:\n%s", want, back)
 		}
@@ -231,13 +235,17 @@ func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
 	checkoutB := repoDir(t, "checkout-b", origin)
 	srv, session := newCapSession(t)
 
+	// The three contents are worded to be lexically distinct: the save path
+	// links a restatement as a `duplicate` edge at save time and #926 collapses
+	// such a pair in query mode, which would hide one of these saves from the
+	// search below and take its evidence of one shared project with it.
 	saves := []struct {
 		projectID string
 		content   string
 	}{
 		{"ghost", "saved under the plain project name"},
 		{checkoutA, "saved from the first differently named checkout"},
-		{checkoutB, "saved from the second differently named checkout"},
+		{checkoutB, "saved inside a second working copy of the repository"},
 	}
 	for i, save := range saves {
 		res := callTool(t, session, "ghost_memory_save", map[string]any{
@@ -314,12 +322,16 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 	srv, session := newCapSession(t)
 	ctx := context.Background()
 
+	// The two contents are worded to be lexically distinct: the save path links
+	// a restatement as a `duplicate` edge at save time and #926 collapses such a
+	// pair in query mode, which would hide one of these saves from the search
+	// below and take its evidence of one shared project with it.
 	for i, save := range []struct {
 		projectID string
 		content   string
 	}{
 		{"ghost", "saved before the relative checkout"},
-		{relative, "saved from the relative checkout"},
+		{relative, "saved from a directory named by a relative path"},
 	} {
 		res := callTool(t, session, "ghost_memory_save", map[string]any{
 			"project_id": save.projectID,
@@ -351,7 +363,7 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 			"query":      "saved",
 			"limit":      10,
 		}))
-		for _, want := range []string{"saved before the relative checkout", "saved from the relative checkout"} {
+		for _, want := range []string{"saved before the relative checkout", "saved from a directory named by a relative path"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("checkout %q cannot see %q after the relative save:\n%s", projectID, want, out)
 			}

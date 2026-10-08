@@ -697,6 +697,26 @@ func TestCandidatesPassiveGlobalDropsTheNearDuplicateLoser(t *testing.T) {
 	}
 }
 
+func TestCandidatesPassiveGlobalVetoesNearDuplicateDropOnContradict(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	if err := st.CreateLink(ctx, "gp_mid", "gp_high", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("link duplicate: %v", err)
+	}
+	if err := st.CreateLink(ctx, "gp_mid", "gp_high", "contradicts", 1, "manual"); err != nil {
+		t.Fatalf("link contradicts: %v", err)
+	}
+
+	global, err := st.Candidates(ctx, passiveRequest("proj", globalPassivePolicy()))
+	if err != nil {
+		t.Fatalf("global passive: %v", err)
+	}
+	// The contradicts veto spares the near-duplicate loser.
+	if !containsStr(passiveIDs(global), "gp_mid") {
+		t.Errorf("with a contradicts edge, the loser must not be removed: %v", passiveIDs(global))
+	}
+}
+
 // TestCandidatesPassiveSupersedeDemotesWithoutDropping: a superseded memory may
 // not outrank its replacement, but it is not removed — the assembler decides
 // membership, and the retrieval reorders.

@@ -60,16 +60,21 @@ func searchScopedWithLimit(t *testing.T, session *mcp.ClientSession, query strin
 func TestScopeFilterSeparatesDevelopmentFromProduction(t *testing.T) {
 	_, session := newCapSession(t)
 
+	// The three rows must not be lexical near-duplicates of one another: the
+	// save path links a restatement as a `duplicate` edge at save time, and
+	// #926 collapses such a pair in query mode, so the unscoped row would leave
+	// the unscoped answer before any scope filter had its say. What this test
+	// owns is the scope verdict, so its fixtures hold three distinct claims.
 	saveScoped(t, session, "The project database for development is SQLite.", "development")
 	saveScoped(t, session, "The project database for production is PostgreSQL.", "production")
-	saveScoped(t, session, "The project database for Helmfile is global, dev and prod.", "") // unscoped
+	saveScoped(t, session, "Helmfile keeps one database definition for every environment.", "") // unscoped
 
 	// Scoped to production.
 	out := searchScoped(t, session, "database", map[string]any{"environment": "production"})
 	if !strings.Contains(out, "PostgreSQL") {
 		t.Errorf("production-scoped search must return the production memory:\n%s", out)
 	}
-	if !strings.Contains(out, "The project database for Helmfile") {
+	if !strings.Contains(out, "Helmfile keeps one database definition") {
 		t.Errorf("unscoped memory was excluded — knowledge with no stated environment applies everywhere:\n%s", out)
 	}
 	if strings.Contains(out, "for development is SQLite") {
@@ -88,7 +93,7 @@ func TestScopeFilterSeparatesDevelopmentFromProduction(t *testing.T) {
 
 	// No scope: everything, because nothing is being asked about environment.
 	all := searchScoped(t, session, "database", nil)
-	for _, want := range []string{"for development is SQLite", "for production is PostgreSQL", "The project database for Helmfile"} {
+	for _, want := range []string{"for development is SQLite", "for production is PostgreSQL", "Helmfile keeps one database definition"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("unscoped search lost %q:\n%s", want, all)
 		}

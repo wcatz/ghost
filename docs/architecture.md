@@ -1665,11 +1665,13 @@ Axis interaction rules:
 > total, reported with the withheld rows, never as the ranking's cut),
 > `BucketTally.CountedAgainst` does not infer losers from the store's count, the
 > retrieval record carries it as a dropped verdict, and explain reports it as not
-> included with `near_duplicate_of` set (and `near_duplicate_penalty` 0, because it was
-> never ranked with a penalty). Today that explain row is EMPTY IN PRACTICE: explain
-> requires a query, query mode carries no passive policies, and so `DroppedLosers` is
-> never filled on a path explain can reach; the projection is pinned by a hand-built
-> test for a future passive explain surface. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> included with `near_duplicate_of` set (and `near_duplicate_penalty` 1, the verdict
+> that removed it — reported exactly as `DemotionPenalties` recorded it, never as a
+> number the ranking did not produce). The bucket is filled by the query path itself
+> since [#926](https://github.com/wcatz/ghost/issues/926): `ghost_memory_search`'s retrieval collapses its
+> near-duplicate pairs the way the passive policy drops them, so that explain row is
+> reached by a real search and is pinned over it rather than by a hand-built
+> fixture. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state. It therefore renders and applies
@@ -1681,7 +1683,7 @@ Axis interaction rules:
 > lines, which is not the same as keeping them apart — and stage 7 (diversity) is a
 > pass-through. The plan to converge the surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
-> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), query-mode near-duplicate collapse, [#926](https://github.com/wcatz/ghost/issues/926), and diversity, [#927](https://github.com/wcatz/ghost/issues/927).
+> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md). The remaining work above is separation, [#925](https://github.com/wcatz/ghost/issues/925), and diversity, [#927](https://github.com/wcatz/ghost/issues/927).
 
 What exists now:
 

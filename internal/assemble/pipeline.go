@@ -385,20 +385,24 @@ func runDedup(p *pipeline) {
 	// surface it was written for. It is derived from the request rather than
 	// asserted, because the request is where the policy is stated.
 	note := "near-duplicate reordering is applied by the retriever over the window"
-	// GATED ON PASSIVE as well as on the flag, and the gate is the point: the
-	// policy only ever reaches the store for a passive request, because
-	// `passivePolicies` returns nil for a query and the fusion path only reorders.
-	// A query-mode request that set the flag would otherwise be told a memory was
-	// dropped from the block while it is still in it — which is worse than saying
-	// nothing, because an operator told to go looking for a dropped row will not
-	// find one and will conclude the block is lying about something else.
-	if p.passive && p.dropsDemotedLosers() {
+	// GATED ON THE MODE, then on the flag, and both gates are the point. A
+	// query-mode request reaches no passive policy (`passivePolicies` returns
+	// nil for a query) but its retriever now REMOVES the loser outright (#926),
+	// so the old "no source policy drops losers on this surface yet" would be
+	// false of exactly the surface it was written for — an operator told no
+	// removal happens here would be looking at a window holding one row of each
+	// pair. The sentence is stated as the MODE's behaviour rather than as a
+	// per-row outcome: whether this particular window held a pair is the
+	// per-row decisions below' business.
+	if !p.passive {
+		note = "near-duplicate losers are REMOVED by the retriever, so the answer holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
+	} else if p.dropsDemotedLosers() {
 		// Stated as a POLICY: whether a row was removed is the per-row decisions'
 		// business below, and a note that claimed a removal for every `_global`
 		// slice that sets the flag would be a report about a prediction, on the
 		// overwhelmingly common occasion that the window held no near-duplicate
 		// edge at all.
-		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
+		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of every pair the removal did not veto (a contradicted loser stays, showing the conflict)"
 	} else {
 		note += "; no source policy drops losers on this surface yet"
 	}

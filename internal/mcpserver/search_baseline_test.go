@@ -29,12 +29,19 @@ func normalizeIDs(s string) string {
 // assembler's trace, and it must keep passing unedited: the explain work is
 // not allowed to move a byte of the plain answer, its verdict line, or the
 // advice a scope-emptied answer carries.
+//
+// The rows are worded to be lexically distinct from one another. The save path
+// links a restatement as a `duplicate` edge at save time and #926 collapses
+// such a pair in query mode, so two production rows that read like each other
+// would come back as one and this golden would pin a two-row answer it no
+// longer gets. This test owns the answer's bytes, not the dedup, so its
+// fixtures hold claims the dedup leaves alone.
 func TestScopedSearchAnswerIsByteStable(t *testing.T) {
 	_, session := newCapSession(t)
 	saveScoped(t, session, "database pool size is 10 in development", "development")
-	saveScoped(t, session, "database pool size is 50 in production", "production")
+	saveScoped(t, session, "connection pool ceiling for the reporting database sits at fifty rows", "production")
 	saveScoped(t, session, "database failover runs in production", "production")
-	saveScoped(t, session, "database seed data is for development", "development")
+	saveScoped(t, session, "nightly job populates the warehouse with sample rows", "development")
 
 	got := normalizeIDs(searchScopedWithLimit(t, session, "database", map[string]any{"environment": "production"}, 2))
 
@@ -46,7 +53,7 @@ func TestScopedSearchAnswerIsByteStable(t *testing.T) {
 		t.Fatalf("scope-filtered answer lists %d rows, want 2:\n%s", n, got)
 	}
 	machine := got[strings.LastIndex(got, "[ghost:outcome="):]
-	const wantMachine = "[ghost:outcome=answerable reason=floor_met floor_fts_rank=3 abstain_cosine=off candidates=2 admitted=2 legs=fts:ok,vector:not_run tokens_est=19]\n"
+	const wantMachine = "[ghost:outcome=answerable reason=floor_met floor_fts_rank=3 abstain_cosine=off candidates=2 admitted=2 legs=fts:ok,vector:not_run tokens_est=27]\n"
 	if machine != wantMachine {
 		t.Errorf("verdict line changed:\n got: %q\nwant: %q", machine, wantMachine)
 	}
