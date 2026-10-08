@@ -48,7 +48,7 @@ ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost history compact [--apply]   Remove history versions that changed nothing (bounded by --before)
-ghost bench [--sweep|--context|--passive]   Run the built-in benchmark
+ghost bench [--sweep|--context|--passive|--audit]   Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
 ```
@@ -636,19 +636,19 @@ for a call and a session that belong together. Four pieces make that hold
 
 What this does not fix: the bodies of Edit, Write and Bash tool arguments are still in the
 token set, which clears the token bar (three shared distinctive words and a third of the
-memory's words) on ordinary development text. Measured on the test fixture (about 10,000
-words, twenty memories from the session's own domain, all in one call of that session),
-`TestSameDomainResidualWithTheOrderInPlace`:
-
-| the call comes | `used` of 20, bodies feed the token arm (shipped) | `used` of 20, bodies do not (variant, not shipped) |
-|---|---|---|
-| before turn 0 of 40 (session start) | 10 | 9 |
-| before turn 20 | 10 | 9 |
-| before turn 36 | 10 | 5 |
-| after the last turn | 0 | 0 |
+memory's words) on ordinary development text. It is measured by `ghost bench --audit`
+([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
+labelled offline session (forty memories, twenty of them in the session's own domain, a
+long scripted session of narrative and file bodies with hand-written labels) through
+`audit.Run` and scores the verdicts against the labels. The numbers are the bench's golden
+(`internal/bench/testdata/audit_report.golden`), not a table kept here, so they cannot go
+stale. At the time of writing, same-domain memories no turn restates are judged `used` in
+11 of 11 cases for a call before turn 0 of 40 (a session-start injection), 11 of 15 for a
+call before turn 20, and 0 for a call after the last turn, while every labelled cite and
+restatement is caught.
 
 Ordering helps only for a call made late; a session-start injection still sees the whole
-session. Excluding the bodies changes little on this fixture, because its narrative turns
+session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 9 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
 are themselves in the memories' domain, so the evidence does not support removing them
 from the token arm. Known limits that all fail toward unjudged: a session id that changes
 inside one long-lived server process keeps the old id, and subagent calls are attributed
@@ -661,8 +661,8 @@ positive verdict feeds is the operator-facing figure in `ghost context --audit`,
 `ghost_health` and the lifecycle summary, and that figure is split by `retrieval_audit.signal`
 ([#930](https://github.com/wcatz/ghost/issues/930)): the precision is the share of scored
 verdicts proved by a cited id (`signal = identifier`), and a `used` proved by wording
-overlap is printed beside it as `restated by wording (heuristic)`. The table above shows
-why: the same-domain residual is entirely the wording arm. An unknown or empty signal on a
+overlap is printed beside it as `restated by wording (heuristic)`. The bench's golden shows
+why (its `used/token` rows against its `used/identifier` rows): the same-domain residual is entirely the wording arm. An unknown or empty signal on a
 `used` row is counted as wording, the weaker claim. No schema change.
 
 ### Memory history
