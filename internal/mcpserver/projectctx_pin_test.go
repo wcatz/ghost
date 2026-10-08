@@ -209,3 +209,55 @@ func TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow(t *testing.T) {
 		t.Errorf("the resource does not report its global cut. Got:\n%s", got)
 	}
 }
+
+// TestTheGlobalProjectResourceReportsItsPinnedCut: the `_global` project id
+// renders only a Global section, and the resource has to report the cut there as
+// the tool does.
+func TestTheGlobalProjectResourceReportsItsPinnedCut(t *testing.T) {
+	st, db := newPinStore(t)
+	seedGlobalPins(t, db, 25)
+	got, err := ProjectResourceAt(context.Background(), st, "_global", pinCtxNow)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if !strings.Contains(got, "5 pinned global memories cut") {
+		t.Errorf("the _global project resource drops the cut. Got:\n%s", got)
+	}
+}
+
+// TestAFoldedProjectCutIsStatedWithoutClaimingRowsAreShown: 30 low-ranked pinned
+// project rows and 40 higher-ranked pinned globals. Not one project row is on the
+// page, so the count moves under Global in a form that says none is, on the tool
+// and on the resource alike.
+func TestAFoldedProjectCutIsStatedWithoutClaimingRowsAreShown(t *testing.T) {
+	st, db := newPinStore(t)
+	var pins []pinCtxRow
+	for i := 0; i < 30; i++ {
+		pins = append(pins, pinCtxRow{id: fmt.Sprintf("pin-%05d", i), project: "vproj", content: fmt.Sprintf("pinned project rule %02d", i), importance: 0.2, pinned: true})
+	}
+	seedPinContext(t, db, 0, pins...)
+	var globals []pinCtxRow
+	for i := 0; i < 40; i++ {
+		globals = append(globals, pinCtxRow{id: fmt.Sprintf("gpin-%04d", i), project: "_global", content: fmt.Sprintf("global pinned rule %02d", i), importance: 0.9, pinned: true})
+	}
+	seedPinContext(t, db, 0, globals...)
+	tool, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	res, err := ProjectResourceAt(context.Background(), st, "vproj", pinCtxNow)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	for name, got := range map[string]string{"tool": tool, "resource": res} {
+		if strings.Contains(got, "## Memories") {
+			t.Errorf("%s renders a Memories section with no rows. Got:\n%s", name, got)
+		}
+		if !strings.Contains(got, "30 pinned memories cut: none of them is in the block above") {
+			t.Errorf("%s does not say the 30 project rows are cut and absent. Got:\n%s", name, got)
+		}
+		if strings.Contains(got, "30 pinned memories cut: the pinned rows alone") {
+			t.Errorf("%s claims shown rows for a cut that has none. Got:\n%s", name, got)
+		}
+	}
+}

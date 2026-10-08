@@ -2143,7 +2143,7 @@ func (s *Server) registerTools() {
 			// sentence above the rows would read as though the rows were the
 			// sentence's continuation.
 			var gsb strings.Builder
-			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil, "")
+			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil, "", "")
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{
 					// `args.Limit` and NOT a fixed cap: origin/main's
@@ -3995,7 +3995,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// one heading that is true of it, which for this project is also the whole
 	// block.
 	if projectID == memory.GlobalProjectID {
-		projectContextSection(&sb, globalSectionHeading, projectContextItems(globals))
+		projectContextSection(&sb, globalSectionHeading, projectContextItems(globals)+foldedOwn+globalLine)
 	} else {
 		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
 		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
@@ -4005,7 +4005,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		if projectID == "" {
 			limit = projectContextMemoriesCap
 		}
-		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals, foldedOwn+globalLine)
+		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals, foldedOwn, globalLine)
 	}
 
 	if sb.Len() == 0 {

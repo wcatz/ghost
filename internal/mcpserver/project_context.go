@@ -267,7 +267,13 @@ func projectContextPinnedLines(res assemble.Result, projectID string, own []asse
 	ownLine = projectContextPinnedLine(ownCut, "")
 	globalLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
 	if len(own) == 0 {
-		foldedOwn, ownLine = ownLine, ""
+		// Under a heading whose rows are another project's, the section-local
+		// sentence ("the ones shown are the best-ranked of them") would claim a set
+		// of shown rows that is not there.
+		foldedOwn, ownLine = "", ""
+		if ownCut > 0 {
+			foldedOwn = fmt.Sprintf("(%d pinned memories cut: none of them is in the block above. Call ghost_memories_list to see them.)\n", ownCut)
+		}
 	}
 	return ownLine, foldedOwn, globalLine
 }
@@ -471,7 +477,7 @@ func projectContextWithNotRegistered(text, asked string) string {
 //
 // `limit` is the cap the CALLER asked for, and the two call sites pass different
 // ones on purpose — see projectContextGlobalBudget.
-func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Builder, limit int, alreadyShown, carried []assemble.Item, carriedLine string) {
+func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Builder, limit int, alreadyShown, carried []assemble.Item, foldedOwn, carriedLine string) {
 	rows := carried
 	line := carriedLine
 	if globals, err := s.projectContextGlobals(ctx, limit); err == nil {
@@ -506,7 +512,7 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 		// its count replaces the union window's rather than adding to it.
 		line = projectContextPinnedLine(cut, "global ")
 	}
-	projectContextSection(sb, globalSectionHeading, projectContextItems(rows)+line)
+	projectContextSection(sb, globalSectionHeading, projectContextItems(rows)+foldedOwn+line)
 }
 
 // projectContextEmptyNote is what the surface says about a project whose memory
