@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
@@ -99,6 +100,13 @@ type Summary struct {
 	// judged. Said on the summary because a run that judged nothing and a run that was
 	// never able to match anything look the same in a count.
 	NoSession bool
+	// NoOrder is true when none of the scanned text carried an instant (an older scanner,
+	// or a host whose lines name none), so no call could be placed before or after it and
+	// none was judged.
+	NoOrder bool
+	// UnorderedCalls counts this session's calls whose recorded instant could not be read,
+	// which are left unjudged: a call that cannot be placed has no "after".
+	UnorderedCalls int
 	// UnscopedCalls counts the project's recent calls that carry no session id, and is
 	// set only when the scanned session matched NO call. It states what was observed and
 	// nothing about why: a scoped read that found nothing, and K recent calls that no
@@ -178,6 +186,14 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 		res.NoSession = true
 		return res, nil
 	}
+	// A call is judged only against the text written AFTER it: text from before it cannot
+	// be a use of what it returned. That needs an instant on the text, so a scan with none
+	// judges nothing (every memory would otherwise come out `ignored` on text that was
+	// never placed), and a call with no instant is skipped, and an entry with none can never produce `used`.
+	if !s.Empty() && !s.Ordered() {
+		res.NoOrder = true
+		return res, nil
+	}
 	records, err := store.RetrievalRecordsForSession(ctx, projectID, s.SessionID(), CallWindow)
 	if err != nil {
 		return res, fmt.Errorf("audit: read retrieval records: %w", err)
@@ -203,7 +219,18 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 	var kept []placed
 	bySource := map[string]*SourceSummary{}
 
+	views := map[int64]*Signals{}
 	for _, rec := range records {
+		cutoff, ok := recordedInstant(rec.RecordedAt)
+		if !ok {
+			res.UnorderedCalls++
+			continue
+		}
+		view := views[cutoff.UnixMilli()]
+		if view == nil {
+			view = s.Since(cutoff)
+			views[cutoff.UnixMilli()] = view
+		}
 		sum := bySource[rec.Source]
 		if sum == nil {
 			sum = &SourceSummary{Source: rec.Source}
@@ -254,7 +281,7 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 			}
 			judged = append(judged, Judged{MemoryID: id, Content: c})
 		}
-		for _, v := range Compare(s, judged) {
+		for _, v := range Compare(view, judged) {
 			res.Verdicts++
 			res.VerdictList = append(res.VerdictList, v)
 			kept = append(kept, placed{verdict: v, record: rec.RowID, source: rec.Source, sess: rec.SessionID,
@@ -300,6 +327,28 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 		}
 	}
 	return res, nil
+}
+
+// recordedInstant is the earliest instant text can be said to come AFTER a call
+// recorded at the given store timestamp.
+//
+// The store stamps a call to the second and a scanned line is stamped to the
+// millisecond, so a line from the same second may have been written before the call
+// (the call's own query, for one). The call is therefore taken at the END of its second:
+// text must be written after it, and a line inside the call's own second is not counted.
+// That can drop an answer given within a second of the call, which can leave the memory
+// `ignored` and never `used`. An empty or unreadable stamp has no instant at all.
+func recordedInstant(stamp string) (time.Time, bool) {
+	stamp = strings.TrimSpace(stamp)
+	if stamp == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, time.RFC3339Nano} {
+		if t, err := time.ParseInLocation(layout, stamp, time.UTC); err == nil {
+			return t.Truncate(time.Second).Add(time.Second), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // count files one verdict under its bucket.
@@ -416,6 +465,14 @@ func (r Summary) String() string {
 	if r.NoSession {
 		b.WriteString("  the scanned session carried no session id, so no call could be matched to it " +
 			"and none was judged\n")
+	}
+	if r.NoOrder {
+		b.WriteString("  the scanned text carried no instants, so no call could be placed before or " +
+			"after it and none was judged\n")
+	}
+	if r.UnorderedCalls > 0 {
+		fmt.Fprintf(&b, "  %d call(s) of this session carry no readable instant and were not judged\n",
+			r.UnorderedCalls)
 	}
 	if r.UnscopedCalls > 0 {
 		fmt.Fprintf(&b, "  this session has no recorded calls in this project; %d of the project's recent "+

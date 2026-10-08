@@ -9,9 +9,12 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -145,6 +148,17 @@ func TestTheSidecarCarriesTheSession(t *testing.T) {
 // what makes it thousands of words long. Deterministic, so a failure is reproducible.
 func devSessionText(t *testing.T, s *Signals) (words int) {
 	t.Helper()
+	return devSessionTextFrom(t, s, 0, true)
+}
+
+// devSessionTextFrom is devSessionText with an order: turn i is written i-callTurn
+// minutes after the call the caller is about to record (so turns before callTurn were
+// written before it). feedArgs false leaves the Edit/Write bodies out of the signals
+// altogether, which is the variant "tool arguments stop feeding the token arm", measured
+// here and not shipped.
+func devSessionTextFrom(t *testing.T, s *Signals, callTurn int, feedArgs bool) (words int) {
+	t.Helper()
+	now := time.Now()
 	narrative := []string{
 		"I will read the assembler first and then change how the retrieval record is written by the sink",
 		"The failing test shows the verdicts column holds stale rows, so the reader needs a session predicate",
@@ -164,12 +178,18 @@ func devSessionText(t *testing.T, s *Signals) (words int) {
 		return b.String()
 	}
 	for i := 0; i < 40; i++ {
+		// A minute between turns, offset half a minute so no turn falls in the second the
+		// call is recorded in (the call is taken at the end of that second): a turn at or
+		// after callTurn is clearly after it, one before is clearly before.
+		s.SetAt(now.Add(time.Duration(i-callTurn)*time.Minute + 30*time.Second))
 		text := narrative[i%len(narrative)]
 		s.AddProse(text)
 		words += len(strings.Fields(text))
 		// Edit/Write-shaped tool arguments: one file body per call.
 		args := body(4)
-		s.AddToolArgs(args)
+		if feedArgs {
+			s.AddToolArgs(args)
+		}
 		words += len(strings.Fields(args))
 	}
 	return words
@@ -332,26 +352,283 @@ func TestSameDomainMemoriesInTheSameSessionRemainProblemB(t *testing.T) {
 	t.Logf("remaining problem B: same session, same domain, %d words of text: %d of %d memories judged used", words, used, res.Verdicts)
 }
 
-// TestRunDoesNotJudgeCallsBeforeTheSessionBegins is the documented follow-up to the
-// session scope: a call is judged against the text written AFTER it, and the scanned
-// signals carry no order or timestamp to say which text that is. Here the text is
-// scanned (written) before the call is recorded, so a memory the call kept cannot have
-// been used in it; today it is judged `used`.
+// TestSameDomainResidualWithTheOrderInPlace measures the residual problem B after a call
+// is judged only against the text written after it, for the call at the start of the
+// session (a session-start injection: every turn is after it), in the middle, and late,
+// and for both readings of the token arm: tool-call bodies feeding it (shipped) and not
+// feeding it (a variant measured here and NOT shipped). The numbers are logged for the
+// record; what is asserted is only that moving the call later, or taking the bodies out,
+// never produces MORE `used`.
+func TestSameDomainResidualWithTheOrderInPlace(t *testing.T) {
+	measure := func(callTurn int, feedArgs bool) (used, judged int) {
+		store, projectID := auditStore(t)
+		var ids []string
+		for i, c := range devMemories() {
+			id := fmt.Sprintf("DEV%02d", i)
+			seedMemory(t, store, projectID, id, c)
+			ids = append(ids, id)
+		}
+		_ = recordCallIn(t, store, projectID, testSession, ids...)
+		s := newTestSignals(t)
+		devSessionTextFrom(t, s, callTurn, feedArgs)
+		res, err := Run(context.Background(), store, projectID, s)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		for _, o := range res.byMemory() {
+			if o == OutcomeUsed {
+				used++
+			}
+		}
+		return used, res.Verdicts
+	}
+	prev := map[bool]int{true: 21, false: 21}
+	for _, callTurn := range []int{0, 20, 36, 40} {
+		with, n := measure(callTurn, true)
+		without, _ := measure(callTurn, false)
+		t.Logf("call before turn %2d of 40: %d of %d used with tool bodies feeding the token arm, %d of %d without", callTurn, with, n, without, n)
+		if with > prev[true] || without > prev[false] || without > with {
+			t.Errorf("call before turn %d: used with=%d without=%d (previous %d / %d): a later call or fewer bodies must never add a `used`", callTurn, with, without, prev[true], prev[false])
+		}
+		prev[true], prev[false] = with, without
+	}
+}
+
+// TestRunDoesNotJudgeCallsBeforeTheSessionBegins: a call is judged against the text
+// written AFTER it. Here the text is written an hour before the call is recorded, so a
+// memory the call kept cannot have been used in it. The same text written after the call
+// is a use, which is what keeps the test from passing by judging nothing.
 func TestRunDoesNotJudgeCallsBeforeTheSessionBegins(t *testing.T) {
-	t.Skip("follow-up to #648: scanned signals have no order or timestamp, so a call is still judged against the whole session's text, including text written before it")
+	for _, tc := range []struct {
+		name string
+		at   time.Duration
+		want Outcome
+	}{
+		{"written before the call", -time.Hour, OutcomeIgnored},
+		{"written after the call", time.Hour, OutcomeUsed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, projectID := auditStore(t)
+			seedMemory(t, store, projectID, "LATE", memContent)
+
+			s := newTestSignals(t)
+			s.SetAt(time.Now().Add(tc.at))
+			s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+			_ = recordCallIn(t, store, projectID, testSession, "LATE")
+
+			res, err := Run(context.Background(), store, projectID, s)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := res.byMemory()["LATE"]; got != tc.want {
+				t.Fatalf("LATE judged %q for text %s, want %q", got, tc.name, tc.want)
+			}
+		})
+	}
+}
+
+// TestEveryArmJudgesOnlyTextAfterTheCall: the id, token, save and negation arms all read
+// the view of the signals after the call, so none of them can be satisfied by earlier text.
+func TestEveryArmJudgesOnlyTextAfterTheCall(t *testing.T) {
+	const id = "0123456789ABCDEF0123456789ABCDEF"
+	add := map[string]func(s *Signals){
+		"identifier": func(s *Signals) { s.AddProse("as noted in " + id + " the plugin is fine") },
+		"token":      func(s *Signals) { s.AddProse("the opencode plugin materializes its transcript under mkdtemp") },
+		"save":       func(s *Signals) { s.AddSaveArgs("the opencode plugin materializes its transcript under mkdtemp") },
+		"negation": func(s *Signals) {
+			s.AddProse("That is wrong: the opencode plugin materializes its transcript under mkdtemp and rm-rfs the directory on hook close")
+		},
+	}
+	for name, fn := range add {
+		t.Run(name, func(t *testing.T) {
+			judge := func(offset time.Duration) Outcome {
+				store, projectID := auditStore(t)
+				seedMemory(t, store, projectID, id, memContent)
+				s := newTestSignals(t)
+				s.SetAt(time.Now().Add(offset))
+				fn(s)
+				_ = recordCallIn(t, store, projectID, testSession, id)
+				res, err := Run(context.Background(), store, projectID, s)
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				return res.byMemory()[id]
+			}
+			before, after := judge(-time.Hour), judge(time.Hour)
+			if before != OutcomeIgnored {
+				t.Errorf("%s arm: text written before the call gave %q, want %q", name, before, OutcomeIgnored)
+			}
+			if after == OutcomeIgnored {
+				t.Errorf("%s arm: the same text written after the call gave %q; the arm never fires, so the check above proves nothing", name, after)
+			}
+		})
+	}
+}
+
+// TestTextWithNoInstantIsNeverEvidence: a scanner that could not place a line carries its
+// words but the run never counts them for any call, and a scan with no placed text at all
+// judges nothing rather than filing every memory as ignored.
+func TestTextWithNoInstantIsNeverEvidence(t *testing.T) {
 	store, projectID := auditStore(t)
-	seedMemory(t, store, projectID, "LATE", memContent)
+	seedMemory(t, store, projectID, "UNPLACED", memContent)
+	_ = recordCallIn(t, store, projectID, testSession, "UNPLACED")
 
-	s := newTestSignals(t)
-	s.AddProse("the opencode plugin materializes its transcript under mkdtemp") // written first
-	_ = recordCallIn(t, store, projectID, testSession, "LATE")                  // retrieved afterwards
-
+	s := NewWithHasher(testHasher)
+	s.SetSessionID(testSession)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp") // no SetAt
 	res, err := Run(context.Background(), store, projectID, s)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := res.byMemory()["LATE"]; got == OutcomeUsed {
-		t.Fatalf("LATE judged %q from text written before the call that kept it", got)
+	if res.Verdicts != 0 || !res.NoOrder {
+		t.Fatalf("verdicts = %d, NoOrder = %v: a scan with no instants must judge nothing and say so", res.Verdicts, res.NoOrder)
+	}
+	if !strings.Contains(res.String(), "no instants") {
+		t.Errorf("the summary does not name the unplaced scan:\n%s", res)
+	}
+
+	// Mixed: the placed line is after the call, the unplaced one carries the memory's words.
+	mixed := NewWithHasher(testHasher)
+	mixed.SetSessionID(testSession)
+	mixed.AddToolArgs("the opencode plugin materializes its transcript under mkdtemp") // unplaced
+	mixed.SetAt(time.Now().Add(time.Hour))
+	mixed.AddProse("unrelated narrative about the weather")
+	res, err = Run(context.Background(), store, projectID, mixed)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := res.byMemory()["UNPLACED"]; got != OutcomeIgnored {
+		t.Fatalf("an unplaced line counted as evidence: judged %q", got)
+	}
+}
+
+// TestACallWithNoInstantIsLeftUnjudged: a record whose recorded_at is empty or unreadable
+// has no "after", so it is not judged, whatever the text says.
+func TestACallWithNoInstantIsLeftUnjudged(t *testing.T) {
+	for _, stamp := range []string{"", "not a time"} {
+		store, projectID, dbPath := reportStore(t)
+		_ = recordCallIn(t, store, projectID, testSession, "USEDID")
+		db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatalf("open a second handle: %v", err)
+		}
+		if _, err := db.Exec(`UPDATE retrieval_record SET recorded_at = ? WHERE project_id = ?`, stamp, projectID); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		_ = db.Close()
+		s := newTestSignals(t)
+		s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+		res, err := Run(context.Background(), store, projectID, s)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.Verdicts != 0 || res.UnorderedCalls != 1 {
+			t.Errorf("recorded_at %q: verdicts = %d, unordered calls = %d, want 0 and 1", stamp, res.Verdicts, res.UnorderedCalls)
+		}
+		if !strings.Contains(res.String(), "no readable instant") {
+			t.Errorf("recorded_at %q: the summary does not say the call was left unjudged:\n%s", stamp, res)
+		}
+	}
+}
+
+// TestTheSidecarCarriesEveryInstant: the scan is in the hook and the comparison in the
+// detached child, so the order has to cross the gap with the fingerprints, for all four
+// kinds of signal.
+func TestTheSidecarCarriesEveryInstant(t *testing.T) {
+	const id = "0123456789ABCDEF0123456789ABCDEF"
+	s := newTestSignals(t)
+	at := time.Now().Add(-90 * time.Minute).Truncate(time.Millisecond)
+	s.SetAt(at)
+	s.AddProse("That is wrong: " + id + " is stale and should be ignored")
+	s.AddSaveArgs("a saved sentence about the sidecar format")
+	s.SetAt(at.Add(time.Minute))
+	s.AddToolArgs("the materialized transcript lives under mkdtemp")
+
+	path, err := WriteSidecar(t.TempDir(), s)
+	if err != nil {
+		t.Fatalf("WriteSidecar: %v", err)
+	}
+	back, err := ReadSidecar(path, testHasher)
+	if err != nil {
+		t.Fatalf("ReadSidecar: %v", err)
+	}
+	for _, cutoff := range []time.Time{at, at.Add(30 * time.Second), at.Add(2 * time.Minute)} {
+		want, got := s.Since(cutoff), back.Since(cutoff)
+		if len(want.prose) != len(got.prose) || len(want.saves) != len(got.saves) ||
+			len(want.ids) != len(got.ids) || len(want.negated) != len(got.negated) {
+			t.Errorf("view at %v differs after a round trip: want %d/%d/%d/%d got %d/%d/%d/%d (prose/saves/ids/neg)",
+				cutoff, len(want.prose), len(want.saves), len(want.ids), len(want.negated),
+				len(got.prose), len(got.saves), len(got.ids), len(got.negated))
+		}
+	}
+	if n := len(back.Since(at.Add(30 * time.Second)).prose); n == 0 || n == len(back.prose) {
+		t.Errorf("the view after the first turn holds %d of %d prose tokens: the instants did not survive", n, len(back.prose))
+	}
+	if len(back.Since(at.Add(2*time.Minute)).prose) != 0 {
+		t.Errorf("a cutoff after every line still holds prose")
+	}
+}
+
+// TestASidecarOfAnOlderVersionIsRefusedByName: v3 carried no instants, so reading it as
+// v4 would leave every signal unplaced. It is refused, naming the versions.
+func TestASidecarOfAnOlderVersionIsRefusedByName(t *testing.T) {
+	if SidecarHeader == sidecarV3 {
+		t.Fatal("the header was not bumped")
+	}
+	path := t.TempDir() + "/ghost-audit-old.signals"
+	if err := writeFileString(path, sidecarV3+"\nprose 0123456789abcdef\nsession \"s\"\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := ReadSidecar(path, testHasher)
+	if err == nil {
+		t.Fatal("ReadSidecar accepted a v3 file; every signal in it would be unplaced")
+	}
+	for _, want := range []string{SidecarHeader, sidecarV3} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %q", err, want)
+		}
+	}
+	// A v4 line with no instant is refused, not defaulted.
+	if err := writeFileString(path, SidecarHeader+"\nprose 0123456789abcdef\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := ReadSidecar(path, testHasher); err == nil {
+		t.Error("a prose line with no instant was accepted")
+	}
+}
+
+// TestSweepSidecarsDeletesOlderVersionSidecars: a file an older build wrote can never be
+// read again, so the sweep takes it (once stale) instead of leaving it behind for good.
+func TestSweepSidecarsDeletesOlderVersionSidecars(t *testing.T) {
+	dir := t.TempDir()
+	for name, header := range map[string]string{
+		"ghost-audit-v1.signals": sidecarV1, "ghost-audit-v2.signals": sidecarV2,
+		"ghost-audit-v3.signals": sidecarV3, "ghost-audit-v4.signals": SidecarHeader,
+	} {
+		p := dir + "/" + name
+		if err := writeFileString(p, header+"\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := touchOlderThan(p, 2*sidecarStaleAfter); err != nil {
+			t.Fatalf("age: %v", err)
+		}
+	}
+	foreign := dir + "/ghost-audit-foreign.signals"
+	if err := writeFileString(foreign, "# somebody else's file\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := touchOlderThan(foreign, 2*sidecarStaleAfter); err != nil {
+		t.Fatal(err)
+	}
+	n, err := SweepSidecars(dir, sidecarStaleAfter)
+	if err != nil {
+		t.Fatalf("SweepSidecars: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("swept %d, want the 4 sidecars of every version", n)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("a file that is not a sidecar was removed: %v", err)
 	}
 }
 

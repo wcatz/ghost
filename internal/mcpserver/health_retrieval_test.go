@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -82,7 +83,8 @@ func judgeRetrievalHealth(t *testing.T, store *memory.Store, degraded bool) {
 		t.Fatalf("NewHasher: %v", err)
 	}
 	s := audit.NewWithHasher(hasher)
-	s.SetSessionID("s1") // the session the fixture's calls were made in
+	s.SetSessionID("s1")               // the session the fixture's calls were made in
+	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse(retrievalHealthContent)
 	if degraded {
 		s.MarkDegraded("transcript truncated")
@@ -151,7 +153,8 @@ func TestHealthReportsRetrievalFiguresPerSource(t *testing.T) {
 		t.Fatalf("NewHasher: %v", err)
 	}
 	s := audit.NewWithHasher(hasher)
-	s.SetSessionID("s1") // the session the fixture's calls were made in
+	s.SetSessionID("s1")               // the session the fixture's calls were made in
+	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse(retrievalHealthContent)
 	if _, err := audit.Run(ctx, store, "abc123", s); err != nil {
 		t.Fatalf("audit.Run: %v", err)

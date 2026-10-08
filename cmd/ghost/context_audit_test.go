@@ -404,7 +404,8 @@ func seedAuditCLIStore(t *testing.T, dataHome string) string {
 	}
 	// One judged verdict, so the report has a scored figure as well as the calls.
 	s := audit.NewWithHasher(mustHasher(t))
-	s.SetSessionID("s1") // the session the fixture's calls were made in
+	s.SetSessionID("s1")               // the session the fixture's calls were made in
+	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse("the scratch directory is reaped before each lifecycle run begins")
 	if _, err := audit.Run(ctx, store, "projx", s); err != nil {
 		t.Fatalf("audit.Run: %v", err)
