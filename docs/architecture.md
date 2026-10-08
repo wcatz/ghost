@@ -610,7 +610,7 @@ for a call and a session that belong together. Four pieces make that hold
   server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
   record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
-  signals and the sidecar (a `session` line; header v4 since the order below). `audit.Run` judges only what
+  signals and the sidecar (a `session` line; header v4 for the order below, v5 since the turns were grouped, older files refused by name). `audit.Run` judges only what
   `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
   the `CallWindow` limit, and an empty id judges nothing. When that read finds nothing it
   makes one more bounded, project-wide read, only to count the recent calls that carry no
@@ -625,10 +625,14 @@ for a call and a session that belong together. Four pieces make that hold
 - **A call is judged only against text written after it.** Every scanner stamps what it
   reads with the line's own instant (Claude and codex `timestamp`, opencode part or
   message `time`), the signals keep the latest instant of each fingerprint and id, and the
-  sidecar (header v4) carries them; v3, v2 and v1 are refused by name. `Run` takes a
+  sidecar (header v5) carries them, one `turn` line per instant; v4, v3, v2 and v1 are refused by name. `Run` takes a
   call's `recorded_at` as the end of its second (the store stamps to the second, a line to
   the millisecond, so a same-second line may predate the call) and judges it against
-  `Signals.Since(that instant)`, for all four arms. Anything unplaced can never make a
+  `Signals.Since(that instant)`, for all four arms. Within that view the token arm is
+  asked ONE TURN AT A TIME (#932): `matches` looks for a single turn whose own words clear
+  the bar, so domain wording the session spread over forty turns is not a use of anything,
+  and the `turn` lines are what carries the grouping across the gap to the detached child.
+  Anything unplaced can never make a
   memory `used`: an entry with no instant never counts, a scan with none judges nothing
   (`Summary.NoOrder`), a call with an empty or unreadable `recorded_at` is skipped
   (`Summary.UnorderedCalls`), and a scan that carried unplaced lines is marked degraded.
@@ -643,12 +647,18 @@ long scripted session of narrative and file bodies with hand-written labels) thr
 `audit.Run` and scores the verdicts against the labels. The numbers are the bench's golden
 (`internal/bench/testdata/audit_report.golden`), not a table kept here, so they cannot go
 stale. At the time of writing, same-domain memories no turn restates are judged `used` in
-11 of 11 cases for a call before turn 0 of 40 (a session-start injection), 11 of 15 for a
+10 of 11 cases for a call before turn 0 of 40 (a session-start injection), 10 of 15 for a
 call before turn 20, and 0 for a call after the last turn, while every labelled cite and
-restatement is caught.
+restatement is caught. The residual narrowed when the token arm was restricted to ONE
+turn (#932): the bar has to be cleared by the words that arrived together, so the four
+memories the corpus spreads across turns went from judged `used` 4 of 4 to 0 of 4, the
+session-start `used/token` false positives went 15 → 10 and `used` precision 0.318 →
+0.412, with recall 1.000 unchanged. What is left is a single turn that happens to repeat
+a third of an own-domain memory, which is the shape the floor and the fraction were
+chosen for.
 
 Ordering helps only for a call made late; a session-start injection still sees the whole
-session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 9 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
+session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 7 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
 are themselves in the memories' domain, so the evidence does not support removing them
 from the token arm. Known limits that all fail toward unjudged: a session id that changes
 inside one long-lived server process keeps the old id, and subagent calls are attributed

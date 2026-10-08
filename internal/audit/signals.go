@@ -35,7 +35,14 @@ const (
 	// placed on either side of a call. A v3 file parses and would carry no instants, so
 	// every one of its signals would be unplaceable and the audit would judge nothing
 	// from it; refusing the version says so instead, and costs that turn's audit.
-	SidecarHeader = "# ghost-audit-signals v4"
+	//
+	// v5 because prose is now grouped by TURN (#932): the token arm is cleared within
+	// one turn, so what a `prose` line cannot say is which of its fingerprints arrived
+	// together — and a v4 file's pooled prose would read back as one bag over the whole
+	// session, which is the union this build refuses. Refusing the version costs that
+	// turn's audit rather than filing its verdicts on the union.
+	SidecarHeader = "# ghost-audit-signals v5"
+	sidecarV4     = "# ghost-audit-signals v4"
 	sidecarV3     = "# ghost-audit-signals v3"
 	sidecarV2     = "# ghost-audit-signals v2"
 	sidecarV1     = "# ghost-audit-signals v1"
@@ -85,6 +92,17 @@ type Signals struct {
 	idsAt   []int64
 	proseAt []int64
 	savesAt []int64
+	// turns is the agent's own words grouped by the instant they arrived at: one turn
+	// per SetAt instant the scanner stepped through, with the fingerprints it carried
+	// de-duplicated WITHIN that turn. It is what the token arm judges (#932) — a
+	// restatement is local, so the bar has to be cleared inside one turn and never by
+	// the union of the session — while prose above stays the pooled view for Empty,
+	// Unplaced and Ordered, which count entries rather than judge wording.
+	//
+	// A turn whose at is 0 is carried like every other unplaced entry and is never
+	// evidence: matches skips it, so text the scanner could not place cannot clear the
+	// bar however much of a memory it repeats.
+	turns []turn
 	// at is the instant (Unix milliseconds) the scanner is currently reading, set with
 	// SetAt before each line and stamped on everything added until it changes. 0 until
 	// set, which places nothing.
@@ -99,6 +117,20 @@ type Signals struct {
 	// claim about ONE session's text: Run judges only the calls recorded under this id,
 	// and an empty one judges none (see Run).
 	session string
+}
+
+// turn is everything the agent wrote under ONE SetAt instant: one assistant line of
+// a Claude record, one opencode message's parts, one codex response_item. The
+// scanners already step the instant per line or part, so the grouping happens here
+// rather than in them.
+//
+// fps is de-duplicated within the turn, because the token arm counts DISTINCT
+// shared fingerprints and a sentence repeating one word must not fill the bar.
+type turn struct {
+	// at is when the turn was written, Unix milliseconds, 0 when unplaced.
+	at int64
+	// fps are the turn's own fingerprints, in first-seen order.
+	fps []string
 }
 
 // SetSessionID names the session these signals were scanned from. Set once by the
@@ -201,6 +233,15 @@ func (s *Signals) Since(cutoff time.Time) *Signals {
 	for _, seg := range s.negated {
 		if seg.at > 0 && seg.at >= from {
 			out.negated = append(out.negated, seg)
+		}
+	}
+	// Turns are filtered exactly as negated sentences are: a turn written before the
+	// call is text the call cannot have been used in, and a turn with no instant is
+	// no turn's after. The view keeps the turn whole rather than re-stamping it, so
+	// the arm still judges the words together or not at all.
+	for _, tn := range s.turns {
+		if tn.at > 0 && tn.at >= from {
+			out.turns = append(out.turns, tn)
 		}
 	}
 	return out
@@ -333,10 +374,30 @@ func (s *Signals) AddID(id string) {
 // the token arm's floor of three is what stops a lone id from standing in for a
 // memory's own wording — TestAddProseKeepsIDsOutOfTheTokenSet pins that.
 func (s *Signals) addWords(text string) {
-	s.addAt(&s.prose, &s.proseAt, s.h.DistinctTokens(text))
+	fps := s.h.DistinctTokens(text)
+	s.addAt(&s.prose, &s.proseAt, fps)
+	s.addToTurn(fps)
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
+}
+
+// addToTurn files the fingerprints under the scanner's current instant, appending
+// to the open turn when the instant is unchanged and opening a new one when it
+// moves. That is the whole definition of a turn: everything one SetAt stamped,
+// nothing else.
+//
+// The instant is compared rather than remembered separately, so a scanner that
+// steps back (or repeats an instant) merges the same text the way one that never
+// moved would, and a turn with at == 0 — text no timestamp could place — is still
+// carried, so Unplaced counts it and the sidecar can say it happened.
+func (s *Signals) addToTurn(fps []string) {
+	if n := len(s.turns); n > 0 && s.turns[n-1].at == s.at {
+		addUnseen(&s.turns[n-1].fps, fps)
+		return
+	}
+	s.turns = append(s.turns, turn{at: s.at})
+	addUnseen(&s.turns[len(s.turns)-1].fps, fps)
 }
 
 // AddProse records the agent's own words: its prose, and the arguments of the
@@ -517,18 +578,32 @@ func WriteSidecar(dir string, s *Signals) (string, error) {
 	for i, id := range s.ids {
 		buf.WriteString("id " + id + " " + atField(s.idsAt, i) + "\n")
 	}
-	for i, fp := range s.prose {
-		buf.WriteString("prose " + fp + " " + atField(s.proseAt, i) + "\n")
+	// One line per turn, instant first, so the file says which words arrived
+	// together (#932). prose is NOT written: it is the pooled view, rebuildable
+	// from the turns on read, and a `prose` line in a v5 file is refused rather
+	// than read as one bag over the whole session.
+	for _, tn := range s.turns {
+		// Straight into the buffer rather than into a `line` that is
+		// concatenated per fingerprint: the sidecar is written on the stop-hook
+		// path, which is synchronous, and one turn can hold every distinct
+		// token of a large assistant line — a `+=` there is quadratic in the
+		// turn's own size.
+		buf.WriteString("turn " + strconv.FormatInt(tn.at, 10))
+		for _, fp := range tn.fps {
+			buf.WriteByte(' ')
+			buf.WriteString(fp)
+		}
+		buf.WriteByte('\n')
 	}
 	for i, fp := range s.saves {
 		buf.WriteString("save " + fp + " " + atField(s.savesAt, i) + "\n")
 	}
 	for _, seg := range s.negated {
-		line := "neg " + strconv.FormatInt(seg.at, 10)
+		buf.WriteString("neg " + strconv.FormatInt(seg.at, 10))
 		if f := seg.field(); f != "" {
-			line += " " + f
+			buf.WriteString(" " + f)
 		}
-		buf.WriteString(line + "\n")
+		buf.WriteByte('\n')
 	}
 	if s.degraded != "" {
 		buf.WriteString("degraded " + strconv.QuoteToASCII(s.degraded) + "\n")
@@ -572,8 +647,8 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 		// file beside it is not necessarily one this package wrote, so the error
 		// names the formats rather than echoing whatever the file's first line
 		// says.
-		return nil, fmt.Errorf("audit: sidecar header is not %s (%s, %s and %s are previous formats this build cannot read)",
-			SidecarHeader, sidecarV3, sidecarV2, sidecarV1)
+		return nil, fmt.Errorf("audit: sidecar header is not %s (%s, %s, %s and %s are previous formats this build cannot read)",
+			SidecarHeader, sidecarV4, sidecarV3, sidecarV2, sidecarV1)
 	}
 	s := &Signals{h: h}
 	for i, line := range bytes.Split(rest, []byte("\n")) {
@@ -592,7 +667,32 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 			}
 			s.ids = append(s.ids, strings.ToUpper(id))
 			s.idsAt = append(s.idsAt, at)
-		case "prose", "save":
+		case "turn":
+			head, fps, hasFPS := strings.Cut(string(value), " ")
+			at, err := strconv.ParseInt(head, 10, 64)
+			if err != nil || at < 0 {
+				return nil, fmt.Errorf("audit: sidecar line %d: %q is not an instant", i+1, head)
+			}
+			tn := turn{at: at}
+			if hasFPS {
+				fields := strings.Fields(fps)
+				for _, text := range fields {
+					fp, ok := unhex64(text)
+					if !ok {
+						return nil, fmt.Errorf("audit: sidecar line %d: %q is not a token fingerprint", i+1, text)
+					}
+					tn.fps = append(tn.fps, fp)
+				}
+				// The pooled prose view is rebuilt exactly as the scanner built
+				// it — through addAt, under this turn's instant — so a Signals
+				// read back is judged like one written, entry for entry, and the
+				// latest instant still wins.
+				s.at = at
+				s.addAt(&s.prose, &s.proseAt, tn.fps)
+				s.at = 0
+			}
+			s.turns = append(s.turns, tn)
+		case "save":
 			text, at, err := cutAt(string(value))
 			if err != nil {
 				return nil, fmt.Errorf("audit: sidecar line %d: %w", i+1, err)
@@ -601,13 +701,8 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 			if !ok {
 				return nil, fmt.Errorf("audit: sidecar line %d: %q is not a token fingerprint", i+1, text)
 			}
-			if string(kind) == "prose" {
-				s.prose = append(s.prose, fp)
-				s.proseAt = append(s.proseAt, at)
-			} else {
-				s.saves = append(s.saves, fp)
-				s.savesAt = append(s.savesAt, at)
-			}
+			s.saves = append(s.saves, fp)
+			s.savesAt = append(s.savesAt, at)
 		case "neg":
 			head, rest, _ := strings.Cut(string(value), " ")
 			at, err := strconv.ParseInt(head, 10, 64)

@@ -569,31 +569,143 @@ func TestTheSidecarCarriesEveryInstant(t *testing.T) {
 	}
 }
 
-// TestASidecarOfAnOlderVersionIsRefusedByName: v3 carried no instants, so reading it as
-// v4 would leave every signal unplaced. It is refused, naming the versions.
+// TestTheSidecarCarriesEveryTurn: the scan is in the hook and the comparison in the
+// detached child, so the turns have to cross the gap — a sidecar that flattened them
+// back into one bag would let the union judge where a turn must (wcatz/ghost#932).
+//
+// Three turns: the first carries a whole memory, which both the turn and the union
+// catch; the second and third carry three words each of a twelve-word memory, which
+// only the union clears. Judged identically before and after the round trip, both
+// ways.
+func TestTheSidecarCarriesEveryTurn(t *testing.T) {
+	at := time.Now().Add(-90 * time.Minute).Truncate(time.Millisecond)
+	s := newTestSignals(t)
+	s.SetAt(at)
+	s.AddProse(memContent)
+	s.SetAt(at.Add(time.Minute))
+	s.AddProse("sweep migration assembler")
+	s.SetAt(at.Add(2 * time.Minute))
+	s.AddProse("verdicts kestrel gateway")
+
+	whole := memTokens(t)
+	split := testTokens("sweep migration assembler verdicts kestrel gateway rotates bearer nightly upstream proxies stale")
+	if len(split) != 12 {
+		t.Fatalf("split fixture = %d tokens, want 12", len(split))
+	}
+	if !clearsTokenBar(sharedTokens(s.prose, split), len(split)) {
+		t.Fatalf("precondition: the union of the two later turns clears the bar, so only the union could call this used")
+	}
+	if s.matches(split) {
+		t.Fatal("precondition: a turn already clears the split memory's bar, so this fixture cannot tell the readings apart")
+	}
+	if !s.matches(whole) {
+		t.Fatal("precondition: the turn carrying the whole memory does not clear its bar")
+	}
+
+	path, err := WriteSidecar(t.TempDir(), s)
+	if err != nil {
+		t.Fatalf("WriteSidecar: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the file: %v", err)
+	}
+	if n := strings.Count(string(raw), "\nturn "); n != 3 {
+		t.Errorf("the sidecar carries %d turn lines, want 3:\n%s", n, raw)
+	}
+	if strings.Contains(string(raw), "\nprose ") {
+		t.Errorf("the sidecar still carries prose lines, which cannot tell one turn from another:\n%s", raw)
+	}
+	back, err := ReadSidecar(path, testHasher)
+	if err != nil {
+		t.Fatalf("ReadSidecar: %v", err)
+	}
+	if !back.matches(whole) {
+		t.Errorf("a turn that carried a whole memory was judged ignored after the round trip")
+	}
+	if back.matches(split) {
+		t.Errorf("a split only the union clears was judged used/%s after the round trip", SignalToken)
+	}
+	if !clearsTokenBar(sharedTokens(back.prose, split), len(split)) {
+		t.Errorf("the union of the round-tripped prose no longer clears the split memory's bar: the turns did not survive")
+	}
+}
+
+// TestUnplacedTextIsNeverATurnThatCounts: a turn under SetAt(time.Time{}) is counted
+// by Unplaced() — the scan is partly unplaced and says so — and never clears the
+// token bar, however much of a memory it carries (wcatz/ghost#932). The union check
+// keeps the fixture honest: the words are there and would clear it.
+func TestUnplacedTextIsNeverATurnThatCounts(t *testing.T) {
+	s := NewWithHasher(testHasher)
+	s.SetAt(time.Time{})
+	s.AddProse(memContent)
+
+	toks := memTokens(t)
+	if !clearsTokenBar(sharedTokens(s.prose, toks), len(toks)) {
+		t.Fatalf("precondition: the unplaced text alone would clear the bar, so this fixture proves nothing")
+	}
+	if n := s.Unplaced(); n == 0 {
+		t.Errorf("Unplaced() = 0, want the prose written with no instant")
+	}
+	if s.matches(toks) {
+		t.Errorf("a turn with no instant cleared the token bar: unplaced text was judged evidence")
+	}
+	// Placed text clears, so the two differ by the instant and nothing else.
+	s.SetAt(time.Now())
+	s.AddProse(memContent)
+	if !s.matches(toks) {
+		t.Errorf("the same words under an instant did not clear the bar")
+	}
+}
+
+// TestASidecarOfAnOlderVersionIsRefusedByName: a v4 file carried no turns, so reading
+// it as v5 would leave the token arm with one bag over the whole session — the very
+// union this build refuses. It is refused by name, alongside the older formats.
 func TestASidecarOfAnOlderVersionIsRefusedByName(t *testing.T) {
-	if SidecarHeader == sidecarV3 {
+	if SidecarHeader == sidecarV4 {
 		t.Fatal("the header was not bumped")
 	}
 	path := t.TempDir() + "/ghost-audit-old.signals"
-	if err := writeFileString(path, sidecarV3+"\nprose 0123456789abcdef\nsession \"s\"\n"); err != nil {
+	if err := writeFileString(path, sidecarV3+"\nprose 0123456789abcdef 1\nsession \"s\"\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	_, err := ReadSidecar(path, testHasher)
 	if err == nil {
 		t.Fatal("ReadSidecar accepted a v3 file; every signal in it would be unplaced")
 	}
-	for _, want := range []string{SidecarHeader, sidecarV3} {
+	for _, want := range []string{SidecarHeader, sidecarV4, sidecarV3} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not name %q", err, want)
 		}
 	}
-	// A v4 line with no instant is refused, not defaulted.
-	if err := writeFileString(path, SidecarHeader+"\nprose 0123456789abcdef\n"); err != nil {
+	// A v4 file: readable by the build that wrote it, and refused here because its
+	// prose lines say nothing about which turn any word arrived in.
+	if err := writeFileString(path, sidecarV4+"\nprose 0123456789abcdef 1\nsession \"s\"\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if _, err := ReadSidecar(path, testHasher); err == nil {
-		t.Error("a prose line with no instant was accepted")
+		t.Errorf("ReadSidecar accepted a %s file; its prose lines are a union over the whole session", sidecarV4)
+	} else {
+		for _, want := range []string{SidecarHeader, sidecarV4} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal %q does not name %q", err, want)
+			}
+		}
+	}
+	// A v5 turn line with no instant is refused, not defaulted.
+	if err := writeFileString(path, SidecarHeader+"\nturn\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := ReadSidecar(path, testHasher); err == nil {
+		t.Error("a turn line with no instant was accepted")
+	}
+	// A v5 file still carrying a prose line is refused: prose is not a field this
+	// build writes, and guessing at it would rebuild the union.
+	if err := writeFileString(path, SidecarHeader+"\nprose 0123456789abcdef 1\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := ReadSidecar(path, testHasher); err == nil {
+		t.Error("a prose line in a v5 file was accepted")
 	}
 }
 
@@ -603,7 +715,8 @@ func TestSweepSidecarsDeletesOlderVersionSidecars(t *testing.T) {
 	dir := t.TempDir()
 	for name, header := range map[string]string{
 		"ghost-audit-v1.signals": sidecarV1, "ghost-audit-v2.signals": sidecarV2,
-		"ghost-audit-v3.signals": sidecarV3, "ghost-audit-v4.signals": SidecarHeader,
+		"ghost-audit-v3.signals": sidecarV3, "ghost-audit-v4.signals": sidecarV4,
+		"ghost-audit-v5.signals": SidecarHeader,
 	} {
 		p := dir + "/" + name
 		if err := writeFileString(p, header+"\n"); err != nil {
@@ -624,8 +737,8 @@ func TestSweepSidecarsDeletesOlderVersionSidecars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SweepSidecars: %v", err)
 	}
-	if n != 4 {
-		t.Errorf("swept %d, want the 4 sidecars of every version", n)
+	if n != 5 {
+		t.Errorf("swept %d, want the 5 sidecars of every version", n)
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("a file that is not a sidecar was removed: %v", err)
