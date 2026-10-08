@@ -304,7 +304,10 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 // matches the record to the scan that judged it (#922); the project-context
 // surfaces (tool, resource, prompt) can only reach the host environment's id,
 // since they have no tool request to read a transport id from; and a session
-// start carries the hook payload's own id, which sessionIDFor never produces.
+// start carries the hook payload's own id, or none at all when the caller has
+// no payload (`ghost context`, opencode's plugin), which the audit leaves
+// unjudged. None of the three is a rule provenance follows, and the payload's
+// id in particular is one sessionIDFor never produces.
 // Provenance borrows none of them: a provenance row claims what the transport
 // said and nothing inferred. So under Claude Code a save (and the
 // `ghost_memory_flag` row filed through this function) records no session while
