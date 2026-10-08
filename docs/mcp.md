@@ -345,10 +345,12 @@ spend one line's share of the response budget. It is a field on the memory's one
 on `ghost_memory_search`, `ghost_project_context`, the session-start block and the
 `ghost://memories/global` resource alike. The two rows do **not** both remain: stage 5
 walks the rows that have a live `contradicts` edge in keep-priority order and withholds
-any row that contradicts one it already kept. A chain A-B-C keeps both ends and drops
-only the middle (the far end's sole edge is to the middle, which is itself withheld); a
-triangle — three rows that all contradict each other — keeps one winner; a star keeps
-its centre. The keep priority is one documented tie-break, in order — pinned beats
+any row that contradicts one it already kept, so what a shape keeps depends on which row
+wins keep priority. A chain A-B-C whose winner is an end keeps both ends and drops only
+the middle (the far end's sole edge is to the middle, which is itself withheld), and one
+whose winner is the middle keeps the middle alone; a triangle — three rows that all
+contradict each other — keeps one winner; a star keeps its centre alone when the centre
+wins, and otherwise every leaf with the centre withheld. The keep priority is one documented tie-break, in order — pinned beats
 unpinned; a later `verified_at` beats an earlier or absent one; a later `updated_at`
 (or `created_at` when `updated_at` is unset) beats an earlier one; and an exact tie
 falls to the rank the window already holds, because relevance rank is not evidence that

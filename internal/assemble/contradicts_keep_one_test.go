@@ -568,3 +568,49 @@ func TestAnswerWithoutContradictsEdgesIsUnchanged(t *testing.T) {
 		t.Errorf("a no-edge answer grew decisions: %+v", res.Trace.Decisions)
 	}
 }
+
+// TestStarWhoseLeafWinsKeepsEveryLeaf pins the other half of the star: what a
+// shape keeps follows keep priority, not the shape. A is pinned and C carries a
+// later updated_at than the centre B, so the walk is A, C, B: A and C each have
+// no kept neighbour when they are reached and stay, and B is withheld against
+// both of them. The block holds both leaves and no centre.
+func TestStarWhoseLeafWinsKeepsEveryLeaf(t *testing.T) {
+	center := stamped("B1", 0.8, "2026-02-01 00:00:00")
+	a := stamped("A1", 0.9, "2026-01-01 00:00:00")
+	a.Pinned = true
+	c := stamped("C1", 0.7, "2026-03-01 00:00:00")
+	set := setOf(a, center, c)
+	set.Edges = []memory.LinkEdge{
+		{From: "B1", To: "A1", Relation: "contradicts", Strength: 1},
+		{From: "B1", To: "C1", Relation: "contradicts", Strength: 1},
+	}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	if got := itemIDs(res.Items); !eq(got, []string{"A1", "C1"}) {
+		t.Fatalf("items = %v, want both leaves A1 and C1", got)
+	}
+	var saw bool
+	for _, d := range res.Trace.Decisions {
+		if d.ID == "C1" && len(d.Against) > 0 {
+			t.Errorf("C1 contradicts nothing kept, yet a decision names it against %v", d.Against)
+		}
+		if d.ID != "B1" {
+			continue
+		}
+		saw = true
+		if !eq(d.Against, []string{"A1", "C1"}) {
+			t.Errorf("B1: Against = %v, want [A1 C1] (both kept leaves, rank order)", d.Against)
+		}
+	}
+	if !saw {
+		t.Errorf("no decision records withholding the centre B1")
+	}
+	if kept := lineOf(t, res.Response, "A1"); !strings.Contains(kept, "conflicts_with=`B1`") {
+		t.Errorf("the winning leaf must name the centre it directly contradicts: %q", kept)
+	}
+	if kept := lineOf(t, res.Response, "C1"); !strings.Contains(kept, "conflicts_with=`B1`") {
+		t.Errorf("the other leaf directly contradicts the withheld centre and must name it: %q", kept)
+	}
+}

@@ -312,11 +312,14 @@ type contradictionSeparation struct {
 // The rule is GREEDY over keep priority, not per connected component. Order the
 // rows that have a live, non-scope-exempt contradicts edge by that priority and
 // walk it: keep a row unless it has a contradicts edge to a row already kept,
-// otherwise drop it against the kept rows it directly contradicts. A chain A-B-C
-// keeps both ends and drops only the middle (the far end's sole edge is to the
-// middle, which is itself dropped, so it contradicts nothing kept); a triangle —
-// three rows that all contradict each other — keeps one winner; a star keeps its
-// centre. The component rule this replaces winnowed a whole component to one row,
+// otherwise drop it against the kept rows it directly contradicts. What a shape
+// keeps follows from which row wins keep priority, not from the shape: a chain
+// A-B-C whose winner is an end keeps both ends and drops only the middle (the far
+// end's sole edge is to the middle, which is itself dropped, so it contradicts
+// nothing kept), and one whose winner is the middle keeps the middle alone; a
+// triangle — three rows that all contradict each other — keeps one winner; a
+// star keeps its centre alone when the centre wins, and otherwise every leaf
+// with the centre dropped. The component rule this replaces winnowed a whole component to one row,
 // which over-dropped: a chain's far end was withheld with nothing it contradicts
 // left in the block, and the winner's conflicts_with named a row it had no edge
 // to. The withheld rows are dropped here with Decision.Against naming the kept
