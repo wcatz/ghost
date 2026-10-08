@@ -171,13 +171,14 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 		row.SupersededBy = tokens(memory.ClampAttribution(f.SupersededBy))
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(f.NearDuplicateOf))
 	}
-	// A removed near-duplicate loser carries no ranking fact (it was never in the
-	// window the ranking facts cover), so the trace's own record names what it
-	// lost to. A fact the retriever did record is the same verdict and stands.
-	// NearDuplicatePenalty is left at 0 on purpose: it is a ranking value (the
-	// penalty the window's ordering applied), and a removed loser was never
-	// ranked with one. The pairing is reported only through near_duplicate_of and
-	// the reason, never as a number the ranking did not produce.
+	// A removed near-duplicate loser that the ranking stamped reports the
+	// penalty and the counterpart EXACTLY as the removal used them: the penalty
+	// is the verdict that removed the row (1 for the pair it lost), not a rank
+	// the row still holds, and the number is never invented — a loser on a path
+	// that recorded no ranking fact for it keeps the zero the fact is born with
+	// and is identified by the pairing instead. That pairing comes from the
+	// trace's own record when the facts did not carry it, so near_duplicate_of
+	// is never empty on a row the retriever removed.
 	if l, ok := p.losers[m.ID]; ok && len(row.NearDuplicateOf) == 0 {
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(l.LostTo))
 	}

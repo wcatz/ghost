@@ -401,23 +401,31 @@ func TestRunPassiveRefusesASliceNamingAnotherProject(t *testing.T) {
 	run(t, &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9))}, ok)
 }
 
-// TestRunPassiveQueryModeIgnoresTheDropPolicyInTheNote is the shape of the other
-// half: a query-mode request that sets DropDemotedLosers must not be told a
-// memory was dropped, because nothing was — the policies never reach a query
-// retrieval and the fusion path only reorders.
-func TestRunPassiveQueryModeIgnoresTheDropPolicyInTheNote(t *testing.T) {
-	f := &fakeRetriever{set: setOf(candidate("c1", "proj", "fact", "a row", 0.9))}
-	req := baseRequest()
-	req.Budget = Budget{MaxItems: 2, Slices: []Slice{{
-		Bucket: "proj", MaxItems: 2, DropDemotedLosers: true, DemotionThreshold: 0.9,
-	}}}
-	res := run(t, f, req)
-	if containsNote(res.Notes, "losers are REMOVED") {
-		t.Errorf("a query-mode request must not be told losers were removed: no policy reaches a query retrieval, "+
-			"and the fusion path only reorders (%v)", res.Notes)
-	}
-	if !containsNote(res.Notes, "no source policy drops losers") {
-		t.Errorf("and it must say the drop does not apply here: %v", res.Notes)
+// TestRunQueryModeNoteReportsTheCollapse is the shape of the other half: a
+// query-mode request reaches no passive policy, but its own retriever now
+// REMOVES near-duplicate losers, so the note has to say that rather than the
+// old "no source policy drops losers on this surface yet" — which would be
+// false of the surface it was written for. The sentence is the policy, not the
+// outcome: it is the same whether or not this particular window held a pair,
+// and the per-row decisions below are what says whether one did. The
+// DropDemotedLosers flag is set on one arm and not the other to pin that the
+// sentence comes from the MODE and never from a passive policy a query never
+// carries.
+func TestRunQueryModeNoteReportsTheCollapse(t *testing.T) {
+	for _, drops := range []bool{false, true} {
+		f := &fakeRetriever{set: setOf(candidate("c1", "proj", "fact", "a row", 0.9))}
+		req := baseRequest()
+		req.Budget = Budget{MaxItems: 2, Slices: []Slice{{
+			Bucket: "proj", MaxItems: 2, DropDemotedLosers: drops, DemotionThreshold: 0.9,
+		}}}
+		res := run(t, f, req)
+		if !containsNote(res.Notes, "losers are REMOVED") {
+			t.Errorf("a query-mode note (DropDemotedLosers=%v) must say losers are removed: %v", drops, res.Notes)
+		}
+		if containsNote(res.Notes, "no source policy drops losers") {
+			t.Errorf("a query-mode note (DropDemotedLosers=%v) must not deny the removal the query retriever performs: %v",
+				drops, res.Notes)
+		}
 	}
 }
 

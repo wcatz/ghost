@@ -142,6 +142,58 @@ type demotionPairs struct {
 	loser, winner string
 }
 
+// contradictingIDs reports which of ids a live `contradicts` edge joins to
+// another id in the same set. It is a set rather than a list of pairs because
+// the caller vetoes on participation: removing the loser of a near-duplicate
+// pair would hide the opposing claim it also carries, and which specific pair
+// the contradiction sits beside is not the question the veto asks.
+//
+// Only endpoints INSIDE ids count, for the same reason the near-duplicate and
+// supersede reads are window-scoped: an edge to a row this retrieval never
+// surfaced cannot be hidden by a removal from it.
+func contradictingIDs(ctx context.Context, db Queryer, ids []string) (map[string]bool, error) {
+	if len(ids) < 2 {
+		return nil, nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids)*2)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	list := strings.Join(ph, ",")
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT l.source_id, l.target_id
+		FROM memory_links l
+		WHERE l.relation = 'contradicts' AND l.invalidated_at IS NULL
+		  AND l.source_id IN (%s) AND l.target_id IN (%s)
+	`, list, list), args...)
+	if err != nil {
+		return nil, fmt.Errorf("contradicting pairs: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out map[string]bool
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			return nil, fmt.Errorf("contradicting pairs: %w", err)
+		}
+		if out == nil {
+			out = make(map[string]bool, 2)
+		}
+		out[a], out[b] = true, true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("contradicting pairs: %w", err)
+	}
+	return out, nil
+}
+
 // demotionVerdicts folds the per-edge outcomes into a penalty count per loser and
 // the counterpart ids behind it. It is the shared tail of DemotionPenalties and
 // its attribution form, so "which member of a pair loses" is decided once.
@@ -404,9 +456,10 @@ func (s *Store) demoteResults(ctx context.Context, results []Memory, p SearchPar
 }
 
 // demoteNearDuplicates ranks down the lower-ranked member of each
-// near-duplicate pair present in the window. Without it, ghost_memory_search
-// returns both members of a pair at full rank even though injection demotes
-// one.
+// near-duplicate pair present in the window. It is the membership-preserving
+// reorder the fuseAndRank search paths still apply (and what injection agrees
+// with); the assembler's retriever does better than reorder there — it removes
+// the loser, via dropNearDuplicates below.
 func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p SearchParams) []Memory {
 	if len(results) < 2 {
 		return results
@@ -432,4 +485,94 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 	// position in the window, so a separate attribution read would be a second
 	// chance to name a different loser than the demotion chose.
 	return StableDemote(results, func(m Memory) string { return m.ID }, penalty)
+}
+
+// dropNearDuplicates is demoteNearDuplicates' removal counterpart, and the
+// query path's half of #926: the verdicts are the same read over the same
+// window, decided by the same rules and stamped into the trace the same way,
+// but the losing row LEAVES the set instead of sinking to the bottom of it —
+// so a window spent on a restatement is a window slot returned to the next
+// distinct row (hydrateTail backfills the gap the removal leaves).
+//
+// It reports what it removed rather than only the survivors: the caller files
+// each removal on CandidateSet.DroppedLosers, which is the one source stage 6,
+// the retrieval record and explain read, and a removal the caller could not see
+// would be a row that vanished from every account of this retrieval.
+//
+// removed keeps the window's own order (the rows are walked in rank order), so
+// the kept rows are the original slice minus the losers — the representative's
+// rank, score and position are untouched by construction. lostTo maps each
+// removed id to the ids it lost to, sorted, never empty for a key it carries.
+//
+// A failed edge read returns the results unchanged with no removal and no
+// attribution: a partial removal out of a read that broke would be a row
+// dropped without a verdict behind it, and the window it would have left is
+// still a correct answer — the one demoteNearDuplicates has always given.
+//
+// A live `contradicts` edge VETOES the removal of the row it names. The two
+// verdicts describe different things: a duplicate edge says one row restates
+// another, a contradicts edge says two rows are opposing claims, and a pair
+// can easily carry both because opposing claims share their wording ("the
+// cache is redis" / "the cache is memcached"). Ranking one below the other
+// keeps both claims on screen; removing one hides the conflict the
+// contradiction marker exists to show. The veto is read only when the window
+// actually holds a near-duplicate pair, and a veto read that fails stops the
+// removal for the same reason a penalty read that fails does: removals are
+// decided on evidence, and "I could not check for a hidden contradiction" is
+// not evidence that there is none.
+func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams) (kept, removed []Memory, lostTo map[string][]string) {
+	if len(results) < 2 {
+		return results, nil, nil
+	}
+	ids := make([]string, len(results))
+	protected := make(map[string]bool, len(results))
+	for i, m := range results {
+		ids[i] = m.ID
+		protected[m.ID] = m.Pinned || RetentionExempt(m)
+	}
+	s.mu.RLock()
+	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
+	if err == nil && len(pairs) > 0 {
+		var contradicted map[string]bool
+		contradicted, err = contradictingIDs(ctx, s.queryDB(), ids)
+		if err == nil && len(contradicted) > 0 {
+			keptPairs := make([]demotionPairs, 0, len(pairs))
+			for _, pr := range pairs {
+				if contradicted[pr.loser] {
+					continue
+				}
+				keptPairs = append(keptPairs, pr)
+			}
+			pairs = keptPairs
+		}
+	}
+	s.mu.RUnlock()
+	if err != nil {
+		s.logger.Warn("near-duplicate drop: lookup failed", "error", err)
+		return results, nil, nil
+	}
+	penalty, against := demotionVerdicts(pairs)
+	// Stamped exactly as nearDuplicateVerdicts stamps it, for the same reason:
+	// the penalty and the counterpart ids explain reports are the ones this
+	// removal decided on, taken from one read. The zeros are stamped too — a
+	// pair this window judged and kept is a recorded verdict, not an unasked
+	// one, and the rows are the trace's to create either way.
+	for _, id := range ids {
+		if t := p.trace.row(id); t != nil {
+			t.NearDuplicatePenalty = penalty[id]
+			t.NearDuplicateOf = against[id]
+		}
+	}
+	if len(penalty) == 0 {
+		return results, nil, nil
+	}
+	kept = make([]Memory, 0, len(results))
+	for _, m := range results {
+		if penalty[m.ID] > 0 {
+			removed = append(removed, m)
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept, removed, against
 }

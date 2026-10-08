@@ -183,10 +183,11 @@ type SlicePolicy struct {
 	DropDemotedLosers bool
 }
 
-// DroppedLoser is one near-duplicate loser the retriever removed from a passive
-// bucket, with the ids of the rows it lost to (sorted, never empty). The
-// Candidate is the row as the retriever scored it, so a consumer reads the same
-// project, score and age it would have read had the row been returned.
+// DroppedLoser is one near-duplicate loser the retriever removed rather than
+// ranked last — from a collapsed query window or a passive bucket — with the
+// ids of the rows it lost to (sorted, never empty). The Candidate is the row as
+// the retriever scored it, so a consumer reads the same project, score and age
+// it would have read had the row been returned.
 type DroppedLoser struct {
 	Candidate
 	LostTo []string
@@ -198,12 +199,13 @@ type DroppedLoser struct {
 type CandidateSet struct {
 	Rows []Candidate
 	// DroppedLosers are the near-duplicate losers the retriever REMOVED instead
-	// of ranking last (a passive bucket whose policy sets DropDemotedLosers),
-	// each with the ids of the rows it lost to. They are not in Rows, and the
-	// assembler cannot rediscover them: the removal happened over a window whose
-	// edges it never saw. Carrying them is what lets stage 6 put each one in the
-	// trace and the retrieval record with its reason. Empty on every read that
-	// drops nothing, which is every query-mode read.
+	// of ranking last (a query window, which collapses its pairs, or a passive
+	// bucket whose policy sets DropDemotedLosers), each with the ids of the rows
+	// it lost to. They are not in Rows, and the assembler cannot rediscover them:
+	// the removal happened over a window whose edges it never saw. Carrying them
+	// is what lets stage 6 put each one in the trace and the retrieval record
+	// with its reason. Empty on every read in which the window held no
+	// near-duplicate edge to act on.
 	DroppedLosers []DroppedLoser
 	Edges         []LinkEdge
 	EdgesStatus   EdgeStatus
@@ -581,9 +583,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	selected := selectHydratedWindow(hydrated, window, poolIDsOf(pool))
 	selected = decayRank(selected, scores, p, req.Fetch.Limit, req.Now)
-	selected = cand.demoteResults(ctx, selected, p)
+	selected = cand.demoteSuperseded(ctx, selected, p)
+	// The near-duplicate verdicts are read once more, by the removal itself: the
+	// loser leaves the set here rather than being ranked last, and it reports
+	// what it removed so the assembler can file the verdict (#926).
+	kept, removed, lostTo := cand.dropNearDuplicates(ctx, selected, p)
+	selected = kept
+	droppedIDs := make([]string, len(removed))
+	for i, m := range removed {
+		droppedIDs[i] = m.ID
+	}
 
-	tail, err := cand.hydrateTail(ctx, pool, selected, scores, req.Fetch.Limit, req.Now)
+	tail, err := cand.hydrateTail(ctx, pool, selected, droppedIDs, scores, req.Fetch.Limit, req.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -594,6 +605,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	set.Rows = rows
 	set.Widened = len(rows) > req.Fetch.Limit
+
+	// The removed losers, each with the ids it lost to: not in Rows, and the
+	// assembler cannot rediscover them — the edge verdict that removed them was
+	// read over a window it never saw. Filing them here, before the explain
+	// buckets are built, is what lets stage 6 put each one in the trace, the
+	// retrieval record and explain with its reason.
+	for _, m := range removed {
+		set.DroppedLosers = append(set.DroppedLosers, DroppedLoser{
+			Candidate: candidateOf(m, scores, fts, vec, req.Now),
+			LostTo:    lostTo[m.ID],
+		})
+	}
 
 	// The explain fields are filled next, from the same snapshot the ranking
 	// read: the excluded and floor-dropped rows are hydrated here, and the
@@ -1038,15 +1061,24 @@ func hydrateWindow(ctx context.Context, s *Store, window HybridWindow, pool []*h
 // window is returned in, so a predicate that removes a window row is backfilled
 // by the row that would have ranked next.
 //
+// dropped names the window rows the retriever REMOVED as near-duplicate losers
+// (#926). They are excluded for the same reason selected is: the pool walks in
+// rank order, so a loser still eligible there would be re-added by its own
+// backfill and would fill the very slot its removal freed. Excluding it is what
+// hands that slot to the next distinct row.
+//
 // The tail is ordered but not demoted. Supersede and near-duplicate demotion
 // are window-scoped reorders that production applies to the rows it returns;
 // widening them here would change the order of rows the window already fixed,
 // and deciding them over the assembler's final membership is the conflict and
 // dedup stages' job.
-func (s *Store) hydrateTail(ctx context.Context, pool []*hybridCandidate, selected []Memory, scores map[string]float64, limit int, now time.Time) ([]Memory, error) {
-	taken := make(map[string]bool, len(selected))
+func (s *Store) hydrateTail(ctx context.Context, pool []*hybridCandidate, selected []Memory, dropped []string, scores map[string]float64, limit int, now time.Time) ([]Memory, error) {
+	taken := make(map[string]bool, len(selected)+len(dropped))
 	for _, m := range selected {
 		taken[m.ID] = true
+	}
+	for _, id := range dropped {
+		taken[id] = true
 	}
 	ids := make([]string, 0, limit)
 	for _, c := range pool {
