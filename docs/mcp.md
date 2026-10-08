@@ -105,7 +105,7 @@ header line states; the per-project report is named in the same line.
 
 ```text
 **Retrieval audit** — store-wide, per source, every call this store has recorded; a search and an injection are never pooled; for one project run `ghost context --audit --project <name>`
-  search: 12 call(s), 30 kept, 6% cited by id (2 of 30 scored), 10 restated by wording (heuristic), 15 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  search: 12 call(s), 30 kept, 6% cited by id (2 of 30 scored), 10 restated by wording (heuristic), 15 ignored, 1 superseded in session, 2 contradicted, 3 kept nothing
   ⚠ search: 2 of its 30 scored verdict(s) are degraded — judged against a partly-read transcript (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls
   project_context: no rows — this source has recorded no calls

@@ -184,7 +184,7 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 		switch v.outcome {
 		case VerdictOutcomeUsed:
 			t.Used += v.n
-			if v.signal == VerdictSignalIdentifier {
+			if v.cited == 1 {
 				t.UsedByID += v.n
 			} else {
 				t.UsedByWording += v.n
@@ -327,9 +327,13 @@ func (s *Store) retrievalRecordTotals(ctx context.Context, floor time.Time) ([]r
 // cell. The contradicted memory ids that cell contributed are NOT here — they are the
 // subject of their own statement, for the reason in the file comment.
 type verdictTotalsRow struct {
-	source      string
-	outcome     string
-	signal      string
+	source  string
+	outcome string
+	// cited is 1 when the verdict's signal is VerdictSignalIdentifier and 0 otherwise.
+	// The signal column is unconstrained text, so the aggregate groups on this closed
+	// classification and never on the value, which keeps its output bounded by the
+	// vocabularies and not by the distinct signals a store happens to hold.
+	cited       int
 	degraded    string
 	attribution int
 	n           int
@@ -361,21 +365,24 @@ type verdictTotalsRow struct {
 // enough to make the wrong list look right, which is why it survived. See
 // retrievalContradictedIDs for where the ids come from now.
 func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]verdictTotalsRow, error) {
-	attribution, args := verdictAttribution(floor)
+	attribution, attrArgs := verdictAttribution(floor)
+	// The signal's placeholder sits in the SELECT list ahead of the attribution CASE, so
+	// its argument binds first.
+	args := append([]any{VerdictSignalIdentifier}, attrArgs...)
 
 	query := `
 		WITH judged AS (
 			SELECT a.source AS source,
 			       a.outcome AS outcome,
-			       a.signal AS signal,
+			       CASE WHEN a.signal = ? THEN 1 ELSE 0 END AS cited,
 			       a.degraded AS degraded,
 			       a.memory_id AS memory_id,` + attribution + ` AS attribution
 			FROM retrieval_audit a WHERE ` + auditWindowPredicate(floor) + `
 			AND a.memory_id <> ''
 		)
-		SELECT source, outcome, signal, degraded, attribution, COUNT(*) AS n
+		SELECT source, outcome, cited, degraded, attribution, COUNT(*) AS n
 		FROM judged
-		GROUP BY source, outcome, signal, degraded, attribution`
+		GROUP BY source, outcome, cited, degraded, attribution`
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -389,7 +396,7 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 	var out []verdictTotalsRow
 	for rows.Next() {
 		var r verdictTotalsRow
-		if err := rows.Scan(&r.source, &r.outcome, &r.signal, &r.degraded, &r.attribution, &r.n); err != nil {
+		if err := rows.Scan(&r.source, &r.outcome, &r.cited, &r.degraded, &r.attribution, &r.n); err != nil {
 			return nil, fmt.Errorf("read retrieval verdict totals: %w", err)
 		}
 		out = append(out, r)

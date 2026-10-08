@@ -17,7 +17,7 @@ package audit
 //     why. That is deliberately a function that CANNOT be wrong, because the one
 //     test that matters is whether a future caller can get a pooled figure out of
 //     this package at all.
-//   - Precision is used / SCORED, and scored counts VERDICTS, not calls and not
+//   - Precision is UsedByID / SCORED (a cited id, #930), and scored counts VERDICTS, not calls and not
 //     kept memories. One call can keep twenty, so a call denominator would
 //     understate every figure; and a kept memory no run has judged yet is not a
 //     denominator either, because a fresh install with searches but no lifecycle

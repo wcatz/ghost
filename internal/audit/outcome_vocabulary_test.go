@@ -363,6 +363,25 @@ func TestTheStoreWideAggregateSplitsUsedByItsSignal(t *testing.T) {
 			}
 		})
 	}
+	// Under a window the split still binds to the right placeholders: the signal's
+	// argument sits ahead of the window's in the statement.
+	t.Run("a windowed read", func(t *testing.T) {
+		store, projectID, _ := reportStore(t)
+		call := recordCall(t, store, projectID, "search", "USEDID")
+		fileVerdict(t, store, memory.RetrievalAuditRow{
+			ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
+			Outcome: string(OutcomeUsed), Signal: string(SignalIdentifier), RecordRowID: call,
+		})
+		totals, err := store.RetrievalSourceTotals(context.Background(), time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("RetrievalSourceTotals: %v", err)
+		}
+		for _, s := range totals {
+			if s.Source == "search" && (s.Scored != 1 || s.UsedByID != 1 || s.UsedByWording != 0) {
+				t.Errorf("windowed read: Scored/UsedByID/UsedByWording = %d/%d/%d, want 1/1/0", s.Scored, s.UsedByID, s.UsedByWording)
+			}
+		}
+	})
 	// A non-used row never touches either field, whatever signal it carries.
 	t.Run("an ignored row carrying an identifier signal", func(t *testing.T) {
 		store, projectID, _ := reportStore(t)
