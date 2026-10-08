@@ -261,3 +261,31 @@ func TestAFoldedProjectCutIsStatedWithoutClaimingRowsAreShown(t *testing.T) {
 		}
 	}
 }
+
+// TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading: 25 pinned
+// project rows outrank 5 pinned globals, so the window shows 20 project rows and
+// not one global. The count must not create a Global section with no rows.
+func TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading(t *testing.T) {
+	st, db := newPinStore(t)
+	var pins []pinCtxRow
+	for i := 0; i < 25; i++ {
+		pins = append(pins, pinCtxRow{id: fmt.Sprintf("pin-%05d", i), project: "vproj", content: fmt.Sprintf("pinned project rule %02d", i), importance: 0.9, pinned: true})
+	}
+	for i := 0; i < 5; i++ {
+		pins = append(pins, pinCtxRow{id: fmt.Sprintf("gpin-%04d", i), project: "_global", content: fmt.Sprintf("global pinned rule %02d", i), importance: 0.1, pinned: true})
+	}
+	seedPinContext(t, db, 0, pins...)
+	got, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	if strings.Contains(got, "## Global") {
+		t.Errorf("the note conjured a Global section with no rows. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "5 pinned global memories cut: none of them is in the block above") {
+		t.Errorf("the global cut is not reported. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "5 pinned memories cut") {
+		t.Errorf("the project's own cut (25 pinned, 20 shown) is not reported. Got:\n%s", got)
+	}
+}

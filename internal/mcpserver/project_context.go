@@ -857,6 +857,15 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		}
 		own, globals = projectContextSplit(memories.Items)
 		ownLine, foldedOwn, globalLine := projectContextPinnedLines(memories, projectID, own)
+		if len(globals) == 0 && globalLine != "" {
+			// The mirror of the fold above: no `_global` row is on the page, so the
+			// count must not conjure the Global heading or claim shown rows. It
+			// rides with `## Memories`, which has rows (a window is never empty
+			// while rows were cut), and says none of them is shown.
+			ownLine += fmt.Sprintf("(%d pinned global memories cut: none of them is in the block above. Call ghost_memories_list to see them.)\n",
+				memories.Trace.PinnedCut[memory.GlobalProjectID])
+			globalLine = ""
+		}
 		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+ownLine)
 		// The tool's Global section is the `_global` half of its own window and
 		// NO second read: `limit` already capped the whole block, and a second
