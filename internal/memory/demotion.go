@@ -507,7 +507,11 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // removed keeps the window's own order (the rows are walked in rank order), so
 // the kept rows are the original slice minus the losers — the representative's
 // rank, score and position are untouched by construction. lostTo maps each
-// removed id to the ids it lost to, sorted, never empty for a key it carries.
+// removed id to the ids it lost to, sorted, never empty for a key it carries,
+// and NEVER nil: the "removed nothing" returns below hand back an empty map
+// rather than a nil one, because the caller files its removals into this map
+// and a pair that only the SECOND pass sees (a straddling pair while the window
+// holds none of its own) would panic on the first entry written into a nil map.
 //
 // A failed edge read returns the results unchanged with no removal and no
 // attribution: a partial removal out of a read that broke would be a row
@@ -528,8 +532,14 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // decided on evidence, and "I could not check for a hidden contradiction" is
 // not evidence that there is none.
 func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams) (kept, removed []Memory, lostTo map[string][]string) {
+	// Non-nil from the first line, so EVERY return below is safe to file a
+	// removal into (see the contract above): the three returns that remove
+	// nothing are the common case for a window holding no pair, and they used to
+	// hand back nil, which panicked the caller that files the SECOND pass's
+	// removals into the FIRST pass's map.
+	lostTo = make(map[string][]string)
 	if len(results) < 2 {
-		return results, nil, nil
+		return results, nil, lostTo
 	}
 	ids := make([]string, len(results))
 	protected := make(map[string]bool, len(results))
@@ -556,7 +566,7 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Warn("near-duplicate drop: lookup failed", "error", err)
-		return results, nil, nil
+		return results, nil, lostTo
 	}
 	penalty, against := demotionVerdicts(pairs)
 	// Stamped exactly as nearDuplicateVerdicts stamps it, for the same reason:
@@ -571,7 +581,7 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 		}
 	}
 	if len(penalty) == 0 {
-		return results, nil, nil
+		return results, nil, lostTo
 	}
 	kept = make([]Memory, 0, len(results))
 	for _, m := range results {
@@ -581,5 +591,6 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 		}
 		kept = append(kept, m)
 	}
-	return kept, removed, against
+	lostTo = against
+	return kept, removed, lostTo
 }
