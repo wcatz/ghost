@@ -1880,7 +1880,7 @@ func (s *Server) registerTools() {
 		Importance any  `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
 		Tags       any  `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
-		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to guarantee it a slot on every passive context surface (session start, ghost_project_context, the project and global resources) ahead of ranking, unless its validity window has closed or its scope contradicts the session. Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
+		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to guarantee it a slot on every passive context surface (session start, ghost_project_context, the project and global resources) ahead of ranking, unless its validity window has closed or its scope contradicts the session (an as_of reading replays the past and reserves nothing). Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 		validityArgs
 		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session (true of this conversation only \u2014 Ghost derives an expiry, and 'ghost prune' is the only thing that removes one, never automatically), project (the default: persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning, and nothing automatic can rewrite it). Use session for an observation that is about now; use persistent for a decision or rule the user would be annoyed to lose. An unknown value is refused. On a near-duplicate save the tier RAISES the existing row and never lowers it."`
 	}
@@ -2143,7 +2143,7 @@ func (s *Server) registerTools() {
 			// sentence above the rows would read as though the rows were the
 			// sentence's continuation.
 			var gsb strings.Builder
-			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil)
+			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil, "")
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{
 					// `args.Limit` and NOT a fixed cap: origin/main's
@@ -3340,7 +3340,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_pin",
 		Title:       "Pin/Unpin Memory",
-		Description: "Pin or unpin a memory. Requires project_id to verify ownership — you cannot pin memories from other projects. A pinned memory is guaranteed a slot on every passive surface (session start, ghost_project_context, the project and global resources), whatever its importance or age, ahead of ranking; it is still withheld when its validity window has closed, its scope contradicts the session or it is resolved. If pinned memories outnumber a surface's cap, the best-ranked of them are shown and the block says how many were cut. Pinned memories survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
+		Description: "Pin or unpin a memory. Requires project_id to verify ownership — you cannot pin memories from other projects. A pinned memory is guaranteed a slot on every passive surface (session start, ghost_project_context, the project and global resources), whatever its importance or age, ahead of ranking; it is still withheld when its validity window has closed, its scope contradicts the session or it is resolved. If pinned memories outnumber a surface's cap, the best-ranked of them are shown and the block says how many were cut. This is the present reading: an as_of reading replays the rows as they stood and does not reserve slots. Pinned memories survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -3627,6 +3627,9 @@ func (s *Server) registerResources() {
 		text := "No global memories saved yet. Use ghost_save_global to add cross-project knowledge."
 		if len(res.Items) > 0 {
 			text = "## Ghost Global Memories\n\n" + projectContextItems(res.Items)
+			if res.Trace != nil {
+				text += projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
+			}
 		} else if note := projectContextEmptyNote(res); note != "" {
 			text = note
 		}
@@ -3876,6 +3879,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// see. The `_global` half is handed to the Global section below rather than
 	// rendered here, so the block carries ONE copy of that heading.
 	var own, globals []assemble.Item
+	var foldedOwn, globalLine string
 	if projectID != "" {
 		var err error
 		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
@@ -3883,7 +3887,9 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
 		}
 		own, globals = projectContextSplit(memories.Items)
-		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+projectContextPinnedCut(memories))
+		var ownLine string
+		ownLine, foldedOwn, globalLine = projectContextPinnedLines(memories, projectID, own)
+		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+ownLine)
 	}
 
 	// Everything keyed on the project is skipped for an unresolved one, and
@@ -3999,7 +4005,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		if projectID == "" {
 			limit = projectContextMemoriesCap
 		}
-		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals)
+		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals, foldedOwn+globalLine)
 	}
 
 	if sb.Len() == 0 {

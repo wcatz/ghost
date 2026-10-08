@@ -277,7 +277,7 @@ func projectRows(p string) []PassiveRow {
 	var rows []PassiveRow
 	cat := func(i int) string { return passiveCategories[i%len(passiveCategories)] }
 
-	// Nine live rows (ten before a pin became a slot guarantee on the union surfaces, #924, which made the pinned row one more expected row under a 20-row cap), importance 0.95 down to 0.55, newest first. Two of them carry
+	// Nine live rows, importance 0.95 down to 0.55 (ten before #924: with the pinned row expected on the union surfaces the tenth, live-08, was measured missed on both, recall 0.955, because the pin takes one of the union's 20 slots; a corpus whose expected set the surface cannot hold measures the cap, not the pin), newest first. Two of them carry
 	// the production scope and two an open window that contains the clock, so a
 	// block under the production scope still has them and the validity reader sees
 	// `valid` as well as `unset`.

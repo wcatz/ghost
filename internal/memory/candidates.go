@@ -224,7 +224,7 @@ type CandidateSet struct {
 	// read leaves it zero because its validity filtering happens in the assembler,
 	// where the removed rows are counted per stage as usual.
 	ValidityExcluded int
-	// PinnedBeyond is, per passive bucket, how many eligible pinned rows never
+	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
 	// entered the window: the window is a LIMIT, and a bucket holding more pinned
 	// rows than the window has places reads only the first of them. Set only for
 	// a bucket whose whole window is pinned (the only case in which a pinned row

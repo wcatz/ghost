@@ -210,13 +210,15 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 			}
 			set.ValidityExcluded += excluded
 		}
-		if beyond, err := s.passivePinnedBeyond(ctx, req, pol, cols, fetched); err != nil {
+		beyond, err := s.passivePinnedBeyond(ctx, req, pol, cols, fetched)
+		if err != nil {
 			return nil, err
-		} else if beyond > 0 {
+		}
+		for project, n := range beyond {
 			if set.PinnedBeyond == nil {
 				set.PinnedBeyond = map[string]int{}
 			}
-			set.PinnedBeyond[pol.Bucket] = beyond
+			set.PinnedBeyond[project] += n
 		}
 		rows = append(rows, fetched...)
 	}
@@ -423,20 +425,24 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	return query, append(args, pol.OverFetch)
 }
 
-// passivePinnedBeyond counts the pinned rows the window's LIMIT left unread. The
-// fetch orders pinned rows first, so a pinned row can only be past the LIMIT when
-// the whole window is pinned; any other window already holds every pinned row the
-// population has, and the count is not run. It asks the same population and the
-// same validity predicate the fetch does, so a row the fetch withholds is not
-// counted as one the window missed.
-func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, fetched []Candidate) (int, error) {
+// passivePinnedBeyond counts the pinned rows the window's LIMIT left unread, by
+// the row's own project (a union bucket reads `_global` rows too, and the cut
+// belongs to the project the rows are shown under). The fetch orders pinned rows
+// first, so a pinned row can only be past the LIMIT when the whole window is
+// pinned; any other window already holds every pinned row the population has, and
+// the count is not run. It asks the same population and the same validity
+// predicate the fetch does, so a row the fetch withholds is not counted as one the
+// window missed.
+func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, fetched []Candidate) (map[string]int, error) {
 	if len(fetched) == 0 || len(fetched) < pol.OverFetch {
-		return 0, nil
+		return nil, nil
 	}
+	read := map[string]int{}
 	for _, c := range fetched {
 		if !c.Pinned {
-			return 0, nil
+			return nil, nil
 		}
+		read[c.ProjectID]++
 	}
 	where, args := passivePopulationSQL(pol, req, cols)
 	if cols.HasValidity {
@@ -444,14 +450,26 @@ func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, p
 		where += " AND " + validityMatchesSQL()
 		args = append(args, stamp, stamp)
 	}
-	var n int
-	if err := s.queryDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM memories WHERE "+where+" AND pinned = 1", args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("candidates: passive pinned count for bucket %q: %w", pol.Bucket, err)
+	rows, err := s.queryDB().QueryContext(ctx, "SELECT project_id, COUNT(*) FROM memories WHERE "+where+" AND pinned = 1 GROUP BY project_id", args...)
+	if err != nil {
+		return nil, fmt.Errorf("candidates: passive pinned count for bucket %q: %w", pol.Bucket, err)
 	}
-	if beyond := n - len(fetched); beyond > 0 {
-		return beyond, nil
+	defer func() { _ = rows.Close() }()
+	beyond := map[string]int{}
+	for rows.Next() {
+		var project string
+		var n int
+		if err := rows.Scan(&project, &n); err != nil {
+			return nil, fmt.Errorf("candidates: passive pinned count for bucket %q: %w", pol.Bucket, err)
+		}
+		if n > read[project] {
+			beyond[project] = n - read[project]
+		}
 	}
-	return 0, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("candidates: passive pinned count for bucket %q: %w", pol.Bucket, err)
+	}
+	return beyond, nil
 }
 
 // PassiveEligibleCount is how many rows the policy's bucket holds that the

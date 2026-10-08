@@ -571,10 +571,10 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 			p.dropped[rows[i].ID] = reason
 			p.droppedBy[stageBudget]++
 			if p.passive && rows[i].Pinned {
-				bucket := rows[i].FetchedBy
-				if bucket == "" {
-					bucket = rows[i].ProjectID
-				}
+				// Keyed on the row's OWN project, the key the decision below and
+				// CountsFor use, so the count is a subset of the same bucket's RankedOut
+				// even when a union bucket admits `_global` rows.
+				bucket := rows[i].ProjectID
 				p.trace.addPinnedCut(bucket, 1)
 			}
 			p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)

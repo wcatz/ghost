@@ -146,3 +146,66 @@ func TestProjectContextSaysNothingWhenEveryPinnedRowFits(t *testing.T) {
 		t.Errorf("a cut is reported where no pinned row was cut. Got:\n%s", tool)
 	}
 }
+
+func seedGlobalPins(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	var rows []pinCtxRow
+	for i := 0; i < n; i++ {
+		rows = append(rows, pinCtxRow{id: fmt.Sprintf("gpin-%04d", i), project: "_global", content: fmt.Sprintf("global pinned rule %02d", i), importance: 0.2 + float64(i)*0.005, pinned: true})
+	}
+	seedPinContext(t, db, 0, rows...)
+}
+
+// TestAGlobalOnlyWindowPutsTheCutUnderTheGlobalHeading: 25 pinned `_global` rows
+// read as project `_global` with a limit of 20. Every row is `_global`'s, so the
+// block has no `## Memories` section, and a note must not conjure the heading.
+func TestAGlobalOnlyWindowPutsTheCutUnderTheGlobalHeading(t *testing.T) {
+	st, db := newPinStore(t)
+	seedGlobalPins(t, db, 25)
+	got, err := ProjectContextAt(context.Background(), st, "_global", 20, pinCtxNow)
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	if strings.Contains(got, "## Memories") {
+		t.Errorf("a note created an empty Memories section. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "5 pinned global memories cut") {
+		t.Errorf("the global cut is not reported. Got:\n%s", got)
+	}
+}
+
+// TestAGlobalCutIsNotAttributedToTheProject: the union window cuts `_global`
+// pinned rows while the project's own pinned rows all fit, so the note names the
+// global rows and sits under the Global heading.
+func TestAGlobalCutIsNotAttributedToTheProject(t *testing.T) {
+	st, db := newPinStore(t)
+	seedGlobalPins(t, db, 25)
+	seedPinContext(t, db, 0, pinCtxRow{id: "own-pin01", project: "vproj", content: "an own pinned rule", importance: 0.9, pinned: true})
+	got, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	memories, global, _ := strings.Cut(got, "## Global")
+	if strings.Contains(memories, "pinned memories cut") || strings.Contains(memories, "pinned global memories cut") {
+		t.Errorf("a global cut is reported under Memories. Got:\n%s", got)
+	}
+	if !strings.Contains(global, "6 pinned global memories cut") {
+		t.Errorf("the global cut (26 pinned, 20 shown) is not reported under Global. Got:\n%s", got)
+	}
+}
+
+// TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow: 40 pinned `_global`
+// rows against the resource's two caps. The union window shows 20 and the Global
+// section's own cap 15, which is a subset of the 20, so 20 are on the page and 20
+// are cut.
+func TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow(t *testing.T) {
+	st, db := newPinStore(t)
+	seedGlobalPins(t, db, 40)
+	got, err := ProjectResourceAt(context.Background(), st, "vproj", pinCtxNow)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if !strings.Contains(got, "20 pinned global memories cut") {
+		t.Errorf("the resource does not report its global cut. Got:\n%s", got)
+	}
+}

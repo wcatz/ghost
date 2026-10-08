@@ -33,7 +33,7 @@ type Trace struct {
 	Stages    []StageTrace
 	Decisions []Decision
 	Floors    Floors
-	// PinnedCut is, per passive bucket, how many pinned rows the bucket's cap left
+	// PinnedCut is, per project (the row's own), how many pinned rows the cap left
 	// out: the pinned rows stage 8 cut plus the ones the retriever reported past
 	// its window. A pin is a slot guarantee, so a non-zero count means the pinned
 	// rows alone exceeded the cap, and it is a subset of what the bucket ranked out.
