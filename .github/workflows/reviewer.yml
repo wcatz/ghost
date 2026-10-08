@@ -35,6 +35,10 @@ jobs:
     # opencode/big-pickle last because its provider has refused CI calls ("free
     # tier can only be used from within OpenCode"). The selection step caps the
     # list at MAX_CANDIDATES (8), so a ninth entry is never probed.
+    # opencode/step-5-preview-free leads while it is free (a one-week preview
+    # from 2026-10-08, 1M context); that pushes opencode/big-pickle to ninth,
+    # which costs nothing in CI since its provider refuses CI calls anyway.
+    # Drop the step-5 line when the preview ends.
     #
     # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
     # not Kimi: Muse Spark 1.3 Contributor is the cheapest suitable current
@@ -42,6 +46,7 @@ jobs:
     # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: >-
+        opencode/step-5-preview-free
         opencode/space-bunny-free
         opencode/mimo-v2.6-flash-free
         opencode/longcat-2.5-preview-free
