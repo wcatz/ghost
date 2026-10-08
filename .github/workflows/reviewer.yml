@@ -35,6 +35,14 @@ jobs:
     # opencode/big-pickle last because its provider has refused CI calls ("free
     # tier can only be used from within OpenCode"). The selection step caps the
     # list at MAX_CANDIDATES (8), so a ninth entry is never probed.
+    # Roster as of 2026-10-08, checked with one short `opencode run` per model:
+    # step-5 (a one-week free preview from 2026-10-08, 1M context; drop it
+    # when the preview ends), ling-3.1, longcat and both nemotrons answered;
+    # mimo, space-bunny, muse and big-pickle were rate-limited at the time, so
+    # they follow. ling-3.0-flash-fin was dropped (upstream "Model is
+    # unavailable"), and exo-free, though still listed, is deprecated. That
+    # leaves opencode/big-pickle ninth, which costs nothing in CI since its
+    # provider refuses CI calls anyway.
     #
     # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
     # not Kimi: Muse Spark 1.3 Contributor is the cheapest suitable current
@@ -42,13 +50,14 @@ jobs:
     # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: >-
-        opencode/space-bunny-free
-        opencode/mimo-v2.6-flash-free
+        opencode/step-5-preview-free
+        opencode/ling-3.1-flash-free
         opencode/longcat-2.5-preview-free
         opencode/nemotron-3-ultra-free
-        opencode/muse-spark-1.3-contributor-free
-        opencode/ling-3.0-flash-fin-free
         opencode/nemotron-3.5-lightning-free
+        opencode/mimo-v2.6-flash-free
+        opencode/space-bunny-free
+        opencode/muse-spark-1.3-contributor-free
         opencode/big-pickle
       PAID_MODEL: opencode-go/muse-spark-1.3-contributor
     # Must stay above the bounded model-selection phase (15 min), the free
