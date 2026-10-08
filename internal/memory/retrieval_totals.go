@@ -65,11 +65,20 @@ type RetrievalSourceTotals struct {
 	// one population, and a verdict about a session rather than about a call has no
 	// (call, memory) pair to belong to — so putting it in the numerator and the
 	// denominator is a ratio of two populations wearing one name.
-	Scored       int
-	Used         int
-	Ignored      int
-	Superseded   int
-	Contradicted int
+	Scored int
+	// Used is every `used` verdict, and is the sum of the next two. A positive verdict
+	// has two strengths and the store records which in retrieval_audit.signal.
+	Used int
+	// UsedByID is the `used` verdicts proved by a cited id (signal = identifier): the
+	// one positive claim the comparison can make exactly, and the precision figure.
+	UsedByID int
+	// UsedByWording is every other `used` verdict: a token overlap, and also an empty
+	// or unrecognised signal, which is the weaker claim and so the safe reading of a
+	// row this build cannot classify.
+	UsedByWording int
+	Ignored       int
+	Superseded    int
+	Contradicted  int
 	// ContradictedIDs is every memory id this source's calls were judged to
 	// contradict, deduplicated and sorted. Ids only: the renderers have no content to
 	// print and no other field could reach them. An id is stored text and is carried
@@ -175,6 +184,11 @@ func (s *Store) RetrievalSourceTotals(ctx context.Context, floor time.Time) ([]R
 		switch v.outcome {
 		case VerdictOutcomeUsed:
 			t.Used += v.n
+			if v.cited == 1 {
+				t.UsedByID += v.n
+			} else {
+				t.UsedByWording += v.n
+			}
 		case VerdictOutcomeIgnored:
 			t.Ignored += v.n
 		case VerdictOutcomeSuperseded:
@@ -313,8 +327,13 @@ func (s *Store) retrievalRecordTotals(ctx context.Context, floor time.Time) ([]r
 // cell. The contradicted memory ids that cell contributed are NOT here — they are the
 // subject of their own statement, for the reason in the file comment.
 type verdictTotalsRow struct {
-	source      string
-	outcome     string
+	source  string
+	outcome string
+	// cited is 1 when the verdict's signal is VerdictSignalIdentifier and 0 otherwise.
+	// The signal column is unconstrained text, so the aggregate groups on this closed
+	// classification and never on the value, which keeps its output bounded by the
+	// vocabularies and not by the distinct signals a store happens to hold.
+	cited       int
 	degraded    string
 	attribution int
 	n           int
@@ -346,20 +365,24 @@ type verdictTotalsRow struct {
 // enough to make the wrong list look right, which is why it survived. See
 // retrievalContradictedIDs for where the ids come from now.
 func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]verdictTotalsRow, error) {
-	attribution, args := verdictAttribution(floor)
+	attribution, attrArgs := verdictAttribution(floor)
+	// The signal's placeholder sits in the SELECT list ahead of the attribution CASE, so
+	// its argument binds first.
+	args := append([]any{VerdictSignalIdentifier}, attrArgs...)
 
 	query := `
 		WITH judged AS (
 			SELECT a.source AS source,
 			       a.outcome AS outcome,
+			       CASE WHEN a.signal = ? THEN 1 ELSE 0 END AS cited,
 			       a.degraded AS degraded,
 			       a.memory_id AS memory_id,` + attribution + ` AS attribution
 			FROM retrieval_audit a WHERE ` + auditWindowPredicate(floor) + `
 			AND a.memory_id <> ''
 		)
-		SELECT source, outcome, degraded, attribution, COUNT(*) AS n
+		SELECT source, outcome, cited, degraded, attribution, COUNT(*) AS n
 		FROM judged
-		GROUP BY source, outcome, degraded, attribution`
+		GROUP BY source, outcome, cited, degraded, attribution`
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -373,7 +396,7 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 	var out []verdictTotalsRow
 	for rows.Next() {
 		var r verdictTotalsRow
-		if err := rows.Scan(&r.source, &r.outcome, &r.degraded, &r.attribution, &r.n); err != nil {
+		if err := rows.Scan(&r.source, &r.outcome, &r.cited, &r.degraded, &r.attribution, &r.n); err != nil {
 			return nil, fmt.Errorf("read retrieval verdict totals: %w", err)
 		}
 		out = append(out, r)

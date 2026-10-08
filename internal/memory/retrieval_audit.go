@@ -124,6 +124,11 @@ const (
 	VerdictOutcomeContradicted = "contradicted"
 )
 
+// VerdictSignalIdentifier is the stored signal of a `used` verdict the agent proved by
+// naming the memory's id. It is the only signal the totals tell apart; the audit
+// package's SignalIdentifier is held to this value by a test.
+const VerdictSignalIdentifier = "identifier"
+
 // AllVerdictOutcomes is every value above, in the order the four outcome buckets are
 // named in the figures — so it is a LIST and not a set, and the order is part of what
 // the two packages agree on.

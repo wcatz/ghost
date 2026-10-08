@@ -86,6 +86,7 @@ func judgeRetrievalHealth(t *testing.T, store *memory.Store, degraded bool) {
 	s.SetSessionID("s1")               // the session the fixture's calls were made in
 	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse(retrievalHealthContent)
+	s.AddID(retrievalHealthMemory) // cited by id, which is the kind of used verdict the figure counts
 	if degraded {
 		s.MarkDegraded("transcript truncated")
 	}
@@ -156,6 +157,7 @@ func TestHealthReportsRetrievalFiguresPerSource(t *testing.T) {
 	s.SetSessionID("s1")               // the session the fixture's calls were made in
 	s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 	s.AddProse(retrievalHealthContent)
+	s.AddID(retrievalHealthMemory) // cited by id, which is the kind of used verdict the figure counts
 	if _, err := audit.Run(ctx, store, "abc123", s); err != nil {
 		t.Fatalf("audit.Run: %v", err)
 	}
@@ -168,7 +170,8 @@ func TestHealthReportsRetrievalFiguresPerSource(t *testing.T) {
 	for _, want := range []string{
 		"search:",
 		"2 kept",
-		"50% used",
+		"50% cited by id (1 of 2 scored)",
+		"0 restated by wording (heuristic)",
 		"1 ignored",
 	} {
 		if !strings.Contains(text, want) {
@@ -202,8 +205,13 @@ func TestHealthSaysIgnoredIsNotAScore(t *testing.T) {
 
 	_, text := retrievalHealthServer(t, store)
 
-	if !strings.Contains(text, "not a relevance") && !strings.Contains(text, "not a relevance or usefulness score") {
-		t.Errorf("the retrieval block does not say that \"ignored\" is not a score:\n%s", text)
+	for _, want := range []string{
+		"neither is a relevance or usefulness score",
+		"\"restated by wording\" is a token-overlap heuristic",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the retrieval block does not carry %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -330,7 +338,7 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	// beside it is over one attributed verdict, not two. A denominator holding a
 	// verdict with no call in it is a ratio of two populations, which is the thing
 	// this whole attribution split exists to prevent.
-	if !strings.Contains(text, "100% used (1 of 1 scored)") {
+	if !strings.Contains(text, "100% cited by id (1 of 1 scored)") {
 		t.Errorf("ghost_health put the unattributed verdict into the precision denominator:\n%s", text)
 	}
 	if strings.Contains(text, "(1 of 2 scored)") || strings.Contains(text, "(2 of 2 scored)") {
@@ -367,7 +375,7 @@ func TestHealthNamesVerdictsThatCarryNoSession(t *testing.T) {
 	if !strings.Contains(text, "carry no session") {
 		t.Errorf("ghost_health does not name the unscoped verdict:\n%s", text)
 	}
-	if strings.Contains(text, "% used (1 of 1 scored)") {
+	if strings.Contains(text, "% cited by id (1 of 1 scored)") {
 		t.Errorf("ghost_health counted a verdict with no session in a figure:\n%s", text)
 	}
 }

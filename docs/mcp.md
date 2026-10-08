@@ -105,14 +105,14 @@ header line states; the per-project report is named in the same line.
 
 ```text
 **Retrieval audit** — store-wide, per source, every call this store has recorded; a search and an injection are never pooled; for one project run `ghost context --audit --project <name>`
-  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 15 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  search: 12 call(s), 30 kept, 6% cited by id (2 of 30 scored), 10 restated by wording (heuristic), 15 ignored, 1 superseded in session, 2 contradicted, 3 kept nothing
   ⚠ search: 2 of its 30 scored verdict(s) are degraded — judged against a partly-read transcript (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls
   project_context: no rows — this source has recorded no calls
-  "ignored" is the residual, not a relevance or usefulness score: it means the agent's own words never mentioned the memory
+  "ignored" means the agent's own words never mentioned the memory, and "restated by wording" is a token-overlap heuristic; neither is a relevance or usefulness score
 ```
 
-That is one store's real block, cut at the retrieval part — the same rows
+That is one store's real block, cut at the retrieval part (the split of its 12 `used` verdicts into 2 cited and 10 restated is illustrative; the other figures were measured) — the same rows
 [`ghost context --audit`](cli.md#ghost-context---audit) prints for one project,
 with the `⚠` line the compact form adds under the source it is about.
 
@@ -121,7 +121,7 @@ this, and it is here rather than in a tool of its own because every caller
 already fetches `ghost_health` — the count is 23 with `ghost_memory_flag`, and
 this block does not change it.
 
-Six things the block is careful about, each because the cheaper version is a
+Seven things the block is careful about, each because the cheaper version is a
 confident wrong answer:
 
 - **Per source, never pooled.** A search asks whether the agent used what it
@@ -132,10 +132,15 @@ confident wrong answer:
   they are in no figure; a `⚠ N verdict(s) carry no session` line says how many, and
   nothing is deleted from the store.
 - **Empty sources are NAMED.** A source with no rows says so rather than
-  reporting 0% used, which would read as a verdict on a source that has never run
+  reporting 0% cited, which would read as a verdict on a source that has never run
   here. `session_start` and `project_context` record their own retrievals, so they
   carry figures on a store whose sessions have run; they say `no rows` on a store
   that has only ever searched.
+- **The percentage is a cited id, not a guess.** `N% cited by id` is the share of
+  scored verdicts whose `used` was proved by the agent naming the memory's id, the one
+  positive claim the comparison can make exactly. A `used` proved only by wording
+  overlap is printed beside it as `restated by wording (heuristic)` and is in no
+  percentage. A positive verdict changes no decision anywhere; the figure is all it is for.
 - **`ignored` is the residual, not a score.** It is the only field here that an
   agent is likely to misread as a judgement about memory quality, and nothing in
   this package ranks a memory. The sentence is printed whenever any verdict

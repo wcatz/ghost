@@ -178,6 +178,7 @@ func judgeEveryProject(t *testing.T, store *memory.Store, projects int) {
 		s.SetSessionID("s1")               // the session the fixture's calls were made in
 		s.SetAt(time.Now().Add(time.Hour)) // written after the calls the fixture recorded
 		s.AddProse(retrievalHealthContent)
+		s.AddID(id + "MEM")
 		if _, err := audit.Run(context.Background(), store, id, s); err != nil {
 			t.Fatalf("audit.Run(%s): %v", id, err)
 		}
@@ -213,7 +214,7 @@ func TestHealthRetrievalCostDoesNotGrowWithTheProjectCount(t *testing.T) {
 
 	// And the thirty-project figures are the pooled sum, not the one-project ones: a
 	// cost fix that stopped reporting anything would satisfy the count above.
-	for _, want := range []string{"30 call(s)", "30 kept", "100% used (30 of 30 scored)"} {
+	for _, want := range []string{"30 call(s)", "30 kept", "100% cited by id (30 of 30 scored)"} {
 		if !strings.Contains(manyText, want) {
 			t.Errorf("the 30-project health block does not report %q:\n%s", want, manyText)
 		}
