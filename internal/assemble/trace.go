@@ -138,8 +138,8 @@ type StageTrace struct {
 // is the retriever's verdict, made over a window this pipeline never saw the
 // edges of, so stage 6 does not decide it: it records what the retriever reported
 // (CandidateSet.DroppedLosers), the winner ids included. Stage 5 decides its own:
-// a `contradicts` component is separated, and the withheld row's decision names
-// the one row the component kept. Every other stage leaves it empty.
+// a row withheld from a `contradicts` pair names the kept row or rows it
+// directly contradicts. Every other stage leaves it empty.
 //
 // ProjectID is the row's own project, recorded because a trace is read per
 // bucket: the session-start block keys its "N shown of M total" line on it, and
