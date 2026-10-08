@@ -275,7 +275,9 @@ func holdWriteLock(t *testing.T, dbPath string, hold time.Duration) {
 // the honest value for a call that carried no question — passive retrieval is
 // keyed on that absence — where a digest of "" would be the same constant on
 // every injection, in a column that reads like a fingerprint; an empty
-// `session_id` is the truth over stdio, which reports none. The kept ids are
+// `session_id` is this fixture's own: it drives loadSessionContext, the caller
+// with no hook payload, so no session id was ever named for the record to
+// carry. The kept ids are
 // compared with the ids the block RENDERED rather than the ids the store holds:
 // the block is what the agent was given, and a record naming a row the block
 // dropped would be the "used" verdict this table exists to keep honest.
