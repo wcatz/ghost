@@ -296,16 +296,20 @@ func TestSeparationRankBreaksAnExactTie(t *testing.T) {
 	assertSeparated(t, res, "AAA", "BBB")
 }
 
-// A three-way contradiction is ONE component: one winner, and every other
-// member recorded against it — not three pairwise separations that could leave
-// two rows standing.
-func TestThreeWayContradictionKeepsOneWinner(t *testing.T) {
-	oldest := stamped("A1", 0.9, "2026-01-01 00:00:00")
-	middle := stamped("B1", 0.8, "2026-02-01 00:00:00")
-	newest := stamped("C1", 0.7, "2026-03-01 00:00:00")
-	set := setOf(oldest, middle, newest)
-	// A chain, not a triangle: the component has to be found transitively, or a
-	// three-way disagreement would keep the two ends of it.
+// A chain A-B-C is NOT one component to winnow to a single row: the two ends
+// do not contradict each other, so both stay and only the middle is dropped.
+// The middle is dropped against the end kept first (the keep-priority winner),
+// the only kept row it directly contradicts. The component rule this replaces
+// winnowed the whole chain to one row, which over-dropped: C's only edge is to
+// B, which is itself dropped, so C was withheld with nothing it contradicts
+// left in the block, and the winner's conflicts_with named C — an edge that
+// does not exist.
+func TestChainKeepsBothEndsAndDropsTheMiddle(t *testing.T) {
+	a := stamped("A1", 0.9, "2026-01-01 00:00:00")
+	a.Pinned = true // A wins the tie-break, so it is kept first
+	middle := stamped("B1", 0.8, "2026-03-01 00:00:00")
+	c := stamped("C1", 0.7, "2026-02-01 00:00:00")
+	set := setOf(a, middle, c)
 	set.Edges = []memory.LinkEdge{
 		{From: "A1", To: "B1", Relation: "contradicts", Strength: 1},
 		{From: "B1", To: "C1", Relation: "contradicts", Strength: 1},
@@ -314,49 +318,177 @@ func TestThreeWayContradictionKeepsOneWinner(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: set}, separationRequest())
 
-	if got := itemIDs(res.Items); !eq(got, []string{"C1"}) {
-		t.Fatalf("items = %v, want only the winner C1", got)
+	// Both ends stay: C's only edge is to B, which is itself dropped.
+	if got := itemIDs(res.Items); !eq(got, []string{"A1", "C1"}) {
+		t.Fatalf("items = %v, want both ends A1 and C1", got)
 	}
-	// Each loser carries its own drop, and both are recorded against the ONE
-	// row that stayed.
-	for _, loser := range []string{"A1", "B1"} {
+	// The middle is dropped against the one kept row it directly contradicts.
+	var sawB bool
+	for _, d := range res.Trace.Decisions {
+		if d.ID != "B1" {
+			continue
+		}
+		sawB = true
+		if d.Stage != stageConflicts || d.Reason != "contradiction_separated" || d.Kept {
+			t.Errorf("B1: decision = {stage:%q reason:%q kept:%v}, want a stage-5 drop", d.Stage, d.Reason, d.Kept)
+		}
+		if !eq(d.Against, []string{"A1"}) {
+			t.Errorf("B1: Against = %v, want [A1]", d.Against)
+		}
+	}
+	if !sawB {
+		t.Errorf("no decision records withholding B1: %+v", res.Trace.Decisions)
+	}
+	// Each kept end names the middle it directly contradicts — and nothing else.
+	if la := lineOf(t, res.Response, "A1"); !strings.Contains(la, "conflicts_with=`B1`") {
+		t.Errorf("A1 must name the withheld middle: %q", la)
+	}
+	if lc := lineOf(t, res.Response, "C1"); !strings.Contains(lc, "conflicts_with=`B1`") {
+		t.Errorf("C1 must name the withheld middle: %q", lc)
+	}
+	if strings.Contains(lineOf(t, res.Response, "A1"), "C1") || strings.Contains(lineOf(t, res.Response, "C1"), "A1") {
+		t.Errorf("an end names the other end, which it does not contradict")
+	}
+	// The answer reports each real pair once: A1-B1 and B1-C1.
+	joined := strings.Join(res.Notes, "\n")
+	if got := strings.Count(joined, "contradicts pair recorded"); got != 2 {
+		t.Errorf("a chain reported %d pair(s), want 2: %s", got, joined)
+	}
+	if !strings.Contains(joined, "A1 kept, B1 withheld") || !strings.Contains(joined, "C1 kept, B1 withheld") {
+		t.Errorf("the answer note does not name both surviving pairs: %s", joined)
+	}
+}
+
+// A triangle — three rows that all contradict each other — keeps one winner
+// and drops the other two, each against the winner. This is the case the
+// component rule was written for, and the greedy rule agrees with it.
+func TestTriangleKeepsOneWinnerAndDropsTwo(t *testing.T) {
+	a := stamped("A1", 0.9, "2026-01-01 00:00:00")
+	a.Pinned = true
+	b := stamped("B1", 0.8, "2026-02-01 00:00:00")
+	c := stamped("C1", 0.7, "2026-03-01 00:00:00")
+	set := setOf(a, b, c)
+	set.Edges = []memory.LinkEdge{
+		{From: "A1", To: "B1", Relation: "contradicts", Strength: 1},
+		{From: "B1", To: "C1", Relation: "contradicts", Strength: 1},
+		{From: "A1", To: "C1", Relation: "contradicts", Strength: 1},
+	}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("items = %v, want only the winner A1", got)
+	}
+	for _, loser := range []string{"B1", "C1"} {
+		if got := renderedLines(res.Response, loser); len(got) != 0 {
+			t.Errorf("the withheld side %s rendered %d line(s):\n%s", loser, len(got), res.Response)
+		}
 		var saw bool
 		for _, d := range res.Trace.Decisions {
 			if d.ID != loser {
 				continue
 			}
 			saw = true
-			if d.Stage != stageConflicts || d.Reason != "contradiction_separated" || d.Kept {
-				t.Errorf("%s: decision = {stage:%q reason:%q kept:%v}, want a stage-5 drop",
-					loser, d.Stage, d.Reason, d.Kept)
-			}
-			if !eq(d.Against, []string{"C1"}) {
-				t.Errorf("%s: Against = %v, want [C1]", loser, d.Against)
+			if !eq(d.Against, []string{"A1"}) {
+				t.Errorf("%s: Against = %v, want [A1]", loser, d.Against)
 			}
 		}
 		if !saw {
-			t.Errorf("no decision records withholding %s: %+v", loser, res.Trace.Decisions)
+			t.Errorf("no decision records withholding %s", loser)
 		}
 	}
-	// The winner's line names BOTH withheld ids, and neither loser renders.
-	for _, loser := range []string{"A1", "B1"} {
-		if got := renderedLines(res.Response, loser); len(got) != 0 {
-			t.Errorf("the withheld side %s rendered %d line(s):\n%s", loser, len(got), res.Response)
+	kept := lineOf(t, res.Response, "A1")
+	if !strings.Contains(kept, "conflicts_with=`B1`,`C1`") {
+		t.Errorf("the winner must name both rows it directly contradicts: %q", kept)
+	}
+}
+
+// A star — B contradicts A and C, and A and C do not contradict each other —
+// with B winning keeps B and drops both A and C, each against B.
+func TestStarKeepsCenterAndDropsLeaves(t *testing.T) {
+	center := stamped("B1", 0.8, "2026-02-01 00:00:00")
+	center.Pinned = true
+	a := stamped("A1", 0.9, "2026-01-01 00:00:00")
+	c := stamped("C1", 0.7, "2026-03-01 00:00:00")
+	set := setOf(a, center, c)
+	set.Edges = []memory.LinkEdge{
+		{From: "B1", To: "A1", Relation: "contradicts", Strength: 1},
+		{From: "B1", To: "C1", Relation: "contradicts", Strength: 1},
+	}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	if got := itemIDs(res.Items); !eq(got, []string{"B1"}) {
+		t.Fatalf("items = %v, want only the center B1", got)
+	}
+	for _, loser := range []string{"A1", "C1"} {
+		var saw bool
+		for _, d := range res.Trace.Decisions {
+			if d.ID != loser {
+				continue
+			}
+			saw = true
+			if !eq(d.Against, []string{"B1"}) {
+				t.Errorf("%s: Against = %v, want [B1]", loser, d.Against)
+			}
+		}
+		if !saw {
+			t.Errorf("no decision records withholding %s", loser)
 		}
 	}
-	kept := lineOf(t, res.Response, "C1")
-	if !strings.Contains(kept, "conflicts_with=`A1`,`B1`") {
-		t.Errorf("the kept line does not name both withheld sides: %q", kept)
+	kept := lineOf(t, res.Response, "B1")
+	if !strings.Contains(kept, "conflicts_with=`A1`,`C1`") {
+		t.Errorf("the center must name both leaves it directly contradicts: %q", kept)
 	}
-	joined := strings.Join(res.Notes, "\n")
-	// The answer reports the one pair it can speak for: the pair whose
-	// surviving endpoint it holds. A pair whose two endpoints are both gone is
-	// no claim about this block.
-	if got := strings.Count(joined, "contradicts pair recorded"); got != 1 {
-		t.Errorf("a three-way component reported %d pair(s), want 1: %s", got, joined)
+}
+
+// A row that contradicts two kept rows that do not contradict each other is
+// dropped against BOTH, and its explain reason names both — each a row it
+// really has a contradicts edge to.
+func TestRowContradictingTwoKeptRowsIsDroppedAgainstBoth(t *testing.T) {
+	k1 := stamped("K1", 0.9, "2026-01-01 00:00:00")
+	k2 := stamped("K2", 0.8, "2026-01-01 00:00:00")
+	d := stamped("D1", 0.7, "2026-01-01 00:00:00")
+	set := setOf(k1, k2, d)
+	set.Edges = []memory.LinkEdge{
+		{From: "D1", To: "K1", Relation: "contradicts", Strength: 1},
+		{From: "D1", To: "K2", Relation: "contradicts", Strength: 1},
 	}
-	if !strings.Contains(joined, "C1 kept, B1 withheld") {
-		t.Errorf("the answer note does not name the surviving pair: %s", joined)
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	if got := itemIDs(res.Items); !eq(got, []string{"K1", "K2"}) {
+		t.Fatalf("items = %v, want both kept rows K1 and K2", got)
+	}
+	var saw bool
+	for _, dec := range res.Trace.Decisions {
+		if dec.ID != "D1" {
+			continue
+		}
+		saw = true
+		if !eq(dec.Against, []string{"K1", "K2"}) {
+			t.Errorf("D1: Against = %v, want [K1 K2]", dec.Against)
+		}
+	}
+	if !saw {
+		t.Fatalf("no decision records withholding D1: %+v", res.Trace.Decisions)
+	}
+	// explain names both kept rows D1 directly contradicts.
+	req := separationRequest()
+	req.Explain = true
+	res = run(t, &fakeRetriever{set: set}, req)
+	if res.Explain == nil {
+		t.Fatal("explain: true produced no payload")
+	}
+	for _, r := range res.Explain.Rows {
+		if r.ID == Token("D1") {
+			if !strings.Contains(r.Reason, "K1") || !strings.Contains(r.Reason, "K2") {
+				t.Errorf("explain reason for D1 = %q, want it to name both K1 and K2", r.Reason)
+			}
+		}
 	}
 }
 
