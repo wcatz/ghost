@@ -48,8 +48,11 @@ resolves to nothing is refused and says so, naming --project, because a
 mistyped project answered with every project's figures would be a report about
 a scope nobody asked for. Figures are per source and are never pooled — a
 search and an injection answer different questions — and a source with no rows
-says so rather than reporting 0%. "ignored" means the agent's own words never
-mentioned the memory; it is not a relevance or usefulness score. One half of
+says so rather than reporting 0%. The percentage is the share of verdicts
+proved by a cited memory id; a match on wording alone is printed beside it as a
+heuristic. "ignored" means the agent's own words never mentioned the memory, and
+"restated by wording" is a token-overlap heuristic; neither is a relevance or
+usefulness score. One half of
 "missed" (a fact the agent re-derived and was never shown) is not measured by
 anything and is reported as no figure, not as a zero.
 

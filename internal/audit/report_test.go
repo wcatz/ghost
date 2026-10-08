@@ -105,6 +105,9 @@ func TestReportKeepsEachSourceSeparate(t *testing.T) {
 	_ = recordCall(t, store, projectID, "session_start", "SSID", "SSIGN")
 
 	s := newTestSignals(t)
+	// The agent NAMES the used memory's id, so the verdict is the cited kind the
+	// precision counts; wording alone would be a heuristic and not in the figure.
+	s.AddID("USEDID")
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
 	judge(t, store, projectID, s)
@@ -141,6 +144,43 @@ func TestReportKeepsEachSourceSeparate(t *testing.T) {
 	// sitting at zero, and vice versa.
 	if rep.Pooled() != nil {
 		t.Errorf("the report exposes a pooled figure (%v); the sources must never be pooled", *rep.Pooled())
+	}
+}
+
+// TestReportSplitsUsedByItsSignal: a positive verdict is two strengths of claim, and
+// the figure is the stronger one. One call keeps three memories, one used by a cited id,
+// one used by wording, one ignored: the precision is the cited share (1 of 3), not the
+// share of every used verdict (2 of 3).
+func TestReportSplitsUsedByItsSignal(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	call := recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+	fileVerdict(t, store,
+		memory.RetrievalAuditRow{ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
+			Outcome: string(OutcomeUsed), Signal: string(SignalIdentifier), RecordRowID: call},
+		memory.RetrievalAuditRow{ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "CONID",
+			Outcome: string(OutcomeUsed), Signal: string(SignalToken), RecordRowID: call},
+		memory.RetrievalAuditRow{ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "IGNID",
+			Outcome: string(OutcomeIgnored), RecordRowID: call},
+	)
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("no search figures")
+	}
+	if search.Used != 2 || search.UsedByID != 1 || search.UsedByWording != 1 {
+		t.Errorf("Used/UsedByID/UsedByWording = %d/%d/%d, want 2/1/1", search.Used, search.UsedByID, search.UsedByWording)
+	}
+	if got, ok := search.Precision(); !ok || got != 33 {
+		t.Errorf("Precision() = %d, %v; want 33, true: the figure is the cited share, not every used verdict", got, ok)
+	}
+	line := search.Summary()
+	for _, want := range []string{"33% cited by id (1 of 3 scored)", "1 restated by wording (heuristic)"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("Summary() = %q, missing %q", line, want)
+		}
 	}
 }
 
@@ -306,7 +346,8 @@ func TestReportStatesItsLimitsOnItsFace(t *testing.T) {
 
 	for _, want := range []string{
 		// "ignored" is a statement about the transcript, not about the memory.
-		"not a relevance or usefulness score",
+		"neither is a relevance or usefulness score",
+		"\"restated by wording\" is a token-overlap heuristic",
 		// Sources are separate denominators.
 		"never pooled",
 		// The undetectable half of "missed" must read as NOT MEASURED. Printing
@@ -526,6 +567,7 @@ func TestReportReadsAnotherProjectsRowsForNothing(t *testing.T) {
 	_ = recordCall(t, store, other, "search", "OTHERID")
 
 	s := newTestSignals(t)
+	s.AddID("USEDID")
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, projectID, s)
 	judge(t, store, other, s)
@@ -666,6 +708,9 @@ func TestBuildStoreReportPoolsProjectsAndNeverSources(t *testing.T) {
 	_ = recordCall(t, store, "p2", "search", "B1")
 
 	s := newTestSignals(t)
+	for _, id := range []string{"A1", "A2", "A3"} {
+		s.AddID(id)
+	}
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	judge(t, store, p1, s)
 	judge(t, store, "p2", s)
@@ -836,8 +881,8 @@ func TestSummaryIsOneLinePerSource(t *testing.T) {
 		},
 		{
 			name: "figures",
-			src:  SourceReport{Source: "search", Calls: 2, Kept: 4, Scored: 3, Used: 1, Ignored: 2, Superseded: 1, Contradicted: 1, KeptNothing: 1},
-			want: "search: 2 call(s), 4 kept, 33% used (1 of 3 scored), 2 ignored, 1 superseded in session, 1 contradicted, 1 kept nothing",
+			src:  SourceReport{Source: "search", Calls: 2, Kept: 4, Scored: 3, Used: 1, UsedByID: 1, Ignored: 2, Superseded: 1, Contradicted: 1, KeptNothing: 1},
+			want: "search: 2 call(s), 4 kept, 33% cited by id (1 of 3 scored), 0 restated by wording (heuristic), 2 ignored, 1 superseded in session, 1 contradicted, 1 kept nothing",
 		},
 	}
 	for _, tc := range cases {
@@ -1195,6 +1240,17 @@ func TestBuildStoreReportIsTheSumOfThePerProjectReports(t *testing.T) {
 		`INSERT INTO retrieval_audit (project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
 		 VALUES ('p2', 999999, 's9', 'search', 'B1', 'contradicted', '', '')`)
 
+	// Used verdicts of each strength in BOTH projects, so the split is summed across
+	// projects and not only read off one.
+	for p, ids := range map[string][2]string{p1: {"A1", "A2"}, "p2": {"B1", "B2"}} {
+		byID, byWording := recordCall(t, store, p, "search", ids[0]), recordCall(t, store, p, "search", ids[1])
+		fileVerdict(t, store,
+			memory.RetrievalAuditRow{ProjectID: p, SessionID: "s5", Source: "search", MemoryID: ids[0],
+				Outcome: string(OutcomeUsed), Signal: string(SignalIdentifier), RecordRowID: byID},
+			memory.RetrievalAuditRow{ProjectID: p, SessionID: "s5", Source: "search", MemoryID: ids[1],
+				Outcome: string(OutcomeUsed), Signal: string(SignalToken), RecordRowID: byWording})
+	}
+
 	whole, err := BuildStoreReport(ctx, store, ReportOptions{})
 	if err != nil {
 		t.Fatalf("BuildStoreReport: %v", err)
@@ -1256,6 +1312,8 @@ func diffSourceReports(want, got SourceReport) string {
 	note("KeptNothing", want.KeptNothing, got.KeptNothing)
 	note("Scored", want.Scored, got.Scored)
 	note("Used", want.Used, got.Used)
+	note("UsedByID", want.UsedByID, got.UsedByID)
+	note("UsedByWording", want.UsedByWording, got.UsedByWording)
 	note("Ignored", want.Ignored, got.Ignored)
 	note("Superseded", want.Superseded, got.Superseded)
 	note("Contradicted", want.Contradicted, got.Contradicted)
@@ -1302,6 +1360,8 @@ func sumPerProject(reports []Report) Report {
 			cur.KeptNothing += src.KeptNothing
 			cur.Scored += src.Scored
 			cur.Used += src.Used
+			cur.UsedByID += src.UsedByID
+			cur.UsedByWording += src.UsedByWording
 			cur.Ignored += src.Ignored
 			cur.Superseded += src.Superseded
 			cur.Contradicted += src.Contradicted

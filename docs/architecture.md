@@ -654,6 +654,17 @@ from the token arm. Known limits that all fail toward unjudged: a session id tha
 inside one long-lived server process keeps the old id, and subagent calls are attributed
 to whatever session id their server process carries (not verified either way).
 
+What a positive verdict is for. `used` and `ignored` change no decision and by design
+never will: `UsefulnessByMemory` reads only `contradicted` and `superseded_in_session`,
+so a popularity loop over what the agent happened to restate cannot form. The one thing a
+positive verdict feeds is the operator-facing figure in `ghost context --audit`,
+`ghost_health` and the lifecycle summary, and that figure is split by `retrieval_audit.signal`
+([#930](https://github.com/wcatz/ghost/issues/930)): the precision is the share of scored
+verdicts proved by a cited id (`signal = identifier`), and a `used` proved by wording
+overlap is printed beside it as `restated by wording (heuristic)`. The table above shows
+why: the same-domain residual is entirely the wording arm. An unknown or empty signal on a
+`used` row is counted as wording, the weaker claim. No schema change.
+
 ### Memory history
 
 `memory_history` is the append-only CHANGE LOG of how a memory reached its
