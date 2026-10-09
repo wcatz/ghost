@@ -21,13 +21,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// stopReminder is emitted (as hook JSON) when a tool-using session ends
-// without a single Ghost save. It is a non-blocking "approve" so no host
-// renders it as a Stop hook error — the message is surfaced as a plain
-// reminder, never as a failure. (Hosts that cannot honor a block — opencode —
-// re-present it through their own channel; Claude/Codex/Goose show it as a
-// normal system note, not an error.)
-const stopReminder = `{"decision":"approve","reason":"Reminder: this session used tools but saved nothing to Ghost. If you learned anything worth keeping — commands, configs, gotchas, decisions — save it with ghost_memory_save before moving on."}`
+// stopReminder is the text of the reminder shown to the agent when a turn
+// uses tools but saves nothing new to Ghost since the last stop hook.
+// It is emitted via hookSpecificOutput.additionalContext (the documented
+// non-blocking channel for Stop hooks) so the model sees it as guidance,
+// not as a hook error. The reason field of an "approve" decision is NOT
+// shown to the model per Claude Code's hook documentation.
+const stopReminder = `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."}}`
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -84,12 +84,12 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 }
 
 // runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
-// — only on stop events (nudge=true) — the save-nudge reminder. The nudge is a
-// non-blocking {"decision":"approve"} emitted for every host that reaches the
-// nudge path, so no host surfaces it as a Stop hook error. opencode's plugin
-// re-presents it through its own log channel; claude/codex/goose show it as a
-// plain system note. session-end (nudge=false) never scans the transcript and
-// never emits output.
+// — only on stop events (nudge=true) — the save-nudge reminder. The nudge is
+// emitted via hookSpecificOutput.additionalContext (the documented non-blocking
+// channel for Stop hooks) so the model sees it as guidance, not as a hook error.
+// opencode's plugin captures this stdout and re-presents it through its own
+// log channel; claude/codex/goose show it as a plain system note. session-end
+// (nudge=false) never scans the transcript and never emits output.
 func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
 	// Adapter-materialized transcripts are swept once this invocation ends —
 	// including on the guarded early-return below, so a leaked temp dir can't
@@ -140,12 +140,22 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		logFailOpen(stderr, "scan transcript", err)
 		return
 	}
-	if res.ToolCalls == 0 || res.GhostSaves > 0 {
+	if res.ToolCalls == 0 {
 		return
 	}
-	// The reminder fires for every host that reaches here, but as a non-blocking
-	// "approve" so hosts never present it as a Stop hook error. opencode's plugin
-	// captures this same stdout and re-presents it through its own log channel.
+	// Gate on "no new Ghost saves since this session's previous stop".
+	// Read the last-seen save count for this session from the lifecycle marker dir.
+	lastSaves := ReadLastSaveCount(p.SessionID)
+	if res.GhostSaves > lastSaves {
+		// There are new saves since the last stop — update the marker and don't nudge.
+		_ = WriteLastSaveCount(p.SessionID, res.GhostSaves)
+		return
+	}
+	// No new saves since last stop — update marker and emit nudge.
+	_ = WriteLastSaveCount(p.SessionID, res.GhostSaves)
+	// The reminder fires for every host that reaches here, emitted via
+	// hookSpecificOutput.additionalContext (the documented non-blocking channel
+	// for Stop hooks) so the model sees it as guidance, not as a hook error.
 	_, _ = fmt.Fprintln(stdout, stopReminder)
 }
 

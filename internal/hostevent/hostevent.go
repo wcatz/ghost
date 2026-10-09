@@ -54,9 +54,10 @@ type Capability struct {
 }
 
 // capabilityMatrix mirrors the spec's v1 source-capability table. codex blocks
-// Stop via {"decision":"block"} and injects via SessionStart additionalContext;
-// goose blocks Stop subject to a host-side consecutive-block cap we never rely
-// on; opencode plugins have no stop-blocking or injection surface.
+// Stop via {"decision":"block"}; goose blocks Stop subject to a host-side
+// consecutive-block cap we never rely on; opencode plugins have no stop-blocking
+// surface. The non-blocking guidance channel for Stop hooks is
+// hookSpecificOutput.additionalContext (supported by all four hosts).
 var capabilityMatrix = map[Source]Capability{
 	SourceClaudeCode: {BlockStop: true, InjectContext: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},

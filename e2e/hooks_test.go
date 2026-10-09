@@ -319,22 +319,26 @@ func TestHookStop(t *testing.T) {
 			r := s.mustRunStdin(stopPayload(host, s.work, transcript, format),
 				"hook", "stop", "--source", host)
 			mustContain(t, "stop nudge (host "+host+")", r.stdout, "ghost_memory_save")
-			// It is a non-blocking approve, not a block: a host that rendered it
-			// as a Stop failure would make every turn look broken. The decision
-			// is JSON, so it is parsed rather than pattern-matched.
-			var decision struct {
-				Decision string `json:"decision"`
-				Reason   string `json:"reason"`
+			// The nudge is emitted via hookSpecificOutput.additionalContext (the
+			// documented non-blocking channel for Stop hooks), not as a decision.
+			var nudge struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
 			}
 			line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(r.stdout), "\n", 2)[0])
-			if err := jsonUnmarshal([]byte(line), &decision); err != nil {
+			if err := jsonUnmarshal([]byte(line), &nudge); err != nil {
 				t.Fatalf("the stop reminder is not JSON: %v\n%s", err, line)
 			}
-			if decision.Decision != "approve" {
-				t.Fatalf("the stop reminder is a %q, want a non-blocking approve: %s", decision.Decision, line)
+			if nudge.HookSpecificOutput.HookEventName != "Stop" {
+				t.Fatalf("the stop reminder has wrong hookEventName: %q", nudge.HookSpecificOutput.HookEventName)
 			}
-			if !strings.Contains(decision.Reason, "ghost_memory_save") {
-				t.Fatalf("the reminder does not name the tool to use: %q", decision.Reason)
+			if !strings.Contains(nudge.HookSpecificOutput.AdditionalContext, "ghost_memory_save") {
+				t.Fatalf("the reminder does not name the tool to use: %q", nudge.HookSpecificOutput.AdditionalContext)
+			}
+			if !strings.Contains(nudge.HookSpecificOutput.AdditionalContext, "Do not save what the repository already states") {
+				t.Fatalf("the reminder should have updated wording: %q", nudge.HookSpecificOutput.AdditionalContext)
 			}
 		})
 	}

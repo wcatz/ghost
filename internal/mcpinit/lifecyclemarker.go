@@ -57,6 +57,17 @@ const (
 	// the detail that captures exist to preserve. The alert still shows one
 	// line; the file keeps enough to diagnose from.
 	lifecycleMarkerDetailMaxBytes = 1500
+
+	// lifecycleSavesMarkerPrefix is the stem for per-session save count markers.
+	// Each session gets its own file named after its session ID (sanitized).
+	// This tracks the last-seen Ghost save count so the stop hook can gate
+	// the nudge on "no new saves since last stop" rather than "no saves ever".
+	lifecycleSavesMarkerPrefix = "lifecycle-saves"
+	// lifecycleSavesMarkerVersion is the schema version for save count markers.
+	lifecycleSavesMarkerVersion = 1
+	// lifecycleSavesMarkerMaxAge is the self-clean horizon for save markers.
+	// A session that hasn't been seen for this long is considered dead.
+	lifecycleSavesMarkerMaxAge = 30 * 24 * time.Hour
 )
 
 // NoLLMBackendError is the marker error text for the specific failure this
@@ -75,6 +86,15 @@ type lifecycleFailureMarker struct {
 	Error        string   `json:"error"`
 	At           string   `json:"at"` // RFC3339, UTC
 	Version      int      `json:"version"`
+}
+
+// lifecycleSavesMarker is the lifecycle-saves-<session>.json schema.
+// It tracks the last-seen Ghost save count for a session.
+type lifecycleSavesMarker struct {
+	SessionID     string `json:"session_id"`
+	LastSaveCount int    `json:"last_save_count"`
+	UpdatedAt     string `json:"updated_at"` // RFC3339, UTC
+	Version       int    `json:"version"`
 }
 
 // WriteLifecycleFailure records a failed (or never-started) consolidation
@@ -183,6 +203,112 @@ func ClearLifecycleFailure(project string) error {
 		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+// savesMarkerFile is the marker file name for one session inside
+// config.DataDir(). Sanitized because session IDs come from hosts and may
+// contain characters unsafe for filenames.
+func savesMarkerFile(sessionID string) string {
+	return lifecycleSavesMarkerPrefix + "-" + sanitizeSavesSessionID(sessionID) + ".json"
+}
+
+// sanitizeSavesSessionID maps a session ID onto a file-name-safe stem.
+// Session IDs originate from host adapters (Claude Code, Codex, Goose, Opencode)
+// and are not constrained by Ghost. This mirrors sanitizeMarkerProject but is
+// kept separate because the character constraints may differ over time.
+func sanitizeSavesSessionID(sessionID string) string {
+	var b strings.Builder
+	for _, r := range sessionID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "unknown"
+	}
+	if len(out) > 80 {
+		return out[:80]
+	}
+	return out
+}
+
+// ReadLastSaveCount reads the last-seen Ghost save count for a session.
+// Returns 0 if no marker exists or if the marker is stale/expired.
+// Best-effort: any error returns 0 (fail open — treat as first stop for this session).
+func ReadLastSaveCount(sessionID string) int {
+	if sessionID == "" {
+		return 0
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return 0
+	}
+	path := filepath.Join(dataDir, savesMarkerFile(sessionID))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var m lifecycleSavesMarker
+	if json.Unmarshal(b, &m) != nil {
+		return 0
+	}
+	if _, err := time.Parse(time.RFC3339, m.UpdatedAt); err != nil {
+		return 0
+	}
+	// Self-clean: if the marker is older than the max age, treat as expired.
+	at, _ := time.Parse(time.RFC3339, m.UpdatedAt)
+	if time.Since(at) > lifecycleSavesMarkerMaxAge {
+		_ = os.Remove(path) // best effort
+		return 0
+	}
+	return m.LastSaveCount
+}
+
+// WriteLastSaveCount records the current Ghost save count for a session.
+// Best-effort: callers ignore the error — failing to record must never fail a stop.
+func WriteLastSaveCount(sessionID string, saveCount int) error {
+	if sessionID == "" {
+		return nil
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return fmt.Errorf("locate data dir: %w", err)
+	}
+	m := lifecycleSavesMarker{
+		SessionID:     sessionID,
+		LastSaveCount: saveCount,
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Version:       lifecycleSavesMarkerVersion,
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	markerName := savesMarkerFile(sessionID)
+	tmp, err := os.CreateTemp(dataDir, markerName+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, filepath.Join(dataDir, markerName)); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
 	}
 	return nil
 }
