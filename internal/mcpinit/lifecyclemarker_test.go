@@ -330,7 +330,7 @@ Use project_id: "myproj" for all ghost_* tool calls.
 
 **Session #1** with this project.
 
-Save new discoveries with ghost_memory_save during work.
+` + sessionSaveInstruction + `
 `
 	if out != want {
 		t.Errorf("no-marker stdout must be byte-identical to the pinned golden\n got: %q\nwant: %q", out, want)

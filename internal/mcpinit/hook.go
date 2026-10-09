@@ -421,7 +421,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintln(&sb, memory.AsOfSourceNote(*asOf))
 		}
 		if asOf == nil {
-			fmt.Fprintln(&sb, "Save discoveries with ghost_memory_save during work.")
+			fmt.Fprintln(&sb, sessionSaveInstruction)
 		} else {
 			fmt.Fprintf(&sb, "(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 			if len(globals) > 0 || tally.asOfWithheld > 0 {
@@ -529,9 +529,26 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		fmt.Fprintf(&sb, "\n(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 		return sb.String()
 	}
-	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
+	fmt.Fprintf(&sb, "\n%s", sessionSaveInstruction)
 	return sb.String()
 }
+
+// sessionSaveInstruction is the closing line of the session-start block, on both
+// branches (a matched project and an unmatched directory). It is ONE constant
+// rather than one line per branch because the two branches are the two halves of
+// the only text an agent is guaranteed to read before it saves anything: under
+// opencode's Code Mode the tool catalog shows five of Ghost's tools and
+// ghost_memory_save is not among them (#959), so this line and the server
+// instructions are the whole of when-to-save guidance a host delivers. Two
+// copies would drift, and the branch nobody re-reads is the one that goes stale.
+//
+// It names the four moments worth a save, one fact per memory, and the three
+// shapes that are not one — what the repository already says, the task's
+// progress, and a key or token value — because the audit behind #959 measured
+// 43 saves of which 32 were good: 4 duplicates, 2 repository restatements, 2
+// transient progress notes, and 4 of 8 global rows wrong. A historical block
+// (asOf != nil) omits it on purpose: it is an instruction about the present.
+const sessionSaveInstruction = "Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value."
 
 // The two rank phrases and the two tool pointers are the session-start block's
 // own wording for each bucket, kept beside the helper that splices them: the

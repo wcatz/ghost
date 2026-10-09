@@ -97,7 +97,11 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 	if strings.Contains(stdout, "as_of ") {
 		t.Errorf("a request with no --as-of produced a historical block:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "Save new discoveries with ghost_memory_save") {
+	// The session instruction's opening words: the whole sentence is
+	// mcpinit's constant, and the CLI reads the block the hook renders,
+	// so a distinctive prefix is what this side can pin without reaching
+	// into mcpinit's unexported constant.
+	if !strings.Contains(stdout, "Save to Ghost as it happens, not at the end") {
 		t.Errorf("the current block lost its session instruction:\n%s", stdout)
 	}
 }
