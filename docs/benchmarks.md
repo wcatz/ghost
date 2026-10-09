@@ -936,7 +936,7 @@ the ancestry of whatever launched the runner (which would bill Claude for
 verdicts about an opencode-driven arc, and fail outright when the sandbox holds
 only opencode's credential).
 
-Every record is written through the real MCP `ghost_memory_save`, the block is
+Every record is written through the real MCP `ghost_memory_save` (or `ghost_save_global` for a record a storyline marks cross-project), the block is
 rendered by the real `ghost context`, and the two lifecycle phases are the real
 `ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI
 for is a chronology restamp: `created_at` has second granularity, so a reversal
@@ -1040,8 +1040,10 @@ gates on them:
   both low means delivery or recall failed, and the block-size column says which.
 - `correction-replay`: the mistake is repeated in at most 1 of 10 runs with Ghost
   and at least 7 of 10 without (the "stale/mistake used" column).
-- The stale original is marked or absent in 10 of 10 runs (the same column, on
-  `stale-fact` and `reversed-decision`).
+- The stale original is marked or absent in 10 of 10 runs: in the answer, the
+  "stale/mistake used" column reads 0 of 10 on `stale-fact` and
+  `reversed-decision`; in the block, the "block delivered" column reads 10 of 10,
+  because it folds in the `stale-original` and `expired-withheld` lines.
 
 Not covered: a tool-enabled arm with the Ghost MCP server registered (saving and
 searching), and a Claude Code arm through `claude -p` with the SessionStart hook

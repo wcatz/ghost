@@ -76,8 +76,11 @@ type cell struct {
 	arm    string
 	run    int
 	res    *Result
-	err    error
+	err    error // the run's own error; nil means res holds a graded result
 	report string
+	// reportErr is a failure to write the run's report, kept apart from err so a
+	// completed, graded run is never counted as one that did not run.
+	reportErr error
 }
 
 func run(cfg config) error {
@@ -151,7 +154,10 @@ func run(cfg config) error {
 				if c.err != nil {
 					fmt.Printf("%s %s run %d: ERROR: %v\n", story.Key, arm, n, c.err)
 				} else {
-					c.report, c.err = writeCellReport(cfg.resultsDir, story, arm, n, c.res, model)
+					// A report that could not be written is its own failure: the run
+					// finished and was graded, so its result stays in every tally and
+					// in the exit code, and err stays the RUN's error alone.
+					c.report, c.reportErr = writeCellReport(cfg.resultsDir, story, arm, n, c.res, model)
 					printCell(c)
 				}
 				cells = append(cells, c)
@@ -179,6 +185,9 @@ func run(cfg config) error {
 	// control that did not run measures nothing.
 	var failed []string
 	for _, c := range cells {
+		if c.reportErr != nil {
+			failed = append(failed, fmt.Sprintf("%s %s run %d: report not written: %v", c.story.Key, c.arm, c.run, c.reportErr))
+		}
 		switch {
 		case c.err != nil:
 			failed = append(failed, fmt.Sprintf("%s %s run %d errored", c.story.Key, c.arm, c.run))
@@ -256,6 +265,10 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, model string, st
 func printCell(c cell) {
 	for _, ch := range c.res.Checks {
 		fmt.Printf("%s %s — %s\n", ch.verdict(), ch.Name, oneLine(ch.Detail))
+	}
+	if c.reportErr != nil {
+		fmt.Printf("report NOT written: %v\n", c.reportErr)
+		return
 	}
 	fmt.Printf("report written: %s\n", c.report)
 }
