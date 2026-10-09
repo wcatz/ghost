@@ -8,7 +8,8 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories; paired 95% CI over `vector-only` **+0.018** [+0.003, +0.034] |
-| `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.138** (304/2200 rows); the item cap shortened **220/220** queries and dropped **8% of the graded rows it reached**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
+| `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.145** (302/2080 rows) at the shipped relevance-cutoff default **0.63** ([#954](https://github.com/wcatz/ghost/issues/954)); **0.138** (304/2200) with the cutoff off; **280.318** est. tokens/answer (was 296.6); result rate **1.000**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
+| `ghost bench --cutoff-sweep` | Sweeps the query-mode relevance cutoff over the same `--context` corpus: graded-relevant rows admitted, context precision, result rate and est. tokens per answer at each share | The gradient the shipped default (0.63) is chosen from: relevant **304 → 302** while precision **0.138 → 0.145** and tokens **296.6 → 280.3**, result rate holding **1.000**; **0.65** is the last share that still meets the 298 floor (298, no margin) and **0.70** is the first below it (292) |
 | `ghost bench --passive` | The **passive** blocks — session start, `ghost context`, `ghost_project_context`, the project resource — over a synthetic four-project store that holds resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows | Withheld leakage **0.000** on every surface (and non-zero when a filter is disabled, which the test checks); expected-row recall **1.000** on every surface; the session-start count lines **PASS** the honesty check (8 of 8, after #897) |
 | `ghost bench --audit` | The **retrieval audit** itself: its verdicts against a labelled offline session | Same-domain memories judged `used` at session start **16 of 20** (10 of the 11 that no turn restates); cited ids caught **3 of 3**, restatements **4 of 4** (session-start call); spread-over-turns memories judged `used` **0 of 4** (the labels expect none, and after #932 no turn carries one alone); token-arm precision **0.286** (4/14) at session start; a call after the last turn judges **0** `used` |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
@@ -17,11 +18,11 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Ranking-state suite | Graded corpus carrying `created_at` spread and `supersedes` edges | Demote alone **1.000** R@1, decay alone **0.071**, shipped pair **0.214** against **0.571** with both off — the two paths do not compose, because the rows decay pushes down are the rows the demote promotes |
 | Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
 | No-answer queries | What search returns when nothing in the corpus answers the query | False-positive rate **1.000** in every condition at the shipped `search.min_similarity: 0` — and still **0.875** for the shipped hybrid path at a 0.50 cosine, against the keyword leg's **0.625**; mean top cosine **0.584** vs **0.741** answerable, and 51/220 answerable queries sit at or below the no-answer maximum |
-| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old, plus correction-replay, ops-fact, and stale-fact arcs; with-Ghost vs without-Ghost arms graded on the agent's **answer** | **9/10** on `reversed-decision` (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half. New arcs and without-Ghost arm added in #974. |
+| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old | **9/10** on the original arc (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a recency-trap fixture, a ranking-state fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
-**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state, no-answer and context-assembly suites are report-only in CI. The storyline eval is local-only and gates nothing (the CI wiring is #338, not done). Four arcs ship: `reversed-decision`, `correction-replay`, `ops-fact`, `stale-fact`; each runs with-Ghost and without-Ghost arms. The official GPT-4o leaderboard-comparable run has not been executed.
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state, no-answer and context-assembly suites are report-only in CI. The storyline eval is local-only and gates nothing (the CI wiring is #338, not done). The official GPT-4o leaderboard-comparable run has not been executed.
 
 > Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
 
@@ -201,7 +202,9 @@ vec=0.30                 0.494   0.737    0.875    0.790  -0.0280 [-0.0440, -0.0
 
 Every other table in this file asks **which row came first**. Recall@1, MRR@10 and NDCG@10 are statements about ORDER, and they are invariant under the decision that actually costs a caller money: NDCG@10 gives the tenth row the same credit as the first, so a block carrying ten rows where two would have answered scores *identically* to the two-row block while costing five times the tokens. Nothing in a ranking metric can see a row that should never have been in the block at all, because ordering presumes the set is right.
 
-`ghost bench --context` measures the block. It assembles one context block per graded query through the same path `ghost_memory_search` takes — `Store.Candidates` → `internal/assemble.Run` — at that tool's own budget (**10 items, 16000 response bytes** = `2 × memory.MaxContentLen`, `CondHybrid`), because a context metric measured against any other budget is a metric about a surface nobody ships. It prints this section and returns, so the ordering tables it is read against are **not above it** — they are what plain `ghost bench` prints. Here is one captured run:
+`ghost bench --context` measures the block. It assembles one context block per graded query through the same path `ghost_memory_search` takes — `Store.Candidates` → `internal/assemble.Run` — at that tool's own budget (**10 items, 16000 response bytes** = `2 × memory.MaxContentLen`, `CondHybrid`), because a context metric measured against any other budget is a metric about a surface nobody ships. It prints this section and returns, so the ordering tables it is read against are **not above it** — they are what plain `ghost bench` prints.
+
+Since [#954](https://github.com/wcatz/ghost/issues/954) a query-mode block is measured at the shipped relevance-cutoff default (`context.relevance_cutoff` **0.63**), which stops an answer where relevance falls off. The captured run below is the **pre-cutoff baseline** (cutoff off), kept because the analysis that follows it is an argument about the budget's cost, which the baseline isolates; [The relevance cutoff](#the-relevance-cutoff-ghost-bench---cutoff-sweep) gives the sweep the default was chosen from and the cutoff-on figures. Here is the baseline run:
 
 ```text
 context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; report-only, no gate)
@@ -270,6 +273,27 @@ Three findings, all from the table above:
 **What this does not measure: session-start injection.** The block measured here is the one `ghost_memory_search` assembles. The passive blocks (session start, `ghost context`, `ghost_project_context`) are a different request shape and are measured by [`ghost bench --passive`](#passive-context-ghost-bench---passive) instead. The **cost** figures here do cover the rendered search response in full, framing and verdict line included, because that is what a caller receives and pays for; they do not cover a session-start injection.
 
 **CI cost.** The context metrics are measured on the existing graded dataset at report time, not by a new test that reloads the 551-row corpus: the fixture is 8 rows, and `internal/bench`'s test time is unchanged within noise (14.36 s on `98ffe9c5` before this section, 11.7–13.5 s after it over six runs, so within noise; the new tests themselves read 0.17 s).
+
+## The relevance cutoff (`ghost bench --cutoff-sweep`)
+
+`ghost bench --cutoff-sweep` ([#954](https://github.com/wcatz/ghost/issues/954)) measures the block the same `--context` report does, but once per relevance-cutoff share, so the shipped default is a measurement rather than a hand-set constant. ONE rule, ONE parameter: `context.relevance_cutoff` is the share of the **top row's fused Base** (the score before the age decay) a row must clear to stay in a query-mode block — cut the answer where relevance falls off. It runs **after dedup and before the budget**, is **query-mode only** (a passive read is a digest and keeps its slices), and can only **shorten** a block: `limit` stays the maximum, the top row is always kept (so the result rate never falls below 1.000 on an answerable query) and a pinned row is never cut. Each cut row is recorded with reason `relevance_cutoff` — in the trace, in the retrieval record, and in the explain payload.
+
+The sweep, on the 220-query graded corpus at the tool budget (`0.000` is the pre-cutoff baseline, and the figures are graded-relevant rows admitted / context precision / est. tokens per answer):
+
+```text
+cutoff     relevant     items context precision      result rate                tokens/ans
+0.000           304      2200 0.138 (304/2200)       1.000 (220/220)        296.609 (65254/220)
+0.500           304      2200 0.138 (304/2200)       1.000 (220/220)        296.609 (65254/220)
+0.600           304      2200 0.138 (304/2200)       1.000 (220/220)        296.609 (65254/220)
+0.630           302      2080 0.145 (302/2080)       1.000 (220/220)        280.318 (61670/220)  <- shipped default
+0.640           300      1987 0.151 (300/1987)       1.000 (220/220)        267.677 (58889/220)
+0.650           298      1890 0.158 (298/1890)       1.000 (220/220)        254.236 (55932/220)
+0.700           292      1494 0.195 (292/1494)       1.000 (220/220)        199.550 (43901/220)
+```
+
+**Why 0.63, and the shape of the trade.** The ranking is not the problem — hybrid MRR@10 is 0.902, so the useful row is usually first; the block simply never stopped. The cutoff compares the fused **Base** (the score before the age decay), so a relevant month-old decision is not cut for being old, and it exempts pinned and keyword-reserved rows (the reservation admits a keyword hit whose fused score is below the cut by design). The graded corpus's relevant and noise rows are interleaved in fused score, so a single relative-to-top threshold cannot cut only the noise: at 0.50 and 0.60 no answer shortens (every row is still within the share, and the table equals the baseline), and at ~0.70 the top rows of many queries fall off together, so the block shrinks a lot **and** graded-relevant rows are cut with it. The honest knee is between those. **0.63 admits 302 of the 304 baseline relevant rows** — a 4-row margin over the ship floor of 298 — holds the result rate at **1.000**, raises context precision **0.138 → 0.145** and lowers estimated tokens **296.6 → 280.318** per answer. 0.64 (300 relevant, precision 0.151, 267.7 tokens) and 0.65 (298 relevant, precision 0.158, 254.2 tokens) also clear the gate but leave a margin of two rows and none; the relevant floor is the hard constraint, so the default keeps the larger margin rather than the last points of precision.
+
+**The gate, and what does not move.** graded-relevant admitted 302 (floor 298, +4); result rate 1.000; context precision 0.138 → 0.145 (up); est. tokens 296.6 → 280.3 (down); contamination 0.000 unchanged (still a corpus property). Plain `ghost bench` is **unchanged** — the retriever is not touched, and the two results tables are byte-identical before and after. `ghost bench --passive` is **byte-identical** — the cutoff is a recorded pass-through on a passive request, so no passive block, note or verdict moves. Setting `context.relevance_cutoff: 0` reproduces the pre-cutoff block exactly, which is the byte-identity the disabled state promises.
 
 ## Passive context (`ghost bench --passive`)
 
@@ -862,61 +886,65 @@ reversal that the store holds correctly and the session-start block still report
 as current is invisible to every suite above, because each of them renders a
 block once against a corpus whose answers never contradict each other.
 
-Four storylines ship:
+`reversed-decision` (project `northwind-api`) is the original arc: sessions 1
+and 2 establish a decision, session 3 records its reversal, and the grade asks
+whether the run's own lifecycle caught up. Its block lines are —
 
-| arc | key | what it measures |
-|---|---|---|
-| Reversed decision | `reversed-decision` | A long-lived project whose early decision is later contradicted; session 3 must act on the reversal from a cold start. |
-| Correction replay | `correction-replay` | The user corrects the agent in session 1; sessions 2–3 get the same task and must not repeat the mistake. The correction is saved as a memory. |
-| Ops fact | `ops-fact` | A host/port fact saved as a global memory in one repo is needed in another repo via `ghost_search_all` or the global bucket. |
-| Stale fact | `stale-fact` | A fact with a closed `valid_until` window must not be used after the date. The validity filter withholds it in the with-Ghost arm. |
+| check | what it reads |
+|---|---|
+| `injection-present:session-N` | the block really reached session N (and is the size the session saw) |
+| `carry-forward:session-N` | the previous session's record is in session N's block |
+| `stale-original:session-N` | a record the store marks superseded is **not** in session N's block unmarked |
+| `stale-original:final-block` | same, for the block rendered after the arc's own lifecycle |
+| `supersede-edge:<newer>` | a live `supersedes` edge exists **and points the way the store's own stamps say it must** |
+| `reversal-live:<newer>` | the replacement was not itself resolved (a supersede that resolves both is not a reversal) |
+| `final-block-carries:<newer>` | the replacement survives into the last block |
+| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the arc's record. **Advisory**: reported, never decides the verdict or the exit code |
 
-Each arc runs **two arms side by side**:
-
-| arm | block | purpose |
-|---|---|---|
-| **with-ghost** | real `ghost context` injection | measures whether Ghost delivers and the agent uses it |
-| **without-ghost** | empty block (not a missing hook) | same scripts, same model, same seeds; measures the agent's own knowledge |
-
-Both arms use the same model and the same seeds. The without-Ghost arm is not a missing hook — it is an **empty block**, so the session receives the header but no memories. The primary grade is the agent's **ANSWER** (did it act on the carried-forward mark?), not the block. Block checks are kept as `delivery:` diagnostics.
+The grade reads **store state** — `memory_links` rows and `memories` stamps — not
+the CLI's stdout. Stdout is kept in the report because a warning is evidence, but
+a phase that prints a verdict it did not write cannot pass a check.
 
 Run it (local only, nothing is wired into CI):
 
 ```sh
-# Both arms, one run each (coordinator uses -runs 10)
 go run ./eval/storyline -model opencode-go/glm-5.3-flash \
-  -opencode-auth-file ~/.local/share/opencode/auth.json \
-  -runs 10
-
-# Without-Ghost arm only
-go run ./eval/storyline -model opencode-go/glm-5.3-flash \
-  -opencode-auth-file ~/.local/share/opencode/auth.json \
-  -without-ghost -runs 10
+  -opencode-auth-file ~/.local/share/opencode/auth.json
 ```
 
-Defaults need only the checkout: `-storyline reversed-decision` (or `correction-replay`, `ops-fact`, `stale-fact`), `-repo .`, `-results-dir eval/storyline/results`, and a 3-minute embedding drain. `-keep` retains the scratch tree (`<repo>/.sandbox/`, holding the built binary, the store and the raw output of every phase) for post-mortem; without it the tree is removed. The run exits non-zero when a check fails, so it can be driven from a script — but a failing check is a **finding about Ghost**, not a runner bug, and the report is the artifact.
+Defaults need only the checkout: `-storyline reversed-decision`, `-repo .`,
+`-results-dir eval/storyline/results`, and a 3-minute embedding drain. `-keep`
+retains the scratch tree (`<repo>/.sandbox/`, holding the built binary, the store
+and the raw output of every phase) for post-mortem; without it the tree is
+removed. The run exits non-zero when a check fails, so it can be driven from a
+script — but a failing check is a **finding about Ghost**, not a runner bug, and
+the report is the artifact.
 
-Isolation is eval/cycle's, reused rather than reinvented: the data dir, config dir and HOME all point inside the run's own scratch tree, an inherited override of any of them is dropped, `ANTHROPIC_API_KEY` is stripped, and an opencode credential is copied into the scratch data dir (`-opencode-auth-file`) so the sandboxed sessions authenticate without touching yours. Two further pins are the run's own: the model is resolved **once** and passed to everything — the sessions, the judge, `GHOST_OPENCODE_MODEL` in the child env, and the report's `model:` line — so the arc is one model's behaviour end to end, and an inherited `GHOST_OPENCODE_MODEL` in your shell cannot decide the sessions alone (`internal/ai` would otherwise read it out of the runner's own environment while the phases used the default). The phases pass `--source opencode` rather than letting `ghost supersede`/`ghost resolve` resolve a harness by walking the ancestry of whatever launched the runner (which would bill Claude for verdicts about an opencode-driven arc, and fail outright when the sandbox holds only opencode's credential).
+Isolation is eval/cycle's, reused rather than reinvented: the data dir, config dir
+and HOME all point inside the run's own scratch tree, an inherited override of any
+of them is dropped, `ANTHROPIC_API_KEY` is stripped, and an opencode credential is
+copied into the scratch data dir (`-opencode-auth-file`) so the sandboxed
+sessions authenticate without touching yours. Two further pins are the run's own:
+the model is resolved **once** and passed to everything — the sessions, the judge,
+`GHOST_OPENCODE_MODEL` in the child env, and the report's `model:` line — so the
+arc is one model's behaviour end to end, and an inherited `GHOST_OPENCODE_MODEL`
+in your shell cannot decide the sessions alone (`internal/ai` would otherwise
+read it out of the runner's own environment while the phases used the default).
+The phases pass `--source opencode`
+rather than letting `ghost supersede`/`ghost resolve` resolve a harness by walking
+the ancestry of whatever launched the runner (which would bill Claude for
+verdicts about an opencode-driven arc, and fail outright when the sandbox holds
+only opencode's credential).
 
-Every record is written through the real MCP `ghost_memory_save`, the block is rendered by the real `ghost context`, and the two lifecycle phases are the real `ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI for is a chronology restamp: `created_at` has second granularity, so a reversal seeded in the same second as the claim it reverses would leave the supersedes direction an arbitrary tie-break — and the direction check would then grade harness timing as a model failure. Restamping is metadata only.
+Every record is written through the real MCP `ghost_memory_save`, the block is
+rendered by the real `ghost context`, and the two lifecycle phases are the real
+`ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI
+for is a chronology restamp: `created_at` has second granularity, so a reversal
+seeded in the same second as the claim it reverses would leave the supersedes
+direction an arbitrary tie-break — and the direction check would then grade
+harness timing as a model failure. Restamping is metadata only.
 
-**Checks per arc (per session):**
-
-| check prefix | what it grades |
-|---|---|
-| `injection-present:session-N` | the block really reached session N (and is the size the session saw) |
-| `delivery:block-carries:session-N:<key>` | the previous session's record is in session N's block (delivery diagnostic) |
-| `delivery:stale-absent:session-N:<key>` | a record the store marks superseded is **not** in session N's block unmarked (delivery diagnostic) |
-| `answer-carries:session-N:<key>` | **primary grade** — the agent's answer contains the carried-forward mark |
-| `answer-paraphrases:session-N:<key>` | non-gating paraphrase proxy (token overlap); `-judge` is the authoritative check |
-| `supersede-edge:<newer>` | a live `supersedes` edge exists **and points the way the store's own stamps say it must** |
-| `reversal-live:<newer>` | the replacement was not itself resolved |
-| `final-block-carries:<newer>` | the replacement survives into the last block |
-| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the reversal |
-
-The grade reads **store state** — `memory_links` rows and `memories` stamps — not the CLI's stdout. Stdout is kept in the report because a warning is evidence, but a phase that prints a verdict it did not write cannot pass a check.
-
-**Measured 2026-09-29, `opencode-go/glm-5.3-flash`, local run, 9/10 checks pass (reversed-decision):**
+**Measured 2026-09-29, `opencode-go/glm-5.3-flash`, local run, 9/10 checks pass:**
 
 ```
 storyline: reversed-decision (northwind-api) — Long-lived project with a reversed early decision
@@ -935,20 +963,93 @@ PASS reversal-live:session-store-postgres … PASS final-block-carries:session-s
 error: 1 of 10 checks failed: stale-original:session-3
 ```
 
-The finding is real and it is a *rendering* gap, not a storage gap: `ghost supersede` linked the pair and `ghost resolve` stamped the Redis decision `resolved_at` in the same run, and the final block correctly omits it. But session 3's block — rendered before the arc's lifecycle ran — carried both the current Postgres decision and the stale Redis one with nothing marking the old claim. A reader had to resolve the contradiction themselves; the model in fact did, correctly, in prose. Read the failing check as "the block does not say which of two contradicting records is current", not as "the store lost the reversal".
+The finding is real and it is a *rendering* gap, not a storage gap: `ghost
+supersede` linked the pair and `ghost resolve` stamped the Redis decision
+`resolved_at` in the same run, and the final block correctly omits it. But
+session 3's block — rendered before the arc's lifecycle ran — carried both the
+current Postgres decision and the stale Redis one with nothing marking the old
+claim. A reader had to resolve the contradiction themselves; the model in fact
+did, correctly, in prose. Read the failing check as "the block does not say which
+of two contradicting records is current", not as "the store lost the reversal".
 
-**Known limits, stated so the number is not over-read.** The `delivery:stale-absent` match is deliberately narrow: it looks for the record's own verbatim text, so a paraphrased restatement of the stale claim would pass it. `-judge` covers the paraphrase case authoritatively, and is off by default because it costs a model call and its verdict is a non-gating column. The `answer-paraphrases` check is a deterministic token-overlap proxy; it is not the judge. The without-Ghost arm has an empty block, so its `delivery:` checks trivially pass/fail and its `answer-carries` measures the agent's own knowledge — this is the comparison that reveals whether Ghost changes what the agent does. Success numbers are reported against, not gated in CI:
-
-- With Ghost, the carried-forward answer appears in at least 8 of 10 runs per arc. Without Ghost, at most 2 of 10.
-- Correction-replay: the mistake is repeated in at most 1 of 10 runs with Ghost, against at least 7 of 10 without.
-- The stale original is marked or absent in 10 of 10 runs.
-
-The runner stays local-only. Every run is sandboxed: HOME, XDG_*, and GHOST_DEV_FORBID_DATA_DIR set inline.
+**Known limits, stated so the number is not over-read.** The `stale-original`
+match is deliberately narrow: it looks for the record's own verbatim text, so a
+paraphrased restatement of the stale claim would pass it. `--judge` covers the
+paraphrase case, and is off by default because it costs a model call and its
 verdict is not deterministic. And the arc's lifecycle runs **after** the last
 session by construction, so the runner cannot yet demonstrate the production
 ordering (a supersede caught in session 2's lifecycle changing session 3's
 block); it can only show what the block does when the reversal is already stored
 and unresolved. Both are follow-ups, not claims.
+
+### Usefulness: the without-Ghost arm and the answer grade
+
+The block lines above say whether Ghost *delivered* a claim. They cannot say
+whether delivery changed what an agent did, and a carry-forward check that reads
+the block would pass trivially with Ghost and fail without it without measuring
+anything. So every session is graded twice, on separate lines:
+
+- **Delivery lines** (`injection-present`, `carry-forward`, `stale-original`,
+  `expired-withheld`): what the block held. Unchanged from the table above.
+- **Answer lines**, the primary grade, read only what the agent *said*.
+  `answer-carries:session-N:<name>` passes when the answer contains one of a
+  check's spellings (case-insensitive). `answer-avoids:session-N:<name>` fails
+  when the answer *uses* a stale, expired or mistaken claim: the spelling appears
+  as a whole token in a sentence with no marker of being old or wrong (`not`,
+  `instead of`, `old`, `deprecated`, `expired`, `ignores`, ...), so "use X, not Y"
+  is not a use of Y. Both are verbatim readings and cannot see a paraphrase; the
+  advisory judge column is the second look.
+
+`Validate` refuses a storyline whose answer grade could pass for the wrong
+reason: a carried spelling that appears in the script of the stage graded on it
+(the answer could be read out of the prompt), or in no earlier record (nothing
+could have carried it).
+
+Three arcs ship beside `reversed-decision`, each with an invented value a model
+cannot guess and a record that exists only for the arc:
+
+| arc | what it asks | why the answer cannot leak from a script |
+|---|---|---|
+| `correction-replay` (`acme-billing`) | session 1 is corrected on which header carries the idempotency key (the natural answer is `Idempotency-Key`; the right one is `X-Acme-Dedupe-Token`); sessions 2 and 3 ask the same question | the correction is only in session 1's script; sessions 2 and 3 name neither header |
+| `ops-fact` (`invoice-worker`) | a broker host and port given in one repository, saved through `ghost_save_global`, are needed in another | only session 1's script states the address; the sessions have no tools, so the global bucket in the injection is the only cross-project route measured (`ghost_search_all` is not reachable from them) |
+| `stale-fact` (`ledger-client`) | an old endpoint is saved with a `valid_until` that closed in January 2025, and session 1 is told the new one | the old endpoint is in no script, its record's wording does not say it is old (only the validity filter can withhold it), and only session 1's script names the new one |
+
+**The without-Ghost arm.** `-without-ghost` runs each storyline a second time per
+run, on the same build, the same model, the same scripts and the same saves, with
+one difference: each session is handed an *empty* block inside the same prompt
+framing (an empty block, not a missing hook). The records are still written and
+the project still bound, so the store is identical; the arc stages and end-state
+reads are skipped because no session of the arm is told what they produce, and
+only the answer lines are graded. Its misses are the measurement, so the arm
+never decides the exit code (an error in it still does). `-runs N` repeats both
+arms, `-storyline` takes a key, a comma-separated list or `all`, and the run ends
+with a table per storyline, both arms side by side, with each session's block
+size:
+
+```sh
+go run ./eval/storyline -storyline all -without-ghost -runs 10 \
+  -model opencode-go/glm-5.3-flash -opencode-auth-file ~/.local/share/opencode/auth.json
+```
+
+**Targets, not measurements.** These are the numbers a 10-run table is read
+against; none of them has been measured, no results artifact ships, and nothing
+gates on them:
+
+- With Ghost, the carried-forward answer appears in at least 8 of 10 runs per arc;
+  without Ghost, at most 2 of 10. Both high means the script leaks the answer;
+  both low means delivery or recall failed, and the block-size column says which.
+- `correction-replay`: the mistake is repeated in at most 1 of 10 runs with Ghost
+  and at least 7 of 10 without (the "stale/mistake used" column).
+- The stale original is marked or absent in 10 of 10 runs (the same column, on
+  `stale-fact` and `reversed-decision`).
+
+Not covered: a tool-enabled arm with the Ghost MCP server registered (saving and
+searching), and a Claude Code arm through `claude -p` with the SessionStart hook
+in a sandbox HOME. Every run is sandboxed: `HOME`, `XDG_DATA_HOME` and
+`XDG_CONFIG_HOME` point into the run's scratch tree, and
+`GHOST_DEV_FORBID_DATA_DIR` names the data directory your own environment
+resolves, so a resolve that escapes the tree is refused by the development build
+instead of writing to your store.
 
 ## Reporting rules (all phases)
 

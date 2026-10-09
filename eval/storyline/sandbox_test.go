@@ -25,7 +25,15 @@ func TestScratchEnvConfinesEveryRoot(t *testing.T) {
 	t.Setenv("OPENCODE_API_KEY", "oc-live")
 
 	env := scratchEnv("/scratch", "")
-	joined := strings.Join(env, "\n")
+	// The forbidden-dir variable is the one place the developer's own roots are
+	// SUPPOSED to appear: it names what the child must not touch.
+	var kept []string
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GHOST_DEV_FORBID_DATA_DIR=") {
+			kept = append(kept, kv)
+		}
+	}
+	joined := strings.Join(kept, "\n")
 	for _, want := range []string{
 		"XDG_DATA_HOME=/scratch/data",
 		"XDG_CONFIG_HOME=/scratch/config",
@@ -161,5 +169,46 @@ func TestScratchLayoutLivesInsideTheScratchRoot(t *testing.T) {
 		if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 			t.Errorf("%s was not created under the scratch root", want)
 		}
+	}
+}
+
+// TestScratchEnvForbidsTheDevelopersDataDir: the sandbox claim is that a resolve
+// which escapes the scratch tree is REFUSED, and a development build only refuses
+// a directory listed in GHOST_DEV_FORBID_DATA_DIR. The list is the data dir the
+// caller's own environment resolves, read before HOME and XDG_DATA_HOME are
+// replaced, and a listing the caller already had is kept.
+func TestScratchEnvForbidsTheDevelopersDataDir(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/dev/data")
+	t.Setenv("HOME", "/dev/home")
+	t.Setenv("GHOST_DEV_FORBID_DATA_DIR", "/already/listed")
+	var got string
+	for _, kv := range scratchEnv("/scratch", "") {
+		if v, ok := strings.CutPrefix(kv, "GHOST_DEV_FORBID_DATA_DIR="); ok {
+			if got != "" {
+				t.Fatal("the variable is set twice")
+			}
+			got = v
+		}
+	}
+	want := "/already/listed" + string(os.PathListSeparator) + "/dev/data/ghost"
+	if got != want {
+		t.Fatalf("GHOST_DEV_FORBID_DATA_DIR = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "/scratch") {
+		t.Fatal("the scratch tree must not be forbidden")
+	}
+}
+
+func TestForbiddenDataDirsFallsBackToHome(t *testing.T) {
+	env := map[string]string{"HOME": "/dev/home"}
+	want := "/dev/home/.local/share/ghost"
+	got := forbiddenDataDirs(func(k string) string { return env[k] })
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// A listing already naming it is not repeated.
+	env["GHOST_DEV_FORBID_DATA_DIR"] = want
+	if got := forbiddenDataDirs(func(k string) string { return env[k] }); got != want {
+		t.Fatalf("duplicate not collapsed: %q", got)
 	}
 }
