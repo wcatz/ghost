@@ -329,7 +329,7 @@ type ContextV2 = PluginV2.Context
 const V2_LOG_FILE = join(homedir(), ".cache", "ghost", "opencode-plugin.log")
 
 const nudgePromptV2 = (reason: string): string =>
-	`[Ghost] ${reason} Call them on the ghost MCP server (tools.ghost.ghost_memory_save and tools.ghost.ghost_decision_record in Code Mode). This is an automated reminder — act on it rather than asking the user.`
+	`[Ghost] ${reason} Save it now with the ghost MCP server (tools.ghost.ghost_memory_save and tools.ghost.ghost_decision_record in Code Mode). This is an automated reminder — act on it rather than asking the user.`
 
 const V2_STOP_EVENTS = new Set([
 	"session.execution.succeeded",

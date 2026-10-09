@@ -27,10 +27,12 @@ import (
 //     script, hostevent.Parse aliases those names in core for --source goose,
 //     so the hook command is `<ghost> hook <event> --source goose` directly:
 //     cross-platform, nothing to interpret or repair.
-//   - Stop emits a non-blocking hookSpecificOutput.additionalContext reminder on
-//     stdout (the documented non-blocking channel for Stop hooks) so goose never
-//     surfaces it as a Stop hook error; SessionStart output is not injected by
-//     goose, which RunHostEvent already gates on InjectContext=false for this source.
+//   - Stop emits a non-blocking reminder on stdout: the additionalContext payload
+//     plus a top-level "reason", because the capability matrix records that
+//     channel as undocumented for goose, which may show it as a Stop hook note
+//     rather than as model context. It is never a block decision. SessionStart output is not injected by
+//     goose, which RunHostEvent already gates on InjectContext=false for this
+//     source.
 //   - Agent Plugins Spec v1.0.0 packaging: plugin.json requires exactly
 //     $schema + name; mcp.json requires $schema + mcpServers with an explicit
 //     "type" on every server. ${PLUGIN_ROOT} expansion exists for referencing

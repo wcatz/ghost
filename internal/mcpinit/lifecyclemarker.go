@@ -274,9 +274,16 @@ func WriteLastSaveCount(sessionID string, saveCount int) error {
 	if sessionID == "" {
 		return nil
 	}
-	dataDir, err := config.DataDir()
+	// DataDirPath, not DataDir: the stop hook runs on every tool-using turn,
+	// and bookkeeping must not MkdirAll a ghost/ directory no store ever
+	// created. A missing directory means no marker, and so no per-turn gate
+	// for that session (ReadLastSaveCount degrades the same way).
+	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return fmt.Errorf("locate data dir: %w", err)
+	}
+	if fi, err := os.Stat(dataDir); err != nil || !fi.IsDir() {
+		return nil
 	}
 	sweepSavesMarkers(dataDir)
 	m := lifecycleSavesMarker{

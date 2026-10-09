@@ -108,8 +108,8 @@ func TestRunStop(t *testing.T) {
 		if _, has := got["decision"]; has {
 			t.Errorf("nudge must carry no decision key, got %q", out)
 		}
-		if got["reason"] != got["hookSpecificOutput"].(map[string]any)["additionalContext"] {
-			t.Errorf("reason must repeat the additionalContext text for older readers, got %q", out)
+		if _, has := got["reason"]; has {
+			t.Errorf("a host with a documented Stop channel gets only that channel, got %q", out)
 		}
 		if !strings.Contains(out, "Do not save what the repository already states") {
 			t.Errorf("nudge wording not the per-turn text: %q", out)

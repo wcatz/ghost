@@ -16,6 +16,17 @@ func stopInputFor(t *testing.T, session, transcript string) string {
 		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, session, transcript))
 }
 
+// isolatedHomeWithStore is isolatedHome plus the data directory a store would
+// have made: the marker is written only where one already exists.
+func isolatedHomeWithStore(t *testing.T) string {
+	t.Helper()
+	dataHome := isolatedHome(t)
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dataHome
+}
+
 func savesMarkerPath(t *testing.T, dataHome, session string) string {
 	t.Helper()
 	return filepath.Join(dataHome, "ghost", savesMarkerFile(session))
@@ -25,7 +36,7 @@ func savesMarkerPath(t *testing.T, dataHome, session string) string {
 // session's previous stop, not only when the whole session has none.
 func TestStopGateIsPerTurn(t *testing.T) {
 	t.Run("a save between two stops suppresses the second reminder", func(t *testing.T) {
-		isolatedHome(t)
+		isolatedHomeWithStore(t)
 		first := writeTranscript(t, lineUser, lineToolBash, lineText)
 		if out := runStopHook(t, stopInputFor(t, "sess", first)); !strings.Contains(out, "ghost_memory_save") {
 			t.Fatalf("first stop with no saves must nudge, got %q", out)
@@ -36,7 +47,7 @@ func TestStopGateIsPerTurn(t *testing.T) {
 		}
 	})
 	t.Run("no save since the previous stop reminds even after an earlier save", func(t *testing.T) {
-		isolatedHome(t)
+		isolatedHomeWithStore(t)
 		first := writeTranscript(t, lineUser, lineToolBash, lineGhostSave)
 		if out := runStopHook(t, stopInputFor(t, "sess", first)); out != "" {
 			t.Fatalf("first stop saved; got %q", out)
@@ -49,7 +60,7 @@ func TestStopGateIsPerTurn(t *testing.T) {
 		}
 	})
 	t.Run("sessions do not share a count", func(t *testing.T) {
-		isolatedHome(t)
+		isolatedHomeWithStore(t)
 		saved := writeTranscript(t, lineToolBash, lineGhostSave)
 		_ = runStopHook(t, stopInputFor(t, "a", saved))
 		other := writeTranscript(t, lineToolBash, lineGhostSave)
@@ -63,7 +74,7 @@ func TestStopGateIsPerTurn(t *testing.T) {
 		}
 	})
 	t.Run("session end removes the marker", func(t *testing.T) {
-		dataHome := isolatedHome(t)
+		dataHome := isolatedHomeWithStore(t)
 		path := writeTranscript(t, lineToolBash, lineText)
 		_ = runStopHook(t, stopInputFor(t, "gone", path))
 		marker := savesMarkerPath(t, dataHome, "gone")
@@ -80,8 +91,25 @@ func TestStopGateIsPerTurn(t *testing.T) {
 }
 
 func TestSaveCountMarker(t *testing.T) {
-	t.Run("round trip creates the data dir", func(t *testing.T) {
-		isolatedHome(t)
+	t.Run("a write never creates the data dir", func(t *testing.T) {
+		dataHome := isolatedHome(t)
+		if err := WriteLastSaveCount("s", 3); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+			t.Fatalf("data dir was created: %v", err)
+		}
+		// A whole stop over a tool-using transcript, with no store, must not either.
+		path := writeTranscript(t, lineToolBash, lineText)
+		if out := runStopHook(t, stopInputFor(t, "sess", path)); !strings.Contains(out, "ghost_memory_save") {
+			t.Fatalf("the nudge must still fire without a marker, got %q", out)
+		}
+		if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+			t.Fatalf("the stop hook created the data dir: %v", err)
+		}
+	})
+	t.Run("round trip", func(t *testing.T) {
+		isolatedHomeWithStore(t)
 		if got := ReadLastSaveCount("s"); got != 0 {
 			t.Fatalf("missing marker = %d", got)
 		}
@@ -93,13 +121,13 @@ func TestSaveCountMarker(t *testing.T) {
 		}
 	})
 	t.Run("empty session id is inert", func(t *testing.T) {
-		isolatedHome(t)
+		isolatedHomeWithStore(t)
 		if err := WriteLastSaveCount("", 3); err != nil || ReadLastSaveCount("") != 0 {
 			t.Fatal("an empty session id must neither write nor read")
 		}
 	})
 	t.Run("unparseable and undated markers read as zero", func(t *testing.T) {
-		dataHome := isolatedHome(t)
+		dataHome := isolatedHomeWithStore(t)
 		if err := WriteLastSaveCount("s", 1); err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +142,7 @@ func TestSaveCountMarker(t *testing.T) {
 		}
 	})
 	t.Run("an expired marker reads as zero and a write sweeps it", func(t *testing.T) {
-		dataHome := isolatedHome(t)
+		dataHome := isolatedHomeWithStore(t)
 		if err := WriteLastSaveCount("old", 1); err != nil {
 			t.Fatal(err)
 		}
@@ -150,4 +178,35 @@ func TestSaveCountMarker(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStopReminderCarriesReasonOnlyWhereTheChannelIsUndocumented pins the use
+// of Capability.StopGuidance: hosts without the documented channel also get the
+// older top-level reason; neither shape carries a decision.
+func TestStopReminderCarriesReasonOnlyWhereTheChannelIsUndocumented(t *testing.T) {
+	for _, host := range []string{"claude-code", "opencode", "codex", "goose"} {
+		t.Run(host, func(t *testing.T) {
+			isolatedHomeWithStore(t)
+			path := writeTranscript(t, lineToolBash, lineText)
+			input := contractInputFor(t, "Stop", host, "claude-jsonl",
+				fmt.Sprintf(`{"session_id":"s","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
+			var out strings.Builder
+			RunHostEvent("stop", host, strings.NewReader(input), &out, os.Stderr)
+			var got map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out.String())
+			}
+			if _, has := got["decision"]; has {
+				t.Errorf("no decision key expected, got %s", out.String())
+			}
+			_, hasReason := got["reason"]
+			wantReason := host == "codex" || host == "goose"
+			if hasReason != wantReason {
+				t.Errorf("reason present = %v, want %v: %s", hasReason, wantReason, out.String())
+			}
+			if !strings.Contains(out.String(), `"additionalContext"`) {
+				t.Errorf("additionalContext missing: %s", out.String())
+			}
+		})
+	}
 }

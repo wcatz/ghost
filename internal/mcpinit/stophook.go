@@ -26,33 +26,33 @@ import (
 // nothing new to Ghost since the previous stop.
 const stopReminderText = "Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."
 
-// stopReminder is the one line of hook JSON written on a nudged stop. The
+// stopReminderFor is the one line of hook JSON written on a nudged stop. The
 // Claude Code hooks documentation lists `hookSpecificOutput.additionalContext`
 // as the Stop channel for "non-error feedback that continues the conversation";
 // its only top-level `decision` value is "block", so the old
 // {"decision":"approve","reason":…} carried text no host is documented to show
-// the model. `reason` stays beside it, with no decision, so a host that reads
-// only the older shape still receives the text; the opencode plugin reads
-// either key.
-var stopReminder = func() string {
-	b, err := json.Marshal(struct {
+// the model. A host whose capability entry records that channel (StopGuidance)
+// gets exactly that shape. Any other host also gets a top-level `reason`, with
+// no decision, so one that reads only the older shape still receives the text.
+func stopReminderFor(c hostevent.Capability) string {
+	out := struct {
 		HookSpecificOutput struct {
 			HookEventName     string `json:"hookEventName"`
 			AdditionalContext string `json:"additionalContext"`
 		} `json:"hookSpecificOutput"`
-		Reason string `json:"reason"`
-	}{
-		HookSpecificOutput: struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		}{"Stop", stopReminderText},
-		Reason: stopReminderText,
-	})
+		Reason string `json:"reason,omitempty"`
+	}{}
+	out.HookSpecificOutput.HookEventName = "Stop"
+	out.HookSpecificOutput.AdditionalContext = stopReminderText
+	if !c.StopGuidance {
+		out.Reason = stopReminderText
+	}
+	b, err := json.Marshal(out)
 	if err != nil {
 		panic(err) // a fixed struct of strings cannot fail to marshal
 	}
 	return string(b)
-}()
+}
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -147,7 +147,8 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if !nudge || p.TranscriptPath == "" {
 		return
 	}
-	if _, ok := hostevent.CapabilityFor(p.HostSource()); !ok {
+	capability, ok := hostevent.CapabilityFor(p.HostSource())
+	if !ok {
 		logFailOpen(stderr, "unknown source "+string(p.HostSource()), fmt.Errorf("no capability entry"))
 		return
 	}
@@ -180,8 +181,8 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if res.GhostSaves > lastSaves {
 		return
 	}
-	// Emitted for every host that reaches here; see stopReminder for the channel.
-	_, _ = fmt.Fprintln(stdout, stopReminder)
+	// Emitted for every host that reaches here; see stopReminderFor for the channel.
+	_, _ = fmt.Fprintln(stdout, stopReminderFor(capability))
 }
 
 // scanAuditSignals reads the transcript for what the agent DID with what Ghost
@@ -207,7 +208,8 @@ func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
 	if p.Contract == nil || p.TranscriptPath == "" {
 		return nil
 	}
-	if _, ok := hostevent.CapabilityFor(p.HostSource()); !ok {
+	_, ok := hostevent.CapabilityFor(p.HostSource())
+	if !ok {
 		return nil
 	}
 	key, err := memory.ReadRetrievalKey()

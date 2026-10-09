@@ -55,8 +55,8 @@ type Capability struct {
 	// non-blocking Stop reminder carried as hookSpecificOutput.additionalContext
 	// (Claude Code), or where ghost's own plugin reads that output and
 	// delivers it itself (opencode). Elsewhere the channel is undocumented, so
-	// the reminder also carries a top-level "reason" for hosts that read only
-	// that shape.
+	// ghost also adds a top-level "reason" to the reminder for hosts that read
+	// only that shape (mcpinit.stopReminderFor).
 	StopGuidance bool
 }
 
