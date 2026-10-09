@@ -851,6 +851,14 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		hostSessionID:  hostSessionResolver(),
 	}
 
+	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {
+		// The environment named a session and it was deliberately not recorded:
+		// this process inherited it, or the parent could not be read. Name the
+		// cause, never the value, so an operator whose audit stops judging can
+		// find it.
+		logger.Info("host session id not recorded: this process is not the session root, or its parent's environment could not be read")
+	}
+
 	// Resolve the retrieval record's per-install key now, at construction, so the
 	// search path never does. A cold key costs a data-directory resolution, a
 	// read, and on a first install a mkdir and a create — unbounded filesystem

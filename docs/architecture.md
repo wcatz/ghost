@@ -604,11 +604,14 @@ for a call and a session that belong together. Four pieces make that hold
 - **The call names its session.** `retrieval_record.session_id` (no schema change; the
   column and `retrieval_audit.session_id` already existed, and were empty on every row written before this change) is
   the host's id for the session. The MCP server over stdio has no transport id, so it
-  reads `CLAUDE_CODE_SESSION_ID` from its own environment once at startup, which is the
+  decides once at startup, in `New`, whether to use `CLAUDE_CODE_SESSION_ID` from its own
+  environment: on Linux only when this process is the session root (the parent's initial
+  `/proc/<ppid>/environ` lacks the variable), with every failure to tell falling toward
+  `""`; elsewhere the environment's id is used as before. It is the
   id Claude Code also sends in every hook payload as `session_id` and names its session
   record after; the session-start hook records its payload's id directly. Hosts whose
-  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
-  record `""`.
+  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`),
+  and servers that inherited the variable from a parent that already had it, record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
   signals and the sidecar (a `session` line; header v4 for the order below, v5 since the turns were grouped, older files refused by name). `audit.Run` judges only what
   `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
