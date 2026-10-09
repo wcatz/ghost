@@ -358,11 +358,13 @@ func NewAuditCorpus() AuditCorpus {
 	minute++
 
 	// An id inside an update of the same memory: the agent rewrote the memory and the
-	// call carries its id as the argument that says which one. That is an edit and not
-	// a citation. The rewrite shares two words with it, which no arm counts.
+	// call carries its id as the argument that says which one, and the text it carries
+	// is the memory's own wording, which is what the store holds when the call is
+	// judged. That is an edit: not a citation, not a use by wording, and not a
+	// restatement that supersedes the memory by itself.
 	editID := fpMem("edit", "Compactor watermark advances only after manifests are fsynced")
 	add(AuditTurn{Minute: minute, Kind: AuditToolCall, Tool: "mcp__ghost__ghost_memory_update", Edits: []string{editID},
-		Text: `{"memory_id":"` + editID + `","content":"Compactor watermark note reworded for clarity"}`})
+		Text: `{"memory_id":"` + editID + `","content":"Compactor watermark advances only after manifests are fsynced"}`})
 	minute++
 
 	// Guards. A memory of three distinctive words that one turn repeats whole is the

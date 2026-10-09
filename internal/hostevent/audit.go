@@ -198,17 +198,21 @@ func walkArgText(v any) string {
 // resolves every host's naming convention, so a scanner passes the name it found
 // and this decides.
 //
-// An UPDATE of a stored memory goes the same way and for the same reason, and for a
-// second one: its arguments name the memory being rewritten (`memory_id`), and an id
-// in a tool call is otherwise a citation. Filed as a save, the id is never lifted, so
-// an agent editing a memory is not reported as having relied on it. The words of the
-// rewrite are the agent declaring the memory's knowledge again, which is what the
-// save arm already reads. An update that cites ANOTHER memory by id is lost with it;
-// that is the conservative direction, since a citation is the one claim a false
-// `used` makes.
+// An UPDATE of a stored memory is read as nothing at all. Its arguments are the id of
+// the memory being rewritten and that memory's own new text, and the audit judges a
+// memory against what is stored NOW, which is that text: so as prose the update would
+// file the memory used by its own wording, as a citation it would file it used by its
+// id, and as a save it would file it superseded by itself, a decision-bearing verdict
+// that inverts the finding (the memory holds the newest text there is). None of the
+// three is evidence about the memory, so none is recorded. An update that cites ANOTHER
+// memory by id or wording is lost with it; that is the conservative direction, since a
+// citation is the one claim a false `used` makes.
 func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
+	if isGhostUpdateTool(name) {
+		return
+	}
 	if text := toolArgText(input); text != "" {
-		if isGhostSaveTool(name) || isGhostUpdateTool(name) {
+		if isGhostSaveTool(name) {
 			sig.AddSaveArgs(text)
 		} else {
 			sig.AddToolArgs(text)

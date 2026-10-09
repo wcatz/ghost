@@ -470,13 +470,13 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 //
-// An id in these arguments is NOT lifted. Ghost's own write tools take a memory id
-// only to say WHICH memory they rewrite (`memory_id` on an update), so the id is the
-// edit's target and not a claim that the agent relied on the memory: counting it filed
-// every edit of a memory as a citation of it, and on a real store every stored
-// identifier verdict was exactly that. A save or an update that restates the memory
-// is still read, as a restatement, by the words above. The cost is a save that names
-// ANOTHER memory by id in order to cite it, which goes unread.
+// An id in these arguments is NOT lifted: a save's arguments are the new memory's own
+// text, so an id in them is not the agent relying on the memory it names. (On a real
+// store every stored identifier verdict was the agent's own update of the memory,
+// counted as a citation; an update is now read as nothing, see hostevent's
+// addToolCall.) A save that restates a memory is still read, as a restatement, by the
+// words above. The cost is a save that names ANOTHER memory by id in order to cite it,
+// which goes unread.
 func (s *Signals) AddSaveArgs(text string) {
 	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
 }
