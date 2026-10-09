@@ -131,6 +131,17 @@ const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 // last few points of precision.
 const DefaultRelevanceCutoff float64 = 0.63
 
+// DefaultNoAnswerCosine is the compiled value of context.no_answer_cosine, the
+// assembler's absolute no-answer bar on query-mode blocks (#955): a block whose
+// best vector cosine is below it is withheld and the answer says nothing cleared
+// the bar. Like DefaultRelevanceCutoff it lives here so the bench that measures
+// the bar (`ghost bench --no-answer-sweep`, via ContextRequest) and the config
+// layer that ships it read ONE number. 0 is off.
+//
+// The number is chosen from the `ghost bench --no-answer-sweep` table in
+// docs/benchmarks.md, which also shows the two rules that were not built.
+const DefaultNoAnswerCosine float64 = 0.62
+
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
 type ScratchConfig struct {
@@ -187,6 +198,21 @@ type ContextConfig struct {
 	// row's absolute score, and this judges it against the best row in the same
 	// block.
 	RelevanceCutoff float64 `koanf:"relevance_cutoff"`
+	// NoAnswerCosine is the absolute no-answer bar applied in the assembler to
+	// QUERY-mode blocks only (#955): when the BEST vector cosine among the rows a
+	// block would carry is strictly below this value, the block is withheld and
+	// the answer says nothing cleared the bar, with the score shown, instead of
+	// ten plausible rows for a question the store cannot answer. 0 leaves the
+	// rule OFF (the pre-#955 block, byte-identical).
+	//
+	// One rule, one parameter. A pinned row is never withheld, a block with no
+	// comparable cosine (no embedder, or the vector leg failed) is never judged,
+	// and passive surfaces never see it. It is a cosine, not a share:
+	// relevance_cutoff compares a row with the best row in its own block, this
+	// compares the best row with an absolute bar, and abstain_cosine only labels
+	// a block weak while still showing it. It is a float64 (not abstain_cosine's
+	// float32) so the generic float parser lands on the field's own type.
+	NoAnswerCosine float64 `koanf:"no_answer_cosine"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -374,6 +400,7 @@ var defaults = map[string]interface{}{
 	"search.min_similarity":                    0.0,
 	"context.abstain_cosine":                   float32(0.0),
 	"context.relevance_cutoff":                 DefaultRelevanceCutoff,
+	"context.no_answer_cosine":                 DefaultNoAnswerCosine,
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
@@ -464,6 +491,12 @@ func checkContextValues(cfg *Config) error {
 	// same reason abstain_cosine refuses it.
 	if v := cfg.Context.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("context.relevance_cutoff: a cutoff is a fraction in [0,1] where 0 is off, got %v", cfg.Context.RelevanceCutoff)
+	}
+	// The no-answer bar is a cosine in [0,1] where 0 is off. NaN compares false
+	// against both bounds and would read as off, telling a user who set a bar
+	// that there is none; a value above 1 would withhold every answer.
+	if v := cfg.Context.NoAnswerCosine; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("context.no_answer_cosine: a cosine is in [0,1] where 0 is off, got %v", cfg.Context.NoAnswerCosine)
 	}
 	return nil
 }
@@ -668,7 +701,7 @@ func defaultConfig() *Config {
 		Injection: DefaultInjectionConfig(),
 		Obsidian:  ObsidianConfig{Interval: "30s"},
 		Scratch:   ScratchConfig{MaxBytes: DefaultScratchMaxBytes},
-		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff},
+		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff, NoAnswerCosine: DefaultNoAnswerCosine},
 	}
 }
 
@@ -1086,6 +1119,9 @@ var envOverrides = []envOverride{
 	// GHOST_CONTEXT_RELEVANCE_CUTOFF: the same reason — the generic transformer
 	// would produce context.relevance.cutoff, missing the relevance_cutoff key.
 	{"GHOST_CONTEXT_RELEVANCE_CUTOFF", "context.relevance_cutoff", floatValue},
+	// GHOST_CONTEXT_NO_ANSWER_COSINE: the same reason — the generic transformer
+	// would produce context.no.answer.cosine, missing the no_answer_cosine key.
+	{"GHOST_CONTEXT_NO_ANSWER_COSINE", "context.no_answer_cosine", floatValue},
 	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
 	// scratch.max.bytes, missing the max_bytes key entirely.
 	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},

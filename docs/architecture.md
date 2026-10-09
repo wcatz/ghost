@@ -1732,6 +1732,17 @@ Axis interaction rules:
 > passive block and a machine with no configured cutoff are byte-identical to a
 > pipeline whose stage was absent. `ghost bench --context` is measured at the
 > shipped default (`docs/benchmarks.md`).
+> The no-answer step ([#955](https://github.com/wcatz/ghost/issues/955)) follows
+> stage 8 on a QUERY only and is numbered with it rather than as a new stage 9: a
+> question nothing in the store answers still filled its window (the bench's 24
+> no-answer queries got ten rows each), so when the best vector cosine among the
+> block's rows is strictly below one absolute bar (`context.no_answer_cosine`) the
+> block is withheld and the answer says "No memory answers this: nothing cleared
+> the bar", with the score shown. ONE rule, ONE parameter. A pinned row is never
+> withheld, a block with no comparable cosine (no vector leg) is never judged, a
+> passive read is a recorded pass-through, and each withheld row is recorded with
+> reason `nothing_cleared_the_bar` in the trace, the retrieval record and explain.
+> 0 is off and byte-identical. Chosen from `ghost bench --no-answer-sweep`.
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in

@@ -231,6 +231,15 @@ type Request struct {
 	// is off and 1 keeps only rows that tie the top. See the stage's own comment
 	// in pipeline.go for the rule and for why it sits where it does.
 	RelevanceCutoff float64
+	// NoAnswerCosine is the caller-resolved cfg.Context.NoAnswerCosine: the
+	// absolute bar the assembler applies to a QUERY-mode block after the relevance
+	// cutoff and before the budget (#955). When the best vector cosine among the
+	// block's rows is strictly below it, the block is withheld and the answer says
+	// nothing cleared the bar. 0 leaves it OFF, and a passive request ignores it
+	// whatever its value. A pinned row is never withheld, a block with no
+	// comparable cosine (no vector leg) is never judged, and it only removes rows.
+	// It is validated against a cosine's [0,1] range. See runNoAnswer.
+	NoAnswerCosine float64
 	// Explain asks Run to project the trace of THIS run into Result.Explain, the
 	// ghost_memory_search explain payload. It is a request for a second reading
 	// of the same run and never for a second run: the candidate request, the
@@ -782,6 +791,12 @@ func validateRequest(req Request) error {
 	// not refused here; the stage reads it rather than rejecting it.
 	if v := req.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("assemble: RelevanceCutoff is a fraction in [0,1], where 0 is off, got %v", req.RelevanceCutoff)
+	}
+	// The no-answer bar is a cosine, so it is refused the way a cosine and the
+	// cutoff are: NaN would read as OFF and tell a caller who set a bar there is
+	// none, and a value above 1 would withhold every answer.
+	if v := req.NoAnswerCosine; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("assemble: NoAnswerCosine is a cosine in [0,1], where 0 is off, got %v", req.NoAnswerCosine)
 	}
 	for _, s := range req.Budget.Slices {
 		if s.MaxItems < 0 || s.MaxBytes < 0 || s.ClampBytes < 0 {

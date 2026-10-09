@@ -204,7 +204,7 @@ Every other table in this file asks **which row came first**. Recall@1, MRR@10 a
 
 `ghost bench --context` measures the block. It assembles one context block per graded query through the same path `ghost_memory_search` takes — `Store.Candidates` → `internal/assemble.Run` — at that tool's own budget (**10 items, 16000 response bytes** = `2 × memory.MaxContentLen`, `CondHybrid`), because a context metric measured against any other budget is a metric about a surface nobody ships. It prints this section and returns, so the ordering tables it is read against are **not above it** — they are what plain `ghost bench` prints.
 
-Since [#954](https://github.com/wcatz/ghost/issues/954) a query-mode block is measured at the shipped relevance-cutoff default (`context.relevance_cutoff` **0.63**), which stops an answer where relevance falls off. The captured run below is the **pre-cutoff baseline** (cutoff off), kept because the analysis that follows it is an argument about the budget's cost, which the baseline isolates; [The relevance cutoff](#the-relevance-cutoff-ghost-bench---cutoff-sweep) gives the sweep the default was chosen from and the cutoff-on figures. Here is the baseline run:
+Since [#954](https://github.com/wcatz/ghost/issues/954) a query-mode block is measured at the shipped relevance-cutoff default (`context.relevance_cutoff` **0.63**), which stops an answer where relevance falls off. The captured run below is the **pre-cutoff baseline** (cutoff off), kept because the analysis that follows it is an argument about the budget's cost, which the baseline isolates; [The relevance cutoff](#the-relevance-cutoff-ghost-bench---cutoff-sweep) gives the sweep the default was chosen from and the cutoff-on figures. Since [#955](https://github.com/wcatz/ghost/issues/955) the report is also measured with the no-answer bar on (`context.no_answer_cosine` **0.62**), so its result rate is 0.991 (218/220) at the shipped defaults — the two answerable queries the bar refuses; [The no-answer bar](#the-no-answer-bar-ghost-bench---no-answer-sweep) gives the sweep. The baseline run is with both off. Here is the baseline run:
 
 ```text
 context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; report-only, no gate)
@@ -294,6 +294,47 @@ cutoff     relevant     items context precision      result rate                
 **Why 0.63, and the shape of the trade.** The ranking is not the problem — hybrid MRR@10 is 0.902, so the useful row is usually first; the block simply never stopped. The cutoff compares the fused **Base** (the score before the age decay), so a relevant month-old decision is not cut for being old, and it exempts pinned and keyword-reserved rows (the reservation admits a keyword hit whose fused score is below the cut by design). The graded corpus's relevant and noise rows are interleaved in fused score, so a single relative-to-top threshold cannot cut only the noise: at 0.50 and 0.60 no answer shortens (every row is still within the share, and the table equals the baseline), and at ~0.70 the top rows of many queries fall off together, so the block shrinks a lot **and** graded-relevant rows are cut with it. The honest knee is between those. **0.63 admits 302 of the 304 baseline relevant rows** — a 4-row margin over the ship floor of 298 — holds the result rate at **1.000**, raises context precision **0.138 → 0.145** and lowers estimated tokens **296.6 → 280.318** per answer. 0.64 (300 relevant, precision 0.151, 267.7 tokens) and 0.65 (298 relevant, precision 0.158, 254.2 tokens) also clear the gate but leave a margin of two rows and none; the relevant floor is the hard constraint, so the default keeps the larger margin rather than the last points of precision.
 
 **The gate, and what does not move.** graded-relevant admitted 302 (floor 298, +4); result rate 1.000; context precision 0.138 → 0.145 (up); est. tokens 296.6 → 280.3 (down); contamination 0.000 unchanged (still a corpus property). Plain `ghost bench` is **unchanged** — the retriever is not touched, and the two results tables are byte-identical before and after. `ghost bench --passive` is **byte-identical** — the cutoff is a recorded pass-through on a passive request, so no passive block, note or verdict moves. Setting `context.relevance_cutoff: 0` reproduces the pre-cutoff block exactly, which is the byte-identity the disabled state promises.
+
+## The no-answer bar (`ghost bench --no-answer-sweep`)
+
+A question nothing in the store answers still gets a full answer: on the 24 no-answer queries every condition returns ten rows for every query, a false-positive rate of 1.000 at the shipped `search.min_similarity` of 0, and a model handed ten plausible rows will often use them. [#955](https://github.com/wcatz/ghost/issues/955) lets `ghost_memory_search` say "nothing here answers this" instead. ONE rule, ONE parameter: `context.no_answer_cosine` — when the **best vector cosine among the rows a block would carry is strictly below the bar**, the block is withheld (`outcome=empty reason=nothing_cleared_the_bar`, with a sentence that states the score and the bar). It runs directly after the relevance cutoff and before the budget, is **query-mode only**, never withholds a pinned row, never judges a block with no vector leg (a machine with no embedder is not a machine with no answers), and a bar of 0 is off and byte-identical.
+
+`ghost bench --no-answer-sweep` measures three rule families the issue named, at the shipped relevance cutoff, over the 220 graded queries (the answerable half) and the 24 no-answer queries (the false-positive half). Only the **cosine** rows are the real assembler rule; **fused** and **combined** are judged from the same block afterwards and were not built. The gate is a false-positive rate at most 0.500 (12 of 24) with at most 7 of the 220 answerable queries refused:
+
+```text
+no-answer sweep (220 graded queries, 24 no-answer queries, at the ghost_memory_search budget and the shipped relevance cutoff)
+cosine  = withhold the block when the BEST vector cosine in it is below the bar (built: context.no_answer_cosine; 0.0000 is off, the baseline)
+fused   = withhold when the top row's fused Base is below the floor (measured from the block, not built)
+combined= withhold when the best cosine is below the bar AND no row ranks in the top four keyword hits (measured from the block, not built)
+
+  rule      setting no-answer FP rate    answerable refused  relevant context precision      tokens/ans  gate
+  cosine    0.0000  1.000 (24/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  off
+  cosine    0.5000  0.875 (21/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  cosine    0.5500  0.750 (18/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  cosine    0.5800  0.625 (15/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  cosine    0.6000  0.417 (10/24)        2/220                    300 0.146 (300/2060)     280.284 (61102/218)  meets
+  cosine    0.6200  0.208 (5/24)         2/220                    300 0.146 (300/2060)     280.284 (61102/218)  meets  <- shipped default
+  cosine    0.6400  0.167 (4/24)         8/220                    293 0.146 (293/2000)     279.939 (59347/212)  fails
+  cosine    0.6600  0.125 (3/24)         16/220                   286 0.149 (286/1925)     279.814 (57082/204)  fails
+  cosine    0.7000  0.000 (0/24)         55/220                   235 0.152 (235/1547)     277.612 (45806/165)  fails
+  fused     0.0150  0.500 (12/24)        4/220                    297 0.146 (297/2040)     279.778 (60432/216)  meets
+  fused     0.0155  0.500 (12/24)        6/220                    295 0.146 (295/2020)     279.626 (59840/214)  meets
+  fused     0.0160  0.292 (7/24)         15/220                   287 0.149 (287/1930)     278.810 (57156/205)  fails
+  fused     0.0162  0.167 (4/24)         31/220                   267 0.151 (267/1770)     277.122 (52376/189)  fails
+  combined  0.6000  1.000 (24/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  combined  0.6200  1.000 (24/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  combined  0.6400  1.000 (24/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+  combined  0.7000  1.000 (24/24)        0/220                    302 0.145 (302/2080)     280.318 (61670/220)  fails
+
+ship gate: no-answer false-positive rate at most 0.500, answerable queries refused at most 7,
+graded-relevant admitted not lower than the refused queries' own rows. Pick the default from this table.
+```
+
+**Why the cosine floor, and why 0.62.** The fused score is a reciprocal-rank sum, so it measures how a row ranked and not how close a match it is: a no-answer query whose words happen to appear in the corpus lands a rank-0 keyword hit and a rank-0 vector hit, and scores the same fused top as an answerable one. A floor on it meets the gate only at its loosest settings (0.0150: 12 of 24 still answered, 4 of 220 refused) and gains nothing a cosine floor does not do better. The combined rule — refuse only when the cosine is weak and no row is a strong keyword match — never fires on this corpus: every one of the 24 no-answer queries has at least one row in the top four keyword ranks, because the keyword leg always ranks *something* first, so "no strong keyword match" is never true and it refuses nothing at any bar. The cosine floor is the rule that separates: at 0.62, 19 of 24 no-answer queries are refused (false-positive rate 0.208) for 2 of 220 answerable ones (headroom of 5 against the 7 allowed, and 0.29 against the 0.5), and the cliff is visible next to it — 0.64 refuses 8 and fails the gate. 0.60 also meets the gate but leaves only a margin of 2 on the false-positive side. The two answerable queries refused at 0.62 are the two whose best cosine in the corpus is below it (0.581 and 0.594); no label or query was touched to get there.
+
+**What moves, and what does not.** Graded-relevant rows admitted 302 → 300 (the two refused queries' own rows, nothing else); context precision 0.145 → 0.146; estimated tokens per answer 280.3 → 280.3 over the 218 answered queries. `ghost bench --context` is now measured with the bar on, so its **result rate is 0.991 (218/220)** where it was 1.000 — the 2 refused answerable queries — and the cutoff sweep above holds the bar off, so its table is unchanged byte for byte. `ghost bench --passive` is **byte-identical**: a passive request carries no query, so the step is a silent recorded pass-through. Plain `ghost bench` is **unchanged** too, and that is not evidence about the rule: its no-answer section measures the retriever path (`bench.Run`), not the assembler, so it cannot see a withheld block. The evidence for the bar is the table above.
+
+**Limits of this reading.** The corpus is 551 rows embedded with one model, and 0.62 is a property of that model's cosine distribution. A different embedding model moves both distributions; read your own before relying on the number, and set `context.no_answer_cosine: 0` to turn the rule off.
 
 ## Passive context (`ghost bench --passive`)
 
