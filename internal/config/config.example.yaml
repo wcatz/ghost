@@ -65,6 +65,15 @@
 # your own corpus with `ghost bench`.
 # context:
 #   abstain_cosine: 0.0              # e.g. 0.62; 0 = arm disabled
+#   # Relative relevance cutoff for query-mode blocks: once a row's fused score
+#   # falls below this fraction of the TOP row's, the answer stops there, so a
+#   # caller gets fewer better rows instead of a window that always fills to
+#   # `limit`. Default 0.63. It only ever shortens an answer — `limit` stays the
+#   # maximum, the top row is always kept, and a pinned row is never cut — and it
+#   # never touches the session-start / project-context digest, which is passive.
+#   # 0 disables it. Chosen from the `ghost bench --cutoff-sweep`; see
+#   # docs/benchmarks.md.
+#   relevance_cutoff: 0.63
 
 # --- Subprocess LLM binary paths ---
 # Same as the defaults above: the harness path override applies to every

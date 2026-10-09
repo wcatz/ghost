@@ -350,7 +350,7 @@ whole-project listing. Two buckets cannot express that: capped at the caller's
 `limit` each, they admit twice the rows the caller asked for. The consequence
 is that a bucket name and a row's own project stop being the same thing, so the
 retriever reports which policy admitted each row (`Candidate.FetchedBy`) and the
-assembler's stage 8 keys its per-slice cap on that. A request that both mixes
+assembler's stage 9 keys its per-slice cap on that. A request that both mixes
 `_global` into one bucket and fetches it in another is refused at both seams: the
 two row sets overlap, so every global row would be admitted twice under two
 different caps. A caller that wants both — the resource's Global section is
@@ -604,11 +604,14 @@ for a call and a session that belong together. Four pieces make that hold
 - **The call names its session.** `retrieval_record.session_id` (no schema change; the
   column and `retrieval_audit.session_id` already existed, and were empty on every row written before this change) is
   the host's id for the session. The MCP server over stdio has no transport id, so it
-  reads `CLAUDE_CODE_SESSION_ID` from its own environment once at startup, which is the
+  decides once at startup, in `New`, whether to use `CLAUDE_CODE_SESSION_ID` from its own
+  environment: on Linux only when this process is the session root (the parent's initial
+  `/proc/<ppid>/environ` lacks the variable), with every failure to tell falling toward
+  `""`; elsewhere the environment's id is used as before. It is the
   id Claude Code also sends in every hook payload as `session_id` and names its session
   record after; the session-start hook records its payload's id directly. Hosts whose
-  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
-  record `""`.
+  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`),
+  and servers that inherited the variable from a parent that already had it, record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
   signals and the sidecar (a `session` line; header v4 for the order below, v5 since the turns were grouped, older files refused by name). `audit.Run` judges only what
   `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
@@ -1182,29 +1185,39 @@ anywhere in the read, and no inference: it is a selection.
   reading rather than a guess. `valid_from` / `valid_until` / `verified_at` are the sharpest
   case: [#575](https://github.com/wcatz/ghost/issues/575) ships the writers, but
   the change log still records no validity, so an `as_of` read takes the window's
-  bounds from the current row. It judges them **at T**, the way
-  `ghost_memory_search` does when it binds the assembler's clock to `as_of`: a
-  row whose window had closed or had not yet opened at T is withheld, and a row
-  valid at T is shown as valid at T even if its window has closed since. The two
-  `as_of` **listing** surfaces — `ghost_project_context`'s `as_of` branch and the
-  `ghost context --as-of` session block — and search all reach that verdict
-  through one helper, `memory.ValidityAt` (stage 2 drops on the same
-  `memory.ValidityWithheld`). The two listings apply it before the limit so a
-  withheld row takes no slot, and state `memory.AsOfValidityNote` once at block
-  level, saying that validity was judged at T, how many rows it withheld
-  (counted, so an all-withheld block is not mistaken for a project that held
-  nothing) and that the bounds, like the row's other unversioned fields, are the
-  current row's. Search reaches the same verdict through stage 2 but does not
-  state that note or a count. A bound exactly at T is inside the window, and an unreadable
-  bound is no bound, as in stage 2. The `unverified` marker is drawn as on any
-  line, because `verified_at` is a flag rather than a predicate. One imprecision
-  is recorded rather than worked around: because the bounds are the current
-  row's, a window edited after T is judged as the edited one, so a row can be
-  withheld from (or kept in) a past answer on the strength of a bound that was
-  not set then ([#910](https://github.com/wcatz/ghost/issues/910)); and a
-  promotion **rewrites** the history rows' `project_id` (it has to, or the
-  project-delete cascade takes a memory's past with it), so a pre-promotion
-  instant reports a promoted memory under `_global`.
+  bounds from the current row. **What a surface does with a borrowed bound is
+  not one rule, and that is the point** ([#910](https://github.com/wcatz/ghost/issues/910)):
+  a bound the row holds today is not evidence about the row at T, so a verdict
+  drawn from it is a claim about today rather than about the instant asked
+  about. The two `as_of` **listing** surfaces — `ghost_project_context`'s `as_of`
+  branch and the `ghost context --as-of` session block — keep the verdict
+  [#899](https://github.com/wcatz/ghost/issues/899) gave them: they judge the
+  window **at T** through one helper, `memory.ValidityAt`, so a row whose window
+  had closed or had not yet opened at T is withheld and a row valid at T is shown
+  as valid at T even if its window has closed since (a bound exactly at T is
+  inside the window, and an unreadable bound is no bound). They apply it before
+  the limit so a withheld row takes no slot, and state `memory.AsOfValidityNote`
+  once at block level, saying that validity was judged at T, how many rows it
+  withheld (counted, so an all-withheld block is not mistaken for a project that
+  held nothing) and that the bounds, like the row's other unversioned fields, are
+  the current row's. **`ghost_memory_search` draws no verdict at all**: stage 2
+  records the empty state for an `as_of` request, which renders the bounds with
+  no verdict word on them, drops nothing, and reports no validity exclusion — a
+  row whose window has closed or has not opened *now* is returned, because
+  nothing says it had at T. `qualifiersFor` appends the same
+  `memory.AsOfBorrowedWindowNote`, which leads with the same borrow sentence the
+  listings lead with and then says no verdict was drawn — because the listing's
+  own note opens by claiming a judgement at T, and a search that printed it would
+  open with a claim its answer contradicts. No state word is drawn on an as_of
+  row, `unverified` included; the bounds and the `verified` stamp still render.
+  The imprecision that remains
+  is therefore the listings' alone and is stated rather than worked around:
+  because the bounds are the current row's, a window edited after T is judged as
+  the edited one, so a row can be withheld from a past listing on the strength of
+  a bound that was not set then. Separately, a promotion **rewrites** the history
+  rows' `project_id` (it has to, or the project-delete cascade takes a memory's
+  past with it), so a pre-promotion instant reports a promoted memory under
+  `_global`.
 - **Which timestamp the age is measured from.** The row's own `created_at`, which
   is what the current read decays on, whenever it can answer — it is set on
   INSERT and never rewritten (a snapshot restore carries the snapshot's
@@ -1244,10 +1257,14 @@ anywhere in the read, and no inference: it is a selection.
 
 `as_of` (RFC 3339) is a parameter on `ghost_memory_search` and
 `ghost_project_context`, and `--as-of` on `ghost context`. In the assembler it is
-a **binding, not a filter**: `Run` moves `Now` to it, so a row's age, its validity
-window and the trace that describes the block are all decided against T rather
-than against the wall clock. The store treats `AsOf` as authoritative over
-`Now` for the same reason.
+a **binding, not a filter**: `Run` moves `Now` to it, so a row's age and the trace
+that describes the block are decided against T rather than against the wall
+clock. The store treats `AsOf` as authoritative over `Now` for the same reason.
+A row's **validity window is the one thing that is not** decided against T,
+because it is not a versioned field: the bounds an `as_of` row carries are the
+live row's, so stage 2 records no verdict for one and drops nothing, and the
+answer says the bounds are today's (see "Which columns are historical" above,
+[#910](https://github.com/wcatz/ghost/issues/910)).
 
 A historical retrieval is **keyword-only**, and says so in the answer, the trace
 and the store's leg status. Every statement in the read names `memory_history` or
@@ -1270,9 +1287,12 @@ term is matched as the PHRASE FTS5 would make it — `ghost_windows_arm64` is th
 adjacent tokens — with a trailing `*` still meaning a prefix match.
 
 Every surface states the instant and what did not run, in one shared sentence
-(`memory.AsOfSourceNote` plus the assembler's retrieval half) and one shared
+(`memory.AsOfSourceNote` plus the assembler's retrieval half), one shared
 omission note (`memory.AsOfUnversionedNote`, for tasks, decisions and learned
-context, none of which is versioned). They are `Result.Qualifiers` rather than
+context, none of which is versioned) and one shared validity note
+(`memory.AsOfValidityNote`, which says the window's bounds are the current row's
+and, on the listings, how many rows that withheld). They are
+`Result.Qualifiers` rather than
 `Result.Notes`: a note list is a diagnostic list shown for the empty answer and
 bounded from the end, where the first thing to go is exactly the sentence that
 changes what the answer *means*.
@@ -1626,7 +1646,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, what replaced it, and how long is it wanted? | `memories.resolved_at`, `memories.pinned`, `memories.retention` + `expires_at` (schema v19), the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — retention/ownership tiers landed in v19 ([#587](https://github.com/wcatz/ghost/issues/587)): three tiers, a `persistent` tier every automated pass spares, a bounded decay for `session` rows, and a `ghost prune` that is dry-run by default and never runs on a timer (see [Retention tiers](#retention-tiers)). `memory_history` records every state change and who made it, and an `as_of` read consumes it for liveness and content (see [Historical retrieval](#historical-retrieval-as_of)), but a current retrieval still does not. No transition model across the axes is documented beyond the per-writer rules in this file and [Retention tiers](#retention-tiers) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memories_list` and `ghost_search_all` still show a closed window, marked `expired` rather than withheld, because they browse rather than filter — every surface that ASSEMBLES a context withholds it, which is now `ghost_memory_search`, the session-start block, `ghost_project_context` and the `ghost://memories/global` resource (see the assembler section below for the list). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record in `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest, and it counts over records that CARRY a stamp rather than over `verified` rows. Which mechanism is in play differs per writer — a live save appends a `verified` row, an import stamps its own `imported` row, a restore reinstates a re-created row's records and deliberately leaves an in-place row's alone, and the corpus route records no stamp at all — so [Evidence provenance](#evidence-provenance) enumerates the set in its writer table rather than this cell, which is a summary, and a summary of four per-writer mechanisms is a fourth claim site. (Named by link rather than by direction: this cell also points at the assembler section below, so a reader told to look below for both finds one and not the other.) Where a record IS written its stamp is the store's clock and never the caller's — a verifier that could date its own check could date it before the thing it checked, and the import holds to that too rather than copying a date in from a file — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated. An `as_of` read is filtered too, and against the instant it asked for rather than the wall clock: `assemble.Run` moves `Now` to the `as_of` value before the stages run, so stage 2 judges the window at T and a row that was true at T but has since expired is kept for that question ([#683](https://github.com/wcatz/ghost/pull/683)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memories_list` and `ghost_search_all` still show a closed window, marked `expired` rather than withheld, because they browse rather than filter — every surface that ASSEMBLES a context withholds it, which is now `ghost_memory_search`, the session-start block, `ghost_project_context` and the `ghost://memories/global` resource (see the assembler section below for the list). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record in `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest, and it counts over records that CARRY a stamp rather than over `verified` rows. Which mechanism is in play differs per writer — a live save appends a `verified` row, an import stamps its own `imported` row, a restore reinstates a re-created row's records and deliberately leaves an in-place row's alone, and the corpus route records no stamp at all — so [Evidence provenance](#evidence-provenance) enumerates the set in its writer table rather than this cell, which is a summary, and a summary of four per-writer mechanisms is a fourth claim site. (Named by link rather than by direction: this cell also points at the assembler section below, so a reader told to look below for both finds one and not the other.) Where a record IS written its stamp is the store's clock and never the caller's — a verifier that could date its own check could date it before the thing it checked, and the import holds to that too rather than copying a date in from a file — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated. An `as_of` read on `ghost_memory_search` is filtered by NO clock at all, which is the point ([#910](https://github.com/wcatz/ghost/issues/910)): `memory_history` versions no validity, so the window an as_of row carries is the live row's and a verdict read from it is a claim about today's bounds. Stage 2 therefore draws none for an `as_of` request — it drops nothing and renders the bounds unjudged — and the answer states the borrow with `memory.AsOfValidityNote` from `qualifiersFor`. The two `as_of` LISTING surfaces still judge the window AT T through `memory.ValidityAt`, which is a documented imprecision of theirs rather than a shared rule. ([#683](https://github.com/wcatz/ghost/pull/683) bound the clock; #910 is what a borrowed bound is worth) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate), and the assembler's conflict stage (which would otherwise separate the pair, mark the surviving row `conflicts_with` and note a contradiction that is two true claims) |
 | **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. The history has three readers: `ghost history <memory-id>`, `Store.MemoryHistory`, and the `as_of` read, which consults it for content and liveness but not for confidence. The evidence table has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
 
@@ -1693,6 +1713,25 @@ Axis interaction rules:
 > another row because of what it is ABOUT, while a digest asks no question and
 > hands a model everything worth knowing, where breadth is the point. The gate
 > is the request's mode (an empty `Query`), never its `Source`.
+> Stage 8 (the relevance cutoff,
+> [#954](https://github.com/wcatz/ghost/issues/954)) is the query-mode dual of
+> stage 7, and the two never both act on one request because each is gated on the
+> opposite mode: a relative-to-top fused-Base cut applied after dedup and before
+> the budget, on a QUERY only, that stops the answer where relevance falls off —
+> `ghost_memory_search` used to always fill its window, so a block that answered a
+> question whose useful row ranked first still carried nine rows of noise (context
+> precision 0.138). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
+> of the top row's fused Base below which a row is cut), chosen from the
+> `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
+> stays the maximum, the top row is always kept (a result rate below 1.000 would
+> be a regression), and a pinned row and a keyword-reserved row are never cut. The comparison is on Base, the score before the age decay, so age and category never read as irrelevance. Each cut row is recorded once —
+> a decision at the stage with reason `relevance_cutoff`, which the retrieval
+> record reads as a dropped verdict and explain reads as an excluded row's reason
+> — so, unlike the passive diversity deferral, its reason REACHES the explain
+> payload. A passive read and an off cutoff (0) are recorded pass-throughs, so a
+> passive block and a machine with no configured cutoff are byte-identical to a
+> pipeline whose stage was absent. `ghost bench --context` is measured at the
+> shipped default (`docs/benchmarks.md`).
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
@@ -1738,6 +1777,11 @@ What exists now:
   `ImportMemory` and `RestoreSnapshot` carry the triple too, and every row
   written before any of those reads nil, which is what stage 2 calls unset —
   so a store nobody has written a window into is corpus-neutral for the stage.
+  The one request that stages 2 judges NOTHING for is a historical (`as_of`) one:
+  the window an as_of row carries is the live row's, because `memory_history`
+  versions no validity, so no verdict read from it is a verdict about the instant
+  and the row is kept with its bounds rendered unjudged
+  ([#910](https://github.com/wcatz/ghost/issues/910)).
 
   **The surfaces that run the pipeline filter on it**, and there are four:
   `ghost_memory_search`, the session-start block,
@@ -2058,7 +2102,7 @@ deferred row is a `diversity` / `diversity_deferred` decision in the trace (and
 `diversity_backfilled` for one that came back).
 
 **The window is PER BUCKET on a sliced read, and that is structural rather than
-cosmetic.** Stage 8 enforces each slice cap over the rows IT admits, so one shared
+cosmetic.** Stage 9 enforces each slice cap over the rows IT admits, so one shared
 window would let one bucket's share evict another bucket's row — which the
 per-bucket cap then readmits — leaving a deferral verdict on a row the answer
 renders, counted as withheld by the bucket tally the session-start header reads. So the
@@ -2066,7 +2110,7 @@ session start's project slice and
 `_global` slice are each divided by their own cap, each computed only over that
 bucket's rows, and a bucket with no item cap is not divided at all because the
 budget stage never cuts its rows on count. A bucket's rows keep their own relative
-order, so one bucket's reordering cannot change which rows stage 8 admits for
+order, so one bucket's reordering cannot change which rows stage 9 admits for
 another. A row a share moved but the budget stage admits keeps no drop verdict
 either (`trim` withdraws it), so no block shows a row the header calls withheld.
 Query mode is OUTSIDE it, and the reason is the two questions
@@ -2095,6 +2139,8 @@ Both consumers should call one assembler with an explicit budget, so every surfa
 query
   1. retrieve       hybrid FTS + vector candidates, widened window (0.3 FTS / 0.7 vector RRF)
   2. validity       drop or bound rows outside valid_from/valid_until, flag unverified
+                    (an as_of request draws NO verdict: the window is the live row's,
+                    so nothing is dropped and the bounds render unjudged — #910)
   3. scope          machine-readable memories.scope match, project membership
   4. provenance     bounded penalty for unattributed or low-confidence rows
   5. conflicts      separate a contradicts pair: one row kept by the documented
@@ -2135,7 +2181,7 @@ Rules the pipeline must hold:
   byte-identical while their one behavioural difference is not in them at all.
 - **The trace is the explain payload.** `explain:true` is a projection of the same `Run` the formatted answer comes from, so explain and the answer cannot disagree about what a row was or why it was withheld.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through. An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
-- **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **The budget is a hard boundary, in the unit it names.** Stage 9's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
 - **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
 - **The pipeline is measurable.** `ghost bench --context` measures context precision, contamination rate, budget adherence, diversity, and token cost, and `ghost bench --passive` measures the passive surfaces (see [Benchmarks](benchmarks.md)); contamination classification reuses the production exclusion reasons so the two cannot drift.
 

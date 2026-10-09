@@ -149,8 +149,12 @@ func formatNote(format string, args ...any) string {
 //     if the label omits the one word that settles it.
 //
 // On the assembler's own surfaces the last two never appear: stage 2 drops those
-// rows before stage 9 renders them, so Item.Line is only ever handed valid,
-// unverified or unset. A surface that has not run the stages derives the state
+// rows before the render stage runs them, so Item.Line is only ever handed
+// valid, unverified or unset — except on a historical (as_of) request, where
+// stage 2 records the empty state for every row because the window is the live
+// row's and no verdict drawn from it is a verdict about the instant (#910). An
+// empty state renders the values and no verdict, which is the right reading of a
+// bound nobody can place. A surface that has not run the stages derives the state
 // itself with ValidityStateOf, because it cannot claim a row is out of date
 // without knowing what date it is.
 func validityLabel(state string, from, until, verified *time.Time) string {
@@ -222,10 +226,13 @@ func ValidityStateOf(from, until, verified *string, now time.Time) string {
 //
 // state is the row's verdict against the clock the caller is rendering for;
 // ValidityStateOf is what a current listing passes, and memory.ValidityAt at the
-// requested instant is what an as_of listing passes, so the verdict is the one
-// ghost_memory_search reaches at that instant. An empty state renders the values
-// and no verdict, and is right where the caller already knows the row survived
-// stage 2.
+// requested instant is what an as_of listing passes. An empty state renders the
+// values and no verdict, and is right where the caller already knows the row
+// survived stage 2 — which is what stage 2 records for every row on an as_of
+// request, because the bounds are the live row's (#910). ghost_memory_search
+// reaches no verdict at that instant any more, so a caller comparing this label
+// with a searched answer is comparing a listing's verdict with a rendering that
+// has none.
 func ValidityLabel(state string, from, until, verified *string) string {
 	f, u, v := parseStampPtr(from), parseStampPtr(until), parseStampPtr(verified)
 	if f == nil && u == nil && v == nil && state != validityUnverified {
