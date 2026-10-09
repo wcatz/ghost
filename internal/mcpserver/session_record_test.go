@@ -10,6 +10,11 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -28,10 +33,21 @@ func lastRecordSession(t *testing.T, srv *Server) (session string, n int) {
 }
 
 // TestSearchRecordsTheHostsSessionIDOverStdio: stdio assigns no transport id, so the
-// session the host named in the server's environment is recorded.
+// session the host named in the server's environment is recorded WHEN the server is the
+// host session (parent lacks CLAUDE_CODE_SESSION_ID).
 func TestSearchRecordsTheHostsSessionIDOverStdio(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-1")
-	srv, session := newCapSession(t)
+	root := t.TempDir()
+	// Fake proc: ghost(100) <- parent(200) WITHOUT CLAUDE_CODE_SESSION_ID
+	writeFakeProc(t, root, 100, 200, []string{"PATH=/usr/bin", "HOME=/home/user"})
+
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	srv.procRoot = root
+	srv.testPid = 100
+
+	session := connectedClient(t, srv)
 	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
 	listingIDs(t, session, "nightly export", nil)
 	if got, n := lastRecordSession(t, srv); n != 1 || got != "host-session-1" {
@@ -63,5 +79,105 @@ func TestProjectContextRecordsTheHostsSessionID(t *testing.T) {
 	_ = callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"})
 	if got, n := lastRecordSession(t, srv); n != 1 || got != "host-session-2" {
 		t.Fatalf("project context recorded %d row(s) with session %q, want 1 row naming host-session-2", n, got)
+	}
+}
+
+// writeFakeProc creates a fake /proc tree for testing IsHostSession.
+// root is the temp dir, pid is the current process (ghost), ppid is the parent.
+func writeFakeProc(t *testing.T, root string, pid, ppid int, parentEnv []string) {
+	t.Helper()
+	// Write current process (ghost)
+	ghostDir := filepath.Join(root, fmt.Sprintf("%d", pid))
+	if err := os.MkdirAll(ghostDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", ghostDir, err)
+	}
+	stat := fmt.Sprintf("%d (ghost) S %d\n", pid, ppid)
+	if err := os.WriteFile(filepath.Join(ghostDir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatalf("write ghost stat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ghostDir, "comm"), []byte("ghost\n"), 0o644); err != nil {
+		t.Fatalf("write ghost comm: %v", err)
+	}
+
+	// Write parent process
+	parentDir := filepath.Join(root, fmt.Sprintf("%d", ppid))
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", parentDir, err)
+	}
+	stat = fmt.Sprintf("%d (parent) S 1\n", ppid)
+	if err := os.WriteFile(filepath.Join(parentDir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatalf("write parent stat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "comm"), []byte("parent\n"), 0o644); err != nil {
+		t.Fatalf("write parent comm: %v", err)
+	}
+	// Write parent environ
+	envData := []byte(strings.Join(parentEnv, "\x00") + "\x00")
+	if err := os.WriteFile(filepath.Join(parentDir, "environ"), envData, 0o644); err != nil {
+		t.Fatalf("write parent environ: %v", err)
+	}
+
+	// Write init (pid 1)
+	initDir := filepath.Join(root, "1")
+	if err := os.MkdirAll(initDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", initDir, err)
+	}
+	stat = "1 (init) S 0\n"
+	if err := os.WriteFile(filepath.Join(initDir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatalf("write init stat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(initDir, "comm"), []byte("init\n"), 0o644); err != nil {
+		t.Fatalf("write init comm: %v", err)
+	}
+	envData = []byte("PATH=/usr/bin\x00")
+	if err := os.WriteFile(filepath.Join(initDir, "environ"), envData, 0o644); err != nil {
+		t.Fatalf("write init environ: %v", err)
+	}
+}
+
+// TestSearchRecordsNoSessionWhenParentHasSessionID: a child process that inherits
+// CLAUDE_CODE_SESSION_ID from its parent records no session id. The audit leaves
+// such calls unjudged.
+func TestSearchRecordsNoSessionWhenParentHasSessionID(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-1")
+	root := t.TempDir()
+	// Fake proc: ghost(100) <- parent(200) with CLAUDE_CODE_SESSION_ID
+	writeFakeProc(t, root, 100, 200, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID=host-session-1"})
+
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	srv.procRoot = root
+	srv.testPid = 100
+
+	session := connectedClient(t, srv)
+	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
+	listingIDs(t, session, "nightly export", nil)
+
+	if got, n := lastRecordSession(t, srv); n != 1 || got != "" {
+		t.Fatalf("child process recorded %d row(s) with session %q, want 1 row with empty session", n, got)
+	}
+}
+
+// TestSearchRecordsSessionWhenParentLacksSessionID: the host session (parent
+// lacks CLAUDE_CODE_SESSION_ID) records its session id.
+func TestSearchRecordsSessionWhenParentLacksSessionID(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-1")
+	root := t.TempDir()
+	// Fake proc: ghost(100) <- parent(200) WITHOUT CLAUDE_CODE_SESSION_ID
+	writeFakeProc(t, root, 100, 200, []string{"PATH=/usr/bin", "HOME=/home/user"})
+
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	srv.procRoot = root
+	srv.testPid = 100
+
+	session := connectedClient(t, srv)
+	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
+	listingIDs(t, session, "nightly export", nil)
+
+	if got, n := lastRecordSession(t, srv); n != 1 || got != "host-session-1" {
+		t.Fatalf("host session recorded %d row(s) with session %q, want 1 row naming host-session-1", n, got)
 	}
 }

@@ -497,10 +497,17 @@ func (s *Server) recordSink() assemble.RecordSink {
 // and the record's Source column is what tells an injection from a search when
 // this is empty.
 //
-// The transport's own id wins when it has one. Over stdio it never does, and then the
-// host's id from the process environment is the best key there is (hostSessionIDFromEnv):
-// it is the one id the stop hook's payload also carries, which is what lets the audit
-// judge this call against that session's text. It is never constructed.
+// The transport's own id wins when it has one. Over stdio it never does. The
+// host's id from the process environment (hostSessionIDFromEnv) is used ONLY
+// when this process is the host session — the process the host started with the
+// variable set in its INITIAL environment. A child process (subagent, CLI call)
+// inherits the variable, so its parent's initial environ also carries it. We
+// detect this by reading /proc/<ppid>/environ: if the parent has the variable,
+// this process inherited it and returns ""; if the parent lacks it, this process
+// is the host session and the variable is its own. This rule is what lets the
+// audit match a retrieval record to the session whose stop hook scanned the
+// transcript — a call made by the host session itself keeps its id, a call made
+// by an inherited child records none and is left unjudged.
 func (s *Server) sessionIDFor(req *mcp.CallToolRequest) string {
 	if req != nil && req.Session != nil {
 		// ID() is "" unless the underlying connection assigns session ids; see
@@ -509,7 +516,16 @@ func (s *Server) sessionIDFor(req *mcp.CallToolRequest) string {
 			return id
 		}
 	}
-	return s.hostSessionID
+	// stdio transport: only return the host session id when this process is the
+	// host session itself (not a child that inherited the env var).
+	procRoot := s.procRoot
+	if procRoot == "" {
+		procRoot = "/proc"
+	}
+	if ai.IsHostSession(procRoot, s.testPid) {
+		return s.hostSessionID
+	}
+	return ""
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -686,6 +702,13 @@ type Server struct {
 	// one place and a test sets it before New. "" for every host that does not put one
 	// there, and then the retrieval record carries none and the audit leaves it alone.
 	hostSessionID string
+	// procRoot is the root of the proc filesystem to use for host-session
+	// detection. "" means the real /proc. Tests override this to point at a
+	// fake proc tree.
+	procRoot string
+	// testPid is the process id to use for host-session detection. 0 means
+	// use os.Getpid(). Tests override this to match their fake proc tree.
+	testPid int
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
