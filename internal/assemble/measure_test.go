@@ -63,10 +63,21 @@ func TestMeasureCapsTheCallersOwnRenderAndKeepsPinned(t *testing.T) {
 	// Framing alone over the cap: cutting rows cannot help, so they are kept.
 	req = build()
 	req.Budget.MaxBytes = 10
+	req.Budget.FramingCeiling = 40
 	req.Budget.Measure = func(items []Item, _ *Trace) int { return 50 + len(items) }
 	res = run(t, mk(), req)
 	if len(res.Items) != len(rows) {
 		t.Errorf("kept %d rows, want all %d: the framing alone is over the cap", len(res.Items), len(rows))
+	}
+
+	// Framing over the cap but under the ceiling: cutting still helps, so rows go.
+	req = build()
+	req.Budget.MaxBytes = 10
+	req.Budget.FramingCeiling = 100
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 20 + len(items)*5 }
+	res = run(t, mk(), req)
+	if len(res.Items) != 0 {
+		t.Errorf("kept %d rows, want 0: the framing (20) is over the cap (10) but under the ceiling (100), so cutting runs to none", len(res.Items))
 	}
 
 	// Only pinned rows left: the last resort cuts a pinned row from the bottom.

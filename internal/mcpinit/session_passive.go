@@ -52,11 +52,17 @@ const (
 // appends.
 const sessionStartByteCap = 9000
 
-// The framing's own bounds, so the block can always fit the cap: the learned
-// summary is bounded only by the prompt that writes it, and task and decision
-// titles by nothing but the MCP handler's limit. With these, ten tasks, five
-// decisions and the summary stay near 7 KB at the worst, which leaves room for
-// rows under sessionStartByteCap.
+// sessionHostLimit is Claude Code's 10,000-character cap on a hook's output.
+const sessionHostLimit = 10000
+
+// The framing's own bounds. The learned summary is bounded only by the prompt
+// that writes it, and task and decision titles by nothing on the import paths
+// (the MCP handler's own limit does not apply to `ghost import`). These three
+// fields are bounded in BYTES at the read, which shrinks the usual case; they are
+// not a guarantee. quoteData folds each line break to a 3-byte marker, so a
+// bounded field can still render up to three times as long, and the project name
+// and ids are unbounded. The framing is therefore still unbounded in the tail, and
+// the fit pass keeps the rows when it alone reaches the host limit.
 const (
 	sessionLearnedBytes = 1000
 	sessionTitleBytes   = 120
@@ -304,6 +310,8 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	}
 	budget.MaxBytes = sessionStartByteCap
 	budget.KeepPinned = true
+	// The host's own limit: a framing alone at or over it cannot be helped by cutting rows.
+	budget.FramingCeiling = sessionHostLimit
 	budget.Measure = func(items []assemble.Item, trace *assemble.Trace) int {
 		mem, glob := sessionRowsFrom(items)
 		return len(formatSessionContext(projectID, frame.project, nil, mem, frame.learned, frame.tasks, frame.decisions, frame.interactionCount, glob, tallyFor(trace, len(mem), len(glob))))

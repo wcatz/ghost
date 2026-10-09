@@ -977,10 +977,11 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 			break
 		}
 
-		// A caller's own render that is over the cap with NO row in it cannot be
-		// helped by cutting rows: the framing alone is the excess, and cutting every
-		// row would deliver nothing for no gain. Keep the rows, stop.
-		if p.req.Budget.Measure != nil && len(p.items) > 0 && p.req.Budget.Measure(nil, p.trace) > p.req.Budget.MaxBytes {
+		// A caller's own render that is at or over its ceiling with NO row in it cannot
+		// be helped by cutting rows: the framing alone is the excess, and cutting
+		// every row would deliver nothing for no gain. Keep the rows, stop. Between
+		// the cap and the ceiling cutting still helps, so it carries on.
+		if p.req.Budget.Measure != nil && p.req.Budget.FramingCeiling > 0 && len(p.items) > 0 && p.req.Budget.Measure(nil, p.trace) >= p.req.Budget.FramingCeiling {
 			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
 			p.trace.Notes = res.Notes
 			return res, nil

@@ -152,9 +152,16 @@ type Budget struct {
 	// envelope, so the cap bounds the bytes the caller actually emits and each
 	// cut is recorded in this run's trace and retrieval record like any other
 	// stage-8 decision. The trace passed in already holds the cuts made so far.
-	// Nil keeps the search envelope. Measure must be pure and cheap: it runs
-	// once per dropped row.
+	// Nil keeps the search envelope. Measure must be pure and cheap: it runs at
+	// least once per dropped row and may be called more than once per drop. The
+	// items slice may be EMPTY (nil) — that is how the caller's framing alone is
+	// measured — so Measure must not assume a row.
 	Measure func(items []Item, trace *Trace) int
+	// FramingCeiling, with Measure, is the size at which cutting rows cannot help:
+	// when the framing alone (Measure of no rows) is at or over it, the rows are
+	// kept rather than all cut for nothing. Below it, rows are cut down to none if
+	// that is what it takes to reach MaxBytes. 0 means rows are always cut.
+	FramingCeiling int
 	// KeepPinned makes the response-fit post-pass cut the lowest-ranked UNPINNED
 	// row first, and a pinned row only when none other is left. Without it the
 	// pass cuts the bottom of the ranking, which is not where a pinned row is
