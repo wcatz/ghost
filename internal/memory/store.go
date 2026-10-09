@@ -580,6 +580,15 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if claimed > 0 {
 		return false, nil
 	}
+	// An OVERLAPPING claim is a claim too, and the guard is bind's own: a project
+	// inside dir would be swallowed by it, and dir inside a project that records
+	// no remote would be answered for by that project. Each declines the bind.
+	if err := checkBindPathConflicts(ctx, tx, id, dir); err != nil {
+		if errors.Is(err, ErrBindPathClaimed) || errors.Is(err, ErrBindPathContainsOther) || errors.Is(err, ErrBindPathInsideOther) {
+			return false, nil
+		}
+		return false, err
+	}
 	if err := CheckImportedProject(createdProject(id, dir, name)); err != nil {
 		return false, fmt.Errorf("create project: %w", err)
 	}

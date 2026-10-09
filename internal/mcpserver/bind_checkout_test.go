@@ -289,3 +289,37 @@ func TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote(t *testing.T
 		t.Fatalf("owner path = %q, want %q", got, dir)
 	}
 }
+
+// TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim: the containment guards
+// `ghost project bind` applies. A directory holding another project's checkout
+// would claim every clone beneath it, and a directory inside a project that
+// records no remote is already answered for by that project.
+func TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	parent := filepath.Join(t.TempDir(), "workspace")
+	child := filepath.Join(parent, "infra")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.EnsureProjectWithRepo(ctx, "infra", child, "infra", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.BindNewProjectToCheckout(ctx, "infra2", parent, "infra2", ""); err != nil || ok {
+		t.Fatalf("bind of a directory holding another project = %v, %v; want false", ok, err)
+	}
+
+	nested := filepath.Join(child, "sub", "dir-longer-than-ten")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.BindNewProjectToCheckout(ctx, "inner", nested, "inner", ""); err != nil || ok {
+		t.Fatalf("bind inside a project with no remote = %v, %v; want false", ok, err)
+	}
+	for _, id := range []string{"infra2", "inner"} {
+		if _, found := projectPath(t, store, id); found {
+			t.Fatalf("a declined bind wrote a row for %s", id)
+		}
+	}
+}
