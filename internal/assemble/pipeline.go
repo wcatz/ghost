@@ -642,13 +642,28 @@ func (p *pipeline) dropsDemotedLosers() bool {
 	return false
 }
 
-// runDiversity is stage 7: a per-category SHARE of the window (#927).
+// runDiversity is stage 7: a per-category SHARE of the window (#927), on PASSIVE
+// reads only.
 //
-// A small answer is easy to fill with rows from one category while the
+// A small digest is easy to fill with rows from one category while the
 // next-ranked rows of every other category are cut, and a reader gets a block
 // about one thing. The share is bounded so it cannot do that: inside the window
 // no category may take more than half the slots, rounded up, and never fewer
 // than one.
+//
+// WHY PASSIVE ONLY, AND WHY IT IS THE MODE AND NOT THE SOURCE. A query is a
+// relevance question and the ranking is the whole answer to it: `ghost_memory_search`
+// asked "what matches", so moving the row that matches behind another row because
+// of what it is ABOUT is the stage answering a question nobody asked. A passive
+// read asks no question at all — it hands a model everything worth knowing before
+// a turn — and there breadth is the point, because a digest that is all one
+// category teaches one thing. The gate is the request-bound `p.passive` (an empty
+// Query, bound once at Run) rather than `Source`, for the reason the pipeline's
+// own field gives: the consequences follow from the absence of a query, and a
+// Source-keyed branch would let a future passive source be shared by a query-mode
+// one. A query-mode request is a recorded pass-through here — no deferral, no
+// backfill, no per-row verdict, no drop — so search is unchanged by this stage
+// byte for byte.
 //
 // It is a DEFERRAL and never a deletion, and the three rules that follow from
 // that are the whole design:
@@ -671,6 +686,16 @@ func (p *pipeline) dropsDemotedLosers() bool {
 // demotions, none of which a second pass could recover.
 func runDiversity(p *pipeline) {
 	in := len(p.rows)
+	if !p.passive {
+		// A query-mode read: the stage is a recorded no-op, so a reader can see
+		// it ran and declined rather than inferring it was skipped.
+		note := "diversity shares the window on a passive read only: this request carries a " +
+			"query, so the ranking decides it and the share would move the row that answered it, " +
+			"so no row was deferred"
+		p.blockNotes = append(p.blockNotes, note)
+		p.trace.record(stageDiversity, in, in, nil, note)
+		return
+	}
 	window := p.admitCap()
 	if window <= 0 {
 		// A request that bounds no rows has no window for a share to divide —
@@ -941,6 +966,10 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 			// in the per-stage breakdown, in the bucket tally the passive header
 			// reads, and in the retrieval record. The row is still listed as
 			// removed by this stage, because it was.
+			//
+			// Only a PASSIVE read can reach this with a stage 7 verdict: the share
+			// is a passive-read rule, so a query-mode answer is cut by this stage
+			// with no earlier verdict to keep.
 			if _, decided := p.dropped[rows[i].ID]; !decided {
 				p.dropped[rows[i].ID] = reason
 				p.droppedBy[stageBudget]++

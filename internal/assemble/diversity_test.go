@@ -1,11 +1,20 @@
 package assemble
 
-// Stage 7, the diversity stage (#927). A small answer is easy to fill with rows
+// Stage 7, the diversity stage (#927). A small digest is easy to fill with rows
 // from one category while the next-ranked rows of every other category are cut,
 // so the rule here is a per-category SHARE of the window rather than a filter:
 // within the window no category may take more than half the slots, rounded up.
 //
-// The four properties these tests hold, each with a mutation that kills it:
+// THE SHARE IS A PASSIVE-READ RULE, and that is the first thing to know about the
+// fixtures below: every one of them asks through a passive request. A query is a
+// relevance question and the ranking is the whole answer to it, so moving the row
+// that answered it behind another row because of what it is ABOUT is the stage
+// answering a question nobody asked. A passive read asks no question and hands a
+// model everything worth knowing, where breadth is the point. The two
+// TestQueryMode* tests pin the query half: an overflowing query-mode read is left
+// exactly as ranked, with no verdict of any kind at this stage.
+//
+// The properties these tests hold, each with a mutation that kills it:
 //
 //   - a window one category filled is mixed, up to the share, with the
 //     next-ranked rows of other categories;
@@ -15,10 +24,11 @@ package assemble
 //   - a pinned row is never deferred, and it still counts toward its category's
 //     share;
 //   - a request whose candidates fit under the window records a no-op, so a
-//     block that never had to choose is unchanged.
+//     block that never had to choose is unchanged;
+//   - a query-mode request records the same no-op, whatever its window holds.
 //
-// The trace and explain halves are pinned together, because a deferral a reader
-// cannot see is indistinguishable from a row that was never a candidate.
+// The trace and the reason sentence are pinned together, because a deferral a
+// reader cannot see is indistinguishable from a row that was never a candidate.
 
 import (
 	"strings"
@@ -33,13 +43,122 @@ import (
 // the cap itself would test nothing but the budget stage.
 const diversityWindow = 4
 
-// diversityRequest is a query-mode request whose item cap IS the window: no
-// slices, so stage 8's only trim is the total cap and the rows diversity moves
-// are the rows the budget then cuts.
+// diversityRequest is a PASSIVE request whose item cap IS the window: one slice
+// for the project under test and no total cap, so stage 8's only trim is the
+// slice cap and the rows diversity moves are the rows the budget then cuts. The
+// share is a passive-read rule, so this is the shape every fixture below asks in.
 func diversityRequest(window int) Request {
+	req := baseRequest()
+	req.Query = ""
+	req.Source = SourceSessionStart
+	req.Budget = Budget{Slices: []Slice{{Bucket: "proj", MaxItems: window, ClampBytes: 200}}}
+	return req
+}
+
+// diversityQueryRequest is the same window as a QUERY, which is the shape
+// `ghost_memory_search` sends: a total item cap and no slices. The share does not
+// apply to it, so this is the request the two query-mode tests use to pin that.
+func diversityQueryRequest(window int) Request {
 	req := baseRequest()
 	req.Budget = Budget{MaxItems: window}
 	return req
+}
+
+// overfullOneCategoryWindow is the fixture both query-mode tests use: four rows
+// of one category followed by two of another, at a window of four. It OVERFLOWS,
+// which is the one case where a share could act — and on a passive read it does,
+// which is what makes it a fixture that can tell the two modes apart. A fixture
+// that fitted would pass on any tree.
+func overfullOneCategoryWindow() []memory.Candidate {
+	return []memory.Candidate{
+		catCandidate("a1", "gotcha", 0.90),
+		catCandidate("a2", "gotcha", 0.80),
+		catCandidate("a3", "gotcha", 0.70),
+		catCandidate("a4", "gotcha", 0.60),
+		catCandidate("b1", "preference", 0.55),
+		catCandidate("b2", "preference", 0.50),
+	}
+}
+
+// The query-mode half of the rule. A query is a relevance question and the
+// ranking is the whole answer to it, so stage 7 declines it: the row that
+// answered the question must not move behind another row because of what it is
+// ABOUT. Both tests are RED on a branch that shares the window on a query, and
+// both are the byte-identity claim for `ghost_memory_search`.
+
+// TestQueryModeLeavesAnOverflowingWindowExactlyAsRanked: the same over-full,
+// one-category window that a passive read mixes is left in the ranking's own
+// order on a query-mode read. The budget's top four is the answer, and stage 7
+// records no verdict of any kind — not a deferral, not a backfill.
+func TestQueryModeLeavesAnOverflowingWindowExactlyAsRanked(t *testing.T) {
+	rows := overfullOneCategoryWindow()
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, diversityQueryRequest(diversityWindow))
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "a4"}) {
+		t.Errorf("items = %v, want the ranking's own top %d: a query is ranked for "+
+			"relevance and the share must not move the row that answered it", ids, diversityWindow)
+	}
+	for _, d := range decisionsAt(res, stageDiversity) {
+		t.Errorf("stage %s filed a verdict on a query-mode read: %+v", stageDiversity, d)
+	}
+	if st := stageTraceFor(res, stageDiversity); len(st.DroppedIDs) != 0 {
+		t.Errorf("stage %s dropped %v on a query-mode read", stageDiversity, st.DroppedIDs)
+	}
+	if st := stageTraceFor(res, stageDiversity); st.In != len(rows) || st.Out != len(rows) {
+		t.Errorf("stage %s saw %d rows and left %d, want %d and %d: it removed nothing",
+			stageDiversity, st.In, st.Out, len(rows), len(rows))
+	}
+}
+
+// TestQueryModeOverflowIsByteIdenticalToTheRanking: the observable answer of an
+// overflowing query-mode read is the retriever's order cut at the item cap —
+// the same rows, the same order, the same verdicts and the same per-stage counts
+// a tree whose stage 7 was a pass-through produces. The ONE thing that moves is
+// the stage's own diagnostic sentence, which no surface renders: the search
+// surface prints no notes for a non-empty answer, and `assemblerNotes` writes
+// them only for an empty one.
+func TestQueryModeOverflowIsByteIdenticalToTheRanking(t *testing.T) {
+	rows := overfullOneCategoryWindow()
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, diversityQueryRequest(diversityWindow))
+
+	want := make([]string, diversityWindow)
+	for i := range want {
+		want[i] = rows[i].ID
+	}
+	if ids := itemIDs(res.Items); !eq(ids, want) {
+		t.Errorf("items = %v, want %v", ids, want)
+	}
+	// Every row the budget cut keeps the budget's own verdict, because no stage
+	// deferred it first: `b1` and `b2` are outside the window by the ranking, not
+	// by a share.
+	for _, id := range []string{"b1", "b2"} {
+		verdicts := 0
+		for _, d := range res.Trace.Decisions {
+			if d.ID == id && !d.Kept {
+				verdicts++
+				if d.Stage != stageBudget {
+					t.Errorf("%s = %+v, want the budget's own cut", id, d)
+				}
+			}
+		}
+		if verdicts != 1 {
+			t.Errorf("%s carries %d dropped verdicts, want exactly one (the budget's)", id, verdicts)
+		}
+	}
+	// The stage list, and every other stage's counts, are what the pass-through
+	// produced: stage 7 is present, ran, and changed nothing.
+	gotStages := make([]string, 0, len(res.Trace.Stages))
+	for _, st := range res.Trace.Stages {
+		gotStages = append(gotStages, st.Stage)
+		if st.Stage == stageDiversity && (st.In != st.Out || len(st.DroppedIDs) != 0) {
+			t.Errorf("stage %s = in %d out %d dropped %v, want a pass-through",
+				stageDiversity, st.In, st.Out, st.DroppedIDs)
+		}
+	}
+	wantStages := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "budget", "render", "response_fit"}
+	if !eq(gotStages, wantStages) {
+		t.Errorf("stage list = %v, want %v", gotStages, wantStages)
+	}
 }
 
 // catCandidate is a candidate in the named category. Content names the category
@@ -296,9 +415,12 @@ func TestDiversityIsANoOpWhenEverythingFits(t *testing.T) {
 	}
 }
 
-// TestDiversityIsANoOpWhenTheRequestStatesNoItemCap: a byte-only budget has no
-// window for a share to divide, so the stage declines rather than inventing one
-// from the retrieval ceiling. The answer is the budget stage's to bound.
+// TestDiversityIsANoOpWhenTheRequestStatesNoItemCap: a passive read bounded only
+// by bytes has no window for a share to divide, so the stage declines rather than
+// inventing one from the retrieval ceiling. The answer is the budget stage's to
+// bound. A passive slice must still state an OVER-FETCH — the read cannot be
+// unbounded on a path that runs at every session start — so the shape under test
+// is a slice whose fetch is named and whose block is not.
 func TestDiversityIsANoOpWhenTheRequestStatesNoItemCap(t *testing.T) {
 	rows := []memory.Candidate{
 		catCandidate("a1", "gotcha", 0.90),
@@ -306,11 +428,13 @@ func TestDiversityIsANoOpWhenTheRequestStatesNoItemCap(t *testing.T) {
 		catCandidate("a3", "gotcha", 0.70),
 	}
 	req := baseRequest()
-	req.Budget = Budget{MaxBytes: 16000}
+	req.Query = ""
+	req.Source = SourceSessionStart
+	req.Budget = Budget{Slices: []Slice{{Bucket: "proj", OverFetch: 8, MaxBytes: 4000}}}
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
 	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3"}) {
-		t.Errorf("items = %v, want all three rows: a byte-only request has no "+
+		t.Errorf("items = %v, want all three rows: a byte-only passive block has no "+
 			"item window to divide", ids)
 	}
 	// The guard's whole observable effect is what it records: the stage says it
@@ -328,7 +452,18 @@ func TestDiversityIsANoOpWhenTheRequestStatesNoItemCap(t *testing.T) {
 // its own decision naming its stage and reason, and the rows it moved do not
 // appear in the answer without an explanation. The mirror half: a row the stage
 // moved and then readmitted is IN the answer and is not reported as deferred.
-func TestDiversityRecordsEveryDeferralInTheTraceAndExplain(t *testing.T) {
+// TestDiversityRecordsEveryDeferralInTheTrace: each deferred row gets its own
+// decision naming its stage, its reason and the row's own project, and the rows
+// it moved do not appear in the answer without a record of why. The mirror half
+// is below: a row the stage moved and then readmitted is IN the answer and is
+// recorded as considered, not as deferred.
+//
+// The explain half of this used to live here and is now a renderer test, because
+// a passive read cannot ask for an explanation: `validateRequest` refuses
+// `Explain` without a query, and the share is a passive-read rule, so no shipped
+// run can carry the reason into a search payload. The sentence itself is pinned
+// by TestExplainReasonNamesTheShareARowHit so it cannot rot while unreachable.
+func TestDiversityRecordsEveryDeferralInTheTrace(t *testing.T) {
 	rows := []memory.Candidate{
 		catCandidate("a1", "gotcha", 0.90),
 		catCandidate("a2", "gotcha", 0.80),
@@ -337,9 +472,7 @@ func TestDiversityRecordsEveryDeferralInTheTraceAndExplain(t *testing.T) {
 		catCandidate("b1", "preference", 0.55),
 		catCandidate("b2", "preference", 0.50),
 	}
-	req := diversityRequest(diversityWindow)
-	req.Explain = true
-	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, diversityRequest(diversityWindow))
 
 	got := decisionsAt(res, stageDiversity)
 	if len(got) != 2 {
@@ -357,27 +490,40 @@ func TestDiversityRecordsEveryDeferralInTheTraceAndExplain(t *testing.T) {
 			t.Errorf("decision %d names project %q, want the row's own", i, d.ProjectID)
 		}
 	}
+	if st := stageTraceFor(res, stageDiversity); !eq(st.DroppedIDs, []string{"a3", "a4"}) {
+		t.Errorf("stage %s dropped %v, want [a3 a4]", stageDiversity, st.DroppedIDs)
+	}
+	if res.Explain != nil {
+		t.Error("a request that did not ask for a projection carries one")
+	}
+}
 
-	if res.Explain == nil {
-		t.Fatal("an explain request carries no projection")
+// TestExplainReasonNamesTheShareARowHit: the sentence a passive deferral renders
+// if a projection ever reads it. It is asked of the renderer directly, because
+// the shipped path cannot reach it — `Request.Explain` is refused without a query
+// and the share is a passive-read rule — and a sentence nothing exercises is a
+// sentence that rots. It names the category, the share and the window, and states
+// the RULE rather than the count the answer holds: when the other categories run
+// out of rows the deferred ones come back, so a block can carry more of one
+// category than the share and a sentence claiming otherwise would contradict the
+// block above it.
+func TestExplainReasonNamesTheShareARowHit(t *testing.T) {
+	p := &pipeline{
+		passive:  true,
+		deferred: map[string]diversityDeferral{"a3": {category: "gotcha", share: 2}},
+		dropped:  map[string]string{"a3": reasonDiversityDeferred},
+		req:      diversityRequest(diversityWindow),
 	}
-	for _, id := range []string{"a3", "a4"} {
-		row := explainRowByID(t, res.Explain, id)
-		if row.Included {
-			t.Errorf("%s is outside the window, so the payload must not mark it included", id)
-		}
-		if !strings.Contains(row.Reason, "gotcha") {
-			t.Errorf("%s reason = %q, want it to name the category that filled the share", id, row.Reason)
-		}
-		if !strings.Contains(row.Reason, "diversity") {
-			t.Errorf("%s reason = %q, want it to name the stage", id, row.Reason)
+	got := p.explainReason("a3", memory.ExplainRow{}, nil)
+	for _, want := range []string{"diversity", "gotcha", "2", "4"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reason = %q, want it to name %q", got, want)
 		}
 	}
-	for _, id := range []string{"a1", "a2", "b1", "b2"} {
-		row := explainRowByID(t, res.Explain, id)
-		if !row.Included {
-			t.Errorf("%s is in the answer, so the payload must mark it included (reason %q)", id, row.Reason)
-		}
+	// The fallback, for a row whose deferral the pipeline did not record.
+	p2 := &pipeline{passive: true, dropped: map[string]string{"a3": reasonDiversityDeferred}}
+	if got := p2.explainReason("a3", memory.ExplainRow{}, nil); !strings.Contains(got, "share") {
+		t.Errorf("reason = %q, want it to name the share", got)
 	}
 }
 
@@ -397,19 +543,25 @@ func TestDiversityLeavesTheSessionStartBlockAlone(t *testing.T) {
 	if ids := itemIDs(res.Items); !eq(ids, []string{"p1", "p2", "p3", "g1", "g2"}) {
 		t.Errorf("items = %v, want the per-slice caps' own answer", ids)
 	}
-	// The row the share moved is explained by the deferral that moved it, and
-	// the stage 8 cut that followed is not filed as a second verdict for it:
-	// one row, one fate.
+	// The rows the share moved are explained by the deferral that moved them: the
+	// stage 8 cut that followed is not filed as a second verdict for it, so one
+	// row is counted once — in the breakdown, in the bucket tally and in the
+	// retrieval record.
+	dropped := map[string]int{}
 	for _, d := range res.Trace.Decisions {
-		if d.ID != "p4" {
+		if d.Kept {
 			continue
 		}
-		if d.Kept {
+		dropped[d.ID]++
+		if d.ID != "p4" {
 			continue
 		}
 		if d.Reason != reasonDiversityDeferred {
 			t.Errorf("p4 = %+v, want its one drop verdict to be the deferral", d)
 		}
+	}
+	if n := dropped["p4"]; n != 1 {
+		t.Errorf("p4 carries %d drop verdicts, want exactly one", n)
 	}
 }
 
@@ -452,11 +604,14 @@ func TestDiversityHalfOfAWindowRoundsUp(t *testing.T) {
 	}
 }
 
-// TestDiversityRunsOnEverySurface: the stage is on the shared pipeline, so a
-// surface that assembles inherits it. A per-surface rule would be a second
+// TestDiversityRunsOnEveryPassiveSurface: the stage is on the shared pipeline and
+// the gate is the request's mode rather than its Source, so every passive surface
+// inherits it whatever it calls itself. A per-surface rule would be a second
 // implementation, and this asserts the one place the rule lives by running the
-// same fixture through two different sources.
-func TestDiversityRunsOnEverySurface(t *testing.T) {
+// same passive fixture under each source — including SourceSearch, which is
+// passive here because the QUERY is what decides the mode, not the label. The
+// query-mode half of the same claim is the two TestQueryMode* tests.
+func TestDiversityRunsOnEveryPassiveSurface(t *testing.T) {
 	rows := []memory.Candidate{
 		catCandidate("a1", "gotcha", 0.90),
 		catCandidate("a2", "gotcha", 0.85),
@@ -473,7 +628,7 @@ func TestDiversityRunsOnEverySurface(t *testing.T) {
 		// rows, whatever the share did to which of them they are.
 		if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "b1", "a3"}) {
 			t.Errorf("source %s: items = %v, want the same shared rule every "+
-				"other surface gets", source, ids)
+				"other passive surface gets", source, ids)
 		}
 	}
 }

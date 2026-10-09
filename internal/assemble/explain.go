@@ -256,6 +256,15 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			// rows the deferred ones come back, so a block can carry more of one
 			// category than the share, and a sentence claiming otherwise would
 			// contradict the block above it.
+			//
+			// UNREACHABLE from a shipped run today, and the reason is the stage's
+			// own scope: the share is a PASSIVE-read rule and `Request.Explain` is
+			// refused without a query, so every explain projection is a
+			// query-mode one. It is kept rather than deleted because the trace
+			// and the retrieval record carry the reason on a passive read, and a
+			// projection of one would reach for exactly this sentence — the
+			// generic fallback below would call the share a "rule" and name
+			// neither the category nor the cap.
 			d, ok := p.deferred[id]
 			if !ok {
 				return "deferred by the diversity stage: the memory's category had filled its share of the window"

@@ -120,7 +120,9 @@ type Signals struct {
 // different events, and a count that had to satisfy the identity would have to
 // lie about one of them. A row the budget then cuts keeps the verdict stage 7
 // gave it (see trim), so In - Out still equals the number of rows the whole
-// pipeline judged.
+// pipeline judged. All of this is on PASSIVE reads only: the share is a
+// passive-read rule, so a query-mode request records stage 7 as a pass-through
+// and holds no decision for it at all.
 //
 // In and Out are what the stage saw and left, and they chain from one stage to
 // the next EXCEPT at stage 6: its In is the rows it was handed plus the
