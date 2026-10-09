@@ -80,6 +80,14 @@ type Leak struct {
 // that way would score an unexamined row clean. The pipeline reaches stage 3 for
 // every admitted row, so a missing entry is a defect rather than a case, and the
 // benchmark asserts there are none.
+//
+// The two validity arms read the state stage 2 recorded, so an as_of row raises
+// neither: stage 2 records the empty state for a historical request, because the
+// window it would have judged is the live row's and no verdict drawn from it is a
+// verdict about the instant (#910). A historical block holding a row whose window
+// has closed since is therefore not contamination — it is the row the read was
+// asked for — and the bench that measures leakage over a past instant would score
+// it clean by reading a state that says nothing.
 func (r Result) Leaks() []Leak {
 	if r.Trace == nil {
 		return nil
