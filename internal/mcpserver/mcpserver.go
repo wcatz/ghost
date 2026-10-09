@@ -241,25 +241,38 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	if pathShaped {
 		remote = detectRemoteForSave(projectID)
 	}
+
+	// If this is a new project (resolvedID == "") and the project_id is name-shaped
+	// (not a filesystem path), bind it to the server's working directory so the
+	// session-start resolver can match it. Do not rebind an existing project.
+	if resolvedID == "" && !pathShaped && s.workingDir != "" {
+		// Detect the remote from the working directory, if it's a git checkout.
+		remote = detectRemoteForSave(s.workingDir)
+		// Use the working directory as the recorded path for this project.
+		return s.ensureProjectForWithRemote(ctx, projectID, remote, s.workingDir)
+	}
+
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
 		// resolution without the basename fallback. Going through its own
 		// resolution first could turn an arbitrary duplicate basename into an
 		// explicit id and bypass the unique-name rule.
-		return s.ensureProjectForWithRemote(ctx, projectID, remote)
+		return s.ensureProjectForWithRemote(ctx, projectID, remote, projectID)
 	}
 
 	// With no usable repository identity, retain ordinary id/name/path lookup.
 	if resolvedID != "" {
 		projectID = resolvedID
 	}
-	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+	return s.ensureProjectForWithRemote(ctx, projectID, remote, "")
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
 // resolution. repoRemote must come from the caller: an empty value preserves
 // the ordinary create-or-resolve behavior and never clears recorded identity.
-func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, *memory.BindingRefusal, error) {
+// projectPath is the filesystem path to record for the project; if empty, the project
+// id is used as the path (the store normalizes this).
+func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote, projectPath string) (string, *memory.BindingRefusal, error) {
 	normalizedRemote := memory.NormalizeRepoRemote(repoRemote)
 	if normalizedRemote != "" {
 		return s.store.ResolveOrCreateRepoProject(
@@ -267,13 +280,13 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 			projectID,
 			path.Base(normalizedRemote),
 			projectID,
-			projectID,
+			projectPath,
 			projectID,
 			repoRemote,
 		)
 	}
 
-	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, repoRemote); err != nil {
+	if err := s.store.EnsureProjectWithRepo(ctx, projectID, projectPath, projectID, repoRemote); err != nil {
 		return "", nil, err
 	}
 	return projectID, nil, nil
@@ -686,6 +699,11 @@ type Server struct {
 	// one place and a test sets it before New. "" for every host that does not put one
 	// there, and then the retrieval record carries none and the audit leaves it alone.
 	hostSessionID string
+	// workingDir is the directory the MCP server process was started in, captured
+	// ONCE at construction. It is used to bind a newly created project to the
+	// checkout the agent is working in, so the session-start resolver can match it.
+	// Empty if the working directory could not be determined.
+	workingDir string
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
@@ -703,6 +721,39 @@ const hostSessionEnv = "CLAUDE_CODE_SESSION_ID"
 // recording the old one, and the call then matches no scan; a server behind a bridge that
 // does not forward the host's environment records none.
 func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
+
+// workingDirFromEnv is the directory the server process was started in, or "".
+//
+// It is captured once at construction so the environment is touched in one place.
+// Returns "" if the working directory cannot be determined, or if it is the user's
+// home directory or the filesystem root — those are not real project checkouts.
+func workingDirFromEnv() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Resolve symlinks so cwd matches the canonical path stored in the DB.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	// Never bind to home or filesystem root — they are not project checkouts.
+	if cwd == "/" {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cwd == home {
+			return ""
+		}
+		// The session cwd may reach home through a symlink or trailing form;
+		// compare resolved paths too.
+		if evalHome, err := filepath.EvalSymlinks(home); err == nil {
+			if cwd == evalHome {
+				return ""
+			}
+		}
+	}
+	return cwd
+}
 
 // searchResponseCap is one formatted search response's byte cap: the field's
 // value where it was set, and the shipped default where it was not.
@@ -814,6 +865,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
 		hostSessionID:  hostSessionIDFromEnv(),
+		workingDir:     workingDirFromEnv(),
 	}
 
 	// Resolve the retrieval record's per-install key now, at construction, so the
