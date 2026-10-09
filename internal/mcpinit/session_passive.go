@@ -52,6 +52,16 @@ const (
 // appends.
 const sessionStartByteCap = 9000
 
+// The framing's own bounds, so the block can always fit the cap: the learned
+// summary is bounded only by the prompt that writes it, and task and decision
+// titles by nothing but the MCP handler's limit. With these, ten tasks, five
+// decisions and the summary stay near 7 KB at the worst, which leaves room for
+// rows under sessionStartByteCap.
+const (
+	sessionLearnedBytes = 1000
+	sessionTitleBytes   = 120
+)
+
 // sessionFrame is what formatSessionContext needs beside the memory rows, loaded
 // BEFORE the assembly so the byte cap can be measured on the render the host
 // receives. The zero value is a block with nothing around its rows.

@@ -60,12 +60,34 @@ func TestMeasureCapsTheCallersOwnRenderAndKeepsPinned(t *testing.T) {
 		t.Errorf("tally ByteCut=%d RankedOut=%d, want 2 and 2", tally.ByteCut, tally.RankedOut)
 	}
 
-	// Framing alone over the cap: every row goes and Run still answers.
+	// Framing alone over the cap: cutting rows cannot help, so they are kept.
 	req = build()
 	req.Budget.MaxBytes = 10
-	req.Budget.Measure = func([]Item, *Trace) int { return 50 }
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 50 + len(items) }
 	res = run(t, mk(), req)
-	if len(res.Items) != 0 {
-		t.Errorf("kept %d rows with the framing alone over the cap", len(res.Items))
+	if len(res.Items) != len(rows) {
+		t.Errorf("kept %d rows, want all %d: the framing alone is over the cap", len(res.Items), len(rows))
+	}
+
+	// Only pinned rows left: the last resort cuts a pinned row from the bottom.
+	req = build()
+	req.Budget.MaxBytes = 250
+	req.Budget.KeepPinned = true
+	req.Budget.Measure = func(items []Item, _ *Trace) int {
+		n := 0
+		for _, it := range items {
+			n += len(it.Content)
+		}
+		return n
+	}
+	var pinnedOnly []memory.Candidate
+	for i, id := range []string{"P1", "P2", "P3", "P4"} {
+		c := ranked(id, i, strings.Repeat("x", 100))
+		c.Pinned = true
+		pinnedOnly = append(pinnedOnly, c)
+	}
+	res = run(t, &fakeRetriever{set: ftsOnlySet(pinnedOnly...)}, req)
+	if got := strings.Join(itemIDs(res.Items), ","); got != "P1,P2" {
+		t.Errorf("kept %q, want P1,P2: with only pinned rows left the bottom one goes", got)
 	}
 }

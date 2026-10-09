@@ -488,3 +488,105 @@ func TestSessionStartUnderTheByteCapCutsNothing(t *testing.T) {
 		}
 	}
 }
+
+// execOnStore runs statements against the store at dbPath.
+func execOnStore(t *testing.T, dbPath string, stmts ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+}
+
+// A pinned row that sits BELOW unpinned rows in the block (the bucket order puts
+// `_global` after the project) is still the last to go: unpinned project rows are
+// cut before it.
+func TestSessionStartCutsUnpinnedRowsBeforeAPinnedOneRankedBelowThem(t *testing.T) {
+	dbPath, projectPath, pinned := seedByteCapStore(t)
+	execOnStore(t, dbPath, `UPDATE memories SET pinned = 1 WHERE id = 'gmem00'`)
+	long := strings.Repeat("Task title words ", 10)
+	for i := 0; i < 6; i++ {
+		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
+	}
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the cap", len(block))
+	}
+	// Seven unpinned globals sit below the pinned one, so the pressure has to reach
+	// past them into the project's unpinned rows for the order to matter.
+	if strings.Contains(block, "pmem11") || strings.Contains(block, "gmem07") {
+		t.Fatalf("not enough pressure: the bottom unpinned rows survive:\n%s", block)
+	}
+	if !strings.Contains(block, "gmem00") {
+		t.Errorf("the pinned global was cut before unpinned project rows")
+	}
+	for _, id := range pinned {
+		if !strings.Contains(block, id) {
+			t.Errorf("pinned project row %s was cut", id)
+		}
+	}
+}
+
+// Every project row cut while the pinned globals remain: the Memories heading and
+// the count line still say what happened, rather than the section vanishing and
+// the project reading as one with nothing saved.
+func TestSessionStartKeepsTheMemoriesHeadingWhenEveryProjectRowIsCut(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	execOnStore(t, dbPath,
+		`UPDATE memories SET pinned = 1 WHERE project_id = '_global'`,
+		`UPDATE memories SET pinned = 0 WHERE id LIKE 'ppin%'`,
+		`UPDATE memories SET content = content || content WHERE project_id = '_global'`,
+	)
+	// Enough framing that the pinned globals plus a single project row do not fit.
+	long := strings.Repeat("Task title words ", 10)
+	for i := 0; i < 6; i++ {
+		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
+	}
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if strings.Contains(block, "pmem") || strings.Contains(block, "ppin") {
+		t.Fatalf("a project row survived, so the fixture does not cut them all:\n%s", block)
+	}
+	if !strings.Contains(block, "gmem") {
+		t.Fatalf("no global survived:\n%s", block)
+	}
+	if !strings.Contains(block, "**Memories (") {
+		t.Errorf("the Memories heading is gone:\n%s", block)
+	}
+	if !strings.Contains(block, "cut to keep this block under the host's output limit") {
+		t.Errorf("the count line does not say rows were cut for size:\n%s", block)
+	}
+}
+
+// Framing is bounded, so an oversized learned summary, task title or decision
+// title cannot push the block past the host limit or cost it every row.
+func TestSessionStartBoundsTheFraming(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	execOnStore(t, dbPath,
+		fmt.Sprintf(`UPDATE ghost_state SET learned_context = '%s' WHERE project_id = 'pbig'`, strings.Repeat("Learned words. ", 800)),
+		fmt.Sprintf(`UPDATE tasks SET title = '%s'`, strings.Repeat("Huge task title ", 100)),
+		fmt.Sprintf(`UPDATE decisions SET title = '%s'`, strings.Repeat("Huge decision title ", 100)),
+	)
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if len(block) >= 10000 {
+		t.Errorf("block is %d bytes, at or over the host's 10,000 limit", len(block))
+	}
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the %d cap", len(block), sessionStartByteCap)
+	}
+	rows := strings.Count(block, "pmem") + strings.Count(block, "ppin") + strings.Count(block, "gmem")
+	if rows == 0 {
+		t.Errorf("every row was cut for framing that is now bounded:\n%s", block)
+	}
+}
