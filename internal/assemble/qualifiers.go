@@ -45,10 +45,19 @@ func historicalQualifier(asOf time.Time) string {
 // count and the store holds the fact, and one sentence has to answer "what is
 // missing from this set" for both a direct reader of the set and a reader of a
 // search over it.
+//
+// The window is qualified by memory.AsOfBorrowedWindowNote, NOT by the
+// AsOfValidityNote the two as_of listing surfaces print (#908): those judge the
+// window at T and withhold what it excludes, so their sentence has a verdict and
+// a count to state. Stage 2 here draws no verdict and withholds nothing, so the
+// listing's sentence would open by claiming a judgement this block never made and
+// then retract it — the exact misreading #910 exists to close. Both lead with the
+// same borrow sentence, so the caveat a reader needs comes first either way.
 func qualifiersFor(req Request, set *memory.CandidateSet) []string {
 	var out []string
 	if req.AsOf != nil {
 		out = append(out, historicalQualifier(*req.AsOf))
+		out = append(out, memory.AsOfBorrowedWindowNote(*req.AsOf))
 	}
 	if set != nil {
 		if note := memory.AsOfUnknownNote(set.Unrecorded); note != "" {
