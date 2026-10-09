@@ -1205,9 +1205,9 @@ anywhere in the read, and no inference: it is a selection.
   `memory.AsOfBorrowedWindowNote`, which leads with the same borrow sentence the
   listings lead with and then says no verdict was drawn — because the listing's
   own note opens by claiming a judgement at T, and a search that printed it would
-  open with a claim its answer contradicts. The
-  `unverified` marker is drawn as on any line where a verdict IS drawn, because
-  `verified_at` is a flag rather than a predicate. The imprecision that remains
+  open with a claim its answer contradicts. No state word is drawn on an as_of
+  row, `unverified` included; the bounds and the `verified` stamp still render.
+  The imprecision that remains
   is therefore the listings' alone and is stated rather than worked around:
   because the bounds are the current row's, a window edited after T is judged as
   the edited one, so a row can be withheld from a past listing on the strength of
