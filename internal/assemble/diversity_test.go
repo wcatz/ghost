@@ -95,14 +95,34 @@ func renderedVerdictsAreHonest(t *testing.T, res Result) {
 	}
 	for bucket, n := range perBucket {
 		tally := CountsFor(res.Trace, bucket, n)
-		if tally.Shown != n {
-			t.Errorf("bucket %s: the tally says %d shown, the answer renders %d", bucket, tally.Shown, n)
-		}
-		for _, d := range res.Trace.Decisions {
-			if d.Kept || d.ProjectID != bucket || !shown[d.ID] {
-				continue
+		// NOT `tally.Shown != n`: CountsFor copies the `shown` argument it is
+		// handed straight into BucketTally.Shown, so that comparison can never
+		// fail. What the helper checks instead is derived from TWO records and
+		// so can: stage 7's own DroppedIDs, and its per-row verdicts. They are
+		// written by different code paths and a withdrawal rewrites both, so a
+		// row that left only one of them shows up here.
+		var stageDropped []string
+		for _, st := range res.Trace.Stages {
+			if st.Stage == stageDiversity {
+				stageDropped = st.DroppedIDs
 			}
-			t.Errorf("bucket %s: %s is counted a withheld row and is rendered", bucket, d.ID)
+		}
+		for _, id := range stageDropped {
+			verdict := false
+			for _, d := range res.Trace.Decisions {
+				if d.ID == id && d.Stage == stageDiversity && !d.Kept {
+					verdict = true
+				}
+			}
+			if !verdict {
+				t.Errorf("bucket %s: stage %s lists %s as dropped and no decision says so", bucket, stageDiversity, id)
+			}
+			if shown[id] {
+				t.Errorf("bucket %s: stage %s lists %s as dropped and the answer renders it", bucket, stageDiversity, id)
+			}
+		}
+		if tally.Withheld < 0 || tally.RankedOut < 0 || tally.Deduped < 0 {
+			t.Errorf("bucket %s: the tally holds a negative count: %+v", bucket, tally)
 		}
 	}
 }
