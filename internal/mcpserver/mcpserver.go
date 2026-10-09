@@ -2957,7 +2957,7 @@ func (s *Server) registerTools() {
 		// arrays survive schema validation and are normalized in-handler.
 		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
-		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned or retention-exempt, in which case it stays live and the answer says so)."`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -3044,7 +3044,7 @@ func (s *Server) registerTools() {
 					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
 				if len(retirement.Declined) > 0 {
-					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because it is pinned or retention-exempt, so session start and search still return it at full rank.", joinTokens(retirement.Declined))
+					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
 				}
 			}
 		}

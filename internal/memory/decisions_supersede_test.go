@@ -492,7 +492,7 @@ func TestSupersedeDecisionLinkLookup(t *testing.T) {
 	t.Run("copied link retires nothing", func(t *testing.T) {
 		s := testStore(t)
 		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
-		other, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "an unrelated memory", Source: "manual", Importance: 0.5})
+		other, err := s.Create(ctx, testProject, Memory{Category: "decision", Content: "an unrelated memory", Source: "manual", Importance: 0.5})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -506,4 +506,69 @@ func TestSupersedeDecisionLinkLookup(t *testing.T) {
 			t.Error("an ambiguous link retired a memory")
 		}
 	})
+}
+
+// A row forged with the decision link but not the decision category is not the
+// companion: not for a legacy decision (real companion unlinked) and not for a
+// decision whose companion was deleted.
+func TestSupersedeDecisionIgnoresAForgedLinkOnANonDecisionMemory(t *testing.T) {
+	ctx := context.Background()
+	forge := func(t *testing.T, s *Store, decisionID string) string {
+		id, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "an unrelated memory", Source: "manual", Importance: 0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, decisionCompanionRef(decisionID), id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	t.Run("legacy decision", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+		if _, err := s.db.Exec(`UPDATE memories SET source_ref = NULL WHERE id IN (?, ?)`, oldMem, newMem); err != nil {
+			t.Fatal(err)
+		}
+		forged := forge(t, s, oldDec)
+		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+			t.Fatal(err)
+		}
+		if decisionMemoryResolved(t, s, forged) {
+			t.Error("a forged non-decision memory was retired")
+		}
+		if !decisionMemoryResolved(t, s, oldMem) {
+			t.Error("the real legacy companion was not retired")
+		}
+	})
+	t.Run("deleted companion", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		if err := s.Delete(ctx, oldMem); err != nil {
+			t.Fatal(err)
+		}
+		forged := forge(t, s, oldDec)
+		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+			t.Fatal(err)
+		}
+		if decisionMemoryResolved(t, s, forged) {
+			t.Error("a forged non-decision memory was retired")
+		}
+	})
+}
+
+func TestWriterPathsRefuseTheReservedDecisionRef(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "forged link", "manual", 0.5, nil,
+		UpsertOptions{Provenance: Provenance{SourceRef: "decision:abc"}})
+	if err == nil {
+		t.Error("UpsertWithOptions accepted a reserved source_ref")
+	}
+	id, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "plain", Source: "manual", Importance: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{Provenance: Provenance{SourceRef: "decision:abc"}}); err == nil {
+		t.Error("UpdateMemoryWithOptions accepted a reserved source_ref")
+	}
 }

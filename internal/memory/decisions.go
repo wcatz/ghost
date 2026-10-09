@@ -158,7 +158,7 @@ type DecisionRetirement struct {
 	// Retired are the companion memory ids this call stamped resolved.
 	Retired []string
 	// Declined are live companion memory ids that were found and left standing
-	// because the resolve guard refuses them (pinned, or retention 'persistent').
+	// because the resolve guard refuses them (pinned, retention 'persistent', or a convention/preference category).
 	// Such a memory keeps being returned by search and session start.
 	Declined []string
 }
@@ -252,7 +252,23 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 // carries source_ref). The lookup does not filter on source, because a default
 // import downgrades every memory's source and would otherwise lose the link;
 // it requires the link to name exactly one memory instead.
-func decisionCompanionRef(decisionID string) string { return "decision:" + decisionID }
+func decisionCompanionRef(decisionID string) string { return decisionRefPrefix + decisionID }
+
+// decisionRefPrefix is the source_ref namespace only RecordDecision writes. The
+// writer tools (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
+// checkReservedSourceRef, so a caller cannot stamp an unrelated memory with a
+// decision's link; ImportMemory does not refuse it, because a restore must keep
+// the link, and the lookup's category and uniqueness checks cover that door.
+const decisionRefPrefix = "decision:"
+
+// checkReservedSourceRef refuses a caller-supplied source_ref in the reserved
+// decision namespace.
+func checkReservedSourceRef(ref string) error {
+	if strings.HasPrefix(ref, decisionRefPrefix) {
+		return fmt.Errorf("source_ref %q is reserved: the %q prefix links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
+	}
+	return nil
+}
 
 // findDecisionCompanionsTx returns the LIVE companion memory ids of decisionID.
 //
@@ -264,11 +280,12 @@ func decisionCompanionRef(decisionID string) string { return "decision:" + decis
 // edited memory, match nothing rather than the wrong row: a stale decision left
 // live is recoverable, a wrong memory retired is not.
 func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) ([]string, error) {
-	// source_ref is a caller-writable column, so the link is trusted only when
+	// The writer tools refuse the reserved prefix, but an import can still carry
+	// one, so the link is trusted only for a decision-category memory and only when
 	// it is unambiguous: a copied value gives two rows and retires neither.
 	var linked int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM memories WHERE project_id = ? AND source_ref = ?
+		SELECT count(*) FROM memories WHERE project_id = ? AND category = 'decision' AND source_ref = ?
 	`, projectID, decisionCompanionRef(decisionID)).Scan(&linked); err != nil {
 		return nil, fmt.Errorf("count linked companions: %w", err)
 	}
@@ -278,7 +295,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	if linked == 1 {
 		return selectIDs(ctx, tx, `
 			SELECT id FROM memories
-			WHERE project_id = ? AND source_ref = ? AND resolved_at IS NULL
+			WHERE project_id = ? AND category = 'decision' AND source_ref = ? AND resolved_at IS NULL
 		`, projectID, decisionCompanionRef(decisionID))
 	}
 
@@ -377,12 +394,11 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	if len(newCompanions) > 0 {
 		newCompanion = newCompanions[0]
 	}
-	retire := candidates[:0:0]
-	for _, id := range candidates {
-		if id != newCompanion {
-			retire = append(retire, id)
-		}
-	}
+	// The replacement's own companion cannot be among the candidates: a link
+	// names one memory, so one memory is never linked to both decisions, and the
+	// text fallback refuses a text two decisions share. No exclusion is needed
+	// here, and none is written, rather than a guard no test can reach.
+	retire := candidates
 	if len(retire) == 0 {
 		return out, nil
 	}
@@ -419,7 +435,7 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	events := make([]historyEvent, len(changed))
 	for i, id := range changed {
 		events[i] = historyEvent{phase: phaseResolve}
-		if newCompanion == "" || id == newCompanion {
+		if newCompanion == "" {
 			continue
 		}
 		// The reverse edge is read inside the transaction, which holds the
