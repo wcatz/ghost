@@ -771,3 +771,50 @@ const linkInvalidateSQL = `
 		UPDATE memory_links SET invalidated_at = datetime('now')
 		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
 	`
+
+// PinnedContradictedRow represents a pinned memory that has been contradicted
+// by a newer, unpinned memory via a contradicts edge.
+type PinnedContradictedRow struct {
+	ID        string
+	ProjectID string
+	Content   string
+	// ContradictedBy is the ID of the newer row that contradicts this pinned row.
+	ContradictedBy string
+	// ContradictedByContent is the content of the contradicting row for context.
+	ContradictedByContent string
+}
+
+// PinnedRowsWithContradictions returns all pinned memories that are the target
+// of a live contradicts edge from an unpinned (newer) memory. This identifies
+// pinned rows that have been contradicted by newer evidence but remain in the
+// store due to their pin.
+func (s *Store) PinnedRowsWithContradictions(ctx context.Context) ([]PinnedContradictedRow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id, m.project_id, m.content, ml.source_id, src.content
+		FROM memories m
+		JOIN memory_links ml ON ml.target_id = m.id
+		JOIN memories src ON src.id = ml.source_id
+		WHERE m.pinned = 1
+		  AND src.pinned = 0
+		  AND ml.relation = 'contradicts'
+		  AND ml.invalidated_at IS NULL
+		ORDER BY m.project_id, m.id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("pinned rows with contradictions: %w", err)
+	}
+	defer rows.Close()
+
+	var result []PinnedContradictedRow
+	for rows.Next() {
+		var r PinnedContradictedRow
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Content, &r.ContradictedBy, &r.ContradictedByContent); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}

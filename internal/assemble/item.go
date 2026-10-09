@@ -62,6 +62,13 @@ type Item struct {
 	// that is the point of the marker. The list is held whole; ConflictsLabel
 	// bounds what the line renders of it.
 	ConflictsWith []string
+	// ContradictedBy lists the ids of the rows that directly contradict this one
+	// and were withheld by stage 5. It is set for a pinned row on a passive read
+	// when a newer row contradicts it but the pin wins the keep-priority tie-break.
+	// This marks the pinned row as having been contradicted by newer evidence,
+	// without withholding the pinned row itself. The list is held whole; the label
+	// rendering bounds what the line shows.
+	ContradictedBy []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
 	// replaced this one through a live `supersedes` edge. It is set only for a
 	// pinned row on a passive read (markSuperseded): a pin guarantees a slot and
@@ -100,11 +107,12 @@ func (i Item) Line() string {
 	// A field on the same physical line, never a line of its own: a memory is one
 	// line, and a marker on a second one would read as a second memory.
 	conflicts := ConflictsLabel(i.ConflictsWith)
+	contradictedBy := ContradictedByLabel(i.ContradictedBy)
 	return "- [" + i.Category + "] `" + Token(i.ID) + "` (" +
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts +
-		SupersededByLabel(i.SupersededBy) +
+		SupersededByLabel(i.SupersededBy) + contradictedBy +
 		") " + Data(i.Content)
 }
 
@@ -156,6 +164,21 @@ func SupersededByLabel(ids []string) string {
 		toks[i] = "`" + Token(id) + "`"
 	}
 	return " superseded_by=" + strings.Join(toks, ",")
+}
+
+// ContradictedByLabel renders the rows that contradict a pinned row, as they are
+// rendered on their own lines (Token), or "" when none is in this answer.
+// This marker appears on a pinned row that won the keep-priority tie-break but
+// was the target of a contradicts edge from a newer row that was withheld.
+func ContradictedByLabel(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	toks := make([]string, len(ids))
+	for i, id := range ids {
+		toks[i] = "`" + Token(id) + "`"
+	}
+	return " contradicted_by=" + strings.Join(toks, ",")
 }
 
 // SourceLabel renders a row's origin label as ` source=<label>`. The label is

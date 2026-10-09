@@ -3118,6 +3118,20 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
 		}
 
+		// Pinned rows with open contradictions (#975): pinned memories that have
+		// been contradicted by newer, unpinned rows but remain in the store due to
+		// their pin. These require manual review — unpin or update the pinned row.
+		if pinnedContradicted, err := s.store.PinnedRowsWithContradictions(ctx); err == nil {
+			if len(pinnedContradicted) > 0 {
+				fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d\n", len(pinnedContradicted))
+				for _, r := range pinnedContradicted {
+					fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
+						assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
+						assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
+				}
+			}
+		}
+
 		// History growth (#729), additive: everything above keeps its name and
 		// its meaning, and this is the one block that says how fast
 		// memory_history is filling and how much of that is version rows that

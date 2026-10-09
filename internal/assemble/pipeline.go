@@ -56,6 +56,11 @@ type pipeline struct {
 	// contradicts the middle, which the near end dropped), and the marker would
 	// under-name if it were built from the separations alone.
 	conflictPartners map[string][]string
+	// contradictedBy maps each pinned row that was the TARGET of a contradicts
+	// edge from a withheld row to the withheld rows that contradict it. This is
+	// used to render the contradicted_by marker on pinned rows that won the
+	// keep-priority tie-break but were contradicted by newer evidence.
+	contradictedBy map[string][]string
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
 	// the stages run and belongs to the stage that acts on it: stage 8 is what
@@ -492,6 +497,29 @@ func runConflicts(p *pipeline) {
 				sort.Slice(partners, func(i, j int) bool { return rank[partners[i]] < rank[partners[j]] })
 				p.conflictPartners[id] = partners
 			}
+		}
+		// Build the contradictedBy map for pinned rows that are the TARGET of a
+		// contradicts edge from a withheld row. The edge direction is From→To
+		// (the From row contradicts the To row). If a pinned row is the target
+		// and the source was withheld, the pinned row is marked as contradicted
+		// by that withheld row.
+		p.contradictedBy = make(map[string][]string, len(keptSet))
+		for _, e := range p.set.Edges {
+			if e.Relation != "contradicts" || !admitted[e.From] || !admitted[e.To] {
+				continue
+			}
+			// Check if the target is a kept pinned row and the source is withheld
+			if keptSet[e.To] && withheld[e.From] {
+				cand, ok := candByID[e.To]
+				if ok && cand.Pinned {
+					p.contradictedBy[e.To] = append(p.contradictedBy[e.To], e.From)
+				}
+			}
+		}
+		// Sort the contradictedBy lists by rank order for stable rendering
+		for id, list := range p.contradictedBy {
+			sort.Slice(list, func(i, j int) bool { return rank[list[i]] < rank[list[j]] })
+			p.contradictedBy[id] = list
 		}
 		// Remove the withheld rows, preserving rank order. A fresh slice, not
 		// p.rows[:0]: the candidate set is the retriever's return value and the
@@ -1340,6 +1368,7 @@ func (p *pipeline) markConflicts() {
 	}
 	for i := range p.items {
 		p.items[i].ConflictsWith = nil
+		p.items[i].ContradictedBy = nil
 		partners, ok := p.conflictPartners[p.items[i].ID]
 		if !ok {
 			continue
@@ -1349,6 +1378,17 @@ func (p *pipeline) markConflicts() {
 			// is a defensive one for a row that somehow survived.
 			if !present[w] {
 				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, w)
+			}
+		}
+		// Populate ContradictedBy for pinned rows that are targets of contradicts
+		// edges from withheld rows.
+		if p.items[i].Pinned {
+			if contradictedBy, ok := p.contradictedBy[p.items[i].ID]; ok {
+				for _, w := range contradictedBy {
+					if !present[w] {
+						p.items[i].ContradictedBy = append(p.items[i].ContradictedBy, w)
+					}
+				}
 			}
 		}
 	}
