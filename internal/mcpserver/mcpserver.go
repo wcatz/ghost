@@ -2940,14 +2940,6 @@ func (s *Server) registerTools() {
 		for i, alt := range alternatives {
 			alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
-		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve project: %w", err)
-		}
-		if resolved == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
-		}
-		args.ProjectID = resolved
 		if alternatives == nil {
 			alternatives = []string{}
 		}
@@ -2961,22 +2953,30 @@ func (s *Server) registerTools() {
 		if tags, err = validateTags(tags); err != nil {
 			return nil, nil, err
 		}
+		// Resolve the project through the same path a save uses, so the first
+		// decision on a project the store has never seen opens it instead of
+		// failing (#956). The tool used to answer `project "<id>" not found`
+		// here, and an agent refused at that point records its decision under
+		// the global scope instead — which is how a decision about one project
+		// ends up answering for all of them.
+		//
 		// Pass "" for path: MCP callers name projects rather than describing
 		// them, though ensureProjectFor still derives repository identity when
-		// project_id is an absolute path and returns the id to write to.
-		// Mirrors ghost_memory_save: without this, a decision recorded for a
+		// project_id happens to be an absolute path and returns the id to write
+		// to. Mirrors ghost_memory_save: without this, a decision recorded for a
 		// project that has never saved a memory yet fails with a raw
 		// FK-constraint error instead of succeeding, since
 		// decisions.project_id references projects.id.
 		//
-		// The refusal from a refused unique-name binding (#613) is discarded
-		// here and cannot be reported: this tool refuses a project_id that
-		// does not already resolve, so the id it passes is one
-		// ResolveProject answered with, and ensureProjectFor returns it on the
-		// exact-id lookup before it can derive repository identity. Teaching
-		// this path to open a project from a path is a separate change from
-		// making the refusal visible.
-		canonical, _, err := s.ensureProjectFor(ctx, args.ProjectID)
+		// A refused unique-name binding (#613) is REPORTED rather than
+		// discarded. Discarding it was sound while this tool refused a project
+		// it could not resolve, because no id it held could reach the
+		// repository route that produces a refusal; routing through
+		// ensureProjectFor makes that reachable, so a decision can now be
+		// written to a project of its own while a same-named project kept the
+		// name — and "Decision recorded" is otherwise the same sentence as
+		// "you just stopped seeing the context of the project you named".
+		canonical, refused, err := s.ensureProjectFor(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
@@ -2999,6 +2999,13 @@ func (s *Server) registerTools() {
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
+		// A decision routed to a project of its own while a same-named project
+		// kept the name (#613) has to say so, for the reason the save result
+		// does: the decision landed and the caller's address did not, and the
+		// two are otherwise the same sentence.
+		if notice := refused.Notice(); notice != "" {
+			msg += " — " + notice
+		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
 			switch {
