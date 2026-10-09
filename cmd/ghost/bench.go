@@ -141,7 +141,11 @@ func runBench() {
 	// clock cannot make it: a row's age and its validity window would both move.
 	// One seed serves either mode, so the choice is a clock and nothing else.
 	clock := time.Now().UTC()
-	if mode == benchModeContext {
+	// The cutoff sweep reads the SAME clock the --context table is measured at,
+	// not the wall clock: a sweep row is the block --context would print at that
+	// share, and a table that moved with the calendar could neither reproduce nor
+	// be compared against the report it chooses a default for.
+	if mode == benchModeContext || mode == benchModeCutoff {
 		clock = bench.ContextInstant()
 	}
 	db, err := memory.OpenDB(":memory:")
