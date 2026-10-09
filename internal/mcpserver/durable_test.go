@@ -156,7 +156,7 @@ func TestASavedConventionThatNamesAFileDrawsNoAdvisory(t *testing.T) {
 			wantAdvisory: false,
 		},
 		{
-			name:         "a gotcha carrying a reason connector is exempt whatever its category",
+			name:         "a fact carrying a reason connector is exempt whatever its category",
 			category:     "fact",
 			content:      "Gotcha: the sync check is defined in internal/mcpserver/ensure_project.go on purpose, because a bound path is the only address a session has.",
 			wantAdvisory: false,
@@ -528,5 +528,44 @@ func TestDurableSavesCarryNoAdvisory(t *testing.T) {
 		if stored != content {
 			t.Errorf("stored content = %q, want %q verbatim", stored, content)
 		}
+	}
+}
+
+// An update that leaves the category out is judged under the category the
+// stored row already carries (#960): a note filed as a rule is not re-judged
+// as a fact because the edit left the field alone, and a stored fact gets no
+// such grace from an always-style sentence.
+func TestUpdateJudgesAnOmittedCategoryAgainstTheStoredRow(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	const content = "The hint is always defined in internal/mcpserver/durable.go."
+
+	for _, tc := range []struct {
+		name         string
+		stored       string
+		wantAdvisory bool
+	}{
+		{"stored convention keeps its rule standing", "convention", false},
+		{"stored fact does not gain it", "fact", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+				Category: tc.stored, Content: "an older note about the same subject", Source: "mcp", Importance: 0.7, Tags: []string{},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			resp := resultText(callTool(t, session, "ghost_memory_update", map[string]any{
+				"project_id": "test-project",
+				"memory_id":  id,
+				"content":    content,
+			}))
+			if !strings.Contains(resp, "Memory updated (id: "+id+")") {
+				t.Fatalf("update response reports no stored id: %q", resp)
+			}
+			if got := strings.Contains(resp, "ADVISORY"); got != tc.wantAdvisory {
+				t.Errorf("advisory present = %v, want %v; got %q", got, tc.wantAdvisory, resp)
+			}
+		})
 	}
 }
