@@ -1994,6 +1994,13 @@ func TestCLIBench(t *testing.T) {
 	mustMatch(t, "bench --sweep", sweep.stdout, "(?i)recall|ndcg|mrr|hit|precision|f1|score|rank")
 	mustMatch(t, "bench --sweep (values)", sweep.stdout, `[0-9]+\.[0-9]+`)
 
+	// --cutoff-sweep prints a table of per-share figures indexed by the cutoff
+	// share. It runs at the same fixed clock as --context so the table is
+	// reproducible and directly comparable.
+	cutoff := s.mustRun("bench", "--cutoff-sweep")
+	mustMatch(t, "bench --cutoff-sweep (values)", cutoff.stdout, `[0-9]+\.[0-9]+`)
+	mustMatch(t, "bench --cutoff-sweep has 0.63 row", cutoff.stdout, "0\\.630")
+
 	// An unknown flag is an error, and the usage goes with it.
 	bad := s.mustFail("bench", "--nope")
 	mustMatch(t, "bench with an unknown flag", bad.stderr, "(?i)unknown flag")

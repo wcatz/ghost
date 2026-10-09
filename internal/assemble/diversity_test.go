@@ -44,7 +44,7 @@ import (
 const diversityWindow = 4
 
 // diversityRequest is a PASSIVE request whose item cap IS the window: one slice
-// for the project under test and no total cap, so stage 8's only trim is the
+// for the project under test and no total cap, so stage 9's only trim is the
 // slice cap and the rows diversity moves are the rows the budget then cuts. The
 // share is a passive-read rule, so this is the shape every fixture below asks in.
 func diversityRequest(window int) Request {
@@ -57,7 +57,7 @@ func diversityRequest(window int) Request {
 
 // diversityBucketedRequest is the shape the real session start sends: a project
 // slice and a `_global` slice, with no total cap, so each bucket's own slice cap
-// is what stage 8 enforces over the rows it admits. The share divides each
+// is what stage 9 enforces over the rows it admits. The share divides each
 // bucket by its own cap, which is what the two-bucket tests pin.
 func diversityBucketedRequest(projCap, globalCap int) Request {
 	req := diversityRequest(projCap)
@@ -76,7 +76,7 @@ func bucketedFact(id, bucket, category string, score float64) memory.Candidate {
 // renderedVerdictsAreHonest is the invariant the per-bucket window exists for: a
 // row the answer RENDERS carries no drop verdict, and the bucket tally the passive
 // header reads counts exactly the rows it renders. Before the per-bucket window a
-// deferred row could be admitted by stage 8 with its deferral verdict still on it,
+// deferred row could be admitted by stage 9 with its deferral verdict still on it,
 // which is a header-honesty break — the block shows a row the header says it
 // withheld.
 func renderedVerdictsAreHonest(t *testing.T, res Result) {
@@ -227,7 +227,7 @@ func TestQueryModeOverflowIsByteIdenticalToTheRanking(t *testing.T) {
 				stageDiversity, st.In, st.Out, st.DroppedIDs)
 		}
 	}
-	wantStages := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "budget", "render", "response_fit"}
+	wantStages := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "budget", "render", "response_fit"}
 	if !eq(gotStages, wantStages) {
 		t.Errorf("stage list = %v, want %v", gotStages, wantStages)
 	}
@@ -361,7 +361,7 @@ func TestDiversityBackfillsWhenTheOtherCategoriesRunOut(t *testing.T) {
 	// The row that stayed behind the window kept its own order: the deferral
 	// moved a4 down and did not sort it. a5 was already behind the window when
 	// the walk reached it, so it was never a deferral candidate — moving it to
-	// just after the window would have promoted it — and stage 8 cuts it as the
+	// just after the window would have promoted it — and stage 9 cuts it as the
 	// budget's own row.
 	st := stageTraceFor(res, stageDiversity)
 	if !eq(st.DroppedIDs, []string{"a4"}) {
@@ -742,9 +742,9 @@ func TestDiversityIsDeterministic(t *testing.T) {
 }
 
 // The per-bucket half of the rule. A sliced passive budget states a cap PER
-// BUCKET and stage 8 enforces each one over the rows it admits, so a share that
+// BUCKET and stage 9 enforces each one over the rows it admits, so a share that
 // divides ONE window across all the buckets would let one bucket's share evict
-// another bucket's row — the very row stage 8 then keeps, leaving a deferral
+// another bucket's row — the very row stage 9 then keeps, leaving a deferral
 // verdict on a row in the answer and a header that says it was withheld.
 
 // TestDiversityNeverDefersARowAnotherBucketsCapKeeps: the reproduction from
@@ -890,7 +890,7 @@ func TestDiversityKeepsWithinCategoryOrderWhenAPinIsAdmittedBehindTheWindow(t *t
 		t.Errorf("items = %v, want [a1 a2 a3 a5]: the window in rank order", ids)
 	}
 	// The rows the share moved keep their own relative order. a6 was already
-	// behind the window, so it is not a deferral at all and stage 8 cuts it.
+	// behind the window, so it is not a deferral at all and stage 9 cuts it.
 	if st := stageTraceFor(res, stageDiversity); !eq(st.DroppedIDs, []string{"a4"}) {
 		t.Errorf("deferred = %v, want [a4]", st.DroppedIDs)
 	}
@@ -906,7 +906,7 @@ func TestDiversityKeepsWithinCategoryOrderWhenAPinIsAdmittedBehindTheWindow(t *t
 // asked of the state `trim` hands it. A slice byte cap reaches it on a shipped
 // shape — see TestTrimWithdrawsADeferralForEveryRowItKeeps — so what this pins is
 // the pieces: the verdict, the `dropped` map, the `deferred` detail and the
-// per-stage count all have to let a row go when stage 8 keeps it, and a row with
+// per-stage count all have to let a row go when stage 9 keeps it, and a row with
 // no deferral must keep its own verdict untouched.
 func TestWithdrawDefersARowStageEightAdmits(t *testing.T) {
 	p := &pipeline{
@@ -920,7 +920,7 @@ func TestWithdrawDefersARowStageEightAdmits(t *testing.T) {
 	p.trace.decide("a3", "proj", stageDiversity, reasonDiversityDeferred, 0.7)
 
 	if !p.withdrawDeferral("a3") {
-		t.Fatal("a deferral for a row stage 8 keeps must be withdrawn")
+		t.Fatal("a deferral for a row stage 9 keeps must be withdrawn")
 	}
 	if _, still := p.dropped["a3"]; still {
 		t.Error("a3 is still in the dropped map, so explain would report a row the answer renders as withheld")

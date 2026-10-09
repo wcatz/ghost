@@ -46,7 +46,7 @@ func TestRunServesAMixedPassiveBucket(t *testing.T) {
 // retriever reporting which policy admitted a row.
 //
 // A `_global` row inside a project bucket does not name a slice by its own
-// project, so a stage 8 keyed on the ROW's bucket finds no cap for it and leaves
+// project, so a stage 9 keyed on the ROW's bucket finds no cap for it and leaves
 // it unbounded — and "at most 3 rows" quietly becomes "at most 3 project rows,
 // plus however many globals were nearby". Here the cap is 1 and the window
 // carries a project row and two globals, so the wrong lookup admits all three.
