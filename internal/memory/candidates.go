@@ -334,6 +334,11 @@ type Candidate struct {
 	// reordering, not a score, so it is expressed by the returned order.
 	Base, Decay, Score float64
 	AgeDays            float64
+	// KeywordReserved says the keyword reservation admitted this row into the
+	// window: its fused score is below the cut by design. The assembler's
+	// relevance cutoff (#954) keeps such a row rather than undo the reservation.
+	// It is set on query-mode rows only and does not need an explain request.
+	KeywordReserved bool
 	// Evidence counts the records supporting this memory, read in the SAME
 	// snapshot as the rows. It rides here because the assembler may reach the
 	// store through this one read and no other, so a fact only this read can
@@ -644,7 +649,9 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 
 	rows := make([]Candidate, 0, len(selected)+len(tail))
 	for _, m := range append(selected, tail...) {
-		rows = append(rows, candidateOf(m, scores, fts, vec, req.Now))
+		c := candidateOf(m, scores, fts, vec, req.Now)
+		c.KeywordReserved = window.Reserved[m.ID]
+		rows = append(rows, c)
 	}
 	set.Rows = rows
 	set.Widened = len(rows) > req.Fetch.Limit

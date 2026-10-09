@@ -196,13 +196,13 @@ type Request struct {
 	AbstainCosine float32
 	// RelevanceCutoff is the caller-resolved cfg.Context.RelevanceCutoff: the
 	// relative-to-top cutoff the assembler applies to a QUERY-mode block after
-	// dedup and before the budget (#954). Once a row's fused score falls below
-	// this fraction of the top row's, the answer stops there and every row from
-	// that point on is dropped with its own reason (§954). 0 — the value every
+	// dedup and before the budget (#954). Once a row's fused Base falls below
+	// this fraction of the top row's Base (never the age-decayed Score), that row
+	// is dropped with its own reason (§954). 0 — the value every
 	// caller sends until a default is chosen — leaves it OFF, and a passive
 	// request ignores it whatever its value, because a digest is not a relevance
 	// answer. It can only SHORTEN a block: the top row is always kept, `limit`
-	// stays the maximum and a pinned row is never cut.
+	// stays the maximum, and a pinned or keyword-reserved row is never cut.
 	//
 	// It is validated against the same [0,1] range a fraction occupies, where 0
 	// is off and 1 keeps only rows that tie the top. See the stage's own comment
@@ -750,11 +750,11 @@ func validateRequest(req Request) error {
 		return fmt.Errorf("assemble: AbstainCosine is a cosine in [0,1], where 0 leaves the arm off, "+
 			"got %v", req.AbstainCosine)
 	}
-	// The cutoff is a fraction of the top row's fused score, so it inhabits the
+	// The cutoff is a fraction of the top row's fused Base, so it inhabits the
 	// same [0,1] as a cosine and is refused the same way. NaN compares false
 	// against both bounds and would read as OFF, telling a caller who set a
 	// cutoff that there is none; an infinite or above-one value is a threshold
-	// above the top score, which admits nothing the answer would not already
+	// above the top Base, which admits nothing the answer would not already
 	// have. 0 is a valid and meaningful value — the cutoff is disabled — so it is
 	// not refused here; the stage reads it rather than rejecting it.
 	if v := req.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {

@@ -76,7 +76,7 @@ func FormatContextCutoffSweep(points []CutoffSweepPoint) string {
 		break
 	}
 	fmt.Fprintf(&b, "relevance cutoff sweep (%d graded queries at the ghost_memory_search budget)\n", queries)
-	b.WriteString("a row is cut once its fused score falls below the share of the TOP row's; 0.000 is off (the baseline)\n\n")
+	b.WriteString("a row is cut once its fused Base falls below the share of the TOP row's Base; 0.000 is off (the baseline)\n\n")
 	fmt.Fprintf(&b, "  %-8s %10s %9s %-22s %-22s %14s\n",
 		"cutoff", "relevant", "items", "context precision", "result rate", "tokens/ans")
 	for _, pt := range points {

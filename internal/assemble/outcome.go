@@ -87,7 +87,7 @@ const (
 	reasonNoFloorArm    = "no_floor_arm"
 	reasonBudgetDropped = "response_budget"
 	// reasonRelevanceCutoff is the cutoff stage's per-row reason (#954): the
-	// row's fused score fell below the configured fraction of the top row's, so
+	// row's fused Base fell below the configured fraction of the top row's, so
 	// the answer stopped where relevance fell off. It is a per-row reason like
 	// reasonNearDuplicate above, not an outcome one: the stage always keeps the
 	// top row, so it can never empty an answer and is never a cause named by an

@@ -280,3 +280,54 @@ func tokeniseID(t *testing.T, id string) string {
 	}
 	return id
 }
+
+// TestCutoffComparesBaseNotTheDecayedScore: the cutoff measures relevance, so it
+// reads the fused Base, not Score = Base * Decay. A month-old decision whose
+// Base is high is relevant and survives behind a fresh top row; a fresh row with
+// a low Base is not and is cut, although its decayed-free Score sits above the
+// old decision's. A cutoff on Score would do the reverse and measure age and
+// category.
+func TestCutoffComparesBaseNotTheDecayedScore(t *testing.T) {
+	old := candidate("old-decision", "proj", "decision", "a relevant month-old decision", 0)
+	old.Base, old.Decay, old.Score = 9, 0.15, 9*0.15
+	rows := []memory.Candidate{
+		candidate("top", "proj", "fact", "the fresh answer", 10),
+		candidate("fresh-weak", "proj", "fact", "fresh but barely relevant", 3),
+		old,
+	}
+	res := cutoffRun(t, 0.63, rows...)
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"top", "old-decision"}) {
+		t.Fatalf("items = %v, want the high-Base old decision kept and the low-Base fresh row cut", ids)
+	}
+	if d := cutoffDecision(res, "fresh-weak"); d == nil || d.Reason != reasonRelevanceCutoff {
+		t.Errorf("the low-Base fresh row has no relevance_cutoff decision: %+v", d)
+	}
+	if d := cutoffDecision(res, "old-decision"); d != nil {
+		t.Errorf("the old decision was cut by age: %+v", d)
+	}
+}
+
+// TestKeywordReservedRowBelowTheFloorIsKept: a row the keyword reservation
+// admitted carries a low fused score by design, so the cutoff must not undo the
+// reservation. The unreserved row beside it with the same Base is cut.
+func TestKeywordReservedRowBelowTheFloorIsKept(t *testing.T) {
+	reserved := candidate("reserved", "proj", "fact", "keyword reserved", 2)
+	reserved.KeywordReserved = true
+	set := setOf(
+		candidate("top", "proj", "fact", "the answer", 10),
+		reserved,
+		candidate("plain", "proj", "fact", "below and unreserved", 2),
+	)
+	res := run(t, &fakeRetriever{set: set}, cutoffQueryRequest(0.5))
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"top", "reserved"}) {
+		t.Fatalf("items = %v, want the keyword-reserved row kept and the plain one cut", ids)
+	}
+	if d := cutoffDecision(res, "reserved"); d != nil {
+		t.Errorf("the keyword-reserved row carries a cutoff decision: %+v", d)
+	}
+	if d := cutoffDecision(res, "plain"); d == nil {
+		t.Error("the unreserved row below the floor was not cut")
+	}
+}

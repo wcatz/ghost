@@ -1044,9 +1044,10 @@ type diversityDeferral struct {
 // from a Source that happens to be a search.
 //
 // THE RULE, and it is ONE rule with ONE parameter — Request.RelevanceCutoff, the
-// cfg.Context.relevance_cutoff share. A row is cut when its fused Score (the
-// decay-ordered score the tail is ranked on) is strictly below that share of the
-// TOP row's Score. Three guarantees follow from how the line is drawn:
+// cfg.Context.relevance_cutoff share. A row is cut when its fused Base (the
+// pre-decay score, so age and category never read as irrelevance) is strictly
+// below that share of the TOP row's Base. Four guarantees follow from how the
+// line is drawn:
 //
 //   - The top row is always kept. It IS the reference, so a share in (0,1] never
 //     cuts it, and a disabled cutoff (0) cuts nothing, so a query whose every row
@@ -1055,6 +1056,9 @@ type diversityDeferral struct {
 //   - A pinned row is never cut. A pin is a slot guarantee (#936), and a stage
 //     that dropped a pinned row would take the guarantee back. It is exempt from
 //     the drop and still ranked where the retriever put it.
+//   - A keyword-reserved row is never cut. The reservation admitted it into the
+//     window through the keyword leg and it carries a low fused score by design,
+//     so cutting it would undo the reservation.
 //   - `limit` stays the maximum. This is not a cap: it removes rows the budget
 //     stage then has fewer of, so a block can only shrink, never grow.
 //
@@ -1087,14 +1091,14 @@ func runCutoff(p *pipeline) {
 		p.trace.record(stageCutoff, in, in, nil)
 		return
 	}
-	// The reference is the top row's fused Score. rows are in rank order and the
-	// top row is the highest-scored, so rows[0].Score is the maximum. A
-	// non-positive top (only a store whose decay drives every score to zero)
-	// makes the floor non-positive, and then a non-positive score is never
+	// The reference is the top row's fused Base (the pre-decay score). rows are
+	// in rank order and the top row is the highest-scored, so rows[0].Base is the
+	// maximum. A non-positive top (only a store whose decay drives every score to
+	// zero) makes the floor non-positive, and then a non-positive base is never
 	// strictly below it, so every row is kept: the conservative answer when there
 	// is no positive relevance to be a fraction of.
-	top := p.rows[0].Score
-	floor := share * top
+	topBase := p.rows[0].Base
+	floor := share * topBase
 	// A fresh slice, not p.rows[:0]: the candidate set is the retriever's return
 	// value and the contract says it is the widened untrimmed result, so
 	// compacting into its backing array would leave the caller holding stale
@@ -1106,7 +1110,7 @@ func runCutoff(p *pipeline) {
 	for i := range p.rows {
 		c := p.rows[i]
 		switch {
-		case i == 0 || c.Pinned || c.Score >= floor:
+		case i == 0 || c.Pinned || c.KeywordReserved || c.Base >= floor:
 			keptRows = append(keptRows, c)
 			keptItems = append(keptItems, p.items[i])
 			continue
@@ -1124,15 +1128,16 @@ func runCutoff(p *pipeline) {
 }
 
 // cutoffSummaryNote is stage 8's block statement. It names the share the rows
-// fell below and how many were cut, because that is the number the block lost —
-// and it is only appended when the stage actually cut something, so an off-state
-// or a query whose rows all cleared the cutoff leaves the notes list untouched.
+// fell below and how many were cut (or that every row was kept). A note is
+// appended whenever the stage runs with share > 0, so a reader can see the
+// cutoff ran even when it kept every row. A passive request and a disabled
+// cutoff (share <= 0) are recorded as pass-throughs with no note.
 func cutoffSummaryNote(n int, share float64) string {
 	if n == 0 {
-		return fmt.Sprintf("relevance cutoff kept every row: no row's fused score fell below %s of the top match",
+		return fmt.Sprintf("relevance cutoff kept every row: no row's fused Base fell below %s of the top match's Base",
 			cutoffShareLabel(share))
 	}
-	return fmt.Sprintf("relevance cutoff stopped the answer where relevance fell off: %d row(s) scored below %s of the top match's fused score and were cut",
+	return fmt.Sprintf("relevance cutoff stopped the answer where relevance fell off: %d row(s) scored below %s of the top match's Base and were cut",
 		n, cutoffShareLabel(share))
 }
 

@@ -121,14 +121,14 @@ const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 //
 // The number is chosen from the `ghost bench --cutoff-sweep` table in
 // docs/benchmarks.md, and the trade it makes is explicit rather than tuned: on
-// the graded corpus it admits 303 of the 304 baseline graded-relevant rows
+// the graded corpus it admits 302 of the 304 baseline graded-relevant rows
 // (the ship floor is 298), holds the answerable result rate at 1.000, raises
-// context precision from 0.138 to 0.149 and lowers the estimated token cost per
-// answer from about 297 to about 274. It is one step below the most aggressive
-// share that still clears the relevant floor (0.64: 299 relevant, 0.156
-// precision, 259 tokens), chosen for the five-row margin over the floor rather
-// than for the last few points of precision — the floor is the hard constraint
-// and a ship that clears it barely is a ship one corpus edit from failing it.
+// context precision from 0.138 to 0.145 and lowers the estimated token cost per
+// answer from about 297 to about 280. 0.64 (300 relevant) and 0.65 (298) also
+// clear the floor but leave a margin of two rows and none; the floor is the
+// hard constraint and a ship that clears it barely is a ship one corpus edit
+// from failing it, so the default keeps the four-row margin rather than the
+// last few points of precision.
 const DefaultRelevanceCutoff float64 = 0.63
 
 // ScratchConfig bounds the scratch root every harness spawn is confined to
@@ -456,7 +456,7 @@ func checkContextValues(cfg *Config) error {
 	if v := float64(cfg.Context.AbstainCosine); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("context.abstain_cosine: a cosine is between 0 and 1, got %v", cfg.Context.AbstainCosine)
 	}
-	// The cutoff is a share of the top row's fused score, so it is the same
+	// The cutoff is a share of the top row's fused Base, so it is the same
 	// (0,1] range a fraction can be in: 0 leaves it off, and a value above 1
 	// would keep every row (a threshold above the top score admits nothing it
 	// would not already have). NaN compares false against both bounds and reads

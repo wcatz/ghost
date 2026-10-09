@@ -276,6 +276,9 @@ type configOpts struct {
 	autoSupersede bool
 	// minInterval is lifecycle.min_interval. Empty uses the shipped default.
 	minInterval string
+	// relevanceCutoff is written as context.relevance_cutoff. Empty keeps 0
+	// (off), the value every other sandbox runs with.
+	relevanceCutoff string
 	// extra is appended verbatim, for the handful of keys with no field here.
 	extra string
 }
@@ -302,7 +305,11 @@ func (s *sandbox) writeConfig(opts configOpts) {
 	// the request wiring (internal/mcpserver) and the measured default sweep
 	// (internal/bench, `ghost bench --cutoff-sweep`). A test that needs it on
 	// reconfigures it rather than inheriting a shaped default.
-	sb.WriteString("context:\n  relevance_cutoff: 0\n")
+	cutoff := opts.relevanceCutoff
+	if cutoff == "" {
+		cutoff = "0"
+	}
+	fmt.Fprintf(&sb, "context:\n  relevance_cutoff: %s\n", cutoff)
 	sb.WriteString("obsidian:\n  auto_sync: false\n  interval: 30s\n")
 	fmt.Fprintf(&sb, "reflection:\n  auto_reflect: %t\n  auto_resolve: %t\n  auto_supersede: %t\n",
 		opts.autoReflect, opts.autoResolve, opts.autoSupersede)
