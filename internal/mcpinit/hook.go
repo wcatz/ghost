@@ -908,7 +908,8 @@ type sessionMemory struct {
 	Agent                 string
 	SourceRef             string
 	// ConflictsWith is the assembler's marker, carried through unchanged: the
-	// rows this one contradicts in the same block (assemble.Item.ConflictsWith).
+	// rows this one directly contradicts that stage 5 withheld, so they are not
+	// in the block (assemble.Item.ConflictsWith).
 	ConflictsWith []string
 	// SupersededBy is the assembler's marker for a pinned row whose replacement is
 	// in the same block (assemble.Item.SupersededBy), carried through unchanged.

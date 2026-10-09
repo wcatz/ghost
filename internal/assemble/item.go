@@ -55,11 +55,12 @@ type Item struct {
 	// itself comes from memory.OriginClass, never from this field's literal
 	// value, and the compatibility correction is scoped by ProjectID above.
 	Source string
-	// ConflictsWith lists the ids of the other rows in the SAME rendered answer
-	// that this one is joined to by a live `contradicts` edge. It is set in one
-	// place, after the last stage that can remove a row (markConflicts), so a row
-	// is never marked against a partner the reader cannot see. The list is held
-	// whole; ConflictsLabel bounds what the line renders of it.
+	// ConflictsWith lists the ids of the rows this one directly contradicts that
+	// stage 5 withheld and did not render. It is set in one place, after the last
+	// stage that can remove a row (markConflicts), so it names only rows that are
+	// out of the answer by construction — the reader cannot see the partner, and
+	// that is the point of the marker. The list is held whole; ConflictsLabel
+	// bounds what the line renders of it.
 	ConflictsWith []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
 	// replaced this one through a live `supersedes` edge. It is set only for a
