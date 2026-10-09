@@ -118,13 +118,19 @@ func (h Hasher) DistinctTokens(text string) []string {
 // "this scan found nothing" and costs one turn's audit. The alternative costs the
 // property the sidecar exists for, on a turn nobody was watching.
 func (h Hasher) distinctTokens(words []string) []string {
+	return h.distinctTokensWithStopwords(words, stopWords)
+}
+
+// distinctTokensWithStopwords is distinctTokens with a custom stopword set.
+// The stopwords map is read-only; the caller owns it.
+func (h Hasher) distinctTokensWithStopwords(words []string, stopwords map[string]bool) []string {
 	if !h.HasKey() {
 		return nil
 	}
 	seen := make(map[string]bool, len(words))
 	out := make([]string, 0, len(words))
 	for _, word := range words {
-		if len(word) < minTokenLen || stopWords[word] {
+		if len(word) < minTokenLen || stopwords[word] {
 			continue
 		}
 		fp := h.Fingerprint(word)
@@ -134,6 +140,11 @@ func (h Hasher) distinctTokens(words []string) []string {
 		}
 	}
 	return out
+}
+
+// DistinctTokensWithStopwords is DistinctTokens with a custom stopword set.
+func (h Hasher) DistinctTokensWithStopwords(text string, stopwords map[string]bool) []string {
+	return h.distinctTokensWithStopwords(splitWords(text), stopwords)
 }
 
 // HasKey reports whether this hasher was built over a key.

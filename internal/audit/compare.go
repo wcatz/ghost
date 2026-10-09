@@ -128,8 +128,8 @@ type Verdict struct {
 // `ghost context --audit`, and since #930 a wrong `restated by wording` count
 // beside the precision. An absolute floor alone is the same mistake scaled: three
 // matched words out of a three-word memory is the whole memory, while three out
-// of ninety is noise. So a memory is claimed when the agent repeated at least a
-// third of its distinctive words AND at least three of them.
+// of ninety is noise. So a memory is claimed when the agent repeated at least
+// half of its distinctive words AND at least three of them.
 //
 // The rule is pinned by TestCompareTokenArmNeedsEnoughOfTheMemory and
 // TestCompareTokenArmNeedsEveryTokenOfAShortMemory rather than only stated here,
@@ -141,7 +141,7 @@ type Verdict struct {
 // loose bar there reports ordinary use as a finding the operator would act on.
 const (
 	tokenFloor    = 3
-	tokenFraction = 3
+	tokenFraction = 2
 )
 
 // Compare judges every retrieved memory against the signals, and returns one
@@ -176,7 +176,9 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 	if j.MemoryID == "" {
 		return Verdict{}, false
 	}
-	toks := s.h.DistinctTokens(j.Content)
+	// Use per-session stopwords to filter generic project words.
+	sessionStopwords := s.SessionStopwords()
+	toks := s.h.DistinctTokensWithStopwords(j.Content, sessionStopwords)
 
 	switch {
 	case s.contradicts(toks, j.MemoryID):
