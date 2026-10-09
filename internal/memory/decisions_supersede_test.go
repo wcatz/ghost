@@ -63,22 +63,26 @@ func TestSupersedeDecisionRetiresTheCompanionMemory(t *testing.T) {
 		t.Fatalf("SupersedeDecision: %v", err)
 	}
 
-	// Active search (query-based) demotes resolved memories but doesn't filter
-	// them entirely — a query matching only the retired companion will still
-	// return it, just with a halved score. The passive session-start read,
-	// however, binds resolved_at IS NULL in SQL and filters it completely.
-	set, err := s.Candidates(ctx, candidateRequest("Redis lists as the queue backend", 10, now))
+	// Active search demotes a resolved memory rather than filtering it, so a
+	// query matching both decisions must rank the replacement above the
+	// reversed decision.
+	set, err := s.Candidates(ctx, candidateRequest("job queue", 10, now))
 	if err != nil {
 		t.Fatalf("search after supersede: %v", err)
 	}
-	// The query only matches the old memory, so it's returned (demoted but
-	// still the only hit). The passive path below is the one that withholds it.
-	if got := candidateIDs(t, set); len(got) == 0 {
-		t.Errorf("active search returned nothing for a query matching only the retired memory; expected it (demoted)")
+	pos := map[string]int{}
+	for i, id := range candidateIDs(t, set) {
+		pos[id] = i
+	}
+	if _, ok := pos[newMemoryID]; !ok {
+		t.Fatalf("search does not return the replacement's companion %s", newMemoryID)
+	}
+	if po, ok := pos[oldMemoryID]; ok && po < pos[newMemoryID] {
+		t.Errorf("search ranks the reversed decision (%d) above its replacement (%d)", po, pos[newMemoryID])
 	}
 
-	// And the same is true of the passive read session start runs, which binds
-	// resolved_at IS NULL in SQL rather than by rank.
+	// The passive read session start runs binds resolved_at IS NULL in SQL
+	// rather than by rank, so the reversed decision is absent outright.
 	set, err = s.Candidates(ctx, decisionSupersedePassiveRequest())
 	if err != nil {
 		t.Fatalf("session-start read after supersede: %v", err)
@@ -152,6 +156,9 @@ func TestSupersedeDecisionRecordsTheNewDecisionAsTheReason(t *testing.T) {
 	}
 	if edge == nil {
 		t.Fatalf("no 'supersedes' edge on the retired companion, got %d other link(s)", len(links))
+	}
+	if edge.Source != "manual" {
+		t.Errorf("'supersedes' edge source = %q, want manual: no classifier judged it", edge.Source)
 	}
 	if edge.SourceID != newMemoryID || edge.TargetID != oldMemoryID {
 		t.Errorf("'supersedes' edge runs %s -> %s, want %s -> %s",
@@ -235,5 +242,232 @@ func TestSupersedeDecisionWithoutACompanionMemorySucceeds(t *testing.T) {
 	}
 	if len(all) != 2 || all[1].ID != oldDecisionID || all[1].Status != "superseded" {
 		t.Errorf("the decisions row was not marked superseded without a companion: %v", all)
+	}
+}
+
+func decisionHistoryPhases(t *testing.T, s *Store, ctx context.Context, memoryID string) []string {
+	t.Helper()
+	hist, err := s.MemoryHistory(ctx, memoryID, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	var out []string
+	for _, e := range hist {
+		out = append(out, e.Phase)
+	}
+	return out
+}
+
+func decisionMemoryResolved(t *testing.T, s *Store, id string) bool {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, id).Scan(&n); err != nil {
+		t.Fatalf("read resolved_at: %v", err)
+	}
+	return n == 1
+}
+
+// Two decisions with identical text must never be confused: superseding one
+// retires only its own companion.
+func TestSupersedeDecisionWithIdenticalTextRetiresOnlyItsOwnCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	rec := func(title string) (string, string) {
+		d, m, _, err := s.RecordDecision(ctx, testProject, title, "same decision", "same rationale", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision: %v", err)
+		}
+		return d, m
+	}
+	decA, memA := rec("Same title")
+	decB, memB := rec("Same title")
+	decC, memC := rec("Replacement title")
+
+	// Supersede the FIRST-recorded of the identical pair, so a newest-wins or
+	// oldest-wins tie-break would each get one of the two orders wrong.
+	if err := s.SupersedeDecision(ctx, testProject, decA, decC); err != nil {
+		t.Fatalf("SupersedeDecision: %v", err)
+	}
+	if !decisionMemoryResolved(t, s, memA) {
+		t.Errorf("the superseded decision's own companion %s is still live", memA)
+	}
+	if decisionMemoryResolved(t, s, memB) {
+		t.Errorf("the identical-text decision's companion %s was retired", memB)
+	}
+	if decisionMemoryResolved(t, s, memC) {
+		t.Errorf("the replacement's companion %s was retired", memC)
+	}
+
+	// And the other order: superseding B retires B's companion, not A's again.
+	if err := s.SupersedeDecision(ctx, testProject, decB, decC); err != nil {
+		t.Fatalf("SupersedeDecision (B): %v", err)
+	}
+	if !decisionMemoryResolved(t, s, memB) {
+		t.Errorf("companion %s of the second superseded decision is still live", memB)
+	}
+	if got := decisionHistoryPhases(t, s, ctx, memA); len(got) != 2 {
+		t.Errorf("companion A history phases = %v, want save and one retirement", got)
+	}
+}
+
+// The link is the id, not the text: editing the companion's content must not
+// make the decision lose it.
+func TestSupersedeDecisionFindsAnEditedCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	if _, err := s.db.Exec(`UPDATE memories SET content = 'edited by hand' WHERE id = ?`, oldMem); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+		t.Fatalf("SupersedeDecision: %v", err)
+	}
+	if !decisionMemoryResolved(t, s, oldMem) {
+		t.Error("an edited companion was not retired")
+	}
+}
+
+// A companion that predates the source_ref link is found by text only when the
+// text is unambiguous.
+func TestSupersedeDecisionLegacyCompanionMatchIsUnambiguousOnly(t *testing.T) {
+	ctx := context.Background()
+	unlink := func(t *testing.T, s *Store, ids ...string) {
+		for _, id := range ids {
+			if _, err := s.db.Exec(`UPDATE memories SET source_ref = NULL WHERE id = ?`, id); err != nil {
+				t.Fatalf("unlink: %v", err)
+			}
+		}
+	}
+	t.Run("unique text is retired", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+		unlink(t, s, oldMem, newMem)
+		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+			t.Fatal(err)
+		}
+		if !decisionMemoryResolved(t, s, oldMem) {
+			t.Error("unambiguous legacy companion was not retired")
+		}
+	})
+	t.Run("duplicate text retires nothing", func(t *testing.T) {
+		s := testStore(t)
+		rec := func(title string) (string, string) {
+			d, m, _, err := s.RecordDecision(ctx, testProject, title, "same", "same", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return d, m
+		}
+		decA, memA := rec("T")
+		_, memB := rec("T")
+		decC, memC := rec("Other")
+		unlink(t, s, memA, memB, memC)
+		if err := s.SupersedeDecision(ctx, testProject, decA, decC); err != nil {
+			t.Fatal(err)
+		}
+		if decisionMemoryResolved(t, s, memA) || decisionMemoryResolved(t, s, memB) {
+			t.Error("an ambiguous legacy match retired a companion that may belong to another decision")
+		}
+	})
+}
+
+// Old and new compose to the same text and the old companion is gone: the
+// replacement's own companion must not be retired or linked to itself.
+func TestSupersedeDecisionNeverRetiresTheReplacementsOwnCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, _, _, err := s.RecordDecision(ctx, testProject, "T", "same", "same", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Re-record the same text; the first record's companion is then deleted.
+	newDec, newMem, _, err := s.RecordDecision(ctx, testProject, "T", "same", "same", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM memories WHERE source_ref = ?`, decisionCompanionRef(oldDec)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+		t.Fatal(err)
+	}
+	if decisionMemoryResolved(t, s, newMem) {
+		t.Error("the replacement's own companion was retired")
+	}
+	var self int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_links WHERE source_id = target_id`).Scan(&self); err != nil {
+		t.Fatal(err)
+	}
+	if self != 0 {
+		t.Errorf("%d self link(s) written", self)
+	}
+}
+
+// A retirement is never a state change without a history row.
+func TestSupersedeDecisionWithoutAReplacementCompanionStillRecordsHistory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+	if err := s.Delete(ctx, newMem); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+		t.Fatal(err)
+	}
+	if !decisionMemoryResolved(t, s, oldMem) {
+		t.Fatal("companion not retired")
+	}
+	phases := decisionHistoryPhases(t, s, ctx, oldMem)
+	if len(phases) != 2 || phases[1] != phaseResolve {
+		t.Errorf("history phases = %v, want save then %s", phases, phaseResolve)
+	}
+}
+
+// When the reverse edge is already live no edge is written, and history must
+// not claim a supersession the graph contradicts.
+func TestSupersedeDecisionDoesNotClaimAnEdgeItRefused(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+	if _, err := s.db.Exec(`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES (?, ?, 'supersedes', 1, 'manual')`, oldMem, newMem); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := s.MemoryHistory(ctx, oldMem, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range hist {
+		if e.Phase == phaseSupersede {
+			t.Errorf("history claims a supersede by %s while the reverse edge is live", e.RelatedID)
+		}
+	}
+	if !decisionMemoryResolved(t, s, oldMem) {
+		t.Error("companion not retired")
+	}
+}
+
+// A pinned companion is left live, writes nothing, and is reported.
+func TestSupersedeDecisionReportsAPinnedCompanionItLeftLive(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	if _, err := s.db.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, oldMem); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Retired) != 0 || len(got.Declined) != 1 || got.Declined[0] != oldMem {
+		t.Errorf("report = %+v, want the pinned companion declined", got)
+	}
+	if decisionMemoryResolved(t, s, oldMem) {
+		t.Error("a pinned companion was retired")
+	}
+	if phases := decisionHistoryPhases(t, s, ctx, oldMem); len(phases) != 1 {
+		t.Errorf("history phases = %v, want only the save", phases)
 	}
 }

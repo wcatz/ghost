@@ -94,10 +94,10 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	// the cap, and this is the last writer-side stop before the INSERT.
 	content, cut := decisionCompanionContent(title, decision, rationale)
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags)
-		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?)
+		INSERT INTO memories (project_id, category, content, source, importance, tags, source_ref)
+		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?, ?)
 		RETURNING id
-	`, projectID, content, string(tagJSON)).Scan(&memoryID)
+	`, projectID, content, string(tagJSON), decisionCompanionRef(decisionID)).Scan(&memoryID)
 	if err != nil {
 		return "", "", false, fmt.Errorf("record decision memory: %w", err)
 	}
@@ -139,40 +139,57 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 // composition "title: decision. Rationale: rationale", clamped through
 // ClampContent.
 //
-// It is a pure function of the three fields the decisions row holds, and that
-// is the ONLY thing identifying which memory belongs to which decision: the
-// two rows carry no id pointing at each other, on either side. So this
-// composition is the mapping in both directions — RecordDecision uses it to
-// write the memory, and SupersedeDecision recomposes it from the stored row
-// to find that memory again. Clamping here rather than at the field level is
-// load-bearing for the same reason it is at the write: two individually
-// sub-cap fields can concatenate over the cap, and a composition clamped to a
-// different string than the one stored is a lookup that finds nothing.
+// It is a pure function of the three fields the decisions row holds. It is
+// NOT how a decision finds its memory: that is the source_ref link
+// (decisionCompanionRef), which survives an edit to the memory's text. The
+// composition is used only to find a companion written before that link
+// existed, and only when the match is unambiguous. Clamping here rather than at
+// the field level matters for the same reason it does at the write: two
+// individually sub-cap fields can concatenate over the cap.
 func decisionCompanionContent(title, decision, rationale string) (content string, cut bool) {
 	content, cut = ClampContent(fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale))
 	return content, cut
 }
 
-// SupersedeDecision marks oldID as superseded by newID within one project.
+// DecisionRetirement is what a supersede did to the old decision's companion
+// memory, so a caller can say so instead of reporting a decisions-row flip as
+// if it were the whole of the change.
+type DecisionRetirement struct {
+	// Retired are the companion memory ids this call stamped resolved.
+	Retired []string
+	// Declined are live companion memory ids that were found and left standing
+	// because the resolve guard refuses them (pinned, or retention 'persistent').
+	// Such a memory keeps being returned by search and session start.
+	Declined []string
+}
+
+// SupersedeDecision marks oldID as superseded by newID within one project and
+// retires the old decision's companion memory in the same transaction. It is
+// SupersedeDecisionReport without the report.
+func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error {
+	_, err := s.SupersedeDecisionReport(ctx, projectID, oldID, newID)
+	return err
+}
+
+// SupersedeDecisionReport marks oldID as superseded by newID within one project.
 // The decisions table has carried `status` and `superseded_by` columns since
 // the schema was written, but nothing ever wrote them — so a reversed decision
 // stayed `status: active` forever and ranked alongside the decision that
 // replaced it. This is the writer.
 //
 // It also retires the old decision's companion memory in the same transaction.
-// The decisions row was the only half being written, and the half that mattered
-// most was the one left behind: the companion is an ordinary memory, so search
-// and session start kept returning the reversed decision as current long after
-// `ghost_decisions_list` had dropped it. Retiring it runs the same machinery a
-// memory supersede runs — see retireDecisionCompanionTx for what that means and
-// for how the two rows are matched.
+// The companion is an ordinary memory, so search and session start kept
+// returning the reversed decision as current long after `ghost_decisions_list`
+// had dropped it. See retireDecisionCompanionTx for what retiring means and how
+// the two rows are matched.
 //
 // Both IDs must belong to projectID and must differ; a decision cannot
 // supersede itself. Superseding an already-superseded decision just repoints
 // it, so re-running is safe.
-func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error {
+func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (DecisionRetirement, error) {
+	var out DecisionRetirement
 	if oldID == newID {
-		return fmt.Errorf("supersede decision: a decision cannot supersede itself (%s)", oldID)
+		return out, fmt.Errorf("supersede decision: a decision cannot supersede itself (%s)", oldID)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,12 +197,10 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 	// The status flip and the retirement are ONE transaction, because they are
 	// one fact — "this decision is no longer current" — and a reader that saw
 	// the first without the second would keep being handed the reversed
-	// decision by search and session start. The whole of the companion lookup,
-	// the resolved_at stamp and the history row therefore run inside this
-	// transaction, and a failure anywhere rolls back both halves.
+	// decision by search and session start. A failure anywhere rolls back both.
 	tx, lock, err := s.beginWrite(ctx, "supersede-decision")
 	if err != nil {
-		return fmt.Errorf("supersede decision: begin tx: %w", err)
+		return out, fmt.Errorf("supersede decision: begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
 
@@ -195,32 +210,10 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM decisions WHERE id = ? AND project_id = ?`,
 		newID, projectID).Scan(&exists); err != nil {
-		return fmt.Errorf("supersede decision: lookup %s: %w", newID, err)
+		return out, fmt.Errorf("supersede decision: lookup %s: %w", newID, err)
 	}
 	if exists == 0 {
-		return fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
-	}
-
-	// Both decisions are READ, not merely counted: the old one's three fields
-	// compose the text of the memory this retires, and the new one's compose
-	// the text of the memory that replaces it — the id that names the reason.
-	var oldTitle, oldDecision, oldRationale string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
-		oldID, projectID).Scan(&oldTitle, &oldDecision, &oldRationale); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("supersede decision: decision %s not found in project %s", oldID, projectID)
-		}
-		return fmt.Errorf("supersede decision: lookup %s: %w", oldID, err)
-	}
-	var newTitle, newDecision, newRationale string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
-		newID, projectID).Scan(&newTitle, &newDecision, &newRationale); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
-		}
-		return fmt.Errorf("supersede decision: lookup %s: %w", newID, err)
+		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -229,160 +222,222 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 		WHERE id = ? AND project_id = ?
 	`, newID, oldID, projectID)
 	if err != nil {
-		return fmt.Errorf("supersede decision: %w", err)
+		return out, fmt.Errorf("supersede decision: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("supersede decision: %w", err)
+		return out, fmt.Errorf("supersede decision: rows affected: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("supersede decision: decision %s not found in project %s", oldID, projectID)
+		return out, fmt.Errorf("supersede decision: decision %s not found in project %s", oldID, projectID)
 	}
 
-	oldContent, _ := decisionCompanionContent(oldTitle, oldDecision, oldRationale)
-	newContent, _ := decisionCompanionContent(newTitle, newDecision, newRationale)
-	if err := s.retireDecisionCompanionTx(ctx, tx, projectID, oldContent, newContent); err != nil {
-		return fmt.Errorf("supersede decision: retire companion: %w", err)
+	out, err = retireDecisionCompanionTx(ctx, tx, projectID, oldID, newID)
+	if err != nil {
+		return DecisionRetirement{}, fmt.Errorf("supersede decision: retire companion: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("supersede decision: commit: %w", err)
+		return DecisionRetirement{}, fmt.Errorf("supersede decision: commit: %w", err)
 	}
 	lock.reportHold("supersede-decision", time.Now())
-	return nil
+	return out, nil
+}
+
+// decisionCompanionRef is the stable link from a companion memory back to the
+// decision it carries: written into memories.source_ref by RecordDecision, in
+// the same INSERT, so it cannot be absent on a row this build wrote and cannot
+// drift when the memory's text is later edited. Decision ids survive a portable
+// export/import (ImportDecision keeps the artifact's id, and the memory row
+// carries source_ref), so the link survives a restore too.
+func decisionCompanionRef(decisionID string) string { return "decision:" + decisionID }
+
+// findDecisionCompanionsTx returns the LIVE companion memory ids of decisionID.
+//
+// The link is memories.source_ref. A companion written before that link
+// existed carries none, so for a decision with no linked companion at all the
+// lookup falls back to the composed text — but only when it is unambiguous: one
+// live unlinked decision_log memory with that text AND exactly one decisions row
+// in the project composing to it. Two decisions with identical text, or an
+// edited memory, match nothing rather than the wrong row: a stale decision left
+// live is recoverable, a wrong memory retired is not.
+func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) ([]string, error) {
+	var linked int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM memories
+		WHERE project_id = ? AND source = 'decision_log' AND source_ref = ?
+	`, projectID, decisionCompanionRef(decisionID)).Scan(&linked); err != nil {
+		return nil, fmt.Errorf("count linked companions: %w", err)
+	}
+	if linked > 0 {
+		return selectIDs(ctx, tx, `
+			SELECT id FROM memories
+			WHERE project_id = ? AND source = 'decision_log' AND source_ref = ?
+			  AND resolved_at IS NULL
+			ORDER BY rowid
+		`, projectID, decisionCompanionRef(decisionID))
+	}
+
+	var title, decision, rationale string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
+		decisionID, projectID).Scan(&title, &decision, &rationale); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read decision: %w", err)
+	}
+	content, _ := decisionCompanionContent(title, decision, rationale)
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT title, decision, rationale FROM decisions WHERE project_id = ?`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("read project decisions: %w", err)
+	}
+	same := 0
+	for rows.Next() {
+		var t, d, r string
+		if err := rows.Scan(&t, &d, &r); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan project decision: %w", err)
+		}
+		if c, _ := decisionCompanionContent(t, d, r); c == content {
+			same++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("read project decisions: %w", err)
+	}
+	_ = rows.Close()
+	if same != 1 {
+		return nil, nil
+	}
+
+	unlinked, err := selectIDs(ctx, tx, `
+		SELECT id FROM memories
+		WHERE project_id = ? AND source = 'decision_log' AND category = 'decision'
+		  AND content = ? AND (source_ref IS NULL OR source_ref = '')
+		  AND resolved_at IS NULL
+	`, projectID, content)
+	if err != nil {
+		return nil, fmt.Errorf("find unlinked companion: %w", err)
+	}
+	if len(unlinked) != 1 {
+		return nil, nil
+	}
+	return unlinked, nil
 }
 
 // retireDecisionCompanionTx retires the companion memory of a decision that has
 // just been superseded, inside the transaction that marked it.
 //
-// The companion is found by CONTENT, because the composed text is the only
-// link between a decisions row and its memory (see decisionCompanionContent).
-// That is exact for every decision recorded by this build and every one
-// restored from a portable artifact, since both the row and the memory were
-// clamped by the same function. It is exact only up to a tie when the same
-// decision was recorded twice in one project: two companions then assert the
-// same claim, and the newest of them is the REPLACEMENT's own whenever the
-// replacement was recorded after the reversed decision — the shape
-// supersession has, and the one shape in which superseding would otherwise
-// withhold the claim that just won. So with more than one match the newest is
-// left standing, and the claim the new decision asserts survives.
+// The retirement is the memory-supersede machinery: a resolved_at stamp under
+// the same eligibility guard SetResolved and MarkResolved use, a 'supersedes'
+// edge from the replacement's companion, and a history row per stamped memory.
+// The stamp is what withholds — every read binds resolved_at IS NULL — so search
+// and session start stop returning the reversed decision with no model pass.
 //
-// The retirement is the memory-supersede machinery, all three parts of it:
-// a 'supersedes' edge from the replacement's companion to this one, a
-// resolved_at stamp under the same eligibility guard SetResolved and
-// MarkResolved use, and a 'supersede' history row naming the replacement's
-// companion as the reason. The stamp is what withholds — every read binds
-// resolved_at IS NULL — so search and session start stop returning the
-// reversed decision with no LLM pass, and the edge plus the row are what
-// answer "what replaced it" afterwards.
+// Rules the shape of this function enforces:
+//   - Companions are found by id link (findDecisionCompanionsTx), so a second
+//     decision with identical text is never touched.
+//   - A memory that is the replacement's own companion is never stamped and never
+//     linked to itself.
+//   - Every stamped memory gets exactly one history row, in the same transaction:
+//     'supersede' naming the replacement's companion when the edge was written,
+//     'resolve' with no related id when there is no replacement companion or the
+//     reverse edge is already live (so history never claims an edge the graph
+//     does not hold).
+//   - The edge is 'manual': a caller asserted it, no classifier judged it, so the
+//     classifier's re-judgement and withdrawal paths (which select on 'llm') do
+//     not own it.
+//   - A companion the guard refuses (pinned, persistent) is left live, writes
+//     nothing, and is returned in Declined so the caller can say it still ranks.
 //
-// The stamp re-checks resolved_at IS NULL, which is what makes a second
-// SupersedeDecision over the same pair a no-op rather than a second history
-// row for the same retirement. A companion that cannot be stamped — one that is
-// pinned or persistent — is excluded from the stamp (the same guard that
-// SetResolved and MarkResolved use), so it takes no edge, records no history
-// row and registers no demotion. This is intentional: a decision companion
-// that the user has explicitly pinned or set to retention-exempt status is a
-// non-negotiable rule and must not be silently retired by a supersede pass.
-func (s *Store) retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldContent, newContent string) error {
-	var companionIDs []string
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM memories
-		WHERE project_id = ? AND source = 'decision_log' AND category = 'decision'
-		  AND content = ? AND resolved_at IS NULL
-		ORDER BY created_at DESC, rowid DESC
-	`, projectID, oldContent)
+// Idempotence: only live companions are looked up, so a second supersede over
+// the same pair finds nothing to stamp and writes no second history row.
+func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
+	var out DecisionRetirement
+	candidates, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
 	if err != nil {
-		return fmt.Errorf("find companion memory: %w", err)
+		return out, err
 	}
-	defer rows.Close() //nolint:errcheck
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scan companion memory: %w", err)
+	// The replacement's companion names the reason. One with no companion (an
+	// imported decision) leaves the reason unstated rather than naming an id
+	// that is not a memory.
+	newCompanions, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
+	if err != nil {
+		return out, err
+	}
+	newCompanion := ""
+	if len(newCompanions) > 0 {
+		newCompanion = newCompanions[0]
+	}
+	retire := candidates[:0:0]
+	for _, id := range candidates {
+		if id != newCompanion {
+			retire = append(retire, id)
 		}
-		companionIDs = append(companionIDs, id)
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read companion memories: %w", err)
-	}
-	if len(companionIDs) == 0 {
-		// Nothing to retire, and not an error: a decision restored from a
-		// portable artifact carries no companion of its own, and one whose
-		// companion was deleted has nothing left to withhold. The decisions
-		// row is the half that always lands.
-		return nil
-	}
-	if len(companionIDs) > 1 {
-		// Newest first, so the replacement's own companion — recorded after
-		// the decision it reverses — is the one left standing.
-		companionIDs = companionIDs[1:]
+	if len(retire) == 0 {
+		return out, nil
 	}
 
-	// The replacement's companion, whose id names the reason. A replacement
-	// with no companion (an imported decision) leaves the reason unstated
-	// rather than naming an id that is not a memory.
-	var newCompanion string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM memories
-		WHERE project_id = ? AND source = 'decision_log' AND category = 'decision'
-		  AND content = ? AND resolved_at IS NULL
-		ORDER BY created_at DESC, rowid DESC
-		LIMIT 1
-	`, projectID, newContent).Scan(&newCompanion)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("find replacement companion memory: %w", err)
-	}
-
-	in := strings.TrimSuffix(strings.Repeat("?,", len(companionIDs)), ",")
-	args := make([]interface{}, 0, len(companionIDs)+2)
-	for _, id := range companionIDs {
+	in := strings.TrimSuffix(strings.Repeat("?,", len(retire)), ",")
+	args := make([]any, 0, len(retire)+2)
+	for _, id := range retire {
 		args = append(args, id)
 	}
 	args = append(args, projectID, projectID)
 
 	// The same SELECT/UPDATE pair the two resolve writers issue, so the
-	// companion is withheld under exactly the guard a resolve stamp is —
-	// unpinned, non-exempt, unresolved. Idempotent by that guard: a second
-	// supersede selects nothing, stamps nothing and records nothing.
+	// companion is withheld under exactly the guard a resolve stamp is.
 	changed, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
 	if err != nil {
-		return fmt.Errorf("select companion to retire: %w", err)
+		return out, fmt.Errorf("select companion to retire: %w", err)
+	}
+	stamped := make(map[string]bool, len(changed))
+	for _, id := range changed {
+		stamped[id] = true
+	}
+	for _, id := range retire {
+		if !stamped[id] {
+			out.Declined = append(out.Declined, id)
+		}
 	}
 	if len(changed) == 0 {
-		return nil
+		return out, nil
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedUpdateSQL, in), args...); err != nil {
-		return fmt.Errorf("retire companion memory: %w", err)
+		return out, fmt.Errorf("retire companion memory: %w", err)
 	}
 
-	if newCompanion != "" {
-		for _, id := range changed {
-			// The reverse edge is read inside the transaction, which holds the
-			// write lock, so a pair claimed the other way round cannot be
-			// written into a cycle here.
-			opposed, err := linkIsActive(ctx, tx, id, newCompanion, "supersedes")
-			if err != nil {
-				return fmt.Errorf("read existing link: %w", err)
-			}
-			if opposed {
-				continue
-			}
-			if err := insertLinkTx(ctx, tx, newCompanion, id, "supersedes", 1, "llm", ""); err != nil {
-				return fmt.Errorf("link superseded companion: %w", err)
-			}
+	events := make([]historyEvent, len(changed))
+	for i, id := range changed {
+		events[i] = historyEvent{phase: phaseResolve}
+		if newCompanion == "" || id == newCompanion {
+			continue
 		}
-		// One history row per retired companion, in the phase vocabulary a
-		// supersede already writes and naming the memory that replaced it.
-		events := make([]historyEvent, len(changed))
-		for i := range events {
-			events[i] = historyEvent{phase: phaseSupersede, relatedID: newCompanion}
+		// The reverse edge is read inside the transaction, which holds the
+		// write lock, so a pair claimed the other way round cannot be written
+		// into a cycle here.
+		opposed, err := linkIsActive(ctx, tx, id, newCompanion, "supersedes")
+		if err != nil {
+			return out, fmt.Errorf("read existing link: %w", err)
 		}
-		if err := appendHistoryEventsTx(ctx, tx, events, changed); err != nil {
-			return err
+		if opposed {
+			continue
 		}
+		if err := insertLinkTx(ctx, tx, newCompanion, id, "supersedes", 1, "manual", ""); err != nil {
+			return out, fmt.Errorf("link superseded companion: %w", err)
+		}
+		events[i] = historyEvent{phase: phaseSupersede, relatedID: newCompanion}
 	}
-	return nil
+	if err := appendHistoryEventsTx(ctx, tx, events, changed); err != nil {
+		return out, err
+	}
+	out.Retired = changed
+	return out, nil
 }
 
 // ListDecisions returns decisions for a project.
