@@ -58,14 +58,18 @@ const (
 //
 // sessionStartByteCap is the total byte budget for the session-start memory
 // block (the part rendered by assemble.Run). It is set below the host's
-// 10,000-character cap with margin for the header, learned summary, tasks and
-// decisions that formatSessionContext adds around it. A block already under the
-// cap is byte-identical to origin/main.
+// 10,000-character cap (Claude Code hooks: "A hook's additionalContext,
+// systemMessage, and initialUserMessage strings, and its plain stdout, are
+// capped at 10,000 characters"; over-the-limit output is replaced by a file
+// path and a preview of up to the first 2,000 characters), with margin for the
+// header, learned summary, tasks and decisions that formatSessionContext adds
+// around it. A block already under the cap is byte-identical to origin/main.
 //
 // The slices carry ClampBytes matching the caller's preview truncation
 // (sessionDisplayBytes=200, globalsDisplayBytes=300) so that the assembler's
 // fitResponse post-pass measures the same bytes the renderer emits. The caller
-// still applies truncateUTF8 to append the "…" display marker.
+// appends the "…" display marker when content length equals the budget; the
+// stored row is untouched — display truncation only, no store-side loss.
 const sessionStartByteCap = 7500
 
 func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget {

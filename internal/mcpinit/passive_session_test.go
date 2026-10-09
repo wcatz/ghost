@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -348,7 +349,7 @@ func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
 
 	// Build a store with many long memories that will exceed the 7500 byte cap.
 	// Each project memory is ~400 bytes (200 bytes preview + formatting overhead).
-	// 25 unpinned + 5 pinned = 30 project memories.
+	// 30 unpinned + 5 pinned = 35 project memories.
 	// 10 global memories ~300 bytes each.
 	// Total uncompressed would be well over 7500 bytes.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
@@ -387,10 +388,12 @@ func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
 		}
 	}
 
-	// Run the session-start hook
-	input := fmt.Sprintf(`{"cwd": "%s"}`, projectPath)
+	// Run the session-start hook - use json.Marshal to safely serialize the
+	// cwd path (handles Windows path separators correctly).
+	input := map[string]string{"cwd": projectPath}
+	b, _ := json.Marshal(input)
 	var out strings.Builder
-	runSessionStartHook(t, input, &out)
+	runSessionStartHook(t, string(b), &out)
 	block := out.String()
 
 	// 1. The full block (header + memories + globals + footer) must be under the host's 10,000 char limit
