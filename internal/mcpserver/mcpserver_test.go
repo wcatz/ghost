@@ -120,7 +120,18 @@ func TestGhostTaskCreate_RejectsUnknownProject(t *testing.T) {
 	}
 }
 
-func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
+// TestGhostDecisionRecord_OpensAnUnknownProject is #956 from the tool's own
+// surface: a decision recorded against a project the store has never seen is not
+// refused. It used to be — the handler answered `project "<id>" not found` and
+// wrote nothing, so an agent's first decision on a fresh store failed and it then
+// recorded the decision under the global scope instead.
+//
+// Both reads are SCOPED, and the previous version of this test was scoped to no
+// project at all: `ListDecisions` binds `project_id = ?`, so its `""` returned
+// nothing whatever the tool had written, and "must not be persisted" was an
+// assertion that could not fail. The two reads here are the one project the
+// decision should be in and the one it should not.
+func TestGhostDecisionRecord_OpensAnUnknownProject(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	srv := New(store, logger, "test")
@@ -131,7 +142,7 @@ func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
 		Name: "ghost_decision_record",
 		Arguments: map[string]any{
 			"project_id": "nonexistent-project",
-			"title":      "should not be recorded",
+			"title":      "should be recorded",
 			"decision":   "some decision",
 			"rationale":  "some rationale",
 		},
@@ -139,16 +150,39 @@ func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool ghost_decision_record: %v", err)
 	}
-	if !result.IsError {
-		t.Fatalf("expected error result for unknown project, got: %+v", result.Content)
+	if result.IsError {
+		t.Fatalf("a decision for an unknown project was refused: %+v", result.Content)
 	}
 
-	decisions, err := store.ListDecisions(ctx, "", "", 10)
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var opened bool
+	for _, p := range projects {
+		if p.ID == "nonexistent-project" {
+			opened = true
+		}
+	}
+	if !opened {
+		t.Errorf("the decision did not open a project for the id it was given; the store holds %d project(s)",
+			len(projects))
+	}
+
+	decisions, err := store.ListDecisions(ctx, "nonexistent-project", "", 10)
 	if err != nil {
 		t.Fatalf("ListDecisions: %v", err)
 	}
-	if len(decisions) != 0 {
-		t.Errorf("decision must not be persisted against an empty project id, found %d", len(decisions))
+	if len(decisions) != 1 {
+		t.Fatalf("the opened project holds %d decision(s), want the one just recorded", len(decisions))
+	}
+	// And nothing was filed under the project the fixture already holds, which is
+	// the shape of the workaround this change removes: an agent refused here used
+	// to write the decision into whichever project did resolve.
+	if elsewhere, err := store.ListDecisions(ctx, "abc123", "", 10); err != nil {
+		t.Fatalf("ListDecisions(abc123): %v", err)
+	} else if len(elsewhere) != 0 {
+		t.Errorf("the decision landed in %d row(s) under an existing project, want 0", len(elsewhere))
 	}
 }
 

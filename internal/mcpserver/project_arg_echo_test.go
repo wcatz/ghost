@@ -90,7 +90,7 @@ const storeAmbiguityLabel = memory.ProjectIdentifierLabel
 // sweep that assumed `project_id` would silently drop whichever surface did not use
 // it — and `ghost_resolve` does not.
 //
-// Three entries are deliberately qualified rather than plain members of the set,
+// Four entries are deliberately qualified rather than plain members of the set,
 // and each qualification is the honest reason the surface cannot satisfy the whole
 // sweep:
 //
@@ -112,6 +112,16 @@ const storeAmbiguityLabel = memory.ProjectIdentifierLabel
 //     TestACredentialShapedProjectIDIsNeverEchoedBack, which is where a regression of
 //     #836 would show; putting it here would mean one table asserting two different
 //     shapes of the same guarantee.
+//
+//   - `ghost_decision_record` is absent for the same reason as `ghost_memory_save`,
+//     and since #956 the reason is the same MECHANISM: the tool resolves its project
+//     through `ensureProjectFor`, so it answers exactly as the save does on all three
+//     shapes — a credential guard refusal naming the field and the format and no part
+//     of the value. Its own `project "…" not found` sentence, which used to be what
+//     this sweep read, is gone. The guarantee is not: it is asserted directly, over
+//     the same two ambiguity fixtures, by
+//     TestDecisionRecordNeverEchoesACredentialShapedProjectID, and the whole refusal
+//     class by TestDecisionRecordRefusesAProjectIDTheSaveRefuses.
 //
 //   - `record_decision` RESOLVES nothing. It hands its `project_id` straight to
 //     `ghost_decision_record` in the text it asks the model to write, so the
@@ -188,12 +198,6 @@ var projectResolvingSurfaces = []struct {
 		name: "ghost_decisions_list", argKey: "project_id", argName: "project_id",
 		read:              toolReader("ghost_decisions_list", "project_id", nil),
 		silentWhenUnknown: true,
-	},
-	{
-		name: "ghost_decision_record", argKey: "project_id", argName: "project_id",
-		read: toolReader("ghost_decision_record", "project_id", map[string]any{
-			"title": "a decision", "decision": "we chose it", "rationale": "because",
-		}),
 	},
 	{
 		name: "ghost_task_create", argKey: "project_id", argName: "project_id",

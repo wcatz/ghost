@@ -69,14 +69,23 @@ func TestMemorySaveReportsRefusedNameBinding(t *testing.T) {
 	}
 }
 
-// TestDecisionRecordCannotReachARefusedNameBinding pins why the notice is a
-// ghost_memory_save result and not a ghost_decision_record one. This tool
-// refuses a project_id that does not already resolve, so the id it hands on is
-// one ResolveProject answered with — and ensureProjectFor returns that on the
-// exact-id lookup, before it can derive a repository and reach the unique-name
-// fallback. A test that expected the notice here would be testing a path the
-// tool cannot take.
-func TestDecisionRecordCannotReachARefusedNameBinding(t *testing.T) {
+// TestDecisionRecordReportsRefusedNameBinding is the product half of #613 on the
+// decision path, and it is the test #956 turned around.
+//
+// It used to assert the opposite: the tool refused a project_id it could not
+// resolve, so the id it handed on was always one `ResolveProject` had answered
+// with, and `ensureProjectFor` returned that on the exact-id lookup before it
+// could derive a repository — no refusal was reachable. Routing the decision
+// through `ensureProjectFor` makes the repository route reachable, so a decision
+// recorded from an unrelated clone of a same-named repository is now written to a
+// project of its own while `real-infra` keeps the name.
+//
+// So the contract is the save's: the decision is still recorded — refusing to
+// route it would lose the decision to protect an address — and the result names
+// what kept the name and where the decision went, because "Decision recorded" and
+// "you just stopped seeing the context of the project you named" are otherwise
+// the same sentence to the agent reading it.
+func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
@@ -92,17 +101,43 @@ func TestDecisionRecordCannotReachARefusedNameBinding(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	// The refusal this save would have to report is one the decision path
-	// cannot reach: nothing resolves the unrelated clone to the project that
-	// kept the name, so the tool stops before any of it.
 	res := callTool(t, session, "ghost_decision_record", map[string]any{
 		"project_id": checkout,
 		"title":      "Adopt the nested checkout as its own project",
 		"decision":   "Bind the vendored clone to a project of its own",
 		"rationale":  "Its remote contradicts the enclosing project, so a save must not bind it there",
 	})
-	if !res.IsError {
-		t.Fatalf("a decision for an unresolved project succeeded: %s", resultText(res))
+	if res.IsError {
+		t.Fatalf("a decision for an unresolved project was refused: %s", resultText(res))
+	}
+	out := resultText(res)
+	for _, want := range []string{"infra", recorded, checkout, "real-infra"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the decision result does not report %q:\n%s", want, out)
+		}
+	}
+
+	// The decision and its companion memory are in the project it was routed to,
+	// and not in the one that could not claim it: a notice that also moved the
+	// rows would trade a visible refusal for a silent misroute.
+	for _, projectID := range []string{recorded, "real-infra"} {
+		if count, err := srv.store.CountMemories(ctx, projectID); err != nil {
+			t.Fatalf("CountMemories(%q): %v", projectID, err)
+		} else if count != 0 {
+			t.Errorf("a refused decision wrote %d memories into %q, want 0", count, projectID)
+		}
+	}
+	if count, err := srv.store.CountMemories(ctx, checkout); err != nil {
+		t.Fatalf("CountMemories(%q): %v", checkout, err)
+	} else if count != 1 {
+		t.Errorf("the decision landed in %d memories at %q, want the companion memory alone", count, checkout)
+	}
+	decisions, err := srv.store.ListDecisions(ctx, checkout, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 1 {
+		t.Errorf("the routed project holds %d decision(s), want the one just recorded", len(decisions))
 	}
 
 	// A decision under the project that does resolve still works, and says

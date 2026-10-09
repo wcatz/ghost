@@ -1221,10 +1221,11 @@ func TestMCPLifecycles(t *testing.T) {
 	t.Run("the decision tool refuses a credential in a nested field", func(t *testing.T) {
 		s := newSandbox(t)
 		cs := s.mcpSession(t)
-		// The project has to exist before the guard is even reached: the tool
-		// resolves the project first, so a decision aimed at a project nothing
-		// has ever mentioned would be refused for the wrong reason and the
-		// test would pass on an error it never checked for.
+		// The save is what puts the project on record, and it is kept for a
+		// reason that outlives #956: the tool now opens a project it has never
+		// heard of, so without this the refusal under test would be about a
+		// project that did not exist yet rather than about the credential, and
+		// the assertions below would be reading an answer about something else.
 		call(t, cs, "ghost_memory_save", map[string]any{
 			"project_id": e2eProject,
 			"content":    "a note that creates the project the decision is aimed at",
