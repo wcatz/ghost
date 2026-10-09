@@ -1702,6 +1702,10 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	}, nil, nil
 }
 
+// maxHealthPinnedContradictions bounds how many pinned-contradiction entries
+// ghost_health renders; the count line carries the total.
+const maxHealthPinnedContradictions = 20
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -3164,18 +3168,24 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
 		}
 
-		// Pinned rows with open contradictions (#975): pinned memories that have
-		// been contradicted by newer, unpinned rows but remain in the store due to
-		// their pin. These require manual review — unpin or update the pinned row.
-		if pinnedContradicted, err := s.store.PinnedRowsWithContradictions(ctx); err == nil {
-			if len(pinnedContradicted) > 0 {
-				fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d\n", len(pinnedContradicted))
-				for _, r := range pinnedContradicted {
-					fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
-						assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
-						assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
-				}
+		// Pinned rows with open contradictions (#975): a pin keeps a memory in
+		// every session start, and nothing else tells its owner that newer rows
+		// disagree with it. Report-only: no row is unpinned, resolved or withheld
+		// here. A failed read is reported rather than dropped, so the section's
+		// absence means only "nothing to review".
+		if pinned, total, perr := s.store.PinnedRowsWithContradictions(ctx, maxHealthPinnedContradictions); perr != nil {
+			fmt.Fprintf(&sb, "**Pinned rows with open contradictions:** could not be read: %v\n", perr)
+		} else if total > 0 {
+			fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d — unpin or update the pinned row\n", total)
+			for _, r := range pinned {
+				fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
+					assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
+					assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
 			}
+			if more := total - len(pinned); more > 0 {
+				fmt.Fprintf(&sb, "  ... and %d more\n", more)
+			}
+			sb.WriteString("\n")
 		}
 
 		// History growth (#729), additive: everything above keeps its name and

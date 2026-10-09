@@ -772,49 +772,78 @@ const linkInvalidateSQL = `
 		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
 	`
 
-// PinnedContradictedRow represents a pinned memory that has been contradicted
-// by a newer, unpinned memory via a contradicts edge.
+// PinnedContradictedRow is one open contradiction against a pinned memory: a
+// live `contradicts` edge joins it to a newer, unresolved memory.
 type PinnedContradictedRow struct {
 	ID        string
 	ProjectID string
 	Content   string
-	// ContradictedBy is the ID of the newer row that contradicts this pinned row.
-	ContradictedBy string
-	// ContradictedByContent is the content of the contradicting row for context.
+	// ContradictedBy is the id of the newer row that contradicts this pinned row,
+	// and ContradictedByContent is its content.
+	ContradictedBy        string
 	ContradictedByContent string
 }
 
-// PinnedRowsWithContradictions returns all pinned memories that are the target
-// of a live contradicts edge from an unpinned (newer) memory. This identifies
-// pinned rows that have been contradicted by newer evidence but remain in the
-// store due to their pin.
-func (s *Store) PinnedRowsWithContradictions(ctx context.Context) ([]PinnedContradictedRow, error) {
+// pinnedContradictionHead and pinnedContradictionTail are the statement ghost_health reports pinned
+// contradictions from. `contradicts` is symmetric and may be stored either way
+// round, so the edge is read in both directions; an edge whose endpoints' scopes
+// conflict is two true claims about two places and every reader exempts it; an
+// invalidated edge or a resolved row on either side is closed. Content is cut
+// to pinnedContradictionPreview characters in SQL, so the read is bounded per
+// row, and the newer-than test is made in Go (ParseStamp), because the two
+// stamp columns are not guaranteed one textual format.
+const pinnedContradictionHead = `
+	SELECT m.id, m.project_id, substr(m.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(m.updated_at, ''), m.created_at),
+	       o.id, substr(o.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(o.updated_at, ''), o.created_at)
+	FROM memories m
+	JOIN memory_links ml ON ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
+	 AND (ml.target_id = m.id OR ml.source_id = m.id)
+	JOIN memories o ON o.id = CASE WHEN ml.target_id = m.id THEN ml.source_id ELSE ml.target_id END
+	WHERE m.pinned = 1 AND m.resolved_at IS NULL AND o.resolved_at IS NULL AND o.id <> m.id
+	  AND NOT `
+
+const pinnedContradictionTail = `
+	ORDER BY m.project_id, m.id, o.id`
+
+const pinnedContradictionPreview = "200"
+
+// PinnedRowsWithContradictions reports the pinned memories a newer memory
+// contradicts through a live `contradicts` edge, at most limit of them, and the
+// total there are. Newer is the freshness key the assembler's marker uses:
+// updated_at, or created_at when unset. A pin keeps such a row in every session
+// start and nothing else tells its owner later evidence disagrees, so this is
+// the list to review: unpin or update the row. Contents are cut to 200
+// characters. It only reads; it never changes a row or an edge.
+func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]PinnedContradictedRow, int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.project_id, m.content, ml.source_id, src.content
-		FROM memories m
-		JOIN memory_links ml ON ml.target_id = m.id
-		JOIN memories src ON src.id = ml.source_id
-		WHERE m.pinned = 1
-		  AND src.pinned = 0
-		  AND ml.relation = 'contradicts'
-		  AND ml.invalidated_at IS NULL
-		ORDER BY m.project_id, m.id
-	`)
+	query := pinnedContradictionHead + scopesConflictSQL("m.scope", "o.scope") + pinnedContradictionTail
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("pinned rows with contradictions: %w", err)
+		return nil, 0, fmt.Errorf("pinned rows with contradictions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []PinnedContradictedRow
+	total := 0
 	for rows.Next() {
 		var r PinnedContradictedRow
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Content, &r.ContradictedBy, &r.ContradictedByContent); err != nil {
-			return nil, err
+		var pinnedStamp, otherStamp string
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Content, &pinnedStamp, &r.ContradictedBy, &r.ContradictedByContent, &otherStamp); err != nil {
+			return nil, 0, err
 		}
-		result = append(result, r)
+		pt, _ := ParseStamp(pinnedStamp)
+		ot, _ := ParseStamp(otherStamp)
+		if !ot.After(pt) {
+			continue
+		}
+		total++
+		if len(result) < limit {
+			result = append(result, r)
+		}
 	}
-	return result, rows.Err()
+	return result, total, rows.Err()
 }

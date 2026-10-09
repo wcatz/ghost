@@ -56,11 +56,16 @@ type pipeline struct {
 	// contradicts the middle, which the near end dropped), and the marker would
 	// under-name if it were built from the separations alone.
 	conflictPartners map[string][]string
-	// contradictedBy maps each pinned row that was the TARGET of a contradicts
-	// edge from a withheld row to the withheld rows that contradict it. This is
-	// used to render the contradicted_by marker on pinned rows that won the
-	// keep-priority tie-break but were contradicted by newer evidence.
+	// contradictedBy maps each PINNED row stage 5 kept to the rows that
+	// directly contradict it, through a live scope-compatible edge, and are newer
+	// than it, in rank order. A pin is never withheld, so the row stays and the
+	// marker is what tells the reader later evidence disagrees (#975). A partner
+	// is either withheld (the pin outranks it) or another pinned row that was
+	// kept; withheldIDs tells markConflicts which, so it can drop a partner the
+	// response-fit pass later cut.
 	contradictedBy map[string][]string
+	// withheldIDs is the set of rows stage 5 withheld.
+	withheldIDs map[string]bool
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
 	// the stages run and belongs to the stage that acts on it: stage 9 is what
@@ -473,7 +478,11 @@ func runConflicts(p *pipeline) {
 					against = append(against, nb)
 				}
 			}
-			if len(against) == 0 {
+			// A pinned row is never withheld by the walk: a pin is a promise of
+			// delivery, and a contradiction is reported on the row (contradicted_by)
+			// rather than settled by removing it (#975). It sorts ahead of every
+			// unpinned row, so only another pinned row can be in `against`.
+			if len(against) == 0 || candByID[id].Pinned {
 				keptSet[id] = true
 				continue
 			}
@@ -518,28 +527,25 @@ func runConflicts(p *pipeline) {
 				p.conflictPartners[id] = partners
 			}
 		}
-		// Build the contradictedBy map for pinned rows that are the TARGET of a
-		// contradicts edge from a withheld row. The edge direction is From→To
-		// (the From row contradicts the To row). If a pinned row is the target
-		// and the source was withheld, the pinned row is marked as contradicted
-		// by that withheld row.
-		p.contradictedBy = make(map[string][]string, len(keptSet))
-		for _, e := range p.set.Edges {
-			if e.Relation != "contradicts" || !admitted[e.From] || !admitted[e.To] {
+		// Each kept pinned row names the rows that contradict it and are newer: the
+		// adjacency is already scope-filtered and deduplicated, so this adds no
+		// second reading of the edges.
+		p.withheldIDs = withheld
+		p.contradictedBy = make(map[string][]string)
+		for _, id := range involved {
+			if !keptSet[id] || !candByID[id].Pinned {
 				continue
 			}
-			// Check if the target is a kept pinned row and the source is withheld
-			if keptSet[e.To] && withheld[e.From] {
-				cand, ok := candByID[e.To]
-				if ok && cand.Pinned {
-					p.contradictedBy[e.To] = append(p.contradictedBy[e.To], e.From)
+			var newer []string
+			for _, nb := range adj[id] {
+				if contradictionStamp(candByID[nb]).After(contradictionStamp(candByID[id])) {
+					newer = append(newer, nb)
 				}
 			}
-		}
-		// Sort the contradictedBy lists by rank order for stable rendering
-		for id, list := range p.contradictedBy {
-			sort.Slice(list, func(i, j int) bool { return rank[list[i]] < rank[list[j]] })
-			p.contradictedBy[id] = list
+			if len(newer) > 0 {
+				sort.Slice(newer, func(i, j int) bool { return rank[newer[i]] < rank[newer[j]] })
+				p.contradictedBy[id] = newer
+			}
 		}
 		// Remove the withheld rows, preserving rank order. A fresh slice, not
 		// p.rows[:0]: the candidate set is the retriever's return value and the
@@ -1518,6 +1524,14 @@ func (p *pipeline) markConflicts() {
 	for i := range p.items {
 		p.items[i].ConflictsWith = nil
 		p.items[i].ContradictedBy = nil
+		// A partner is named only while the reader's answer matches what stage 5
+		// decided: a withheld row is out of it by construction, a kept pinned row
+		// must still be in it.
+		for _, w := range p.contradictedBy[p.items[i].ID] {
+			if present[w] != p.withheldIDs[w] {
+				p.items[i].ContradictedBy = append(p.items[i].ContradictedBy, w)
+			}
+		}
 		partners, ok := p.conflictPartners[p.items[i].ID]
 		if !ok {
 			continue
@@ -1527,17 +1541,6 @@ func (p *pipeline) markConflicts() {
 			// is a defensive one for a row that somehow survived.
 			if !present[w] {
 				p.items[i].ConflictsWith = append(p.items[i].ConflictsWith, w)
-			}
-		}
-		// Populate ContradictedBy for pinned rows that are targets of contradicts
-		// edges from withheld rows.
-		if p.items[i].Pinned {
-			if contradictedBy, ok := p.contradictedBy[p.items[i].ID]; ok {
-				for _, w := range contradictedBy {
-					if !present[w] {
-						p.items[i].ContradictedBy = append(p.items[i].ContradictedBy, w)
-					}
-				}
 			}
 		}
 	}

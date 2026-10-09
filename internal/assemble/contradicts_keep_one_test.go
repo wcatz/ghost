@@ -660,34 +660,6 @@ func conflictsWithTokens(t *testing.T, line string) []string {
 		return nil
 	}
 	label := line[at+len("conflicts_with="):]
-	// Stop at the next marker or closing paren
-	if end := strings.Index(label, " "); end >= 0 {
-		label = label[:end]
-	}
-	if end := strings.Index(label, ")"); end >= 0 {
-		label = label[:end]
-	}
-	var tokens []string
-	for _, part := range strings.Split(label, ",") {
-		part = strings.Trim(strings.TrimSpace(part), "`")
-		if part != "" {
-			tokens = append(tokens, part)
-		}
-	}
-	return tokens
-}
-
-// contradictedByTokens reads the ids a rendered line names in contradicted_by=.
-func contradictedByTokens(t *testing.T, line string) []string {
-	t.Helper()
-	at := strings.Index(line, "contradicted_by=")
-	if at < 0 {
-		return nil
-	}
-	label := line[at+len("contradicted_by="):]
-	if end := strings.Index(label, " "); end >= 0 {
-		label = label[:end]
-	}
 	if end := strings.Index(label, ")"); end >= 0 {
 		label = label[:end]
 	}
@@ -706,9 +678,7 @@ func contradictedByTokens(t *testing.T, line string) []string {
 // KEPT rows it has a direct contradicts edge to; no Against names a row the
 // withheld row scope-conflicts with; and each kept line names only the rows it
 // directly contradicts that were withheld — which never includes its
-// scope-conflicting partner, because that is not an edge. Pinned rows that are
-// the target of a contradicts edge from a withheld row also carry a
-// contradicted_by marker naming the contradicting row.
+// scope-conflicting partner, because that is not an edge.
 func assertMixedScopeWalk(t *testing.T, res Result, set *memory.CandidateSet, wantKept []string) {
 	t.Helper()
 	if got := itemIDs(res.Items); !eq(got, wantKept) {
@@ -720,14 +690,12 @@ func assertMixedScopeWalk(t *testing.T, res Result, set *memory.CandidateSet, wa
 	}
 	scopes := make(map[string]map[string]string, len(set.Rows))
 	direct := make(map[string][]string, len(set.Rows))
-	directed := make(map[string][]string, len(set.Rows)) // source -> targets
 	for _, row := range set.Rows {
 		scopes[row.ID] = row.Scope
 	}
 	for _, e := range set.Edges {
 		direct[e.From] = append(direct[e.From], e.To)
 		direct[e.To] = append(direct[e.To], e.From)
-		directed[e.From] = append(directed[e.From], e.To)
 	}
 	// wantNames, in the rank order the window holds, is every row in ids that is
 	// a direct contradicts neighbour of owner and stands on the stated side.
@@ -738,21 +706,6 @@ func assertMixedScopeWalk(t *testing.T, res Result, set *memory.CandidateSet, wa
 				continue
 			}
 			want = append(want, row.ID)
-		}
-		return want
-	}
-	// wantContradictedBy returns the rows that contradict the owner (owner is target)
-	// and are withheld.
-	wantContradictedBy := func(owner string, withheld map[string]bool) []string {
-		var want []string
-		for src, targets := range directed {
-			if withheld[src] {
-				for _, tgt := range targets {
-					if tgt == owner {
-						want = append(want, src)
-					}
-				}
-			}
 		}
 		return want
 	}
@@ -803,13 +756,6 @@ func assertMixedScopeWalk(t *testing.T, res Result, set *memory.CandidateSet, wa
 		}
 		if got := conflictsWithTokens(t, line); !eq(got, wantTokens) {
 			t.Errorf("%s: the rendered line names %v, want %v: %q", it.ID, got, wantTokens, line)
-		}
-		// Check contradicted_by marker for pinned rows
-		if it.Pinned {
-			wantContradicted := wantContradictedBy(it.ID, withheld)
-			if got := contradictedByTokens(t, line); !eq(got, wantContradicted) {
-				t.Errorf("%s: contradicted_by = %v, want %v: %q", it.ID, got, wantContradicted, line)
-			}
 		}
 		for _, partner := range want {
 			if memory.ScopesConflict(scopes[it.ID], scopes[partner]) {
