@@ -489,9 +489,11 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// #683's historical read SELECTs the triple off the current row — a
 		// reader, and the one that made this test earn its place on an upstream
 		// merge rather than only on this branch's own additions. The window is then
-		// judged at the instant asked for, because assemble.Run moves Now to the
-		// as_of value before the stages run, so this read carrying the present's
-		// boundaries is a documented decision rather than an oversight.
+		// either judged at the instant asked for (the as_of listings, through
+		// memory.ValidityAt) or not judged at all (ghost_memory_search, whose
+		// stage 2 records no verdict because the bounds are the present's, #910),
+		// so this read carrying the present's boundaries is a documented decision
+		// rather than an oversight.
 		"asof.go:ReadMemoriesAsOf": true,
 		// The exported seam the live writers reach verified_at THROUGH, so its own
 		// body names no column and the scan cannot see it either. Listed so a future
