@@ -58,6 +58,75 @@ func TestNDCGAtK(t *testing.T) {
 	approx(t, "single-at-2", NDCGAtK([]string{"x", "a", "y"}, Relevance{"a": 1}, 10), 0.630930)
 }
 
+func TestTopRowRelevant(t *testing.T) {
+	rel := Relevance{"a": 1, "b": 2, "c": 3}
+	cases := []struct {
+		name   string
+		ranked []string
+		want   bool
+	}{
+		{"relevant-first", []string{"a", "x"}, true},
+		{"best-labelled-first", []string{"c", "a", "b"}, true},
+		{"relevant-not-first", []string{"x", "a"}, false},
+		{"zero-gain-first", []string{"z", "c"}, false},
+		{"empty-list", nil, false},
+		{"no-labelled-hit", []string{"x", "y", "z"}, false},
+	}
+	for _, tc := range cases {
+		if got := TopRowRelevant(tc.ranked, rel); got != tc.want {
+			t.Errorf("%s: TopRowRelevant(%v) = %v, want %v", tc.name, tc.ranked, got, tc.want)
+		}
+	}
+}
+
+func TestTopRowBestLabelled(t *testing.T) {
+	rel := Relevance{"a": 1, "b": 2, "c": 3}
+	cases := []struct {
+		name   string
+		ranked []string
+		want   bool
+	}{
+		{"top-carries-highest", []string{"c", "b", "a"}, true},
+		{"top-is-relevant-but-not-best", []string{"a", "c", "b"}, false},
+		{"top-has-no-gain", []string{"x", "c"}, false},
+		{"empty-list", nil, false},
+	}
+	for _, tc := range cases {
+		if got := TopRowBestLabelled(tc.ranked, rel); got != tc.want {
+			t.Errorf("%s: TopRowBestLabelled(%v) = %v, want %v", tc.name, tc.ranked, got, tc.want)
+		}
+	}
+	// The tie case is worth a case of its own, because "tied with equal
+	// gain" above reads b:1 against c:3 and does not mean what it says.
+	equal := Relevance{"a": 1, "b": 1}
+	if !TopRowBestLabelled([]string{"a", "b"}, equal) {
+		t.Error("a top row tied for the best gain is best-labelled: nothing it labels outranks it")
+	}
+	if !TopRowBestLabelled([]string{"b", "a"}, equal) {
+		t.Error("the tie holds in the other direction")
+	}
+}
+
+func TestRecall1Ceiling(t *testing.T) {
+	// One labelled row: the only ceiling that reads as a ranking.
+	approx(t, "ceiling-one", Recall1Ceiling(Relevance{"a": 1}), 1.0)
+	// Rank 1 holds one row, so four labelled rows cap any ranking at 0.25
+	// however well it ranks — the ceiling is about the labels, not the
+	// search.
+	approx(t, "ceiling-four", Recall1Ceiling(Relevance{"a": 1, "b": 2, "c": 1, "d": 3}), 0.25)
+	approx(t, "ceiling-two", Recall1Ceiling(Relevance{"a": 1, "b": 2}), 0.5)
+	// Graded with zero gain counts nowhere, so {"a":1, "b":0, "c":2} has
+	// two relevant items and a ceiling of 1/2.
+	approx(t, "ceiling-ignores-zero-gain", Recall1Ceiling(Relevance{"a": 1, "b": 0, "c": 2}), 0.5)
+	// Undefined for a query nothing labels, like every other ratio here.
+	approx(t, "ceiling-none", Recall1Ceiling(Relevance{}), 0)
+	// A ranked list cannot beat it: whatever the ranking, the top row is
+	// one of the four, so recall@1 is 0.25.
+	if got := RecallAtK([]string{"d", "a", "b", "c"}, Relevance{"a": 1, "b": 2, "c": 1, "d": 3}, 1); got != 0.25 {
+		t.Errorf("a perfect ranking scored %.3f at recall@1, and the ceiling says that is the most any ranking can score", got)
+	}
+}
+
 func TestRelevantCount(t *testing.T) {
 	if n := (Relevance{"a": 1, "b": 0, "c": 2}).relevantCount(); n != 2 {
 		t.Errorf("relevantCount = %d, want 2", n)
