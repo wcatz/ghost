@@ -856,7 +856,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		// this process inherited it, or the parent could not be read. Name the
 		// cause, never the value, so an operator whose audit stops judging can
 		// find it.
-		logger.Info("host session id not recorded: this process is not the session root, or its parent's environment could not be read")
+		logger.Warn("host session id not recorded: this process is not the session root, or its parent's environment could not be read")
 	}
 
 	// Resolve the retrieval record's per-install key now, at construction, so the
