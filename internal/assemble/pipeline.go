@@ -1091,10 +1091,12 @@ func runCutoff(p *pipeline) {
 		p.trace.record(stageCutoff, in, in, nil)
 		return
 	}
-	// The reference is the top row's fused Base (the pre-decay score). rows are
-	// in rank order and the top row is the highest-scored, so rows[0].Base is the
-	// maximum. A non-positive top (only a store whose decay drives every score to
-	// zero) makes the floor non-positive, and then a non-positive base is never
+	// The reference is the top-ranked row's fused Base (the pre-decay score).
+	// Rank order is decayed score with pinned rows first, so rows[0].Base is not
+	// always the largest Base in the set; a lower reference only lowers the floor,
+	// so the cut errs toward keeping rows. A non-positive top (only a store whose
+	// decay drives every score to zero) makes the floor non-positive, and then a
+	// non-positive base is never
 	// strictly below it, so every row is kept: the conservative answer when there
 	// is no positive relevance to be a fraction of.
 	topBase := p.rows[0].Base
