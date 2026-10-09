@@ -50,8 +50,29 @@ func TestPinnedRowsWithContradictions(t *testing.T) {
 		t.Fatalf("got %+v (total %d), want only %s contradicted by %s", got, total, pin, newer)
 	}
 
-	// The bound limits the rows returned and still counts them all.
+	// The same pair stored the other way round too is still one contradiction.
+	if err := s.CreateLink(ctx, pin, newer, "contradicts", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if got, total, err = s.PinnedRowsWithContradictions(ctx, 10); err != nil || total != 1 || len(got) != 1 || got[0].AlsoContradictedBy != 0 {
+		t.Fatalf("both-ways pair: %+v total %d err %v, want one entry", got, total, err)
+	}
+
+	// A second newer row is another contradicting row of the SAME pinned row:
+	// still one pinned row, counted once, with the other named in the count.
 	if err := s.CreateLink(ctx, mk("the database is derby", "2026-07-01 00:00:00"), pin, "contradicts", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if got, total, err = s.PinnedRowsWithContradictions(ctx, 10); err != nil || total != 1 || len(got) != 1 || got[0].AlsoContradictedBy != 1 {
+		t.Fatalf("two newer rows: %+v total %d err %v, want one pinned row with 1 more", got, total, err)
+	}
+
+	// The bound limits the entries returned and still counts every pinned row.
+	pin2 := mk("tabs are required", "2026-01-01 00:00:00")
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, pin2); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if err := s.CreateLink(ctx, mk("spaces are required", "2026-07-01 00:00:00"), pin2, "contradicts", 1, "manual"); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 	got, total, err = s.PinnedRowsWithContradictions(ctx, 1)

@@ -3181,6 +3181,9 @@ func (s *Server) registerTools() {
 				fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
 					assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
 					assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
+				if r.AlsoContradictedBy > 0 {
+					fmt.Fprintf(&sb, "  (+%d more contradicting rows)\n", r.AlsoContradictedBy)
+				}
 			}
 			if more := total - len(pinned); more > 0 {
 				fmt.Fprintf(&sb, "  ... and %d more\n", more)
