@@ -1,6 +1,9 @@
 package mcpserver
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // The deterministic half of #674: one advisory, appended to the response of a
 // save whose content reads as a repository fact.
@@ -17,7 +20,10 @@ import "regexp"
 // its own manifest." is a second copy of the durable shape that would then be
 // flagged. The rule is per-sentence and not per-note, so a note whose FIRST
 // sentence is a location claim is flagged whatever its later sentences add; that
-// is the accepted cost, and it is a sentence of advice, not a refusal.
+// is the accepted cost, and it is a sentence of advice, not a refusal. The one
+// exception is the reason connector, which is checked over the WHOLE note (#960):
+// a reason can sit in a sentence of its own, and a note that carries one anywhere
+// explains itself, which is the one property a repository fact cannot have.
 //
 // Measured residual, on the committed bench corpora (612 memories across
 // internal/bench/testdata): 0 fired, down from 4/547 before the reference
@@ -126,14 +132,66 @@ var repoFactPredicate = regexp.MustCompile(`(?i)\b(?:` +
 // that gives it meaning.
 var sentenceBoundary = regexp.MustCompile(`[.!?:;]\s|\n`)
 
+// repoFactReason matches the half of a note that makes it durable knowledge
+// rather than a restatement: a REASON connector. A note that says why is
+// carrying something the repository does not hold, whatever file it names —
+// "the schema version is declared in internal/memory/schema.go, because an
+// older build's store is migrated on open" is a rule with its reason, and the
+// reason is the part worth keeping.
+//
+// The scope is the NOTE and not the sentence, which is the one place this rule
+// is deliberately wider than the reference/predicate pair above. A reason can
+// sit in a sentence of its own, and a note that carries one anywhere is a note
+// that explains itself; the per-sentence rule exists to stop a predicate in one
+// sentence pairing with a path in another, which is a different question from
+// "does this note explain itself". #960 measured the cost of the narrow
+// reading: two of three advisories in the save-quality audit were false
+// positives on one planted convention, a rule with its reason that happens to
+// name a file.
+var repoFactReason = regexp.MustCompile(`(?i)\b(?:` +
+	`because|so that|on purpose|never|must` +
+	`)\b`)
+
+// repoFactRule matches an imperative inside ONE sentence: the claim being
+// judged is a rule, and a rule is durable knowledge whatever it names. Narrower
+// than the connector list on purpose — "always" is here and not above, because
+// a note that merely says "always" without saying why is not excused by the
+// reason half, only by the category half below.
+var repoFactRule = regexp.MustCompile(`(?i)\b(?:must|never|always)\b`)
+
+// repoFactRuleCategory is the set of categories whose notes are rules by
+// nature. A rule word only exempts a sentence filed under one of these: the
+// category is the caller's own statement that this note is a rule, and a bare
+// location claim filed as a `convention` is still a bare location claim.
+var repoFactRuleCategory = map[string]bool{
+	"convention": true,
+	"decision":   true,
+	"gotcha":     true,
+}
+
 // repoFactHint returns the advisory sentence for content that reads as a
 // repository fact, or "" for everything else. It is called with the content
-// the save has just stored, and it never decides the save.
-func repoFactHint(content string) string {
+// the save has just stored and the category it was filed under, and it never
+// decides the save.
+//
+// Two exemptions, both of which leave the note stored and only drop the
+// sentence (#960): a note carrying a reason connector anywhere, and a sentence
+// that is a rule filed under a rule category. Both are the direction the rule
+// wants — over-flagging a true fact costs one sentence, under-flagging a stale
+// one costs an injection slot in every later session — and neither can refuse
+// the save.
+func repoFactHint(content, category string) string {
+	if repoFactReason.MatchString(content) {
+		return ""
+	}
 	for _, sentence := range sentenceBoundary.Split(content, -1) {
-		if repoFactPredicate.MatchString(sentence) && repoFactReference.MatchString(sentence) {
-			return repoFactAdvisory
+		if !(repoFactPredicate.MatchString(sentence) && repoFactReference.MatchString(sentence)) {
+			continue
 		}
+		if repoFactRuleCategory[strings.ToLower(strings.TrimSpace(category))] && repoFactRule.MatchString(sentence) {
+			continue
+		}
+		return repoFactAdvisory
 	}
 	return ""
 }

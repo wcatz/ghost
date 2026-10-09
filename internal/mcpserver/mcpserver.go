@@ -1160,7 +1160,16 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	// got stored. The rule still reaches that tool through the server
 	// instructions, which route design decisions to it by name.
 	if content != nil {
-		msg += repoFactHint(*content)
+		// The category the note will carry after this update, which is the
+		// one the advisory judges it as: a category passed here wins, and an
+		// omitted one leaves the stored row's, so a note already filed as a
+		// rule is not re-judged as a fact because this call left the field
+		// alone.
+		category := mems[0].Category
+		if args.Category != "" {
+			category = args.Category
+		}
+		msg += repoFactHint(*content, category)
 	}
 	if truncated {
 		msg += truncationWarning("content", memoryTruncationAdvice)
@@ -2043,7 +2052,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
@@ -2608,7 +2617,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
