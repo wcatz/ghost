@@ -1245,3 +1245,36 @@ func TestMCPLifecycles(t *testing.T) {
 		}
 	})
 }
+
+// TestMCPRelevanceCutoff turns the query-mode relevance cutoff (#954) on through
+// the built binary. Every other sandbox runs with it off; here the same store
+// answers the same query twice, with the cutoff off and then at 1 (only rows
+// that tie the top survive), and the second answer must be shorter while still
+// carrying the top row.
+func TestMCPRelevanceCutoff(t *testing.T) {
+	s := newSandbox(t)
+	seed := s.mcpSession(t)
+	for _, c := range []string{
+		"the relay cutoffprobe listens on port 2222 in production for cutoffprobe traffic cutoffprobe",
+		"cutoffprobe is mentioned once beside unrelated staging notes",
+		"another cutoffprobe aside about backups",
+		"yet another passing cutoffprobe reference in the runbook",
+	} {
+		call(t, seed, "ghost_memory_save", map[string]any{"project_id": e2eProject, "content": c, "category": "architecture"})
+	}
+	args := map[string]any{"project_id": e2eProject, "query": "cutoffprobe"}
+	count := func(out string) int {
+		return strings.Count(out, "cutoffprobe is") + strings.Count(out, "relay cutoffprobe") + strings.Count(out, "another cutoffprobe") + strings.Count(out, "passing cutoffprobe")
+	}
+
+	off := count(call(t, s.mcpSession(t), "ghost_memory_search", args))
+	if off < 2 {
+		t.Fatalf("cutoff off returned %d of the 4 matching rows, want at least 2 for the comparison to mean anything", off)
+	}
+
+	s.reconfigure(configOpts{relevanceCutoff: "1"})
+	on := call(t, s.mcpSession(t), "ghost_memory_search", args)
+	if got := count(on); got >= off || got < 1 {
+		t.Errorf("cutoff 1 returned %d rows, cutoff off %d: want a shorter, non-empty answer\n%s", got, off, on)
+	}
+}

@@ -350,7 +350,7 @@ whole-project listing. Two buckets cannot express that: capped at the caller's
 `limit` each, they admit twice the rows the caller asked for. The consequence
 is that a bucket name and a row's own project stop being the same thing, so the
 retriever reports which policy admitted each row (`Candidate.FetchedBy`) and the
-assembler's stage 8 keys its per-slice cap on that. A request that both mixes
+assembler's stage 9 keys its per-slice cap on that. A request that both mixes
 `_global` into one bucket and fetches it in another is refused at both seams: the
 two row sets overlap, so every global row would be admitted twice under two
 different caps. A caller that wants both — the resource's Global section is
@@ -604,11 +604,14 @@ for a call and a session that belong together. Four pieces make that hold
 - **The call names its session.** `retrieval_record.session_id` (no schema change; the
   column and `retrieval_audit.session_id` already existed, and were empty on every row written before this change) is
   the host's id for the session. The MCP server over stdio has no transport id, so it
-  reads `CLAUDE_CODE_SESSION_ID` from its own environment once at startup, which is the
+  decides once at startup, in `New`, whether to use `CLAUDE_CODE_SESSION_ID` from its own
+  environment: on Linux only when this process is the session root (the parent's initial
+  `/proc/<ppid>/environ` lacks the variable), with every failure to tell falling toward
+  `""`; elsewhere the environment's id is used as before. It is the
   id Claude Code also sends in every hook payload as `session_id` and names its session
   record after; the session-start hook records its payload's id directly. Hosts whose
-  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`)
-  record `""`.
+  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`),
+  and servers that inherited the variable from a parent that already had it, record `""`.
 - **The scan names its session.** The stop hook stamps the payload's `session_id` on the
   signals and the sidecar (a `session` line; header v4 for the order below, v5 since the turns were grouped, older files refused by name). `audit.Run` judges only what
   `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
@@ -1710,6 +1713,25 @@ Axis interaction rules:
 > another row because of what it is ABOUT, while a digest asks no question and
 > hands a model everything worth knowing, where breadth is the point. The gate
 > is the request's mode (an empty `Query`), never its `Source`.
+> Stage 8 (the relevance cutoff,
+> [#954](https://github.com/wcatz/ghost/issues/954)) is the query-mode dual of
+> stage 7, and the two never both act on one request because each is gated on the
+> opposite mode: a relative-to-top fused-Base cut applied after dedup and before
+> the budget, on a QUERY only, that stops the answer where relevance falls off —
+> `ghost_memory_search` used to always fill its window, so a block that answered a
+> question whose useful row ranked first still carried nine rows of noise (context
+> precision 0.138). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
+> of the top row's fused Base below which a row is cut), chosen from the
+> `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
+> stays the maximum, the top row is always kept (a result rate below 1.000 would
+> be a regression), and a pinned row and a keyword-reserved row are never cut. The comparison is on Base, the score before the age decay, so age and category never read as irrelevance. Each cut row is recorded once —
+> a decision at the stage with reason `relevance_cutoff`, which the retrieval
+> record reads as a dropped verdict and explain reads as an excluded row's reason
+> — so, unlike the passive diversity deferral, its reason REACHES the explain
+> payload. A passive read and an off cutoff (0) are recorded pass-throughs, so a
+> passive block and a machine with no configured cutoff are byte-identical to a
+> pipeline whose stage was absent. `ghost bench --context` is measured at the
+> shipped default (`docs/benchmarks.md`).
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
@@ -2080,7 +2102,7 @@ deferred row is a `diversity` / `diversity_deferred` decision in the trace (and
 `diversity_backfilled` for one that came back).
 
 **The window is PER BUCKET on a sliced read, and that is structural rather than
-cosmetic.** Stage 8 enforces each slice cap over the rows IT admits, so one shared
+cosmetic.** Stage 9 enforces each slice cap over the rows IT admits, so one shared
 window would let one bucket's share evict another bucket's row — which the
 per-bucket cap then readmits — leaving a deferral verdict on a row the answer
 renders, counted as withheld by the bucket tally the session-start header reads. So the
@@ -2088,7 +2110,7 @@ session start's project slice and
 `_global` slice are each divided by their own cap, each computed only over that
 bucket's rows, and a bucket with no item cap is not divided at all because the
 budget stage never cuts its rows on count. A bucket's rows keep their own relative
-order, so one bucket's reordering cannot change which rows stage 8 admits for
+order, so one bucket's reordering cannot change which rows stage 9 admits for
 another. A row a share moved but the budget stage admits keeps no drop verdict
 either (`trim` withdraws it), so no block shows a row the header calls withheld.
 Query mode is OUTSIDE it, and the reason is the two questions
@@ -2159,7 +2181,7 @@ Rules the pipeline must hold:
   byte-identical while their one behavioural difference is not in them at all.
 - **The trace is the explain payload.** `explain:true` is a projection of the same `Run` the formatted answer comes from, so explain and the answer cannot disagree about what a row was or why it was withheld.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through. An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
-- **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **The budget is a hard boundary, in the unit it names.** Stage 9's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
 - **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
 - **The pipeline is measurable.** `ghost bench --context` measures context precision, contamination rate, budget adherence, diversity, and token cost, and `ghost bench --passive` measures the passive surfaces (see [Benchmarks](benchmarks.md)); contamination classification reuses the production exclusion reasons so the two cannot drift.
 

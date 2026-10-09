@@ -248,6 +248,7 @@ The vector arm of that floor is configurable and ships off:
 ```yaml
 context:
   abstain_cosine: 0.0   # 0 = arm disabled
+  relevance_cutoff: 0.63  # fraction of the top row's fused Base; 0 = off
 ```
 
 A returned memory clears the vector arm when its cosine is **at least** this value. The value must be between 0 and 1: a negative one is satisfied by every row including the worst match, an infinite one by none, and a NaN reads as no threshold at all, so all three are refused as the load error they are rather than accepted as settings. The assembler refuses them again on the request itself, so a caller that builds a `Request` without going through this file inherits the guard instead of a silently wrong floor. The default is 0 — meaning *disabled*, not "a threshold of zero", which every row clears. The verdict line renders three states, because a threshold and a threshold that ran are different facts: `abstain_cosine=off` (nobody configured one), `abstain_cosine=not_applied` (one is configured and no cosine could be compared — the vector leg never ran, the ordinary state on a machine with no working embedder, or it ran and failed; the verdict line's `reason=` and `legs=` say which, so the threshold you set is never silently doing nothing without also saying why), and the number itself, printed when the vector leg executed — which is not the same as a row being compared, because an empty result reads no cosine at all and a result whose first row cleared the keyword arm never reads one.
@@ -257,6 +258,8 @@ The default is off deliberately, and the measurement behind it is about the dist
 The keyword arm needs no key: a result within the top four keyword ranks clears it. This is also why an unavailable embedder is never a reason to call a match weak — a result whose rows carry keyword ranks is judged by that arm whether or not a vector leg ran, and the line reports the vector arm separately (`abstain_cosine=not_applied`, `legs=vector:not_run`). What is reported as `no_floor_arm` is the opposite case: no arm held a value to compare, because no row carried a keyword rank and no cosine reached them. That is `answerable` rather than below a floor nobody applied.
 
 `context.abstain_cosine` is unrelated to `search.min_similarity` above: that floor runs inside the vector leg *before* fusion and so never sees a keyword-only result, which is the case this one exists to judge.
+
+`context.relevance_cutoff` is the query-mode relevance cutoff ([#954](https://github.com/wcatz/ghost/issues/954)): a block stops where relevance falls off, once a row's fused Base is below this **fraction of the top row's fused Base**. It is ONE rule with ONE parameter, applied in the assembler after dedup and before the budget, and it can only **shorten** an answer — `limit` stays the maximum, the top row is always kept (so the result rate never drops below 1.000 on an answerable query) a pinned row is never cut and a keyword-reserved row is never cut. The comparison is on the fused Base, the score before the age decay, so a relevant month-old decision is not cut for being old. It is a **query-mode** rule: the passive surfaces (session start, project context) are a digest and keep their slices whatever this is set to. The default **0.63** is chosen from the `ghost bench --cutoff-sweep` gradient in [`benchmarks.md`](benchmarks.md#the-relevance-cutoff-ghost-bench---cutoff-sweep) — it admits 302 of the 304 baseline graded-relevant rows while raising context precision 0.138 → 0.145 and lowering estimated tokens per answer 296.6 → 280.3. The value is a fraction in [0, 1]; **0 is off** (the pre-cutoff block, byte-identical to a machine that never had the cutoff), and a value of 1 keeps only rows that tie the top. Setting `relevance_cutoff: 0` disables it, which is the state a machine with no config runs. Unlike `abstain_cosine` it does not need to be measured against your own distribution before use — the sweep below ships a default — but you can raise or lower it from the sweep's own reasoning.
 
 ## Session injection
 
@@ -564,6 +567,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_SESSION_SCOPE` | `injection.session_scope` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_CONTEXT_ABSTAIN_COSINE` | `context.abstain_cosine` |
+| `GHOST_CONTEXT_RELEVANCE_CUTOFF` | `context.relevance_cutoff` |
 | `GHOST_SCRATCH_MAX_BYTES` | `scratch.max_bytes` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
 | `GHOST_LIFECYCLE_MIN_INTERVAL` | `lifecycle.min_interval` |

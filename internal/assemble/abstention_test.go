@@ -604,7 +604,7 @@ func TestTheResponseFitPassRecomputesTheOutcome(t *testing.T) {
 		// A2 clears arm A and is the LAST admitted row, so it is the one the pass
 		// drops; what is left never cleared anything. "Last admitted" is the
 		// pass's order, not a keyword rank — the pipeline's order is authoritative
-		// and stage 8 preserves it — which is why A1 (the sentinel rank -1) is the
+		// and stage 9 preserves it — which is why A1 (the sentinel rank -1) is the
 		// survivor. A2 is also the LARGE one: a weak answer carries an abstention
 		// sentence, and a tiny dropped row would cost fewer bytes than that
 		// sentence adds, so with the sizes reversed no cap separates the one-row
@@ -860,7 +860,7 @@ func TestAResponseThatCannotFitIsAnError(t *testing.T) {
 
 // TestAFitPassEmptyStillExplainsWhatRemovedTheRows: the per-stage breakdown is
 // what makes an empty answer's leading sentence checkable, and the response-fit
-// pass is the one thing that empties a set without going through stage 8. If it
+// pass is the one thing that empties a set without going through stage 9. If it
 // shrinks the admitted items but not the surviving rows, the breakdown's own gate
 // stays false and the note silently disappears — on exactly the case this
 // post-pass introduces.
@@ -1021,7 +1021,7 @@ func TestTheResponseFitEmptyNamesTheByteCap(t *testing.T) {
 	}
 }
 
-// TestTheBudgetCopyNamesTheCapThatEmptiedTheSet: stage 8 is the other producer
+// TestTheBudgetCopyNamesTheCapThatEmptiedTheSet: stage 9 is the other producer
 // of `all_over_budget`, and it reaches that reason with MaxBytes at 0. A sentence
 // quoting "the response budget of 0 bytes" names a budget the caller never set
 // and tells it to fix a filter it never passed.
