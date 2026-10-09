@@ -31,18 +31,19 @@ func TestCapabilityFor(t *testing.T) {
 		ok     bool
 		block  bool
 		inject bool
+		guide  bool
 	}{
-		{SourceClaudeCode, true, true, true},
-		{SourceCodex, true, true, true},
-		{SourceGoose, true, true, false},
-		{SourceOpencode, true, false, false},
-		{"gemini-cli", false, false, false},
-		{"", false, false, false},
+		{SourceClaudeCode, true, true, true, true},
+		{SourceCodex, true, true, true, false},
+		{SourceGoose, true, true, false, false},
+		{SourceOpencode, true, false, false, true},
+		{"gemini-cli", false, false, false, false},
+		{"", false, false, false, false},
 	}
 	for _, c := range cases {
 		got, ok := CapabilityFor(c.source)
-		if ok != c.ok || got.BlockStop != c.block || got.InjectContext != c.inject {
-			t.Errorf("CapabilityFor(%q) = %+v,%v want block=%v inject=%v ok=%v", c.source, got, ok, c.block, c.inject, c.ok)
+		if ok != c.ok || got.BlockStop != c.block || got.InjectContext != c.inject || got.StopGuidance != c.guide {
+			t.Errorf("CapabilityFor(%q) = %+v,%v want block=%v inject=%v guide=%v ok=%v", c.source, got, ok, c.block, c.inject, c.guide, c.ok)
 		}
 	}
 }

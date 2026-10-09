@@ -50,16 +50,19 @@ const DEBOUNCE_MS = 2000
 const MAX_TRACKED_SESSIONS = 256
 
 // Once the save reminder has been injected into a session, don't re-inject it
-// on later idle transitions: the nudge condition stays true until something is
-// actually saved, and re-prompting every idle would be noisy. Bounded like
-// lastFire so long-lived hosts don't grow it without limit.
+// while ghost keeps reporting it: ghost's gate is per turn, so the reminder
+// comes back on every save-free turn, and an agent that ignored one would be
+// prompted again by its own reply's stop. A stop on which ghost stays silent
+// (a save landed since the previous stop) clears the entry, so the next
+// save-free turn is reminded again. Bounded like lastFire so long-lived hosts
+// don't grow it without limit.
 const nudgedSessions = new Map<string, true>()
 
 // Builds the agent-facing instruction injected into the live session when the
 // save nudge fires: a clear directive to review the session and persist any
-// discoveries via ghost_memory_save.
+// durable rules via ghost_memory_save (the reminder text carries the wording).
 const nudgePrompt = (reason: string): string =>
-	`[Ghost] ${reason} As the assistant, if there are discoveries worth keeping, save them now via ghost_ghost_memory_save. This is an automated reminder — act on it rather than asking the user.`
+	`[Ghost] ${reason} On this surface the tools are named ghost_ghost_memory_save and ghost_ghost_decision_record. This is an automated reminder — act on it rather than asking the user.`
 
 // Materializes ghost's session-start context block for a directory and returns
 // it, so opencode can inject it passively via instructions (opencode has no
@@ -168,11 +171,11 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
-			// opencode cannot block a stop, so the {"decision":"approve"} nudge
-			// ghost emits on stdout is captured here and injected into the live
-			// session (client.session.promptAsync) so the agent itself acts on
-			// it — the faithful analog of the claude/codex blocking nudge. If
-			// the injection fails it falls back to a log line.
+			// opencode cannot block a stop, so the hookSpecificOutput.additionalContext
+			// nudge ghost emits on stdout is captured here and injected into the
+			// live session (client.session.promptAsync) so the agent itself acts
+			// on it — the faithful analog of the claude/codex non-blocking nudge.
+			// If the injection fails it falls back to a log line.
 			let nudge = ""
 			child.stdout?.on("data", (d) => { nudge += d.toString() })
 			// stderr is piped and drained rather than inherited: this child is
@@ -191,11 +194,19 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 					log("warn", `ghost hook stderr: ${errs.trim().slice(0, 500)}`)
 				}
 				const trimmed = nudge.trim()
+				if (!trimmed && sessionID) nudgedSessions.delete(sessionID)
 				if (trimmed) {
 					let reason = trimmed
 					try {
 						const parsed = JSON.parse(trimmed)
-						if (typeof parsed?.reason === "string") reason = parsed.reason
+						// New format: {"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"..."}}
+						if (typeof parsed?.hookSpecificOutput?.additionalContext === "string") {
+							reason = parsed.hookSpecificOutput.additionalContext
+						}
+						// Legacy format (for compatibility): {"decision":"approve","reason":"..."}
+						else if (typeof parsed?.reason === "string") {
+							reason = parsed.reason
+						}
 					} catch { /* keep raw payload */ }
 					// Inject the reminder into the live session so the agent
 					// acts on it. Once per session; on failure, fall back to a
@@ -322,7 +333,7 @@ type ContextV2 = PluginV2.Context
 const V2_LOG_FILE = join(homedir(), ".cache", "ghost", "opencode-plugin.log")
 
 const nudgePromptV2 = (reason: string): string =>
-	`[Ghost] ${reason} As the assistant, if there are discoveries worth keeping, save them now with the ghost MCP server's ghost_memory_save tool (tools.ghost.ghost_memory_save in Code Mode). This is an automated reminder — act on it rather than asking the user.`
+	`[Ghost] ${reason} Save it now with the ghost MCP server (tools.ghost.ghost_memory_save and tools.ghost.ghost_decision_record in Code Mode). This is an automated reminder — act on it rather than asking the user.`
 
 const V2_STOP_EVENTS = new Set([
 	"session.execution.succeeded",
@@ -450,11 +461,19 @@ const setupV2 = async (ctx: ContextV2) => {
 			child.on("close", () => {
 				if (errs.trim()) log(`ghost hook stderr: ${errs.trim().slice(0, 500)}`)
 				const trimmed = nudge.trim()
+				if (!trimmed) nudgedSessions.delete(sessionID)
 				if (trimmed && !nudgedSessions.has(sessionID)) {
 					let reason = trimmed
 					try {
 						const parsed = JSON.parse(trimmed)
-						if (typeof parsed?.reason === "string") reason = parsed.reason
+						// New format: {"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"..."}}
+						if (typeof parsed?.hookSpecificOutput?.additionalContext === "string") {
+							reason = parsed.hookSpecificOutput.additionalContext
+						}
+						// Legacy format (for compatibility): {"decision":"approve","reason":"..."}
+						else if (typeof parsed?.reason === "string") {
+							reason = parsed.reason
+						}
 					} catch { /* keep raw payload */ }
 					nudgedSessions.set(sessionID, true)
 					if (nudgedSessions.size > MAX_TRACKED_SESSIONS) {

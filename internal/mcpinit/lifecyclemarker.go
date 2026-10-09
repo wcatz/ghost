@@ -2,7 +2,9 @@ package mcpinit
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,6 +59,17 @@ const (
 	// the detail that captures exist to preserve. The alert still shows one
 	// line; the file keeps enough to diagnose from.
 	lifecycleMarkerDetailMaxBytes = 1500
+
+	// lifecycleSavesMarkerPrefix is the stem for per-session save count markers.
+	// Each session gets its own file named after its session ID (sanitized).
+	// This tracks the last-seen Ghost save count so the stop hook can gate
+	// the nudge on "no new saves since last stop" rather than "no saves ever".
+	lifecycleSavesMarkerPrefix = "lifecycle-saves"
+	// lifecycleSavesMarkerVersion is the schema version for save count markers.
+	lifecycleSavesMarkerVersion = 1
+	// lifecycleSavesMarkerMaxAge is the self-clean horizon for save markers.
+	// A session that hasn't been seen for this long is considered dead.
+	lifecycleSavesMarkerMaxAge = 30 * 24 * time.Hour
 )
 
 // NoLLMBackendError is the marker error text for the specific failure this
@@ -75,6 +88,15 @@ type lifecycleFailureMarker struct {
 	Error        string   `json:"error"`
 	At           string   `json:"at"` // RFC3339, UTC
 	Version      int      `json:"version"`
+}
+
+// lifecycleSavesMarker is the lifecycle-saves-<session>.json schema.
+// It tracks the last-seen Ghost save count for a session.
+type lifecycleSavesMarker struct {
+	SessionID     string `json:"session_id"`
+	LastSaveCount int    `json:"last_save_count"`
+	UpdatedAt     string `json:"updated_at"` // RFC3339, UTC
+	Version       int    `json:"version"`
 }
 
 // WriteLifecycleFailure records a failed (or never-started) consolidation
@@ -183,6 +205,125 @@ func ClearLifecycleFailure(project string) error {
 		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+// savesMarkerFile is the marker file name for one session inside
+// config.DataDir(). Sanitized because session IDs come from hosts and may
+// contain characters unsafe for filenames.
+func savesMarkerFile(sessionID string) string {
+	// The sanitised stem alone would give "a/b" and "a_b" one file, so the
+	// stem carries a short hash of the RAW id as well.
+	sum := sha256.Sum256([]byte(sessionID))
+	return lifecycleSavesMarkerPrefix + "-" + sanitizeSavesSessionID(sessionID) + "-" + hex.EncodeToString(sum[:4]) + ".json"
+}
+
+// sanitizeSavesSessionID maps a session ID onto a file-name-safe stem.
+// Session IDs originate from host adapters (Claude Code, Codex, Goose, Opencode)
+// and are not constrained by Ghost. This mirrors sanitizeMarkerProject but is
+// kept separate because the character constraints may differ over time.
+func sanitizeSavesSessionID(sessionID string) string {
+	var b strings.Builder
+	for _, r := range sessionID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "unknown"
+	}
+	if len(out) > 80 {
+		return out[:80]
+	}
+	return out
+}
+
+// ReadLastSaveCount reads the last-seen Ghost save count for a session.
+// Returns 0 if no marker exists or if the marker is stale/expired.
+// Best-effort: any error returns 0 (fail open — treat as first stop for this session).
+func ReadLastSaveCount(sessionID string) int {
+	if sessionID == "" {
+		return 0
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return 0
+	}
+	path := filepath.Join(dataDir, savesMarkerFile(sessionID))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var m lifecycleSavesMarker
+	if json.Unmarshal(b, &m) != nil {
+		return 0
+	}
+	if _, err := time.Parse(time.RFC3339, m.UpdatedAt); err != nil {
+		return 0
+	}
+	if at, _ := time.Parse(time.RFC3339, m.UpdatedAt); time.Since(at) > lifecycleSavesMarkerMaxAge {
+		return 0
+	}
+	return m.LastSaveCount
+}
+
+// WriteLastSaveCount records the current Ghost save count for a session.
+// Best-effort: callers ignore the error — failing to record must never fail a stop.
+func WriteLastSaveCount(sessionID string, saveCount int) error {
+	if sessionID == "" {
+		return nil
+	}
+	// DataDirPath, not DataDir: the stop hook runs on every tool-using turn,
+	// and bookkeeping must not MkdirAll a ghost/ directory no store ever
+	// created. A missing directory means no marker, and so no per-turn gate
+	// for that session (ReadLastSaveCount degrades the same way).
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return fmt.Errorf("locate data dir: %w", err)
+	}
+	if fi, err := os.Stat(dataDir); err != nil || !fi.IsDir() {
+		return nil
+	}
+	// Sweep once per session — when this write creates the session's marker —
+	// not on every tool-using stop: the sweep reads every marker in the
+	// directory, and this is the path the host blocks the agent on.
+	if _, err := os.Stat(filepath.Join(dataDir, savesMarkerFile(sessionID))); os.IsNotExist(err) {
+		sweepSavesMarkers(dataDir)
+	}
+	m := lifecycleSavesMarker{
+		SessionID:     sessionID,
+		LastSaveCount: saveCount,
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Version:       lifecycleSavesMarkerVersion,
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	markerName := savesMarkerFile(sessionID)
+	tmp, err := os.CreateTemp(dataDir, markerName+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, filepath.Join(dataDir, markerName)); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
 	}
 	return nil
 }
@@ -429,4 +570,52 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
 		truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes), p)
+}
+
+// RemoveLastSaveCount deletes a session's save-count marker. The session-end
+// event calls it: that session id is never stopped again, so the marker would
+// otherwise sit in the data directory forever. Best-effort, like the write.
+func RemoveLastSaveCount(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(dataDir, savesMarkerFile(sessionID)))
+}
+
+// sweepSavesMarkers removes save-count markers whose own updated_at is past
+// lifecycleSavesMarkerMaxAge: sessions that ended without a session-end event
+// (a killed host, a host with no such event). Run when a session's first marker is written, so a
+// marker is never read for the sweep to be reached.
+func sweepSavesMarkers(dataDir string) {
+	paths, err := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json"))
+	if err != nil {
+		return
+	}
+	// An interrupted write leaves lifecycle-saves-*.json.tmp<N>; age is its
+	// modification time, since it holds no complete marker.
+	tmps, _ := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json.tmp*"))
+	for _, path := range tmps {
+		if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > lifecycleSavesMarkerMaxAge {
+			_ = os.Remove(path)
+		}
+	}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var m lifecycleSavesMarker
+		var at time.Time
+		perr := json.Unmarshal(b, &m)
+		if perr == nil {
+			at, perr = time.Parse(time.RFC3339, m.UpdatedAt)
+		}
+		if perr != nil || time.Since(at) > lifecycleSavesMarkerMaxAge {
+			_ = os.Remove(path)
+		}
+	}
 }

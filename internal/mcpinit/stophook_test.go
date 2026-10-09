@@ -86,18 +86,38 @@ func runStopHook(t *testing.T, stdin string) string {
 }
 
 func TestRunStop(t *testing.T) {
-	t.Run("blocks when tools ran but nothing saved", func(t *testing.T) {
+	t.Run("nudges when tools ran but no new saves since last stop", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
-			t.Errorf("expected block decision, got %q", out)
+		if !strings.Contains(out, `hookSpecificOutput`) {
+			t.Errorf("expected nudge via hookSpecificOutput, got %q", out)
 		}
 		if !strings.Contains(out, "ghost_memory_save") {
-			t.Errorf("reason should mention ghost_memory_save, got %q", out)
+			t.Errorf("nudge should mention ghost_memory_save, got %q", out)
+		}
+		if !strings.Contains(out, "additionalContext") {
+			t.Errorf("nudge should use additionalContext channel, got %q", out)
+		}
+		// The documented Stop channel is additionalContext; a top-level
+		// decision would be read as a block (or ignored), never as a reminder.
+		var got map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("nudge is not JSON: %v\n%s", err, out)
+		}
+		if _, has := got["decision"]; has {
+			t.Errorf("nudge must carry no decision key, got %q", out)
+		}
+		if _, has := got["reason"]; has {
+			t.Errorf("a host with a documented Stop channel gets only that channel, got %q", out)
+		}
+		if !strings.Contains(out, "Do not save what the repository already states") {
+			t.Errorf("nudge wording not the per-turn text: %q", out)
 		}
 	})
 
 	t.Run("allows when a ghost save happened", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash, lineGhostSave)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
@@ -105,6 +125,7 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("allows pure conversation with no tool calls", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineUser, lineText)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
@@ -112,14 +133,16 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("tool name in prose does not count as a save", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
+		if !strings.Contains(out, `hookSpecificOutput`) {
 			t.Errorf("prose mention must not suppress the nudge, got %q", out)
 		}
 	})
 
 	t.Run("stop_hook_active short-circuits", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash)
 		if out := runStopHook(t, stopInput(t, path, true)); out != "" {
 			t.Errorf("expected silence when already active, got %q", out)
@@ -127,24 +150,28 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("fail-open on missing transcript", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, stopInput(t, "/nonexistent/transcript.jsonl", false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("fail-open on empty transcript path", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, stopInput(t, "", false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("fail-open on garbage stdin", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, "{not json"); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("skips unparseable transcript lines", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, "garbage not json", lineToolBash, "{{{{", lineGhostSave)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence (save found despite garbage), got %q", out)
@@ -154,14 +181,14 @@ func TestRunStop(t *testing.T) {
 
 // TestRunHostEvent_NativeClaudePayloadCompletesEnvelope pins the envelope-
 // completion rule at the dispatch level: Claude Code sends no contract
-// object, so the argv values must complete it — a native payload blocks
+// object, so the argv values must complete it — a native payload nudges
 // exactly like an explicit-envelope one.
 func TestRunHostEvent_NativeClaudePayloadCompletesEnvelope(t *testing.T) {
 	isolatedHome(t)
 	path := writeTranscript(t, lineUser, lineToolBash, lineText)
 	out := runStopHook(t, nativeStopInput(path))
-	if !strings.Contains(out, `"decision":"approve"`) {
-		t.Errorf("native payload should complete its envelope and block, got %q", out)
+	if !strings.Contains(out, `hookSpecificOutput`) {
+		t.Errorf("native payload should complete its envelope and nudge, got %q", out)
 	}
 }
 
@@ -201,8 +228,11 @@ func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
 	// opencode now receives the nudge on stdout (its plugin re-presents it as a
 	// non-blocking reminder); the key invariant here is that the transient
 	// transcript dir is still swept after the hook runs.
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
-		t.Errorf("expected nudge block decision on stdout, got %q", out.String())
+	if !strings.Contains(out.String(), `hookSpecificOutput`) {
+		t.Errorf("expected nudge via hookSpecificOutput on stdout, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "additionalContext") {
+		t.Errorf("expected additionalContext channel, got %q", out.String())
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("transient transcript dir was not swept: %v", err)
@@ -302,10 +332,10 @@ func TestRunHostEvent_SessionEndNeverNudges(t *testing.T) {
 }
 
 // TestRunHostEvent_NudgeEmittedForAllHosts pins the contract: the save-nudge
-// block decision is emitted on stdout for every host that reaches the stop
-// nudge path — including non-blocking hosts like opencode (which cannot honor
-// the block but re-present it as a non-blocking reminder via their plugin). No
-// stderr line is ever emitted, so there is no terminal bleed.
+// is emitted via hookSpecificOutput.additionalContext on stdout for every host
+// that reaches the stop nudge path — including non-blocking hosts like opencode
+// (which cannot honor a block but re-present it as a non-blocking reminder via
+// their plugin). No stderr line is ever emitted, so there is no terminal bleed.
 func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 	isolatedHome(t)
 	path := writeTranscript(t, lineUser, lineToolBash, lineText)
@@ -314,8 +344,11 @@ func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
-		t.Errorf("nudge must emit block decision on stdout, got %q", out.String())
+	if !strings.Contains(out.String(), `hookSpecificOutput`) {
+		t.Errorf("nudge must emit hookSpecificOutput on stdout, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "additionalContext") {
+		t.Errorf("nudge must use additionalContext channel, got %q", out.String())
 	}
 	if errBuf.Len() != 0 {
 		t.Errorf("nudge must not emit stderr (no terminal bleed), got %q", errBuf.String())
@@ -631,7 +664,8 @@ func TestRunStop_OpencodeV2Transcript(t *testing.T) {
 				fmt.Sprintf(`{"session_id":"oc2","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
 			var out bytes.Buffer
 			RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-			if got := strings.Contains(out.String(), `"decision":"approve"`); got != tc.wantNudge {
+			got := strings.Contains(out.String(), `hookSpecificOutput`) && strings.Contains(out.String(), "additionalContext")
+			if got != tc.wantNudge {
 				t.Errorf("nudge emitted = %v, want %v (stdout %q)", got, tc.wantNudge, out.String())
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
