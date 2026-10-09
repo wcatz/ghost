@@ -17,11 +17,11 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Ranking-state suite | Graded corpus carrying `created_at` spread and `supersedes` edges | Demote alone **1.000** R@1, decay alone **0.071**, shipped pair **0.214** against **0.571** with both off — the two paths do not compose, because the rows decay pushes down are the rows the demote promotes |
 | Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
 | No-answer queries | What search returns when nothing in the corpus answers the query | False-positive rate **1.000** in every condition at the shipped `search.min_similarity: 0` — and still **0.875** for the shipped hybrid path at a 0.50 cosine, against the keyword leg's **0.625**; mean top cosine **0.584** vs **0.741** answerable, and 51/220 answerable queries sit at or below the no-answer maximum |
-| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old | **9/10** on the one shipped arc (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half |
+| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old, plus correction-replay, ops-fact, and stale-fact arcs; with-Ghost vs without-Ghost arms graded on the agent's **answer** | **9/10** on `reversed-decision` (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half. New arcs and without-Ghost arm added in #974. |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a recency-trap fixture, a ranking-state fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
-**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state, no-answer and context-assembly suites are report-only in CI. The storyline eval is local-only and gates nothing (the CI wiring is #338, not done). The official GPT-4o leaderboard-comparable run has not been executed.
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state, no-answer and context-assembly suites are report-only in CI. The storyline eval is local-only and gates nothing (the CI wiring is #338, not done). Four arcs ship: `reversed-decision`, `correction-replay`, `ops-fact`, `stale-fact`; each runs with-Ghost and without-Ghost arms. The official GPT-4o leaderboard-comparable run has not been executed.
 
 > Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
 
@@ -854,7 +854,7 @@ and fails if it grows past the 2048-byte budget, so the figure guarded is the
 one an agent pays. Selection is untouched by the row shape: the behavioral floor
 is still 8/8 and the cap is still 15.
 
-## Storyline evals (`eval/storyline`) — local only, one shipped arc
+## Storyline evals (`eval/storyline`) — local only, four shipped arcs
 
 `eval/storyline` measures a property no single-shot benchmark can: what a project
 looks like **across** sessions when the ground truth changes mid-stream. A
@@ -862,65 +862,61 @@ reversal that the store holds correctly and the session-start block still report
 as current is invisible to every suite above, because each of them renders a
 block once against a corpus whose answers never contradict each other.
 
-One storyline ships, `reversed-decision` (project `northwind-api`): sessions 1
-and 2 establish a decision, session 3 records its reversal, and the grade asks
-whether the run's own lifecycle caught up —
+Four storylines ship:
 
-| check | what it reads |
-|---|---|
-| `injection-present:session-N` | the block really reached session N (and is the size the session saw) |
-| `carry-forward:session-N` | the previous session's record is in session N's block |
-| `stale-original:session-N` | a record the store marks superseded is **not** in session N's block unmarked |
-| `stale-original:final-block` | same, for the block rendered after the arc's own lifecycle |
-| `supersede-edge:<newer>` | a live `supersedes` edge exists **and points the way the store's own stamps say it must** |
-| `reversal-live:<newer>` | the replacement was not itself resolved (a supersede that resolves both is not a reversal) |
-| `final-block-carries:<newer>` | the replacement survives into the last block |
-| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the reversal |
+| arc | key | what it measures |
+|---|---|---|
+| Reversed decision | `reversed-decision` | A long-lived project whose early decision is later contradicted; session 3 must act on the reversal from a cold start. |
+| Correction replay | `correction-replay` | The user corrects the agent in session 1; sessions 2–3 get the same task and must not repeat the mistake. The correction is saved as a memory. |
+| Ops fact | `ops-fact` | A host/port fact saved as a global memory in one repo is needed in another repo via `ghost_search_all` or the global bucket. |
+| Stale fact | `stale-fact` | A fact with a closed `valid_until` window must not be used after the date. The validity filter withholds it in the with-Ghost arm. |
 
-The grade reads **store state** — `memory_links` rows and `memories` stamps — not
-the CLI's stdout. Stdout is kept in the report because a warning is evidence, but
-a phase that prints a verdict it did not write cannot pass a check.
+Each arc runs **two arms side by side**:
+
+| arm | block | purpose |
+|---|---|---|
+| **with-ghost** | real `ghost context` injection | measures whether Ghost delivers and the agent uses it |
+| **without-ghost** | empty block (not a missing hook) | same scripts, same model, same seeds; measures the agent's own knowledge |
+
+Both arms use the same model and the same seeds. The without-Ghost arm is not a missing hook — it is an **empty block**, so the session receives the header but no memories. The primary grade is the agent's **ANSWER** (did it act on the carried-forward mark?), not the block. Block checks are kept as `delivery:` diagnostics.
 
 Run it (local only, nothing is wired into CI):
 
 ```sh
+# Both arms, one run each (coordinator uses -runs 10)
 go run ./eval/storyline -model opencode-go/glm-5.3-flash \
-  -opencode-auth-file ~/.local/share/opencode/auth.json
+  -opencode-auth-file ~/.local/share/opencode/auth.json \
+  -runs 10
+
+# Without-Ghost arm only
+go run ./eval/storyline -model opencode-go/glm-5.3-flash \
+  -opencode-auth-file ~/.local/share/opencode/auth.json \
+  -without-ghost -runs 10
 ```
 
-Defaults need only the checkout: `-storyline reversed-decision`, `-repo .`,
-`-results-dir eval/storyline/results`, and a 3-minute embedding drain. `-keep`
-retains the scratch tree (`<repo>/.sandbox/`, holding the built binary, the store
-and the raw output of every phase) for post-mortem; without it the tree is
-removed. The run exits non-zero when a check fails, so it can be driven from a
-script — but a failing check is a **finding about Ghost**, not a runner bug, and
-the report is the artifact.
+Defaults need only the checkout: `-storyline reversed-decision` (or `correction-replay`, `ops-fact`, `stale-fact`), `-repo .`, `-results-dir eval/storyline/results`, and a 3-minute embedding drain. `-keep` retains the scratch tree (`<repo>/.sandbox/`, holding the built binary, the store and the raw output of every phase) for post-mortem; without it the tree is removed. The run exits non-zero when a check fails, so it can be driven from a script — but a failing check is a **finding about Ghost**, not a runner bug, and the report is the artifact.
 
-Isolation is eval/cycle's, reused rather than reinvented: the data dir, config dir
-and HOME all point inside the run's own scratch tree, an inherited override of any
-of them is dropped, `ANTHROPIC_API_KEY` is stripped, and an opencode credential is
-copied into the scratch data dir (`-opencode-auth-file`) so the sandboxed
-sessions authenticate without touching yours. Two further pins are the run's own:
-the model is resolved **once** and passed to everything — the sessions, the judge,
-`GHOST_OPENCODE_MODEL` in the child env, and the report's `model:` line — so the
-arc is one model's behaviour end to end, and an inherited `GHOST_OPENCODE_MODEL`
-in your shell cannot decide the sessions alone (`internal/ai` would otherwise
-read it out of the runner's own environment while the phases used the default).
-The phases pass `--source opencode`
-rather than letting `ghost supersede`/`ghost resolve` resolve a harness by walking
-the ancestry of whatever launched the runner (which would bill Claude for
-verdicts about an opencode-driven arc, and fail outright when the sandbox holds
-only opencode's credential).
+Isolation is eval/cycle's, reused rather than reinvented: the data dir, config dir and HOME all point inside the run's own scratch tree, an inherited override of any of them is dropped, `ANTHROPIC_API_KEY` is stripped, and an opencode credential is copied into the scratch data dir (`-opencode-auth-file`) so the sandboxed sessions authenticate without touching yours. Two further pins are the run's own: the model is resolved **once** and passed to everything — the sessions, the judge, `GHOST_OPENCODE_MODEL` in the child env, and the report's `model:` line — so the arc is one model's behaviour end to end, and an inherited `GHOST_OPENCODE_MODEL` in your shell cannot decide the sessions alone (`internal/ai` would otherwise read it out of the runner's own environment while the phases used the default). The phases pass `--source opencode` rather than letting `ghost supersede`/`ghost resolve` resolve a harness by walking the ancestry of whatever launched the runner (which would bill Claude for verdicts about an opencode-driven arc, and fail outright when the sandbox holds only opencode's credential).
 
-Every record is written through the real MCP `ghost_memory_save`, the block is
-rendered by the real `ghost context`, and the two lifecycle phases are the real
-`ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI
-for is a chronology restamp: `created_at` has second granularity, so a reversal
-seeded in the same second as the claim it reverses would leave the supersedes
-direction an arbitrary tie-break — and the direction check would then grade
-harness timing as a model failure. Restamping is metadata only.
+Every record is written through the real MCP `ghost_memory_save`, the block is rendered by the real `ghost context`, and the two lifecycle phases are the real `ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI for is a chronology restamp: `created_at` has second granularity, so a reversal seeded in the same second as the claim it reverses would leave the supersedes direction an arbitrary tie-break — and the direction check would then grade harness timing as a model failure. Restamping is metadata only.
 
-**Measured 2026-09-29, `opencode-go/glm-5.3-flash`, local run, 9/10 checks pass:**
+**Checks per arc (per session):**
+
+| check prefix | what it grades |
+|---|---|
+| `injection-present:session-N` | the block really reached session N (and is the size the session saw) |
+| `delivery:block-carries:session-N:<key>` | the previous session's record is in session N's block (delivery diagnostic) |
+| `delivery:stale-absent:session-N:<key>` | a record the store marks superseded is **not** in session N's block unmarked (delivery diagnostic) |
+| `answer-carries:session-N:<key>` | **primary grade** — the agent's answer contains the carried-forward mark |
+| `answer-paraphrases:session-N:<key>` | non-gating paraphrase proxy (token overlap); `-judge` is the authoritative check |
+| `supersede-edge:<newer>` | a live `supersedes` edge exists **and points the way the store's own stamps say it must** |
+| `reversal-live:<newer>` | the replacement was not itself resolved |
+| `final-block-carries:<newer>` | the replacement survives into the last block |
+| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the reversal |
+
+The grade reads **store state** — `memory_links` rows and `memories` stamps — not the CLI's stdout. Stdout is kept in the report because a warning is evidence, but a phase that prints a verdict it did not write cannot pass a check.
+
+**Measured 2026-09-29, `opencode-go/glm-5.3-flash`, local run, 9/10 checks pass (reversed-decision):**
 
 ```
 storyline: reversed-decision (northwind-api) — Long-lived project with a reversed early decision
@@ -939,19 +935,15 @@ PASS reversal-live:session-store-postgres … PASS final-block-carries:session-s
 error: 1 of 10 checks failed: stale-original:session-3
 ```
 
-The finding is real and it is a *rendering* gap, not a storage gap: `ghost
-supersede` linked the pair and `ghost resolve` stamped the Redis decision
-`resolved_at` in the same run, and the final block correctly omits it. But
-session 3's block — rendered before the arc's lifecycle ran — carried both the
-current Postgres decision and the stale Redis one with nothing marking the old
-claim. A reader had to resolve the contradiction themselves; the model in fact
-did, correctly, in prose. Read the failing check as "the block does not say which
-of two contradicting records is current", not as "the store lost the reversal".
+The finding is real and it is a *rendering* gap, not a storage gap: `ghost supersede` linked the pair and `ghost resolve` stamped the Redis decision `resolved_at` in the same run, and the final block correctly omits it. But session 3's block — rendered before the arc's lifecycle ran — carried both the current Postgres decision and the stale Redis one with nothing marking the old claim. A reader had to resolve the contradiction themselves; the model in fact did, correctly, in prose. Read the failing check as "the block does not say which of two contradicting records is current", not as "the store lost the reversal".
 
-**Known limits, stated so the number is not over-read.** The `stale-original`
-match is deliberately narrow: it looks for the record's own verbatim text, so a
-paraphrased restatement of the stale claim would pass it. `--judge` covers the
-paraphrase case, and is off by default because it costs a model call and its
+**Known limits, stated so the number is not over-read.** The `delivery:stale-absent` match is deliberately narrow: it looks for the record's own verbatim text, so a paraphrased restatement of the stale claim would pass it. `-judge` covers the paraphrase case authoritatively, and is off by default because it costs a model call and its verdict is a non-gating column. The `answer-paraphrases` check is a deterministic token-overlap proxy; it is not the judge. The without-Ghost arm has an empty block, so its `delivery:` checks trivially pass/fail and its `answer-carries` measures the agent's own knowledge — this is the comparison that reveals whether Ghost changes what the agent does. Success numbers are reported against, not gated in CI:
+
+- With Ghost, the carried-forward answer appears in at least 8 of 10 runs per arc. Without Ghost, at most 2 of 10.
+- Correction-replay: the mistake is repeated in at most 1 of 10 runs with Ghost, against at least 7 of 10 without.
+- The stale original is marked or absent in 10 of 10 runs.
+
+The runner stays local-only. Every run is sandboxed: HOME, XDG_*, and GHOST_DEV_FORBID_DATA_DIR set inline.
 verdict is not deterministic. And the arc's lifecycle runs **after** the last
 session by construction, so the runner cannot yet demonstrate the production
 ordering (a supersede caught in session 2's lifecycle changing session 3's

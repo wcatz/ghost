@@ -66,6 +66,10 @@ type Ghost interface {
 	// in becomes true chronological order, one minute apart.
 	Restamp(ctx context.Context, order []string) error
 	State(ctx context.Context) (State, error)
+	// Start opens any long-lived processes (e.g., MCP session for binaryGhost).
+	Start(ctx context.Context) error
+	// Abort closes any long-lived processes for a run that ended before Settle.
+	Abort()
 }
 
 // Session is one simulated session and everything the run can say about it.
@@ -101,6 +105,9 @@ type Result struct {
 	// An unreadable verdict is an error the run stops on, never a silent fail.
 	Judged  bool
 	Verdict string
+	// WithoutGhost means this run used the emptyGhost (empty block, no store).
+	// The grade then measures the agent's ANSWER for carried-forward marks.
+	WithoutGhost bool
 }
 
 // Passed reports whether every graded check passed. A run with no checks has
@@ -158,6 +165,10 @@ type Run struct {
 	// Timeout bounds one harness call and one arc stage. Zero means defaultTimeout.
 	Timeout time.Duration
 	Out     io.Writer
+	// WithoutGhost means the run uses the emptyGhost (empty block, no store).
+	// The grade then measures the agent's ANSWER for carried-forward marks,
+	// not the block. Block checks are kept as delivery diagnostics.
+	WithoutGhost bool
 }
 
 const (
@@ -180,27 +191,31 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	if r.Timeout <= 0 {
 		r.Timeout = defaultTimeout
 	}
-	res := &Result{Story: r.Story, WorkDir: r.WorkDir}
+	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost}
 
-	// The project's own history first, then the location its sessions stand in.
-	// Both happen before the first block is rendered: a project with no recorded
-	// path renders no project half at all, and the first session would read as an
-	// empty one for a reason that has nothing to do with the storyline.
 	order := []string{}
-	res.Opening = make(map[string]string, len(r.Story.Opening))
-	for _, rec := range r.Story.Opening {
-		id, err := r.save(ctx, rec)
-		if err != nil {
-			return nil, fmt.Errorf("opening record %s: %w", rec.Key, err)
+	if !r.WithoutGhost {
+		// The project's own history first, then the location its sessions stand in.
+		// Both happen before the first block is rendered: a project with no recorded
+		// path renders no project half at all, and the first session would read as an
+		// empty one for a reason that has nothing to do with the storyline.
+		res.Opening = make(map[string]string, len(r.Story.Opening))
+		for _, rec := range r.Story.Opening {
+			id, err := r.save(ctx, rec)
+			if err != nil {
+				return nil, fmt.Errorf("opening record %s: %w", rec.Key, err)
+			}
+			order = append(order, id)
+			// Kept on the Result, not only in the local order slice: a storyline may
+			// reverse an opening record, and the grade resolves the edge through both
+			// keys. See Result.Opening.
+			res.Opening[rec.Key] = id
 		}
-		order = append(order, id)
-		// Kept on the Result, not only in the local order slice: a storyline may
-		// reverse an opening record, and the grade resolves the edge through both
-		// keys. See Result.Opening.
-		res.Opening[rec.Key] = id
-	}
-	if err := r.Ghost.Bind(ctx, r.Story.Project, r.WorkDir); err != nil {
-		return nil, fmt.Errorf("bind %s to %s: %w", r.Story.Project, r.WorkDir, err)
+		if err := r.Ghost.Bind(ctx, r.Story.Project, r.WorkDir); err != nil {
+			return nil, fmt.Errorf("bind %s to %s: %w", r.Story.Project, r.WorkDir, err)
+		}
+	} else {
+		res.Opening = make(map[string]string)
 	}
 
 	for i, stage := range r.Story.Stages {
@@ -220,53 +235,60 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			return nil, fmt.Errorf("stage %d session: %w", i+1, err)
 		}
 		sess := Session{Index: i, Block: block, Prompt: prompt, Answer: answer, Saved: map[string]string{}}
-		for _, rec := range stage.Records {
-			id, err := r.save(ctx, rec)
-			if err != nil {
-				return nil, fmt.Errorf("stage %d record %s: %w", i+1, rec.Key, err)
+		if !r.WithoutGhost {
+			for _, rec := range stage.Records {
+				id, err := r.save(ctx, rec)
+				if err != nil {
+					return nil, fmt.Errorf("stage %d record %s: %w", i+1, rec.Key, err)
+				}
+				sess.Saved[rec.Key] = id
+				order = append(order, id) // preserve save order for restamp
 			}
-			sess.Saved[rec.Key] = id
-			order = append(order, id)
 		}
 		res.Sessions = append(res.Sessions, sess)
 		_, _ = fmt.Fprintf(r.Out, "stage %d/%d: %d injected bytes, %d answer bytes, %d record(s) recorded\n",
 			i+1, len(r.Story.Stages), len(block), len(answer), len(stage.Records))
 	}
 
-	// Chronology is restamped once, over the whole arc, so the supersedes
-	// direction between two records seeded in the same second is the storyline's
-	// order rather than an arbitrary tie-break.
-	if err := r.Ghost.Restamp(ctx, order); err != nil {
-		return nil, fmt.Errorf("restamp chronology: %w", err)
-	}
-	if err := r.callDo(ctx, r.Ghost.Settle); err != nil {
-		return nil, fmt.Errorf("settle: %w", err)
-	}
-	sup, err := r.call(ctx, func(c context.Context) (string, error) {
-		return r.Ghost.Supersede(c, r.Story.Project)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("supersede: %w", err)
-	}
-	res.Supersede = sup
+	if !r.WithoutGhost {
+		if err := r.Ghost.Restamp(ctx, order); err != nil {
+			return nil, fmt.Errorf("restamp chronology: %w", err)
+		}
+		if err := r.callDo(ctx, r.Ghost.Settle); err != nil {
+			return nil, fmt.Errorf("settle: %w", err)
+		}
+		sup, err := r.call(ctx, func(c context.Context) (string, error) {
+			return r.Ghost.Supersede(c, r.Story.Project)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("supersede: %w", err)
+		}
+		res.Supersede = sup
 
-	// Resolve runs after supersede and before the end state is read: an edge the
-	// demotion stage wrote is what the final block is supposed to stop carrying.
-	resOut, err := r.call(ctx, func(c context.Context) (string, error) {
-		return r.Ghost.Resolve(c, r.Story.Project)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("resolve: %w", err)
-	}
-	res.Resolve = resOut
+		// Resolve runs after supersede and before the end state is read: an edge the
+		// demotion stage wrote is what the final block is supposed to stop carrying.
+		resOut, err := r.call(ctx, func(c context.Context) (string, error) {
+			return r.Ghost.Resolve(c, r.Story.Project)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resolve: %w", err)
+		}
+		res.Resolve = resOut
 
-	if res.FinalBlock, err = r.call(ctx, func(c context.Context) (string, error) {
-		return r.Ghost.Context(c, r.WorkDir)
-	}); err != nil {
-		return nil, fmt.Errorf("final injection: %w", err)
-	}
-	if res.State, err = r.callState(ctx); err != nil {
-		return nil, fmt.Errorf("graded state: %w", err)
+		if res.FinalBlock, err = r.call(ctx, func(c context.Context) (string, error) {
+			return r.Ghost.Context(c, r.WorkDir)
+		}); err != nil {
+			return nil, fmt.Errorf("final injection: %w", err)
+		}
+		if res.State, err = r.callState(ctx); err != nil {
+			return nil, fmt.Errorf("graded state: %w", err)
+		}
+	} else {
+		// Without-Ghost: no arc stages, final block is empty, state is empty
+		res.FinalBlock = "## Ghost context: empty\n"
+		res.State = State{Links: []Link{}, Stamps: map[string]Stamp{}}
+		res.Supersede = ""
+		res.Resolve = ""
 	}
 	res.Checks = grade(res)
 	if r.Judge != nil {
@@ -372,9 +394,9 @@ func newBinaryGhost(bin string, env []string, project, workDir, dbPath, ollama s
 	}
 }
 
-// start opens the MCP process the saves go through. Its stderr is the run's own
+// Start opens the MCP process the saves go through. Its stderr is the run's own
 // log, never the child's stdout: stdout is the JSON-RPC stream.
-func (g *binaryGhost) start(ctx context.Context) error {
+func (g *binaryGhost) Start(ctx context.Context) error {
 	cmd := exec.Command(g.bin, "mcp")
 	cmd.Env = g.env
 	cmd.Stderr = g.log
@@ -387,10 +409,10 @@ func (g *binaryGhost) start(ctx context.Context) error {
 	return nil
 }
 
-// abort closes the MCP process for a run that ended before Settle did. Settle is
+// Abort closes the MCP process for a run that ended before Settle did. Settle is
 // the normal close; this is the one for a run that failed or was interrupted, so
 // a failed run does not leave a ghost process holding the scratch store open.
-func (g *binaryGhost) abort() {
+func (g *binaryGhost) Abort() {
 	if g.mcp != nil {
 		g.mcp.close()
 	}
@@ -652,4 +674,56 @@ func ollamaReachable(url string) error {
 		return fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// emptyGhost is the without-Ghost arm: it renders an empty block (not a missing
+// hook) and provides no store. It implements the Ghost interface so the same
+// sequencing runs, but every Context call returns an empty block and the arc
+// stages are no-ops.
+type emptyGhost struct{}
+
+func newEmptyGhost() Ghost {
+	return &emptyGhost{}
+}
+
+func (g *emptyGhost) Bind(ctx context.Context, project, workDir string) error {
+	return nil
+}
+
+func (g *emptyGhost) Save(ctx context.Context, project string, rec Record) (string, error) {
+	// No-op save — the without-Ghost arm doesn't persist anything.
+	return "", nil
+}
+
+func (g *emptyGhost) Context(ctx context.Context, workDir string) (string, error) {
+	// Empty block, not a missing hook. The session receives the header but no
+	// memories, so the carry-forward grade measures the agent's own answer.
+	return "## Ghost context: empty\n", nil
+}
+
+func (g *emptyGhost) Settle(ctx context.Context) error {
+	return nil
+}
+
+func (g *emptyGhost) Supersede(ctx context.Context, project string) (string, error) {
+	return "", nil
+}
+
+func (g *emptyGhost) Resolve(ctx context.Context, project string) (string, error) {
+	return "", nil
+}
+
+func (g *emptyGhost) Restamp(ctx context.Context, order []string) error {
+	return nil
+}
+
+func (g *emptyGhost) State(ctx context.Context) (State, error) {
+	return State{Links: []Link{}, Stamps: map[string]Stamp{}}, nil
+}
+
+func (g *emptyGhost) Start(ctx context.Context) error {
+	return nil
+}
+
+func (g *emptyGhost) Abort() {
 }

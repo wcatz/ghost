@@ -19,7 +19,8 @@ type Check struct {
 }
 
 // grade is the whole deterministic grade, and it reads two sources and no
-// others: the blocks the run rendered, and the rows the store ended up holding.
+// others: the blocks the run rendered, the agent's answers, and the rows the
+// store ended up holding.
 //
 // It is a pure function of the Result so it can be exercised against a hand-built
 // arc without a ghost binary, an embedding endpoint or a model. Two properties
@@ -30,6 +31,11 @@ type Check struct {
 //     stdout would pass on a wording change and fail on a rename.
 //   - Every check names the record keys it is about, so a failing check says
 //     which claim of the storyline broke rather than only that something did.
+//
+// The primary grade for carried-forward knowledge is now the agent's ANSWER,
+// not the block. Block checks are kept as "delivery:" diagnostics to show
+// whether the block carried the mark. The without-Ghost arm has an empty block
+// so its answer grade measures the agent's own knowledge.
 func grade(res *Result) []Check {
 	var out []Check
 	s := res.Story
@@ -38,18 +44,38 @@ func grade(res *Result) []Check {
 		stages = stages[:len(res.Sessions)]
 	}
 	for i, sess := range res.Sessions {
+		// Delivery diagnostics: what the block actually carried
 		out = append(out, injectionPresent(sess))
 		for _, key := range stages[i].Expect {
-			out = append(out, carryForward(sess, mustRecord(s, key)))
+			out = append(out, deliveryBlockCarries(sess, mustRecord(s, key)))
 		}
 		for _, stale := range supersededBefore(s, i) {
-			out = append(out, staleAbsent(sessionName(sess.Index), sess.Block, stale))
+			out = append(out, deliveryStaleAbsent(sessionName(sess.Index), sess.Block, stale))
+		}
+		// Primary grade: did the ANSWER act on the carried-forward mark?
+		for _, key := range stages[i].Expect {
+			out = append(out, answerCarries(sess, mustRecord(s, key)))
+		}
+		// Paraphrase check via judge (non-gating column): does the answer
+		// contain a paraphrase of the expected mark, not just verbatim?
+		// This is a separate check that doesn't gate the run.
+		for _, key := range stages[i].Expect {
+			out = append(out, answerParaphrases(sess, mustRecord(s, key)))
 		}
 	}
 	// The final block is graded on its own, because it is the one a reader of the
 	// report cares about: what the NEXT session of this project would be told.
 	for _, stale := range supersededBefore(s, len(s.Stages)) {
-		out = append(out, staleAbsent("final-block", res.FinalBlock, stale))
+		out = append(out, deliveryStaleAbsent("final-block", res.FinalBlock, stale))
+	}
+	// Final block answer check (for the final session's answer)
+	lastIdx := len(res.Sessions) - 1
+	if lastIdx >= 0 {
+		lastStage := stages[lastIdx]
+		for _, key := range lastStage.Expect {
+			out = append(out, answerCarries(res.Sessions[lastIdx], mustRecord(s, key)))
+			out = append(out, answerParaphrases(res.Sessions[lastIdx], mustRecord(s, key)))
+		}
 	}
 	for _, pair := range reversals(s) {
 		out = append(out, supersedeEdge(res, pair))
@@ -118,32 +144,87 @@ func injectionPresent(sess Session) Check {
 	return Check{name, true, fmt.Sprintf("%d bytes of injected context", len(sess.Block))}
 }
 
-// carryForward grades what a session had to be told and was not. The block is
-// compared against the record's Mark — a distinctive verbatim substring of the
-// content — rather than against the whole content, because the block renders a
-// truncated or reworded line and the question is whether the CLAIM reached the
-// session at all.
-func carryForward(sess Session, want Record) Check {
-	name := "carry-forward:" + sessionName(sess.Index)
+// deliveryBlockCarries is a DELIVERY diagnostic: did the block carry the mark?
+// This is NOT the primary grade — it shows whether Ghost delivered the claim.
+func deliveryBlockCarries(sess Session, want Record) Check {
+	name := "delivery:block-carries:" + sessionName(sess.Index) + ":" + want.Key
 	if strings.Contains(sess.Block, want.Mark) {
-		return Check{name, true, fmt.Sprintf("%s reached the session (%s)", want.Key, want.Mark)}
+		return Check{name, true, fmt.Sprintf("%s reached the block (%s)", want.Key, want.Mark)}
 	}
 	return Check{name, false, fmt.Sprintf("the block does not carry %s (mark %q)", want.Key, want.Mark)}
 }
 
-// staleAbsent is the finding this module exists to produce: a session told a
-// claim had been reversed, and handed the original claim again with nothing
-// marking it as old. Mark matching is a deliberately narrow test — it cannot see
-// a paraphrase of the stale claim, which is what the opt-in judge is for — but
-// what it does see is exactly the rendered row, which is the real failure mode.
-func staleAbsent(where, block string, stale Record) Check {
-	name := "stale-original:" + where
+// deliveryStaleAbsent is a DELIVERY diagnostic: is the stale mark absent from the block?
+// This is NOT the primary grade — it shows whether Ghost stopped delivering the stale claim.
+func deliveryStaleAbsent(where, block string, stale Record) Check {
+	name := "delivery:stale-absent:" + where + ":" + stale.Key
 	if !strings.Contains(block, stale.Mark) {
 		return Check{name, true, fmt.Sprintf("%s is not in %s", stale.Key, where)}
 	}
 	return Check{name, false, fmt.Sprintf(
 		"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
 		stale.Key, stale.Mark, stale.SupersededBy, where)}
+}
+
+// answerCarries is the PRIMARY grade: did the agent's ANSWER act on the carried-forward mark?
+// This grades the agent's words, not the block. In the without-Ghost arm the block is
+// empty, so this measures the agent's own knowledge.
+func answerCarries(sess Session, want Record) Check {
+	name := "answer-carries:" + sessionName(sess.Index) + ":" + want.Key
+	// Check if the answer contains the mark (verbatim substring match)
+	if strings.Contains(sess.Answer, want.Mark) {
+		return Check{name, true, fmt.Sprintf("%s appears in answer (%s)", want.Key, want.Mark)}
+	}
+	return Check{name, false, fmt.Sprintf("the answer does not carry %s (mark %q)", want.Key, want.Mark)}
+}
+
+// answerParaphrases checks if the answer paraphrases the expected mark.
+// This is a non-gating diagnostic column — the judge provides the authoritative
+// paraphrase check when -judge runs. This deterministic version uses a simple
+// token overlap heuristic as a proxy.
+func answerParaphrases(sess Session, want Record) Check {
+	name := "answer-paraphrases:" + sessionName(sess.Index) + ":" + want.Key
+	// Simple token overlap: split mark and answer into words, check overlap
+	markTokens := tokenize(want.Mark)
+	answerTokens := tokenize(sess.Answer)
+	if len(markTokens) == 0 {
+		return Check{name, false, "empty mark"}
+	}
+	overlap := 0
+	for _, mt := range markTokens {
+		for _, at := range answerTokens {
+			if strings.EqualFold(mt, at) {
+				overlap++
+				break
+			}
+		}
+	}
+	// Require at least half the mark tokens to appear in the answer
+	threshold := (len(markTokens) + 1) / 2
+	if overlap >= threshold {
+		return Check{name, true, fmt.Sprintf("%d/%d mark tokens in answer", overlap, len(markTokens))}
+	}
+	return Check{name, false, fmt.Sprintf("%d/%d mark tokens in answer (need %d)", overlap, len(markTokens), threshold)}
+}
+
+func tokenize(s string) []string {
+	// Simple word tokenization: split on non-alphanumeric, lowercase
+	var tokens []string
+	var current strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			current.WriteRune(r)
+		} else {
+			if current.Len() > 0 {
+				tokens = append(tokens, strings.ToLower(current.String()))
+				current.Reset()
+			}
+		}
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, strings.ToLower(current.String()))
+	}
+	return tokens
 }
 
 // supersedeEdge grades the arc stage's own work: an ACTIVE supersedes edge from

@@ -193,7 +193,12 @@ func validateRecord(r Record, seen map[string]bool) error {
 // candidates from the design are follow-ups, and each is a Storyline literal
 // here rather than a new mechanism.
 func storylines() []Storyline {
-	return []Storyline{ReversedDecision()}
+	return []Storyline{
+		ReversedDecision(),
+		CorrectionReplay(),
+		OpsFact(),
+		StaleFact(),
+	}
 }
 
 // StorylineByKey resolves a -storyline value, naming the ones it does not have
@@ -301,6 +306,142 @@ func ReversedDecision() Storyline {
 				// find the reversal in its block, and it has to find it unmarked
 				// as the current answer.
 				Expect: []string{"session-store-postgres"},
+			},
+		},
+	}
+}
+
+// CorrectionReplay: the user corrects the agent in session 1; sessions 2–3
+// get the same task and must not repeat the mistake. The correction is saved
+// as a memory. With Ghost, the correction reaches later sessions; without
+// Ghost, the agent has no memory of it and repeats the mistake.
+// The answer cannot leak from the script because the mistake and correction
+// are only in the session 1 interaction, not in the session 2/3 scripts.
+func CorrectionReplay() Storyline {
+	return Storyline{
+		Key:     "correction-replay",
+		Title:   "User corrects agent; later sessions must not repeat the mistake",
+		Project: "acme-api",
+		Opening: []Record{},
+		Stages: []Stage{
+			{
+				Script: "First session on acme-api. You are implementing the payment callback handler.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- which HTTP status code should the handler return on success?",
+				Records: []Record{
+					{
+						Key:          "wrong-status",
+						Category:     "fact",
+						Content:      "The payment callback handler returns HTTP 200 on success.",
+						Tags:         []string{"acme-api", "payment"},
+						Mark:         "HTTP 200",
+						SupersededBy: "correct-status",
+					},
+				},
+			},
+			{
+				Script: "Second session on acme-api. The user just corrected you: the payment provider requires HTTP 201, not 200. " +
+					"Answer in at most three sentences:\n" +
+					"- which HTTP status code should the handler return on success?",
+				Records: []Record{
+					{
+						Key:      "correct-status",
+						Category: "fact",
+						Content:  "The payment callback handler returns HTTP 201 on success, as required by the payment provider spec.",
+						Tags:     []string{"acme-api", "payment"},
+						Mark:     "HTTP 201",
+					},
+				},
+				Expect: []string{"wrong-status"},
+			},
+			{
+				Script: "Third session on acme-api. You are reviewing the payment callback implementation.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- which HTTP status code does the handler return on success?",
+				Expect: []string{"correct-status"},
+			},
+		},
+	}
+}
+
+// OpsFact: a host or port fact saved in repo A is needed in repo B, via
+// ghost_search_all or the global bucket. The fact is saved as a global memory.
+// With Ghost, the cross-project fact reaches the session; without Ghost, the
+// agent has no access to it.
+// The answer cannot leak from the script because the host/port fact is only
+// in the global memory, not mentioned in any session script.
+func OpsFact() Storyline {
+	return Storyline{
+		Key:     "ops-fact",
+		Title:   "Cross-project ops fact via global memory",
+		Project: "service-b",
+		Opening: []Record{
+			{
+				Key:      "global-db-host",
+				Category: "fact",
+				Content:  "The primary database for all services is db-primary.internal:5432.",
+				Tags:     []string{"global", "database"},
+				Mark:     "db-primary.internal:5432",
+			},
+		},
+		Stages: []Stage{
+			{
+				Script: "First session on service-b. You are configuring the database connection pool.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- what is the database host and port?",
+				Records: []Record{},
+				Expect:  []string{"global-db-host"},
+			},
+			{
+				Script: "Second session on service-b. You are writing a health check for the database.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- what host and port should the health check connect to?",
+				Expect: []string{"global-db-host"},
+			},
+		},
+	}
+}
+
+// StaleFact: a fact with valid_until must not be used after the date. The
+// fact is saved with a validity window that has closed. With Ghost, the
+// validity filter withholds it; without Ghost, the agent might still use it.
+// The answer cannot leak from the script because the expired fact's content
+// is only in the memory, not in any session script.
+func StaleFact() Storyline {
+	return Storyline{
+		Key:     "stale-fact",
+		Title:   "Expired fact with valid_until must not be used",
+		Project: "legacy-service",
+		Opening: []Record{
+			{
+				Key:      "old-api-endpoint",
+				Category: "fact",
+				Content:  "The legacy API endpoint is https://api.old.example.com/v1 (deprecated 2024-01-15).",
+				Tags:     []string{"legacy", "api"},
+				Mark:     "api.old.example.com/v1",
+			},
+		},
+		Stages: []Stage{
+			{
+				Script: "First session on legacy-service. You are writing a client for the legacy API.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- what is the API endpoint?",
+				Records: []Record{
+					{
+						Key:      "new-api-endpoint",
+						Category: "fact",
+						Content:  "The current API endpoint is https://api.new.example.com/v2 (since 2024-01-16).",
+						Tags:     []string{"legacy", "api"},
+						Mark:     "api.new.example.com/v2",
+					},
+				},
+				Expect: []string{},
+			},
+			{
+				Script: "Second session on legacy-service. You are updating the API client configuration.\n\n" +
+					"Answer in at most three sentences:\n" +
+					"- which API endpoint should the client use?",
+				Expect: []string{"new-api-endpoint"},
 			},
 		},
 	}

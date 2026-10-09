@@ -120,6 +120,15 @@ func (f *fakeGhost) State(_ context.Context) (State, error) {
 	return st, nil
 }
 
+func (f *fakeGhost) Start(_ context.Context) error {
+	f.calls = append(f.calls, "start")
+	return nil
+}
+
+func (f *fakeGhost) Abort() {
+	f.calls = append(f.calls, "abort")
+}
+
 // stamps gives every saved row a created_at that increases with its seed order —
 // the chronology the runner's restamp writes, so an edge's direction is readable
 // from the store rather than from the order the ids happen to have. A stamp missing

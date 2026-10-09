@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,7 +88,17 @@ func gradedResult(t *testing.T) *Result {
 		for _, r := range s.Stages[i].Records {
 			saved[r.Key] = g.idOf(r.Key)
 		}
-		res.Sessions = append(res.Sessions, Session{Index: i, Block: block(i), Saved: saved})
+		// Provide answers that contain the expected marks for the answer-carries checks
+		var answer string
+		switch i {
+		case 0: // Session 1: no Expect
+			answer = "We will use Redis for session state."
+		case 1: // Session 2: Expects session-store-redis
+			answer = "The previous choice was Redis (SESSION_STORE=redis), but now we use Postgres."
+		case 2: // Session 3: Expects session-store-postgres
+			answer = "We store sessions in Postgres; the bootstrap sets SESSION_STORE=postgres."
+		}
+		res.Sessions = append(res.Sessions, Session{Index: i, Block: block(i), Saved: saved, Answer: answer})
 	}
 	for _, r := range s.Order() {
 		if !rendered[r.Key] {
@@ -135,10 +146,13 @@ func TestGradeAcceptsACoherentArc(t *testing.T) {
 	}
 	for _, name := range []string{
 		"injection-present:session-1",
-		"carry-forward:session-2",
-		"carry-forward:session-3",
-		"stale-original:session-3",
-		"stale-original:final-block",
+		"delivery:block-carries:session-2:session-store-redis",
+		"answer-carries:session-2:session-store-redis",
+		"delivery:block-carries:session-3:session-store-postgres",
+		"delivery:stale-absent:session-3:session-store-redis",
+		"answer-carries:session-3:session-store-postgres",
+		"delivery:stale-absent:final-block:session-store-redis",
+		"answer-carries:session-3:session-store-postgres",
 		"supersede-edge:session-store-postgres",
 		"reversal-live:session-store-postgres",
 		"final-block-carries:session-store-postgres",
@@ -150,19 +164,24 @@ func TestGradeAcceptsACoherentArc(t *testing.T) {
 func TestGradeFailsWhenTheReversalWasNotInjected(t *testing.T) {
 	res := gradedResult(t)
 	res.Sessions[2].Block = "## Ghost context: acme\n- [decision] «We will store sessions in Redis.»\n"
+	// Also modify the answer to not contain the mark
+	res.Sessions[2].Answer = "We store sessions in Redis; the bootstrap sets SESSION_STORE=redis."
 	res.Checks = grade(res)
-	c := checkByName(t, res, "carry-forward:session-3")
+	// The delivery check should fail (block doesn't carry the mark)
+	c := checkByName(t, res, "delivery:block-carries:session-3:session-store-postgres")
 	if c.Passed {
-		t.Fatal("a block without the reversal passed the carry-forward check")
+		t.Fatal("a block without the reversal passed the delivery check")
 	}
 	if !strings.Contains(c.Detail, "session-store-postgres") {
 		t.Fatalf("detail does not name the missing record: %q", c.Detail)
 	}
+	// The answer check should also fail (answer doesn't carry the mark)
+	c = checkByName(t, res, "answer-carries:session-3:session-store-postgres")
+	if c.Passed {
+		t.Fatal("an answer without the reversal passed the answer check")
+	}
 }
 
-// TestGradeFailsWhileTheSupersededClaimIsStillInjected is the finding this
-// module exists to measure: a session told a claim was reversed, and handed the
-// original claim again with nothing marking it as old.
 func TestGradeFailsWhileTheSupersededClaimIsStillInjected(t *testing.T) {
 	res := gradedResult(t)
 	// Re-quote the superseded row VERBATIM, which is what the block does when it
@@ -179,7 +198,7 @@ func TestGradeFailsWhileTheSupersededClaimIsStillInjected(t *testing.T) {
 	res.Sessions[2].Block = post
 	res.FinalBlock = post
 	res.Checks = grade(res)
-	for _, name := range []string{"stale-original:session-3", "stale-original:final-block"} {
+	for _, name := range []string{"delivery:stale-absent:session-3:session-store-redis", "delivery:stale-absent:final-block:session-store-redis"} {
 		c := checkByName(t, res, name)
 		if c.Passed {
 			t.Errorf("%s passed while the superseded claim was still injected", name)
@@ -276,7 +295,7 @@ func TestParseJudgeVerdict(t *testing.T) {
 		// would put a number in the report that nothing observed.
 		{"maybe", false, true},
 		{"", false, true},
-		// A PREFIX match turns the first word of an ordinary English sentence
+		// A PREFIX match turns the first word of an ordinary sentence
 		// into a verdict: "Yesterday's block..." is not a yes and "Nothing in
 		// the block names the new store" is not a no. The rule is the first WORD
 		// being exactly yes or no, so a sentence that starts with one and then
@@ -343,7 +362,7 @@ func TestWriteReportNamesEveryCheckAndTheSessionAnswers(t *testing.T) {
 		t.Fatalf("read report: %v", err)
 	}
 	for _, want := range []string{
-		"reversed-decision", "opencode/big-pickle", "carry-forward:session-3",
+		"reversed-decision", "opencode/big-pickle", "answer-carries:session-3:session-store-postgres",
 		"supersede-edge:session-store-postgres", "Postgres",
 	} {
 		if !strings.Contains(string(b), want) {
@@ -367,5 +386,130 @@ func TestWriteReportSaysAFailedCheckFailed(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "FAIL") {
 		t.Error("a report of a failed run does not say so")
+	}
+}
+
+// TestAnswerCarriesPassAndFail tests the new answer-carries check with canned answers
+// for each arc type (pass and fail for each arc).
+func TestAnswerCarriesPassAndFail(t *testing.T) {
+	arcs := []struct {
+		name      string
+		story     Storyline
+		pass      string // answer that should pass
+		fail      string // answer that should fail
+		expectKey string // the record key that is expected
+		stage     int
+	}{
+		{
+			name:      "reversed-decision",
+			story:     ReversedDecision(),
+			pass:      "We store sessions in Postgres with SESSION_STORE=postgres.",
+			fail:      "We store sessions in Redis with SESSION_STORE=redis.",
+			expectKey: "session-store-postgres",
+			stage:     2,
+		},
+		{
+			name:      "correction-replay",
+			story:     CorrectionReplay(),
+			pass:      "The handler returns HTTP 201 as required by the payment provider.",
+			fail:      "The handler returns HTTP 200.",
+			expectKey: "correct-status",
+			stage:     2,
+		},
+		{
+			name:      "ops-fact",
+			story:     OpsFact(),
+			pass:      "The database host is db-primary.internal:5432.",
+			fail:      "The database host is localhost on port 5432.",
+			expectKey: "global-db-host",
+			stage:     1,
+		},
+		{
+			name:      "stale-fact",
+			story:     StaleFact(),
+			pass:      "The current API endpoint is https://api.new.example.com/v2.",
+			fail:      "The legacy API endpoint is https://api.old.example.com/v1.",
+			expectKey: "new-api-endpoint",
+			stage:     1,
+		},
+	}
+
+	for _, arc := range arcs {
+		t.Run(arc.name+"/pass", func(t *testing.T) {
+			s := arc.story
+			g := saveAll(t, s)
+			res := &Result{
+				Story:   s,
+				WorkDir: "/scratch/work/test",
+				State:   State{Links: []Link{}, Stamps: g.stamps()},
+			}
+			// Build blocks with the expected marks delivered
+			for i := range s.Stages {
+				var b strings.Builder
+				b.WriteString("## Ghost context: " + s.Project + "\n")
+				for _, r := range s.Opening {
+					fmtLine(&b, r)
+				}
+				for j := 0; j < i; j++ {
+					for _, r := range s.Stages[j].Records {
+						fmtLine(&b, r)
+					}
+				}
+				answer := arc.pass
+				if i != arc.stage {
+					answer = "some answer"
+				}
+				saved := map[string]string{}
+				for _, r := range s.Stages[i].Records {
+					saved[r.Key] = g.idOf(r.Key)
+				}
+				res.Sessions = append(res.Sessions, Session{Index: i, Block: b.String(), Saved: saved, Answer: answer})
+			}
+			res.FinalBlock = res.Sessions[len(res.Sessions)-1].Block
+			res.Checks = grade(res)
+			checkName := "answer-carries:session-" + strconv.Itoa(arc.stage+1) + ":" + arc.expectKey
+			c := checkByName(t, res, checkName)
+			if !c.Passed {
+				t.Errorf("expected pass for %s: %s", checkName, c.Detail)
+			}
+		})
+
+		t.Run(arc.name+"/fail", func(t *testing.T) {
+			s := arc.story
+			g := saveAll(t, s)
+			res := &Result{
+				Story:   s,
+				WorkDir: "/scratch/work/test",
+				State:   State{Links: []Link{}, Stamps: g.stamps()},
+			}
+			for i := range s.Stages {
+				var b strings.Builder
+				b.WriteString("## Ghost context: " + s.Project + "\n")
+				for _, r := range s.Opening {
+					fmtLine(&b, r)
+				}
+				for j := 0; j < i; j++ {
+					for _, r := range s.Stages[j].Records {
+						fmtLine(&b, r)
+					}
+				}
+				answer := arc.fail
+				if i != arc.stage {
+					answer = "some answer"
+				}
+				saved := map[string]string{}
+				for _, r := range s.Stages[i].Records {
+					saved[r.Key] = g.idOf(r.Key)
+				}
+				res.Sessions = append(res.Sessions, Session{Index: i, Block: b.String(), Saved: saved, Answer: answer})
+			}
+			res.FinalBlock = res.Sessions[len(res.Sessions)-1].Block
+			res.Checks = grade(res)
+			checkName := "answer-carries:session-" + strconv.Itoa(arc.stage+1) + ":" + arc.expectKey
+			c := checkByName(t, res, checkName)
+			if c.Passed {
+				t.Errorf("expected fail for %s: %s", checkName, c.Detail)
+			}
+		})
 	}
 }
