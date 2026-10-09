@@ -253,8 +253,7 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 }
 
 // retireDecisionCompanionTx retires the companion memory of a decision that has
-// just been superseded, inside the transaction that marked it — the caller has
-// already committed the decisions row by the time this returns.
+// just been superseded, inside the transaction that marked it.
 //
 // The companion is found by CONTENT, because the composed text is the only
 // link between a decisions row and its memory (see decisionCompanionContent).
@@ -280,8 +279,11 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // The stamp re-checks resolved_at IS NULL, which is what makes a second
 // SupersedeDecision over the same pair a no-op rather than a second history
 // row for the same retirement. A companion that cannot be stamped — one that is
-// pinned or persistent — still takes the edge, so its ranking demotes it the
-// way a superseded memory's always does.
+// pinned or persistent — is excluded from the stamp (the same guard that
+// SetResolved and MarkResolved use), so it takes no edge, records no history
+// row and registers no demotion. This is intentional: a decision companion
+// that the user has explicitly pinned or set to retention-exempt status is a
+// non-negotiable rule and must not be silently retired by a supersede pass.
 func (s *Store) retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldContent, newContent string) error {
 	var companionIDs []string
 	rows, err := tx.QueryContext(ctx, `
@@ -366,7 +368,7 @@ func (s *Store) retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, proje
 			if opposed {
 				continue
 			}
-			if err := insertLinkTx(ctx, tx, newCompanion, id, "supersedes", 1, "manual", ""); err != nil {
+			if err := insertLinkTx(ctx, tx, newCompanion, id, "supersedes", 1, "llm", ""); err != nil {
 				return fmt.Errorf("link superseded companion: %w", err)
 			}
 		}
