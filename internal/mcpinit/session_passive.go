@@ -61,6 +61,11 @@ const (
 // 10,000-character cap with margin for the header, learned summary, tasks and
 // decisions that formatSessionContext adds around it. A block already under the
 // cap is byte-identical to origin/main.
+//
+// The slices carry ClampBytes matching the caller's preview truncation
+// (sessionDisplayBytes=200, globalsDisplayBytes=300) so that the assembler's
+// fitResponse post-pass measures the same bytes the renderer emits. The caller
+// still applies truncateUTF8 to append the "…" display marker.
 const sessionStartByteCap = 7500
 
 func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget {
@@ -71,6 +76,10 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 	// it fits, recording each cut as response_fit in the trace and retrieval
 	// record. Pinned rows rank first (pinned DESC in both bucket orders) and
 	// survive the cut.
+	//
+	// ClampBytes matches the caller's preview truncation so the assembler's
+	// byte measurement matches what the hook actually renders. The caller appends
+	// the "…" display marker after the assembler returns.
 	slices := make([]assemble.Slice, 0, 2)
 
 	// The project slice is conditional, and the condition is the no-match case:
@@ -93,6 +102,9 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 			// can only shuffle rows the block shows in full. The loader this
 			// replaces skipped it there too.
 			DemoteOnlyWhenOverCap: true,
+			// ClampBytes matches the caller's preview truncation so the
+			// assembler's fitResponse measures the same bytes the hook renders.
+			ClampBytes: sessionDisplayBytes,
 		})
 	}
 	slices = append(slices, assemble.Slice{
@@ -109,6 +121,8 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 		// them, because a superseded preference is not worth one of eight slots
 		// in a block that competes for attention across every project.
 		DropDemotedLosers: true,
+		// ClampBytes matches the caller's preview truncation (300 bytes).
+		ClampBytes: globalsDisplayBytes,
 	})
 	return assemble.Budget{MaxBytes: sessionStartByteCap, Slices: slices}
 }
@@ -248,7 +262,12 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 			// 300 bytes here vs. 200 below is deliberate, not drift: globals are
 			// capped at a much smaller item count (globalsCap=8), so a larger
 			// per-item byte budget still keeps the total section bytes low.
-			row.Content = truncateUTF8(row.Content, globalsDisplayBytes)
+			// The assembler pre-clamps to globalsDisplayBytes; if the content
+			// length equals the budget it was clamped and we append the display
+			// ellipsis so the preview shows it was cut.
+			if len(row.Content) >= globalsDisplayBytes {
+				row.Content = row.Content[:globalsDisplayBytes] + "…"
+			}
 			globals = append(globals, row)
 			continue
 		}
@@ -256,7 +275,9 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		// project memories have a larger cap (sessionMemoriesCap=15 vs.
 		// globalsCap=8): a smaller per-item budget keeps total section bytes
 		// comparable.
-		row.Content = truncateUTF8(row.Content, sessionDisplayBytes)
+		if len(row.Content) >= sessionDisplayBytes {
+			row.Content = row.Content[:sessionDisplayBytes] + "…"
+		}
 		memories = append(memories, row)
 	}
 	// The tally is the trace's own split of each bucket into shown, ranked-out
