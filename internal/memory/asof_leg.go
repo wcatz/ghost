@@ -78,10 +78,10 @@ func AsOfSourceNote(t time.Time) string {
 // row — tags, scope, pin, confidence, agent, source_ref and the validity window,
 // which are exactly the fields a row line renders that the history table does
 // not version — because "nothing in this block is a claim about the present"
-// would be false about them. AsOfValidityNote is where the borrow of the
-// window's bounds is stated beside the rows, together with the verdict a
-// surface did or did not draw from them; this sentence names the whole set
-// too, so the two notes cannot read as a contradiction.
+// would be false about them. AsOfValidityNote and AsOfBorrowedWindowNote both
+// LEAD with the borrow of the window's bounds and then say, each for its own
+// surface, what a verdict was or was not drawn from them; this sentence names
+// the whole set too, so the two notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
 		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
@@ -89,32 +89,28 @@ func AsOfUnversionedNote() string {
 		"this block is a claim about the present."
 }
 
-// AsOfValidityNote is the sentence stating how a historical block treated
-// validity and, when withheld is positive, how many rows a listing withheld, and
-// it is the same sentence on every surface that renders one.
-//
-// What the three surfaces do with the window is NOT the same, and the sentence
-// says so rather than claiming a rule one of them stopped applying (#910). A
-// listing — ghost_project_context's as_of branch and the ghost context --as-of
-// session block — judges the window AT the requested instant through
-// memory.ValidityAt and withholds a row whose window had closed or had not yet
-// opened then. ghost_memory_search with as_of judges nothing: memory_history
-// never versioned the window, so the bounds an as_of row carries are the LIVE
-// row's, and a verdict read from them is a claim about today's bounds rather
-// than about the row at T — which is exactly what made a search drop a row
-// whose window has since closed or has not yet opened. Stage 2 of the assembler
-// therefore draws no verdict on an as_of request and drops nothing, and this
-// note is what the rendered bounds are qualified by instead.
-//
-// The borrow itself is the part all three share and the note states it whatever
-// a surface did with it: the bounds, like tags, scope, pin, confidence, agent
-// and source_ref, are the current row's, because the history table does not
-// version them.
+// asOfBorrowedWindowSentence is the lead sentence every historical read carries,
+// whichever surface rendered it and whatever that surface then did with the
+// window. It LEADS, because it is the one part all three share and the part a
+// reader needs before any verdict is read: the bounds, like tags, scope, pin,
+// confidence, agent and source_ref, are the current row's, because
+// memory_history versions none of them. A verdict drawn from a bound the row
+// holds today is a claim about today, so the sentence has to come before any
+// statement about what was withheld.
+func asOfBorrowedWindowSentence() string {
+	return "The window's bounds, like the row's tags, scope, pin, confidence, agent and source_ref, are read from " +
+		"the current row, because the history table does not version them."
+}
+
+// AsOfValidityNote is the sentence an as_of LISTING prints: it judged validity
+// at the requested instant, and withheld (and counts) what that excluded. The
+// two surfaces that render one are ghost_project_context's as_of branch and the
+// ghost context --as-of session block, both of which judge through
+// memory.ValidityAt. It leads with the borrow and only then states the verdict,
+// so a reader meets the caveat before the claim it qualifies.
 func AsOfValidityNote(at time.Time, withheld int) string {
-	note := "Validity judged at " + at.UTC().Format(time.RFC3339) + ": a memory whose validity window had closed " +
-		"or had not yet opened at that instant is withheld where a surface judges validity at that instant, and " +
-		"a search withholds none on that account. The window's bounds, like the row's tags, scope, pin, " +
-		"confidence, agent and source_ref, are read from the current row, because the history table does not version them."
+	note := asOfBorrowedWindowSentence() + " Validity judged at " + at.UTC().Format(time.RFC3339) +
+		": a memory whose validity window had closed or had not yet opened at that instant is withheld."
 	switch {
 	case withheld == 1:
 		note += " 1 memory was withheld for that reason, so it is out of window at that instant rather than absent from the store."
@@ -122,6 +118,24 @@ func AsOfValidityNote(at time.Time, withheld int) string {
 		note += fmt.Sprintf(" %d memories were withheld for that reason, so they are out of window at that instant rather than absent from the store.", withheld)
 	}
 	return note
+}
+
+// AsOfBorrowedWindowNote is the sentence a read that judged no window prints,
+// which today is ghost_memory_search with as_of. It leads with the same borrow
+// sentence the listings lead with, and then says what the absence of a verdict
+// means rather than leaving the reader to infer one from a missing marker.
+//
+// The absent verdict is the deliberate half (#910): memory_history versions no
+// validity, so the bounds an as_of row carries are the LIVE row's, and judging
+// them against T is what used to drop a row whose window has closed since or has
+// not opened yet. Stage 2 of the assembler therefore records no state for a
+// historical request, so a row is neither withheld as expired nor labelled not
+// yet valid, and no marker is evidence the row was inside its window then.
+// Without this sentence the silence reads as the verdict it replaced.
+func AsOfBorrowedWindowNote(at time.Time) string {
+	return asOfBorrowedWindowSentence() + " No verdict was drawn from them for this read, so no row is withheld as " +
+		"expired or labelled not yet valid: a bound the row holds today is not a claim about " +
+		at.UTC().Format(time.RFC3339) + ", and a missing marker is not evidence a row was inside its window then."
 }
 
 // asOfLeg is a query term prepared for matching against text, rather than for

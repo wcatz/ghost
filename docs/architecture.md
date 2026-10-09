@@ -1202,8 +1202,10 @@ anywhere in the read, and no inference: it is a selection.
   no verdict word on them, drops nothing, and reports no validity exclusion — a
   row whose window has closed or has not opened *now* is returned, because
   nothing says it had at T. `qualifiersFor` appends the same
-  `memory.AsOfValidityNote`, with a withheld count of zero by construction
-  rather than by omission, and it leads the answer as every qualifier does. The
+  `memory.AsOfBorrowedWindowNote`, which leads with the same borrow sentence the
+  listings lead with and then says no verdict was drawn — because the listing's
+  own note opens by claiming a judgement at T, and a search that printed it would
+  open with a claim its answer contradicts. The
   `unverified` marker is drawn as on any line where a verdict IS drawn, because
   `verified_at` is a flag rather than a predicate. The imprecision that remains
   is therefore the listings' alone and is stated rather than worked around:

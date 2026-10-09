@@ -46,18 +46,18 @@ func historicalQualifier(asOf time.Time) string {
 // missing from this set" for both a direct reader of the set and a reader of a
 // search over it.
 //
-// AsOfValidityNote is the same sentence the two as_of listing surfaces print
-// (#908), and a search needs it for the opposite reason from theirs: they judge
-// the window at T and withhold what it excludes, while stage 2 here judges
-// nothing and withholds nothing, so the row's bounds are the only thing left to
-// explain — and they are today's. Its withheld count is ZERO by construction,
-// not by omission: an as_of request withholds no row on that account, and the
-// note's count clause is therefore absent rather than claiming a number.
+// The window is qualified by memory.AsOfBorrowedWindowNote, NOT by the
+// AsOfValidityNote the two as_of listing surfaces print (#908): those judge the
+// window at T and withhold what it excludes, so their sentence has a verdict and
+// a count to state. Stage 2 here draws no verdict and withholds nothing, so the
+// listing's sentence would open by claiming a judgement this block never made and
+// then retract it — the exact misreading #910 exists to close. Both lead with the
+// same borrow sentence, so the caveat a reader needs comes first either way.
 func qualifiersFor(req Request, set *memory.CandidateSet) []string {
 	var out []string
 	if req.AsOf != nil {
 		out = append(out, historicalQualifier(*req.AsOf))
-		out = append(out, memory.AsOfValidityNote(*req.AsOf, 0))
+		out = append(out, memory.AsOfBorrowedWindowNote(*req.AsOf))
 	}
 	if set != nil {
 		if note := memory.AsOfUnknownNote(set.Unrecorded); note != "" {

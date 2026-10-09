@@ -4185,8 +4185,11 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 }
 
 // withholdInvalidAt drops the rows whose validity window had closed or had not
-// yet opened at t, with the same rule ghost_memory_search applies when it binds
-// its clock to as_of (memory.ValidityAt).
+// yet opened at t, with the rule an as_of LISTING applies to a borrowed window
+// (memory.ValidityAt). ghost_memory_search judges none: the bounds are the
+// present's, so stage 2 of the assembler records no verdict and drops nothing
+// (#910). The two surfaces therefore differ by design, and this is the listing's
+// half.
 func withholdInvalidAt(rows []memory.AsOfRow, t time.Time) []memory.AsOfRow {
 	out := make([]memory.AsOfRow, 0, len(rows))
 	for _, r := range rows {

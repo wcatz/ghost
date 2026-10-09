@@ -893,9 +893,14 @@ func TestAsOfSearchReturnsWhatTheListingWithholdsAtT(t *testing.T) {
 	if !strings.Contains(listing, "Validity judged at "+at) {
 		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)
 	}
-	if !strings.Contains(search, "Validity judged at "+at) {
-		t.Errorf("the search does not state the as_of validity note, so the bounds its rows show read as the "+
-			"row's own at T:\n%s", search)
+	want := memory.AsOfBorrowedWindowNote(asOfInstant(t, at))
+	if !strings.Contains(search, want) {
+		t.Errorf("the search does not state that the bounds its rows show are the current row's, want:\n%s\n%s",
+			want, search)
+	}
+	// The listing's sentence, which asserts a verdict this read did not draw.
+	if strings.Contains(search, "Validity judged at") {
+		t.Errorf("the search answer claims validity was judged at T, a judgement this read did not make:\n%s", search)
 	}
 	for _, r := range rows {
 		inListing := strings.Contains(listing, r.content)
@@ -917,6 +922,18 @@ func TestAsOfSearchReturnsWhatTheListingWithholdsAtT(t *testing.T) {
 			}
 		}
 	}
+}
+
+// asOfInstant parses the RFC 3339 constant the as_of tests read at, so an
+// assertion on a rendered note names the same instant the tool was asked about
+// rather than a second spelling of it.
+func asOfInstant(t *testing.T, at string) time.Time {
+	t.Helper()
+	got, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		t.Fatalf("parse %q: %v", at, err)
+	}
+	return got
 }
 
 // searchLine returns the rendered row line of a search answer whose content is

@@ -354,9 +354,14 @@ func TestSearchAsOfKeepsARowWhoseCurrentWindowIsClosedOrUnopened(t *testing.T) {
 				"evidence about that instant\n%s", content, historical)
 		}
 	}
-	if !strings.Contains(historical, "Validity judged at "+at.Format(time.RFC3339)) {
-		t.Errorf("the answer does not state the as_of validity note, so the window its rows show reads as the "+
-			"row's own at that instant:\n%s", historical)
+	want := memory.AsOfBorrowedWindowNote(at)
+	if !strings.Contains(historical, want) {
+		t.Errorf("the answer does not state that the window its rows show is the current row's, want:\n%s\n%s",
+			want, historical)
+	}
+	// The listing's sentence, which asserts a verdict this read did not draw.
+	if strings.Contains(historical, "Validity judged at") {
+		t.Errorf("the search answer claims validity was judged at T, a judgement this read did not make:\n%s", historical)
 	}
 	for _, content := range []string{"walrus window closed since T", "walrus window opens after now"} {
 		line := searchLine(historical, content)

@@ -101,13 +101,20 @@ func TestAsOfSearchDrawsNoValidityVerdictFromTheBorrowedWindow(t *testing.T) {
 		t.Errorf("%d of 3 windowed rows render their bounds, want 3: the borrow has to be visible to be disclosed", shown)
 	}
 
-	// The disclosure, and it is the listing surfaces' own sentence.
-	want := memory.AsOfValidityNote(t0, 0)
+	// The disclosure. It is the SEARCH's sentence, not the listings': both lead
+	// with the shared borrow, and the verdict clause is what only a surface that
+	// drew a verdict may state. A note that opened by claiming a judgement this
+	// read made and then retracted it is the misreading the change exists to close.
+	want := memory.AsOfBorrowedWindowNote(t0)
 	if len(res.Qualifiers) == 0 || !strings.Contains(res.Qualifiers[len(res.Qualifiers)-1], want) {
-		t.Errorf("the qualifiers do not carry the as_of validity note, want:\n%s", want)
+		t.Errorf("the qualifiers do not carry the as_of window note, want:\n%s", want)
 	}
 	if !strings.Contains(res.Response, want) {
 		t.Errorf("the answer does not state that the window shown is today's:\n%s", res.Response)
+	}
+	// And specifically not the listing's sentence, which asserts a verdict at T.
+	if strings.Contains(res.Response, "Validity judged at") {
+		t.Errorf("the search answer claims validity was judged at T, a judgement this read did not make:\n%s", res.Response)
 	}
 }
 
@@ -121,8 +128,8 @@ func TestAsOfSearchStatesTheNoteOnAnEmptyAnswerToo(t *testing.T) {
 	if len(res.Items) != 0 {
 		t.Fatalf("the block is not empty, so the assertion below would prove nothing about an empty answer")
 	}
-	if want := memory.AsOfValidityNote(t0, 0); !strings.Contains(res.Response, want) {
-		t.Errorf("an empty historical answer does not state the as_of validity note, want:\n%s\n%s", want, res.Response)
+	if want := memory.AsOfBorrowedWindowNote(t0); !strings.Contains(res.Response, want) {
+		t.Errorf("an empty historical answer does not state the as_of window note, want:\n%s\n%s", want, res.Response)
 	}
 }
 
