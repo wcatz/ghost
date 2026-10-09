@@ -163,6 +163,11 @@ var repoFactRule = regexp.MustCompile(`(?i)\b(?:must|never|always)\b`)
 // nature. A rule word only exempts a sentence filed under one of these: the
 // category is the caller's own statement that this note is a rule, and a bare
 // location claim filed as a `convention` is still a bare location claim.
+// The note-level reason check (`repoFactReason`) covers `must` and `never`
+// in every category, so only `always` reaches the category-gated rule check
+// below. This design ensures that a convention or decision that merely says
+// "must" or "never" is still exempt as durable knowledge, regardless of
+// its category, while `always` is the only rule word that is category-gated.
 var repoFactRuleCategory = map[string]bool{
 	"convention": true,
 	"decision":   true,
@@ -176,10 +181,11 @@ var repoFactRuleCategory = map[string]bool{
 //
 // Two exemptions, both of which leave the note stored and only drop the
 // sentence (#960): a note carrying a reason connector anywhere, and a sentence
-// that is a rule filed under a rule category. Both are the direction the rule
-// wants — over-flagging a true fact costs one sentence, under-flagging a stale
-// one costs an injection slot in every later session — and neither can refuse
-// the save.
+// that is a rule filed under a rule category. The justification is that an
+// advisory that fires on durable knowledge trains agents to ignore it; the
+// false positives #960 measured were exactly that — a convention with its
+// reason was flagged, and the note was worth keeping. Neither exemption can
+// refuse a save.
 func repoFactHint(content, category string) string {
 	if repoFactReason.MatchString(content) {
 		return ""

@@ -116,11 +116,14 @@ func TestRepoFactHintStillFlagsABareRestatementOfAFile(t *testing.T) {
 // of the SENTENCE being judged and only counts in a category whose notes are
 // rules by nature (convention, decision, gotcha). A note filed as a `fact` is
 // not excused for containing "always", because `fact` makes no such claim
-// about the note and the savings must not depend on a caller's spelling.
+// about the note. The `strings.ToLower` in `repoFactHint` is defensive-only
+// (the three call sites all validate the category through
+// `memory.IsValidCategory`, which is an exact lowercase map lookup), so a
+// mixed-case category can never reach the hint from a write path.
 func TestRepoFactHintGatesTheRuleHalfOnTheCategory(t *testing.T) {
 	content := "Decision: the repository-fact hint always reads the same two patterns, and the pair is defined in internal/mcpserver/durable.go beside the save path it judges."
 
-	for _, category := range []string{"convention", "decision", "gotcha", "Convention"} {
+	for _, category := range []string{"convention", "decision", "gotcha"} {
 		if hint := repoFactHint(content, category); hint != "" {
 			t.Errorf("repoFactHint(..., %q) = %q — category %q is a rule category", content, category, hint)
 		}
