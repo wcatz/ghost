@@ -107,6 +107,160 @@ func TestSaveGuidanceSaysGhostOnlyGuides(t *testing.T) {
 	}
 }
 
+// #959: the audit behind the issue measured 43 saves of which 32 were good —
+// 4 duplicates, 2 repository restatements, 2 transient progress notes, and 4 of
+// 8 global rows wrong. These tests pin the guidance that answers each, on the
+// surfaces an agent reads BEFORE it saves: the server instructions and the two
+// SAVE tool descriptions. Prose in constants, so nothing but a test stops it
+// from being reworded away.
+
+// saveGuidanceGolden is the claim set every save surface must carry. Each entry
+// is a phrase that names one of the audit's findings; a surface that drops one
+// has lost the answer to that finding.
+var saveGuidanceGolden = []string{
+	// the four moments worth a save, on every surface that carries the sentence
+	"when the user corrects you or states a rule",
+	"when a bug's root cause is found",
+	"when a choice is made for a reason",
+	"when a tool or dependency behaves unexpectedly",
+	// one fact per memory, refined rather than re-saved (#959: 4 duplicates)
+	"One memory per fact",
+	"ghost_memory_update",
+	// the three shapes that are not a memory (#959: 2 repository restatements,
+	// 2 transient progress notes)
+	"not what the repository says",
+	"not the current task's progress",
+	"never a key or token value",
+	// a constraint has a home: convention, or dependency for a toolchain or
+	// version limit (#959: two runs refused a save for using a category that
+	// does not exist)
+	"convention (naming/workflow, and any constraint that is not a toolchain or version limit)",
+	"dependency (versions/API quirks, and toolchain and version limits)",
+	// fact is the weakest category, not the default for everything
+	"fact (general knowledge — the weakest category, for when nothing more specific fits)",
+	// a stated date is a valid_until trigger (#959: one of two runs used it)
+	"When the user states a date after which something changes",
+}
+
+// TestSaveGuidanceStatesTheAuditAnswersOnEverySaveSurface pins the claim set
+// above on the server instructions and both SAVE tool descriptions.
+func TestSaveGuidanceStatesTheAuditAnswersOnEverySaveSurface(t *testing.T) {
+	_, session := newCapSession(t)
+
+	surfaces := map[string]string{
+		"mcpInstructions":   mcpInstructions,
+		"ghost_memory_save": saveToolDescription(t, session, "ghost_memory_save"),
+		"ghost_save_global": saveToolDescription(t, session, "ghost_save_global"),
+	}
+	for name, text := range surfaces {
+		for _, want := range saveGuidanceGolden {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s is missing the save guidance %q — the answer to an audit finding was removed or reworded away", name, want)
+			}
+		}
+	}
+	// The durability knobs are a pair on the surfaces whose tool takes both
+	// (#959: one planted invariant saved three different ways). ghost_save_global
+	// has no pin argument, so it carries the retention-only form instead; a
+	// sentence telling an agent to pass an argument the schema lacks is false.
+	for _, name := range []string{"mcpInstructions", "ghost_memory_save"} {
+		for _, want := range []string{"pass pin=true and retention='persistent' together", "omit both otherwise"} {
+			if !strings.Contains(surfaces[name], want) {
+				t.Errorf("%s is missing the durability pair %q", name, want)
+			}
+		}
+	}
+	// The When-to-Save bullet and the category paragraph must route a
+	// constraint the same way, and the old "constraint found → dependency"
+	// bullet must not return.
+	if !strings.Contains(mcpInstructions, "a constraint that is not a toolchain or version limit → category: convention") {
+		t.Errorf("the When-to-Save bullet does not route a non-toolchain constraint to convention")
+	}
+	if strings.Contains(mcpInstructions, "API quirk, or constraint found → category: dependency") {
+		t.Errorf("the When-to-Save bullet routes every constraint to dependency, contradicting the category paragraph")
+	}
+	global := surfaces["ghost_save_global"]
+	if strings.Contains(global, "pin=true") {
+		t.Errorf("ghost_save_global advertises pin=true, an argument it does not take:\n%s", global)
+	}
+	if !strings.Contains(global, "pass retention='persistent' for a rule the user said must never be broken") {
+		t.Errorf("ghost_save_global lost the retention-only durability clause:\n%s", global)
+	}
+}
+
+// TestSaveToolExampleIsADurableRule pins the example the save description
+// carries. The old one was a location fact — 'k3s-mini-1 runs Grafana on port
+// 80' — which is the kind of memory the tool's own definition says not to
+// save, so the one exemplar every reader saw taught the wrong shape.
+func TestSaveToolExampleIsADurableRule(t *testing.T) {
+	_, session := newCapSession(t)
+
+	desc := saveToolDescription(t, session, "ghost_memory_save")
+	for _, want := range []string{
+		"Grafana stays on port 80 behind the ingress because the ops firewall only forwards 80/443; do not move it to 3000.",
+		"category='convention'",
+		"importance=0.8",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("ghost_memory_save's example lost %q — the exemplar teaches the wrong shape of memory:\n%s", want, desc)
+		}
+	}
+	if strings.Contains(desc, "k3s-mini-1 runs Grafana on port 80") {
+		t.Errorf("ghost_memory_save still carries the location-fact example its own definition says not to save:\n%s", desc)
+	}
+}
+
+// TestSaveGuidanceSaysWhatNotToSave pins the do-not-save list, which is the half
+// of the guidance an agent reads as a filter, including the #959 generalisation
+// of "CLAUDE.md" to the project's agent instructions.
+func TestSaveGuidanceSaysWhatNotToSave(t *testing.T) {
+	for _, want := range []string{
+		"ephemeral debug state",
+		"info derivable from code/git",
+		"content already in the project's agent instructions (CLAUDE.md, AGENTS.md)",
+	} {
+		if !strings.Contains(mcpInstructions, want) {
+			t.Errorf("mcpInstructions is missing %q in its do-not-save list — the guidance was removed or reworded away", want)
+		}
+	}
+	// The old wording named CLAUDE.md alone, which opencode, codex and goose
+	// users never see: their agent instructions are AGENTS.md or nothing.
+	if strings.Contains(mcpInstructions, "content in CLAUDE.md.") {
+		t.Errorf("mcpInstructions still names CLAUDE.md alone in its do-not-save list")
+	}
+}
+
+// TestSaveGuidanceScopesGlobalSaves pins the rule that answers the audit's
+// wrong-global rows: a global save is for what the user said applies everywhere,
+// a codebase rule stays in the project, and a memory about Ghost's own tools is
+// never one.
+func TestSaveGuidanceScopesGlobalSaves(t *testing.T) {
+	for _, want := range []string{
+		"Global (ghost_save_global) only when the user says it applies to every repository",
+		"A rule learned in this codebase stays in the project even when it sounds general",
+		"promote later with ghost_memory_promote",
+		"Never save a memory about how Ghost's own tools behaved",
+	} {
+		if !strings.Contains(mcpInstructions, want) {
+			t.Errorf("mcpInstructions is missing %q — the global-save rule was removed or reworded away", want)
+		}
+	}
+	// The tool's own description carries the rule too: it is what an agent
+	// reads at the moment it picks the tool.
+	_, session := newCapSession(t)
+	desc := saveToolDescription(t, session, "ghost_save_global")
+	for _, want := range []string{
+		"only when the user says the knowledge applies to every repository",
+		"A rule learned in this codebase stays in the project even when it sounds general",
+		"promote it later with ghost_memory_promote",
+		"Never save a memory about how Ghost's own tools behaved",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("ghost_save_global is missing %q — the global-save rule was removed or reworded away", want)
+		}
+	}
+}
+
 // TestRepoFactHintRecognisesOnlyContainmentClaims is the shape table for the
 // deterministic hint. Two conditions, both required IN THE SAME SENTENCE: the
 // note must NAME something in the repository and CLAIM what is there. Firing on

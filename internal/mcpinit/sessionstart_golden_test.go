@@ -268,6 +268,53 @@ func TestSessionStartBlockGolden(t *testing.T) {
 	}
 }
 
+// TestSessionStartInstructionIsOneStatementOnBothBranches pins the closing
+// line of the block, on the project branch and the no-project branch alike.
+// It is the only when-to-save text an agent is guaranteed to read before it
+// saves anything — under opencode's Code Mode the tool catalog shows five of
+// Ghost's tools and ghost_memory_save is not among them (#959) — so the two
+// branches carrying two copies of it is how the one that nobody re-reads goes
+// stale. The claims are the audit's: the four moments worth a save, one fact
+// per memory, and the three shapes that are not one.
+func TestSessionStartInstructionIsOneStatementOnBothBranches(t *testing.T) {
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	_, projectPath := goldenSessionStartStore(t, xdgHome)
+
+	projectBlock := RenderSessionContext(projectPath)
+	noProjectBlock := RenderSessionContext(filepath.Join(t.TempDir(), "unmatched"))
+
+	if !strings.Contains(projectBlock, sessionSaveInstruction) {
+		t.Errorf("the project branch dropped the session instruction:\n%s", projectBlock)
+	}
+	if !strings.Contains(noProjectBlock, sessionSaveInstruction) {
+		t.Errorf("the no-project branch dropped the session instruction:\n%s", noProjectBlock)
+	}
+	// The two branches must not have drifted into two wordings of the same
+	// advice: the instruction is one constant, so a block that carries it
+	// carries all of it.
+	if n := strings.Count(projectBlock, sessionSaveInstruction); n != 1 {
+		t.Errorf("the project branch carries the instruction %d times, so a second copy has drifted:\n%s", n, projectBlock)
+	}
+	for _, want := range []string{
+		"Save to Ghost as it happens, not at the end",
+		"when the user corrects you or states a rule",
+		"when a bug's root cause is found",
+		"when a choice is made for a reason",
+		"when a tool or dependency behaves unexpectedly",
+		"One memory per fact",
+		"ghost_memory_update",
+		"not what the repository says",
+		"not the current task's progress",
+		"never a key or token value",
+	} {
+		if !strings.Contains(sessionSaveInstruction, want) {
+			t.Errorf("the session instruction lost %q — the guidance was removed or reworded away", want)
+		}
+	}
+}
+
 // TestGoldenFixtureIsStableAcrossRuns is the guard on the golden itself: a
 // baseline recorded from a fixture that depends on the wall clock is not a
 // baseline. Two renders of the same store must be byte-identical, or the
@@ -374,7 +421,7 @@ Use project_id: "goldproj" for all ghost_* tool calls.
 - [preference] «global memory 08 content for the golden block»
 
 
-Save new discoveries with ghost_memory_save during work.
+Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.
 `
 
 // goldenBlockAfter is the block the session-start surface renders on this
@@ -431,4 +478,4 @@ const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"- [preference] `gmem08` (0.5) «global memory 08 content for the golden block»\n" +
 	"\n" +
 	"\n" +
-	"Save new discoveries with ghost_memory_save during work.\n"
+	sessionSaveInstruction + "\n"

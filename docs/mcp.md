@@ -262,11 +262,12 @@ Clients that support MCP resource subscriptions can pin these resources to survi
 
 The server embeds instructions that encourage agents to:
 
-- Save durable discoveries immediately instead of batching them.
-- Save durable knowledge — a rule, a constraint, a decision, or a reason the code
-  does not state — rather than a fact the repository already holds, such as
-  `foo.go contains HandleFoo()`.
-- Use categories consistently.
+- Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again.
+- Save durable knowledge — a rule, a constraint, a decision, or a reason the code does not state — rather than a fact the repository already holds, such as `foo.go contains HandleFoo()`.
+- Use categories consistently: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow, and any constraint that is not a toolchain or version limit), gotcha (pitfalls/bugs), dependency (versions/API quirks, and toolchain and version limits), preference (user preferences), fact (general knowledge — the weakest category, for when nothing more specific fits).
+- Durability knobs come as a pair: pass pin=true and retention='persistent' together for a rule the user said must never be broken, and omit both otherwise.
+- When the user states a date after which something changes — a rotation, an expiry, a migration, a deadline — pass valid_until with that date.
+- Global (ghost_save_global) only when the user says it applies to every repository. A rule learned in this codebase stays in the project even when it sounds general; promote later with ghost_memory_promote. Never save a memory about how Ghost's own tools behaved.
 - Search project memory before making changes.
 - Use `ghost_search_all` for cross-project knowledge.
 - Use `_global` only for information that truly applies everywhere.

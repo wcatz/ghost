@@ -196,7 +196,7 @@ func TestSessionStartBlockIsUnchangedWhenSessionScopeIsUnset(t *testing.T) {
 		"\n" +
 		"**Session #1** with this project.\n" +
 		"\n" +
-		"Save new discoveries with ghost_memory_save during work.\n"
+		sessionSaveInstruction + "\n"
 	if got != want {
 		t.Errorf("session-start block changed with injection.session_scope unset.\n got:\n%q\nwant:\n%q", got, want)
 	}
