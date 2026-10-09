@@ -31,7 +31,7 @@ func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 // tinySweepFixture is a four-memory corpus with two queries, for the sweep
 // behaviours that are about the CODEPATH (which point is the reference, what
 // happens when there is none) rather than about this corpus's ranking. The
-// committed dataset's 551 embeddings are the expensive part of this package and
+// committed dataset's 549 embeddings are the expensive part of this package and
 // both of those properties hold over four memories exactly as well.
 func tinySweepFixture(t *testing.T) (*memory.Store, []Query) {
 	t.Helper()
@@ -172,7 +172,7 @@ func TestSweepGrid(t *testing.T) {
 // What actually tipped it, since the two obvious causes are both wrong: ONE
 // corpus load costs ~10s under -race (9.8s and 13.0s here, 10.7s and 12.0s on
 // origin/main, so #677's per-row validity and provenance writes are free), and
-// four extra rows on 551 is 0.7% of a load. This package was within about ten
+// four extra rows on 549 is 0.7% of a load. This package was within about ten
 // seconds of the ceiling — CI's job passed at 7m08s — and #677 added one more
 // corpus-wide test, `TestBuiltinDatasetCarriesValidityIntoRetrieval`, a full
 // load plus a Candidates read, 9.14s here. Nine seconds of test against ten

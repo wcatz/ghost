@@ -7,8 +7,8 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Evaluation | What it measures | Headline result |
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
-| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories; paired 95% CI over `vector-only` **+0.018** [+0.003, +0.034] |
-| `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.138** (304/2200 rows); the item cap shortened **220/220** queries and dropped **8% of the graded rows it reached**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
+| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.831** on 220 queries and 549 memories; paired 95% CI over `vector-only` **+0.0175** [+0.0029, +0.0325] |
+| `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.141** (310/2200 rows); the item cap shortened **220/220** queries and dropped **7.7% of the graded rows it reached**; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
 | `ghost bench --passive` | The **passive** blocks — session start, `ghost context`, `ghost_project_context`, the project resource — over a synthetic four-project store that holds resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows | Withheld leakage **0.000** on every surface (and non-zero when a filter is disabled, which the test checks); expected-row recall **1.000** on every surface; the session-start count lines **PASS** the honesty check (8 of 8, after #897) |
 | `ghost bench --audit` | The **retrieval audit** itself: its verdicts against a labelled offline session | Same-domain memories judged `used` at session start **16 of 20** (10 of the 11 that no turn restates); cited ids caught **3 of 3**, restatements **4 of 4** (session-start call); spread-over-turns memories judged `used` **0 of 4** (the labels expect none, and after #932 no turn carries one alone); token-arm precision **0.286** (4/14) at session start; a call after the last turn judges **0** `used` |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
@@ -69,54 +69,27 @@ Published end-to-end (answer-accuracy) numbers use a GPT-4o judge and a generato
 
 `ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-Current numbers (v2 dataset: 551 memories spanning all 8 categories, 220 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
+Current numbers (v3 dataset: 549 memories spanning all 8 categories, 220 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.467   0.625   0.697   0.836   0.749
-vector-only      0.503   0.694   0.764   0.882   0.800
-hybrid           0.520   0.712   0.763   0.902   0.818
+fts-only         0.466   0.630   0.702   0.838   0.759
+vector-only      0.507   0.698   0.766   0.894   0.814
+hybrid           0.522   0.718   0.765   0.911   0.831
 ```
 
 Every row above was measured on this build from the committed dataset and
 fixture, and reproduces exactly with `go run ./cmd/ghost bench` (or
-`go test ./internal/bench -run TestBenchDatasetReport -v`). The corpus grew by
-four `validity_*` rows carrying `valid_from`/`valid_until`/`verified_at`, and
-three things moved with it that need separating, because only one of them is a
-ranking change:
-
-- **The four rows moved the numbers by at most 0.001 on the gated metrics.**
-  `fts-only` R@5 0.626 → 0.625, `vector-only` R@1 0.506 → 0.503 and
-  NDCG@10 0.801 → 0.800, `hybrid` unchanged on all five. The corpus grew
-  547 → 551, and four new candidates now compete for a ten-row window, so a
-  query that filled its window from eleven candidates fills it from fifteen.
-  That is the cost of a larger corpus rather than a ranking regression — the
-  shipped path did not move — and every condition stays inside the 0.005
-  NDCG@10 / R@5 tolerance the context-assembler plan applies to each of its
-  ranking-affecting PRs (the plan's own comparison contract, measured on the
-  branch against `origin/main`; there is no CI job asserting it). The floors
-  `TestBenchRegressionFloors` does enforce — NDCG@10 0.73/0.78/0.80 and
-  recall@10 0.67/0.75/0.75 — are met with the same headroom as before, which
-  is why the `fts` CI job stays green. Nothing in these conditions reads a validity
-  column: they call `SearchFTS`, `SearchVector` and `SearchHybrid` directly, so
-  the new rows are inert here on purpose. What the corpus now carries is a
-  validity window for the assembler's own condition to act on, which is where
-  a stage-2 filter becomes measurable (PR 7 of
-  [`docs/superpowers/specs/2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md)).
-  `TestBuiltinDatasetCarriesValidityIntoRetrieval` keeps that claim honest: it
-  reads the rows back out of `Store.Candidates` — the read stage 2 consumes
-  — with the stamps still attached, and
-  `TestValidityFixtureCoversEveryStage2State` fails if the four stop covering
-  every state stage 2 reads.
-- **The `embeddings.json` fixture was added to, never rewritten.** The four new
-  vectors were embedded through `internal/embedding`'s `EmbedDocument`, the same
-  client and `search_document: ` prefix that produced the committed ones, and
-  they were merged into the fixture by a one-off script that read the existing
-  keys, re-encoded them through the same JSON writer and refused to write unless
-  the result decoded to the original map. That script was not committed: it is
-  four keys in and nothing out, and a tool that exists to preserve one file's
-  keys is a thing to keep only while keys are being added. A future
-  regeneration goes through the route
+`go test ./internal/bench -run TestBenchDatasetReport -v`). The corpus changed
+from v2: two byte-identical duplicate rows were dropped (yaml_indent/yaml_two_space
+and no_main_push/no_main_direct), and fifteen queries gained a second row at the
+gain their content earns. The floors `TestBenchRegressionFloors` enforces
+(NDCG@10 0.74/0.79/0.81 and recall@10 0.67/0.75/0.75) are re-floored against
+these measurements with the same per-row margins the test already carried.
+This is a label/corpus correction, not a ranking change — the ranking is unchanged.
+- **The `embeddings.json` fixture was added to, never rewritten.** The vectors
+  for the remaining keys are exactly as before; the two dropped keys' vectors
+  remain in the fixture unused. A future regeneration goes through the route
   [in this section](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped) — `EmbedDocument` for memory keys and
   `EmbedQuery` for query names, not raw `/api/embed` calls, which is the mistake
   the prefix-free fixture used to carry — and that route rewrites every key, so
@@ -184,15 +157,15 @@ The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --swee
 
 ```
 params                     R@1    R@10   MRR@10  NDCG@10  vs default (paired 95%)
-vec=0.70                 0.520   0.763    0.902    0.818  this is the default  <- current default
-vec=0.80                 0.518   0.763    0.900    0.817  -0.0014 [-0.0059, +0.0024]
-vec=0.60                 0.519   0.763    0.901    0.816  -0.0019 [-0.0061, +0.0019]
-vec=0.90                 0.509   0.771    0.891    0.812  -0.0056 [-0.0160, +0.0038]
-vec=0.50                 0.509   0.755    0.890    0.809  -0.0087 [-0.0184, +0.0008]
-vec=0.30                 0.494   0.737    0.875    0.790  -0.0280 [-0.0440, -0.0128]
+vec=0.70                 0.522   0.765    0.911    0.831  this is the default  <- current default
+vec=0.80                 0.521   0.765    0.910    0.830  -0.0011 [-0.0056, +0.0028]
+vec=0.60                 0.521   0.765    0.910    0.830  -0.0015 [-0.0057, +0.0021]
+vec=0.90                 0.512   0.772    0.901    0.826  -0.0049 [-0.0148, +0.0036]
+vec=0.50                 0.513   0.758    0.900    0.824  -0.0074 [-0.0171, +0.0012]
+vec=0.30                 0.498   0.740    0.884    0.806  -0.0254 [-0.0411, -0.0113]
 ```
 
-- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.818, with vec 0.80 at 0.817 and vec 0.60 at 0.816 — 0.002 and 0.006 below, all three inside the intervals below; vec 0.50 and vec 0.30 fall away, 0.30 sharply (0.790). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30. **The top five points are not separable, and the table should not be read as a ranking of them.** That is measured rather than asserted, and the table above is the measurement: the intervals for 0.80, 0.60, 0.90 and 0.50 all contain zero, and 0.30's excludes it outright. So the grid establishes a **shape**: a broad plateau of indistinguishable points from 0.50 to 0.90, one bad corner (0.30), and nothing about which point inside the plateau is best. (These intervals are narrower than the cross-condition ones above because two grid points differ in one fusion weight only, so most per-query differences are exactly zero — which is the point: the plateau is flat, not merely close.) `vec=0.50` is the one row that changed when the sweep became reproducible, and it changed a conclusion rather than a digit: at −0.0100 [−0.0194, −0.0012] it read as separable from the default, and at −0.0087 [−0.0184, +0.0008] it does not — so 0.50 belongs inside the plateau, not at its edge.
+- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.831, with vec 0.80 at 0.830 and vec 0.60 at 0.830 — 0.001 and 0.001 below, all three inside the intervals below; vec 0.50 and vec 0.30 fall away, 0.30 sharply (0.806). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30. **The top five points are not separable, and the table should not be read as a ranking of them.** That is measured rather than asserted, and the table above is the measurement: the intervals for 0.80, 0.60, 0.90 and 0.50 all contain zero, and 0.30's excludes it outright. So the grid establishes a **shape**: a broad plateau of indistinguishable points from 0.50 to 0.90, one bad corner (0.30), and nothing about which point inside the plateau is best. (These intervals are narrower than the cross-condition ones above because two grid points differ in one fusion weight only, so most per-query differences are exactly zero — which is the point: the plateau is flat, not merely close.) `vec=0.50` is the one row that changed when the sweep became reproducible, and it changed a conclusion rather than a digit: at −0.0100 [−0.0194, −0.0012] it read as separable from the default, and at −0.0087 [−0.0184, +0.0008] it does not — so 0.50 belongs inside the plateau, not at its edge.
 - **The sweep reproduces, and the reason is the tie-break.** A grid point weighting its two legs EQUALLY is where RRF scores collide, and the store resolves a collision with two inputs that were being redrawn on every run: it breaks tied fused scores **by memory id**, and it re-sorts the window by a **decay factor** built from `created_at`. The benchmark used to seed every row through `store.Create`, so the id came from the column's `hex(randomblob(16))` default and `created_at` came from `datetime('now')` per row. `vec=0.50`'s NDCG@10 therefore took four values (0.807, 0.808, 0.809, 0.810) over ten runs of one binary, and its paired interval crossed zero, while the other five points — which barely tie — were byte-identical every time ([#708](https://github.com/wcatz/ghost/issues/708)). Both inputs are now a function of the fixture: a seeded row is stored under `bench:<project>:<key>` (`corpusID`) and carries one stamp per seeding pass (`corpusStamp`), so a tie resolves by the dataset's own key order and a tied pair of different categories is ordered by their categories rather than by which side of a second boundary they landed. Nothing in the ranking changed: `store.Create` still mints its own ids, `ghost bench`'s three-abiations table is **byte-identical before and after** (the ablations never tie, so a derived id cannot move them), and the five unaffected sweep rows are unchanged to the digit. The table above is five runs of one binary, byte-identical, and the report now says so in its own footer rather than telling the reader to discount a row.
 
 - **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
@@ -216,7 +189,7 @@ context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; repor
 
   metric                                value  population
   result rate                 1.000 (220/220)  queries that admitted at least one row
-  context precision          0.138 (304/2200)  graded-relevant of the admitted rows
+  context precision          0.141 (310/2200)  graded-relevant of the admitted rows
   contamination                0.000 (0/2200)  admitted rows the assembler flags
 
   contamination by arm         rows  what the arm is
@@ -229,14 +202,14 @@ context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; repor
   cross-bucket row, so there is nothing for an arm to catch. docs/benchmarks.md says which.
 
   budget adherence                      value  population
-  largest response                 2411 bytes  cap 16000 bytes, 0 responses over it
-  largest block, tokens            336 (est.)  bytes/4 rounded up per row; an estimate, there is no tokenizer here
-  item cap trimmed          0.499 (2191/4391)  of the rows that reached it; 1.000 (220/220) of answered queries, 0.082 (27/331) of the graded ones among them
-  response fit trimmed         0.000 (0/2200)  of the rows that reached it; 0.000 (0/220) of answered queries, 0.000 (0/304) of the graded ones among them
+  largest response                 2438 bytes  cap 16000 bytes, 0 responses over it
+  largest block, tokens            346 (est.)  bytes/4 rounded up per row; an estimate, there is no tokenizer here
+  item cap trimmed          0.499 (2191/4391)  of the rows that reached it; 1.000 (220/220) of answered queries, 0.077 (26/336) of the graded ones among them
+  response fit trimmed         0.000 (0/2200)  of the rows that reached it; 0.000 (0/220) of answered queries, 0.000 (0/310) of the graded ones among them
 
   cost per answered query               value  population
-  estimated tokens         296.609 (65254/220)  mean over answered queries; bytes/4 per row, an estimate, no tokenizer here
-  rendered bytes           2232.964 (491252/220) bytes  mean over answered queries; the complete response, framing and verdict line included
+  estimated tokens         296.850 (65307/220)  mean over answered queries; bytes/4 per row, an estimate, no tokenizer here
+  rendered bytes           2233.932 (491465/220) bytes  mean over answered queries; the complete response, framing and verdict line included
 
   admitted rows by bucket      rows            share  queries
   bench                        2200 1.000 (2200/2200)      220
@@ -257,9 +230,9 @@ context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; repor
 
 Three findings, all from the table above:
 
-- **The budget is the binding constraint on every query, and it costs graded-relevant rows.** The item cap shortened **220 of 220** answered queries and cut **2191 of the 4391 rows that reached it** (`0.499`). Of the **331 graded-relevant rows that reached the cap, 27 were cut** — `0.082`, or 8% of the relevant evidence the budget was offered. The same 27 are 1.2% of the 2191 rows it cut, so the cap is overwhelmingly discarding low-relevance rows, which is what a bottom-of-the-ranking trim should do; the 8% is the part that is not, and it is a direct argument about `limit`: the shipped 10 is not a neutral default, it is a policy that discards 8% of what it found. A caller who needs the rest asks for it and pays for it in tokens. **Two things about the 331, both of which a reader is entitled to.** It is the graded population that *reached the budget*, not every graded row in the corpus: a row stage 2 or stage 3 dropped never entered a block, so this report never scored it and its relevance is unmeasured — the figure is the budget's cost among the rows the budget had a choice about. And the denominator is the graded rows, not the admitted ones: "relevant rows cut, over the rows the caller received" divides two different populations and prints 0.012, a smaller and quieter number that means nothing.
-- **A block costs 296.6 estimated tokens and 2233 bytes, and the worst one cost 336 and 2411.** The mean sits close under the maximum because the item cap binds on every query, so most blocks are near-full rather than short — a caller sizing a context budget from the mean alone would under-reserve by about 12%, which is why the report prints both. The byte figure is the **complete rendered response**, framing and verdict line included, because that is what a caller receives; the token figure is the assembler's own bytes/4 estimate and there is no tokenizer in the pipeline, so it is an estimate everywhere it appears. Both are means over **answered** queries, so a query that returned nothing costs nothing here — true of the bill, false of the outcome, which is why the result rate is printed beside them.
-- **The byte cap never binds, and the item cap always does.** The largest rendered response was 2411 bytes against a 16000-byte cap — 15% — so the response-fit pass fired on no query: it ran on all 220 and dropped nothing, which is `0.000 (0/2200)` rather than `n/a`, because it *was* measured. This is not a coincidence but a consequence: a larger `limit` makes the *byte* cap harder to hit, not easier, so the two bounds are not interchangeable and a report that folded them into one "budget" number would advise raising the limit that raises the problem. They are counted separately, and with their own populations, for that reason: a row the fit pass drops has already passed the item cap, so the cap saw every row and the fit pass only the ones the cap left. The cap's 4391 and the fit pass's 2200 are different numbers about the same run, not a contradiction.
+- **The budget is the binding constraint on every query, and it costs graded-relevant rows.** The item cap shortened **220 of 220** answered queries and cut **2191 of the 4391 rows that reached it** (`0.499`). Of the **336 graded-relevant rows that reached the cap, 26 were cut** — `0.077`, or 7.7% of the relevant evidence the budget was offered. The same 26 are 1.2% of the 2191 rows it cut, so the cap is overwhelmingly discarding low-relevance rows, which is what a bottom-of-the-ranking trim should do; the 7.7% is the part that is not, and it is a direct argument about `limit`: the shipped 10 is not a neutral default, it is a policy that discards 7.7% of what it found. A caller who needs the rest asks for it and pays for it in tokens. **Two things about the 336, both of which a reader is entitled to.** It is the graded population that *reached the budget*, not every graded row in the corpus: a row stage 2 or stage 3 dropped never entered a block, so this report never scored it and its relevance is unmeasured — the figure is the budget's cost among the rows the budget had a choice about. And the denominator is the graded rows, not the admitted ones: "relevant rows cut, over the rows the caller received" divides two different populations and prints 0.012, a smaller and quieter number that means nothing.
+- **A block costs 296.9 estimated tokens and 2234 bytes, and the worst one cost 346 and 2438.** The mean sits close under the maximum because the item cap binds on every query, so most blocks are near-full rather than short — a caller sizing a context budget from the mean alone would under-reserve by about 12%, which is why the report prints both. The byte figure is the **complete rendered response**, framing and verdict line included, because that is what a caller receives; the token figure is the assembler's own bytes/4 estimate and there is no tokenizer in the pipeline, so it is an estimate everywhere it appears. Both are means over **answered** queries, so a query that returned nothing costs nothing here — true of the bill, false of the outcome, which is why the result rate is printed beside them.
+- **The byte cap never binds, and the item cap always does.** The largest rendered response was 2438 bytes against a 16000-byte cap — 15% — so the response-fit pass fired on no query: it ran on all 220 and dropped nothing, which is `0.000 (0/2200)` rather than `n/a`, because it *was* measured. This is not a coincidence but a consequence: a larger `limit` makes the *byte* cap harder to hit, not easier, so the two bounds are not interchangeable and a report that folded them into one "budget" number would advise raising the limit that raises the problem. They are counted separately, and with their own populations, for that reason: a row the fit pass drops has already passed the item cap, so the cap saw every row and the fit pass only the ones the cap left. The cap's 4391 and the fit pass's 2200 are different numbers about the same run, not a contradiction.
 - **A trim ratio is only meaningful if it can fall.** All three budget ratios are fractions of a stated population, and the query ratio's is **every answered query** rather than the trimmed ones — otherwise it reads `1.000` on any corpus where the cap binds everywhere *and* on any corpus where the budget had been removed entirely, and the report cannot tell a budget that binds from one that was deleted. The graded corpus cannot demonstrate that (220/220 is true there), so it is pinned on a 12-row fixture whose two queries straddle the cap: one reaches all twelve and is trimmed, one reaches three and is not, and the ratio must read `0.500 (1/2)`.
 - **This corpus cannot measure contamination, and the report says so rather than printing 0.000 as if it could.** The graded corpus holds no resolved row, no out-of-window row, no scope contradiction and no `_global` row (see [what this table cannot see](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped)), and the only contamination arm reachable through a real `assemble.Run` is `resolved` — stage 2 drops an out-of-window row and stage 3 drops a scope contradiction *before* either can be admitted. So all five arms read 0 and the 0.000 is a **property of the corpus, not evidence the filters work**. A gate on it would be a gate on a tautology, which is why this section is report-only. The measurement is carried by an 8-row in-test fixture (`contextFixture`, `internal/bench/context_test.go`) that holds a `resolved` row, an expired row, a not-yet-valid row and a `_global` row, and asserts the assembler withholds the first two and flags the third.
 
@@ -269,11 +242,11 @@ Three findings, all from the table above:
 
 **What this does not measure: session-start injection.** The block measured here is the one `ghost_memory_search` assembles. The passive blocks (session start, `ghost context`, `ghost_project_context`) are a different request shape and are measured by [`ghost bench --passive`](#passive-context-ghost-bench---passive) instead. The **cost** figures here do cover the rendered search response in full, framing and verdict line included, because that is what a caller receives and pays for; they do not cover a session-start injection.
 
-**CI cost.** The context metrics are measured on the existing graded dataset at report time, not by a new test that reloads the 551-row corpus: the fixture is 8 rows, and `internal/bench`'s test time is unchanged within noise (14.36 s on `98ffe9c5` before this section, 11.7–13.5 s after it over six runs, so within noise; the new tests themselves read 0.17 s).
+**CI cost.** The context metrics are measured on the existing graded dataset at report time, not by a new test that reloads the 549-row corpus: the fixture is 8 rows, and `internal/bench`'s test time is unchanged within noise (14.36 s on `98ffe9c5` before this section, 11.7–13.5 s after it over six runs, so within noise; the new tests themselves read 0.17 s).
 
 ## Passive context (`ghost bench --passive`)
 
-`ghost bench --context` cannot tell one version of the passive surfaces from another, for two reasons that are both about the corpus. It measures the block `ghost_memory_search` returns, which is a *query* request; the session-start block, `ghost context` and `ghost_project_context` are *passive* requests (no query, a bucket per project, a policy per bucket) built by `assemble.Run` in passive mode. And its 551-row corpus holds one project and no resolved, expired, out-of-window or `_global` row, so every filter a passive surface applies is a no-op on it and its contamination figure is `0.000` whatever the code does. `ghost bench --passive` is the measurement those two facts call for: a synthetic corpus built to discriminate, read through the production entry points.
+`ghost bench --context` cannot tell one version of the passive surfaces from another, for two reasons that are both about the corpus. It measures the block `ghost_memory_search` returns, which is a *query* request; the session-start block, `ghost context` and `ghost_project_context` are *passive* requests (no query, a bucket per project, a policy per bucket) built by `assemble.Run` in passive mode. And its 549-row corpus holds one project and no resolved, expired, out-of-window or `_global` row, so every filter a passive surface applies is a no-op on it and its contamination figure is `0.000` whatever the code does. `ghost bench --passive` is the measurement those two facts call for: a synthetic corpus built to discriminate, read through the production entry points.
 
 **The corpus** (`internal/bench/passive_corpus.go`, deterministic, offline, no embedding, no LLM, clock fixed at `bench.ContextInstant()`): four projects and `_global`, 217 rows. Each large project (`alpha`, `beta`, `gamma`) holds 10 live rows (importance 0.95 down to 0.50), one pinned low-importance old row, one `contradicts`-withheld row stage 5 separates from that pin (a live `contradicts` edge joins the two; the pin wins the documented tie-break, so the row is withheld and the pin's line names it), three superseded rows each beside the row that replaced it, three near-duplicates of live rows (explicit `duplicate` edges, because nothing embeds offline), 30 live low-importance filler rows so every budget cuts, and the rows that must never appear: three `resolved`, three `expired` (`valid_until` in 2020), two `not yet valid` (`valid_from` in 2099) and two scoped to `env=staging`. The withheld rows carry the highest importance and the newest `created_at` in their project, so a filter that stopped working would put them at the top of the block, not somewhere a cap would hide them. `delta` is small on purpose: all of it fits under every cap, so it is the one place a near-duplicate or a superseded row is shown beside what it restates. `_global` carries the same classes. Every validity stamp is in `memory.StoredStampLayout` and asserted to parse, because an unreadable stamp is kept as unset and a fixture of them would show zero leakage for the wrong reason.
 

@@ -30,7 +30,7 @@ const contextFixtureKey = "global_rule"
 // contextFixture is the small corpus the context metrics are measured on, and it
 // exists because the graded corpus cannot measure them.
 //
-// The 551-row corpus holds no resolved row, no `_global` row and no supersession
+// The 549-row corpus holds no resolved row, no `_global` row and no supersession
 // edge — docs/benchmarks.md says so — and the only contamination arm reachable
 // through a real assemble.Run is the resolved one, because stage 2 drops an
 // expired or not-yet-valid row and stage 3 drops a scope contradiction before
