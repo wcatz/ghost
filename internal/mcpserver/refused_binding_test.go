@@ -157,10 +157,9 @@ func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 }
 
 // TestMemorySaveWithoutRefusalReportsNothing pins the quiet side of the same
-// contract: an ordinary save under a name matching the working directory's
-// repository, and ordinary subsequent saves from a different repository, must
-// not report refusals. The name-shaped save binds to the working directory;
-// the path-shaped saves create/join their own project via repository identity.
+// contract: an ordinary save under a name, and an ordinary second save that
+// repository identity joins to the project it already had, must read exactly
+// as they did before. A notice on every result is a notice nobody reads.
 func TestMemorySaveWithoutRefusalReportsNothing(t *testing.T) {
 	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
@@ -169,35 +168,22 @@ func TestMemorySaveWithoutRefusalReportsNothing(t *testing.T) {
 	const origin = "https://github.com/wcatz/infra.git"
 	first := repoDir(t, "infra", origin)
 	second := repoDir(t, "infra-elsewhere", origin)
-	_, session := newCapSession(t)
+	srv, session := newCapSession(t)
+	// The server's own directory is the test binary's, a real checkout of another
+	// repository; this test is about an unbound server, so it has none.
+	srv.workingDir = ""
 
-	// First save: name-shaped, matches the working directory's repository (ghost).
-	// This binds the project to the working directory with the ghost remote.
-	res := callTool(t, session, "ghost_memory_save", map[string]any{
-		"project_id": "ghost",
-		"content":    "saved without a refused binding",
-		"category":   "fact",
-	})
-	if res.IsError {
-		t.Fatalf("save 0 failed: %s", resultText(res))
-	}
-	if out := resultText(res); strings.Contains(out, "instead") {
-		t.Errorf("save 0 reported a refusal that did not happen:\n%s", out)
-	}
-
-	// Second and third saves: path-shaped from a different repository (infra.git).
-	// These create/join their own project via repository identity (name "infra").
-	for i, projectID := range []string{first, second} {
+	for i, projectID := range []string{"infra", first, second} {
 		res := callTool(t, session, "ghost_memory_save", map[string]any{
 			"project_id": projectID,
 			"content":    "saved without a refused binding",
 			"category":   "fact",
 		})
 		if res.IsError {
-			t.Fatalf("save %d failed: %s", i+1, resultText(res))
+			t.Fatalf("save %d failed: %s", i, resultText(res))
 		}
 		if out := resultText(res); strings.Contains(out, "instead") {
-			t.Errorf("save %d reported a refusal that did not happen:\n%s", i+1, out)
+			t.Errorf("save %d reported a refusal that did not happen:\n%s", i, out)
 		}
 	}
 }

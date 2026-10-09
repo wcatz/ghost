@@ -242,14 +242,19 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		remote = detectRemoteForSave(projectID)
 	}
 
-	// If this is a new project (resolvedID == "") and the project_id is name-shaped
-	// (not a filesystem path), bind it to the server's working directory so the
-	// session-start resolver can match it. Do not rebind an existing project.
-	if resolvedID == "" && !pathShaped && s.workingDir != "" {
-		// Detect the remote from the working directory, if it's a git checkout.
-		remote = detectRemoteForSave(s.workingDir)
-		// Use the working directory as the recorded path for this project.
-		return s.ensureProjectForWithRemote(ctx, projectID, remote, s.workingDir)
+	// A save that CREATES a project from a name-shaped id binds it to the checkout
+	// the server was started in, so the next session in that directory resolves it
+	// instead of printing the no-project block (#957). Never an existing project:
+	// resolvedID == "" is the gate, and the store's upsert would not move a path
+	// anyway. Never a checkout another project already claims, by path or by
+	// remote: binding a second name there would silently fold it into the first.
+	if resolvedID == "" && !pathShaped {
+		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
+			if err := s.store.EnsureProjectWithRepo(ctx, projectID, dir, projectID, dirRemote); err != nil {
+				return "", nil, err
+			}
+			return projectID, nil, nil
+		}
 	}
 
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
@@ -257,22 +262,42 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		// resolution without the basename fallback. Going through its own
 		// resolution first could turn an arbitrary duplicate basename into an
 		// explicit id and bypass the unique-name rule.
-		return s.ensureProjectForWithRemote(ctx, projectID, remote, projectID)
+		return s.ensureProjectForWithRemote(ctx, projectID, remote)
 	}
 
 	// With no usable repository identity, retain ordinary id/name/path lookup.
 	if resolvedID != "" {
 		projectID = resolvedID
 	}
-	return s.ensureProjectForWithRemote(ctx, projectID, remote, "")
+	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+}
+
+// checkoutToBind reports the directory a newly created name-shaped project is
+// recorded against, and the repository remote there, or ok=false when the save
+// must open the project unbound as it always did: no usable server directory, a
+// directory some project already claims (an ambiguous claim counts), or one the
+// project-shape and credential guards would refuse as a recorded path.
+func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
+	dir = s.workingDir
+	if dir == "" {
+		return "", "", false
+	}
+	if id, _, err := s.store.ResolveProject(ctx, dir); err != nil || id != "" {
+		return "", "", false
+	}
+	if memory.RejectSecret("path", dir) != nil {
+		return "", "", false
+	}
+	if memory.CheckImportedProject(memory.PortableProject{ID: "x", Name: "x", Path: dir}) != nil {
+		return "", "", false
+	}
+	return dir, detectRemoteForSave(dir), true
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
 // resolution. repoRemote must come from the caller: an empty value preserves
 // the ordinary create-or-resolve behavior and never clears recorded identity.
-// projectPath is the filesystem path to record for the project; if empty, the project
-// id is used as the path (the store normalizes this).
-func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote, projectPath string) (string, *memory.BindingRefusal, error) {
+func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, *memory.BindingRefusal, error) {
 	normalizedRemote := memory.NormalizeRepoRemote(repoRemote)
 	if normalizedRemote != "" {
 		return s.store.ResolveOrCreateRepoProject(
@@ -280,13 +305,13 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 			projectID,
 			path.Base(normalizedRemote),
 			projectID,
-			projectPath,
+			projectID,
 			projectID,
 			repoRemote,
 		)
 	}
 
-	if err := s.store.EnsureProjectWithRepo(ctx, projectID, projectPath, projectID, repoRemote); err != nil {
+	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, repoRemote); err != nil {
 		return "", nil, err
 	}
 	return projectID, nil, nil
@@ -737,7 +762,7 @@ func workingDirFromEnv() string {
 		cwd = resolved
 	}
 	// Never bind to home or filesystem root — they are not project checkouts.
-	if cwd == "/" {
+	if filepath.Dir(cwd) == cwd {
 		return ""
 	}
 	if home, err := os.UserHomeDir(); err == nil {
