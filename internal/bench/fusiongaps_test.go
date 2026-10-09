@@ -277,7 +277,7 @@ func TestFormatResultsCarriesTheTopRowShares(t *testing.T) {
 	if !strings.Contains(out, "top-row shares over the 2 answerable queries") {
 		t.Errorf("`ghost bench` output carries no top-row shares block, so the doc's promise is not runnable:\n%s", out)
 	}
-	for _, want := range []string{"top row relevant", "top row best-labelled", "R@1 ceiling on these labels"} {
+	for _, want := range []string{"top row relevant", "top row best-labelled", "relevant row in top 5", "R@1 ceiling on these labels"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the shares block is present but %q is not:\n%s", want, out)
 		}

@@ -114,6 +114,7 @@ func FormatTopRowShares(results []Result) string {
 		}
 		fmt.Fprintf(&b, "  top row relevant           %-12s %.3f\n", r.Condition, r.TopRowRelevant)
 		fmt.Fprintf(&b, "  top row best-labelled      %-12s %.3f\n", r.Condition, r.TopRowBestLabelled)
+		fmt.Fprintf(&b, "  relevant row in top 5      %-12s %.3f\n", r.Condition, r.Top5Relevant)
 	}
 	if c, ok := ceilingOf(results); ok {
 		fmt.Fprintf(&b, "  R@1 ceiling on these labels %.3f\n", c)

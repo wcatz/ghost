@@ -64,6 +64,9 @@ type Result struct {
 	// against the window.
 	TopRowRelevant     float64
 	TopRowBestLabelled float64
+	// Top5Relevant is the share of the scored queries with at least one
+	// relevant row among the first five results.
+	Top5Relevant float64
 	// Recall1Ceiling is what a perfect ranking of this query set scores at
 	// R@1 — the mean of 1/(labelled rows per query). A property of the
 	// LABELS rather than of the ranking, so it is one figure for the run
@@ -149,7 +152,7 @@ type rankFn func(q Query) ([]string, error)
 func runCondition(ctx context.Context, store *memory.Store, name string, queries []Query, rank rankFn) (Result, error) {
 	res := Result{Condition: name}
 	var sumR1, sumR5, sumR10, sumMRR, sumNDCG float64
-	var sumTopRel, sumTopBest, sumCeiling float64
+	var sumTopRel, sumTopBest, sumTop5, sumCeiling float64
 	for _, q := range queries {
 		if q.Rel.relevantCount() == 0 {
 			// A query nothing in the corpus answers is undefined for these
@@ -186,6 +189,7 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		// and another did not cannot shift the denominator.
 		sumTopRel += boolAsFloat(TopRowRelevant(ranked, q.Rel))
 		sumTopBest += boolAsFloat(TopRowBestLabelled(ranked, q.Rel))
+		sumTop5 += boolAsFloat(AnyRelevantInTopK(ranked, q.Rel, 5))
 		sumCeiling += Recall1Ceiling(q.Rel)
 		cosines, err := resultCosines(ctx, store, q.Vector, ranked)
 		if err != nil {
@@ -206,6 +210,7 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		res.NDCG10 = sumNDCG / n
 		res.TopRowRelevant = sumTopRel / n
 		res.TopRowBestLabelled = sumTopBest / n
+		res.Top5Relevant = sumTop5 / n
 		res.Recall1Ceiling = sumCeiling / n
 	}
 	return res, nil

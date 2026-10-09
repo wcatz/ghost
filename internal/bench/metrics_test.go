@@ -107,6 +107,28 @@ func TestTopRowBestLabelled(t *testing.T) {
 	}
 }
 
+func TestAnyRelevantInTopK(t *testing.T) {
+	rel := Relevance{"a": 1, "b": 2}
+	cases := []struct {
+		name   string
+		ranked []string
+		k      int
+		want   bool
+	}{
+		{"first", []string{"a", "x", "y"}, 5, true},
+		{"last-in-window", []string{"x", "y", "z", "w", "b"}, 5, true},
+		{"just-outside-window", []string{"x", "y", "z", "w", "v", "b"}, 5, false},
+		{"short-list", []string{"x", "a"}, 5, true},
+		{"empty", nil, 5, false},
+		{"zero-window", []string{"a"}, 0, false},
+	}
+	for _, tc := range cases {
+		if got := AnyRelevantInTopK(tc.ranked, rel, tc.k); got != tc.want {
+			t.Errorf("%s: AnyRelevantInTopK(%v, %d) = %v, want %v", tc.name, tc.ranked, tc.k, got, tc.want)
+		}
+	}
+}
+
 func TestRecall1Ceiling(t *testing.T) {
 	// One labelled row: the only ceiling that reads as a ranking.
 	approx(t, "ceiling-one", Recall1Ceiling(Relevance{"a": 1}), 1.0)

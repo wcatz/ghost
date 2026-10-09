@@ -64,6 +64,25 @@ func TopRowRelevant(ranked []string, rel Relevance) bool {
 	return rel[ranked[0]] > 0
 }
 
+// AnyRelevantInTopK reports whether at least one of the first k rows is
+// one the query grades relevant. It is the share-friendly cousin of
+// RecallAtK: a query that labels four rows and has one of them in the
+// window scores 1 here and 0.25 there, so it answers "did the window
+// hold something that answers me" rather than "what fraction of the
+// answer was found". A k below 1 or an empty list has no window, so it
+// reports false.
+func AnyRelevantInTopK(ranked []string, rel Relevance, k int) bool {
+	if k > len(ranked) {
+		k = len(ranked)
+	}
+	for i := 0; i < k; i++ {
+		if rel[ranked[i]] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // TopRowBestLabelled reports whether the top row carries the highest
 // gain the query labels any row with. A tie for the best label counts:
 // two rows at the same gain are both best-labelled, so a query grading

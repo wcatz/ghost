@@ -186,12 +186,13 @@ The R@1 column in the table above is **recall at 1** — the fraction of all rel
 
 On the v2 corpus, 163 of 220 queries carry 2–4 labelled rows, so a perfect ranking scores only about 0.599 at R@1. That is the **R@1 ceiling**: the mean of 1/(labelled rows per query) over the answerable query set. Against that ceiling, the shipped hybrid R@1 of 0.520 is 87% of what is reachable, not 52%.
 
-`ghost bench` now prints two additional shares and the ceiling after the table:
+`ghost bench` prints three additional lines per condition and the ceiling after the table, leaving the table itself unchanged:
 - **top row relevant** — the share of answerable queries whose first result is a relevant row.
 - **top row best-labelled** — the share whose first result carries the highest gain the query labels any row with (a tie for the best gain counts as best-labelled).
+- **relevant row in top 5** — the share of answerable queries with at least one relevant row among the first five results.
 - **R@1 ceiling on these labels** — the mean ceiling over the answerable query set.
 
-These are statements about ORDER and they are the signal a caller reads when they see the first row. Recall@1, MRR@10 and NDCG@10 are also about order, but they discount by the number of labelled rows; the shares above do not, so they read as "did the first row I was handed answer me" rather than "what fraction of the answer was found".
+The shares count queries, not labelled rows, so a query labelling four rows counts once whether one or all four are in the window. Recall@1 is the one ranking metric here that divides by the number of labelled rows; MRR@10 (1/rank of the first relevant hit) and NDCG@10 (normalised by the ideal DCG of the label set) score 1.000 for a perfect ranking however many rows a query labels. That is why only R@1 needs a ceiling, and why the shares read as "did the first row I was handed answer me" rather than "what fraction of the answer was found".
 
 ### Parameter sweep (`ghost bench --sweep`)
 
