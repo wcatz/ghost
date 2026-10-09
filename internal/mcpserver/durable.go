@@ -185,7 +185,7 @@ func repoFactHint(content, category string) string {
 		return ""
 	}
 	for _, sentence := range sentenceBoundary.Split(content, -1) {
-		if !(repoFactPredicate.MatchString(sentence) && repoFactReference.MatchString(sentence)) {
+		if !repoFactPredicate.MatchString(sentence) || !repoFactReference.MatchString(sentence) {
 			continue
 		}
 		if repoFactRuleCategory[strings.ToLower(strings.TrimSpace(category))] && repoFactRule.MatchString(sentence) {
