@@ -239,6 +239,12 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			return fmt.Sprintf("withheld by the retention filter: the memory's tier is not %s", Token(p.req.Retention))
 		case reasonNearDuplicate:
 			return fmt.Sprintf("removed as a near-duplicate: the retriever dropped it in favour of %s", strings.Join(tokens(memory.ClampAttribution(p.losers[id].LostTo)), ", "))
+		case reasonContradictionSeparated:
+			kept := p.separationKept(id)
+			if len(kept) == 1 {
+				return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the row that stage kept", Token(kept[0]))
+			}
+			return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the rows that stage kept", strings.Join(tokens(kept), ", "))
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
 		case "budget", "slice_budget":
@@ -264,6 +270,19 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 		return "not in the answer, and no stage recorded why"
 	}
 	return fmt.Sprintf("outside the result window: only the top %d candidates are retrieved", p.trace.Limit)
+}
+
+// separationKept is the kept rows a stage-5 separation recorded against the
+// withheld id, or nil if none. It is the counterpart explainReason names so a
+// reader meeting the withheld memory can find the side that survived — always
+// rows the withheld memory directly contradicts.
+func (p *pipeline) separationKept(withheld string) []string {
+	for _, sep := range p.separations {
+		if sep.withheld == withheld {
+			return sep.kept
+		}
+	}
+	return nil
 }
 
 // admitCap is the item count the answer was budgeted to, for the sentence that

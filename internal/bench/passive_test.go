@@ -187,7 +187,7 @@ func TestPassiveCorpusGradesAreConsistent(t *testing.T) {
 	}
 	// Every project (and `_global`) carries every class the bench grades.
 	for _, p := range append(append([]string{}, PassiveProjects...), PassiveGlobal) {
-		for _, k := range []PassiveKind{KindLive, KindPinned, KindResolved, KindExpired, KindFuture, KindScoped, KindSuperseded, KindDuplicate} {
+		for _, k := range []PassiveKind{KindLive, KindPinned, KindResolved, KindExpired, KindFuture, KindScoped, KindSuperseded, KindDuplicate, KindContradictsWithheld} {
 			if kinds[p][k] == 0 {
 				t.Errorf("%s holds no %s row", p, k)
 			}
@@ -264,15 +264,62 @@ func TestPassiveCorpusGradesAreConsistent(t *testing.T) {
 	}
 }
 
+// TestPassiveCorpusSeparatesAContradictsPair holds the corpus's contradicts pair
+// to the behaviour it exists to measure (#925). The leak figure would stay zero
+// for the wrong reason if the losing row simply never reached the window: this
+// reads the rendered blocks and requires the row to be ABSENT as a row and the
+// kept pin's line to name it. Both sides are checked — the project's pair and the
+// `_global` pair, which is read in the same block — and on every surface, because
+// every surface renders Item.Line and so inherits the marker.
+func TestPassiveCorpusSeparatesAContradictsPair(t *testing.T) {
+	c, env := passiveEnv(t, BlindNone)
+	byID := c.ByID()
+	for _, spec := range PassiveSurfaces() {
+		for _, p := range PassiveProjects {
+			block, err := spec.Read(context.Background(), env, p)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", spec.Name, p, err)
+			}
+			rows := map[string]bool{}
+			for _, id := range renderedIDs(block) {
+				rows[id] = true
+			}
+			for _, owner := range []string{p, PassiveGlobal} {
+				withheld, kept := corpusID(owner, "contradict-00"), corpusID(owner, "pinned-00")
+				if byID[withheld].Kind != KindContradictsWithheld {
+					t.Fatalf("%s is not a %s row", withheld, KindContradictsWithheld)
+				}
+				if rows[withheld] {
+					t.Errorf("%s/%s: %s rendered as its own row, so the corpus does not exercise stage 5", spec.Name, p, withheld)
+				}
+				if !rows[kept] {
+					t.Fatalf("%s/%s: the kept pin %s did not render, so the pair cannot be marked", spec.Name, p, kept)
+				}
+				var line string
+				for _, l := range strings.Split(block, "\n") {
+					if strings.HasPrefix(l, "- [") && strings.Contains(l, "`"+kept+"` (") {
+						line = l
+						break
+					}
+				}
+				if !strings.Contains(line, "conflicts_with=`"+withheld+"`") {
+					t.Errorf("%s/%s: the kept line does not mark %s withheld:\n%s", spec.Name, p, withheld, line)
+				}
+			}
+		}
+	}
+}
+
 // TestPassiveMeasurementCatchesADisabledFilter is the mutation check. A store
 // seeded without the windows (or without the withdrawals) is the store a product
 // whose validity (or resolved) filter had been removed would behave as if it held:
 // the filter reads each row as live. The leakage figure must go non-zero on every
 // surface, and name rows of the kind the filter exists for — and nothing else.
 //
-// This is the in-test half. The source half — deleting stage 2 from
-// internal/assemble and watching the same figure move — was run by hand for the
-// PR that added this file; it cannot be a test, because it edits the product.
+// The mutation has to be seeded rather than made by deleting the assembler's
+// stage-2 drop: the passive fetch excludes a closed window in SQL before the
+// window closes (passiveFetchSQL), so a row stage 2 would drop never reaches it
+// and removing the stage alone moves no figure on any surface.
 func TestPassiveMeasurementCatchesADisabledFilter(t *testing.T) {
 	for _, tc := range []struct {
 		blind PassiveBlind
@@ -370,7 +417,8 @@ func TestPassiveHonestyCheckReadsBothHeaderShapes(t *testing.T) {
 	c, _ := NewPassiveCorpus()
 	byID := c.ByID()
 	// delta, unscoped: 11 eligible rows (5 live, pinned, 2 old, 2 dup, 1 staging),
-	// 2 withheld by a stage (expired, future), 1 resolved (never in the window).
+	// 3 withheld by a stage (expired, future, contradicts), 1 resolved (never in
+	// the window).
 	var block strings.Builder
 	shown := []string{"live-00", "live-01", "live-02"}
 	for _, k := range shown {
@@ -382,19 +430,19 @@ func TestPassiveHonestyCheckReadsBothHeaderShapes(t *testing.T) {
 		checkSessionHeaders(&sr, PassiveSurfaceSpec{Header: true}, c, "delta", text)
 		return sr
 	}
-	// shown 3, cut 8, withheld 2, total 13.
-	legacy := check("3 shown of 13 total — 10 not shown, ranked by a composite score; use x for the rest")
+	// shown 3, cut 8, withheld 3, total 14.
+	legacy := check("3 shown of 14 total — 11 not shown, ranked by a composite score; use x for the rest")
 	if len(legacy.Findings) == 0 {
 		t.Error("the unfixed header (withheld rows counted as ranked out) passed the honesty check")
 	}
-	fixed := check("3 shown of 13 total — 10 not shown: 8 ranked out by a composite score, 2 withheld rather than ranked out; use x for the rest")
+	fixed := check("3 shown of 14 total — 11 not shown: 8 ranked out by a composite score, 3 withheld rather than ranked out; use x for the rest")
 	for _, f := range fixed.Findings {
 		if f.Bucket == "project" {
 			t.Errorf("the fixed header failed the check: %s", f.Problem)
 		}
 	}
 	// A shown count that is not the number of lines is caught on its own.
-	liar := check("5 shown of 13 total — 8 ranked out by a composite score, 2 withheld rather than ranked out; use x for the rest")
+	liar := check("5 shown of 14 total — 8 ranked out by a composite score, 3 withheld rather than ranked out; use x for the rest")
 	found := false
 	for _, f := range liar.Findings {
 		found = found || strings.Contains(f.Problem, "says 5 shown, block renders 3")

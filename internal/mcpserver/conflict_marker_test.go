@@ -37,17 +37,40 @@ func rowLine(t *testing.T, out, id string) string {
 	return found[0]
 }
 
-func wantPair(t *testing.T, surface, out, a, b string) {
-	t.Helper()
-	if l := rowLine(t, out, a); !strings.Contains(l, "conflicts_with=`"+b+"`") {
-		t.Errorf("%s: %s does not name %s: %q", surface, a, b, l)
+// linesFor returns every rendered memory line naming id. The withheld side of a
+// separated pair renders none, so a caller checking a pair needs a non-fatal
+// form rather than rowLine.
+func linesFor(out, id string) []string {
+	var found []string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "- [") && strings.Contains(l, "`"+id+"` (") {
+			found = append(found, l)
+		}
 	}
-	if l := rowLine(t, out, b); !strings.Contains(l, "conflicts_with=`"+a+"`") {
-		t.Errorf("%s: %s does not name %s: %q", surface, b, a, l)
+	return found
+}
+
+// wantSeparatedPair asserts the pair is separated on this surface: exactly one
+// side renders, and its line names the other as the row stage 5 withheld.
+func wantSeparatedPair(t *testing.T, surface, out, a, b string) {
+	t.Helper()
+	la, lb := linesFor(out, a), linesFor(out, b)
+	switch {
+	case len(la) == 1 && len(lb) == 0:
+		if !strings.Contains(la[0], "conflicts_with=`"+b+"`") {
+			t.Errorf("%s: %s does not name the withheld %s: %q", surface, a, b, la[0])
+		}
+	case len(lb) == 1 && len(la) == 0:
+		if !strings.Contains(lb[0], "conflicts_with=`"+a+"`") {
+			t.Errorf("%s: %s does not name the withheld %s: %q", surface, b, a, lb[0])
+		}
+	default:
+		t.Errorf("%s: a separated pair rendered %d line(s) for %s and %d for %s, want exactly one side",
+			surface, len(la), a, len(lb), b)
 	}
 }
 
-func TestEverySurfaceMarksAContradictingPair(t *testing.T) {
+func TestEverySurfaceSeparatesAContradictingPair(t *testing.T) {
 	st := newValidityStore(t)
 	srv, session := validityServerFor(t, st)
 	ctx := context.Background()
@@ -64,16 +87,16 @@ func TestEverySurfaceMarksAContradictingPair(t *testing.T) {
 	}
 
 	pc := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
-	wantPair(t, "ghost_project_context", pc, a, b)
-	wantPair(t, "ghost_project_context", pc, ga, gb)
+	wantSeparatedPair(t, "ghost_project_context", pc, a, b)
+	wantSeparatedPair(t, "ghost_project_context", pc, ga, gb)
 	if l := rowLine(t, pc, c); strings.Contains(l, "conflicts_with") {
 		t.Errorf("an unlinked row is marked: %q", l)
 	}
 
-	wantPair(t, "ghost://memories/global", renderGlobalMemoriesResource(t, srv), ga, gb)
+	wantSeparatedPair(t, "ghost://memories/global", renderGlobalMemoriesResource(t, srv), ga, gb)
 
 	search := resultText(callTool(t, session, "ghost_memory_search", map[string]any{"project_id": "vproj", "query": "cache"}))
-	wantPair(t, "ghost_memory_search", search, a, b)
+	wantSeparatedPair(t, "ghost_memory_search", search, a, b)
 }
 
 func TestNoSurfaceMarksAWithdrawnOrHalfWithheldPair(t *testing.T) {

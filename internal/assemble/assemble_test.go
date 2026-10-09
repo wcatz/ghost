@@ -1167,11 +1167,11 @@ func TestMixedRemovalsReportTheDominantCause(t *testing.T) {
 }
 
 // TestEmptyResultCarriesNoBlockShapedNotes: the notes an empty answer renders are
-// read by whoever receives it, and two of the stage-5 notes are statements about
-// the block — which by definition does not exist here. "No link joins two of
-// these candidates" is a claim about a set that was never retrieved, and
-// "both remain in the block" is false of two rows the budget removed. An empty
-// answer carries the removal breakdown instead, which is the part that is true.
+// read by whoever receives it, and the stage-5 notes are statements about the
+// block — which by definition does not exist here. "No link joins two of these
+// candidates" is a claim about a set that was never retrieved, and a separation
+// sentence is false of a pair the stage never saw. An empty answer carries the
+// removal breakdown instead, which is the part that is true.
 func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "one", 0.9)
 	b := candidate("B1", "proj", "fact", "two", 0.8)
@@ -1179,30 +1179,30 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
 	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
 
-	// Both endpoints admitted: the pair is reported, because the reader is
-	// looking at an answer that contains both.
+	// Both endpoints admitted at stage 5: the pair is separated, one row stays,
+	// and the answer says so, because the reader is looking at the surviving row.
 	full := baseRequest()
 	full.Budget.MaxItems = 10
 	res := run(t, &fakeRetriever{set: set}, full)
-	if len(res.Items) != 2 {
-		t.Fatalf("precondition: wanted both rows admitted, got %v", itemIDs(res.Items))
+	if got := itemIDs(res.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("precondition: wanted the winner admitted, got %v", got)
 	}
 	if !hasNote(res.Notes, "contradicts pair recorded") {
-		t.Errorf("a contradicts pair with both endpoints in the answer is not reported: %v", res.Notes)
+		t.Errorf("a separated contradicts pair is not reported: %v", res.Notes)
 	}
 
-	// One endpoint cut by the budget. Stage 5 saw both; the answer contains one.
-	// A note claiming "both remain in the block" would be false of what the
-	// caller is reading, so it must not be rendered.
+	// One endpoint withheld by the final budget. Stage 5 saw both and separated
+	// them, so the survivor names the withheld row; nothing claims both are in
+	// the block.
 	cutReq := baseRequest()
 	cutReq.Budget.MaxItems = 1
 	cut := run(t, &fakeRetriever{set: set}, cutReq)
-	if len(cut.Items) != 1 {
-		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(cut.Items))
+	if got := itemIDs(cut.Items); !eq(got, []string{"A1"}) {
+		t.Fatalf("precondition: wanted one admitted row, got %v", got)
 	}
 	for _, n := range cut.Notes {
-		if hasNote([]string{n}, "remain in the block") {
-			t.Errorf("the budget cut one endpoint, but the answer still claims both are in the block: %q", n)
+		if hasNote([]string{n}, "contradicts pair recorded") && !hasNote([]string{n}, "withheld") {
+			t.Errorf("a separation note does not say the other side was withheld: %q", n)
 		}
 	}
 
@@ -1219,8 +1219,8 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(empty.Items))
 	}
 	for _, n := range empty.Notes {
-		if hasNote([]string{n}, "remain in the block") {
-			t.Errorf("an empty result reports rows in the block: %q", n)
+		if hasNote([]string{n}, "contradicts pair recorded") {
+			t.Errorf("an empty result reports a block-shaped conflict note: %q", n)
 		}
 		if hasNote([]string{n}, "edges_unavailable") {
 			t.Errorf("an empty result carries a link-graph claim about a set that was never retrieved: %q", n)
@@ -1253,9 +1253,9 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 		}
 	}
 
-	// One endpoint dropped by an earlier stage, the other admitted: the edge set
-	// still names the pair, and "both remain in the block" would be false of the
-	// row stage 2 removed.
+	// One endpoint dropped by an earlier stage, the other admitted: the pair
+	// never reached stage 5, so no separation note is invented for a row the
+	// stage never saw.
 	expired := "2020-01-01 00:00:00"
 	kept := candidate("KEEP", "proj", "fact", "admitted row", 0.9)
 	gone := candidate("GONE", "proj", "fact", "expired row", 0.8)
@@ -1266,12 +1266,12 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	halfReq := baseRequest()
 	halfReq.Budget.MaxItems = 10
 	partial := run(t, &fakeRetriever{set: halfSet}, halfReq)
-	if len(partial.Items) != 1 {
-		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(partial.Items))
+	if got := itemIDs(partial.Items); !eq(got, []string{"KEEP"}) {
+		t.Fatalf("precondition: wanted one admitted row, got %v", got)
 	}
 	for _, n := range partial.Notes {
-		if hasNote([]string{n}, "remain in the block") {
-			t.Errorf("a contradicts note claims both rows are in the block when one was dropped: %q", n)
+		if hasNote([]string{n}, "contradicts pair recorded") {
+			t.Errorf("a pair stage 5 never saw is reported: %q", n)
 		}
 	}
 }
@@ -1414,14 +1414,14 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 	if !hasNote(tightRes.Notes, "retrieval_fts leg failed") {
 		t.Errorf("under a tight note budget the leg failure was dropped while it led the list: %v", tightRes.Notes)
 	}
-	if hasNote(tightRes.Notes, "both remain in the block") {
+	if hasNote(tightRes.Notes, "contradicts pair recorded") {
 		t.Errorf("conflict chatter was kept ahead of the retrieval's own failure: %v", tightRes.Notes)
 	}
 	// The pairs are a bounded summary, not a list: a graph with dozens of
 	// contradicting edges must not be able to crowd out anything else.
 	pairs := 0
 	for _, n := range res.Notes {
-		if hasNote([]string{n}, "both remain in the block") {
+		if hasNote([]string{n}, "contradicts pair recorded") {
 			pairs++
 		}
 	}
@@ -1476,7 +1476,7 @@ func TestOneFactIsOneNoteWhicheverWayTheEdgePoints(t *testing.T) {
 
 	pairs := 0
 	for _, n := range res.Notes {
-		if hasNote([]string{n}, "both remain in the block") {
+		if hasNote([]string{n}, "contradicts pair recorded") {
 			pairs++
 		}
 	}
@@ -1516,10 +1516,10 @@ func TestThePartialListSaysItIsPartialUnderPressure(t *testing.T) {
 }
 
 // TestAFailedLookupReportsNoPairsEvenIfEdgesWereSupplied: a failed lookup means
-// no edges were read, so saying "both remain in the block" about them asserts a
-// fact about rows the assembler never saw. The production store never returns
-// edges with an error, but the retriever is an interface, so the assembler states
-// the rule itself rather than leaning on an invariant it cannot see.
+// no edges were read, so naming a pair about them asserts a fact about rows the
+// assembler never saw. The production store never returns edges with an error,
+// but the retriever is an interface, so the assembler states the rule itself
+// rather than leaning on an invariant it cannot see.
 func TestAFailedLookupReportsNoPairsEvenIfEdgesWereSupplied(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "one", 0.9)
 	b := candidate("B1", "proj", "fact", "two", 0.8)
@@ -1534,7 +1534,7 @@ func TestAFailedLookupReportsNoPairsEvenIfEdgesWereSupplied(t *testing.T) {
 	if !hasNote(res.Notes, "the link lookup failed") {
 		t.Errorf("the failed lookup is not disclosed: %v", res.Notes)
 	}
-	if hasNote(res.Notes, "both remain in the block") {
+	if hasNote(res.Notes, "contradicts pair recorded") {
 		t.Errorf("pairs are reported for a lookup that read no edges: %v", res.Notes)
 	}
 }
