@@ -55,6 +55,58 @@ func diversityRequest(window int) Request {
 	return req
 }
 
+// diversityBucketedRequest is the shape the real session start sends: a project
+// slice and a `_global` slice, with no total cap, so each bucket's own slice cap
+// is what stage 8 enforces over the rows it admits. The share divides each
+// bucket by its own cap, which is what the two-bucket tests pin.
+func diversityBucketedRequest(projCap, globalCap int) Request {
+	req := diversityRequest(projCap)
+	req.Budget = Budget{Slices: []Slice{
+		{Bucket: "proj", MaxItems: projCap, ClampBytes: 200},
+		{Bucket: memory.GlobalProjectID, MaxItems: globalCap, ClampBytes: 300},
+	}}
+	return req
+}
+
+// bucketedFact is a row in the named category in the named bucket.
+func bucketedFact(id, bucket, category string, score float64) memory.Candidate {
+	return candidate(id, bucket, category, "a "+bucket+" "+category+" memory "+id, score)
+}
+
+// renderedVerdictsAreHonest is the invariant the per-bucket window exists for: a
+// row the answer RENDERS carries no drop verdict, and the bucket tally the passive
+// header reads counts exactly the rows it renders. Before the per-bucket window a
+// deferred row could be admitted by stage 8 with its deferral verdict still on it,
+// which is a header-honesty break — the block shows a row the header says it
+// withheld.
+func renderedVerdictsAreHonest(t *testing.T, res Result) {
+	t.Helper()
+	shown := map[string]bool{}
+	perBucket := map[string]int{}
+	for _, it := range res.Items {
+		shown[it.ID] = true
+		perBucket[it.Bucket]++
+	}
+	for _, d := range res.Trace.Decisions {
+		if d.Kept || !shown[d.ID] {
+			continue
+		}
+		t.Errorf("row %s is RENDERED but carries a drop verdict: %+v", d.ID, d)
+	}
+	for bucket, n := range perBucket {
+		tally := CountsFor(res.Trace, bucket, n)
+		if tally.Shown != n {
+			t.Errorf("bucket %s: the tally says %d shown, the answer renders %d", bucket, tally.Shown, n)
+		}
+		for _, d := range res.Trace.Decisions {
+			if d.Kept || d.ProjectID != bucket || !shown[d.ID] {
+				continue
+			}
+			t.Errorf("bucket %s: %s is counted a withheld row and is rendered", bucket, d.ID)
+		}
+	}
+}
+
 // diversityQueryRequest is the same window as a QUERY, which is the shape
 // `ghost_memory_search` sends: a total item cap and no slices. The share does not
 // apply to it, so this is the request the two query-mode tests use to pin that.
@@ -278,16 +330,19 @@ func TestDiversityBackfillsWhenTheOtherCategoriesRunOut(t *testing.T) {
 	)
 
 	// a3 is the first deferred row, so it is the one that comes back: original
-	// order, not the highest-scoring of the deferred ones.
-	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "b1", "a3"}) {
-		t.Errorf("items = %v, want [a1 a2 b1 a3]: a1 and a2 fill the gotcha "+
+	// order, not the highest-scoring of the deferred ones. The window holds its
+	// four rows in the ranking's own order, so the readmitted a3 sits after a1
+	// and a2 rather than being appended behind b1.
+	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "b1"}) {
+		t.Errorf("items = %v, want [a1 a2 a3 b1]: a1 and a2 fill the gotcha "+
 			"share, b1 takes a second category's slot, and the window is "+
 			"completed by the first deferred row", ids)
 	}
-	// The row that stayed behind the window is the later one, and it kept its own
-	// order: the deferral moved a4 down and did not sort it. a5 was already
-	// behind the window when the walk reached it, so it was never a candidate
-	// for a deferral — moving it to just after the window would have promoted it.
+	// The row that stayed behind the window kept its own order: the deferral
+	// moved a4 down and did not sort it. a5 was already behind the window when
+	// the walk reached it, so it was never a deferral candidate — moving it to
+	// just after the window would have promoted it — and stage 8 cuts it as the
+	// budget's own row.
 	st := stageTraceFor(res, stageDiversity)
 	if !eq(st.DroppedIDs, []string{"a4"}) {
 		t.Errorf("deferred = %v, want [a4]", st.DroppedIDs)
@@ -543,10 +598,13 @@ func TestDiversityLeavesTheSessionStartBlockAlone(t *testing.T) {
 	if ids := itemIDs(res.Items); !eq(ids, []string{"p1", "p2", "p3", "g1", "g2"}) {
 		t.Errorf("items = %v, want the per-slice caps' own answer", ids)
 	}
-	// The rows the share moved are explained by the deferral that moved them: the
-	// stage 8 cut that followed is not filed as a second verdict for it, so one
-	// row is counted once — in the breakdown, in the bucket tally and in the
-	// retrieval record.
+	// The share moves nothing here, and that is the point. The project slice caps
+	// 3 and the global slice caps 2, so each bucket is divided by its own cap:
+	// p4 is behind the project window already, so the stage leaves it there and
+	// the budget stage cuts it — one verdict, and it is the budget's. The old
+	// single shared window deferred p4 out of another bucket's share and the
+	// project cap then readmitted it, which left a deferral verdict on a rendered
+	// row.
 	dropped := map[string]int{}
 	for _, d := range res.Trace.Decisions {
 		if d.Kept {
@@ -556,13 +614,15 @@ func TestDiversityLeavesTheSessionStartBlockAlone(t *testing.T) {
 		if d.ID != "p4" {
 			continue
 		}
-		if d.Reason != reasonDiversityDeferred {
-			t.Errorf("p4 = %+v, want its one drop verdict to be the deferral", d)
+		if d.Reason == reasonDiversityDeferred {
+			t.Errorf("p4 = %+v, want no deferral verdict: the row is behind the "+
+				"project's own window, so the share never moved it", d)
 		}
 	}
 	if n := dropped["p4"]; n != 1 {
-		t.Errorf("p4 carries %d drop verdicts, want exactly one", n)
+		t.Errorf("p4 carries %d drop verdicts, want exactly one (the budget's)", n)
 	}
+	renderedVerdictsAreHonest(t, res)
 }
 
 // TestDiversityDefersNothingWhenTheShareCoversTheWindow: a window of one admits
@@ -625,8 +685,9 @@ func TestDiversityRunsOnEveryPassiveSurface(t *testing.T) {
 		res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 		// a1 and a2 fill the gotcha share, b1 takes a second category's slot, and
 		// the window is completed by the first deferred row: four slots, four
-		// rows, whatever the share did to which of them they are.
-		if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "b1", "a3"}) {
+		// rows, whatever the share did to which of them they are — and the window
+		// holds them in the ranking's own order.
+		if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "b1"}) {
 			t.Errorf("source %s: items = %v, want the same shared rule every "+
 				"other passive surface gets", source, ids)
 		}
@@ -656,6 +717,259 @@ func TestDiversityIsDeterministic(t *testing.T) {
 				t.Fatalf("run %d reordered the block: %v against %v", i,
 					itemIDs(again.Items), itemIDs(first.Items))
 			}
+		}
+	}
+}
+
+// The per-bucket half of the rule. A sliced passive budget states a cap PER
+// BUCKET and stage 8 enforces each one over the rows it admits, so a share that
+// divides ONE window across all the buckets would let one bucket's share evict
+// another bucket's row — the very row stage 8 then keeps, leaving a deferral
+// verdict on a row in the answer and a header that says it was withheld.
+
+// TestDiversityNeverDefersARowAnotherBucketsCapKeeps: the reproduction from
+// review. A `_global` slice capped at 2 and a project slice capped at 3, three
+// global `fact` rows ranked above two project `fact` rows and a project
+// `decision` row. The whole set shares ONE 5-row window in the old code, so the
+// third global row takes a `fact` slot and a project row is deferred — and stage
+// 8 then keeps it under the project cap, so the trace calls a RENDERED row
+// withheld. Per bucket, neither bucket overflows: each holds what its own cap
+// admits, and the answer is the one the slices alone would have produced.
+func TestDiversityNeverDefersARowAnotherBucketsCapKeeps(t *testing.T) {
+	f := &fakeRetriever{set: passiveSet(
+		bucketedFact("g1", memory.GlobalProjectID, "fact", 0.9),
+		bucketedFact("g2", memory.GlobalProjectID, "fact", 0.8),
+		bucketedFact("g3", memory.GlobalProjectID, "fact", 0.7),
+		bucketedFact("p1", "proj", "fact", 0.6),
+		bucketedFact("p2", "proj", "fact", 0.5),
+		bucketedFact("p3", "proj", "decision", 0.4),
+	)}
+	res := run(t, f, diversityBucketedRequest(3, 2))
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"g1", "g2", "p1", "p2", "p3"}) {
+		t.Errorf("items = %v, want [g1 g2 p1 p2 p3] — the answer the two slices "+
+			"alone produce, with neither bucket over its own cap", ids)
+	}
+	renderedVerdictsAreHonest(t, res)
+}
+
+// TestDiversitySharesEachBucketInsideItsOwnCap: both buckets overflow with one
+// category, so both are mixed — each within its own cap, and neither touching the
+// other. The `_global` slice admits 2 of 3 globals and takes the preference one;
+// the project slice admits 2 of 3 project rows and takes the convention one.
+func TestDiversitySharesEachBucketInsideItsOwnCap(t *testing.T) {
+	f := &fakeRetriever{set: passiveSet(
+		bucketedFact("g1", memory.GlobalProjectID, "fact", 0.9),
+		bucketedFact("g2", memory.GlobalProjectID, "fact", 0.8),
+		bucketedFact("g3", memory.GlobalProjectID, "preference", 0.7),
+		bucketedFact("p1", "proj", "gotcha", 0.6),
+		bucketedFact("p2", "proj", "gotcha", 0.5),
+		bucketedFact("p3", "proj", "convention", 0.4),
+	)}
+	res := run(t, f, diversityBucketedRequest(2, 2))
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"g1", "g3", "p1", "p3"}) {
+		t.Errorf("items = %v, want [g1 g3 p1 p3]: each bucket mixed inside its "+
+			"own 2-slot cap, and neither bucket disturbed by the other's share", ids)
+	}
+	// The rows each share moved are its own, and neither is rendered.
+	if st := stageTraceFor(res, stageDiversity); !eq(st.DroppedIDs, []string{"g2", "p2"}) {
+		t.Errorf("deferred = %v, want [g2 p2]", st.DroppedIDs)
+	}
+	renderedVerdictsAreHonest(t, res)
+}
+
+// TestNoDeferredRowIsEverRendered: the invariant, asserted rather than assumed,
+// over every fixture in this file that overflows a window. A row the answer
+// renders carries no drop verdict of any kind, and every drop verdict the trace
+// holds names a row outside the answer.
+func TestNoDeferredRowIsEverRendered(t *testing.T) {
+	type fixture struct {
+		name string
+		req  func() Request
+		rows []memory.Candidate
+	}
+	fixtures := []fixture{
+		{"one bucket overflows", func() Request { return diversityRequest(diversityWindow) },
+			[]memory.Candidate{
+				catCandidate("a1", "gotcha", 0.9), catCandidate("a2", "gotcha", 0.85),
+				catCandidate("a3", "gotcha", 0.8), catCandidate("a4", "gotcha", 0.75),
+				catCandidate("b1", "preference", 0.7),
+			}},
+		{"two buckets both overflow", func() Request { return diversityBucketedRequest(2, 2) },
+			[]memory.Candidate{
+				bucketedFact("g1", memory.GlobalProjectID, "fact", 0.9),
+				bucketedFact("g2", memory.GlobalProjectID, "fact", 0.8),
+				bucketedFact("g3", memory.GlobalProjectID, "preference", 0.7),
+				bucketedFact("p1", "proj", "gotcha", 0.6),
+				bucketedFact("p2", "proj", "gotcha", 0.5),
+				bucketedFact("p3", "proj", "convention", 0.4),
+			}},
+		{"a pinned row behind the window", func() Request { return diversityRequest(diversityWindow) },
+			[]memory.Candidate{
+				catCandidate("a1", "gotcha", 0.9), catCandidate("a2", "gotcha", 0.85),
+				catCandidate("a3", "gotcha", 0.8), catCandidate("a4", "gotcha", 0.75),
+				pinnedCatCandidate("a5", "gotcha", 0.7), catCandidate("a6", "gotcha", 0.65),
+			}},
+		{"the review's reproduction", func() Request { return diversityBucketedRequest(3, 2) },
+			[]memory.Candidate{
+				bucketedFact("g1", memory.GlobalProjectID, "fact", 0.9),
+				bucketedFact("g2", memory.GlobalProjectID, "fact", 0.8),
+				bucketedFact("g3", memory.GlobalProjectID, "fact", 0.7),
+				bucketedFact("p1", "proj", "fact", 0.6),
+				bucketedFact("p2", "proj", "fact", 0.5),
+				bucketedFact("p3", "proj", "decision", 0.4),
+			}},
+	}
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			res := run(t, &fakeRetriever{set: setOf(fx.rows...)}, fx.req())
+			renderedVerdictsAreHonest(t, res)
+			for _, d := range res.Trace.Decisions {
+				if d.Kept || d.Reason != reasonDiversityDeferred {
+					continue
+				}
+				for _, it := range res.Items {
+					if it.ID == d.ID {
+						t.Fatalf("%s: %s is deferred and rendered (%+v)", fx.name, d.ID, d)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDiversityKeepsWithinCategoryOrderWhenAPinIsAdmittedBehindTheWindow: a
+// pinned row ranked behind the window fills a slot the share vacated, and a
+// deferred-and-backfilled row of the SAME category takes the next. The old code
+// appended every backfilled row after the whole head, so the pinned row landed
+// ahead of an earlier-ranked row of its own category. Every category's relative
+// order now holds, in the answer and behind it.
+func TestDiversityKeepsWithinCategoryOrderWhenAPinIsAdmittedBehindTheWindow(t *testing.T) {
+	res := diversityRun(t, diversityWindow,
+		catCandidate("a1", "gotcha", 0.90),
+		catCandidate("a2", "gotcha", 0.85),
+		catCandidate("a3", "gotcha", 0.80),
+		catCandidate("a4", "gotcha", 0.75),
+		pinnedCatCandidate("a5", "gotcha", 0.70),
+		catCandidate("a6", "gotcha", 0.65),
+	)
+
+	// The window holds four: a1 and a2 on the share, the pinned a5 behind it,
+	// and a3 — the first deferred row — readmitted behind that.
+	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "a5"}) {
+		t.Errorf("items = %v, want [a1 a2 a3 a5]", ids)
+	}
+	// The window holds its rows in the ranking's own order. The pinned a5 is
+	// readmitted from behind the window to fill the slot the share vacated, and
+	// it ranks where it belongs — after a1, a2 and a3, not ahead of the
+	// earlier-ranked a3. The old code appended every backfilled row after the
+	// whole head, which put a5 ahead of a3.
+	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "a5"}) {
+		t.Errorf("items = %v, want [a1 a2 a3 a5]: the window in rank order", ids)
+	}
+	// The rows the share moved keep their own relative order. a6 was already
+	// behind the window, so it is not a deferral at all and stage 8 cuts it.
+	if st := stageTraceFor(res, stageDiversity); !eq(st.DroppedIDs, []string{"a4"}) {
+		t.Errorf("deferred = %v, want [a4]", st.DroppedIDs)
+	}
+	// a3 was deferred and readmitted, so it is recorded as considered.
+	for _, d := range decisionsAt(res, stageDiversity) {
+		if d.ID == "a3" && (!d.Kept || d.Reason != reasonDiversityBackfilled) {
+			t.Errorf("a3 = %+v, want a keep with reason %s", d, reasonDiversityBackfilled)
+		}
+	}
+}
+
+// TestWithdrawDefersARowStageEightAdmits: the invariant, enforced rather than
+// hoped for. A row stage 7 deferred is one the window arithmetic says stage 8
+// will cut, and the two agree on a sliced read because they read the same cap for
+// the same rows. Should that ever stop holding, the withdrawal is what keeps a
+// deferral verdict from landing on a row the answer renders — which would be
+// counted as withheld by the bucket tally the passive header reads and recorded
+// as a dropped verdict in the audit, while the block shows the row.
+//
+// The reversal is unreachable from a shipped run today, so it is asked of
+// directly: stage 8 keeps the row, and the verdict, the `dropped` map and the
+// per-stage count all have to let it go.
+func TestWithdrawDefersARowStageEightAdmits(t *testing.T) {
+	p := &pipeline{
+		passive:   true,
+		req:       diversityRequest(diversityWindow),
+		dropped:   map[string]string{"a3": reasonDiversityDeferred, "a4": "budget"},
+		deferred:  map[string]diversityDeferral{"a3": {category: "gotcha", share: 2, slots: 4}},
+		droppedBy: map[string]int{stageDiversity: 1},
+		trace:     newTrace(diversityRequest(diversityWindow), &memory.CandidateSet{}),
+	}
+	p.trace.decide("a3", "proj", stageDiversity, reasonDiversityDeferred, 0.7)
+
+	if !p.withdrawDeferral("a3") {
+		t.Fatal("a deferral for a row stage 8 keeps must be withdrawn")
+	}
+	if _, still := p.dropped["a3"]; still {
+		t.Error("a3 is still in the dropped map, so explain would report a row the answer renders as withheld")
+	}
+	if n := p.droppedBy[stageDiversity]; n != 0 {
+		t.Errorf("stage %s still counts %d removals", stageDiversity, n)
+	}
+	if _, still := p.deferred["a3"]; still {
+		t.Error("a3 still carries its deferral detail")
+	}
+	got := decisionsAt(Result{Trace: p.trace}, stageDiversity)
+	if len(got) != 1 {
+		t.Fatalf("%d decisions at %s, want the one withdrawal: %+v", len(got), stageDiversity, got)
+	}
+	if d := got[0]; !d.Kept || d.Reason != reasonDiversityBackfilled {
+		t.Errorf("decision = %+v, want a keep with reason %s", d, reasonDiversityBackfilled)
+	}
+	// A row with no deferral to withdraw changes nothing, and says so.
+	if p.withdrawDeferral("a4") {
+		t.Error("a4 carries no deferral, so there was nothing to withdraw")
+	}
+	if p.dropped["a4"] != "budget" {
+		t.Errorf("a4 = %q, want its own budget verdict untouched", p.dropped["a4"])
+	}
+}
+
+// TestTrimWithdrawsADeferralForARowItKeeps: the call site, asked of directly.
+// `trim` is where membership is decided, so it is where a deferral on a kept row
+// has to be reversed — and the direct test above cannot reach that, because the
+// per-bucket window is what keeps a deferred row away from a kept row. This one
+// hands `trim` the one state it refuses to produce: a row stage 7 deferred that
+// the budget keeps.
+func TestTrimWithdrawsADeferralForARowItKeeps(t *testing.T) {
+	req := diversityRequest(diversityWindow)
+	p := &pipeline{
+		passive:   true,
+		req:       req,
+		dropped:   map[string]string{"a3": reasonDiversityDeferred},
+		deferred:  map[string]diversityDeferral{"a3": {category: "gotcha", share: 2, slots: 4}},
+		droppedBy: map[string]int{stageDiversity: 1},
+		trace:     newTrace(req, &memory.CandidateSet{}),
+	}
+	rows := []memory.Candidate{catCandidate("a1", "gotcha", 0.9), catCandidate("a3", "gotcha", 0.7)}
+	items := []Item{itemOf(rows[0]), itemOf(rows[1])}
+	p.trace.decide("a3", "proj", stageDiversity, reasonDiversityDeferred, 0.7)
+
+	// a3 is deferred and the budget still keeps it: the state stage 7's own
+	// windows make unreachable, and the reversal is what makes it survivable.
+	keepRow := []bool{true, true}
+	kept, _, dropped := trim(rows, items, keepRow, nil, p, "budget")
+	if len(kept) != 2 {
+		t.Fatalf("trim kept %d rows, want both", len(kept))
+	}
+	if len(dropped) != 0 {
+		t.Errorf("trim reports %v as removed, want nothing: it kept every row", dropped)
+	}
+	if _, still := p.dropped["a3"]; still {
+		t.Error("a3 is still marked dropped, so the bucket tally and the retrieval record would count a rendered row as withheld")
+	}
+	if n := p.droppedBy[stageDiversity]; n != 0 {
+		t.Errorf("stage %s still counts %d removals", stageDiversity, n)
+	}
+	for _, d := range p.trace.Decisions {
+		if d.ID == "a3" && !d.Kept {
+			t.Errorf("a3 = %+v, want the deferral withdrawn", d)
 		}
 	}
 }

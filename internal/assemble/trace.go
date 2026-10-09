@@ -263,6 +263,33 @@ func (t *Trace) keep(id, projectID, stage, reason string, before float64) {
 	})
 }
 
+// withdrawDeferral turns a stage-7 deferral decision for id into the keep it
+// turned out to be, and reports whether it found one.
+//
+// WHY IT EXISTS. A deferral moves a row behind a window, so the row that cut it
+// is the stage that enforces that window — and on a sliced read the two stages
+// agree about which rows are in play, so a deferred row is always one stage 8
+// cuts. Should that ever stop holding — a future change to the window
+// arithmetic, a slice that states no item cap, a cap that moves — the failure
+// would be silent and specific: a deferral verdict on a row the answer renders,
+// counted as withheld by the bucket tally the passive header reads and recorded
+// as a dropped verdict in the audit. This is the one place membership is decided,
+// so this is the one place the reversal belongs. It is unreachable from a shipped
+// run today, and `TestWithdrawDeferralTurnsADeferralIntoAKeep` pins it so the
+// window arithmetic above it cannot break it quietly.
+func (t *Trace) withdrawDeferral(id string) bool {
+	for i := range t.Decisions {
+		d := &t.Decisions[i]
+		if d.ID != id || d.Stage != stageDiversity || d.Kept {
+			continue
+		}
+		d.Kept = true
+		d.Reason = reasonDiversityBackfilled
+		return true
+	}
+	return false
+}
+
 // addPinnedCut counts n pinned rows cut from a bucket.
 func (t *Trace) addPinnedCut(bucket string, n int) {
 	if t.PinnedCut == nil {

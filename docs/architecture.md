@@ -2047,15 +2047,29 @@ and whose vector leg then failed.)
 Diversity (stage 7) is built ([#927](https://github.com/wcatz/ghost/issues/927)): a
 per-category share of the window on PASSIVE reads only, no more than half the
 slots rounded up for any one category, applied only when the candidates left
-after validity, conflicts and dedup EXCEED the window. It is a deferral and never
+after validity, conflicts and dedup EXCEED a window. It is a deferral and never
 a deletion: a row past the cap is moved, in its existing relative order, to just
 after the window so the next-ranked rows of other categories take the slots; if
 those run out, the deferred rows come back in their original order until the
-window is full, so the stage can change WHICH rows fill the window and never how
+window is full, so the stage can change WHICH rows fill a window and never how
 many. A pinned row is never deferred and still counts toward its category's cap;
-within a category nothing is reordered; each deferred row is a `diversity` /
-`diversity_deferred` decision in the trace (and `diversity_backfilled` for one
-that came back). Query mode is OUTSIDE it, and the reason is the two questions
+within a category nothing is reordered, inside a window or behind it alike; each
+deferred row is a `diversity` / `diversity_deferred` decision in the trace (and
+`diversity_backfilled` for one that came back).
+
+**The window is PER BUCKET on a sliced read, and that is structural rather than
+cosmetic.** Stage 8 enforces each slice cap over the rows IT admits, so one shared
+window would let one bucket's share evict another bucket's row — which the
+per-bucket cap then readmits — leaving a deferral verdict on a row the answer
+renders, counted as withheld by the bucket tally the session-start header reads
+and as a dropped verdict in the audit. So the session start's project slice and
+`_global` slice are each divided by their own cap, each computed only over that
+bucket's rows, and a bucket with no item cap is not divided at all because the
+budget stage never cuts its rows on count. A bucket's rows keep their own relative
+order, so one bucket's reordering cannot change which rows stage 8 admits for
+another. A row a share moved but the budget stage admits keeps no drop verdict
+either (`trim` withdraws it), so no block shows a row the header calls withheld.
+Query mode is OUTSIDE it, and the reason is the two questions
 rather than the two surfaces: `ghost_memory_search` asked what MATCHES and the
 ranking is the whole answer, so a share that moved the row that answered would be
 the stage answering a question nobody asked; a digest asked nothing and is handing
