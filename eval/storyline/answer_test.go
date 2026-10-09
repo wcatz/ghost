@@ -485,7 +485,7 @@ func TestSummaryKeepsARunWhoseReportFailedToWrite(t *testing.T) {
 	story := OpsFact()
 	res := answersResult(story, []string{"", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"})
 	out := formatSummary([]cell{{story: story, arm: armWithoutGhost, run: 1, res: res, reportErr: context.DeadlineExceeded}}, 1)
-	if !strings.Contains(out, "| without-ghost | 1 | 1/1 |") || strings.Contains(out, "errored") {
+	if !strings.Contains(out, "| without-ghost | 1 (1 report not written) | 1/1 |") || strings.Contains(out, "errored") {
 		t.Errorf("a graded run was dropped from the summary:\n%s", out)
 	}
 }

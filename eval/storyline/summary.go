@@ -13,6 +13,9 @@ type armTally struct {
 	arm    string
 	runs   int // runs that completed
 	errors int // runs that ended in an error, excluded from every count below
+	// noReport counts completed runs whose report file could not be written: they
+	// stay in every count below, and the table says their report is missing.
+	noReport int
 	// carried counts runs in which EVERY answer-carries line passed.
 	carried int
 	// avoidFailed counts runs in which any answer-avoids line failed: the stale,
@@ -29,8 +32,8 @@ type armTally struct {
 }
 
 // tally reads one arm's completed runs. It is a pure function of the results.
-func tally(arm string, results []*Result, errored int) armTally {
-	t := armTally{arm: arm, runs: len(results), errors: errored}
+func tally(arm string, results []*Result, errored, noReport int) armTally {
+	t := armTally{arm: arm, runs: len(results), errors: errored, noReport: noReport}
 	for _, res := range results {
 		var carries, carriesOK, avoidFail, deliveryFail int
 		for _, c := range res.Checks {
@@ -132,7 +135,7 @@ func formatSummary(cells []cell, runs int) string {
 		b.WriteString("|-----|------|----------------|--------------------|----------------------|-----------------|-------------------------|\n")
 		for _, arm := range []string{armWithGhost, armWithoutGhost} {
 			var results []*Result
-			errored := 0
+			errored, noReport := 0, 0
 			for _, c := range cells {
 				if c.story.Key != story.Key || c.arm != arm {
 					continue
@@ -142,11 +145,14 @@ func formatSummary(cells []cell, runs int) string {
 					continue
 				}
 				results = append(results, c.res)
+				if c.reportErr != nil {
+					noReport++
+				}
 			}
 			if len(results) == 0 && errored == 0 {
 				continue
 			}
-			t := tally(arm, results, errored)
+			t := tally(arm, results, errored, noReport)
 			avoid, judge, delivered := "n/a", "n/a", t.ratio(t.delivered)
 			if t.hasAvoids {
 				avoid = t.ratio(t.avoidFailed)
@@ -160,6 +166,9 @@ func formatSummary(cells []cell, runs int) string {
 			runsCol := fmt.Sprintf("%d", t.runs)
 			if t.errors > 0 {
 				runsCol += fmt.Sprintf(" (+%d errored)", t.errors)
+			}
+			if t.noReport > 0 {
+				runsCol += fmt.Sprintf(" (%d report not written)", t.noReport)
 			}
 			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n",
 				arm, runsCol, t.ratio(t.carried), avoid, judge, delivered, t.blockSizes())
