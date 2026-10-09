@@ -614,3 +614,221 @@ func TestStarWhoseLeafWinsKeepsEveryLeaf(t *testing.T) {
 		t.Errorf("the other leaf directly contradicts the withheld centre and must name it: %q", kept)
 	}
 }
+
+// #945: the shape whose two rows SCOPE-CONFLICT, joined through a row that does
+// not. A names environment=production, C names environment=development, and B
+// names no scope at all, so both edges are live conflicts and A-C is not an
+// edge. The greedy walk resolves it by which row wins keep priority, and in
+// every case the scope-conflicting pair is never separated against EACH OTHER:
+// a row is withheld only against a kept row it has a direct contradicts edge to,
+// and A has no edge to C. Where an unscoped B wins, both scoped rows are withheld
+// against B — through their own edges, which is a real contradiction on each.
+//
+//   A {environment: production} --contradicts-- B {} --contradicts-- C {environment: development}
+
+// mixedScopeShape is the #945 shape, with winner pinned so exactly that row
+// wins keep priority. With no pin, no verified_at and identical stamps, the rank
+// the window holds would decide and the winner would always be A1, so the three
+// winners cannot be told apart without the pin.
+func mixedScopeShape(winner string) *memory.CandidateSet {
+	rows := []memory.Candidate{
+		scopedCandidate("A1", map[string]string{"environment": "production"}, 0.9),
+		candidate("B1", "proj", "fact", "database configuration B1", 0.8),
+		scopedCandidate("C1", map[string]string{"environment": "development"}, 0.7),
+	}
+	for i := range rows {
+		if rows[i].ID == winner {
+			rows[i].Pinned = true
+		}
+	}
+	set := setOf(rows...)
+	set.Edges = []memory.LinkEdge{
+		{From: "A1", To: "B1", Relation: "contradicts", Strength: 1},
+		{From: "B1", To: "C1", Relation: "contradicts", Strength: 1},
+	}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	return set
+}
+
+// conflictsWithTokens reads the ids a rendered line names in conflicts_with=. It
+// parses the label rather than matching a substring, so a withheld id that
+// happens to appear in a row's own content is not read as a marker.
+func conflictsWithTokens(t *testing.T, line string) []string {
+	t.Helper()
+	at := strings.Index(line, "conflicts_with=")
+	if at < 0 {
+		return nil
+	}
+	label := line[at+len("conflicts_with="):]
+	if end := strings.Index(label, ")"); end >= 0 {
+		label = label[:end]
+	}
+	var tokens []string
+	for _, part := range strings.Split(label, ",") {
+		part = strings.Trim(strings.TrimSpace(part), "`")
+		if part != "" {
+			tokens = append(tokens, part)
+		}
+	}
+	return tokens
+}
+
+// assertMixedScopeWalk is the whole contract over one walk of the #945 shape:
+// the stated kept rows stand; every withheld row is dropped against exactly the
+// KEPT rows it has a direct contradicts edge to; no Against names a row the
+// withheld row scope-conflicts with; and each kept line names only the rows it
+// directly contradicts that were withheld — which never includes its
+// scope-conflicting partner, because that is not an edge.
+func assertMixedScopeWalk(t *testing.T, res Result, set *memory.CandidateSet, wantKept []string) {
+	t.Helper()
+	if got := itemIDs(res.Items); !eq(got, wantKept) {
+		t.Fatalf("items = %v, want %v", got, wantKept)
+	}
+	kept := make(map[string]bool, len(wantKept))
+	for _, id := range wantKept {
+		kept[id] = true
+	}
+	scopes := make(map[string]map[string]string, len(set.Rows))
+	direct := make(map[string][]string, len(set.Rows))
+	for _, row := range set.Rows {
+		scopes[row.ID] = row.Scope
+	}
+	for _, e := range set.Edges {
+		direct[e.From] = append(direct[e.From], e.To)
+		direct[e.To] = append(direct[e.To], e.From)
+	}
+	// wantNames, in the rank order the window holds, is every row in ids that is
+	// a direct contradicts neighbour of owner and stands on the stated side.
+	wantNames := func(owner string, ids map[string]bool) []string {
+		var want []string
+		for _, row := range set.Rows {
+			if !ids[row.ID] || !contains(direct[owner], row.ID) {
+				continue
+			}
+			want = append(want, row.ID)
+		}
+		return want
+	}
+	withheld := map[string]bool{}
+	for _, row := range set.Rows {
+		if len(direct[row.ID]) > 0 && !kept[row.ID] {
+			withheld[row.ID] = true
+		}
+	}
+
+	var sawDrop bool
+	for _, d := range res.Trace.Decisions {
+		if d.Stage != stageConflicts {
+			continue
+		}
+		if kept[d.ID] {
+			t.Errorf("a kept row carries a conflicts-stage drop decision: %+v", d)
+			continue
+		}
+		sawDrop = true
+		if len(d.Against) == 0 {
+			t.Errorf("%s is withheld with no decision naming what it was withheld against: %+v", d.ID, d)
+		}
+		for _, against := range d.Against {
+			if !kept[against] {
+				t.Errorf("%s: Against names %s, which was not kept", d.ID, against)
+			}
+			if !contains(direct[d.ID], against) {
+				t.Errorf("%s: Against names %s, which it has no contradicts edge to", d.ID, against)
+			}
+			if memory.ScopesConflict(scopes[d.ID], scopes[against]) {
+				t.Errorf("%s is withheld against %s, which it scope-conflicts with (scopes %v vs %v)", d.ID, against, scopes[d.ID], scopes[against])
+			}
+		}
+	}
+	if got, want := sawDrop, len(withheld) > 0; got != want {
+		t.Errorf("a conflicts-stage drop was recorded = %v, want %v (withheld rows: %v)", got, want, withheld)
+	}
+	for _, it := range res.Items {
+		want := wantNames(it.ID, withheld)
+		if !eq(it.ConflictsWith, want) {
+			t.Errorf("%s: ConflictsWith = %v, want %v — only the withheld rows it directly contradicts", it.ID, it.ConflictsWith, want)
+		}
+		line := lineOf(t, res.Response, it.ID)
+		var wantTokens []string
+		for _, id := range want {
+			wantTokens = append(wantTokens, Token(id))
+		}
+		if got := conflictsWithTokens(t, line); !eq(got, wantTokens) {
+			t.Errorf("%s: the rendered line names %v, want %v: %q", it.ID, got, wantTokens, line)
+		}
+		for _, partner := range want {
+			if memory.ScopesConflict(scopes[it.ID], scopes[partner]) {
+				t.Errorf("the kept %s names %s, which it scope-conflicts with", it.ID, partner)
+			}
+		}
+	}
+	// The pair #945 is about, stated directly: two rows that scope-conflict and
+	// share no edge may never be named against each other on any surface — not
+	// as a drop and not as a partner — so neither rendered line may name the
+	// other.
+	for _, a := range res.Items {
+		for _, b := range res.Items {
+			if a.ID == b.ID || !memory.ScopesConflict(scopes[a.ID], scopes[b.ID]) {
+				continue
+			}
+			if strings.Contains(lineOf(t, res.Response, a.ID), Token(b.ID)) {
+				t.Errorf("%s names %s, a scope-conflicting row it does not contradict:\n%s", a.ID, b.ID, res.Response)
+			}
+		}
+	}
+}
+
+// contains reports whether ids holds id.
+func contains(ids []string, id string) bool {
+	for _, have := range ids {
+		if have == id {
+			return true
+		}
+	}
+	return false
+}
+
+// A wins: A is kept, B is withheld against A — the one kept row it directly
+// contradicts — and C is kept, because its only edge is to B, which is itself
+// withheld. Both scope-conflicting rows stand, and neither names the other.
+func TestMixedScopeWalkWhenAPinnedWins(t *testing.T) {
+	set := mixedScopeShape("A1")
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	assertMixedScopeWalk(t, res, set, []string{"A1", "C1"})
+	if got := renderedLines(res.Response, "B1"); len(got) != 0 {
+		t.Errorf("the withheld B1 rendered %d line(s):\n%s", len(got), res.Response)
+	}
+}
+
+// B wins: the unscoped row is kept and BOTH scoped rows are withheld, each
+// against B through its own direct edge. A and C are never separated against
+// each other — the pair #945 says must be untouched is untouched — and each
+// drop is a real contradiction on a real edge.
+func TestMixedScopeWalkWhenTheUnscopedRowWins(t *testing.T) {
+	set := mixedScopeShape("B1")
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	assertMixedScopeWalk(t, res, set, []string{"B1"})
+	for _, loser := range []string{"A1", "C1"} {
+		if got := renderedLines(res.Response, loser); len(got) != 0 {
+			t.Errorf("the withheld %s rendered %d line(s):\n%s", loser, len(got), res.Response)
+		}
+	}
+}
+
+// C wins: symmetric to A. C is kept, B is withheld, and A is kept — its only
+// edge is to B, which is itself withheld. A and C both stand.
+func TestMixedScopeWalkWhenCPinnedWins(t *testing.T) {
+	set := mixedScopeShape("C1")
+
+	res := run(t, &fakeRetriever{set: set}, separationRequest())
+
+	assertMixedScopeWalk(t, res, set, []string{"A1", "C1"})
+	if got := renderedLines(res.Response, "B1"); len(got) != 0 {
+		t.Errorf("the withheld B1 rendered %d line(s):\n%s", len(got), res.Response)
+	}
+}

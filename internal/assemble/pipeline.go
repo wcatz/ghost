@@ -395,9 +395,15 @@ func runConflicts(p *pipeline) {
 			// true claims about two places, so the edge is not a conflict. Every
 			// other reader of a link applies this same rule (memory.ScopesConflict),
 			// and such a pair is neither separated, marked nor noted. The exemption
-			// is per-edge, as every other reader states it, so a component joined
-			// through other rows can still co-separate two scope-conflicting rows
-			// that share no direct edge; that boundary is tracked as #945.
+			// is per-edge, as every other reader states it, and the greedy walk
+			// below still resolves a mixed-scope shape (#945): with A naming
+			// environment=production contradicting an unscoped B contradicting C
+			// naming environment=development, and no A-C edge, a scoped winner
+			// stands beside the other scoped row and withholds only the middle it
+			// directly contradicts, while an unscoped B that wins withholds both
+			// scoped rows against itself. The two scope-conflicting rows are never
+			// separated against each other, because a row is withheld only
+			// against a kept row it has a direct contradicts edge to.
 			if memory.ScopesConflict(scopes[e.From], scopes[e.To]) {
 				continue
 			}
