@@ -43,6 +43,12 @@ import (
 // fields are zero for it — the honest reading, since nothing records what they
 // held.
 //
+// The validity triple is the one of those a caller then has to decide what to
+// DO with, and a bound the row holds today is not evidence about the instant
+// (#910). The two as_of listings judge it at T through memory.ValidityAt;
+// ghost_memory_search judges none. The read itself borrows and says nothing,
+// which is why every surface that renders these bounds states the borrow.
+//
 // CreatedAt is the exception, and it is the one field here the decay measures an
 // age from: it is the row's own when that column can answer, and the version
 // row's recorded_at when it cannot (the row is gone, or its created_at is later
