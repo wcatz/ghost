@@ -498,8 +498,8 @@ format and never the value. Asking FIRST rather than branching on what comes bac
 the load-bearing part, because the predicate judges shape before credentials, and a
 value that is both hostile and credential-shaped returns a shape error with the
 credential hidden behind it.
-`Store.EnsureProject*` and
-`Store.ResolveOrCreateRepoProject` ask the same function, so a non-MCP caller
+`Store.EnsureProject*`,
+`Store.ResolveOrCreateRepoProject` and `Store.BindNewProjectToCheckout` ask the same function, so a non-MCP caller
 cannot reach a project the exporter would have to drop either. No CLI command
 creates a project row outside `ghost import`, which applies the same predicate
 before its own INSERT.
