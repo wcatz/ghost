@@ -263,3 +263,29 @@ func TestFormatResultsCarriesTheFusionGaps(t *testing.T) {
 		t.Errorf("the NDCG table is present but the comparison rows are not:\n%s", out)
 	}
 }
+
+// TestFormatResultsCarriesTheTopRowShares: mirrors the guard above for the
+// top-row shares block. If the wiring is dropped, both docs/cli.md and
+// docs/benchmarks.md promise a report that nothing produces.
+func TestFormatResultsCarriesTheTopRowShares(t *testing.T) {
+	results := []Result{
+		{Condition: CondHybrid, Queries: 2, Recall1: 0.5, Recall5: 0.7, Recall10: 0.8, MRR10: 0.9, NDCG10: 0.8, TopRowRelevant: 0.8, TopRowBestLabelled: 0.6, Recall1Ceiling: 0.6},
+		{Condition: CondVector, Queries: 2, Recall1: 0.4, Recall5: 0.6, Recall10: 0.7, MRR10: 0.8, NDCG10: 0.7, TopRowRelevant: 0.7, TopRowBestLabelled: 0.5, Recall1Ceiling: 0.6},
+		{Condition: CondFTS, Queries: 2, Recall1: 0.3, Recall5: 0.5, Recall10: 0.6, MRR10: 0.7, NDCG10: 0.6, TopRowRelevant: 0.6, TopRowBestLabelled: 0.4, Recall1Ceiling: 0.6},
+	}
+	out := FormatResults(results)
+	if !strings.Contains(out, "top-row shares over the 2 answerable queries") {
+		t.Errorf("`ghost bench` output carries no top-row shares block, so the doc's promise is not runnable:\n%s", out)
+	}
+	for _, want := range []string{"top row relevant", "top row best-labelled", "R@1 ceiling on these labels"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the shares block is present but %q is not:\n%s", want, out)
+		}
+	}
+	// A results slice with no scored queries prints none of it.
+	empty := []Result{{Condition: CondHybrid}}
+	out = FormatResults(empty)
+	if strings.Contains(out, "top-row shares") {
+		t.Errorf("empty results printed a shares block:\n%s", out)
+	}
+}
