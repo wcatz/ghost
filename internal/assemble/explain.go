@@ -269,10 +269,19 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			if !ok {
 				return "deferred by the diversity stage: the memory's category had filled its share of the window"
 			}
+			// The window the share was half of, which on a sliced read is the
+			// row's OWN bucket cap and not the request's total: naming the total
+			// beside a per-bucket share would print a share that is not half of
+			// the window it names. `d.slots` is 0 only for a deferral built by
+			// hand, and then the request's total is the honest fallback.
+			slots := d.slots
+			if slots == 0 {
+				slots = p.admitCap()
+			}
 			return fmt.Sprintf("deferred by the diversity stage: category %s had filled its share — no more "+
 				"than %d slots for any one category in a %d-row window — so the row was moved behind the "+
 				"window and other categories' rows took the slots",
-				Token(d.category), d.share, p.admitCap())
+				Token(d.category), d.share, slots)
 		case "budget", "slice_budget":
 			return fmt.Sprintf("outside the result window: the answer admits only the top %d", p.admitCap())
 		case reasonBudgetDropped:

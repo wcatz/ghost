@@ -2061,8 +2061,8 @@ deferred row is a `diversity` / `diversity_deferred` decision in the trace (and
 cosmetic.** Stage 8 enforces each slice cap over the rows IT admits, so one shared
 window would let one bucket's share evict another bucket's row — which the
 per-bucket cap then readmits — leaving a deferral verdict on a row the answer
-renders, counted as withheld by the bucket tally the session-start header reads
-and as a dropped verdict in the audit. So the session start's project slice and
+renders, counted as withheld by the bucket tally the session-start header reads. So the
+session start's project slice and
 `_global` slice are each divided by their own cap, each computed only over that
 bucket's rows, and a bucket with no item cap is not divided at all because the
 budget stage never cuts its rows on count. A bucket's rows keep their own relative

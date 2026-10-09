@@ -733,8 +733,9 @@ func TestDiversityIsDeterministic(t *testing.T) {
 // `decision` row. The whole set shares ONE 5-row window in the old code, so the
 // third global row takes a `fact` slot and a project row is deferred — and stage
 // 8 then keeps it under the project cap, so the trace calls a RENDERED row
-// withheld. Per bucket, neither bucket overflows: each holds what its own cap
-// admits, and the answer is the one the slices alone would have produced.
+// withheld. Both buckets overflow their own cap here — the `_global` bucket holds
+// three rows under a two-row one — but no bucket's share evicts a row another
+// bucket's cap keeps, so the answer is the one the slices alone would produce.
 func TestDiversityNeverDefersARowAnotherBucketsCapKeeps(t *testing.T) {
 	f := &fakeRetriever{set: passiveSet(
 		bucketedFact("g1", memory.GlobalProjectID, "fact", 0.9),
@@ -748,7 +749,7 @@ func TestDiversityNeverDefersARowAnotherBucketsCapKeeps(t *testing.T) {
 
 	if ids := itemIDs(res.Items); !eq(ids, []string{"g1", "g2", "p1", "p2", "p3"}) {
 		t.Errorf("items = %v, want [g1 g2 p1 p2 p3] — the answer the two slices "+
-			"alone produce, with neither bucket over its own cap", ids)
+			"alone produce: no bucket's share evicts a row another bucket's cap keeps", ids)
 	}
 	renderedVerdictsAreHonest(t, res)
 }
@@ -881,17 +882,12 @@ func TestDiversityKeepsWithinCategoryOrderWhenAPinIsAdmittedBehindTheWindow(t *t
 	}
 }
 
-// TestWithdrawDefersARowStageEightAdmits: the invariant, enforced rather than
-// hoped for. A row stage 7 deferred is one the window arithmetic says stage 8
-// will cut, and the two agree on a sliced read because they read the same cap for
-// the same rows. Should that ever stop holding, the withdrawal is what keeps a
-// deferral verdict from landing on a row the answer renders — which would be
-// counted as withheld by the bucket tally the passive header reads and recorded
-// as a dropped verdict in the audit, while the block shows the row.
-//
-// The reversal is unreachable from a shipped run today, so it is asked of
-// directly: stage 8 keeps the row, and the verdict, the `dropped` map and the
-// per-stage count all have to let it go.
+// TestWithdrawDefersARowStageEightAdmits: the reversal, asked of directly, and
+// asked of the state `trim` hands it. A slice byte cap reaches it on a shipped
+// shape — see TestTrimWithdrawsADeferralForEveryRowItKeeps — so what this pins is
+// the pieces: the verdict, the `dropped` map, the `deferred` detail and the
+// per-stage count all have to let a row go when stage 8 keeps it, and a row with
+// no deferral must keep its own verdict untouched.
 func TestWithdrawDefersARowStageEightAdmits(t *testing.T) {
 	p := &pipeline{
 		passive:   true,
@@ -971,5 +967,151 @@ func TestTrimWithdrawsADeferralForARowItKeeps(t *testing.T) {
 		if d.ID == "a3" && !d.Kept {
 			t.Errorf("a3 = %+v, want the deferral withdrawn", d)
 		}
+	}
+}
+
+// sizedCandidate is a candidate whose stored content is exactly `size` bytes, so
+// a slice byte cap lands where the test says it lands. The score is its rank.
+func sizedCandidate(id, category string, size int, score float64) memory.Candidate {
+	if size < len(id) {
+		size = len(id)
+	}
+	return candidate(id, "proj", category, id+strings.Repeat(".", size-len(id)), score)
+}
+
+// TestTrimWithdrawsADeferralForEveryRowItKeeps: a slice byte cap is what makes
+// this reachable, and it is reachable often enough to need the rule stated.
+// Stage 7 leaves a deferred row BEHIND the window, and the budget stage then cuts
+// the rows in front of it — a byte cap cuts them while the item count is still
+// under its cap, so a deferred row is readmitted. Every such row must lose its
+// deferral verdict: the answer renders it, and the trace, `dropped`,
+// `droppedBy[diversity]`, the bucket tally and the stage record would all say it
+// was withheld.
+//
+// The fixture is the one a review reproduced: five 25-byte fact rows and three
+// 75-byte decision rows under a 6-row window and a 200-byte slice cap. The share
+// holds three facts and all three decisions, deferring a4 and a5; the byte cap
+// then keeps a1, a2, a3 and b1, cuts b2 and b3, and reads a4 and a5.
+func TestTrimWithdrawsADeferralForEveryRowItKeeps(t *testing.T) {
+	req := diversityRequest(6)
+	req.Budget.Slices[0].MaxBytes = 200
+	res := run(t, &fakeRetriever{set: setOf(
+		sizedCandidate("a1", "fact", 25, 0.90),
+		sizedCandidate("a2", "fact", 25, 0.85),
+		sizedCandidate("a3", "fact", 25, 0.80),
+		sizedCandidate("a4", "fact", 25, 0.75),
+		sizedCandidate("a5", "fact", 25, 0.70),
+		sizedCandidate("b1", "decision", 75, 0.65),
+		sizedCandidate("b2", "decision", 75, 0.60),
+		sizedCandidate("b3", "decision", 75, 0.55),
+	)}, req)
+
+	if ids := itemIDs(res.Items); !eq(ids, []string{"a1", "a2", "a3", "b1", "a4", "a5"}) {
+		t.Fatalf("items = %v, want [a1 a2 a3 b1 a4 a5]", ids)
+	}
+	// Both deferred rows came back, so neither keeps a deferral verdict, neither
+	// is counted as withheld, and the stage record agrees.
+	renderedVerdictsAreHonest(t, res)
+	for _, d := range res.Trace.Decisions {
+		if d.Kept || d.Reason != reasonDiversityDeferred {
+			continue
+		}
+		t.Fatalf("%s = %+v, want no deferral verdict on any rendered row", d.ID, d)
+	}
+	if st := stageTraceFor(res, stageDiversity); len(st.DroppedIDs) != 0 {
+		t.Errorf("stage %s still lists %v as dropped", stageDiversity, st.DroppedIDs)
+	}
+	for _, st := range res.Trace.Stages {
+		if st.Stage != stageDiversity {
+			continue
+		}
+		for _, note := range st.Notes {
+			if strings.Contains(note, "deferred 2") {
+				t.Errorf("the stage note still claims 2 deferrals: %q", note)
+			}
+		}
+	}
+	tally := CountsFor(res.Trace, "proj", len(res.Items))
+	if tally.Shown != len(res.Items) {
+		t.Errorf("the tally says %d shown, the answer renders %d", tally.Shown, len(res.Items))
+	}
+	if tally.Withheld != 0 {
+		t.Errorf("the tally counts %d withheld rows, want 0: every row the answer carries is rendered", tally.Withheld)
+	}
+}
+
+// TestExplainReasonNamesTheBucketsOwnWindow: the share is per bucket, so the
+// sentence must name the window the share was half OF. `d.share` is the row's own
+// bucket cap halved while the request's total is the sum of the slice caps, and a
+// sentence pairing the two would print a share that is not half of the window it
+// names. Unreachable from a shipped run (explain is refused without a query and
+// the share is passive-only), so it is asked of the renderer directly.
+func TestExplainReasonNamesTheBucketsOwnWindow(t *testing.T) {
+	p := &pipeline{
+		passive:  true,
+		req:      diversityBucketedRequest(3, 2),
+		deferred: map[string]diversityDeferral{"p2": {category: "fact", share: 2, slots: 3}},
+		dropped:  map[string]string{"p2": reasonDiversityDeferred},
+	}
+	got := p.explainReason("p2", memory.ExplainRow{}, nil)
+	// A share of 2 is half of the 3-slot bucket window, not of the 5 the request
+	// would answer with as a total.
+	if !strings.Contains(got, "2 slots") || !strings.Contains(got, "3-row window") {
+		t.Errorf("reason = %q, want the share and the bucket's own 3-slot window", got)
+	}
+	if strings.Contains(got, "5-row") {
+		t.Errorf("reason = %q, names the request total beside a per-bucket share", got)
+	}
+	// A deferral with no recorded window falls back to the request's total.
+	p.deferred["p2"] = diversityDeferral{category: "fact", share: 2}
+	if got := p.explainReason("p2", memory.ExplainRow{}, nil); !strings.Contains(got, "5-row window") {
+		t.Errorf("reason = %q, want the request total when the deferral records no window", got)
+	}
+}
+
+// TestDiversityNoteDoesNotClaimAFitItCannotShow: the no-op sentence reports only
+// the population it measured. `in` is every candidate — including rows in buckets
+// the windows skipped — while the window is the cap, so a request whose slices
+// carry only byte caps, or one bucket with no item cap beside a capped one, can
+// reach the no-deferral note with more candidates than the window admits. The
+// sentence must not then claim they all fit.
+func TestDiversityNoteDoesNotClaimAFitItCannotShow(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		req        Request
+		rows       []memory.Candidate
+		wantFit    bool
+		wantHonest bool
+	}{
+		{
+			name: "everything fits", req: diversityRequest(4),
+			rows:       []memory.Candidate{catCandidate("a1", "gotcha", 0.9), catCandidate("a2", "gotcha", 0.8)},
+			wantFit:    true,
+			wantHonest: true,
+		},
+		{
+			name: "a byte-only slice and a total cap", req: func() Request {
+				r := baseRequest()
+				r.Query, r.Source = "", SourceSessionStart
+				r.Budget = Budget{MaxItems: 2, Slices: []Slice{{Bucket: "proj", MaxBytes: 4000, OverFetch: 8}}}
+				return r
+			}(),
+			rows:       []memory.Candidate{catCandidate("a1", "gotcha", 0.9), catCandidate("a2", "gotcha", 0.8), candidate("b1", "_global", "fact", "a global fact b1", 0.7)},
+			wantHonest: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := run(t, &fakeRetriever{set: setOf(tc.rows...)}, tc.req)
+			notes := strings.Join(stageTraceFor(res, stageDiversity).Notes, " ")
+			if !strings.Contains(notes, "no row was deferred") {
+				t.Errorf("notes = %q, want the recorded no-op", notes)
+			}
+			if !tc.wantFit && strings.Contains(notes, "candidates fit under it") {
+				t.Errorf("notes = %q, claim a fit for a population it did not measure", notes)
+			}
+			if !strings.Contains(notes, "per-category share") {
+				t.Errorf("notes = %q, want the share stated", notes)
+			}
+		})
 	}
 }

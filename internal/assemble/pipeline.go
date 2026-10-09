@@ -642,48 +642,6 @@ func (p *pipeline) dropsDemotedLosers() bool {
 	return false
 }
 
-// runDiversity is stage 7: a per-category SHARE of the window (#927), on PASSIVE
-// reads only.
-//
-// A small digest is easy to fill with rows from one category while the
-// next-ranked rows of every other category are cut, and a reader gets a block
-// about one thing. The share is bounded so it cannot do that: inside the window
-// no category may take more than half the slots, rounded up, and never fewer
-// than one.
-//
-// WHY PASSIVE ONLY, AND WHY IT IS THE MODE AND NOT THE SOURCE. A query is a
-// relevance question and the ranking is the whole answer to it: `ghost_memory_search`
-// asked "what matches", so moving the row that matches behind another row because
-// of what it is ABOUT is the stage answering a question nobody asked. A passive
-// read asks no question at all — it hands a model everything worth knowing before
-// a turn — and there breadth is the point, because a digest that is all one
-// category teaches one thing. The gate is the request-bound `p.passive` (an empty
-// Query, bound once at Run) rather than `Source`, for the reason the pipeline's
-// own field gives: the consequences follow from the absence of a query, and a
-// Source-keyed branch would let a future passive source be shared by a query-mode
-// one. A query-mode request is a recorded pass-through here — no deferral, no
-// backfill, no per-row verdict, no drop — so search is unchanged by this stage
-// byte for byte.
-//
-// It is a DEFERRAL and never a deletion, and the three rules that follow from
-// that are the whole design:
-//
-//   - The stage runs only when the candidates left after validity, conflicts and
-//     dedup EXCEED the window. Everything that fits is left exactly as it was,
-//     so a block that never had to choose is byte-for-byte the block it was.
-//   - A row over the share is MOVED, in its existing relative order, to just
-//     after the window, so the next-ranked rows of other categories take the
-//     slots it vacated. Nothing is removed, so the window is never shrunk: if
-//     the other categories cannot fill it, the deferred rows come back in their
-//     original order until it is full again.
-//   - A PINNED row is never deferred, and it still counts toward its category's
-//     share. A pin is a slot guarantee (#936), and a stage that moved a pinned
-//     row behind the window would take the guarantee back with a deferral.
-//
-// Within a category nothing is reordered, and the stage never re-ranks: it reads
-// the retriever's order and writes a permutation of it, because that order
-// carries the keyword reservation, the status demotion, decay and both
-// demotions, none of which a second pass could recover.
 // diversityShareWindow is one window the share divides: the candidate indices it
 // covers, in rank order, the number of rows it admits and the most of them one
 // category may take.
@@ -746,7 +704,9 @@ type diversityShareWindow struct {
 //     and both demotions — survives it.
 //   - A verdict is filed only for a row the stage MOVED. A row it deferred and
 //     then readmitted is recorded as considered, and a row stage 8 admits keeps
-//     no drop verdict (see `withdrawDefersRowsKept`).
+//     no drop verdict — `trim`, which is where membership is decided, withdraws
+//     it, and a slice's byte cap is one shipped shape that gets there (see
+//     `withdrawDeferral`).
 func runDiversity(p *pipeline) {
 	in := len(p.rows)
 	if !p.passive {
@@ -792,9 +752,18 @@ func runDiversity(p *pipeline) {
 			return
 		}
 		share := diversityShare(total)
+		// Two populations, and the sentence names the one it actually measured.
+		// `in` is every candidate — including rows in buckets the windows skipped
+		// — while `total` is the cap, so on a request whose slices carry only byte
+		// caps, or one bucket with no item cap beside a capped one, `in` can
+		// exceed `total` and "N candidates fit under it" would be false.
 		note := fmt.Sprintf("diversity is a per-category share of the %d-row window, "+
-			"no more than %d slots for any one category: %d candidates fit under it, "+
-			"so no row was deferred", total, share, in)
+			"no more than %d slots for any one category: ", total, share)
+		if in <= total {
+			note += fmt.Sprintf("%d candidates fit under it, so no row was deferred", in)
+		} else {
+			note += "no window overflowed, so no row was deferred"
+		}
 		p.blockNotes = append(p.blockNotes, note)
 		p.trace.record(stageDiversity, in, in, nil, note)
 		return
@@ -891,10 +860,7 @@ func runDiversity(p *pipeline) {
 	}
 	p.rows, p.items = rows, items
 
-	note := fmt.Sprintf("diversity deferred %d of %d candidates across %d window(s): no category may take "+
-		"more than half the slots of its own window, so the rows it moved behind the window make room "+
-		"for the next-ranked rows of other categories",
-		len(dropped), in, acting)
+	note := diversitySummaryNote(len(dropped))
 	p.blockNotes = append(p.blockNotes, note)
 
 	p.trace.record(stageDiversity, in, in, dropped, append(stageNotes, note)...)
@@ -1007,6 +973,17 @@ func diversityShare(window int) int {
 		return 0
 	}
 	return (window + 1) / 2
+}
+
+// diversitySummaryNote is stage 7's summary line. It reports only the count of
+// rows the stage moved, because that is the number the withdrawal can correct: a
+// deferral on a row the budget stage admits turns the count down, so the sentence
+// is rewritten from the stage record rather than left claiming a deferral the
+// trace no longer holds.
+func diversitySummaryNote(n int) string {
+	return fmt.Sprintf("diversity deferred %d candidates behind their bucket's window: no category may take "+
+		"more than half the slots of its own window, so the rows it moved make room for the next-ranked "+
+		"rows of other categories", n)
 }
 
 // diversityDeferral is one row stage 7 moved behind the window and why: the
@@ -1150,17 +1127,23 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 		keptRows = append(keptRows, rows[i])
 		keptItems = append(keptItems, items[i])
 	}
-	// A deferral verdict on a row this stage KEPT would be a lie in the trace, in
-	// the bucket tally and in the retrieval record: the answer renders the row
-	// and all three would say it was withheld. Stage 7's per-bucket window makes
-	// this unreachable today, and withdrawDeferral is what keeps it that way.
+	// A deferral verdict on a row this stage KEPT would be a lie: the answer
+	// renders the row, and the trace, `dropped`, `droppedBy`, the bucket tally
+	// and the stage record would all say it was withheld.
+	//
+	// WHEN THIS IS REACHED. Stage 7 leaves a deferred row BEHIND the window, so
+	// what normally cuts it is the rows in front of it. A slice's MaxItems does
+	// exactly that. A slice's MaxBytes is the case that breaks the accounting: it
+	// cuts rows by CONTENT while the item count is still under its cap, so it can
+	// remove every row in front of a deferred one and leave the deferred rows —
+	// which this stage then admits. `MaxItems` and `MaxBytes` on the same slice,
+	// which a real caller can state, is enough. So the withdrawal is not
+	// belt-and-braces against a future refactor; it runs on a shipped shape.
 	for i := range rows {
 		if !keepRow[i] {
 			continue
 		}
-		if p.withdrawDeferral(rows[i].ID) {
-			break
-		}
+		p.withdrawDeferral(rows[i].ID)
 	}
 	return keptRows, keptItems, dropped
 }
