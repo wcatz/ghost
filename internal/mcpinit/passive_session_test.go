@@ -403,7 +403,7 @@ func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
 	for _, prefix := range []string{"pmem", "gmem", "ppin"} {
 		shown += strings.Count(block, "`"+prefix) + strings.Count(block, "["+prefix)
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
 // clause about size appears.
 func TestSessionStartUnderTheByteCapCutsNothing(t *testing.T) {
 	dbPath, projectPath, _ := seedByteCapStore(t)
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
