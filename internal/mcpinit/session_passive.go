@@ -55,13 +55,22 @@ const (
 // than the decay composite, and their near-duplicate losers are DROPPED rather
 // than reordered — a superseded preference is not worth eight slots of a
 // cross-project block.
+//
+// sessionStartByteCap is the total byte budget for the session-start memory
+// block (the part rendered by assemble.Run). It is set below the host's
+// 10,000-character cap with margin for the header, learned summary, tasks and
+// decisions that formatSessionContext adds around it. A block already under the
+// cap is byte-identical to origin/main.
+const sessionStartByteCap = 7500
+
 func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget {
 	inj := cfg.Injection
 
-	// MaxItems and MaxBytes stay 0: they bound the RENDERED RESPONSE, and the
-	// response-fit framing is the search framing — this surface spends its budget
-	// in the per-bucket caps instead, which is what the caps have always meant
-	// here.
+	// MaxBytes bounds the complete rendered memory block (items, globals, notes,
+	// machine line). The response-fit post-pass trims rows from the bottom until
+	// it fits, recording each cut as response_fit in the trace and retrieval
+	// record. Pinned rows rank first (pinned DESC in both bucket orders) and
+	// survive the cut.
 	slices := make([]assemble.Slice, 0, 2)
 
 	// The project slice is conditional, and the condition is the no-match case:
@@ -101,7 +110,7 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 		// in a block that competes for attention across every project.
 		DropDemotedLosers: true,
 	})
-	return assemble.Budget{Slices: slices}
+	return assemble.Budget{MaxBytes: sessionStartByteCap, Slices: slices}
 }
 
 // sessionTally is the two buckets' fates as the session-start block needs them,
