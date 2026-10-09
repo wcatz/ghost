@@ -245,6 +245,11 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	if _, ok := projectPath(t, store, "billing"); ok {
 		t.Fatal("a declined bind wrote a project row")
 	}
+	for _, bad := range []string{"", "relative/dir", string(filepath.Separator)} {
+		if ok, err := store.BindNewProjectToCheckout(ctx, "other", bad, "other", ""); err != nil || ok {
+			t.Fatalf("bind at unusable path %q = %v, %v; want false", bad, ok, err)
+		}
+	}
 	again, err := store.BindNewProjectToCheckout(ctx, "notifier", filepath.Join(t.TempDir(), "elsewhere"), "notifier", "")
 	if err != nil || again {
 		t.Fatalf("rebind of an existing project = %v, %v; want false", again, err)

@@ -555,7 +555,9 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 // project records.
 func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
-	if id == "" || id == "_global" || dir == "" || dir == id {
+	// The path predicate BindProjectPath asks: absolute, not a bare root, and not
+	// the id sentinel, so "usable" keeps one definition across the path writers.
+	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
 		return false, nil
 	}
 
