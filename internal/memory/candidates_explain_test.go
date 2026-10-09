@@ -532,3 +532,36 @@ func TestClampScopeKeysReportsTheRealLength(t *testing.T) {
 		t.Errorf("ClampScopeKeys(1 key) = %d named, total %d, want 1 and 1", len(names), total)
 	}
 }
+
+// TestCandidateFlagsKeywordReservationWithoutExplain: the relevance cutoff keeps
+// a keyword-reserved row, and ghost_memory_search does not ask for an explain
+// payload, so the flag must ride on the Candidate itself, not only in RankFacts.
+func TestCandidateFlagsKeywordReservationWithoutExplain(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	reserved := createTestMemory(t, store, ctx, "quasar calibration is a manual step")
+	for i := range 12 {
+		id := createTestMemory(t, store, ctx, fmt.Sprintf("the quasar calibration notes file %d covers stage %d", i, i))
+		if err := store.StoreEmbedding(ctx, id, []float32{0.99, 0.14}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+	}
+	set, err := store.Candidates(ctx, explainRequest("test-proj", "quasar calibration", []float32{1, 0}, 10, nil, false))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if set.RankFacts != nil {
+		t.Fatalf("RankFacts is set on a request that did not ask for an explain")
+	}
+	n := 0
+	for _, c := range set.Rows {
+		if c.KeywordReserved {
+			n++
+			if c.ID != reserved {
+				t.Errorf("row %s is flagged reserved, want only %s", c.ID, reserved)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d rows flagged keyword-reserved, want exactly the one the reservation promoted", n)
+	}
+}

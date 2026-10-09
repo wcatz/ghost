@@ -1817,6 +1817,9 @@ func (s *Server) registerTools() {
 			Now:           time.Now().UTC(),
 			AsOf:          asOf,
 			AbstainCosine: s.contextCfg.AbstainCosine,
+			// The query-mode relevance cutoff (#954): the assembler shortens the
+			// block where relevance falls off. 0 leaves it off.
+			RelevanceCutoff: s.contextCfg.RelevanceCutoff,
 			// The retrieval record (#646). Set here and not inside the assembler,
 			// because this is the only place that knows the session the call
 			// arrived on — and the assembler writes the row, so nothing about the

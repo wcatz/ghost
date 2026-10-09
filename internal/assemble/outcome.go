@@ -86,6 +86,14 @@ const (
 	reasonFloorMet      = "floor_met"
 	reasonNoFloorArm    = "no_floor_arm"
 	reasonBudgetDropped = "response_budget"
+	// reasonRelevanceCutoff is the cutoff stage's per-row reason (#954): the
+	// row's fused Base fell below the configured fraction of the top row's, so
+	// the answer stopped where relevance fell off. It is a per-row reason like
+	// reasonNearDuplicate above, not an outcome one: the stage always keeps the
+	// top row, so it can never empty an answer and is never a cause named by an
+	// empty result. The retrieval record carries it as a dropped verdict, the
+	// trace as a decision, and explain as an excluded row's reason sentence.
+	reasonRelevanceCutoff = "relevance_cutoff"
 	// reasonRetrievalPartial is the answerable verdict when a leg failed. It is
 	// the same token the machine line's modifier uses, and the two are not
 	// redundant: the reason says why the answer is answerable (no floor verdict
@@ -591,7 +599,7 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 		case reasonAllOverBudget:
 			// Two stages produce this reason and only one of them is the response
 			// cap, so the sentence has to say which. Quoting Budget.MaxBytes
-			// unconditionally names a budget the caller never set whenever stage 8
+			// unconditionally names a budget the caller never set whenever stage 9
 			// emptied the set instead (MaxBytes 0), and tells it to fix a filter it
 			// never passed.
 			if p.droppedBy[stageResponseFit] > 0 {
@@ -640,8 +648,8 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 	return ""
 }
 
-// dominantBudgetBound is which of stage 8's three caps removed the most rows.
-// It is only consulted once stage 8 is known to have emptied the set, and the
+// dominantBudgetBound is which of stage 9's three caps removed the most rows.
+// It is only consulted once stage 9 is known to have emptied the set, and the
 // byte cap wins a tie because it is the stricter of the two a row can break.
 func (p *pipeline) dominantBudgetBound() string {
 	best, bestN := "", 0
