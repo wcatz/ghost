@@ -1668,8 +1668,8 @@ func (s *Server) registerTools() {
 		Retention string `json:"retention,omitempty" jsonschema:"Filter results to one retention tier: session (true for this conversation only; expired session rows are what 'ghost prune' removes), project (the default \u2014 persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). Omit it for every tier. Applied before the result window closes, so a matching row ranked below the window still takes a slot."`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
-		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
-		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list. Every SCORING number is the one the ranking used, read from a record the ranking path writes as it runs: status_factor and decay_factor are the multipliers that ranking actually applied, and for a candidate the window cut before it applied them decay_factor is the one it would have applied, measured against the ranking's own clock. Per memory: FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor and age, supersede and near-duplicate penalties, which project the row belongs to and whether it matched the searched one, the scope verdict and the scope key set the narrowing compared (capped at 16 named, with scope_keys_compared_total giving the real length), the row's validity state, its stored confidence, the reason each excluded candidate was left out, the id of the specific other memory behind every window-scoped demotion (superseded_by, near_duplicate_of), and keyword_reserved / took_slot_from / displaced_by for a row the keyword reservation admitted past the score cut. In query mode a near-duplicate loser is REMOVED by the retriever rather than only demoted: it appears as an excluded row carrying the reason removed as a near-duplicate, with near_duplicate_penalty 1 because the removal IS the verdict and near_duplicate_of naming the representative it lost to. Stage 5 separates a live contradiction the same way: the row it withholds is an excluded row whose reason is the sentence \"withheld by the conflicts stage: the memory contradicts X, the row that stage kept\", naming the row or rows it directly contradicts (contradiction_separated is the reason token recorded on the trace and in the retrieval record, never in this payload), and the kept row's formatted line carries conflicts_with= with the withheld row's id. The query-mode relevance cutoff (#954) stops the answer where relevance falls off, and this payload DOES carry its reason (unlike the diversity deferral, which is passive): an excluded row below the configured share of the top row's fused score carries the reason \"cut by the relevance cutoff: ... below <share> of the top match\" (relevance_cutoff is the reason token recorded on the trace and in the retrieval record, never in this payload). Stage 7's per-category share is a PASSIVE-READ rule and never touches this payload: a query is a relevance question and the ranking is the whole answer to it, so the row that answered it must not move behind another row because of what it is ABOUT, while a digest asks no question and hands a model everything worth knowing, where breadth is the point. On a passive read the share moves — behind the window, never out of the block — a row whose category had filled more than half the slots, so the next-ranked rows of other categories take them, and reads it back if the other categories run out; the trace and the retrieval record carry that as diversity_deferred (diversity_backfilled when it came back). Fields the ranking does not act on report 0 rather than an invented contribution: confidence_contribution, provenance_contribution and validity_penalty are always 0 (an expired or not-yet-valid memory is excluded with its reason rather than ranked lower), provenance_weight is \"off\", and the notes say why. The payload is a projection of the same run the formatted answer comes from, for the same arguments (scope, category, retention, limit, validity, the byte cap): a row is included exactly when that answer lists it, and an excluded row carries the reason the stage that withheld it gave. Every stored string in it (content snippet, ids, project, scope keys and values, leg errors) is rendered as the formatted answer renders it: content inside «...» delimiters, ids and scope text as quoted tokens. Unlike the formatted answer it writes no retrieval record, and a retrieval leg that failed while another answered is reported in the notes instead of as an error (a run where every applicable leg failed is still the retrieval error). The payload is bounded at 150 candidate rows; one that reached the budget carries a truncation object saying how many candidates it omitted, and only excluded candidates are ever dropped, so every row in the answer is present. floor_dropped is about the VECTOR leg: it means the similarity floor cut that row's vector contribution, which for a row the keyword leg also matched leaves it in the answer with a keyword-only rrf_score — check fts_rank to tell that from a row the floor removed outright, and only the latter has rrf_score 0. When the floor removed it outright it also carries status_factor 1.0, because no demotion was applied to a row nothing scored; row_project says whose row it is. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it is refused with as_of, which ranks nothing."`
+		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. A validity window is the one field the change log does not version, so the window a row shows is the row's window today: nothing is dropped as expired or not yet valid on a past read, and the answer states that the bounds are today's. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list. Every SCORING number is the one the ranking used, read from a record the ranking path writes as it runs: status_factor and decay_factor are the multipliers that ranking actually applied, and for a candidate the window cut before it applied them decay_factor is the one it would have applied, measured against the ranking's own clock. Per memory: FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor and age, supersede and near-duplicate penalties, which project the row belongs to and whether it matched the searched one, the scope verdict and the scope key set the narrowing compared (capped at 16 named, with scope_keys_compared_total giving the real length), the row's validity state, its stored confidence, the reason each excluded candidate was left out, the id of the specific other memory behind every window-scoped demotion (superseded_by, near_duplicate_of), and keyword_reserved / took_slot_from / displaced_by for a row the keyword reservation admitted past the score cut. In query mode a near-duplicate loser is REMOVED by the retriever rather than only demoted: it appears as an excluded row carrying the reason removed as a near-duplicate, with near_duplicate_penalty 1 because the removal IS the verdict and near_duplicate_of naming the representative it lost to. Stage 5 separates a live contradiction the same way: the row it withholds is an excluded row whose reason is the sentence \"withheld by the conflicts stage: the memory contradicts X, the row that stage kept\", naming the row or rows it directly contradicts (contradiction_separated is the reason token recorded on the trace and in the retrieval record, never in this payload), and the kept row's formatted line carries conflicts_with= with the withheld row's id. Stage 7's per-category share is a PASSIVE-READ rule and never touches this payload: a query is a relevance question and the ranking is the whole answer to it, so the row that answered it must not move behind another row because of what it is ABOUT, while a digest asks no question and hands a model everything worth knowing, where breadth is the point. On a passive read the share moves — behind the window, never out of the block — a row whose category had filled more than half the slots, so the next-ranked rows of other categories take them, and reads it back if the other categories run out; the trace and the retrieval record carry that as diversity_deferred (diversity_backfilled when it came back). Fields the ranking does not act on report 0 rather than an invented contribution: confidence_contribution, provenance_contribution and validity_penalty are always 0 (an expired or not-yet-valid memory is excluded with its reason rather than ranked lower), provenance_weight is \"off\", and the notes say why. The payload is a projection of the same run the formatted answer comes from, for the same arguments (scope, category, retention, limit, validity, the byte cap): a row is included exactly when that answer lists it, and an excluded row carries the reason the stage that withheld it gave. Every stored string in it (content snippet, ids, project, scope keys and values, leg errors) is rendered as the formatted answer renders it: content inside «...» delimiters, ids and scope text as quoted tokens. Unlike the formatted answer it writes no retrieval record, and a retrieval leg that failed while another answered is reported in the notes instead of as an error (a run where every applicable leg failed is still the retrieval error). The payload is bounded at 150 candidate rows; one that reached the budget carries a truncation object saying how many candidates it omitted, and only excluded candidates are ever dropped, so every row in the answer is present. floor_dropped is about the VECTOR leg: it means the similarity floor cut that row's vector contribution, which for a row the keyword leg also matched leaves it in the answer with a keyword-only rrf_score — check fts_rank to tell that from a row the floor removed outright, and only the latter has rrf_score 0. When the floor removed it outright it also carries status_factor 1.0, because no demotion was applied to a row nothing scored; row_project says whose row it is. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it is refused with as_of, which ranks nothing."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1774,12 +1774,6 @@ func (s *Server) registerTools() {
 			Now:           time.Now().UTC(),
 			AsOf:          asOf,
 			AbstainCosine: s.contextCfg.AbstainCosine,
-			// The relative-to-top cutoff (#954): the server's configured share, the
-			// shipped default unless a config file states another. Query-mode only, and
-			// it can only shorten the answer (limit stays the max, the top row always
-			// survives, a pinned row is never cut). It rides beside the floor above
-			// because both are caller-resolved context.* values.
-			RelevanceCutoff: s.contextCfg.RelevanceCutoff,
 			// The retrieval record (#646). Set here and not inside the assembler,
 			// because this is the only place that knows the session the call
 			// arrived on — and the assembler writes the row, so nothing about the
@@ -2946,14 +2940,6 @@ func (s *Server) registerTools() {
 		for i, alt := range alternatives {
 			alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
-		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve project: %w", err)
-		}
-		if resolved == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
-		}
-		args.ProjectID = resolved
 		if alternatives == nil {
 			alternatives = []string{}
 		}
@@ -2967,22 +2953,30 @@ func (s *Server) registerTools() {
 		if tags, err = validateTags(tags); err != nil {
 			return nil, nil, err
 		}
+		// Resolve the project through the same path a save uses, so the first
+		// decision on a project the store has never seen opens it instead of
+		// failing (#956). The tool used to answer `project "<id>" not found`
+		// here, and an agent refused at that point records its decision under
+		// the global scope instead — which is how a decision about one project
+		// ends up answering for all of them.
+		//
 		// Pass "" for path: MCP callers name projects rather than describing
 		// them, though ensureProjectFor still derives repository identity when
-		// project_id is an absolute path and returns the id to write to.
-		// Mirrors ghost_memory_save: without this, a decision recorded for a
+		// project_id happens to be an absolute path and returns the id to write
+		// to. Mirrors ghost_memory_save: without this, a decision recorded for a
 		// project that has never saved a memory yet fails with a raw
 		// FK-constraint error instead of succeeding, since
 		// decisions.project_id references projects.id.
 		//
-		// The refusal from a refused unique-name binding (#613) is discarded
-		// here and cannot be reported: this tool refuses a project_id that
-		// does not already resolve, so the id it passes is one
-		// ResolveProject answered with, and ensureProjectFor returns it on the
-		// exact-id lookup before it can derive repository identity. Teaching
-		// this path to open a project from a path is a separate change from
-		// making the refusal visible.
-		canonical, _, err := s.ensureProjectFor(ctx, args.ProjectID)
+		// A refused unique-name binding (#613) is REPORTED rather than
+		// discarded. Discarding it was sound while this tool refused a project
+		// it could not resolve, because no id it held could reach the
+		// repository route that produces a refusal; routing through
+		// ensureProjectFor makes that reachable, so a decision can now be
+		// written to a project of its own while a same-named project kept the
+		// name — and "Decision recorded" is otherwise the same sentence as
+		// "you just stopped seeing the context of the project you named".
+		canonical, refused, err := s.ensureProjectFor(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
@@ -3005,6 +2999,13 @@ func (s *Server) registerTools() {
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
+		// A decision routed to a project of its own while a same-named project
+		// kept the name (#613) has to say so, for the reason the save result
+		// does: the decision landed and the caller's address did not, and the
+		// two are otherwise the same sentence.
+		if notice := refused.Notice(); notice != "" {
+			msg += " — " + notice
+		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
 			switch {
@@ -4146,11 +4147,14 @@ func truncateUTF8(s string, maxBytes int) string {
 
 // formatMemoriesInternal is the shared implementation for formatting memories.
 // A nil asOf is a current read: each row's validity window is judged against the
-// wall clock. A non-nil asOf is a historical read and the window is judged AT
-// that instant, which is what ghost_memory_search does when it binds the
-// assembler's clock to as_of: a row whose window had closed or not yet opened at
-// T is withheld (memory.ValidityAt), and a row valid at T is shown as valid at T
-// even if it has expired since. The disclosure (AsOfValidityNote) is NOT written
+// wall clock. A non-nil asOf is a historical read and the window is judged AT that
+// instant through memory.ValidityAt: a row whose window had closed or had not yet
+// opened at T is withheld, and a row valid at T is shown as valid at T even if it
+// has expired since. That is the LISTING's rule, and it is deliberately not the one
+// ghost_memory_search applies to the same borrowed bounds: the assembler's stage 2
+// records no verdict at all on an as_of request, because the bounds are the
+// present's and no verdict drawn from them is a verdict about T (#910). The
+// disclosure (AsOfValidityNote) is NOT written
 // here: an empty body is what tells projectContextSection to write no heading at
 // all, so a note inside a section body would print a heading over nothing. The
 // caller states it once at block level, with the count of rows withheld.
@@ -4188,8 +4192,11 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 }
 
 // withholdInvalidAt drops the rows whose validity window had closed or had not
-// yet opened at t, with the same rule ghost_memory_search applies when it binds
-// its clock to as_of (memory.ValidityAt).
+// yet opened at t, with the rule an as_of LISTING applies to a borrowed window
+// (memory.ValidityAt). ghost_memory_search judges none: the bounds are the
+// present's, so stage 2 of the assembler records no verdict and drops nothing
+// (#910). The two surfaces therefore differ by design, and this is the listing's
+// half.
 func withholdInvalidAt(rows []memory.AsOfRow, t time.Time) []memory.AsOfRow {
 	out := make([]memory.AsOfRow, 0, len(rows))
 	for _, r := range rows {

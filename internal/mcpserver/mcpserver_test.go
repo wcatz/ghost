@@ -120,7 +120,18 @@ func TestGhostTaskCreate_RejectsUnknownProject(t *testing.T) {
 	}
 }
 
-func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
+// TestGhostDecisionRecord_OpensAnUnknownProject is #956 from the tool's own
+// surface: a decision recorded against a project the store has never seen is not
+// refused. It used to be — the handler answered `project "<id>" not found` and
+// wrote nothing, so an agent's first decision on a fresh store failed and it then
+// recorded the decision under the global scope instead.
+//
+// Both reads are SCOPED, and the previous version of this test was scoped to no
+// project at all: `ListDecisions` binds `project_id = ?`, so its `""` returned
+// nothing whatever the tool had written, and "must not be persisted" was an
+// assertion that could not fail. The two reads here are the one project the
+// decision should be in and the one it should not.
+func TestGhostDecisionRecord_OpensAnUnknownProject(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	srv := New(store, logger, "test")
@@ -131,7 +142,7 @@ func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
 		Name: "ghost_decision_record",
 		Arguments: map[string]any{
 			"project_id": "nonexistent-project",
-			"title":      "should not be recorded",
+			"title":      "should be recorded",
 			"decision":   "some decision",
 			"rationale":  "some rationale",
 		},
@@ -139,16 +150,39 @@ func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool ghost_decision_record: %v", err)
 	}
-	if !result.IsError {
-		t.Fatalf("expected error result for unknown project, got: %+v", result.Content)
+	if result.IsError {
+		t.Fatalf("a decision for an unknown project was refused: %+v", result.Content)
 	}
 
-	decisions, err := store.ListDecisions(ctx, "", "", 10)
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var opened bool
+	for _, p := range projects {
+		if p.ID == "nonexistent-project" {
+			opened = true
+		}
+	}
+	if !opened {
+		t.Errorf("the decision did not open a project for the id it was given; the store holds %d project(s)",
+			len(projects))
+	}
+
+	decisions, err := store.ListDecisions(ctx, "nonexistent-project", "", 10)
 	if err != nil {
 		t.Fatalf("ListDecisions: %v", err)
 	}
-	if len(decisions) != 0 {
-		t.Errorf("decision must not be persisted against an empty project id, found %d", len(decisions))
+	if len(decisions) != 1 {
+		t.Fatalf("the opened project holds %d decision(s), want the one just recorded", len(decisions))
+	}
+	// And nothing was filed under the project the fixture already holds, which is
+	// the shape of the workaround this change removes: an agent refused here used
+	// to write the decision into whichever project did resolve.
+	if elsewhere, err := store.ListDecisions(ctx, "abc123", "", 10); err != nil {
+		t.Fatalf("ListDecisions(abc123): %v", err)
+	} else if len(elsewhere) != 0 {
+		t.Errorf("the decision landed in %d row(s) under an existing project, want 0", len(elsewhere))
 	}
 }
 
@@ -843,12 +877,20 @@ func TestWithholdInvalidAtMatchesTheListingFormatter(t *testing.T) {
 	}
 }
 
-// TestProjectContextAsOfAgreesWithSearchAtTheSameInstant: the two as_of surfaces
-// judge the same rows the same way (#899). Rows are saved through the tools with
-// windows placed around T, then both ghost_project_context and ghost_memory_search
-// are asked at T: each row listed by one is listed by the other, and the rows
-// outside their window at T are listed by neither.
-func TestProjectContextAsOfAgreesWithSearchAtTheSameInstant(t *testing.T) {
+// TestAsOfSearchReturnsWhatTheListingWithholdsAtT is #910: the two as_of surfaces
+// deliberately no longer reach the same verdict, and this is the test that pins
+// the difference. Rows are saved through the tools with windows placed around T,
+// then ghost_project_context and ghost_memory_search are asked at T.
+//
+// The listing withholds a row whose window had closed or had not yet opened at T,
+// exactly as it did before (#899), and still says validity was judged at T. Search
+// returns it: the bounds it would have judged are the PRESENT's, because
+// memory_history records no validity, so they are not evidence about T — the
+// reason a row whose window has closed since, or has not opened yet, used to be
+// dropped from a past answer on the strength of a bound the row did not hold then.
+// It says so with the shared note rather than with a verdict word on the line, and
+// the rows both surfaces agree on are still agreed on.
+func TestAsOfSearchReturnsWhatTheListingWithholdsAtT(t *testing.T) {
 	_, session := newCapSession(t)
 	const at = "2035-01-01T00:00:00Z"
 	rows := []struct {
@@ -885,16 +927,60 @@ func TestProjectContextAsOfAgreesWithSearchAtTheSameInstant(t *testing.T) {
 	if !strings.Contains(listing, "Validity judged at "+at) {
 		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)
 	}
+	want := memory.AsOfBorrowedWindowNote(asOfInstant(t, at))
+	if !strings.Contains(search, want) {
+		t.Errorf("the search does not state that the bounds its rows show are the current row's, want:\n%s\n%s",
+			want, search)
+	}
+	// The listing's sentence, which asserts a verdict this read did not draw.
+	if strings.Contains(search, "Validity judged at") {
+		t.Errorf("the search answer claims validity was judged at T, a judgement this read did not make:\n%s", search)
+	}
 	for _, r := range rows {
 		inListing := strings.Contains(listing, r.content)
 		inSearch := strings.Contains(search, r.content)
-		if inListing != inSearch {
-			t.Errorf("%q: listing=%v search=%v, the two as_of surfaces disagree\nlisting:\n%s\nsearch:\n%s", r.content, inListing, inSearch, listing, search)
-		}
 		if inListing != r.inWindow {
-			t.Errorf("%q: listed=%v, want %v (inside its window at T)", r.content, inListing, r.inWindow)
+			t.Errorf("%q: listing=%v, want %v (inside its window at T): the listing's rule is unchanged",
+				r.content, inListing, r.inWindow)
+		}
+		if !inSearch {
+			t.Errorf("%q: an as_of search withheld the row, want it returned: the window is the live row's and "+
+				"is not evidence about that instant\n%s", r.content, search)
+			continue
+		}
+		if line := searchLine(search, r.content); !r.inWindow && line != "" {
+			for _, verdict := range []string{"expired", "not yet valid"} {
+				if strings.Contains(line, verdict) {
+					t.Errorf("%q is labelled %q on a row the stage drew no verdict for: %s", r.content, verdict, line)
+				}
+			}
 		}
 	}
+}
+
+// asOfInstant parses the RFC 3339 constant the as_of tests read at, so an
+// assertion on a rendered note names the same instant the tool was asked about
+// rather than a second spelling of it.
+func asOfInstant(t *testing.T, at string) time.Time {
+	t.Helper()
+	got, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		t.Fatalf("parse %q: %v", at, err)
+	}
+	return got
+}
+
+// searchLine returns the rendered row line of a search answer whose content is
+// content, or "" when the answer holds none. It is the line the answer shows,
+// not the block's disclosure, so a verdict word found here is a verdict on a row
+// the reader was handed.
+func searchLine(answer, content string) string {
+	for _, line := range strings.Split(answer, "\n") {
+		if strings.Contains(line, content) && strings.HasPrefix(line, "- [") {
+			return line
+		}
+	}
+	return ""
 }
 
 // memoryMetaGroup returns the parenthesized metadata group on the result line
