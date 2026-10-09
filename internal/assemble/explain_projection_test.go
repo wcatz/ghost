@@ -176,6 +176,10 @@ func TestExplainMembershipIsTheAnswersMembership(t *testing.T) {
 		t.Fatalf("precondition: the plain answer admitted %v and the explain run %v, want L1,L2 in both", itemIDs(plain.Items), itemIDs(res.Items))
 	}
 	ex := res.Explain
+	// L3 is the last of three rows under a window of two, and it was already
+	// behind the window, so stage 7 leaves it where the ranking put it and the
+	// budget is what cuts it: its reason names the budget, not a deferral that
+	// never happened.
 	wantReason := map[string]string{
 		"EXP": "validity stage", "FUT": "validity stage", "GOT": "category filter",
 		"SES": "retention filter", "OUT": "scope", "L3": "outside the result window",

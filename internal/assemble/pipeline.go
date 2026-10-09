@@ -91,6 +91,11 @@ type pipeline struct {
 	// retriever removed, with the ids they lost to. explain reads it to report
 	// them as not included with near_duplicate_of set.
 	losers map[string]memory.DroppedLoser
+	// deferred is each row stage 7 moved behind the window, with the category
+	// that filled its share and the share itself. It is the reason explain
+	// renders for a row outside the window, and it is kept apart from `dropped`
+	// because the token alone cannot name the cap a row hit.
+	deferred map[string]diversityDeferral
 	// noteCut is how many notes the response-fit post-pass has taken off the end
 	// of the bounded list. It lives here rather than in the post-pass so notes()
 	// stays the one function that produces the list: a second derivation would be
@@ -637,13 +642,193 @@ func (p *pipeline) dropsDemotedLosers() bool {
 	return false
 }
 
-// runDiversity is stage 7: a per-bucket quota, off by default until it is
-// measured. Recorded as a no-op so a reader can see the stage ran and changed
-// nothing, rather than inferring it was skipped.
+// runDiversity is stage 7: a per-category SHARE of the window (#927).
+//
+// A small answer is easy to fill with rows from one category while the
+// next-ranked rows of every other category are cut, and a reader gets a block
+// about one thing. The share is bounded so it cannot do that: inside the window
+// no category may take more than half the slots, rounded up, and never fewer
+// than one.
+//
+// It is a DEFERRAL and never a deletion, and the three rules that follow from
+// that are the whole design:
+//
+//   - The stage runs only when the candidates left after validity, conflicts and
+//     dedup EXCEED the window. Everything that fits is left exactly as it was,
+//     so a block that never had to choose is byte-for-byte the block it was.
+//   - A row over the share is MOVED, in its existing relative order, to just
+//     after the window, so the next-ranked rows of other categories take the
+//     slots it vacated. Nothing is removed, so the window is never shrunk: if
+//     the other categories cannot fill it, the deferred rows come back in their
+//     original order until it is full again.
+//   - A PINNED row is never deferred, and it still counts toward its category's
+//     share. A pin is a slot guarantee (#936), and a stage that moved a pinned
+//     row behind the window would take the guarantee back with a deferral.
+//
+// Within a category nothing is reordered, and the stage never re-ranks: it reads
+// the retriever's order and writes a permutation of it, because that order
+// carries the keyword reservation, the status demotion, decay and both
+// demotions, none of which a second pass could recover.
 func runDiversity(p *pipeline) {
-	note := "diversity is off by default: no measured per-bucket quota"
+	in := len(p.rows)
+	window := p.admitCap()
+	if window <= 0 {
+		// A request that bounds no rows has no window for a share to divide —
+		// the answer is bounded by bytes alone — and the retrieval ceiling is
+		// not a substitute: it sizes the FETCH, not the block. Dividing by it
+		// would defer rows a caller never capped.
+		note := "diversity divides a window, and this request states no item cap: " +
+			"the answer is bounded by bytes alone, so there is no window to divide"
+		p.blockNotes = append(p.blockNotes, note)
+		p.trace.record(stageDiversity, in, in, nil, note)
+		return
+	}
+	share := diversityShare(window)
+	if in <= window {
+		note := fmt.Sprintf("diversity is a per-category share of the %d-row window, "+
+			"no more than %d slots for any one category: %d candidates fit under it, "+
+			"so no row was deferred", window, share, in)
+		p.blockNotes = append(p.blockNotes, note)
+		p.trace.record(stageDiversity, in, in, nil, note)
+		return
+	}
+	if len(p.items) != in {
+		// rows and items are index-aligned by every stage above, and a stage
+		// that permuted one without the other would render a row's content
+		// beside another row's id. Nothing here can repair that, so the stage
+		// declines to act and says which invariant it found broken.
+		note := "diversity did not run: this block's candidate rows and their items " +
+			"disagree in length, so no reordering was attempted"
+		p.blockNotes = append(p.blockNotes, note)
+		p.trace.record(stageDiversity, in, in, nil, note)
+		return
+	}
+
+	// One pass in rank order. `head` is the window as it fills, `deferred` the
+	// rows the share moved out of it and `tail` the rows nothing admitted.
+	//
+	// The line between the last two is the whole rule and it is drawn at the
+	// WINDOW, not at the share. A deferral moves a row to just after the window,
+	// which for a row already behind the window would move it UP — promoting
+	// exactly the rows the ranking had decided against. So only a row the window
+	// was holding is deferred; one behind it keeps its place and can still be
+	// admitted if a slot is free, because the "next-ranked rows of other
+	// categories take the slots" is what a vacated slot is FOR. A store whose
+	// rows are all one category is the case this settles: the share is filled,
+	// nothing else can take the slots, so every deferred row comes back and the
+	// stage records no drop rather than re-describing rows the budget was
+	// already going to cut.
+	//
+	// A row the window was holding is only deferred while the window still has
+	// room, which the length check guarantees: `head` fills in rank order, so it
+	// is full only once the walk has passed index window-1.
+	head := make([]int, 0, window)
+	var deferred, tail []int
+	counts := make(map[string]int, 8)
+	for i, c := range p.rows {
+		switch {
+		case len(head) < window && (c.Pinned || counts[c.Category] < share):
+			head = append(head, i)
+			counts[c.Category]++
+		case i < window:
+			deferred = append(deferred, i)
+		default:
+			tail = append(tail, i)
+		}
+	}
+	// The other categories ran out of rows before the window was full, so the
+	// deferred rows come back in their original order until it is. This is what
+	// makes the stage unable to shorten an answer: every index below the window
+	// is either admitted or deferred, and a deferred row that is not needed
+	// stays behind the window, so the window ends up holding exactly `window`
+	// rows whatever the share did to which of them they are.
+	var backfilled []int
+	for _, i := range deferred {
+		if len(head) >= window {
+			break
+		}
+		backfilled = append(backfilled, i)
+		head = append(head, i)
+	}
+	deferred = deferred[len(backfilled):]
+
+	// Recorded from the ORIGINAL order, so a reader meets each verdict in rank
+	// order, and recorded before the rows are permuted so the ids are the ones
+	// the ranking gave.
+	stageNotes := make([]string, 0, len(deferred))
+	returned := make(map[int]bool, len(backfilled))
+	for _, i := range backfilled {
+		returned[i] = true
+	}
+	moved := make(map[int]bool, len(deferred))
+	if p.deferred == nil {
+		p.deferred = map[string]diversityDeferral{}
+	}
+	for _, i := range deferred {
+		moved[i] = true
+		p.deferred[p.rows[i].ID] = diversityDeferral{category: p.rows[i].Category, share: share}
+	}
+	dropped := make([]string, 0, len(deferred))
+	for i := range p.rows {
+		c := p.rows[i]
+		switch {
+		case returned[i]:
+			p.trace.keep(c.ID, c.ProjectID, stageDiversity, reasonDiversityBackfilled, c.Score)
+		case moved[i]:
+			dropped = append(dropped, c.ID)
+			p.dropped[c.ID] = reasonDiversityDeferred
+			p.droppedBy[stageDiversity]++
+			p.trace.decide(c.ID, c.ProjectID, stageDiversity, reasonDiversityDeferred, c.Score)
+			stageNotes = append(stageNotes, formatNote(
+				"diversity deferred %s: category %s had taken the %d slots half a %d-row window allows",
+				ShortID(c.ID), Token(c.Category), share, window))
+		}
+	}
+
+	note := fmt.Sprintf("diversity deferred %d of %d candidates: no category may take "+
+		"more than the %d slots half a %d-row window allows, so the rows it moved behind "+
+		"the window make room for the next-ranked rows of other categories",
+		len(deferred), in, share, window)
 	p.blockNotes = append(p.blockNotes, note)
-	p.trace.record(stageDiversity, len(p.rows), len(p.rows), nil, note)
+
+	// The permutation itself: the window, then the rows still deferred, then the
+	// rows the ranking put below the window. Fresh slices, not p.rows[:0]: the
+	// candidate set is the retriever's return value and the contract says it is
+	// the widened untrimmed result, so compacting into its backing array would
+	// leave the caller holding duplicated, stale rows.
+	order := make([]int, 0, in)
+	order = append(order, head...)
+	order = append(order, deferred...)
+	order = append(order, tail...)
+	rows := make([]memory.Candidate, len(order))
+	items := make([]Item, len(order))
+	for dst, src := range order {
+		rows[dst] = p.rows[src]
+		items[dst] = p.items[src]
+	}
+	p.rows, p.items = rows, items
+
+	p.trace.record(stageDiversity, in, in, dropped, append(stageNotes, note)...)
+}
+
+// diversityShare is the most slots of the window one category may take: half the
+// window, ROUNDED UP, and never fewer than one. A window of one admits one row
+// and that row has a category, so a share of zero would defer the only row the
+// answer could hold — which is the same answer the window always gave, reached
+// by breaking the guarantee instead of keeping it.
+func diversityShare(window int) int {
+	if window < 1 {
+		return 0
+	}
+	return (window + 1) / 2
+}
+
+// diversityDeferral is one row stage 7 moved behind the window and why: the
+// category that had filled its share, and the share itself. explain reads it so
+// the sentence can name the cap a row hit rather than repeat the token.
+type diversityDeferral struct {
+	category string
+	share    int
 }
 
 // runBudget is stage 8: the final closure. The order the retriever returned is
@@ -748,16 +933,26 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 	for i := range rows {
 		if !keepRow[i] {
 			dropped = append(dropped, rows[i].ID)
-			p.dropped[rows[i].ID] = reason
-			p.droppedBy[stageBudget]++
-			if p.passive && rows[i].Pinned {
-				// Keyed on the row's OWN project, the key the decision below and
-				// CountsFor use, so the count is a subset of the same bucket's RankedOut
-				// even when a union bucket admits `_global` rows.
-				bucket := rows[i].ProjectID
-				p.trace.addPinnedCut(bucket, 1)
+			// ONE verdict per row. A row stage 7 deferred is still in the
+			// candidate order — a deferral moves a row behind the window, it
+			// does not remove it — so the budget stage is what actually cuts it,
+			// and the row the trace has already judged keeps the verdict that
+			// first excluded it. Filing a second one would count one row twice:
+			// in the per-stage breakdown, in the bucket tally the passive header
+			// reads, and in the retrieval record. The row is still listed as
+			// removed by this stage, because it was.
+			if _, decided := p.dropped[rows[i].ID]; !decided {
+				p.dropped[rows[i].ID] = reason
+				p.droppedBy[stageBudget]++
+				if p.passive && rows[i].Pinned {
+					// Keyed on the row's OWN project, the key the decision below and
+					// CountsFor use, so the count is a subset of the same bucket's RankedOut
+					// even when a union bucket admits `_global` rows.
+					bucket := rows[i].ProjectID
+					p.trace.addPinnedCut(bucket, 1)
+				}
+				p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)
 			}
-			p.trace.decide(rows[i].ID, rows[i].ProjectID, stageBudget, reason, rows[i].Score)
 			continue
 		}
 		keptRows = append(keptRows, rows[i])

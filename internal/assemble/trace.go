@@ -102,14 +102,25 @@ type Signals struct {
 
 // StageTrace is one stage's counts and the rows it removed.
 //
-// There is deliberately no "did this stage reorder" field, and the absence is
-// the record rather than a gap. The retriever's order is authoritative — it
-// carries the keyword reservation, the status demotion, decay and both
-// demotions, none of which a second pass could recover — so every stage here
-// either filters or records and none of them moves a row. A field for it could
-// therefore only ever read false, and a trace projection that read a permanently
-// false flag as a fact would be wrong about a stage that had reordered. A stage
-// that starts reordering has to add the field back WITH the stage.
+// There is deliberately no "did this stage reorder" field, and the absence is a
+// decision rather than a gap: a reader who needs to know which rows a stage
+// MOVED reads that stage's own per-row decisions, which say it in more detail
+// than a bool could. Stages 2-6 and 8-9 filter or record and move nothing, so
+// they file no decisions and the question does not arise for them.
+//
+// Stage 7 (diversity) is the one exception, and it is the one stage whose
+// reordering is recorded per row rather than by a flag: it permutes the
+// candidate order so that the rows behind the window are the ones the ranking
+// put there, and every row it moved has a decision naming it (Kept for one it
+// moved and then readmitted, dropped for one left behind the window). Its In and
+// Out are therefore the SAME count — it removed nothing — and its DroppedIDs
+// names the rows it moved behind the window rather than rows it removed from the
+// set. The In - Out = len(DroppedIDs) identity the other stages hold is broken
+// here on purpose: a stage that deferred a row and a stage that deleted one are
+// different events, and a count that had to satisfy the identity would have to
+// lie about one of them. A row the budget then cuts keeps the verdict stage 7
+// gave it (see trim), so In - Out still equals the number of rows the whole
+// pipeline judged.
 //
 // In and Out are what the stage saw and left, and they chain from one stage to
 // the next EXCEPT at stage 6: its In is the rows it was handed plus the

@@ -1681,8 +1681,14 @@ Axis interaction rules:
 > `assemble.Run` as the formatted answer. Stage 5 now SEPARATES a `contradicts`
 > pair ([#925](https://github.com/wcatz/ghost/issues/925)): it keeps one side by
 > the documented tie-break and withholds the other, and the kept line marks it.
-> The one stage still a pass-through is stage 7 (diversity,
-> [#927](https://github.com/wcatz/ghost/issues/927)). The plan to converge the
+> Stage 7 (diversity) is now built ([#927](https://github.com/wcatz/ghost/issues/927)):
+> a per-CATEGORY share of the window — no category may take more than half the
+> slots, rounded up — applied only when the candidates left after validity,
+> conflicts and dedup exceed the window, and a DEFERRAL rather than a deletion
+> (a row past the cap moves behind the window, in its existing relative order,
+> and comes back if the other categories cannot fill it; the window is never
+> shrunk, a pinned row is never deferred, and a block that fits is unchanged).
+> The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
@@ -2033,9 +2039,18 @@ and whose vector leg then failed.)
   Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
   callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
-The one stage still to build is diversity (7, off by default and a
-pass-through), tracked under [#927](https://github.com/wcatz/ghost/issues/927).
-Conflict separation (stage 5) is built ([#925](https://github.com/wcatz/ghost/issues/925)):
+Diversity (stage 7) is built ([#927](https://github.com/wcatz/ghost/issues/927)): a
+per-category share of the window, no more than half the slots rounded up for any
+one category, applied only when the candidates left after validity, conflicts and
+dedup EXCEED the window. It is a deferral and never a deletion: a row past the
+cap is moved, in its existing relative order, to just after the window so the
+next-ranked rows of other categories take the slots; if those run out, the
+deferred rows come back in their original order until the window is full, so the
+stage can change WHICH rows fill the window and never how many. A pinned row is
+never deferred and still counts toward its category's cap; within a category
+nothing is reordered; each deferred row is a `diversity` / `diversity_deferred`
+decision in the trace (and `diversity_backfilled` for one that came back) and is
+reported by explain as not included. Conflict separation (stage 5) is built ([#925](https://github.com/wcatz/ghost/issues/925)):
 stage 5 walks the rows that have a live `contradicts` edge in keep-priority order
 (pinned, then later `verified_at`, then later `updated_at`/`created_at`, then the
 rank the window holds) and withholds any row that contradicts one it already kept;
@@ -2061,8 +2076,7 @@ query
                     kept line. Supersede demotion is the retriever's.
   6. dedup          collapse duplicate/near-duplicate links to one representative
                     (the retriever's removed losers are recorded here, with their winner)
-  7. diversity      cap per-source share so one project cannot crowd out the rest
-                    (designed, not built: today a recorded pass-through)
+  7. diversity      cap per-category share so one category cannot crowd out the rest
   8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context
        → outcome    answerable | weak | empty, with a reason from a closed set

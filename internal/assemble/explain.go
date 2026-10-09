@@ -247,6 +247,23 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the rows that stage kept", strings.Join(tokens(kept), ", "))
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
+		case reasonDiversityDeferred:
+			// A deferral, so the sentence says what the row hit and what moved it:
+			// its category had filled its share of the window, and the stage put
+			// the row behind the window so the next-ranked rows of other
+			// categories could take the slots. It states the RULE, not the count
+			// the answer ends up holding: when the other categories run out of
+			// rows the deferred ones come back, so a block can carry more of one
+			// category than the share, and a sentence claiming otherwise would
+			// contradict the block above it.
+			d, ok := p.deferred[id]
+			if !ok {
+				return "deferred by the diversity stage: the memory's category had filled its share of the window"
+			}
+			return fmt.Sprintf("deferred by the diversity stage: category %s had filled its share — no more "+
+				"than %d slots for any one category in a %d-row window — so the row was moved behind the "+
+				"window and other categories' rows took the slots",
+				Token(d.category), d.share, p.admitCap())
 		case "budget", "slice_budget":
 			return fmt.Sprintf("outside the result window: the answer admits only the top %d", p.admitCap())
 		case reasonBudgetDropped:
@@ -339,6 +356,6 @@ func explainAxisNotes() []string {
 	return []string{
 		"validity_state is the row's own currency at the search clock and validity_penalty is 0 on every row: the assembler's validity stage withholds an expired or not-yet-valid row instead of ranking it lower, so such a row is excluded with its reason and no score carries a validity factor",
 		"confidence and provenance are recorded, not scored: confidence_contribution and provenance_contribution are 0 and provenance_weight is \"off\", because the provenance stage pins an inert weight that no score is multiplied by. Two rows with different confidence therefore ranked identically",
-		"supersede_penalty and near_duplicate_penalty are window-scoped, as the retriever applies them over the rows of its result window only: a candidate below the window reports 0. A contradicts edge causes no penalty (supersedes does, and is reported as supersede_penalty with superseded_by naming the superseder), and there is no per-bucket diversity cap on a search: near_duplicate_of names the row each near-duplicate lost to",
+		"supersede_penalty and near_duplicate_penalty are window-scoped, as the retriever applies them over the rows of its result window only: a candidate below the window reports 0. A contradicts edge causes no penalty (supersedes does, and is reported as supersede_penalty with superseded_by naming the superseder): near_duplicate_of names the row each near-duplicate lost to, and no penalty is what a contradicts leg causes because stage 5 withholds the losing side outright",
 	}
 }
