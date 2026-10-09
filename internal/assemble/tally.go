@@ -53,6 +53,11 @@ type BucketTally struct {
 	// pin's slot guarantee ran out rather than leave those rows to read as ranking.
 	// Set by CountsFor from the trace.
 	PinnedCut int
+	// ByteCut is how many of RankedOut the response-fit post-pass removed to
+	// bring the block under its byte cap (stage 8, reason budget_dropped). It is a
+	// SUBSET of RankedOut and never added to Total, kept apart so a header can say
+	// those rows were cut for size and not outranked by the composite score.
+	ByteCut int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
@@ -146,6 +151,9 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 			t.Deduped++
 		case stageBudget, stageResponseFit:
 			t.RankedOut++
+			if d.Stage == stageResponseFit {
+				t.ByteCut++
+			}
 		default:
 			t.Withheld++
 			if _, seen := counts[d.Reason]; !seen {

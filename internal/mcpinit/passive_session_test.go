@@ -3,12 +3,17 @@ package mcpinit
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // mcpinitSource returns the text of every non-test .go file in internal/mcpinit.
@@ -301,4 +306,287 @@ func funcBody(t *testing.T, source, name string) string {
 	}
 	t.Fatalf("func %s is not closed in the source read", name)
 	return ""
+}
+
+// seedByteCapStore builds a store whose uncapped session-start block is well over
+// the host's 10,000-character limit: a project with pinned rows, many unpinned
+// rows, a learned summary, four tasks and three decisions, and eight globals.
+func seedByteCapStore(t *testing.T) (dbPath, projectPath string, pinned []string) {
+	t.Helper()
+	ghostDir := filepath.Join(t.TempDir(), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath = filepath.Join(ghostDir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	projectPath = filepath.Join(t.TempDir(), "bigproj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project path: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
+	exec(`INSERT INTO projects (id, path, name) VALUES ('pbig', ?, 'bigproj')`, canonical)
+	exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('pbig', ?)`, strings.Repeat("Learned summary sentence. ", 20))
+
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	insert := func(id, project, category string, content string, imp float64, pin int) {
+		exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?)`, id, project, category, content, imp, pin, ts, ts)
+	}
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("ppin%02d", i)
+		pinned = append(pinned, id)
+		insert(id, "pbig", "preference", strings.Repeat(fmt.Sprintf("Pinned %02d content. ", i), 15), 0.2, 1)
+	}
+	for i := 0; i < 30; i++ {
+		insert(fmt.Sprintf("pmem%02d", i), "pbig", "gotcha", strings.Repeat(fmt.Sprintf("Unpinned %02d content. ", i), 15), 0.9-float64(i)*0.01, 0)
+	}
+	for i := 0; i < 10; i++ {
+		insert(fmt.Sprintf("gmem%02d", i), "_global", "preference", strings.Repeat(fmt.Sprintf("Global %02d content. ", i), 20), 0.7, 0)
+	}
+	for i := 0; i < 4; i++ {
+		exec(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES (?, 'pbig', ?, ?, 'pending', 1)`,
+			fmt.Sprintf("task%02d", i), strings.Repeat("Task title words ", 10), strings.Repeat("Task description. ", 15))
+	}
+	for i := 0; i < 3; i++ {
+		exec(`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'pbig', ?, ?, 'why', 'active')`,
+			fmt.Sprintf("dec%02d", i), strings.Repeat("Decision title words ", 8), strings.Repeat("Decision body. ", 20))
+	}
+	return dbPath, projectPath, pinned
+}
+
+// TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned: a ~12 KB store renders a
+// block under the cap that holds every pinned row, the cap is on the bytes of the
+// WHOLE rendered block (framing included), and every cut row is recorded as cut
+// with its reason rather than as delivered.
+func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
+	dbPath, projectPath, pinned := seedByteCapStore(t)
+	cfg := mustHookConfig(t)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+
+	block := SessionBlockAt(dbPath, projectPath, cfg, now)
+
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the %d cap", len(block), sessionStartByteCap)
+	}
+	if len(block) >= 10000 {
+		t.Errorf("block is %d bytes, at or over the host's 10,000 limit", len(block))
+	}
+	for _, id := range pinned {
+		if !strings.Contains(block, id) {
+			t.Errorf("pinned row %s is not in the block", id)
+		}
+	}
+	if !strings.Contains(block, "cut to keep this block under the host's output limit") {
+		t.Errorf("the count line does not say rows were cut for size:\n%s", block)
+	}
+	if !strings.Contains(block, "task00") || !strings.Contains(block, "dec00") {
+		t.Errorf("tasks and decisions are missing from the block")
+	}
+
+	// What the block shows and what the record says were delivered must agree.
+	shown := 0
+	for _, prefix := range []string{"pmem", "gmem", "ppin"} {
+		shown += strings.Count(block, "`"+prefix) + strings.Count(block, "["+prefix)
+	}
+	db, err := memory.OpenReadDB(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var verdicts string
+	if err := db.QueryRow(`SELECT verdicts FROM retrieval_record WHERE source = 'session_start' ORDER BY rowid DESC LIMIT 1`).Scan(&verdicts); err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var rows []struct {
+		ID     string `json:"id"`
+		Kept   bool   `json:"kept"`
+		Stage  string `json:"stage"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(verdicts), &rows); err != nil {
+		t.Fatalf("decode verdicts %q: %v", verdicts, err)
+	}
+	cut, kept := 0, 0
+	for _, r := range rows {
+		inBlock := strings.Contains(block, r.ID)
+		if r.Kept {
+			kept++
+			if !inBlock {
+				t.Errorf("record says %s was delivered, the block does not hold it", r.ID)
+			}
+			continue
+		}
+		if inBlock {
+			t.Errorf("record says %s was cut (%s), the block holds it", r.ID, r.Stage)
+		}
+		if r.Stage == "response_fit" {
+			cut++
+			if r.Reason == "" {
+				t.Errorf("cut row %s has no reason", r.ID)
+			}
+		}
+	}
+	if cut == 0 {
+		t.Fatalf("no response_fit cut recorded; verdicts: %s", verdicts)
+	}
+	for _, id := range pinned {
+		for _, r := range rows {
+			if r.ID == id && !r.Kept {
+				t.Errorf("pinned row %s recorded as cut", id)
+			}
+		}
+	}
+	if kept <= len(pinned) || kept+cut < 23 {
+		t.Errorf("expected unpinned rows delivered beside the pinned ones and 23 judged: kept %d cut %d", kept, cut)
+	}
+	t.Logf("block %d bytes, %d delivered, %d cut for size", len(block), kept, cut)
+}
+
+// A store that fits the cap loses nothing: no cut is recorded and no count-line
+// clause about size appears.
+func TestSessionStartUnderTheByteCapCutsNothing(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM tasks`, `DELETE FROM decisions`, `UPDATE ghost_state SET learned_context = ''`,
+		`DELETE FROM memories WHERE id LIKE 'pmem%' AND id > 'pmem03'`,
+		`DELETE FROM memories WHERE id LIKE 'gmem%' AND id > 'gmem01'`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_ = db.Close()
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+	if len(block) > sessionStartByteCap/2 {
+		t.Fatalf("fixture is not small: %d bytes", len(block))
+	}
+	if strings.Contains(block, "output limit") {
+		t.Errorf("a block under the cap mentions a size cut:\n%s", block)
+	}
+	for _, id := range []string{"pmem00", "pmem03", "gmem00", "gmem01", "ppin00"} {
+		if !strings.Contains(block, id) {
+			t.Errorf("%s is missing from a block under the cap", id)
+		}
+	}
+}
+
+// execOnStore runs statements against the store at dbPath.
+func execOnStore(t *testing.T, dbPath string, stmts ...string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+}
+
+// A pinned row that sits BELOW unpinned rows in the block (the bucket order puts
+// `_global` after the project) is still the last to go: unpinned project rows are
+// cut before it.
+func TestSessionStartCutsUnpinnedRowsBeforeAPinnedOneRankedBelowThem(t *testing.T) {
+	dbPath, projectPath, pinned := seedByteCapStore(t)
+	execOnStore(t, dbPath, `UPDATE memories SET pinned = 1 WHERE id = 'gmem00'`)
+	long := strings.Repeat("Task title words ", 10)
+	for i := 0; i < 6; i++ {
+		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
+	}
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the cap", len(block))
+	}
+	// Seven unpinned globals sit below the pinned one, so the pressure has to reach
+	// past them into the project's unpinned rows for the order to matter.
+	if strings.Contains(block, "pmem11") || strings.Contains(block, "gmem07") {
+		t.Fatalf("not enough pressure: the bottom unpinned rows survive:\n%s", block)
+	}
+	if !strings.Contains(block, "gmem00") {
+		t.Errorf("the pinned global was cut before unpinned project rows")
+	}
+	for _, id := range pinned {
+		if !strings.Contains(block, id) {
+			t.Errorf("pinned project row %s was cut", id)
+		}
+	}
+}
+
+// Every project row cut while the pinned globals remain: the Memories heading and
+// the count line still say what happened, rather than the section vanishing and
+// the project reading as one with nothing saved.
+func TestSessionStartKeepsTheMemoriesHeadingWhenEveryProjectRowIsCut(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	execOnStore(t, dbPath,
+		`UPDATE memories SET pinned = 1 WHERE project_id = '_global'`,
+		`UPDATE memories SET pinned = 0 WHERE id LIKE 'ppin%'`,
+		`UPDATE memories SET content = content || content WHERE project_id = '_global'`,
+	)
+	// Enough framing that the pinned globals plus a single project row do not fit.
+	long := strings.Repeat("Task title words ", 10)
+	for i := 0; i < 6; i++ {
+		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
+	}
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if strings.Contains(block, "pmem") || strings.Contains(block, "ppin") {
+		t.Fatalf("a project row survived, so the fixture does not cut them all:\n%s", block)
+	}
+	if !strings.Contains(block, "gmem") {
+		t.Fatalf("no global survived:\n%s", block)
+	}
+	if !strings.Contains(block, "**Memories (") {
+		t.Errorf("the Memories heading is gone:\n%s", block)
+	}
+	if !strings.Contains(block, "cut to keep this block under the host's output limit") {
+		t.Errorf("the count line does not say rows were cut for size:\n%s", block)
+	}
+}
+
+// Framing is bounded, so an oversized learned summary, task title or decision
+// title cannot push the block past the host limit or cost it every row.
+func TestSessionStartBoundsTheFraming(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	execOnStore(t, dbPath,
+		fmt.Sprintf(`UPDATE ghost_state SET learned_context = '%s' WHERE project_id = 'pbig'`, strings.Repeat("Learned words. ", 800)),
+		fmt.Sprintf(`UPDATE tasks SET title = '%s'`, strings.Repeat("Huge task title ", 100)),
+		fmt.Sprintf(`UPDATE decisions SET title = '%s'`, strings.Repeat("Huge decision title ", 100)),
+	)
+
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+
+	if len(block) >= 10000 {
+		t.Errorf("block is %d bytes, at or over the host's 10,000 limit", len(block))
+	}
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the %d cap", len(block), sessionStartByteCap)
+	}
+	rows := strings.Count(block, "pmem") + strings.Count(block, "ppin") + strings.Count(block, "gmem")
+	if rows == 0 {
+		t.Errorf("every row was cut for framing that is now bounded:\n%s", block)
+	}
 }
