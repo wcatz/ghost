@@ -323,3 +323,28 @@ func TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim(t *testing.T) {
 		}
 	}
 }
+
+// TestBindNewProjectToCheckoutJudgesThePhysicalPath: the guards compare physical
+// paths, so a symlinked spelling of a claimed directory is the same claim.
+func TestBindNewProjectToCheckoutJudgesThePhysicalPath(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	real := filepath.Join(root, "workspace", "infra")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-to-workspace")
+	if err := os.Symlink(filepath.Join(root, "workspace"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := store.EnsureProjectWithRepo(ctx, "infra", real, "infra", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.BindNewProjectToCheckout(ctx, "infra2", link, "infra2", ""); err != nil || ok {
+		t.Fatalf("bind of a symlink to a directory holding another project = %v, %v; want false", ok, err)
+	}
+	if ok, err := store.BindNewProjectToCheckout(ctx, "same", filepath.Join(link, "infra"), "same", ""); err != nil || ok {
+		t.Fatalf("bind of a symlinked spelling of a claimed directory = %v, %v; want false", ok, err)
+	}
+}

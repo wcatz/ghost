@@ -560,6 +560,15 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
 		return false, nil
 	}
+	// Every comparison below is between PHYSICAL paths, as in BindProjectPath: a
+	// caller's spelling (a symlink, a dot segment, native separators) would make
+	// the containment and equality rules inert. What is recorded is the physical
+	// path too, and a directory that cannot be resolved is not a checkout.
+	physical, err := canonicalPath(dir)
+	if err != nil || physical == id || !storedPathIsUsable(physical) {
+		return false, nil
+	}
+	dir = physical
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
