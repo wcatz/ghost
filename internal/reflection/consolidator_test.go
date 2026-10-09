@@ -255,6 +255,16 @@ func TestInferGlobalScope(t *testing.T) {
 		{"credential fact stays project", "fact", "the deploy credential rotates every 90 days", "project"},
 		{"bearer token stays project", "gotcha", "requests need a bearer token in the header", "project"},
 		{"password in cross-repo phrasing stays project", "fact", "the grafana password works across all repos", "project"},
+		// #966: single host/cluster/repo mentions stay project-scoped
+		{"single relay host stays project", "fact", "SSH into relay-3 to restart the block producer", "project"},
+		{"single node host stays project", "fact", "restart node-5 for maintenance", "project"},
+		{"single cluster name stays project", "fact", "deploy to cluster-prod from any repo", "project"},
+		{"single infra host stays project", "fact", "infra-bastion is the jump host", "project"},
+		{"single production host stays project", "fact", "production-db1 needs a password rotation", "project"},
+		{"single staging host stays project", "fact", "staging-app-2 has a memory leak", "project"},
+		{"bastion host stays project", "fact", "SSH via bastion to reach the cluster", "project"},
+		{"explicit single host still project despite weak patterns", "fact", "SSH into relay-3 cluster for maintenance", "project"},
+		{"explicit single node still project despite deploy phrasing", "fact", "deploy to node-7 from CI", "project"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

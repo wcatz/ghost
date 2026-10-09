@@ -145,6 +145,12 @@ func tokenize(s string) map[string]bool {
 // global scope: the shared check in secrets.go applies to both reflection
 // tiers, and global memories are replayed into every project's injected
 // context, so promoting a credential here would widen its blast radius.
+//
+// A fact naming a single host, cluster, or repository stays project-scoped.
+// This is the narrow fix for #966: the previous weak patterns promoted
+// host-specific operational facts to global because they matched "cluster" or
+// "deploy to" phrasing. We now check for explicit single-host language before
+// the weak patterns can promote.
 func inferGlobalScope(category, content string) string {
 	lower := strings.ToLower(content)
 
@@ -159,6 +165,25 @@ func inferGlobalScope(category, content string) string {
 		"this project", "this repo", "the project", "for this service",
 	}
 	for _, p := range projectScopedMarkers {
+		if strings.Contains(lower, p) {
+			return "project"
+		}
+	}
+
+	// Single-host/cluster/repo language: explicit mentions of one host,
+	// cluster, or repository keep the fact project-scoped. This prevents
+	// operational facts like "SSH into relay-3 to restart the block producer"
+	// from being promoted to global just because they contain "cluster" or
+	// "deploy to" phrasing. The check is for singular, specific references
+	// that include a distinguishing identifier (number, name, hyphenated).
+	singleHostPatterns := []string{
+		"relay-", "node-", "host-",
+		"cluster-",
+		"infra-",
+		"production-", "staging-",
+		"bastion", "bastion-",
+	}
+	for _, p := range singleHostPatterns {
 		if strings.Contains(lower, p) {
 			return "project"
 		}

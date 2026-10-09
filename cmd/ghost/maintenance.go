@@ -65,12 +65,115 @@ func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 // -h/--help (see handleHelp). One text for both, so the two can never drift.
 const maintenanceUsage = `Usage: ghost maintenance status
        ghost maintenance clean-scratch [--apply]
+       ghost maintenance consolidate-global [--apply]
 `
 
 // runMaintenanceStatus implements `ghost maintenance status`: live scratch
 // usage + the most recent hygiene runs. Best-effort on the scratch side (an
 // unusable root is reported in the header, not fatal); the database decides
 // between "runs" and the explicit no-database state.
+// parseConsolidateGlobalArgs parses `ghost maintenance consolidate-global` arguments.
+func parseConsolidateGlobalArgs(args []string) (apply bool, err error) {
+	for _, arg := range args {
+		switch arg {
+		case "--apply":
+			apply = true
+		default:
+			return false, fmt.Errorf("unknown argument %q (usage: ghost maintenance consolidate-global [--apply])", arg)
+		}
+	}
+	return apply, nil
+}
+
+// runMaintenanceConsolidateGlobal implements `ghost maintenance consolidate-global`:
+// dry-run by default — lists the near-duplicate clusters found in _global —
+// and applies the folds only behind an explicit --apply.
+func runMaintenanceConsolidateGlobal(args []string) {
+	apply, err := parseConsolidateGlobalArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "no database found (run ghost first)\n")
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
+		os.Exit(1)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close() //nolint:errcheck
+
+	store := memory.NewStore(db, nil)
+
+	ctx := context.Background()
+
+	fmt.Printf("Scanning _global for near-duplicate memories...\n\n")
+
+	result, err := store.ConsolidateGlobal(ctx, memory.GlobalConsolidationOptions{DryRun: !apply})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: global consolidation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result.Clusters) == 0 {
+		fmt.Println("No near-duplicate clusters found in _global.")
+		return
+	}
+
+	fmt.Printf("Found %d cluster(s) covering %d folded memories:\n\n", len(result.Clusters), countFoldedInClusters(result.Clusters))
+
+	for i, cluster := range result.Clusters {
+		fmt.Printf("Cluster %d (similarity >= %.2f):\n", i+1, cluster.Similarity)
+		fmt.Printf("  SURVIVOR: [%s] (imp:%.1f, pinned:%v) %s\n",
+			cluster.Survivor.Category, cluster.Survivor.Importance, cluster.Survivor.Pinned,
+			truncateForDisplay(cluster.Survivor.Content, 120))
+		for _, folded := range cluster.Folded {
+			fmt.Printf("  folded:   [%s] (imp:%.1f, pinned:%v) %s\n",
+				folded.Category, folded.Importance, folded.Pinned,
+				truncateForDisplay(folded.Content, 120))
+		}
+		fmt.Println()
+	}
+
+	if !apply {
+		fmt.Println("DRY RUN — pass --apply to execute the folds above")
+		return
+	}
+
+	fmt.Printf("Applied: folded %d memories into %d survivors.\n", result.Folded, len(result.Clusters))
+}
+
+// countFoldedInClusters returns the total number of folded memories across all clusters.
+func countFoldedInClusters(clusters []memory.GlobalCluster) int {
+	count := 0
+	for _, c := range clusters {
+		count += len(c.Folded)
+	}
+	return count
+}
+
+// truncateForDisplay truncates a string for display, adding ellipsis if truncated.
+func truncateForDisplay(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 func runMaintenanceStatus() {
 	cfg, err := config.Load()
 	if err != nil {
