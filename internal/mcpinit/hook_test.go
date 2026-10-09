@@ -1183,10 +1183,17 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 // facts never decay, so score stays 0.2) plus one 'gotcha' row (importance
 // 0.9, created_at ~400 days back — decays to the 0.15 floor, score
 // 0.9*0.15=0.135). Under raw-importance ordering the gotcha (0.9) would rank
-// first and easily survive the 15-cap; under decayed-score ordering it
-// scores below every fact (0.135 < 0.2) and is the one row trimmed by the
-// cap. Asserting the gotcha marker is absent (and a fact marker present)
-// only passes under decay-ranked ordering.
+// first; under decayed-score ordering it scores below every fact (0.135 <
+// 0.2) and is the LAST row of the 16, which is what this asserts by position.
+//
+// The share changed which row the 15-cap leaves out, and that is its job. The
+// project bucket holds 16 rows under a 15-row cap, so stage 7 divides it: the
+// facts fill their half, the gotcha takes the slot reserved for a second
+// category, and the remaining facts come back — 14 facts plus the gotcha, with
+// one FACT deferred behind the window and cut. A block that is all one thing
+// is what the stage exists to prevent, so the marker that used to be absent
+// is now the one the block gains; the decay ranking is unchanged, and the
+// gotcha still sorts last.
 func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -1254,14 +1261,21 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	if strings.Contains(result, "GOTCHAMARKER") {
-		t.Errorf("expected decayed gotcha (score 0.135) to be trimmed by the 15-cap in favor of higher-scoring facts (0.2); got:\n%s", result)
+	// The decayed gotcha takes the slot the share reserves for a second category,
+	// so the block holds it and one fact is the row left out.
+	if !strings.Contains(result, "GOTCHAMARKER") {
+		t.Errorf("the project bucket holds 16 rows under a 15-row cap, so the share reserves a slot for a second category and the gotcha takes it; got:\n%s", result)
 	}
 	if !strings.Contains(result, "FACTMARKER") {
 		t.Errorf("expected fact rows (score 0.2) to survive the cap; got:\n%s", result)
 	}
-	if !strings.Contains(result, "15 shown of 16 total — 1 not shown") {
+	if !strings.Contains(result, "15 shown of 16 total — 1 withheld rather than ranked out") {
 		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
+	}
+	// The decay ranking is untouched: the gotcha sorts last in the block, below
+	// every fact, which is the assertion the raw-importance ordering fails.
+	if i, j := strings.Index(result, "FACTMARKER13"), strings.Index(result, "GOTCHAMARKER"); i < 0 || j < 0 || j < i {
+		t.Errorf("the decayed gotcha must sort last, below every fact: fact13 at %d, gotcha at %d", i, j)
 	}
 }
 
@@ -1391,7 +1405,14 @@ func TestSessionInjectionBehaviorFloor(t *testing.T) {
 	if !strings.Contains(result, "FACTMARKER") {
 		t.Errorf("expected fact rows to still survive the cap; got:\n%s", result)
 	}
-	if !strings.Contains(result, "15 shown of 16 total — 1 not shown") {
+	// The share defers nothing that stays deferred here, and the header is why
+	// that is visible. The behaviour floor promotes the gotcha to the front, so
+	// the facts fill their half and the rest are deferred; there are exactly as
+	// many free slots as deferred rows, every one comes back, and the row the
+	// 15-cap leaves out is a fact the retriever had already ranked behind the
+	// window. So this line is unchanged: a deferral that ends in a backfill is
+	// not a withholding.
+	if !strings.Contains(result, "15 shown of 16 total — 1 not shown, ranked by a composite score") {
 		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
 	}
 }

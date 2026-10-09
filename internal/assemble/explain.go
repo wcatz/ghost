@@ -247,6 +247,41 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the rows that stage kept", strings.Join(tokens(kept), ", "))
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
+		case reasonDiversityDeferred:
+			// A deferral, so the sentence says what the row hit and what moved it:
+			// its category had filled its share of the window, and the stage put
+			// the row behind the window so the next-ranked rows of other
+			// categories could take the slots. It states the RULE, not the count
+			// the answer ends up holding: when the other categories run out of
+			// rows the deferred ones come back, so a block can carry more of one
+			// category than the share, and a sentence claiming otherwise would
+			// contradict the block above it.
+			//
+			// UNREACHABLE from a shipped run today, and the reason is the stage's
+			// own scope: the share is a PASSIVE-read rule and `Request.Explain` is
+			// refused without a query, so every explain projection is a
+			// query-mode one. It is kept rather than deleted because the trace
+			// and the retrieval record carry the reason on a passive read, and a
+			// projection of one would reach for exactly this sentence — the
+			// generic fallback below would call the share a "rule" and name
+			// neither the category nor the cap.
+			d, ok := p.deferred[id]
+			if !ok {
+				return "deferred by the diversity stage: the memory's category had filled its share of the window"
+			}
+			// The window the share was half of, which on a sliced read is the
+			// row's OWN bucket cap and not the request's total: naming the total
+			// beside a per-bucket share would print a share that is not half of
+			// the window it names. `d.slots` is 0 only for a deferral built by
+			// hand, and then the request's total is the honest fallback.
+			slots := d.slots
+			if slots == 0 {
+				slots = p.admitCap()
+			}
+			return fmt.Sprintf("deferred by the diversity stage: category %s had filled its share — no more "+
+				"than %d slots for any one category in a %d-row window — so the row was moved behind the "+
+				"window and other categories' rows took the slots",
+				Token(d.category), d.share, slots)
 		case "budget", "slice_budget":
 			return fmt.Sprintf("outside the result window: the answer admits only the top %d", p.admitCap())
 		case reasonBudgetDropped:
@@ -339,6 +374,6 @@ func explainAxisNotes() []string {
 	return []string{
 		"validity_state is the row's own currency at the search clock and validity_penalty is 0 on every row: the assembler's validity stage withholds an expired or not-yet-valid row instead of ranking it lower, so such a row is excluded with its reason and no score carries a validity factor",
 		"confidence and provenance are recorded, not scored: confidence_contribution and provenance_contribution are 0 and provenance_weight is \"off\", because the provenance stage pins an inert weight that no score is multiplied by. Two rows with different confidence therefore ranked identically",
-		"supersede_penalty and near_duplicate_penalty are window-scoped, as the retriever applies them over the rows of its result window only: a candidate below the window reports 0. A contradicts edge causes no penalty (supersedes does, and is reported as supersede_penalty with superseded_by naming the superseder), and there is no per-bucket diversity cap on a search: near_duplicate_of names the row each near-duplicate lost to",
+		"supersede_penalty and near_duplicate_penalty are window-scoped, as the retriever applies them over the rows of its result window only: a candidate below the window reports 0. A contradicts edge causes no penalty (supersedes does, and is reported as supersede_penalty with superseded_by naming the superseder): near_duplicate_of names the row each near-duplicate lost to, and no penalty is what a contradicts leg causes because stage 5 withholds the losing side outright",
 	}
 }

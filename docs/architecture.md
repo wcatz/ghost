@@ -1681,8 +1681,19 @@ Axis interaction rules:
 > `assemble.Run` as the formatted answer. Stage 5 now SEPARATES a `contradicts`
 > pair ([#925](https://github.com/wcatz/ghost/issues/925)): it keeps one side by
 > the documented tie-break and withholds the other, and the kept line marks it.
-> The one stage still a pass-through is stage 7 (diversity,
-> [#927](https://github.com/wcatz/ghost/issues/927)). The plan to converge the
+> Stage 7 (diversity) is now built ([#927](https://github.com/wcatz/ghost/issues/927)):
+> a per-CATEGORY share of the window on PASSIVE reads only — no category may
+> take more than half the slots, rounded up — applied only when the candidates
+> left after validity, conflicts and dedup exceed the window, and a DEFERRAL
+> rather than a deletion (a row past the cap moves behind the window, in its
+> existing relative order, and comes back if the other categories cannot fill
+> it; the window is never shrunk, a pinned row is never deferred, and a block
+> that fits is unchanged). Query mode is left to the ranking alone: a query is
+> a relevance question, so the row that answered it must not move behind
+> another row because of what it is ABOUT, while a digest asks no question and
+> hands a model everything worth knowing, where breadth is the point. The gate
+> is the request's mode (an empty `Query`), never its `Source`.
+> The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
@@ -2033,9 +2044,40 @@ and whose vector leg then failed.)
   Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
   callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
-The one stage still to build is diversity (7, off by default and a
-pass-through), tracked under [#927](https://github.com/wcatz/ghost/issues/927).
-Conflict separation (stage 5) is built ([#925](https://github.com/wcatz/ghost/issues/925)):
+Diversity (stage 7) is built ([#927](https://github.com/wcatz/ghost/issues/927)): a
+per-category share of the window on PASSIVE reads only, no more than half the
+slots rounded up for any one category, applied only when the candidates left
+after validity, conflicts and dedup EXCEED a window. It is a deferral and never
+a deletion: a row past the cap is moved, in its existing relative order, to just
+after the window so the next-ranked rows of other categories take the slots; if
+those run out, the deferred rows come back in their original order until the
+window is full, so the stage can change WHICH rows fill a window and never how
+many. A pinned row is never deferred and still counts toward its category's cap;
+within a category nothing is reordered, inside a window or behind it alike; each
+deferred row is a `diversity` / `diversity_deferred` decision in the trace (and
+`diversity_backfilled` for one that came back).
+
+**The window is PER BUCKET on a sliced read, and that is structural rather than
+cosmetic.** Stage 8 enforces each slice cap over the rows IT admits, so one shared
+window would let one bucket's share evict another bucket's row — which the
+per-bucket cap then readmits — leaving a deferral verdict on a row the answer
+renders, counted as withheld by the bucket tally the session-start header reads. So the
+session start's project slice and
+`_global` slice are each divided by their own cap, each computed only over that
+bucket's rows, and a bucket with no item cap is not divided at all because the
+budget stage never cuts its rows on count. A bucket's rows keep their own relative
+order, so one bucket's reordering cannot change which rows stage 8 admits for
+another. A row a share moved but the budget stage admits keeps no drop verdict
+either (`trim` withdraws it), so no block shows a row the header calls withheld.
+Query mode is OUTSIDE it, and the reason is the two questions
+rather than the two surfaces: `ghost_memory_search` asked what MATCHES and the
+ranking is the whole answer, so a share that moved the row that answered would be
+the stage answering a question nobody asked; a digest asked nothing and is handing
+a model everything worth knowing, where breadth is the point. The gate is
+`pipeline.passive` — bound from the absence of a `Query` — rather than `Source`,
+so a future passive source cannot be shared by a query-mode one. Because
+`Request.Explain` is refused without a query, no shipped explain payload can carry
+the reason; it reaches the trace and the retrieval record. Conflict separation (stage 5) is built ([#925](https://github.com/wcatz/ghost/issues/925)):
 stage 5 walks the rows that have a live `contradicts` edge in keep-priority order
 (pinned, then later `verified_at`, then later `updated_at`/`created_at`, then the
 rank the window holds) and withholds any row that contradicts one it already kept;
@@ -2061,8 +2103,8 @@ query
                     kept line. Supersede demotion is the retriever's.
   6. dedup          collapse duplicate/near-duplicate links to one representative
                     (the retriever's removed losers are recorded here, with their winner)
-  7. diversity      cap per-source share so one project cannot crowd out the rest
-                    (designed, not built: today a recorded pass-through)
+  7. diversity      cap per-category share so one category cannot crowd out the
+                    rest (passive reads only: a query is ranked for relevance)
   8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context
        → outcome    answerable | weak | empty, with a reason from a closed set

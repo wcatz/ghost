@@ -1,6 +1,7 @@
 package assemble
 
 import (
+	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -102,14 +103,27 @@ type Signals struct {
 
 // StageTrace is one stage's counts and the rows it removed.
 //
-// There is deliberately no "did this stage reorder" field, and the absence is
-// the record rather than a gap. The retriever's order is authoritative — it
-// carries the keyword reservation, the status demotion, decay and both
-// demotions, none of which a second pass could recover — so every stage here
-// either filters or records and none of them moves a row. A field for it could
-// therefore only ever read false, and a trace projection that read a permanently
-// false flag as a fact would be wrong about a stage that had reordered. A stage
-// that starts reordering has to add the field back WITH the stage.
+// There is deliberately no "did this stage reorder" field, and the absence is a
+// decision rather than a gap: a reader who needs to know which rows a stage
+// MOVED reads that stage's own per-row decisions, which say it in more detail
+// than a bool could. Stages 2-6 and 8-9 filter or record and move nothing, so
+// they file no decisions and the question does not arise for them.
+//
+// Stage 7 (diversity) is the one exception, and it is the one stage whose
+// reordering is recorded per row rather than by a flag: it permutes the
+// candidate order so that the rows behind the window are the ones the ranking
+// put there, and every row it moved has a decision naming it (Kept for one it
+// moved and then readmitted, dropped for one left behind the window). Its In and
+// Out are therefore the SAME count — it removed nothing — and its DroppedIDs
+// names the rows it moved behind the window rather than rows it removed from the
+// set. The In - Out = len(DroppedIDs) identity the other stages hold is broken
+// here on purpose: a stage that deferred a row and a stage that deleted one are
+// different events, and a count that had to satisfy the identity would have to
+// lie about one of them. A row the budget then cuts keeps the verdict stage 7
+// gave it (see trim), so In - Out still equals the number of rows the whole
+// pipeline judged. All of this is on PASSIVE reads only: the share is a
+// passive-read rule, so a query-mode request records stage 7 as a pass-through
+// and holds no decision for it at all.
 //
 // In and Out are what the stage saw and left, and they chain from one stage to
 // the next EXCEPT at stage 6: its In is the rows it was handed plus the
@@ -248,6 +262,70 @@ func (t *Trace) keep(id, projectID, stage, reason string, before float64) {
 	t.Decisions = append(t.Decisions, Decision{
 		ID: id, ProjectID: projectID, Stage: stage, Reason: reason, Kept: true, Before: before,
 	})
+}
+
+// withdrawDeferral turns a stage-7 deferral decision for id into the keep it
+// turned out to be, and reports whether it found one. It also takes the id out of
+// stage 7's `DroppedIDs` and rewrites that stage's summary note, so the stage
+// record keeps agreeing with the verdicts rather than naming a deferral the trace
+// no longer holds.
+//
+// WHY IT EXISTS, AND WHEN IT RUNS. A deferral moves a row behind a window, so the
+// rows in front of it are what normally cut it. A slice's `MaxItems` does exactly
+// that. A slice's `MaxBytes` cuts by CONTENT while the item count is still under
+// its cap, so it can remove every row in front of a deferred one and leave the
+// deferred rows — which the budget stage then admits. That is a shipped shape
+// (`MaxItems` and `MaxBytes` on one slice), and the failure it would otherwise
+// produce is a row the answer RENDERS carrying a `diversity_deferred` verdict:
+// counted as withheld by the bucket tally the passive header reads, and listed as
+// dropped by the stage record. `trim` is where membership is decided, so this is
+// where the reversal belongs.
+//
+// `TestTrimWithdrawsADeferralForEveryRowItKeeps` pins the shipped path and
+// `TestTrimWithdrawsADeferralForARowItKeeps` pins the reversal itself, so the
+// window arithmetic above it cannot break this quietly.
+func (t *Trace) withdrawDeferral(id string) bool {
+	found := false
+	for i := range t.Decisions {
+		d := &t.Decisions[i]
+		if d.ID != id || d.Stage != stageDiversity || d.Kept {
+			continue
+		}
+		d.Kept = true
+		d.Reason = reasonDiversityBackfilled
+		found = true
+		break
+	}
+	if !found {
+		return false
+	}
+	for i := range t.Stages {
+		st := &t.Stages[i]
+		if st.Stage != stageDiversity {
+			continue
+		}
+		st.DroppedIDs = removeID(st.DroppedIDs, id)
+		// The summary line is the one note naming the row count; the per-row
+		// notes name the rows themselves and are left alone.
+		for j, note := range st.Notes {
+			if strings.HasPrefix(note, "diversity deferred ") && strings.Contains(note, "candidates behind") {
+				st.Notes[j] = diversitySummaryNote(len(st.DroppedIDs))
+			}
+		}
+		return true
+	}
+	return true
+}
+
+// removeID drops one id from a slice, keeping the order of the rest.
+func removeID(ids []string, id string) []string {
+	out := ids[:0:0]
+	for _, have := range ids {
+		if have != id {
+			out = append(out, have)
+		}
+	}
+	return out
 }
 
 // addPinnedCut counts n pinned rows cut from a bucket.

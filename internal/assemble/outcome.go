@@ -66,8 +66,21 @@ const (
 	// dominantRemoval: the stage always keeps one side, so it can never be the
 	// cause of an empty answer, only of a withheld row the budget may then cut.
 	reasonContradictionSeparated = "contradiction_separated"
-	reasonAllDiversity           = "all_diversity_capped"
-	reasonAllOverBudget          = "all_over_budget"
+	// reasonDiversityDeferred is a stage 7 decision's reason: the row's category
+	// had already taken its share of the window, so the stage moved the row
+	// behind the window to make room for the next-ranked rows of other
+	// categories. It is a DEFERRAL and never a deletion — the row is still a
+	// candidate, it is simply one this window had no slot for — which is why a
+	// row that came back when the other categories ran out is recorded as a keep
+	// (reasonDiversityBackfilled) rather than as this.
+	reasonDiversityDeferred = "diversity_deferred"
+	// reasonDiversityBackfilled is the KEEP reason for a row stage 7 deferred and
+	// then readmitted, because the other categories did not have enough rows to
+	// fill the window. It is a keep and not a drop so a reader can tell a row
+	// that was never in question from one the stage moved and then moved back.
+	reasonDiversityBackfilled = "diversity_backfilled"
+	reasonAllDiversity        = "all_diversity_capped"
+	reasonAllOverBudget       = "all_over_budget"
 	// Results that admitted rows.
 	reasonBelowFloor    = "below_floor"
 	reasonFloorMet      = "floor_met"
@@ -609,11 +622,18 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "No sufficiently trustworthy memory found: the item budget cut the candidates this search " +
 				"found. Raise the limit to see them." + p.stageNote()
 		}
-		// The dedup and diversity reasons have no sentence yet: diversity is a
-		// pass-through and dedup only records the retriever's removals, so the
-		// copy would be unreachable and would drift from the stage that
-		// eventually produces it. The generic sentence is true of
-		// both, and the per-stage breakdown note beside it says which stage ran.
+		// The dedup reason has no sentence yet: the stage only records the
+		// retriever's removals, so a set whose every row it removed is a set the
+		// retriever emptied. The generic sentence is true of it, and the
+		// per-stage breakdown note beside it says which stage ran.
+		//
+		// Diversity is not in that set any more, but its reason is still
+		// unreachable — and for a structural reason worth stating rather than a
+		// fortunate one. The stage defers rows rather than removing them, and it
+		// always leaves the window holding exactly as many rows as it started
+		// with, so it can never be the stage that emptied a set. The sentence
+		// below is the honest fallback if one ever reaches it, and the breakdown
+		// note names what actually did the removing.
 		return "No sufficiently trustworthy memory found: every candidate this search found was removed before the " +
 			"answer was assembled. " + p.removalBreakdown() + "."
 	}
