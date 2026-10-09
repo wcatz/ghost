@@ -111,6 +111,10 @@ type MemoryStore interface {
 	// single project. Empty means "no repository known" and never clears a
 	// remote already recorded.
 	EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error
+	// BindNewProjectToCheckout opens a NEW project at a checkout in one write
+	// transaction and reports whether it did; a claimed id, path or remote
+	// answers false with no write and never merges.
+	BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error)
 	// ResolveOrCreateRepoProject resolves repository identity and creates the
 	// fallback project in one write transaction. projectRef is the ordinary
 	// resolved id/path; repoName is derived from the remote, not a directory.

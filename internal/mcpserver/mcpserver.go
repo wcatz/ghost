@@ -247,13 +247,19 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// instead of printing the no-project block (#957). Never an existing project:
 	// resolvedID == "" is the gate, and the store's upsert would not move a path
 	// anyway. Never a checkout another project already claims, by path or by
-	// remote: binding a second name there would silently fold it into the first.
+	// remote: binding a second name there would silently fold it into the first,
+	// so the claim test and the insert are one store transaction and a claim
+	// declines the bind rather than merging.
 	if resolvedID == "" && !pathShaped {
 		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
-			if err := s.store.EnsureProjectWithRepo(ctx, projectID, dir, projectID, dirRemote); err != nil {
+			bound, err := s.store.BindNewProjectToCheckout(ctx, projectID, dir, projectID, dirRemote)
+			if err != nil {
 				return "", nil, err
 			}
-			return projectID, nil, nil
+			if bound {
+				return projectID, nil, nil
+			}
+			// Claimed between the probe and the write: open it unbound below.
 		}
 	}
 

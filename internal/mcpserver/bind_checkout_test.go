@@ -224,3 +224,60 @@ func TestWorkingDirNeverTheHomeDirectoryOrRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestBindNewProjectToCheckoutNeverMerges: the claim test and the insert are one
+// store transaction, so two first saves that both saw the directory unclaimed
+// cannot fold the second project away. The loser is told bound=false and writes
+// nothing; a project a save is about to write under always keeps its row.
+func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	first, err := store.BindNewProjectToCheckout(ctx, "notifier", dir, "notifier", "")
+	if err != nil || !first {
+		t.Fatalf("first bind = %v, %v; want true", first, err)
+	}
+	second, err := store.BindNewProjectToCheckout(ctx, "billing", dir, "billing", "")
+	if err != nil || second {
+		t.Fatalf("second bind of the same directory = %v, %v; want false", second, err)
+	}
+	if _, ok := projectPath(t, store, "billing"); ok {
+		t.Fatal("a declined bind wrote a project row")
+	}
+	again, err := store.BindNewProjectToCheckout(ctx, "notifier", filepath.Join(t.TempDir(), "elsewhere"), "notifier", "")
+	if err != nil || again {
+		t.Fatalf("rebind of an existing project = %v, %v; want false", again, err)
+	}
+	if got, _ := projectPath(t, store, "notifier"); got != dir {
+		t.Fatalf("notifier path = %q, want %q", got, dir)
+	}
+}
+
+// TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote: a project that
+// records this directory with a remote the checkout no longer reports is
+// invisible to the resolver but still owns the path. The save must open its own
+// project, with a row, and leave the owner alone.
+func TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote(t *testing.T) {
+	memory.SetDetectRemote(repo.DetectRemote)
+	t.Cleanup(func() { memory.SetDetectRemote(nil) })
+	store := testStore(t)
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureProjectWithRepo(ctx, "owner", dir, "owner", "https://github.com/acme/old.git"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tool := range []string{"ghost_memory_save", "ghost_decision_record"} {
+		saveUnder(t, checkoutServer(t, store, dir), tool, "notifier")
+	}
+	if _, ok := projectPath(t, store, "notifier"); !ok {
+		t.Fatal("the save's project has no row")
+	}
+	if got, _ := projectPath(t, store, "owner"); got != dir {
+		t.Fatalf("owner path = %q, want %q", got, dir)
+	}
+}

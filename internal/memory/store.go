@@ -539,6 +539,62 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// BindNewProjectToCheckout opens project id at the checkout dir, recording the
+// physical path and, when repoRemote is not empty, the repository, and reports
+// whether it did. It is the write side of a save that creates a project from a
+// name (#957).
+//
+// It is not EnsureProjectWithRepo, and the difference is the point: that call
+// MERGES the incoming id into whatever project already owns the path or the
+// remote and deletes the incoming row, which for a save that is about to write
+// under id leaves the memory under a project that no longer exists. Here the
+// claim test and the INSERT share one write transaction, and a claim is
+// answered with bound=false and no write at all, so the caller opens the
+// project the ordinary unbound way. An id the store already holds is never
+// rebound (bound=false), nor is _global, nor a directory or remote any other
+// project records.
+func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if id == "" || id == "_global" || dir == "" || dir == id {
+		return false, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, _, err := s.beginWrite(ctx, "bind-checkout")
+	if err != nil {
+		return false, fmt.Errorf("begin bind checkout tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var claimed int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE id = ? OR path = ? OR (? != '' AND repo_remote = ?)
+	`, id, dir, repoRemote, repoRemote).Scan(&claimed); err != nil {
+		return false, fmt.Errorf("check checkout claim: %w", err)
+	}
+	if claimed > 0 {
+		return false, nil
+	}
+	if err := CheckImportedProject(createdProject(id, dir, name)); err != nil {
+		return false, fmt.Errorf("create project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)`,
+		id, dir, name, repoRemote); err != nil {
+		return false, fmt.Errorf("bind project to checkout: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit bind checkout tx: %w", err)
+	}
+	return true, nil
+}
+
 // BindingRefusalKind names the rule that stopped a repository from claiming
 // the project its name matched.
 type BindingRefusalKind string
