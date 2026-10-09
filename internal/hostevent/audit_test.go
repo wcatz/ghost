@@ -479,3 +479,35 @@ func TestEveryAuditScannerStampsWhenTheAgentWrote(t *testing.T) {
 		})
 	}
 }
+
+// TestScanAuditAnUpdateOfAMemoryDoesNotCiteIt: an update's `memory_id` says which
+// memory is being rewritten, so the id is the edit's target and not the agent relying
+// on it. Its words are read as a restatement, like a save's. Any other tool call that
+// carries the id is still a citation.
+func TestScanAuditAnUpdateOfAMemoryDoesNotCiteIt(t *testing.T) {
+	line := func(tool string) string {
+		return `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"` + tool +
+			`","input":{"memory_id":"` + auditMemoryID + `","content":"` + injectedText + `"}}]}}` + "\n"
+	}
+	for _, name := range []string{"mcp__ghost__ghost_memory_update", "ghost_memory_update", "ghost_ghost_memory_update", "ghost.ghost_memory_update"} {
+		sig := scanAudit(t, FormatClaudeJSONL, line(name))
+		if sig.HasID(auditMemoryID) {
+			t.Errorf("%s: the id of the memory being edited was recorded as a citation", name)
+		}
+		v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+		if !ok || v.Outcome != audit.OutcomeSuperseded {
+			t.Errorf("%s: verdict %+v, want %q: a rewrite restating the memory is a restatement", name, v, audit.OutcomeSuperseded)
+		}
+	}
+	// The control, so the cases above are the routing's doing: the same arguments
+	// under a tool that is not a Ghost write are the agent naming the memory.
+	sig := scanAudit(t, FormatClaudeJSONL, line("mcp__ghost__ghost_memory_pin"))
+	if !sig.HasID(auditMemoryID) {
+		t.Error("an id in another tool's arguments stopped being a citation")
+	}
+	// And another server's tool of the same bare name is not Ghost's.
+	sig = scanAudit(t, FormatClaudeJSONL, line("mcp__other__ghost_memory_update"))
+	if !sig.HasID(auditMemoryID) {
+		t.Error("another server's ghost_memory_update was treated as Ghost's")
+	}
+}

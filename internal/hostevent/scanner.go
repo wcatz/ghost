@@ -89,12 +89,26 @@ var ghostServerQualifiers = []string{"mcp__ghost__", "ghost_", "ghost.", "mcp__g
 // server under any host's convention. Matching is harness-agnostic (#505) but
 // server-aware — the same tool name under another server never counts, or a
 // stop would skip the nudge when nothing was saved to Ghost.
-func isGhostSaveTool(name string) bool {
-	if ghostSaveToolNames[name] {
+func isGhostSaveTool(name string) bool { return isGhostTool(name, ghostSaveToolNames) }
+
+// ghostUpdateToolNames are the tools that rewrite a memory already stored. They are
+// kept apart from ghostSaveToolNames because the save-nudge reads that set to ask
+// whether the session saved NEW knowledge, and an edit of an old row is not that.
+var ghostUpdateToolNames = map[string]bool{
+	"ghost_memory_update": true,
+}
+
+// isGhostUpdateTool is isGhostSaveTool for the tools that edit a stored memory.
+func isGhostUpdateTool(name string) bool { return isGhostTool(name, ghostUpdateToolNames) }
+
+// isGhostTool reports whether name is one of names under the ghost server, however
+// the host spells the qualifier.
+func isGhostTool(name string, names map[string]bool) bool {
+	if names[name] {
 		return true
 	}
 	for _, q := range ghostServerQualifiers {
-		if rest, ok := strings.CutPrefix(name, q); ok && ghostSaveToolNames[rest] {
+		if rest, ok := strings.CutPrefix(name, q); ok && names[rest] {
 			return true
 		}
 	}

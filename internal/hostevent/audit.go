@@ -197,14 +197,30 @@ func walkArgText(v any) string {
 // usage would leave that bucket permanently empty. isGhostSaveTool already
 // resolves every host's naming convention, so a scanner passes the name it found
 // and this decides.
+//
+// An UPDATE of a stored memory goes the same way and for the same reason, and for a
+// second one: its arguments name the memory being rewritten (`memory_id`), and an id
+// in a tool call is otherwise a citation. Filed as a save, the id is never lifted, so
+// an agent editing a memory is not reported as having relied on it. The words of the
+// rewrite are the agent declaring the memory's knowledge again, which is what the
+// save arm already reads. An update that cites ANOTHER memory by id is lost with it;
+// that is the conservative direction, since a citation is the one claim a false
+// `used` makes.
 func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
 	if text := toolArgText(input); text != "" {
-		if isGhostSaveTool(name) {
+		if isGhostSaveTool(name) || isGhostUpdateTool(name) {
 			sig.AddSaveArgs(text)
 		} else {
 			sig.AddToolArgs(text)
 		}
 	}
+}
+
+// AddAuditToolCall files one tool call the way every scanner does, for a caller
+// that holds a call and not a transcript: the retrieval-audit bench scripts calls
+// through it so what it measures is the routing the product uses.
+func AddAuditToolCall(sig *audit.Signals, name string, input json.RawMessage) {
+	addToolCall(sig, name, input)
 }
 
 // claudeAuditLine is the assistant-authored shape of one Claude Code transcript
