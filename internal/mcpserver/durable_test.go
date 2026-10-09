@@ -133,10 +133,6 @@ var saveGuidanceGolden = []string{
 	"dependency (versions/API quirks, and toolchain and version limits)",
 	// fact is the weakest category, not the default for everything
 	"fact (general knowledge — the weakest category, for when nothing more specific fits)",
-	// the durability knobs are a pair, not three interchangeable spellings
-	// (#959: one planted invariant saved three different ways)
-	"pass pin=true and retention='persistent' together",
-	"omit both otherwise",
 	// a stated date is a valid_until trigger (#959: one of two runs used it)
 	"When the user states a date after which something changes",
 }
@@ -157,6 +153,24 @@ func TestSaveGuidanceStatesTheAuditAnswersOnEverySaveSurface(t *testing.T) {
 				t.Errorf("%s is missing the save guidance %q — the answer to an audit finding was removed or reworded away", name, want)
 			}
 		}
+	}
+	// The durability knobs are a pair on the surfaces whose tool takes both
+	// (#959: one planted invariant saved three different ways). ghost_save_global
+	// has no pin argument, so it carries the retention-only form instead; a
+	// sentence telling an agent to pass an argument the schema lacks is false.
+	for _, name := range []string{"mcpInstructions", "ghost_memory_save"} {
+		for _, want := range []string{"pass pin=true and retention='persistent' together", "omit both otherwise"} {
+			if !strings.Contains(surfaces[name], want) {
+				t.Errorf("%s is missing the durability pair %q", name, want)
+			}
+		}
+	}
+	global := surfaces["ghost_save_global"]
+	if strings.Contains(global, "pin=true") {
+		t.Errorf("ghost_save_global advertises pin=true, an argument it does not take:\n%s", global)
+	}
+	if !strings.Contains(global, "pass retention='persistent' for a rule the user said must never be broken") {
+		t.Errorf("ghost_save_global lost the retention-only durability clause:\n%s", global)
 	}
 }
 
