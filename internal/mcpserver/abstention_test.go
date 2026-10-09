@@ -219,11 +219,15 @@ func TestTheByteCapCoversTheQualifiersToo(t *testing.T) {
 	srv := New(store, logger, "test")
 	session := connectedClient(t, srv)
 
-	// Big enough that the qualifier is the difference between fitting and not:
-	// the same corpus at the shipped cap is nowhere near it, and a current read
-	// of the same corpus fits with room to spare.
+	// Small enough that the qualifier is the difference between fitting and not:
+	// the same corpus at the shipped cap is well inside it, and a current read of
+	// the same corpus fits with room to spare — which is what leaves the
+	// disclosure as the only thing that can push a historical read over a cap set
+	// to what the current one needed. A corpus already at the cap would be trimmed
+	// whether the qualifier was measured or not, and the precondition below would
+	// pass for the wrong reason.
 	var current, historical int
-	for i := range 30 {
+	for i := range 20 {
 		res := callTool(t, session, "ghost_memory_save", map[string]any{
 			"project_id": "test-project",
 			"content": fmt.Sprintf("deployment rollback runbook step %02d %s",

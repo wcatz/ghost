@@ -96,7 +96,7 @@ func eq(a, b []string) bool {
 // category post-filter ran after the result window was closed, so a matching
 // row ranked below the window was never seen and the tool reported absence
 // while the memory existed. The filter has to run over the widened candidate
-// set, before stage 8 closes the window.
+// set, before stage 9 closes the window.
 func TestCategoryFiltersBeforeWindowClosure(t *testing.T) {
 	// Ten rows outrank the one that matches the filter; the caller's window is
 	// two, so the eleventh row can only be reached by filtering before closure.
@@ -150,7 +150,7 @@ func TestScopeFiltersBeforeWindowClosure(t *testing.T) {
 // TestNoPredicateKeepsRetrieverOrderAndClosesWindow: with no predicate the
 // assembler must not reorder anything — the retriever's order already carries
 // the keyword reservation, status demotion, decay and both demotions — and
-// stage 8 must close the window at the request's limit.
+// stage 9 must close the window at the request's limit.
 func TestNoPredicateKeepsRetrieverOrderAndClosesWindow(t *testing.T) {
 	r := &fakeRetriever{set: setOf(
 		candidate("A1", "proj", "fact", "one", 0.9),
@@ -555,7 +555,7 @@ func TestTraceRecordsEveryStage(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
-	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "budget", "render", "response_fit"}
+	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "budget", "render", "response_fit"}
 	got := make([]string, 0, len(res.Trace.Stages))
 	for _, st := range res.Trace.Stages {
 		got = append(got, st.Stage)
@@ -612,7 +612,7 @@ func TestTraceCarriesCandidateFacts(t *testing.T) {
 	}
 }
 
-// TestBudgetTrimIsRecordedAgainstTheSlice: stage 8 is the window closure, and
+// TestBudgetTrimIsRecordedAgainstTheSlice: stage 9 is the window closure, and
 // the trace has to say which rows it cut.
 func TestBudgetTrimIsRecordedAgainstTheSlice(t *testing.T) {
 	r := &fakeRetriever{set: setOf(
@@ -1206,7 +1206,7 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 		}
 	}
 
-	// Now stage 8 empties the block after stage 5 described it — the case the
+	// Now stage 9 empties the block after stage 5 described it — the case the
 	// reviewer is about, and the one a caller sees as a bare "No matching
 	// memories found." with a link-graph claim attached.
 	emptyReq := baseRequest()
@@ -1576,7 +1576,7 @@ func TestTheStageRecordKeepsTheStageScopedSentence(t *testing.T) {
 // request that the all-zero check accepts. The window cannot come from the item
 // budget in that shape, and returning 0 handed the store a request it refuses
 // with a message about a fetch limit, naming neither the budget nor the fix. The
-// window falls back to the documented ceiling instead, and stage 8 still trims by
+// window falls back to the documented ceiling instead, and stage 9 still trims by
 // bytes — which is what the caller asked for.
 func TestABudgetWithoutAnItemBoundStillGetsAWindow(t *testing.T) {
 	rows := make([]memory.Candidate, 0, 20)
@@ -1621,7 +1621,7 @@ func TestABudgetWithoutAnItemBoundStillGetsAWindow(t *testing.T) {
 	if !hasNote(res.Notes, "states no item bound") {
 		t.Errorf("nothing tells the caller the window was a ceiling: %v", res.Notes)
 	}
-	// The window is a retrieval width, not a membership cap: stage 8 trims by
+	// The window is a retrieval width, not a membership cap: stage 9 trims by
 	// the caller's bytes, so a byte-only budget can legitimately admit rows from
 	// beyond the window (the retriever hands back the window plus its discarded
 	// tail). The note has to say what actually bounds the block, or a reader
@@ -1723,7 +1723,7 @@ func TestTheCeilingNoteOnlyFiresWhenTheWindowFellBack(t *testing.T) {
 	}
 }
 
-// TestTheCeilingNoteDoesNotClaimATotalByteCapItDoesNotHave: stage 8's per-bucket
+// TestTheCeilingNoteDoesNotClaimATotalByteCapItDoesNotHave: stage 9's per-bucket
 // loop leaves a row in a bucket with no matching slice unbounded in bytes, so a
 // budget whose only byte bound is a slice cap does not bound the whole block. The
 // note is a disclosure about an invented window, and a disclosure that names a
@@ -1796,7 +1796,7 @@ func TestADuplicateSliceBucketIsRefused(t *testing.T) {
 	}}
 
 	if _, err := Run(context.Background(), &fakeRetriever{set: setOf()}, req); err == nil {
-		t.Error("two slices for one bucket were accepted, so the window is sized by their sum while stage 8 honours the first")
+		t.Error("two slices for one bucket were accepted, so the window is sized by their sum while stage 9 honours the first")
 	}
 }
 
