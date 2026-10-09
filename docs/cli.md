@@ -1345,6 +1345,7 @@ ghost bench --sweep
 ghost bench --context
 ghost bench --passive
 ghost bench --audit
+ghost bench --cutoff-sweep
 ```
 
 Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then the **top-row shares and the R@1 ceiling** — the share of queries whose first result is relevant, the share whose first result carries the best label, and the mean ceiling a perfect ranking hits on these labels — then the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
@@ -1356,6 +1357,8 @@ Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) o
 `--passive` is a fourth report and measures the other half of what a model is handed: the **passive** blocks — session start (and `ghost context`, which renders the same block), `ghost_project_context` and the `ghost://project/{id}/context` resource. It builds a synthetic four-project store plus `_global` in a temporary directory (resolved, expired, not-yet-valid, out-of-scope, superseded and near-duplicate rows, a `contradicts` pair stage 5 separates from the pinned row, and enough low-importance rows that every budget cuts), reads each surface through the function production calls at its production budget and a fixed clock, and prints per surface: withheld leakage (must be 0), expected-row recall, cross-project contamination, `_global` share, budget use and cut, duplicate rate, and — for session start — whether the header's shown/ranked-out/withheld counts agree with the rows rendered. It is report-only, touches no data directory, and cannot be combined with `--sweep` or `--context`. See [Benchmarks and methodology](benchmarks.md#passive-context-ghost-bench---passive).
 
 `--audit` is a fifth report and scores the retrieval audit (`ghost lifecycle`'s used/ignored/superseded/contradicted verdicts) instead of retrieval. It builds a labelled offline session — forty memories, a scripted run of turns with hand-written labels for the ids a turn cites, the memories it restates, denies or saves — judges it through `audit.Run` in scratch stores, and prints per-outcome precision and recall (with `used` split by the identifier and token arms), a confusion table and three headline lines. It needs no model, network or data directory, and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#retrieval-audit-ghost-bench---audit).
+
+`--cutoff-sweep` is a sixth report: it sweeps the query-mode relevance cutoff (`context.relevance_cutoff`) over the same graded corpus and fixed clock `--context` uses, and prints per share the graded-relevant rows admitted, context precision, result rate and estimated tokens per answer — the gradient the shipped default (0.63) is chosen from. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-relevance-cutoff-ghost-bench---cutoff-sweep).
 
 ## Scratch hygiene
 

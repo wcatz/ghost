@@ -131,7 +131,7 @@ type Slice struct {
 // and `_global` while injection applies independent caps. A budget that bounds
 // neither rows nor bytes is rejected: an unbounded block is not a request, it is
 // an omission. A MaxBytes cap alone is bounded, so it is honoured — the
-// retrieval window falls back to its documented ceiling, stage 8 still trims by
+// retrieval window falls back to its documented ceiling, stage 9 still trims by
 // the per-slice item caps, and Run's response-fit post-pass brings the complete
 // rendered response inside MaxBytes. MaxBytes is the RESPONSE's bytes, never
 // item content: Slice.MaxBytes is the item-content cap, and applying one field to
@@ -145,6 +145,29 @@ type Budget struct {
 	MaxNoteBytes  int // per-note maximum; 0 = use the documented default
 	MaxNotesBytes int // total notes maximum; 0 = use the documented default
 	Slices        []Slice
+	// Measure is the caller's OWN render of the block, for a surface whose
+	// delivered bytes are not Result.Response (session start frames its block
+	// itself). When set together with MaxBytes, the response-fit post-pass
+	// measures MaxBytes against Measure(items, trace) instead of the search
+	// envelope, so the cap bounds the bytes the caller actually emits and each
+	// cut is recorded in this run's trace and retrieval record like any other
+	// stage-8 decision. The trace passed in already holds the cuts made so far.
+	// Nil keeps the search envelope. Measure must be pure and cheap: it runs at
+	// least once per dropped row and may be called more than once per drop. The
+	// items slice may be EMPTY (nil) — that is how the caller's framing alone is
+	// measured — so Measure must not assume a row.
+	Measure func(items []Item, trace *Trace) int
+	// FramingCeiling, with Measure, is the size at which cutting rows cannot help:
+	// when the framing alone (Measure of no rows) is at or over it, the rows are
+	// kept rather than all cut for nothing. Below it, rows are cut down to none if
+	// that is what it takes to reach MaxBytes. 0 means rows are always cut.
+	FramingCeiling int
+	// KeepPinned makes the response-fit post-pass cut the lowest-ranked UNPINNED
+	// row first, and a pinned row only when none other is left. Without it the
+	// pass cuts the bottom of the ranking, which is not where a pinned row is
+	// guaranteed to be (a behavioral reservation and a supersede reorder both
+	// place unpinned rows above it).
+	KeepPinned bool
 }
 
 // Condition is the retrieval condition. It is an alias so a request and the
@@ -194,6 +217,20 @@ type Request struct {
 	// nobody measured is a relevance verdict, and the bench no-answer report
 	// shows the answerable and no-answer cosine distributions overlap.
 	AbstainCosine float32
+	// RelevanceCutoff is the caller-resolved cfg.Context.RelevanceCutoff: the
+	// relative-to-top cutoff the assembler applies to a QUERY-mode block after
+	// dedup and before the budget (#954). Once a row's fused Base falls below
+	// this fraction of the top row's Base (never the age-decayed Score), that row
+	// is dropped with its own reason (§954). 0 — the value every
+	// caller sends until a default is chosen — leaves it OFF, and a passive
+	// request ignores it whatever its value, because a digest is not a relevance
+	// answer. It can only SHORTEN a block: the top row is always kept, `limit`
+	// stays the maximum, and a pinned or keyword-reserved row is never cut.
+	//
+	// It is validated against the same [0,1] range a fraction occupies, where 0
+	// is off and 1 keeps only rows that tie the top. See the stage's own comment
+	// in pipeline.go for the rule and for why it sits where it does.
+	RelevanceCutoff float64
 	// Explain asks Run to project the trace of THIS run into Result.Explain, the
 	// ghost_memory_search explain payload. It is a request for a second reading
 	// of the same run and never for a second run: the candidate request, the
@@ -264,12 +301,12 @@ type Request struct {
 // The framing is the SEARCH framing, for every Source, because that is the only
 // one this version knows: nothing here branches on Source. A caller whose surface
 // frames differently must not read Response, and must leave Budget.MaxBytes at 0
-// until it supplies a render of its own — otherwise the post-pass measures this
-// envelope against a budget that was stated for another one, and drops rows
-// against a cap the caller never described. Session-start inherits that
-// constraint, not an exemption: it is the passive surface (#581), so it frames
-// its own block around Line() and states its bounds per bucket — `Budget.MaxItems`
-// and `Budget.MaxBytes` both stay 0 and the per-slice caps are the whole bound.
+// until it supplies a render of its own (Budget.Measure) — otherwise the
+// post-pass measures this envelope against a budget that was stated for another
+// one, and drops rows against a cap the caller never described. Session-start is
+// the passive surface (#581): it frames its own block around Line() and states
+// its row bounds per bucket, and it states its BYTE bound through Budget.Measure,
+// so the cap is on the bytes the host receives and not on this envelope.
 type Result struct {
 	Items   []Item
 	Outcome Outcome
@@ -524,7 +561,7 @@ func candidateRequest(req Request) memory.CandidateRequest {
 // The over-fetch default is the slice's own item cap, which is the only reading
 // a query-mode slice has: "fetch what I can admit" is bounded by construction,
 // and only a passive slice needs a wider fetch than it admits, because the
-// selection stages drop rows before stage 8 would.
+// selection stages drop rows before stage 9 would.
 func passivePolicies(req Request) []memory.SlicePolicy {
 	if req.Query != "" {
 		return nil
@@ -587,7 +624,7 @@ func windowIsACeiling(req Request) bool {
 		// window nothing stated; a passive window is stated, per bucket, by the
 		// over-fetch — and the note would tell a reader the block is bounded by a
 		// 100-row window that no passive read ever asked for. A passive slice
-		// bounded only by MaxBytes is bounded by that byte cap, which stage 8
+		// bounded only by MaxBytes is bounded by that byte cap, which stage 9
 		// applies; the note is not where that fact is stated.
 		return false
 	}
@@ -635,7 +672,7 @@ func retrievalWindow(req Request) int {
 	total := itemBound(req)
 	if total <= 0 {
 		// No item bound anywhere, so nothing sizes a window from the budget.
-		// The ceiling is the honest default: stage 8 still trims by whatever
+		// The ceiling is the honest default: stage 9 still trims by whatever
 		// bytes the request bounds, so the caller gets a block its own limits
 		// decide, and a fetch limit of 0 would be refused by the store before
 		// any of that.
@@ -736,6 +773,16 @@ func validateRequest(req Request) error {
 		return fmt.Errorf("assemble: AbstainCosine is a cosine in [0,1], where 0 leaves the arm off, "+
 			"got %v", req.AbstainCosine)
 	}
+	// The cutoff is a fraction of the top row's fused Base, so it inhabits the
+	// same [0,1] as a cosine and is refused the same way. NaN compares false
+	// against both bounds and would read as OFF, telling a caller who set a
+	// cutoff that there is none; an infinite or above-one value is a threshold
+	// above the top Base, which admits nothing the answer would not already
+	// have. 0 is a valid and meaningful value — the cutoff is disabled — so it is
+	// not refused here; the stage reads it rather than rejecting it.
+	if v := req.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("assemble: RelevanceCutoff is a fraction in [0,1], where 0 is off, got %v", req.RelevanceCutoff)
+	}
 	for _, s := range req.Budget.Slices {
 		if s.MaxItems < 0 || s.MaxBytes < 0 || s.ClampBytes < 0 {
 			return fmt.Errorf("assemble: slice %q cannot have a negative bound", s.Bucket)
@@ -743,7 +790,7 @@ func validateRequest(req Request) error {
 	}
 	if buckets := sliceBuckets(req.Budget.Slices); len(buckets) > 0 {
 		return fmt.Errorf("assemble: two slices name the same bucket (%s): itemBound would sum both caps "+
-			"while stage 8 honours only the first, so the window would not be the block's", strings.Join(buckets, ", "))
+			"while stage 9 honours only the first, so the window would not be the block's", strings.Join(buckets, ", "))
 	}
 	if req.Budget.MaxItems == 0 && req.Budget.MaxBytes == 0 && !anySliceBound(req.Budget.Slices) {
 		return errors.New("assemble: this budget states no bound on the block: set MaxItems or MaxBytes, or give a slice an item or byte cap — a ClampBytes clamp alone bounds neither, since a clamped item is shorter")
@@ -815,7 +862,7 @@ func validatePassiveBudget(req Request) error {
 		// Overlapping row sets under distinct bucket NAMES, which `sliceBuckets`
 		// cannot see: one slice admits `_global` into the project read and another
 		// fetches `_global` in its own right. The two sets overlap, so every
-		// global row is admitted twice — and stage 8 would cap them under two
+		// global row is admitted twice — and stage 9 would cap them under two
 		// different slices, so neither slice's cap would describe the block. The
 		// store refuses the same shape; this seam has to, because it is where a
 		// caller states its budget and `Run` is the exported entry point.
