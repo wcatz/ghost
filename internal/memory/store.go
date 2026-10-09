@@ -591,6 +591,16 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
 		return false, err
 	}
+	// A path the resolver could never return for this project is not a binding:
+	// the same check `ghost project bind` makes, on the row just written. It
+	// declines (the rollback undoes the insert) and the save opens the project
+	// unbound, rather than leaving one that looks bound and no session matches.
+	if err := checkPathResolvable(ctx, tx, id, dir, repoRemote); err != nil {
+		if errors.Is(err, ErrBindPathUnmatchable) {
+			return false, nil
+		}
+		return false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit bind checkout tx: %w", err)
 	}

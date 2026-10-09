@@ -233,6 +233,9 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	first, err := store.BindNewProjectToCheckout(ctx, "notifier", dir, "notifier", "")
 	if err != nil || !first {
@@ -245,7 +248,7 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	if _, ok := projectPath(t, store, "billing"); ok {
 		t.Fatal("a declined bind wrote a project row")
 	}
-	for _, bad := range []string{"", "relative/dir", string(filepath.Separator)} {
+	for _, bad := range []string{"", "relative/dir", string(filepath.Separator), "/app", "/tmp/x"} {
 		if ok, err := store.BindNewProjectToCheckout(ctx, "other", bad, "other", ""); err != nil || ok {
 			t.Fatalf("bind at unusable path %q = %v, %v; want false", bad, ok, err)
 		}
