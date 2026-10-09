@@ -383,7 +383,6 @@ func NewAuditCorpus() AuditCorpus {
 	add(AuditTurn{Minute: minute, Kind: AuditProse, Restates: []string{costID},
 		Text: "The pylon rotor torque resets whenever gearbox oil warms, which the next file relies on"})
 	add(AuditTurn{Minute: minute, Kind: AuditToolArgs, Text: auditGiant(200)})
-	minute++
 
 	c.Calls = []AuditCall{
 		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops", "spread"}},
