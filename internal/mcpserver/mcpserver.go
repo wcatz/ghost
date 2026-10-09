@@ -3039,7 +3039,7 @@ func (s *Server) registerTools() {
 				// supersession failure without losing that ID.
 				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
 			} else {
-				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
+				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {
 					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
