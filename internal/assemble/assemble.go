@@ -145,6 +145,29 @@ type Budget struct {
 	MaxNoteBytes  int // per-note maximum; 0 = use the documented default
 	MaxNotesBytes int // total notes maximum; 0 = use the documented default
 	Slices        []Slice
+	// Measure is the caller's OWN render of the block, for a surface whose
+	// delivered bytes are not Result.Response (session start frames its block
+	// itself). When set together with MaxBytes, the response-fit post-pass
+	// measures MaxBytes against Measure(items, trace) instead of the search
+	// envelope, so the cap bounds the bytes the caller actually emits and each
+	// cut is recorded in this run's trace and retrieval record like any other
+	// stage-8 decision. The trace passed in already holds the cuts made so far.
+	// Nil keeps the search envelope. Measure must be pure and cheap: it runs at
+	// least once per dropped row and may be called more than once per drop. The
+	// items slice may be EMPTY (nil) — that is how the caller's framing alone is
+	// measured — so Measure must not assume a row.
+	Measure func(items []Item, trace *Trace) int
+	// FramingCeiling, with Measure, is the size at which cutting rows cannot help:
+	// when the framing alone (Measure of no rows) is at or over it, the rows are
+	// kept rather than all cut for nothing. Below it, rows are cut down to none if
+	// that is what it takes to reach MaxBytes. 0 means rows are always cut.
+	FramingCeiling int
+	// KeepPinned makes the response-fit post-pass cut the lowest-ranked UNPINNED
+	// row first, and a pinned row only when none other is left. Without it the
+	// pass cuts the bottom of the ranking, which is not where a pinned row is
+	// guaranteed to be (a behavioral reservation and a supersede reorder both
+	// place unpinned rows above it).
+	KeepPinned bool
 }
 
 // Condition is the retrieval condition. It is an alias so a request and the
@@ -278,12 +301,12 @@ type Request struct {
 // The framing is the SEARCH framing, for every Source, because that is the only
 // one this version knows: nothing here branches on Source. A caller whose surface
 // frames differently must not read Response, and must leave Budget.MaxBytes at 0
-// until it supplies a render of its own — otherwise the post-pass measures this
-// envelope against a budget that was stated for another one, and drops rows
-// against a cap the caller never described. Session-start inherits that
-// constraint, not an exemption: it is the passive surface (#581), so it frames
-// its own block around Line() and states its bounds per bucket — `Budget.MaxItems`
-// and `Budget.MaxBytes` both stay 0 and the per-slice caps are the whole bound.
+// until it supplies a render of its own (Budget.Measure) — otherwise the
+// post-pass measures this envelope against a budget that was stated for another
+// one, and drops rows against a cap the caller never described. Session-start is
+// the passive surface (#581): it frames its own block around Line() and states
+// its row bounds per bucket, and it states its BYTE bound through Budget.Measure,
+// so the cap is on the bytes the host receives and not on this envelope.
 type Result struct {
 	Items   []Item
 	Outcome Outcome
