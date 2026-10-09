@@ -149,7 +149,7 @@ func formatNote(format string, args ...any) string {
 //     if the label omits the one word that settles it.
 //
 // On the assembler's own surfaces the last two never appear: stage 2 drops those
-// rows before stage 9 renders them, so Item.Line is only ever handed valid,
+// rows before stage 10 renders them, so Item.Line is only ever handed valid,
 // unverified or unset. A surface that has not run the stages derives the state
 // itself with ValidityStateOf, because it cannot claim a row is out of date
 // without knowing what date it is.

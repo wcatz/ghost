@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -55,7 +56,7 @@ import (
 // the request cannot be edited apart.
 const (
 	// ContextItems is the tool's default `limit`: ten rows, and the item cap
-	// stage 8 applies across the project and `_global` buckets together.
+	// stage 9 applies across the project and `_global` buckets together.
 	ContextItems = 10
 	// ContextBytes is the tool's response cap, 2*MaxContentLen. It bounds the
 	// COMPLETE rendered response, which is why the budget table reports the
@@ -109,11 +110,22 @@ func ContextInstant() time.Time {
 // category — is the tool's request, spelled the tool's way. A bench that measured
 // a hand-tuned request would be reporting on its own configuration.
 func ContextRequest(q Query, at time.Time) assemble.Request {
+	return contextRequestWithCutoff(q, at, config.DefaultRelevanceCutoff)
+}
+
+// contextRequestWithCutoff is ContextRequest with the cutoff made explicit, so a
+// sweep can measure the block at every share of the parameter rather than only at
+// the shipped default. The default call path (RunContext, ContextRequest) reads
+// config.DefaultRelevanceCutoff, which is what makes `ghost bench --context` a
+// measurement of the surface as shipped — a report run at cutoff off would be a
+// report about a call no caller makes.
+func contextRequestWithCutoff(q Query, at time.Time, cutoff float64) assemble.Request {
 	return assemble.Request{
-		ProjectID: q.ProjectID,
-		Query:     q.Text,
-		QueryVec:  q.Vector,
-		Source:    assemble.SourceBench,
+		ProjectID:       q.ProjectID,
+		Query:           q.Text,
+		QueryVec:        q.Vector,
+		Source:          assemble.SourceBench,
+		RelevanceCutoff: cutoff,
 		Budget: assemble.Budget{
 			MaxItems: ContextItems,
 			MaxBytes: ContextBytes,
@@ -316,6 +328,13 @@ type ContextCost struct {
 // a hole in the measurement, and a pooled ratio with a hole in it is a number
 // whose denominator nobody can account for.
 func RunContext(ctx context.Context, store *memory.Store, queries []Query, at time.Time) (ContextReport, error) {
+	return runContextAt(ctx, store, queries, at, config.DefaultRelevanceCutoff)
+}
+
+// runContextAt is RunContext over one explicit cutoff. It is the seam the cutoff
+// sweep drives, so the sweep measures the same real Store.Candidates → assemble.Run
+// path at every share of the parameter that a shipped request would run.
+func runContextAt(ctx context.Context, store *memory.Store, queries []Query, at time.Time, cutoff float64) (ContextReport, error) {
 	rep := ContextReport{Queries: len(queries)}
 	// Every arm, in the assembler's order, before any query runs: the report's
 	// shape cannot depend on what happened to leak.
@@ -337,7 +356,7 @@ func RunContext(ctx context.Context, store *memory.Store, queries []Query, at ti
 		if q.Rel.relevantCount() == 0 {
 			continue
 		}
-		res, err := assemble.Run(ctx, store, ContextRequest(q, at))
+		res, err := assemble.Run(ctx, store, contextRequestWithCutoff(q, at, cutoff))
 		if err != nil {
 			return ContextReport{}, fmt.Errorf("assemble %q: %w", q.Name, err)
 		}

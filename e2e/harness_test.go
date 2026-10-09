@@ -293,6 +293,16 @@ func (s *sandbox) writeConfig(opts configOpts) {
 	fmt.Fprintf(&sb, "embedding:\n  enabled: true\n  ollama_url: %s\n  model: %s\n  dimensions: %d\n",
 		s.ollama.URL, fakeModel, fakeDimensions)
 	sb.WriteString("linking:\n  enabled: false\n")
+	// The query-mode relevance cutoff (#954) is OFF here, for the reason linking
+	// is off one line above: it trims the tail of a search answer where relevance
+	// falls off, and the surfaces these tests assert on — resolve's stamping,
+	// scope's filtering, the demotions — would have a row disappear underneath
+	// them for a reason that is not the surface under test. The cutoff itself is
+	// asserted where its subject lives: the assembler stage (internal/assemble),
+	// the request wiring (internal/mcpserver) and the measured default sweep
+	// (internal/bench, `ghost bench --cutoff-sweep`). A test that needs it on
+	// reconfigures it rather than inheriting a shaped default.
+	sb.WriteString("context:\n  relevance_cutoff: 0\n")
 	sb.WriteString("obsidian:\n  auto_sync: false\n  interval: 30s\n")
 	fmt.Fprintf(&sb, "reflection:\n  auto_reflect: %t\n  auto_resolve: %t\n  auto_supersede: %t\n",
 		opts.autoReflect, opts.autoResolve, opts.autoSupersede)

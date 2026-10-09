@@ -245,6 +245,17 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 				return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the row that stage kept", Token(kept[0]))
 			}
 			return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the rows that stage kept", strings.Join(tokens(kept), ", "))
+		case reasonRelevanceCutoff:
+			// The query-mode relevance cutoff (#954): the answer stopped where
+			// relevance fell off, and this row's fused score was below the
+			// configured share of the top match. It names the rule and the share
+			// rather than only that a rule acted, because a caller diagnosing a
+			// short answer needs to know the answer was shortened by design and at
+			// what threshold. Unlike the diversity sentence above it is REACHABLE
+			// from a shipped run: the cutoff is a query rule and this payload is
+			// always a query.
+			return fmt.Sprintf("cut by the relevance cutoff: the answer stops where relevance falls off, and this "+
+				"memory's fused score was below %s of the top match", cutoffShareLabel(p.req.RelevanceCutoff))
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
 		case reasonDiversityDeferred:

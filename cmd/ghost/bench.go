@@ -15,18 +15,21 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit]
+const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
 grid-searches the fusion parameters and prints the ranked table instead.
 --context prints the context-assembly table: what the block ghost_memory_search
 returns costs, how much of it is relevant, and how much of it should never have
-been in it. --passive measures the passive blocks instead — session start,
-ghost context and ghost_project_context — over a synthetic multi-project
-store with resolved, expired, out-of-scope and duplicate rows, and reports
-withheld leakage, recall, contamination and header honesty. --audit scores the
-retrieval audit instead: a scripted offline session with hand-written labels
+been in it. --cutoff-sweep sweeps the query-mode relevance cutoff over the same
+--context corpus and prints, per share, the graded-relevant rows admitted,
+context precision, result rate and estimated tokens per answer — the measurement
+the shipped default is chosen from. --passive measures the passive blocks instead
+— session start, ghost context and ghost_project_context — over a synthetic
+multi-project store with resolved, expired, out-of-scope and duplicate rows, and
+reports withheld leakage, recall, contamination and header honesty. --audit scores
+the retrieval audit instead: a scripted offline session with hand-written labels
 (ids cited, memories restated, denied or saved) is judged by the audit's own
 comparison, and the verdicts are scored against the labels per outcome. See
 docs/benchmarks.md.
@@ -42,6 +45,7 @@ const (
 	benchModeContext = "context"
 	benchModePassive = "passive"
 	benchModeAudit   = "audit"
+	benchModeCutoff  = "cutoff-sweep"
 )
 
 // benchModeOf reads the flags after the command. It is a named function because
@@ -69,6 +73,8 @@ func benchModeOf(args []string) (string, error) {
 			err = set(benchModePassive, "passive")
 		case "--audit":
 			err = set(benchModeAudit, "audit")
+		case "--cutoff-sweep":
+			err = set(benchModeCutoff, "cutoff-sweep")
 		default:
 			return "", fmt.Errorf("unknown flag %q", arg)
 		}
@@ -191,6 +197,19 @@ func runBench() {
 			os.Exit(1)
 		}
 		fmt.Print(bench.FormatContext(rep))
+		return
+	}
+
+	// The cutoff sweep reads the SAME graded corpus at the SAME fixed clock and
+	// the SAME stamped instant --context uses, so a row of its table is the block
+	// `ghost bench --context` would print at that share, one RunContext apart.
+	if mode == benchModeCutoff {
+		points, err := bench.ContextCutoffSweep(ctx, store, queries, stampedAt, bench.ContextCutoffGrid())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatContextCutoffSweep(points))
 		return
 	}
 

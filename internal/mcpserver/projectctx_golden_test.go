@@ -337,7 +337,7 @@ func TestProjectContextGoldenFixtureExercisesItsBranches(t *testing.T) {
 	// holds 18 project rows and 2 globals and cuts at 20; the Global section holds
 	// 20 globals and cuts at 15.
 	if n := strings.Count(tool, "\n- ["); n != 20 {
-		t.Errorf("the tool block carries %d memory lines, so the 20-cap is not binding and stage 8 is untested:\n%s", n, tool)
+		t.Errorf("the tool block carries %d memory lines, so the 20-cap is not binding and stage 9 is untested:\n%s", n, tool)
 	}
 	if n := strings.Count(res, "\n- [preference] `gmem"); n != 15 {
 		t.Errorf("the Global section carries %d rows, so the 15-cap is not binding:\n%s", n, res)
