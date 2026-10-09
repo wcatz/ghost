@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -502,7 +503,7 @@ func (s *Server) recordSink() assemble.RecordSink {
 // when this process is the host session — the process the host started with the
 // variable set in its INITIAL environment. A child process (subagent, CLI call)
 // inherits the variable, so its parent's initial environ also carries it. We
-// detect this by reading /proc/<ppid>/environ: if the parent has the variable,
+// detect this ONCE in New (resolveHostSessionID), never per call, by reading /proc/<ppid>/environ: if the parent has the variable,
 // this process inherited it and returns ""; if the parent lacks it, this process
 // is the host session and the variable is its own. This rule is what lets the
 // audit match a retrieval record to the session whose stop hook scanned the
@@ -516,16 +517,8 @@ func (s *Server) sessionIDFor(req *mcp.CallToolRequest) string {
 			return id
 		}
 	}
-	// stdio transport: only return the host session id when this process is the
-	// host session itself (not a child that inherited the env var).
-	procRoot := s.procRoot
-	if procRoot == "" {
-		procRoot = "/proc"
-	}
-	if ai.IsHostSession(procRoot, s.testPid) {
-		return s.hostSessionID
-	}
-	return ""
+	// stdio transport: the effective host session id, decided once in New.
+	return s.hostSessionID
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -696,19 +689,13 @@ type Server struct {
 	// wall clock, which is every Server New builds; ProjectContextAt sets it so a
 	// block can be measured at a fixed instant.
 	clock func() time.Time
-	// hostSessionID is the id of the host session this server process was started
-	// under, read ONCE from the environment at construction (see hostSessionIDFromEnv).
-	// It is a field rather than a read at each call so the environment is touched in
-	// one place and a test sets it before New. "" for every host that does not put one
-	// there, and then the retrieval record carries none and the audit leaves it alone.
+	// hostSessionID is the session id retrieval records carry over a transport
+	// with none of its own. It is decided ONCE in New (see resolveHostSessionID):
+	// the environment's id only when this process is the host session itself, ""
+	// when it inherited the variable from a parent that already had it. Every
+	// surface (search, project-context tool, resources, prompt) reads this one
+	// field, and nothing reads /proc after construction.
 	hostSessionID string
-	// procRoot is the root of the proc filesystem to use for host-session
-	// detection. "" means the real /proc. Tests override this to point at a
-	// fake proc tree.
-	procRoot string
-	// testPid is the process id to use for host-session detection. 0 means
-	// use os.Getpid(). Tests override this to match their fake proc tree.
-	testPid int
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
@@ -717,7 +704,7 @@ type Server struct {
 // the retrieval record and the stop hook's scan can be matched on it. No other host's
 // variable is listed because none has been observed: codex, opencode and goose servers
 // record no session, and their calls are left unjudged rather than guessed.
-const hostSessionEnv = "CLAUDE_CODE_SESSION_ID"
+const hostSessionEnv = ai.HostSessionEnv
 
 // hostSessionIDFromEnv is the session the host says it started this process under, or "".
 //
@@ -726,6 +713,31 @@ const hostSessionEnv = "CLAUDE_CODE_SESSION_ID"
 // recording the old one, and the call then matches no scan; a server behind a bridge that
 // does not forward the host's environment records none.
 func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
+
+// resolveHostSessionID decides the session id retrieval records carry. On Linux
+// it is the environment's id only when this process IS the host session (the
+// parent's initial environ lacks the variable, see ai.IsHostSession); a child
+// that inherited the variable records "". Every failure to tell (ppid <= 1,
+// unreadable /proc such as EACCES or hidepid, a nested claude started inside
+// another session) fails safe to "". On other platforms /proc does not exist, so
+// the environment's id is used as before: the known gap is that a child there
+// still records the inherited id.
+func resolveHostSessionID(goos, procRoot string, pid int) string {
+	if goos != "linux" {
+		return hostSessionIDFromEnv()
+	}
+	id := hostSessionIDFromEnv()
+	if id == "" || !ai.IsHostSession(procRoot, pid) {
+		return ""
+	}
+	return id
+}
+
+// hostSessionResolver is the package-level hook New calls once. Tests replace it
+// to point at a fake process tree.
+var hostSessionResolver = func() string {
+	return resolveHostSessionID(runtime.GOOS, "/proc", os.Getpid())
+}
 
 // searchResponseCap is one formatted search response's byte cap: the field's
 // value where it was set, and the shipped default where it was not.
@@ -836,7 +848,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		store:          store,
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
-		hostSessionID:  hostSessionIDFromEnv(),
+		hostSessionID:  hostSessionResolver(),
 	}
 
 	// Resolve the retrieval record's per-install key now, at construction, so the

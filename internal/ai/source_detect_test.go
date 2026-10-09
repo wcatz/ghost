@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -441,4 +442,14 @@ func TestIsHostSession(t *testing.T) {
 			t.Error("IsHostSession() = false, want true (parent has different var with prefix)")
 		}
 	})
+}
+
+// TestIsHostSessionRealProc: on Linux the real /proc is readable for this
+// process's own parent chain and the call completes without panicking; the
+// answer itself depends on how the suite was launched.
+func TestIsHostSessionRealProc(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs /proc")
+	}
+	_ = IsHostSession("/proc", os.Getpid())
 }

@@ -43,9 +43,8 @@ func TestSearchRecordsTheHostsSessionIDOverStdio(t *testing.T) {
 
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	useFakeProc(t, root, 100)
 	srv := New(store, logger, "test")
-	srv.procRoot = root
-	srv.testPid = 100
 
 	session := connectedClient(t, srv)
 	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
@@ -73,6 +72,9 @@ func TestAHostThatNamesNoSessionLeavesTheRecordUnscoped(t *testing.T) {
 // covers the tool, both resources and the prompt alike.
 func TestProjectContextRecordsTheHostsSessionID(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-2")
+	root := t.TempDir()
+	writeFakeProc(t, root, 100, 200, []string{"PATH=/usr/bin"})
+	useFakeProc(t, root, 100)
 	st, _ := projectRecordStore(t)
 	srv, session := validityServerFor(t, st)
 	saveValidityRow(t, session, projectContextSentinel, nil)
@@ -80,6 +82,15 @@ func TestProjectContextRecordsTheHostsSessionID(t *testing.T) {
 	if got, n := lastRecordSession(t, srv); n != 1 || got != "host-session-2" {
 		t.Fatalf("project context recorded %d row(s) with session %q, want 1 row naming host-session-2", n, got)
 	}
+}
+
+// useFakeProc points the host-session decision New makes at a fake process tree
+// for the rest of the test.
+func useFakeProc(t *testing.T, root string, pid int) {
+	t.Helper()
+	old := hostSessionResolver
+	hostSessionResolver = func() string { return resolveHostSessionID("linux", root, pid) }
+	t.Cleanup(func() { hostSessionResolver = old })
 }
 
 // writeFakeProc creates a fake /proc tree for testing IsHostSession.
@@ -146,9 +157,8 @@ func TestSearchRecordsNoSessionWhenParentHasSessionID(t *testing.T) {
 
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	useFakeProc(t, root, 100)
 	srv := New(store, logger, "test")
-	srv.procRoot = root
-	srv.testPid = 100
 
 	session := connectedClient(t, srv)
 	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
@@ -169,9 +179,8 @@ func TestSearchRecordsSessionWhenParentLacksSessionID(t *testing.T) {
 
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	useFakeProc(t, root, 100)
 	srv := New(store, logger, "test")
-	srv.procRoot = root
-	srv.testPid = 100
 
 	session := connectedClient(t, srv)
 	saveMem(t, session, "recorded corpus entry about the nightly export", nil)
@@ -179,5 +188,34 @@ func TestSearchRecordsSessionWhenParentLacksSessionID(t *testing.T) {
 
 	if got, n := lastRecordSession(t, srv); n != 1 || got != "host-session-1" {
 		t.Fatalf("host session recorded %d row(s) with session %q, want 1 row naming host-session-1", n, got)
+	}
+}
+
+// TestProjectContextRecordsNoSessionForAnInheritedChild: the project-context path
+// must apply the same host-or-child decision as search; a child whose parent's
+// environ carries the variable records "".
+func TestProjectContextRecordsNoSessionForAnInheritedChild(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-3")
+	root := t.TempDir()
+	writeFakeProc(t, root, 100, 200, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID=host-session-3"})
+	useFakeProc(t, root, 100)
+	st, _ := projectRecordStore(t)
+	srv, session := validityServerFor(t, st)
+	saveValidityRow(t, session, projectContextSentinel, nil)
+	_ = callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"})
+	if got, n := lastRecordSession(t, srv); n != 1 || got != "" {
+		t.Fatalf("child project context recorded %d row(s) with session %q, want 1 row with none", n, got)
+	}
+}
+
+// TestResolveHostSessionIDNonLinuxKeepsTheEnvironmentsID: without /proc the
+// environment's id is used as before.
+func TestResolveHostSessionIDNonLinuxKeepsTheEnvironmentsID(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "host-session-4")
+	if got := resolveHostSessionID("darwin", t.TempDir(), 100); got != "host-session-4" {
+		t.Fatalf("non-linux resolve = %q, want the environment's id", got)
+	}
+	if got := resolveHostSessionID("linux", t.TempDir(), 100); got != "" {
+		t.Fatalf("linux with unreadable proc = %q, want none (fail safe)", got)
 	}
 }

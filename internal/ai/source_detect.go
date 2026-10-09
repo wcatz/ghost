@@ -209,9 +209,10 @@ func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), s
 	return ""
 }
 
-// hostSessionEnv is the environment variable that names the session. It is
-// shared with mcpserver so the detection rule and the server agree on the key.
-const hostSessionEnv = "CLAUDE_CODE_SESSION_ID"
+// HostSessionEnv is the environment variable that names the session. The MCP
+// server reads its value through this same constant, so the detection rule and
+// the server agree on the key.
+const HostSessionEnv = "CLAUDE_CODE_SESSION_ID"
 
 // IsHostSession reports whether the current process is the session root — the
 // process that the host started with CLAUDE_CODE_SESSION_ID set in its initial
@@ -241,7 +242,7 @@ func IsHostSession(root string, pid int) bool {
 	// If the parent lacks it, this process is the host session (the var was
 	// injected for this process at spawn). If the parent has it, this process
 	// inherited it and is a child.
-	return !bytes.Contains(data, []byte(hostSessionEnv+"="))
+	return !bytes.Contains(data, []byte(HostSessionEnv+"="))
 }
 
 // parentPID reads ppid (field 4) from /proc/<pid>/stat. The comm field (field
