@@ -822,6 +822,11 @@ func selectHydratedWindow(hydrated []Memory, window HybridWindow, poolIDs []stri
 type HybridWindow struct {
 	IDs    []string
 	Scores map[string]float64
+	// Reserved holds the ids the keyword reservation admitted: rows whose fused
+	// score is below the cut by design. It is nil when the reservation promoted
+	// nothing. The assembler's relevance cutoff reads it (through
+	// Candidate.KeywordReserved) so it does not undo the reservation.
+	Reserved map[string]bool
 }
 
 func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchParams) []*hybridCandidate {
@@ -1014,6 +1019,7 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 	//     enough to survive that spread exceeds the catastrophic top floor.
 	//
 	// What the issue describes is admission, and admission is what this does.
+	var reserved map[string]bool
 	if slots := limit / 5; p.FTSWeight > 0 && slots > 0 && len(pool) > width {
 		isReserved := func(c *hybridCandidate) bool {
 			if statusDemotionFactor(c.resolved, c.projectID, p.ProjectID) < 1 {
@@ -1046,6 +1052,10 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 						t.DisplacedBy = c.id
 					}
 					pool[i] = c
+					if reserved == nil {
+						reserved = make(map[string]bool)
+					}
+					reserved[c.id] = true
 					break
 				}
 			}
@@ -1067,7 +1077,9 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 		pool = pool[:width]
 	}
 
-	return hybridWindowOf(pool)
+	w := hybridWindowOf(pool)
+	w.Reserved = reserved
+	return w
 }
 
 // hybridCandidate is one memory's fused standing: the rank each leg gave it

@@ -31,7 +31,7 @@ type pipeline struct {
 	rows []memory.Candidate
 	// blockNotes are statements about the assembled block — its conflicts, its
 	// dedup and diversity state. They are held apart from noteBuf because stage 5
-	// runs before stage 8, and a block that stage 8 then trims must not be
+	// runs before stage 9, and a block that stage 9 then trims must not be
 	// described as if it were whole: contradictPairs is filtered against the final
 	// admitted set, and the rest are dropped when nothing was admitted, because
 	// both are the last things the pipeline knows.
@@ -63,7 +63,7 @@ type pipeline struct {
 	contradictedBy map[string][]string
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
-	// the stages run and belongs to the stage that acts on it: stage 8 is what
+	// the stages run and belongs to the stage that acts on it: stage 9 is what
 	// enforces whatever byte bound the caller gave, so its record is where a
 	// reader looking at the trace will find it.
 	windowDisclosure string
@@ -83,7 +83,7 @@ type pipeline struct {
 	// droppedBy counts how many rows each stage removed, which is how an
 	// empty result names the stage responsible.
 	droppedBy map[string]int
-	// droppedByBound counts the same removals by WHICH cap in stage 8 cut the
+	// droppedByBound counts the same removals by WHICH cap in stage 9 cut the
 	// row, because the caps have different remedies: a row-count cap is fixed by
 	// raising the limit and a content-byte cap is not. One map for the stage and
 	// one for the bound, since a stage can empty a set in more than one way and
@@ -118,7 +118,7 @@ type stage struct {
 }
 
 // stages is the pipeline, in order. Every filter and every decision that can
-// affect membership runs before the final window closure in stage 8.
+// affect membership runs before the final window closure in stage 9.
 //
 // Stage 1 (retrieve) is not in this list: it is the one stage that needs the
 // Retriever, so Run performs it before the pipeline starts. Everything after it
@@ -131,6 +131,7 @@ var stages = []stage{
 	{name: stageConflicts, run: runConflicts},
 	{name: stageDedup, run: runDedup},
 	{name: stageDiversity, run: runDiversity},
+	{name: stageCutoff, run: runCutoff},
 	{name: stageBudget, run: runBudget},
 	{name: stageRender, run: runRender},
 }
@@ -139,6 +140,11 @@ var stages = []stage{
 // opened, and record the state of every row that survives. verified_at is a
 // flag, not a predicate — a live row nobody has re-verified is still true as far
 // as the store knows, and hiding it would be a claim the data does not support.
+//
+// On a historical (as_of) request it is the one stage that decides nothing: the
+// window is the live row's, so no verdict drawn from it is a verdict about the
+// instant, and the row is kept with its bounds rendered unjudged. Everything the
+// stage would have concluded is replaced by the disclosure in qualifiersFor.
 func runValidity(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
@@ -150,6 +156,20 @@ func runValidity(p *pipeline) {
 	kept := make([]memory.Candidate, 0, len(p.rows))
 	for _, c := range p.rows {
 		v := readValidity(c, p.req.Now)
+		// A historical (as_of) request draws NO verdict from the window (#910).
+		// memory_history records no validity, so the window an as_of row carries
+		// is the live row's, and judging it against T would answer with bounds
+		// the row did not necessarily hold then: that is what dropped a row whose
+		// window has closed or has not opened NOW even though nothing says it
+		// had at T. The empty state is ValidityLabel's documented "the values and
+		// no verdict" rendering (there is nothing to say about a window nobody
+		// can place), and memory.ValidityWithheld holds nothing back on it, so
+		// the row survives here exactly as a row with no window does. The borrow
+		// is stated instead by memory.AsOfValidityNote, which qualifiersFor
+		// appends to every historical block.
+		if p.req.AsOf != nil {
+			v.state = ""
+		}
 		sig := p.signal(c)
 		sig.ValidityState = v.state
 		for _, raw := range v.unparseable {
@@ -681,10 +701,10 @@ func (p *pipeline) dropsDemotedLosers() bool {
 // category may take.
 //
 // A SLICED request carries one window per bucket that states an item cap, and
-// that is not a refinement — it is the rule. Stage 8 caps each bucket over the
+// that is not a refinement — it is the rule. Stage 9 caps each bucket over the
 // rows IT admits, so a share that divided one window across every bucket would
 // let one bucket's share evict another bucket's row: the eviction moves the row
-// behind the shared window, and stage 8 then keeps it under its own bucket's cap,
+// behind the shared window, and stage 9 then keeps it under its own bucket's cap,
 // which leaves a deferral verdict on a row the answer renders and a header that
 // says a row it is showing was withheld. Dividing per bucket makes the two stages
 // agree about which rows are in play, because they then read the same cap for the
@@ -737,7 +757,7 @@ type diversityShareWindow struct {
 //     order — which carries the keyword reservation, the status demotion, decay
 //     and both demotions — survives it.
 //   - A verdict is filed only for a row the stage MOVED. A row it deferred and
-//     then readmitted is recorded as considered, and a row stage 8 admits keeps
+//     then readmitted is recorded as considered, and a row stage 9 admits keeps
 //     no drop verdict — `trim`, which is where membership is decided, withdraws
 //     it, and a slice's byte cap is one shipped shape that gets there (see
 //     `withdrawDeferral`).
@@ -864,11 +884,11 @@ func runDiversity(p *pipeline) {
 	// back, so a pinned row admitted from behind the window can outrank an
 	// earlier-deferred row of its own category; ordering the kept set by rank
 	// undoes exactly that and nothing else, because the SET of rows in the window
-	// is unchanged and stage 8 admits the same rows either way.
+	// is unchanged and stage 9 admits the same rows either way.
 	//
 	// The move group is ordered by rank for the same reason, and that is what
 	// keeps one bucket's reordering from disturbing another bucket: every bucket
-	// keeps its own rows in its own relative order, so stage 8's per-bucket caps
+	// keeps its own rows in its own relative order, so stage 9's per-bucket caps
 	// admit the same rows they would have admitted unshared.
 	//
 	// Fresh slices, not p.rows[:0]: the candidate set is the retriever's return
@@ -903,10 +923,10 @@ func runDiversity(p *pipeline) {
 // diversityWindows is the set of windows this request's share divides.
 //
 // A SLICED request gets one window per bucket that states an item cap, sized by
-// that slice's cap, because that cap is the bound stage 8 enforces over the rows
+// that slice's cap, because that cap is the bound stage 9 enforces over the rows
 // it admits — see diversityShareWindow. A request with no slices gets the single total
 // window `itemBound` states. A bucket whose slice states no item cap is left out
-// entirely: stage 8 never cuts its rows on count, so there is nothing for a share
+// entirely: stage 9 never cuts its rows on count, so there is nothing for a share
 // to make room for, and moving its rows would only promote rows the ranking had
 // decided against.
 //
@@ -1030,7 +1050,136 @@ type diversityDeferral struct {
 	slots int
 }
 
-// runBudget is stage 8: the final closure. The order the retriever returned is
+// runCutoff is stage 8, on QUERY-mode requests only: the relative relevance
+// cutoff (#954).
+//
+// ghost_memory_search always fills its window, so a block that carries ten rows
+// answers a question whose useful row ranked first with nine rows of noise a
+// model has to discount: the graded bench reports context precision 0.138 at
+// about 297 estimated tokens per answer, eight or nine of every ten rows being
+// noise. This stage stops the answer where relevance falls off, so a caller gets
+// fewer, better rows. The ranking is not the problem — hybrid MRR@10 is 0.902,
+// so the useful row is usually first — the block simply never stops, and this is
+// what stops it. It runs after dedup and before the budget.
+//
+// WHY QUERY-MODE ONLY, AND WHY THE MODE AND NOT THE SOURCE. A query is a
+// relevance question and this is a relevance answer, so it can only shorten a
+// block a search returns. A passive read is a digest that hands a model
+// everything worth knowing, where the order carries no fused score and is not a
+// relevance verdict at all — cutting it would be the stage answering a question
+// nobody asked. The gate is the request-bound p.passive, the same one stage 7
+// reads, because the consequences follow from the ABSENCE of a query rather than
+// from a Source that happens to be a search.
+//
+// THE RULE, and it is ONE rule with ONE parameter — Request.RelevanceCutoff, the
+// cfg.Context.relevance_cutoff share. A row is cut when its fused Base (the
+// pre-decay score, so age and category never read as irrelevance) is strictly
+// below that share of the TOP row's Base. Four guarantees follow from how the
+// line is drawn:
+//
+//   - The top row is always kept. It IS the reference, so a share in (0,1] never
+//     cuts it, and a disabled cutoff (0) cuts nothing, so a query whose every row
+//     is weak is never turned into an empty answer. A result rate below 1.000 on
+//     an answerable query is the regression this prevents.
+//   - A pinned row is never cut. A pin is a slot guarantee (#936), and a stage
+//     that dropped a pinned row would take the guarantee back. It is exempt from
+//     the drop and still ranked where the retriever put it.
+//   - A keyword-reserved row is never cut. The reservation admitted it into the
+//     window through the keyword leg and it carries a low fused score by design,
+//     so cutting it would undo the reservation.
+//   - `limit` stays the maximum. This is not a cap: it removes rows the budget
+//     stage then has fewer of, so a block can only shrink, never grow.
+//
+// It is a cut and never a deferral, unlike stage 7: a row it removes is out of
+// the block for good. Each cut row is recorded once — a decision at this stage
+// with reason relevance_cutoff, which the retrieval record reads as a dropped
+// verdict and explain reads as an excluded row's reason — and a row it keeps
+// records nothing, so the pipeline's one-verdict-per-row rule holds. A passive
+// request and a disabled cutoff are both complete no-ops that record the stage
+// as a pass-through, so a passive block and an off-state query are byte-identical
+// to a pipeline whose stage was absent.
+func runCutoff(p *pipeline) {
+	in := len(p.rows)
+	share := p.req.RelevanceCutoff
+	// A passive request is a recorded no-op with its own note, so a reader can
+	// see the stage ran and declined rather than inferring it was skipped. The
+	// cutoff shortens a relevance answer and a passive block is not one, whatever
+	// the configured share.
+	if p.passive {
+		note := "relevance cutoff is a query-mode rule: this request carries no query, so the " +
+			"block is a digest and the ranking decides it, and no row was cut"
+		p.blockNotes = append(p.blockNotes, note)
+		p.trace.record(stageCutoff, in, in, nil, note)
+		return
+	}
+	// Disabled: 0 is the shipped off state. A complete no-op — no note, no
+	// verdict, no drop — so a request running off produces a block, verdicts,
+	// notes and a response byte-identical to a pipeline whose stage was absent.
+	if share <= 0 || in == 0 {
+		p.trace.record(stageCutoff, in, in, nil)
+		return
+	}
+	// The reference is the top-ranked row's fused Base (the pre-decay score).
+	// Rank order is decayed score with pinned rows first, so rows[0].Base is not
+	// always the largest Base in the set; a lower reference only lowers the floor,
+	// so the cut errs toward keeping rows. A non-positive top (only a store whose
+	// decay drives every score to zero) makes the floor non-positive, and then a
+	// non-positive base is never
+	// strictly below it, so every row is kept: the conservative answer when there
+	// is no positive relevance to be a fraction of.
+	topBase := p.rows[0].Base
+	floor := share * topBase
+	// A fresh slice, not p.rows[:0]: the candidate set is the retriever's return
+	// value and the contract says it is the widened untrimmed result, so
+	// compacting into its backing array would leave the caller holding stale
+	// rows. items are rebuilt to stay index-aligned, because every later stage
+	// reads a row and its item at the same index.
+	keptRows := make([]memory.Candidate, 0, in)
+	keptItems := make([]Item, 0, in)
+	var dropped []string
+	for i := range p.rows {
+		c := p.rows[i]
+		switch {
+		case i == 0 || c.Pinned || c.KeywordReserved || c.Base >= floor:
+			keptRows = append(keptRows, c)
+			keptItems = append(keptItems, p.items[i])
+			continue
+		}
+		dropped = append(dropped, c.ID)
+		p.dropped[c.ID] = reasonRelevanceCutoff
+		p.droppedBy[stageCutoff]++
+		p.trace.decide(c.ID, c.ProjectID, stageCutoff, reasonRelevanceCutoff, c.Score)
+	}
+	p.rows, p.items = keptRows, keptItems
+
+	note := cutoffSummaryNote(len(dropped), share)
+	p.blockNotes = append(p.blockNotes, note)
+	p.trace.record(stageCutoff, in, len(keptRows), dropped, note)
+}
+
+// cutoffSummaryNote is stage 8's block statement. It names the share the rows
+// fell below and how many were cut (or that every row was kept). A note is
+// appended whenever the stage runs with share > 0, so a reader can see the
+// cutoff ran even when it kept every row. A passive request and a disabled
+// cutoff (share <= 0) are recorded as pass-throughs with no note.
+func cutoffSummaryNote(n int, share float64) string {
+	if n == 0 {
+		return fmt.Sprintf("relevance cutoff kept every row: no row's fused Base fell below %s of the top match's Base",
+			cutoffShareLabel(share))
+	}
+	return fmt.Sprintf("relevance cutoff stopped the answer where relevance fell off: %d row(s) scored below %s of the top match's Base and were cut",
+		n, cutoffShareLabel(share))
+}
+
+// cutoffShareLabel renders the cutoff share for a note. It is a percentage
+// because that is how a share of the top score reads to a person, and it is
+// rounded to a whole percent so the note names the number a user set rather than
+// a float expansion of it.
+func cutoffShareLabel(share float64) string {
+	return fmt.Sprintf("%.0f%%", share*100)
+}
+
+// runBudget is stage 9: the final closure. The order the retriever returned is
 // authoritative and is preserved — it carries the keyword reservation, status
 // demotion, decay and both demotions, none of which can be recovered from a
 // single score, so re-sorting here would undo them. What this stage owns is
@@ -1116,7 +1265,7 @@ func runBudget(p *pipeline) {
 	p.trace.record(stageBudget, in, len(rows), dropped, notes...)
 }
 
-// runRender is stage 9: the shared item renderer. Each surface keeps its own
+// runRender is stage 10: the shared item renderer. Each surface keeps its own
 // framing and field order around Line(); what is shared is the item line, so the
 // same memory reads the same way in search output and in an injected block. The
 // response-fit post-pass, which needs the framing to measure a complete
@@ -1182,7 +1331,7 @@ func trim(rows []memory.Candidate, items []Item, keepRow []bool, dropped []strin
 	return keptRows, keptItems, dropped
 }
 
-// withdrawDeferral reverses a stage-7 deferral for a row stage 8 admitted: the
+// withdrawDeferral reverses a stage-7 deferral for a row stage 9 admitted: the
 // row keeps place in the answer and loses the verdict that excluded it, in the
 // trace, in `dropped` and in the per-stage count.
 func (p *pipeline) withdrawDeferral(id string) bool {
@@ -1451,7 +1600,7 @@ func (p *pipeline) removalBreakdown() string {
 	// response_fit is last because it runs last: it is a Run post-pass, not a
 	// stage, and counting it separately is what lets a reader tell a set the
 	// pipeline emptied from one the byte cap emptied.
-	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageBudget, stageResponseFit}
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageCutoff, stageBudget, stageResponseFit}
 	parts := make([]string, 0, len(order))
 	for _, stage := range order {
 		if n := p.droppedBy[stage]; n > 0 {

@@ -32,7 +32,11 @@ type Item struct {
 	ResolvedAt            *time.Time
 	ValidFrom, ValidUntil *time.Time
 	VerifiedAt            *time.Time
-	// ValidityState is valid, future, expired, unverified or unset.
+	// ValidityState is valid, future, expired, unverified or unset — and empty,
+	// which is what stage 2 records for a row on a historical (as_of) request:
+	// the window is the live row's and no verdict can be drawn from it, so the
+	// bounds render unjudged (see ValidityLabel) rather than labelled with a
+	// clock's answer about bounds the row did not hold then.
 	ValidityState string
 	Confidence    *float64
 	Agent         string
