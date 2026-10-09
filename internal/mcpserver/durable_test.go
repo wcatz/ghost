@@ -165,6 +165,15 @@ func TestSaveGuidanceStatesTheAuditAnswersOnEverySaveSurface(t *testing.T) {
 			}
 		}
 	}
+	// The When-to-Save bullet and the category paragraph must route a
+	// constraint the same way, and the old "constraint found → dependency"
+	// bullet must not return.
+	if !strings.Contains(mcpInstructions, "a constraint that is not a toolchain or version limit → category: convention") {
+		t.Errorf("the When-to-Save bullet does not route a non-toolchain constraint to convention")
+	}
+	if strings.Contains(mcpInstructions, "API quirk, or constraint found → category: dependency") {
+		t.Errorf("the When-to-Save bullet routes every constraint to dependency, contradicting the category paragraph")
+	}
 	global := surfaces["ghost_save_global"]
 	if strings.Contains(global, "pin=true") {
 		t.Errorf("ghost_save_global advertises pin=true, an argument it does not take:\n%s", global)

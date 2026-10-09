@@ -779,7 +779,7 @@ Save immediately with ghost_memory_save — do NOT batch or wait:
 - Bug, pitfall, or surprising behavior discovered → category: gotcha
 - Component relationships or design rationale learned → category: architecture
 - Recurring pattern or convention observed → category: convention or pattern
-- Dependency version, API quirk, or constraint found → category: dependency
+- Dependency version or API quirk found → category: dependency; a constraint that is not a toolchain or version limit → category: convention
 - Design choice with alternatives → use ghost_decision_record instead
 
 Global (ghost_save_global) only when the user says it applies to every repository. A rule learned in this codebase stays in the project even when it sounds general; promote later with ghost_memory_promote. Never save a memory about how Ghost's own tools behaved.
