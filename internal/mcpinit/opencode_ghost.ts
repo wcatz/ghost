@@ -50,9 +50,12 @@ const DEBOUNCE_MS = 2000
 const MAX_TRACKED_SESSIONS = 256
 
 // Once the save reminder has been injected into a session, don't re-inject it
-// on later idle transitions: the nudge condition stays true until something is
-// actually saved, and re-prompting every idle would be noisy. Bounded like
-// lastFire so long-lived hosts don't grow it without limit.
+// while ghost keeps reporting it: ghost's gate is per turn, so the reminder
+// comes back on every save-free turn, and an agent that ignored one would be
+// prompted again by its own reply's stop. A stop on which ghost stays silent
+// (a save landed since the previous stop) clears the entry, so the next
+// save-free turn is reminded again. Bounded like lastFire so long-lived hosts
+// don't grow it without limit.
 const nudgedSessions = new Map<string, true>()
 
 // Builds the agent-facing instruction injected into the live session when the
@@ -191,6 +194,7 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 					log("warn", `ghost hook stderr: ${errs.trim().slice(0, 500)}`)
 				}
 				const trimmed = nudge.trim()
+				if (!trimmed && sessionID) nudgedSessions.delete(sessionID)
 				if (trimmed) {
 					let reason = trimmed
 					try {
@@ -457,6 +461,7 @@ const setupV2 = async (ctx: ContextV2) => {
 			child.on("close", () => {
 				if (errs.trim()) log(`ghost hook stderr: ${errs.trim().slice(0, 500)}`)
 				const trimmed = nudge.trim()
+				if (!trimmed) nudgedSessions.delete(sessionID)
 				if (trimmed && !nudgedSessions.has(sessionID)) {
 					let reason = trimmed
 					try {

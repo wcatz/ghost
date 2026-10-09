@@ -290,7 +290,12 @@ func WriteLastSaveCount(sessionID string, saveCount int) error {
 	if fi, err := os.Stat(dataDir); err != nil || !fi.IsDir() {
 		return nil
 	}
-	sweepSavesMarkers(dataDir)
+	// Sweep once per session — when this write creates the session's marker —
+	// not on every tool-using stop: the sweep reads every marker in the
+	// directory, and this is the path the host blocks the agent on.
+	if _, err := os.Stat(filepath.Join(dataDir, savesMarkerFile(sessionID))); os.IsNotExist(err) {
+		sweepSavesMarkers(dataDir)
+	}
 	m := lifecycleSavesMarker{
 		SessionID:     sessionID,
 		LastSaveCount: saveCount,
@@ -583,8 +588,8 @@ func RemoveLastSaveCount(sessionID string) {
 
 // sweepSavesMarkers removes save-count markers whose own updated_at is past
 // lifecycleSavesMarkerMaxAge: sessions that ended without a session-end event
-// (a killed host, a host with no such event). Run on every write, so a marker
-// is never read for the sweep to be reached.
+// (a killed host, a host with no such event). Run when a session's first marker is written, so a
+// marker is never read for the sweep to be reached.
 func sweepSavesMarkers(dataDir string) {
 	paths, err := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json"))
 	if err != nil {

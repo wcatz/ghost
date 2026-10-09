@@ -210,6 +210,26 @@ func TestSaveCountMarker(t *testing.T) {
 			t.Errorf("a file outside the marker prefix must stay: %v", err)
 		}
 	})
+	t.Run("the sweep runs when a session's marker is created, not on every write", func(t *testing.T) {
+		dataHome := isolatedHomeWithStore(t)
+		if err := WriteLastSaveCount("s", 1); err != nil {
+			t.Fatal(err)
+		}
+		stale := filepath.Join(dataHome, "ghost", "lifecycle-saves-z-00000000.json.tmp1")
+		if err := os.WriteFile(stale, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		past := time.Now().Add(-lifecycleSavesMarkerMaxAge - time.Hour)
+		if err := os.Chtimes(stale, past, past); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteLastSaveCount("s", 2); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(stale); err != nil {
+			t.Fatalf("a later write of the same session must not sweep: %v", err)
+		}
+	})
 	t.Run("session ids are sanitised into the file name", func(t *testing.T) {
 		for in, want := range map[string]string{
 			"abc-1_2.3":              "abc-1_2.3",
