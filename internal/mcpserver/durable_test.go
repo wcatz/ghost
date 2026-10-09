@@ -118,6 +118,11 @@ func TestSaveGuidanceSaysGhostOnlyGuides(t *testing.T) {
 // is a phrase that names one of the audit's findings; a surface that drops one
 // has lost the answer to that finding.
 var saveGuidanceGolden = []string{
+	// the four moments worth a save, on every surface that carries the sentence
+	"when the user corrects you or states a rule",
+	"when a bug's root cause is found",
+	"when a choice is made for a reason",
+	"when a tool or dependency behaves unexpectedly",
 	// one fact per memory, refined rather than re-saved (#959: 4 duplicates)
 	"One memory per fact",
 	"ghost_memory_update",
@@ -206,16 +211,13 @@ func TestSaveToolExampleIsADurableRule(t *testing.T) {
 }
 
 // TestSaveGuidanceSaysWhatNotToSave pins the do-not-save list, which is the half
-// of the guidance an agent reads as a filter. #959 added two shapes the audit
-// measured: a release or pull-request status, and a measurement a later run
-// replaces — both durable-looking, both wrong.
+// of the guidance an agent reads as a filter, including the #959 generalisation
+// of "CLAUDE.md" to the project's agent instructions.
 func TestSaveGuidanceSaysWhatNotToSave(t *testing.T) {
 	for _, want := range []string{
 		"ephemeral debug state",
 		"info derivable from code/git",
 		"content already in the project's agent instructions (CLAUDE.md, AGENTS.md)",
-		"the status of a release or an open pull request",
-		"a measurement a later run replaces",
 	} {
 		if !strings.Contains(mcpInstructions, want) {
 			t.Errorf("mcpInstructions is missing %q in its do-not-save list — the guidance was removed or reworded away", want)
@@ -241,6 +243,20 @@ func TestSaveGuidanceScopesGlobalSaves(t *testing.T) {
 	} {
 		if !strings.Contains(mcpInstructions, want) {
 			t.Errorf("mcpInstructions is missing %q — the global-save rule was removed or reworded away", want)
+		}
+	}
+	// The tool's own description carries the rule too: it is what an agent
+	// reads at the moment it picks the tool.
+	_, session := newCapSession(t)
+	desc := saveToolDescription(t, session, "ghost_save_global")
+	for _, want := range []string{
+		"only when the user says the knowledge applies to every repository",
+		"A rule learned in this codebase stays in the project even when it sounds general",
+		"promote it later with ghost_memory_promote",
+		"Never save a memory about how Ghost's own tools behaved",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("ghost_save_global is missing %q — the global-save rule was removed or reworded away", want)
 		}
 	}
 }
