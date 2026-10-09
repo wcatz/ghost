@@ -814,9 +814,12 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 		if !memory.ScopeMatches(row.Scope, scope) {
 			continue
 		}
-		// Validity is judged at T before the cap, with the rule search applies
-		// when it binds its clock to as_of: a row whose window had closed or not
-		// yet opened at T is withheld rather than listed.
+		// Validity is judged at T before the cap, with the rule a listing applies
+		// to a borrowed window: a row whose window had closed or not yet opened
+		// at T is withheld rather than listed. This is NOT the rule
+		// ghost_memory_search applies to the same borrowed bounds (#910) — that
+		// surface judges none, because the bounds are the present's — and the
+		// divergence is stated both in the block's own note and in the docs.
 		if _, outOfWindow := memory.ValidityAt(row.ValidFrom, row.ValidUntil, row.VerifiedAt, asOf); outOfWindow {
 			withheld++
 			continue

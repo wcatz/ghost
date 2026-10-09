@@ -122,10 +122,16 @@ func parseStoredStamp(s *string) (*time.Time, bool) {
 
 // ValidityWithheld reports whether a state names a row the retrieval path
 // does not return: a window that has closed or has not opened. It is the one
-// predicate stage 2 of the assembler drops on, and every historical listing
-// withholds on it too, so a row search leaves out at an instant is a row the
-// listing leaves out at that instant. unverified and unset are kept, because
-// verified_at is a flag rather than a predicate.
+// predicate stage 2 of the assembler drops on, and every as_of listing withholds
+// on it too. unverified and unset are kept, because verified_at is a flag rather
+// than a predicate.
+//
+// A search with as_of drops on nothing (#910): the window an as_of row carries
+// is the live row's, so a verdict read from it is a claim about today rather
+// than about the instant, and stage 2 records the empty state instead — which
+// this predicate is false of. That is why the two surfaces now differ on
+// purpose, and why a row a search returns at an instant is not a statement
+// about what a listing returned there.
 func ValidityWithheld(state string) bool {
 	return state == ValidityExpired || state == ValidityFuture
 }
