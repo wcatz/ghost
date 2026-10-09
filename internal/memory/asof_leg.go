@@ -78,9 +78,10 @@ func AsOfSourceNote(t time.Time) string {
 // row — tags, scope, pin, confidence, agent, source_ref and the validity window,
 // which are exactly the fields a row line renders that the history table does
 // not version — because "nothing in this block is a claim about the present"
-// would be false about them. AsOfValidityNote is where the window's judgement at
-// T and the borrow of its bounds are stated beside the rows; this sentence names
-// the whole set too, so the two notes cannot read as a contradiction.
+// would be false about them. AsOfValidityNote is where the borrow of the
+// window's bounds is stated beside the rows, together with the verdict a
+// surface did or did not draw from them; this sentence names the whole set
+// too, so the two notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
 		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
@@ -88,18 +89,31 @@ func AsOfUnversionedNote() string {
 		"this block is a claim about the present."
 }
 
-// AsOfValidityNote is the sentence stating how a historical listing judged
-// validity and, when withheld is positive, how many rows it withheld, and it is the same sentence on every surface that renders one.
+// AsOfValidityNote is the sentence stating how a historical block treated
+// validity and, when withheld is positive, how many rows a listing withheld, and
+// it is the same sentence on every surface that renders one.
 //
-// Validity is judged AT the requested instant, the way ghost_memory_search with
-// as_of judges it (the assembler binds its clock to that instant): a row whose
-// window had closed or had not yet opened at T is withheld, and a row valid at T
-// is shown as valid at T even if its window has closed since. memory_history never
-// versioned the window itself, so the bounds are read from the current row, and
-// the note says so rather than letting the verdict read as more than it is.
+// What the three surfaces do with the window is NOT the same, and the sentence
+// says so rather than claiming a rule one of them stopped applying (#910). A
+// listing — ghost_project_context's as_of branch and the ghost context --as-of
+// session block — judges the window AT the requested instant through
+// memory.ValidityAt and withholds a row whose window had closed or had not yet
+// opened then. ghost_memory_search with as_of judges nothing: memory_history
+// never versioned the window, so the bounds an as_of row carries are the LIVE
+// row's, and a verdict read from them is a claim about today's bounds rather
+// than about the row at T — which is exactly what made a search drop a row
+// whose window has since closed or has not yet opened. Stage 2 of the assembler
+// therefore draws no verdict on an as_of request and drops nothing, and this
+// note is what the rendered bounds are qualified by instead.
+//
+// The borrow itself is the part all three share and the note states it whatever
+// a surface did with it: the bounds, like tags, scope, pin, confidence, agent
+// and source_ref, are the current row's, because the history table does not
+// version them.
 func AsOfValidityNote(at time.Time, withheld int) string {
 	note := "Validity judged at " + at.UTC().Format(time.RFC3339) + ": a memory whose validity window had closed " +
-		"or had not yet opened at that instant is withheld. The window's bounds, like the row's tags, scope, pin, " +
+		"or had not yet opened at that instant is withheld where a surface judges validity at that instant, and " +
+		"a search withholds none on that account. The window's bounds, like the row's tags, scope, pin, " +
 		"confidence, agent and source_ref, are read from the current row, because the history table does not version them."
 	switch {
 	case withheld == 1:

@@ -45,10 +45,19 @@ func historicalQualifier(asOf time.Time) string {
 // count and the store holds the fact, and one sentence has to answer "what is
 // missing from this set" for both a direct reader of the set and a reader of a
 // search over it.
+//
+// AsOfValidityNote is the same sentence the two as_of listing surfaces print
+// (#908), and a search needs it for the opposite reason from theirs: they judge
+// the window at T and withhold what it excludes, while stage 2 here judges
+// nothing and withholds nothing, so the row's bounds are the only thing left to
+// explain — and they are today's. Its withheld count is ZERO by construction,
+// not by omission: an as_of request withholds no row on that account, and the
+// note's count clause is therefore absent rather than claiming a number.
 func qualifiersFor(req Request, set *memory.CandidateSet) []string {
 	var out []string
 	if req.AsOf != nil {
 		out = append(out, historicalQualifier(*req.AsOf))
+		out = append(out, memory.AsOfValidityNote(*req.AsOf, 0))
 	}
 	if set != nil {
 		if note := memory.AsOfUnknownNote(set.Unrecorded); note != "" {

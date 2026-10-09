@@ -1,9 +1,16 @@
 package mcpserver
 
 import (
+	"context"
+	"database/sql"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // The instants the as_of tests read at. The store under a test is written now, so
@@ -261,5 +268,116 @@ func TestAsOfParsesToUTC(t *testing.T) {
 	}
 	if empty, err := parseAsOf(""); err != nil || empty != nil {
 		t.Errorf("parseAsOf(\"\") = %v, %v; want nil, nil: an omitted argument is a current read, not an error", empty, err)
+	}
+}
+
+// backdatedSession wires a fully-registered server over a store the test can
+// write raw SQL against. It is the only way a PAST instant can be asked about a
+// row a test just wrote: every save stamps its version with the store's own
+// clock, so a historical read at an instant before that sees nothing unless the
+// version's recorded_at is moved — which is exactly what a store whose history
+// predates the read would hold, and what makes the windows below the live row's
+// rather than the version's.
+func backdatedSession(t *testing.T) (*mcp.ClientSession, *sql.DB) {
+	t.Helper()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(context.Background(), "abc123", "/tmp/test", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	return connectedClient(t, New(store, logger, "test")), db
+}
+
+// insertHistoricalRow writes one memory with a version recorded before at, and the
+// validity window the live row holds. The two are deliberately independent: the
+// version is what puts the row in a historical read, and the window is the field
+// that read has to borrow because memory_history records none.
+func insertHistoricalRow(t *testing.T, db *sql.DB, id, content string, from, until *string, at time.Time) {
+	t.Helper()
+	f := memory.StoredStampLayout
+	nullable := func(s *string) any {
+		if s == nil {
+			return nil
+		}
+		return *s
+	}
+	stamp := func(d time.Duration) string { return at.Add(d).Format(f) }
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, valid_from, valid_until, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, "abc123", "fact", content, "manual", nullable(from), nullable(until),
+		stamp(-72*time.Hour), stamp(-24*time.Hour),
+	); err != nil {
+		t.Fatalf("insert %s: %v", id, err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memory_history (memory_id, project_id, category, content, source, recorded_at, phase)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, "abc123", "fact", content, "manual", stamp(-24*time.Hour), "save",
+	); err != nil {
+		t.Fatalf("insert %s history: %v", id, err)
+	}
+}
+
+// TestSearchAsOfKeepsARowWhoseCurrentWindowIsClosedOrUnopened is #910 through the
+// tool, over a store whose history predates the instant asked about — so the row
+// really was there at T, and the only thing that could exclude it is the window
+// the read borrows from the live row.
+//
+// Both rows are returned at T, with the note that says the window shown is
+// today's. The same two rows are dropped by a current search, because today the
+// window really is closed and really is not open: the change is scoped to a
+// historical read, and it is the read that no longer draws the verdict.
+func TestSearchAsOfKeepsARowWhoseCurrentWindowIsClosedOrUnopened(t *testing.T) {
+	at := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
+	session, db := backdatedSession(t)
+	f := memory.StoredStampLayout
+	closedSince := at.Add(90 * 24 * time.Hour).Format(f) // after T, before now
+	opensLater := now.Add(90 * 24 * time.Hour).Format(f) // after now
+	insertHistoricalRow(t, db, "m-closed-since", "walrus window closed since T",
+		strPtr(at.Add(-90*24*time.Hour).Format(f)), &closedSince, at)
+	insertHistoricalRow(t, db, "m-opens-after-now", "walrus window opens after now",
+		strPtr(opensLater), nil, at)
+
+	historical := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project", "query": "walrus", "as_of": at.Format(time.RFC3339),
+	}))
+	for _, content := range []string{"walrus window closed since T", "walrus window opens after now"} {
+		if !strings.Contains(historical, content) {
+			t.Errorf("an as_of search withheld %q, want it returned: the window is the live row's and is not "+
+				"evidence about that instant\n%s", content, historical)
+		}
+	}
+	if !strings.Contains(historical, "Validity judged at "+at.Format(time.RFC3339)) {
+		t.Errorf("the answer does not state the as_of validity note, so the window its rows show reads as the "+
+			"row's own at that instant:\n%s", historical)
+	}
+	for _, content := range []string{"walrus window closed since T", "walrus window opens after now"} {
+		line := searchLine(historical, content)
+		if line == "" {
+			continue
+		}
+		for _, verdict := range []string{"expired", "not yet valid"} {
+			if strings.Contains(line, verdict) {
+				t.Errorf("%q is labelled %q on a row the stage drew no verdict for: %s", content, verdict, line)
+			}
+		}
+	}
+
+	// The same two rows today: the window really has closed and really is not
+	// open, so a current search drops both, as it always did.
+	current := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project", "query": "walrus",
+	}))
+	for _, content := range []string{"walrus window closed since T", "walrus window opens after now"} {
+		if strings.Contains(current, content) {
+			t.Errorf("a current search returned %q, want it withheld as out of window today:\n%s", content, current)
+		}
 	}
 }

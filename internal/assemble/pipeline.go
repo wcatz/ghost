@@ -134,6 +134,11 @@ var stages = []stage{
 // opened, and record the state of every row that survives. verified_at is a
 // flag, not a predicate — a live row nobody has re-verified is still true as far
 // as the store knows, and hiding it would be a claim the data does not support.
+//
+// On a historical (as_of) request it is the one stage that decides nothing: the
+// window is the live row's, so no verdict drawn from it is a verdict about the
+// instant, and the row is kept with its bounds rendered unjudged. Everything the
+// stage would have concluded is replaced by the disclosure in qualifiersFor.
 func runValidity(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
@@ -145,6 +150,20 @@ func runValidity(p *pipeline) {
 	kept := make([]memory.Candidate, 0, len(p.rows))
 	for _, c := range p.rows {
 		v := readValidity(c, p.req.Now)
+		// A historical (as_of) request draws NO verdict from the window (#910).
+		// memory_history records no validity, so the window an as_of row carries
+		// is the live row's, and judging it against T would answer with bounds
+		// the row did not necessarily hold then: that is what dropped a row whose
+		// window has closed or has not opened NOW even though nothing says it
+		// had at T. The empty state is ValidityLabel's documented "the values and
+		// no verdict" rendering (there is nothing to say about a window nobody
+		// can place), and memory.ValidityWithheld holds nothing back on it, so
+		// the row survives here exactly as a row with no window does. The borrow
+		// is stated instead by memory.AsOfValidityNote, which qualifiersFor
+		// appends to every historical block.
+		if p.req.AsOf != nil {
+			v.state = ""
+		}
 		sig := p.signal(c)
 		sig.ValidityState = v.state
 		for _, raw := range v.unparseable {
