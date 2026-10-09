@@ -117,12 +117,6 @@ type Signals struct {
 	// claim about ONE session's text: Run judges only the calls recorded under this id,
 	// and an empty one judges none (see Run).
 	session string
-
-	// wordTurnCounts maps each word to the number of turns it appears in.
-	// Used to compute per-session stopwords (words appearing in many turns).
-	wordTurnCounts map[string]int
-	// currentTurnWords tracks words seen in the current turn being built.
-	currentTurnWords map[string]bool
 }
 
 // turn is everything the agent wrote under ONE SetAt instant: one assistant line of
@@ -156,26 +150,7 @@ func (s *Signals) SetAt(t time.Time) {
 		s.at = 0
 		return
 	}
-	newAt := t.UnixMilli()
-	if s.at != 0 && newAt != s.at {
-		// Instant changed: finalize the current turn's words.
-		s.finalizeTurnWords()
-	}
-	s.at = newAt
-}
-
-// finalizeTurnWords updates wordTurnCounts with words from the completed turn.
-func (s *Signals) finalizeTurnWords() {
-	if len(s.currentTurnWords) == 0 {
-		return
-	}
-	if s.wordTurnCounts == nil {
-		s.wordTurnCounts = make(map[string]int)
-	}
-	for w := range s.currentTurnWords {
-		s.wordTurnCounts[w]++
-	}
-	s.currentTurnWords = nil
+	s.at = t.UnixMilli()
 }
 
 // Unplaced counts the entries no instant could be put on. A scanner reports them as a
@@ -230,32 +205,6 @@ func (s *Signals) Ordered() bool {
 		}
 	}
 	return false
-}
-
-// SessionStopwords returns words that appear in more than half of the session's
-// turns AND in at least two turns. These are per-session stopwords: generic
-// project words that appear everywhere and carry no signal for this session.
-// The caller should use these when computing memory tokens for comparison.
-func (s *Signals) SessionStopwords() map[string]bool {
-	// Finalize any pending turn words.
-	s.finalizeTurnWords()
-	if len(s.wordTurnCounts) == 0 {
-		return nil
-	}
-	turnCount := len(s.turns)
-	if turnCount < 3 {
-		// Need at least 3 turns for meaningful per-session stopwords.
-		return nil
-	}
-	// Threshold: appear in more than half of turns, and in at least 2 turns.
-	threshold := turnCount / 2
-	stopwords := make(map[string]bool)
-	for w, count := range s.wordTurnCounts {
-		if count > threshold && count >= 2 {
-			stopwords[w] = true
-		}
-	}
-	return stopwords
 }
 
 // Since returns the signals written at or after cutoff, which is what a call recorded
@@ -431,22 +380,6 @@ func (s *Signals) addWords(text string) {
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
-	// Track words for per-session stopword computation.
-	s.trackTurnWords(text)
-}
-
-// trackTurnWords adds the words from text to the current turn's word set.
-// Uses the same tokenizer as DistinctTokens but without filtering, so we see
-// all words for frequency counting.
-func (s *Signals) trackTurnWords(text string) {
-	if s.currentTurnWords == nil {
-		s.currentTurnWords = make(map[string]bool)
-	}
-	for _, w := range splitWords(text) {
-		if len(w) >= minTokenLen {
-			s.currentTurnWords[w] = true
-		}
-	}
 }
 
 // addToTurn files the fingerprints under the scanner's current instant, appending
@@ -458,24 +391,9 @@ func (s *Signals) trackTurnWords(text string) {
 // steps back (or repeats an instant) merges the same text the way one that never
 // moved would, and a turn with at == 0 — text no timestamp could place — is still
 // carried, so Unplaced counts it and the sidecar can say it happened.
-//
-// An outlier turn — one with 150 or more distinct tokens — is not added to the
-// turn list at all. A single giant turn (a 100 KB file write, a long agent
-// instruction) would match nearly every memory and dominate the token arm, so it
-// is excluded entirely. The pooled prose view still carries its words for
-// Empty/Unplaced/Ordered.
 func (s *Signals) addToTurn(fps []string) {
 	if n := len(s.turns); n > 0 && s.turns[n-1].at == s.at {
-		// Skip outlier turns: if the turn already has 150+ distinct tokens,
-		// do not add more — it would match everything.
-		if len(s.turns[n-1].fps) >= 150 {
-			return
-		}
 		addUnseen(&s.turns[n-1].fps, fps)
-		return
-	}
-	// New turn: only add if it's not already an outlier.
-	if len(fps) >= 150 {
 		return
 	}
 	s.turns = append(s.turns, turn{at: s.at})
@@ -542,13 +460,11 @@ func (s *Signals) AddProse(text string) {
 // declaring the same knowledge again, which is the superseded-in-session bucket and
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
-//
-// IDs in save arguments are NOT added to the ID list: an id inside a save or
-// update of that same memory is an edit, not a citation. Adding it would file
-// every save as a use on the identifier arm, which is a false positive.
 func (s *Signals) AddSaveArgs(text string) {
 	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
-	s.trackTurnWords(text)
+	for _, id := range memoryIDs(text) {
+		s.AddID(id)
+	}
 }
 
 // AddToolArgs records a non-save tool call's arguments.

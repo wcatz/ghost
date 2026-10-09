@@ -193,7 +193,7 @@ func TestAddSaveArgsIsNotUsage(t *testing.T) {
 // TestAddToolArgsIsUsage: a tool call that is not a save carries the agent's own
 // words like any other prose, so an Edit whose old_string IS the memory's wording
 // is a use. The fixture quotes the whole memory rather than one word of it
-// because the token arm asks for a third of the memory and never fewer than
+// because the token arm asks for a half of the memory and never fewer than
 // three — an Edit naming a single distinctive word is genuinely not evidence, and
 // asserting otherwise here would pin a threshold the tests elsewhere hold.
 func TestAddToolArgsIsUsage(t *testing.T) {
@@ -229,7 +229,7 @@ func TestSignalsRoundTripThroughTheSidecar(t *testing.T) {
 	// Enough of the memory's own words to clear the negation arm's bar rather than
 	// merely carrying a cue — the point of the case is that the cued segment
 	// survives the round trip, and a segment under the bar would not. The bar is
-	// the SAME one the used arm applies (>=3 fingerprints and >=a third of the memory),
+	// the SAME one the used arm applies (>=3 fingerprints and >=a half of the memory),
 	// because a denial needs to be about the memory for the same reason a use does.
 	s.AddProse("that is wrong, the opencode plugin does not materialize its transcript under mkdtemp")
 	s.AddSaveArgs("the opencode plugin materializes its transcript under mkdtemp")

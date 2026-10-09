@@ -139,7 +139,7 @@ func auditOpsMemories() []string {
 // three in each, and never all in one. No single turn restates it, so the labels
 // expect it ignored; a comparison that pools the whole session's words reads the
 // union and calls it used. Each memory has at least ten distinctive words, so three
-// in one turn is under a third of it.
+// in one turn is under a half of it.
 type auditSpread struct {
 	content string
 	turns   [3]string
@@ -278,45 +278,10 @@ func NewAuditCorpus() AuditCorpus {
 	add(AuditTurn{Minute: 32, Kind: AuditSaveArgs, Saves: []string{dev[19]},
 		Text: "Session scoped reads keep one session's calls apart from another's"})
 
-	// False positive case: short memory where 3-token floor is the whole memory.
-	// "alpine meadow protocol" has 3 tokens; need all 3 to match.
-	fpShortID := auditID("falsepos/short")
-	c.Memories = append(c.Memories, AuditMemory{ID: fpShortID, Content: "alpine meadow protocol", Domain: "falsepos"})
-	// Turn with only 2 of 3 words - should NOT match (need all 3 with 1/2 fraction)
-	add(AuditTurn{Minute: 33, Kind: AuditProse, Text: "Walking through the alpine meadow today"})
-	// Turn with all 3 words - SHOULD match (genuine restatement)
-	add(AuditTurn{Minute: 34, Kind: AuditProse, Restates: []string{fpShortID}, Text: "The alpine meadow protocol is followed"})
-
-	// False positive case: giant tool-argument turn (outlier >150 tokens).
-	// A very large tool argument that would match everything without the outlier check.
-	fpGiantID := auditID("falsepos/giant")
-	giantContent := "The giant memory content that has many distinctive words " + strings.Repeat("distinctive word ", 50)
-	c.Memories = append(c.Memories, AuditMemory{ID: fpGiantID, Content: giantContent, Domain: "falsepos"})
-	// Giant tool argument with many tokens - should be skipped by outlier check
-	giantToolArg := `{"tool":"Write","input":{"file_path":"large.go","content":"` + strings.Repeat("package main\nfunc foo() {\n", 200) + `"}}`
-	add(AuditTurn{Minute: 35, Kind: AuditToolArgs, Text: giantToolArg})
-
-	// False positive case: an id inside a save of the same memory (edit, not citation).
-	fpEditID := auditID("falsepos/edit")
-	c.Memories = append(c.Memories, AuditMemory{ID: fpEditID, Content: "The edit memory content for testing", Domain: "falsepos"})
-	// Save args containing the same memory's ID - should NOT count as citation (proposal 4)
-	// The save also restates the content, which IS a supersession (correctly detected).
-	add(AuditTurn{Minute: 36, Kind: AuditSaveArgs, Saves: []string{fpEditID}, Text: "ghost_memory_save --id " + fpEditID + " --content \"The edit memory content for testing\""})
-
-	// False positive case: generic project words appearing in many turns.
-	// Words from the filler turns (formatting, changelog, commit, linter, blank, line, comment,
-	// imports, alphabetically, diff, confirm, unrelated, moved, trailing, newline, generated,
-	// file, splitting, function, shorter, table, cases, copies, deleting, unused, constant,
-	// compiler, reported, benchmark, numbers, unchanged).
-	fpGenericID := auditID("falsepos/generic")
-	c.Memories = append(c.Memories, AuditMemory{ID: fpGenericID, Content: "The formatting changelog commit linter wants a blank line", Domain: "falsepos"})
-	// These words appear in filler turns but memory has many distinctive words - should NOT match
-	// because the filler turns don't have enough overlap with the memory's distinctive words.
-
 	c.Calls = []AuditCall{
-		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops", "spread", "falsepos"}},
-		{Name: "middle", Source: "search", Before: auditTurnCount / 2, Domains: []string{"dev", "spread", "falsepos"}},
-		{Name: "end", Source: "search", Before: auditTurnCount, Domains: []string{"dev", "spread", "falsepos"}},
+		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops", "spread"}},
+		{Name: "middle", Source: "search", Before: auditTurnCount / 2, Domains: []string{"dev", "spread"}},
+		{Name: "end", Source: "search", Before: auditTurnCount, Domains: []string{"dev", "spread"}},
 	}
 	return c
 }

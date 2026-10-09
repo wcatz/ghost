@@ -176,9 +176,7 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 	if j.MemoryID == "" {
 		return Verdict{}, false
 	}
-	// Use per-session stopwords to filter generic project words.
-	sessionStopwords := s.SessionStopwords()
-	toks := s.h.DistinctTokensWithStopwords(j.Content, sessionStopwords)
+	toks := s.h.DistinctTokens(j.Content)
 
 	switch {
 	case s.contradicts(toks, j.MemoryID):
@@ -267,7 +265,7 @@ func (s *Signals) matchesSaves(toks []string) bool {
 //
 //  3. The denial must be about this memory's OWN WORDING, on the arm that reads
 //     wording: the sentence must share the SAME token bar the `used` arm uses
-//     (>=3 distinct fingerprints AND >= a third of the memory's tokens), not a
+//     (>=3 distinct fingerprints AND >= a half of the memory's tokens), not a
 //     lower threshold. Two shared tokens is too loose: a memory about "cache
 //     lockfile directory" would be contradicted by any sentence mentioning two of
 //     those three words in a denial context, even when the denial is about
