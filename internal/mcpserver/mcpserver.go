@@ -3041,10 +3041,10 @@ func (s *Server) registerTools() {
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
 				if len(retirement.Retired) > 0 {
-					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", strings.Join(retirement.Retired, ", "))
+					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
 				if len(retirement.Declined) > 0 {
-					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because it is pinned or retention-exempt, so session start and search still return it at full rank.", strings.Join(retirement.Declined, ", "))
+					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because it is pinned or retention-exempt, so session start and search still return it at full rank.", joinTokens(retirement.Declined))
 				}
 			}
 		}
@@ -4384,4 +4384,15 @@ func repairInstructions(project string, targets []string) string {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
 	}
 	return sb.String()
+}
+
+// joinTokens renders stored ids for a tool answer, each through assemble.Token
+// so an id carrying a newline, a guillemet or a control character cannot reach
+// the reader as anything but a bounded token.
+func joinTokens(ids []string) string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = assemble.Token(id)
+	}
+	return strings.Join(out, ", ")
 }
