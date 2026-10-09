@@ -969,7 +969,11 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 
 		fitNotes = append(fitNotes, vanished(prev, res.Notes)...)
 		prev = res.Notes
-		if p.req.Budget.MaxBytes <= 0 || res.Bytes <= p.req.Budget.MaxBytes {
+		measured := res.Bytes
+		if p.req.Budget.Measure != nil {
+			measured = p.req.Budget.Measure(p.items, p.trace)
+		}
+		if p.req.Budget.MaxBytes <= 0 || measured <= p.req.Budget.MaxBytes {
 			break
 		}
 
@@ -979,15 +983,31 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 			// stays false and the removal breakdown — the thing that makes an
 			// empty answer's leading sentence checkable — disappears on exactly
 			// the case this post-pass creates.
-			lowest := p.items[len(p.items)-1]
-			p.items = p.items[:len(p.items)-1]
-			if n := len(p.rows); n > 0 {
-				p.rows = p.rows[:n-1]
+			at := len(p.items) - 1
+			if p.req.Budget.KeepPinned {
+				for i := at; i >= 0; i-- {
+					if !p.items[i].Pinned {
+						at = i
+						break
+					}
+				}
+			}
+			lowest := p.items[at]
+			p.items = append(p.items[:at:at], p.items[at+1:]...)
+			if len(p.rows) > at {
+				p.rows = append(p.rows[:at:at], p.rows[at+1:]...)
 			}
 			p.dropped[lowest.ID] = reasonBudgetDropped
 			p.droppedBy[stageResponseFit]++
 			p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reasonBudgetDropped, lowest.Score)
 			dropped = append(dropped, lowest.ID)
+		case p.req.Budget.Measure != nil:
+			// The caller's own framing is over the cap with no row left to cut.
+			// The envelope's notes and verdict are not what the caller emits, so
+			// there is nothing further to give way and no search answer to fail.
+			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
+			p.trace.Notes = res.Notes
+			return res, nil
 		case len(res.Notes) > 0:
 			// Cut from the end, which is where boundNotes already puts the
 			// per-row detail: the sentences that qualify the answer survive the

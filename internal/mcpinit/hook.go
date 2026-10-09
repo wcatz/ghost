@@ -454,7 +454,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		fmt.Fprintf(&sb, "**Summary:** %s\n\n", quoteData(learned))
 	}
 
-	if len(memories) > 0 || tally.project.Withheld > 0 {
+	if len(memories) > 0 || tally.project.Withheld > 0 || tally.project.ByteCut > 0 {
 		// A wholly-withheld project half: the rows were seen and refused — not
 		// absent, and not ranked out — so the section keeps its heading and
 		// says so in the assembler's own words, pointing at the tool that still
@@ -562,6 +562,11 @@ const (
 // makes no claim about.
 func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
 	line := sessionCountsBase(tally, rankPhrase, toolPhrase)
+	if line != "" && tally.ByteCut > 0 {
+		// Cut for size, not outranked: the block's byte cap is the host's output
+		// limit, and a row it removed lost to that limit rather than to the score.
+		line = fmt.Sprintf("%s; %d of the not-shown rows were cut to keep this block under the host's output limit", line, tally.ByteCut)
+	}
 	if line == "" || tally.PinnedCut == 0 {
 		return line
 	}
@@ -1027,15 +1032,9 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// half of the same decision in a different file.
 	now := clock()
 
-	// The retrieval record's handle (#850), opened and closed around the one call
-	// that writes it rather than around this whole function: the write happens
-	// inside loadSessionPassive, so holding a second read-write connection — plus
-	// the -wal and -shm files it creates — for the tasks and decisions reads below
-	// would be a cost this function pays for nothing. A missing store makes it a nil
-	// sink with a no-op close, so there is no error path here to write.
-	record, closeRecord := sessionRecordSink(dbPath)
-	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record, sessionID)
-	closeRecord()
+	// The framing is read BEFORE the memory rows, because the byte cap is a cap on
+	// the whole block the host receives and the assembler measures it against the
+	// render of this framing plus the rows kept so far.
 
 	// Get open tasks
 	taskRows, err := db.Query(`
@@ -1080,6 +1079,18 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	_ = db.QueryRow(
 		`SELECT interaction_count FROM ghost_state WHERE project_id = ?`, projectID,
 	).Scan(&interactionCount)
+
+	// The retrieval record's handle (#850), opened and closed around the one call
+	// that writes it rather than around this whole function: the write happens
+	// inside loadSessionPassive, so holding a second read-write connection — plus
+	// the -wal and -shm files it creates — for the tasks and decisions reads above
+	// would be a cost this function pays for nothing. A missing store makes it a nil
+	// sink with a no-op close, so there is no error path here to write.
+	record, closeRecord := sessionRecordSink(dbPath)
+	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record, sessionID, sessionFrame{
+		project: project, learned: learned, tasks: tasks, decisions: decisions, interactionCount: interactionCount,
+	})
+	closeRecord()
 
 	return
 }

@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -307,35 +308,23 @@ func funcBody(t *testing.T, source, name string) string {
 	return ""
 }
 
-// TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned exercises the
-// sessionStartByteCap added in session_passive.go: a store whose full session-
-// start memory block would exceed the cap is trimmed by the response-fit
-// post-pass, the rendered block stays under the host limit, and every pinned
-// row survives the cut.
-func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
+// seedByteCapStore builds a store whose uncapped session-start block is well over
+// the host's 10,000-character limit: a project with pinned rows, many unpinned
+// rows, a learned summary, four tasks and three decisions, and eight globals.
+func seedByteCapStore(t *testing.T) (dbPath, projectPath string, pinned []string) {
 	t.Helper()
-
-	xdgHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdgHome)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	ghostDir := filepath.Join(xdgHome, "ghost")
+	ghostDir := filepath.Join(t.TempDir(), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	dbPath := filepath.Join(ghostDir, "ghost.db")
-
+	dbPath = filepath.Join(ghostDir, "ghost.db")
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck
 
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
-		t.Fatalf("insert _global: %v", err)
-	}
-
-	projectPath := filepath.Join(t.TempDir(), "bigproj")
+	projectPath = filepath.Join(t.TempDir(), "bigproj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project path: %v", err)
 	}
@@ -343,92 +332,159 @@ func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('pbig', ?, 'bigproj')`, canonical); err != nil {
-		t.Fatalf("insert project: %v", err)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
 	}
+	exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
+	exec(`INSERT INTO projects (id, path, name) VALUES ('pbig', ?, 'bigproj')`, canonical)
+	exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('pbig', ?)`, strings.Repeat("Learned summary sentence. ", 20))
 
-	// Build a store with many long memories that will exceed the 7500 byte cap.
-	// Each project memory is ~400 bytes (200 bytes preview + formatting overhead).
-	// 30 unpinned + 5 pinned = 35 project memories.
-	// 10 global memories ~300 bytes each.
-	// Total uncompressed would be well over 7500 bytes.
-	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
-
-	// Pinned memories (should all survive)
-	pinnedCount := 5
-	for i := 0; i < pinnedCount; i++ {
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	insert := func(id, project, category string, content string, imp float64, pin int) {
+		exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?)`, id, project, category, content, imp, pin, ts, ts)
+	}
+	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("ppin%02d", i)
-		content := strings.Repeat("Pinned memory content that is long enough to measure. ", 8) // ~440 bytes
-		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
-			VALUES (?, 'pbig', 'preference', ?, 'manual', 0.9, 1, ?, ?)`, id, content, now, now); err != nil {
-			t.Fatalf("insert pinned: %v", err)
-		}
+		pinned = append(pinned, id)
+		insert(id, "pbig", "preference", strings.Repeat(fmt.Sprintf("Pinned %02d content. ", i), 15), 0.2, 1)
 	}
-
-	// Unpinned memories (many, to push over the cap)
-	unpinnedCount := 30
-	for i := 0; i < unpinnedCount; i++ {
-		id := fmt.Sprintf("pmem%02d", i)
-		content := strings.Repeat(fmt.Sprintf("Unpinned memory %02d content that is long enough to measure. ", i), 8)
-		imp := 0.8 - float64(i)*0.02
-		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
-			VALUES (?, 'pbig', 'gotcha', ?, 'manual', ?, 0, ?, ?)`, id, content, imp, now, now); err != nil {
-			t.Fatalf("insert unpinned: %v", err)
-		}
+	for i := 0; i < 30; i++ {
+		insert(fmt.Sprintf("pmem%02d", i), "pbig", "gotcha", strings.Repeat(fmt.Sprintf("Unpinned %02d content. ", i), 15), 0.9-float64(i)*0.01, 0)
 	}
-
-	// Global memories
-	globalCount := 10
-	for i := 0; i < globalCount; i++ {
-		id := fmt.Sprintf("gmem%02d", i)
-		content := strings.Repeat(fmt.Sprintf("Global memory %02d content. ", i), 10) // ~300 bytes
-		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
-			VALUES (?, '_global', 'preference', ?, 'manual', 0.7, 0, ?, ?)`, id, content, now, now); err != nil {
-			t.Fatalf("insert global: %v", err)
-		}
+	for i := 0; i < 10; i++ {
+		insert(fmt.Sprintf("gmem%02d", i), "_global", "preference", strings.Repeat(fmt.Sprintf("Global %02d content. ", i), 20), 0.7, 0)
 	}
+	for i := 0; i < 4; i++ {
+		exec(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES (?, 'pbig', ?, ?, 'pending', 1)`,
+			fmt.Sprintf("task%02d", i), strings.Repeat("Task title words ", 10), strings.Repeat("Task description. ", 15))
+	}
+	for i := 0; i < 3; i++ {
+		exec(`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'pbig', ?, ?, 'why', 'active')`,
+			fmt.Sprintf("dec%02d", i), strings.Repeat("Decision title words ", 8), strings.Repeat("Decision body. ", 20))
+	}
+	return dbPath, projectPath, pinned
+}
 
-	// Run the session-start hook - use json.Marshal to safely serialize the
-	// cwd path (handles Windows path separators correctly).
-	input := map[string]string{"cwd": projectPath}
-	b, _ := json.Marshal(input)
-	var out strings.Builder
-	runSessionStartHook(t, string(b), &out)
-	block := out.String()
+// TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned: a ~12 KB store renders a
+// block under the cap that holds every pinned row, the cap is on the bytes of the
+// WHOLE rendered block (framing included), and every cut row is recorded as cut
+// with its reason rather than as delivered.
+func TestSessionStartByteCapTrimsLargeBlockAndKeepsPinned(t *testing.T) {
+	dbPath, projectPath, pinned := seedByteCapStore(t)
+	cfg := mustHookConfig(t)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 
-	// 1. The full block (header + memories + globals + footer) must be under the host's 10,000 char limit
+	block := SessionBlockAt(dbPath, projectPath, cfg, now)
+
+	if len(block) > sessionStartByteCap {
+		t.Errorf("block is %d bytes, over the %d cap", len(block), sessionStartByteCap)
+	}
 	if len(block) >= 10000 {
-		t.Errorf("session-start block is %d bytes, exceeds 10,000 char host limit", len(block))
+		t.Errorf("block is %d bytes, at or over the host's 10,000 limit", len(block))
 	}
-
-	// 2. The memory section (what assemble.Run returns) must be under sessionStartByteCap (7500)
-	// We can't directly measure it, but the whole block being under 10000 with header/footer
-	// implies the memory section is under the cap.
-
-	// 3. All pinned rows must be present in the output
-	for i := 0; i < pinnedCount; i++ {
-		id := fmt.Sprintf("ppin%02d", i)
+	for _, id := range pinned {
 		if !strings.Contains(block, id) {
-			t.Errorf("pinned row %s was cut by the byte cap but should survive", id)
+			t.Errorf("pinned row %s is not in the block", id)
 		}
 	}
+	if !strings.Contains(block, "cut to keep this block under the host's output limit") {
+		t.Errorf("the count line does not say rows were cut for size:\n%s", block)
+	}
+	if !strings.Contains(block, "task00") || !strings.Contains(block, "dec00") {
+		t.Errorf("tasks and decisions are missing from the block")
+	}
 
-	// 4. Some unpinned rows should be cut (the block was over the cap)
-	unpinnedFound := 0
-	for i := 0; i < unpinnedCount; i++ {
-		id := fmt.Sprintf("pmem%02d", i)
-		if strings.Contains(block, id) {
-			unpinnedFound++
+	// What the block shows and what the record says were delivered must agree.
+	shown := 0
+	for _, prefix := range []string{"pmem", "gmem", "ppin"} {
+		shown += strings.Count(block, "`"+prefix) + strings.Count(block, "["+prefix)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var verdicts string
+	if err := db.QueryRow(`SELECT verdicts FROM retrieval_record WHERE source = 'session_start' ORDER BY rowid DESC LIMIT 1`).Scan(&verdicts); err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var rows []struct {
+		ID     string `json:"id"`
+		Kept   bool   `json:"kept"`
+		Stage  string `json:"stage"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(verdicts), &rows); err != nil {
+		t.Fatalf("decode verdicts %q: %v", verdicts, err)
+	}
+	cut, kept := 0, 0
+	for _, r := range rows {
+		inBlock := strings.Contains(block, r.ID)
+		if r.Kept {
+			kept++
+			if !inBlock {
+				t.Errorf("record says %s was delivered, the block does not hold it", r.ID)
+			}
+			continue
+		}
+		if inBlock {
+			t.Errorf("record says %s was cut (%s), the block holds it", r.ID, r.Stage)
+		}
+		if r.Stage == "response_fit" {
+			cut++
+			if r.Reason == "" {
+				t.Errorf("cut row %s has no reason", r.ID)
+			}
 		}
 	}
-	if unpinnedFound == unpinnedCount {
-		t.Logf("all unpinned rows fit; block was not over cap (total block %d bytes)", len(block))
-	} else {
-		t.Logf("unpinned rows kept: %d/%d (cut: %d)", unpinnedFound, unpinnedCount, unpinnedCount-unpinnedFound)
+	if cut == 0 {
+		t.Fatalf("no response_fit cut recorded; verdicts: %s", verdicts)
 	}
+	for _, id := range pinned {
+		for _, r := range rows {
+			if r.ID == id && !r.Kept {
+				t.Errorf("pinned row %s recorded as cut", id)
+			}
+		}
+	}
+	if kept <= len(pinned) || kept+cut < 23 {
+		t.Errorf("expected unpinned rows delivered beside the pinned ones and 23 judged: kept %d cut %d", kept, cut)
+	}
+	t.Logf("block %d bytes, %d delivered, %d cut for size", len(block), kept, cut)
+}
 
-	// 5. The trace/retrieval record should have recorded the cuts as response_fit
-	// This is implicitly verified by the trace assertions in other tests.
-
-	t.Logf("session-start block size: %d bytes", len(block))
+// A store that fits the cap loses nothing: no cut is recorded and no count-line
+// clause about size appears.
+func TestSessionStartUnderTheByteCapCutsNothing(t *testing.T) {
+	dbPath, projectPath, _ := seedByteCapStore(t)
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM tasks`, `DELETE FROM decisions`, `UPDATE ghost_state SET learned_context = ''`,
+		`DELETE FROM memories WHERE id LIKE 'pmem%' AND id > 'pmem03'`,
+		`DELETE FROM memories WHERE id LIKE 'gmem%' AND id > 'gmem01'`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_ = db.Close()
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+	if len(block) > sessionStartByteCap/2 {
+		t.Fatalf("fixture is not small: %d bytes", len(block))
+	}
+	if strings.Contains(block, "output limit") {
+		t.Errorf("a block under the cap mentions a size cut:\n%s", block)
+	}
+	for _, id := range []string{"pmem00", "pmem03", "gmem00", "gmem01", "ppin00"} {
+		if !strings.Contains(block, id) {
+			t.Errorf("%s is missing from a block under the cap", id)
+		}
+	}
 }

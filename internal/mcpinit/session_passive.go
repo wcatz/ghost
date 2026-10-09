@@ -36,6 +36,33 @@ const (
 	globalsDisplayBytes = 300
 )
 
+// sessionStartByteCap is the byte cap on the WHOLE session-start block, as
+// formatSessionContext renders it: header, summary, memory rows, tasks,
+// decisions and counts line. It is measured by Budget.Measure on that render, so
+// it is the bytes Claude Code receives and not the assembler's search envelope.
+//
+// The host's limit is 10,000 characters (Claude Code hooks documentation: "A
+// hook's additionalContext, systemMessage, and initialUserMessage strings, and
+// its plain stdout, are capped at 10,000 characters"); over it the host keeps a
+// 2,000-character preview and a file path, and the model sees almost none of the
+// block. A byte count is never below a character count, so a byte cap is
+// conservative. The 1,000-byte margin covers what the render cannot see: the
+// session-number line (the counter is bumped after the load), a lifecycle alert
+// line written to the same stdout ahead of the block, and the newline the hook
+// appends.
+const sessionStartByteCap = 9000
+
+// sessionFrame is what formatSessionContext needs beside the memory rows, loaded
+// BEFORE the assembly so the byte cap can be measured on the render the host
+// receives. The zero value is a block with nothing around its rows.
+type sessionFrame struct {
+	project          string
+	learned          string
+	tasks            [][4]string
+	decisions        [][3]string
+	interactionCount int
+}
+
 // sessionPassiveBudget is the ONE statement of what the session-start block
 // selects, and it is the only place the two bucket policies are written down.
 //
@@ -55,35 +82,15 @@ const (
 // than the decay composite, and their near-duplicate losers are DROPPED rather
 // than reordered — a superseded preference is not worth eight slots of a
 // cross-project block.
-//
-// sessionStartByteCap is the total byte budget for the session-start memory
-// block (the part rendered by assemble.Run). It is set below the host's
-// 10,000-character cap (Claude Code hooks: "A hook's additionalContext,
-// systemMessage, and initialUserMessage strings, and its plain stdout, are
-// capped at 10,000 characters"; over-the-limit output is replaced by a file
-// path and a preview of up to the first 2,000 characters), with margin for the
-// header, learned summary, tasks and decisions that formatSessionContext adds
-// around it. A block already under the cap is byte-identical to origin/main.
-//
-// The slices carry ClampBytes matching the caller's preview truncation
-// (sessionDisplayBytes=200, globalsDisplayBytes=300) so that the assembler's
-// fitResponse post-pass measures the same bytes the renderer emits. The caller
-// appends the "…" display marker when content length equals the budget; the
-// stored row is untouched — display truncation only, no store-side loss.
-const sessionStartByteCap = 7500
-
 func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget {
 	inj := cfg.Injection
 
-	// MaxBytes bounds the complete rendered memory block (items, globals, notes,
-	// machine line). The response-fit post-pass trims rows from the bottom until
-	// it fits, recording each cut as response_fit in the trace and retrieval
-	// record. Pinned rows rank first (pinned DESC in both bucket orders) and
-	// survive the cut.
-	//
-	// ClampBytes matches the caller's preview truncation so the assembler's
-	// byte measurement matches what the hook actually renders. The caller appends
-	// the "…" display marker after the assembler returns.
+	// MaxItems and MaxBytes stay 0 HERE: the row bounds are the per-bucket caps,
+	// which is what they have always meant on this surface. The byte cap on the
+	// whole block is set by loadSessionPassiveFramed, together with the Measure
+	// that makes it a cap on the block's own render; MaxBytes without that
+	// Measure would be measured against the search envelope, which this surface
+	// never emits.
 	slices := make([]assemble.Slice, 0, 2)
 
 	// The project slice is conditional, and the condition is the no-match case:
@@ -106,9 +113,6 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 			// can only shuffle rows the block shows in full. The loader this
 			// replaces skipped it there too.
 			DemoteOnlyWhenOverCap: true,
-			// ClampBytes matches the caller's preview truncation so the
-			// assembler's fitResponse measures the same bytes the hook renders.
-			ClampBytes: sessionDisplayBytes,
 		})
 	}
 	slices = append(slices, assemble.Slice{
@@ -125,10 +129,8 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 		// them, because a superseded preference is not worth one of eight slots
 		// in a block that competes for attention across every project.
 		DropDemotedLosers: true,
-		// ClampBytes matches the caller's preview truncation (300 bytes).
-		ClampBytes: globalsDisplayBytes,
 	})
-	return assemble.Budget{MaxBytes: sessionStartByteCap, Slices: slices}
+	return assemble.Budget{Slices: slices}
 }
 
 // sessionTally is the two buckets' fates as the session-start block needs them,
@@ -149,6 +151,56 @@ type sessionTally struct {
 	// (project and globals together). It is counted, not inferred, and it is
 	// zero on every current read.
 	asOfWithheld int
+}
+
+// sessionRowsFrom splits the assembler's items into the two buckets' rendered
+// rows, previews applied. It is the ONE conversion, shared by the loader and by
+// the byte-cap measure, so what the cap counts is what the block prints.
+//
+// The buckets are separated by the row's OWN project rather than by the order it
+// arrived in: the retriever interleaves nothing, but a caller that ordered its
+// slices differently would, and a global row rendered in the project section
+// would be a claim the block never made.
+func sessionRowsFrom(items []assemble.Item) (memories, globals []sessionMemory) {
+	for _, it := range items {
+		row := sessionMemory{
+			ID:            it.ID,
+			Category:      it.Category,
+			Content:       it.Content,
+			Tags:          it.Tags,
+			Importance:    it.Importance,
+			Pinned:        it.Pinned,
+			CreatedAt:     it.CreatedAt,
+			Scope:         it.Scope,
+			ProjectID:     it.ProjectID,
+			Source:        it.Source,
+			ResolvedAt:    it.ResolvedAt,
+			ValidFrom:     it.ValidFrom,
+			ValidUntil:    it.ValidUntil,
+			VerifiedAt:    it.VerifiedAt,
+			ValidityState: it.ValidityState,
+			Confidence:    it.Confidence,
+			Agent:         it.Agent,
+			SourceRef:     it.SourceRef,
+			ConflictsWith: it.ConflictsWith,
+			SupersededBy:  it.SupersededBy,
+		}
+		if it.ProjectID == memory.GlobalProjectID {
+			// 300 bytes here vs. 200 below is deliberate, not drift: globals are
+			// capped at a much smaller item count (globalsCap=8), so a larger
+			// per-item byte budget still keeps the total section bytes low.
+			row.Content = truncateUTF8(row.Content, globalsDisplayBytes)
+			globals = append(globals, row)
+			continue
+		}
+		// 200 bytes per item, and smaller than the globals' 300 above, because
+		// project memories have a larger cap (sessionMemoriesCap=15 vs.
+		// globalsCap=8): a smaller per-item budget keeps total section bytes
+		// comparable.
+		row.Content = truncateUTF8(row.Content, sessionDisplayBytes)
+		memories = append(memories, row)
+	}
+	return memories, globals
 }
 
 // loadSessionPassive assembles the session-start block's memory rows: the
@@ -183,8 +235,69 @@ type sessionTally struct {
 // the one the reads use — those are read-only (memory.OpenReadDB, mode=ro) — and
 // because the branch with no project to attribute the call to must pass nil and
 // record nothing. See sessionRecordSink.
-func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink, sessionID string) (memories, globals []sessionMemory, tally sessionTally) {
+//
+// The optional frame is the block's framing, which is what lets the byte cap be
+// a cap on the block the host receives; without one the cap measures the rows
+// alone.
+//
+// The cap is stage 8's response-fit pass, run against Budget.Measure: the render
+// of the whole block for the rows kept so far. Rows are cut from the bottom of
+// the ranking, an UNPINNED row before any pinned one (Budget.KeepPinned), and
+// every cut is a `response_fit` decision in the trace and the retrieval record,
+// so a cut row is never recorded as delivered. A block already under the cap
+// loses nothing and is byte-identical to the uncapped render. Only when no
+// unpinned row is left does a pinned row go, because a block over the host's
+// limit delivers none of its rows. The framing itself (summary, tasks,
+// decisions) is counted but not trimmed: if it alone exceeds the cap, every row
+// is cut and the block is still over it.
+func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink, sessionID string, frames ...sessionFrame) (memories, globals []sessionMemory, tally sessionTally) {
+	var frame sessionFrame
+	if len(frames) > 0 {
+		frame = frames[0]
+	}
 	budget := sessionPassiveBudget(cfg, projectID)
+
+	// The store's own counts per bucket, read once and BEFORE the assembly so the
+	// cap's measure and the final header use the same totals.
+	type eligible struct{ n, excluded int }
+	counts := make(map[string]eligible, len(budget.Slices))
+	for _, sl := range budget.Slices {
+		n, excluded, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, now, cfg.Injection.SessionScope)
+		if err != nil {
+			slog.Warn("ghost: session-start eligible count failed, so the header counts the retrieval window", "bucket", sl.Bucket, "error", err)
+			continue
+		}
+		counts[sl.Bucket] = eligible{n, excluded}
+	}
+	// The window is an over-fetch, so the trace counts only the rows it fetched.
+	// The store's count supplies the rows behind it; an unreadable count leaves the
+	// tally as the trace made it (the header then describes the window, which is
+	// the most it can honestly say).
+	tallyFor := func(trace *assemble.Trace, nProject, nGlobals int) sessionTally {
+		t := sessionTally{
+			project: assemble.CountsFor(trace, projectID, nProject),
+			globals: assemble.CountsFor(trace, memory.GlobalProjectID, nGlobals),
+		}
+		for _, sl := range budget.Slices {
+			c, ok := counts[sl.Bucket]
+			if !ok {
+				continue
+			}
+			switch sl.Bucket {
+			case projectID:
+				t.project = t.project.CountedAgainst(c.n, c.excluded, sl.OverFetch+windowExtra(trace, sl.Bucket))
+			case memory.GlobalProjectID:
+				t.globals = t.globals.CountedAgainst(c.n, c.excluded, sl.OverFetch+windowExtra(trace, sl.Bucket))
+			}
+		}
+		return t
+	}
+	budget.MaxBytes = sessionStartByteCap
+	budget.KeepPinned = true
+	budget.Measure = func(items []assemble.Item, trace *assemble.Trace) int {
+		mem, glob := sessionRowsFrom(items)
+		return len(formatSessionContext(projectID, frame.project, nil, mem, frame.learned, frame.tasks, frame.decisions, frame.interactionCount, glob, tallyFor(trace, len(mem), len(glob))))
+	}
 	res, err := assemble.Run(ctx, store, assemble.Request{
 		ProjectID: projectID,
 		// The empty Query IS the passive shape. It is not a placeholder: it is
@@ -235,83 +348,14 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		slog.Warn("ghost: session-start assembly failed, so the block has no memory rows", "error", err)
 		return nil, nil, sessionTally{}
 	}
-	// The buckets are separated by the row's OWN project rather than by the order
-	// it arrived in: the retriever interleaves nothing, but a caller that ordered
-	// its slices differently would, and a global row rendered in the project
-	// section would be a claim the block never made.
-	for _, it := range res.Items {
-		row := sessionMemory{
-			ID:            it.ID,
-			Category:      it.Category,
-			Content:       it.Content,
-			Tags:          it.Tags,
-			Importance:    it.Importance,
-			Pinned:        it.Pinned,
-			CreatedAt:     it.CreatedAt,
-			Scope:         it.Scope,
-			ProjectID:     it.ProjectID,
-			Source:        it.Source,
-			ResolvedAt:    it.ResolvedAt,
-			ValidFrom:     it.ValidFrom,
-			ValidUntil:    it.ValidUntil,
-			VerifiedAt:    it.VerifiedAt,
-			ValidityState: it.ValidityState,
-			Confidence:    it.Confidence,
-			Agent:         it.Agent,
-			SourceRef:     it.SourceRef,
-			ConflictsWith: it.ConflictsWith,
-			SupersededBy:  it.SupersededBy,
-		}
-		if it.ProjectID == memory.GlobalProjectID {
-			// 300 bytes here vs. 200 below is deliberate, not drift: globals are
-			// capped at a much smaller item count (globalsCap=8), so a larger
-			// per-item byte budget still keeps the total section bytes low.
-			// The assembler pre-clamps to globalsDisplayBytes; if the content
-			// length equals the budget it was clamped and we append the display
-			// ellipsis so the preview shows it was cut.
-			if len(row.Content) >= globalsDisplayBytes {
-				row.Content = row.Content[:globalsDisplayBytes] + "…"
-			}
-			globals = append(globals, row)
-			continue
-		}
-		// 200 bytes per item, and smaller than the globals' 300 above, because
-		// project memories have a larger cap (sessionMemoriesCap=15 vs.
-		// globalsCap=8): a smaller per-item budget keeps total section bytes
-		// comparable.
-		if len(row.Content) >= sessionDisplayBytes {
-			row.Content = row.Content[:sessionDisplayBytes] + "…"
-		}
-		memories = append(memories, row)
-	}
+	memories, globals = sessionRowsFrom(res.Items)
 	// The tally is the trace's own split of each bucket into shown, ranked-out
 	// and withheld rows, and it is computed HERE rather than in the renderer
 	// because the trace travels with the result: a caller rendering an answer
 	// must not reconstruct what the stages saw. CountsFor is nil-safe against a
 	// trace that never ran, so an error path that already returned above is not
 	// the only place this can be reached.
-	tally = sessionTally{
-		project: assemble.CountsFor(res.Trace, projectID, len(memories)),
-		globals: assemble.CountsFor(res.Trace, memory.GlobalProjectID, len(globals)),
-	}
-	// The window is an over-fetch, so the trace counts only the rows it fetched.
-	// One count per bucket, over the same predicates the window's fetch uses,
-	// supplies the rows behind it; an unreadable count leaves the tally as the
-	// trace made it (the header then describes the window, which is the most it
-	// can honestly say).
-	for _, sl := range budget.Slices {
-		n, excluded, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, now, cfg.Injection.SessionScope)
-		if err != nil {
-			slog.Warn("ghost: session-start eligible count failed, so the header counts the retrieval window", "bucket", sl.Bucket, "error", err)
-			continue
-		}
-		switch sl.Bucket {
-		case projectID:
-			tally.project = tally.project.CountedAgainst(n, excluded, sl.OverFetch+windowExtra(res.Trace, sl.Bucket))
-		case memory.GlobalProjectID:
-			tally.globals = tally.globals.CountedAgainst(n, excluded, sl.OverFetch+windowExtra(res.Trace, sl.Bucket))
-		}
-	}
+	tally = tallyFor(res.Trace, len(memories), len(globals))
 	if tally.globals.Total() == 0 && tally.project.WithheldNote() != "" {
 		tally.emptyNote = assemble.EmptyNote(res)
 	}
