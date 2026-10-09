@@ -249,7 +249,9 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 // the same INSERT, so it cannot be absent on a row this build wrote and cannot
 // drift when the memory's text is later edited. Decision ids survive a portable
 // export/import (ImportDecision keeps the artifact's id, and the memory row
-// carries source_ref), so the link survives a restore too.
+// carries source_ref). The lookup does not filter on source, because a default
+// import downgrades every memory's source and would otherwise lose the link;
+// it requires the link to name exactly one memory instead.
 func decisionCompanionRef(decisionID string) string { return "decision:" + decisionID }
 
 // findDecisionCompanionsTx returns the LIVE companion memory ids of decisionID.
@@ -262,19 +264,21 @@ func decisionCompanionRef(decisionID string) string { return "decision:" + decis
 // edited memory, match nothing rather than the wrong row: a stale decision left
 // live is recoverable, a wrong memory retired is not.
 func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) ([]string, error) {
+	// source_ref is a caller-writable column, so the link is trusted only when
+	// it is unambiguous: a copied value gives two rows and retires neither.
 	var linked int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM memories
-		WHERE project_id = ? AND source = 'decision_log' AND source_ref = ?
+		SELECT count(*) FROM memories WHERE project_id = ? AND source_ref = ?
 	`, projectID, decisionCompanionRef(decisionID)).Scan(&linked); err != nil {
 		return nil, fmt.Errorf("count linked companions: %w", err)
 	}
-	if linked > 0 {
+	if linked > 1 {
+		return nil, nil
+	}
+	if linked == 1 {
 		return selectIDs(ctx, tx, `
 			SELECT id FROM memories
-			WHERE project_id = ? AND source = 'decision_log' AND source_ref = ?
-			  AND resolved_at IS NULL
-			ORDER BY rowid
+			WHERE project_id = ? AND source_ref = ? AND resolved_at IS NULL
 		`, projectID, decisionCompanionRef(decisionID))
 	}
 

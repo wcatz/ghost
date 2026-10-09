@@ -471,3 +471,39 @@ func TestSupersedeDecisionReportsAPinnedCompanionItLeftLive(t *testing.T) {
 		t.Errorf("history phases = %v, want only the save", phases)
 	}
 }
+
+// A default import re-stamps every memory's source, so the link must not depend
+// on it; and a link naming two memories is ambiguous and retires neither.
+func TestSupersedeDecisionLinkLookup(t *testing.T) {
+	ctx := context.Background()
+	t.Run("downgraded source still found", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		if _, err := s.db.Exec(`UPDATE memories SET source = 'onboarding' WHERE id = ?`, oldMem); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+			t.Fatal(err)
+		}
+		if !decisionMemoryResolved(t, s, oldMem) {
+			t.Error("a companion with a downgraded source was not retired")
+		}
+	})
+	t.Run("copied link retires nothing", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		other, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "an unrelated memory", Source: "manual", Importance: 0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, decisionCompanionRef(oldDec), other); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
+			t.Fatal(err)
+		}
+		if decisionMemoryResolved(t, s, other) || decisionMemoryResolved(t, s, oldMem) {
+			t.Error("an ambiguous link retired a memory")
+		}
+	})
+}
