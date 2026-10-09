@@ -87,6 +87,7 @@ func runStopHook(t *testing.T, stdin string) string {
 
 func TestRunStop(t *testing.T) {
 	t.Run("nudges when tools ran but no new saves since last stop", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
 		if !strings.Contains(out, `hookSpecificOutput`) {
@@ -98,9 +99,25 @@ func TestRunStop(t *testing.T) {
 		if !strings.Contains(out, "additionalContext") {
 			t.Errorf("nudge should use additionalContext channel, got %q", out)
 		}
+		// The documented Stop channel is additionalContext; a top-level
+		// decision would be read as a block (or ignored), never as a reminder.
+		var got map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("nudge is not JSON: %v\n%s", err, out)
+		}
+		if _, has := got["decision"]; has {
+			t.Errorf("nudge must carry no decision key, got %q", out)
+		}
+		if got["reason"] != got["hookSpecificOutput"].(map[string]any)["additionalContext"] {
+			t.Errorf("reason must repeat the additionalContext text for older readers, got %q", out)
+		}
+		if !strings.Contains(out, "Do not save what the repository already states") {
+			t.Errorf("nudge wording not the per-turn text: %q", out)
+		}
 	})
 
 	t.Run("allows when a ghost save happened", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash, lineGhostSave)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
@@ -108,6 +125,7 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("allows pure conversation with no tool calls", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineUser, lineText)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
@@ -115,6 +133,7 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("tool name in prose does not count as a save", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
 		if !strings.Contains(out, `hookSpecificOutput`) {
@@ -123,6 +142,7 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("stop_hook_active short-circuits", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, lineToolBash)
 		if out := runStopHook(t, stopInput(t, path, true)); out != "" {
 			t.Errorf("expected silence when already active, got %q", out)
@@ -130,24 +150,28 @@ func TestRunStop(t *testing.T) {
 	})
 
 	t.Run("fail-open on missing transcript", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, stopInput(t, "/nonexistent/transcript.jsonl", false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("fail-open on empty transcript path", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, stopInput(t, "", false)); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("fail-open on garbage stdin", func(t *testing.T) {
+		isolatedHome(t)
 		if out := runStopHook(t, "{not json"); out != "" {
 			t.Errorf("expected silence, got %q", out)
 		}
 	})
 
 	t.Run("skips unparseable transcript lines", func(t *testing.T) {
+		isolatedHome(t)
 		path := writeTranscript(t, "garbage not json", lineToolBash, "{{{{", lineGhostSave)
 		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
 			t.Errorf("expected silence (save found despite garbage), got %q", out)

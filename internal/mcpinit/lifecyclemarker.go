@@ -262,10 +262,7 @@ func ReadLastSaveCount(sessionID string) int {
 	if _, err := time.Parse(time.RFC3339, m.UpdatedAt); err != nil {
 		return 0
 	}
-	// Self-clean: if the marker is older than the max age, treat as expired.
-	at, _ := time.Parse(time.RFC3339, m.UpdatedAt)
-	if time.Since(at) > lifecycleSavesMarkerMaxAge {
-		_ = os.Remove(path) // best effort
+	if at, _ := time.Parse(time.RFC3339, m.UpdatedAt); time.Since(at) > lifecycleSavesMarkerMaxAge {
 		return 0
 	}
 	return m.LastSaveCount
@@ -277,10 +274,11 @@ func WriteLastSaveCount(sessionID string, saveCount int) error {
 	if sessionID == "" {
 		return nil
 	}
-	dataDir, err := config.DataDirPath()
+	dataDir, err := config.DataDir()
 	if err != nil {
 		return fmt.Errorf("locate data dir: %w", err)
 	}
+	sweepSavesMarkers(dataDir)
 	m := lifecycleSavesMarker{
 		SessionID:     sessionID,
 		LastSaveCount: saveCount,
@@ -555,4 +553,44 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
 		truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes), p)
+}
+
+// RemoveLastSaveCount deletes a session's save-count marker. The session-end
+// event calls it: that session id is never stopped again, so the marker would
+// otherwise sit in the data directory forever. Best-effort, like the write.
+func RemoveLastSaveCount(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(dataDir, savesMarkerFile(sessionID)))
+}
+
+// sweepSavesMarkers removes save-count markers whose own updated_at is past
+// lifecycleSavesMarkerMaxAge: sessions that ended without a session-end event
+// (a killed host, a host with no such event). Run on every write, so a marker
+// is never read for the sweep to be reached.
+func sweepSavesMarkers(dataDir string) {
+	paths, err := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json"))
+	if err != nil {
+		return
+	}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var m lifecycleSavesMarker
+		var at time.Time
+		perr := json.Unmarshal(b, &m)
+		if perr == nil {
+			at, perr = time.Parse(time.RFC3339, m.UpdatedAt)
+		}
+		if perr != nil || time.Since(at) > lifecycleSavesMarkerMaxAge {
+			_ = os.Remove(path)
+		}
+	}
 }

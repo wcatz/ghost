@@ -57,9 +57,9 @@ const nudgedSessions = new Map<string, true>()
 
 // Builds the agent-facing instruction injected into the live session when the
 // save nudge fires: a clear directive to review the session and persist any
-// discoveries via ghost_memory_save.
+// durable rules via ghost_memory_save (the reminder text carries the wording).
 const nudgePrompt = (reason: string): string =>
-	`[Ghost] ${reason} If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states.`
+	`[Ghost] ${reason} On this surface the tools are named ghost_ghost_memory_save and ghost_ghost_decision_record. This is an automated reminder — act on it rather than asking the user.`
 
 // Materializes ghost's session-start context block for a directory and returns
 // it, so opencode can inject it passively via instructions (opencode has no
@@ -329,7 +329,7 @@ type ContextV2 = PluginV2.Context
 const V2_LOG_FILE = join(homedir(), ".cache", "ghost", "opencode-plugin.log")
 
 const nudgePromptV2 = (reason: string): string =>
-	`[Ghost] ${reason} If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states.`
+	`[Ghost] ${reason} Call them on the ghost MCP server (tools.ghost.ghost_memory_save and tools.ghost.ghost_decision_record in Code Mode). This is an automated reminder — act on it rather than asking the user.`
 
 const V2_STOP_EVENTS = new Set([
 	"session.execution.succeeded",

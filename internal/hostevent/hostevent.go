@@ -51,18 +51,25 @@ const (
 type Capability struct {
 	BlockStop     bool
 	InjectContext bool
+	// StopGuidance is true where the host is documented to show the model a
+	// non-blocking Stop reminder carried as hookSpecificOutput.additionalContext
+	// (Claude Code), or where ghost's own plugin reads that output and
+	// delivers it itself (opencode). Elsewhere the channel is undocumented, so
+	// the reminder also carries a top-level "reason" for hosts that read only
+	// that shape.
+	StopGuidance bool
 }
 
 // capabilityMatrix mirrors the spec's v1 source-capability table. codex blocks
 // Stop via {"decision":"block"}; goose blocks Stop subject to a host-side
 // consecutive-block cap we never rely on; opencode plugins have no stop-blocking
-// surface. The non-blocking guidance channel for Stop hooks is
-// hookSpecificOutput.additionalContext (supported by all four hosts).
+// surface. StopGuidance records which hosts are known to deliver the
+// non-blocking Stop reminder (see Capability.StopGuidance).
 var capabilityMatrix = map[Source]Capability{
-	SourceClaudeCode: {BlockStop: true, InjectContext: true},
+	SourceClaudeCode: {BlockStop: true, InjectContext: true, StopGuidance: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
 	SourceGoose:      {BlockStop: true, InjectContext: false},
-	SourceOpencode:   {BlockStop: false, InjectContext: false},
+	SourceOpencode:   {BlockStop: false, InjectContext: false, StopGuidance: true},
 }
 
 // CapabilityFor returns the documented capabilities for source. ok is false

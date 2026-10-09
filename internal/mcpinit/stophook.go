@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,13 +22,37 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// stopReminder is the text of the reminder shown to the agent when a turn
-// uses tools but saves nothing new to Ghost since the last stop hook.
-// It is emitted via hookSpecificOutput.additionalContext (the documented
-// non-blocking channel for Stop hooks) so the model sees it as guidance,
-// not as a hook error. The reason field of an "approve" decision is NOT
-// shown to the model per Claude Code's hook documentation.
-const stopReminder = `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."}}`
+// stopReminderText is what the agent is told when a turn used tools and saved
+// nothing new to Ghost since the previous stop.
+const stopReminderText = "Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."
+
+// stopReminder is the one line of hook JSON written on a nudged stop. The
+// Claude Code hooks documentation lists `hookSpecificOutput.additionalContext`
+// as the Stop channel for "non-error feedback that continues the conversation";
+// its only top-level `decision` value is "block", so the old
+// {"decision":"approve","reason":…} carried text no host is documented to show
+// the model. `reason` stays beside it, with no decision, so a host that reads
+// only the older shape still receives the text; the opencode plugin reads
+// either key.
+var stopReminder = func() string {
+	b, err := json.Marshal(struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+		Reason string `json:"reason"`
+	}{
+		HookSpecificOutput: struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		}{"Stop", stopReminderText},
+		Reason: stopReminderText,
+	})
+	if err != nil {
+		panic(err) // a fixed struct of strings cannot fail to marshal
+	}
+	return string(b)
+}()
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -115,6 +140,10 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		return scanAuditSignals(p, stderr)
 	})
 
+	if !nudge {
+		// The session is over: its save-count marker will not be read again.
+		RemoveLastSaveCount(p.SessionID)
+	}
 	if !nudge || p.TranscriptPath == "" {
 		return
 	}
@@ -143,19 +172,15 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if res.ToolCalls == 0 {
 		return
 	}
-	// Gate on "no new Ghost saves since this session's previous stop".
-	// Read the last-seen save count for this session from the lifecycle marker dir.
+	// Gate per turn: remind when no Ghost save landed since this session's
+	// previous stop. The count seen at each stop is kept per session id, so a
+	// correction made after an earlier save is still reminded.
 	lastSaves := ReadLastSaveCount(p.SessionID)
+	_ = WriteLastSaveCount(p.SessionID, res.GhostSaves)
 	if res.GhostSaves > lastSaves {
-		// There are new saves since the last stop — update the marker and don't nudge.
-		_ = WriteLastSaveCount(p.SessionID, res.GhostSaves)
 		return
 	}
-	// No new saves since last stop — update marker and emit nudge.
-	_ = WriteLastSaveCount(p.SessionID, res.GhostSaves)
-	// The reminder fires for every host that reaches here, emitted via
-	// hookSpecificOutput.additionalContext (the documented non-blocking channel
-	// for Stop hooks) so the model sees it as guidance, not as a hook error.
+	// Emitted for every host that reaches here; see stopReminder for the channel.
 	_, _ = fmt.Fprintln(stdout, stopReminder)
 }
 
