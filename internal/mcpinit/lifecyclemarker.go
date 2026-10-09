@@ -2,7 +2,9 @@ package mcpinit
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -211,7 +213,10 @@ func ClearLifecycleFailure(project string) error {
 // config.DataDir(). Sanitized because session IDs come from hosts and may
 // contain characters unsafe for filenames.
 func savesMarkerFile(sessionID string) string {
-	return lifecycleSavesMarkerPrefix + "-" + sanitizeSavesSessionID(sessionID) + ".json"
+	// The sanitised stem alone would give "a/b" and "a_b" one file, so the
+	// stem carries a short hash of the RAW id as well.
+	sum := sha256.Sum256([]byte(sessionID))
+	return lifecycleSavesMarkerPrefix + "-" + sanitizeSavesSessionID(sessionID) + "-" + hex.EncodeToString(sum[:4]) + ".json"
 }
 
 // sanitizeSavesSessionID maps a session ID onto a file-name-safe stem.
@@ -584,6 +589,14 @@ func sweepSavesMarkers(dataDir string) {
 	paths, err := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json"))
 	if err != nil {
 		return
+	}
+	// An interrupted write leaves lifecycle-saves-*.json.tmp<N>; age is its
+	// modification time, since it holds no complete marker.
+	tmps, _ := filepath.Glob(filepath.Join(dataDir, lifecycleSavesMarkerPrefix+"-*.json.tmp*"))
+	for _, path := range tmps {
+		if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > lifecycleSavesMarkerMaxAge {
+			_ = os.Remove(path)
+		}
 	}
 	for _, path := range paths {
 		b, err := os.ReadFile(path)

@@ -1519,6 +1519,8 @@ ghost version
 
 ## Automatic lifecycle command
 
+The Stop hook also reminds the agent to save when a turn used tools and no Ghost save landed since the session's previous stop. The reminder is `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"..."}}`, the channel the Claude Code hooks documentation gives Stop for non-error feedback; hosts without a documented channel (codex, goose) also get a top-level `reason` with the same text. It never carries a `decision`. The count seen at each stop is kept in a per-session marker in the data directory, written only where that directory already exists and removed at session end.
+
 When automatic lifecycle work is enabled, the Stop hook may spawn:
 
 ```bash

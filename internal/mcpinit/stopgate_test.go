@@ -165,6 +165,51 @@ func TestSaveCountMarker(t *testing.T) {
 			t.Fatal("the live marker must survive the sweep")
 		}
 	})
+	t.Run("ids that sanitise alike get distinct files", func(t *testing.T) {
+		isolatedHomeWithStore(t)
+		if savesMarkerFile("a/b") == savesMarkerFile("a_b") {
+			t.Fatal("a/b and a_b share a marker file")
+		}
+		if err := WriteLastSaveCount("a/b", 4); err != nil {
+			t.Fatal(err)
+		}
+		if got := ReadLastSaveCount("a_b"); got != 0 {
+			t.Fatalf("a_b read a/b's count: %d", got)
+		}
+		if got := ReadLastSaveCount("a/b"); got != 4 {
+			t.Fatalf("a/b = %d, want 4", got)
+		}
+	})
+	t.Run("the sweep removes old leftover temp files and keeps recent ones", func(t *testing.T) {
+		dataHome := isolatedHomeWithStore(t)
+		dir := filepath.Join(dataHome, "ghost")
+		oldTmp := filepath.Join(dir, "lifecycle-saves-x-00000000.json.tmp123")
+		newTmp := filepath.Join(dir, "lifecycle-saves-y-00000000.json.tmp456")
+		other := filepath.Join(dir, "lifecycle-other.json.tmp789")
+		for _, p := range []string{oldTmp, newTmp, other} {
+			if err := os.WriteFile(p, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		past := time.Now().Add(-lifecycleSavesMarkerMaxAge - time.Hour)
+		for _, p := range []string{oldTmp, other} {
+			if err := os.Chtimes(p, past, past); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := WriteLastSaveCount("s", 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(oldTmp); !os.IsNotExist(err) {
+			t.Errorf("old temp file not swept: %v", err)
+		}
+		if _, err := os.Stat(newTmp); err != nil {
+			t.Errorf("recent temp file must stay: %v", err)
+		}
+		if _, err := os.Stat(other); err != nil {
+			t.Errorf("a file outside the marker prefix must stay: %v", err)
+		}
+	})
 	t.Run("session ids are sanitised into the file name", func(t *testing.T) {
 		for in, want := range map[string]string{
 			"abc-1_2.3":              "abc-1_2.3",
