@@ -241,7 +241,7 @@ func TestRunPassiveRetriesTheWindowWhenScopeExcludesEveryRow(t *testing.T) {
 // as everything there was.
 //
 // The fixture puts the retired rows where the pool is and the live rows past it,
-// and the shape is what makes the property checkable: stage 8's slice cap is two
+// and the shape is what makes the property checkable: stage 9's slice cap is two
 // rows, so a window that closed BEFORE validity would admit two retired rows and
 // then empty itself, reporting `no memories` for a project that holds four. It
 // reaches the tail only because every stage that can affect membership runs
