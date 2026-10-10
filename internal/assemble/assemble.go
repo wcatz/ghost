@@ -36,6 +36,10 @@ const (
 	SourceSessionStart Source = "session_start"
 	SourceAllProjects  Source = "all_projects"
 	SourceBench        Source = "bench"
+	// SourceWorkingMoment is a block delivered at the moment of work: next to a
+	// user message or to an edit's tool result, by a host hook. It is its own
+	// source so the audit counts it apart from a session start and a search.
+	SourceWorkingMoment Source = "working_moment"
 )
 
 // Outcome is the relevance verdict for a result. It is derived from the trace
@@ -738,7 +742,7 @@ func projectMode(req Request) memory.ProjectMode {
 // absence it can misread.
 func validateRequest(req Request) error {
 	switch req.Source {
-	case SourceSearch, SourceProjectCtx, SourceSessionStart, SourceAllProjects, SourceBench:
+	case SourceSearch, SourceProjectCtx, SourceSessionStart, SourceAllProjects, SourceBench, SourceWorkingMoment:
 	default:
 		return fmt.Errorf("assemble: unknown source %q", req.Source)
 	}
