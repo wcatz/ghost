@@ -206,3 +206,76 @@ func selectFTSTERMs(terms []ftsTerm, maxWords int) []ftsTerm {
 	sort.SliceStable(sel, func(i, j int) bool { return sel[i].pos < sel[j].pos })
 	return sel
 }
+
+// QueryTerm is one term of a keyword query as the sanitizer reads it, for a
+// caller that has to judge a match itself rather than hand FTS5 a string.
+type QueryTerm struct {
+	// Text is the term as the tokenizer will see it.
+	Text string
+	// Identifier is true for an identifier-shaped term (a symbol, a path, a
+	// version, a mixed alphanumeric): the tier that makes a query specific.
+	Identifier bool
+}
+
+// maxDistinctiveScan bounds how much text DistinctiveTerms reads and how many
+// terms it extracts before selecting, so a very long message costs the same as
+// a short one and the sanitizer's own truncation warning (a stderr line) can
+// never fire on a path that must stay silent.
+const (
+	maxDistinctiveScanBytes = 8 << 10
+	maxDistinctiveScanTerms = 4096
+)
+
+// DistinctiveTerms returns the terms of text that can carry a keyword match:
+// stopwords are dropped, duplicates (case-insensitively) collapse to the first
+// occurrence, and at most max terms are kept, identifier-shaped terms first and
+// then content words, each tier in original order. It is the SAME extraction
+// the FTS query uses (ftsQueryTerms), so a caller judging a match and the leg
+// retrieving it cannot disagree about what the query's terms are.
+func DistinctiveTerms(text string, max int) []QueryTerm {
+	if max <= 0 {
+		return nil
+	}
+	if len(text) > maxDistinctiveScanBytes {
+		text = text[:maxDistinctiveScanBytes]
+	}
+	var ids, words []QueryTerm
+	seen := make(map[string]bool)
+	for _, t := range ftsQueryTerms(text, maxDistinctiveScanTerms) {
+		if t.value == ftsTermValueStopword {
+			continue
+		}
+		key := strings.ToLower(t.clean)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		q := QueryTerm{Text: t.clean, Identifier: t.value == ftsTermValueIdentifier || isFileNameTerm(t.clean)}
+		if q.Identifier {
+			ids = append(ids, q)
+		} else {
+			words = append(words, q)
+		}
+	}
+	out := append(ids, words...)
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
+}
+
+// isFileNameTerm reports a term shaped like a file name or a dotted symbol
+// (stophook.go, config.toml, fmt.Sprintf): letters or digits on both sides of an
+// interior dot. The FTS term tiers do not call that an identifier, but in a
+// message about code it is the most specific thing a person can name, and it is
+// matched as a whole (a substring of the row), never as two ordinary words.
+func isFileNameTerm(w string) bool {
+	i := strings.IndexByte(w, '.')
+	if i <= 0 || i >= len(w)-1 {
+		return false
+	}
+	alnum := func(c byte) bool {
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+	}
+	return alnum(w[i-1]) && alnum(w[i+1])
+}
