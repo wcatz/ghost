@@ -100,6 +100,14 @@ var detectCallingSource = ai.DetectSource
 // MCP saves. Tests replace it to prove named saves never cross this boundary.
 var detectRemoteForSave = repo.DetectRemote
 
+// repoTopLevel is the process boundary that says which git checkout a directory
+// is inside.
+var repoTopLevel = repo.TopLevel
+
+// workingDirResolver is how New learns the server's directory; a test replaces it
+// so no suite depends on where it happens to run.
+var workingDirResolver = workingDirFromEnv
+
 // ensureProjectFor resolves or creates the project for a save and returns the
 // id the caller must write to, adding repository identity when the caller
 // identified it by a filesystem path.
@@ -281,13 +289,31 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 
 // checkoutToBind reports the directory a newly created name-shaped project is
 // recorded against, and the repository remote there, or ok=false when the save
-// must open the project unbound as it always did: no usable server directory, a
-// directory some project already claims (an ambiguous claim counts), or one the
-// project-shape and credential guards would refuse as a recorded path.
+// must open the project unbound as it always did.
+//
+// The directory is the TOP LEVEL of the git checkout the server was started in,
+// physically resolved, never an arbitrary directory: a server started in /tmp,
+// /var, a download folder or a directory that merely holds checkouts is not in a
+// checkout at all, and a project recorded there with no remote would answer for
+// the whole subtree. A checkout that is the home directory or an ancestor of it
+// is declined for the same reason. Also declined: a directory some project
+// already claims (an ambiguous claim counts), and one the project-shape and
+// credential guards would refuse as a recorded path.
 func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
-	dir = s.workingDir
-	if dir == "" {
+	if s.workingDir == "" {
 		return "", "", false
+	}
+	dir = repoTopLevel(s.workingDir)
+	if dir == "" || filepath.Dir(dir) == dir {
+		return "", "", false
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if h, err := filepath.EvalSymlinks(home); err == nil {
+			home = h
+		}
+		if home == dir || strings.HasPrefix(home, strings.TrimRight(dir, string(filepath.Separator))+string(filepath.Separator)) {
+			return "", "", false
+		}
 	}
 	if id, _, err := s.store.ResolveProject(ctx, dir); err != nil || id != "" {
 		return "", "", false
@@ -931,7 +957,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
 		hostSessionID:  hostSessionResolver(),
-		workingDir:     workingDirFromEnv(),
+		workingDir:     workingDirResolver(),
 	}
 
 	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {

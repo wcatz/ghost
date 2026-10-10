@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -46,4 +47,33 @@ func DetectRemote(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TopLevel returns the physical top-level directory of the git checkout that
+// contains dir, or "" when dir is not inside one (or git is unavailable, or the
+// answer takes too long). A bare repository has no working tree and answers "".
+func TopLevel(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), detectTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	top := strings.TrimSpace(string(out))
+	if top == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(top); err == nil {
+		top = resolved
+	}
+	return top
 }
