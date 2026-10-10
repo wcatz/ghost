@@ -147,7 +147,7 @@ func stampInstant(t *testing.T, s string) time.Time {
 // duplicated a state would leave the coverage exactly as it was while making the
 // corpus bigger for the graded conditions, which is cost without signal. The
 // fifth state — unset, meaning no claim at all — is not asserted, because the
-// other 549 rows are it.
+// other 545 rows are it.
 func TestValidityFixtureCoversEveryStage2State(t *testing.T) {
 	ds, _ := loadTestdataDataset(t)
 	now := time.Now().UTC()

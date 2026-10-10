@@ -165,11 +165,19 @@ func seedContextGlobal(t *testing.T, store *memory.Store, project string) {
 // block read the block rather than the report, because a report that says
 // "contamination 1/7" and a block holding the wrong seven rows are both
 // self-consistent and only one of them is the pipeline's behaviour.
+//
+// It runs with the cutoff OFF, because its callers measure the contamination
+// classifier: whether an admitted row is flagged, and which rows reached the
+// block at all. The relevance cutoff (#954) is orthogonal — it removes low-scoring
+// rows before admission — and a resolved contamination row that happens to score
+// low would be cut here, hiding the very leak this fixture exists to expose. So
+// the classifier is exercised on the block as the selection stages leave it, the
+// same subject the report's contamination column is about.
 func assembledIDs(t *testing.T, store *memory.Store, queries []Query, at time.Time) map[string]int {
 	t.Helper()
 	held := map[string]int{}
 	for _, q := range queries {
-		res, err := assemble.Run(context.Background(), store, ContextRequest(q, at))
+		res, err := assemble.Run(context.Background(), store, contextRequestWithCutoff(q, at, 0))
 		if err != nil {
 			t.Fatalf("assemble.Run for %q: %v", q.Name, err)
 		}
@@ -191,7 +199,9 @@ func assembledIDs(t *testing.T, store *memory.Store, queries []Query, at time.Ti
 // only a fixture carrying both kinds of row can tell them apart.
 func TestContextFixtureWithholdsWhatItShouldAndFlagsWhatItLeaks(t *testing.T) {
 	store, queries, at := contextFixtureStore(t)
-	rep, err := RunContext(context.Background(), store, queries, at)
+	// Cutoff off, for the reason assembledIDs documents: this fixture measures the
+	// contamination classifier, which is orthogonal to the relevance cutoff.
+	rep, err := runContextAt(context.Background(), store, queries, at, 0)
 	if err != nil {
 		t.Fatalf("RunContext: %v", err)
 	}
@@ -256,7 +266,10 @@ func TestContextFixtureWithholdsWhatItShouldAndFlagsWhatItLeaks(t *testing.T) {
 // came first, which is what the three existing ablations score.
 func TestContextMeasuresTheBlockNotTheRanking(t *testing.T) {
 	store, queries, at := contextFixtureStore(t)
-	rep, err := RunContext(context.Background(), store, queries, at)
+	// Cutoff off: this fixture measures the report's BLOCK accounting — buckets,
+	// dominant share, cost — on the selection stages' own output, which is the
+	// subject, rather than on a block the relevance cutoff (#954) had shortened.
+	rep, err := runContextAt(context.Background(), store, queries, at, 0)
 	if err != nil {
 		t.Fatalf("RunContext: %v", err)
 	}

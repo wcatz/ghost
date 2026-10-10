@@ -45,24 +45,24 @@ func TestBenchRegressionFloors(t *testing.T) {
 		// tightest being hybrid recall@10 with 0.013 of headroom.
 		//
 		// #965 re-floored these against a corrected LABEL SET, not a changed
-		// ranking: fifteen queries gained a second row at the gain their
-		// content earns and two byte-identical corpus rows were dropped, so
-		// every floor moved with the measurement it guards rather than being
-		// left behind it. Each floor keeps the margin its own row already
-		// carried (observed minus floored: 0.019 / 0.027 / 0.020 / 0.014 /
-		// 0.018 / 0.013), so a row's headroom is a property of the row and
-		// not of when it was written.
-		{CondFTS, 0.74, 0.67},
-		{CondVector, 0.79, 0.75},
-		{CondHybrid, 0.81, 0.75},
+		// ranking: 16 queries had a gain added or raised and two
+		// byte-identical corpus rows were dropped, so the measurement moved
+		// and each floor moved with it. The floors are written to three
+		// decimals so that every row keeps exactly the margin it already
+		// carried (observed minus floor, NDCG@10 / recall@10: fts 0.019 /
+		// 0.027, vector 0.020 / 0.014, hybrid 0.018 / 0.013); two decimals
+		// would have loosened five of the six.
+		{CondFTS, 0.740, 0.675},
+		{CondVector, 0.794, 0.752},
+		{CondHybrid, 0.813, 0.752},
 	}
 	for _, f := range floors {
 		res := r[f.cond]
 		if res.NDCG10 < f.ndcg {
-			t.Errorf("%s: NDCG@10 = %.3f, below floor %.2f", f.cond, res.NDCG10, f.ndcg)
+			t.Errorf("%s: NDCG@10 = %.3f, below floor %.3f", f.cond, res.NDCG10, f.ndcg)
 		}
 		if res.Recall10 < f.recall10 {
-			t.Errorf("%s: recall@10 = %.3f, below floor %.2f", f.cond, res.Recall10, f.recall10)
+			t.Errorf("%s: recall@10 = %.3f, below floor %.3f", f.cond, res.Recall10, f.recall10)
 		}
 	}
 

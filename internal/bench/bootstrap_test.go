@@ -166,10 +166,10 @@ func TestFusionGateDecision(t *testing.T) {
 		ci   PairDiff
 		want bool // true = accepted
 	}{
-		// The measured interval over the committed v2 dataset, so "measured" in
+		// The measured interval over the committed v3 dataset, so "measured" in
 		// the case name is a fact the test can be held to: TestBenchRegressionFloors
-		// logs +0.0179 [+0.0028, +0.0335] from the same code and the same seed pair.
-		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0179, Lo: 0.0028, Hi: 0.0335, Queries: 220}, true},
+		// logs +0.0175 [+0.0029, +0.0325] from the same code and the same seed pair.
+		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0175, Lo: 0.0029, Hi: 0.0325, Queries: 220}, true},
 		{"point estimate dipped below zero, the interval still excludes a real loss",
 			PairDiff{Leg: CondVector, Mean: -0.001, Lo: -0.015, Hi: 0.010, Queries: 220}, true},
 		{"a consistent loss inside the tolerance", PairDiff{Leg: CondFTS, Mean: -0.015, Lo: -0.019, Hi: -0.008, Queries: 220}, true},

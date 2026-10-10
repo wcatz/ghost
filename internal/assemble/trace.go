@@ -21,7 +21,7 @@ type Trace struct {
 	AsOf string
 	// Limit is the window Run asked the retriever for, not the caller's budget:
 	// the caller's item bound widened for a category predicate, or the documented
-	// ceiling when the budget states no item bound at all. The stage 8 record
+	// ceiling when the budget states no item bound at all. The stage 9 record
 	// carries a note when that ceiling was the pipeline's choice, so a projection
 	// built from this trace can tell an invented window from a requested one.
 	Limit           int
@@ -35,7 +35,7 @@ type Trace struct {
 	Decisions []Decision
 	Floors    Floors
 	// PinnedCut is, per project (the row's own), how many pinned rows the cap left
-	// out: the pinned rows stage 8 cut plus the ones the retriever reported past
+	// out: the pinned rows stage 9 cut plus the ones the retriever reported past
 	// its window. A pin is a slot guarantee, so a non-zero count means the pinned
 	// rows alone exceeded the cap, and it is a subset of what the bucket ranked out.
 	// Empty for a query-mode read, which promises a pin nothing.
@@ -183,18 +183,24 @@ type Decision struct {
 // `retrieve` name with no stage behind it is exactly the kind of declaration a
 // reader cannot tell from a stage that ran and removed nothing.
 const (
-	stageValidity    = "validity"
-	stagePredicates  = "predicates"
-	stageProvenance  = "provenance"
-	stageConflicts   = "conflicts"
-	stageDedup       = "dedup"
-	stageDiversity   = "diversity"
+	stageValidity   = "validity"
+	stagePredicates = "predicates"
+	stageProvenance = "provenance"
+	stageConflicts  = "conflicts"
+	stageDedup      = "dedup"
+	stageDiversity  = "diversity"
+	// stageCutoff is the relative-to-top relevance cutoff (#954), a query-mode
+	// reduction that runs between diversity and the budget. It is the query-mode
+	// dual of stage 7: diversity divides a PASSIVE window by category, and this
+	// stops a QUERY answer where relevance falls off, and they never both act on
+	// one request because each is gated on the opposite mode.
+	stageCutoff      = "cutoff"
 	stageBudget      = "budget"
 	stageRender      = "render"
 	stageResponseFit = "response_fit"
 )
 
-// The three caps stage 8 applies, as the sentence names them. They are recorded
+// The three caps stage 9 applies, as the sentence names them. They are recorded
 // per removal because their remedies differ: a row count is raised and a content
 // byte budget is not, so advice that fits one is wrong advice for the other.
 const (

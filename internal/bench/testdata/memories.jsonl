@@ -1,4 +1,4 @@
-# Ghost retrieval benchmark dataset v2. Domain: Cardano stake-pool infra,
+# Ghost retrieval benchmark dataset v3. Domain: Cardano stake-pool infra,
 # Ghost internals, SRE/security/Go engineering (paraphrase-heavy queries).
 # Keys are stable; embeddings.json is keyed by these keys (and by query names
 # in queries.jsonl). When this file changes, regenerate embeddings through
@@ -16,7 +16,7 @@
 # and a fixture that changes meaning on its own is not a fixture. The four together
 # are the four states a CLAIM can be in: one open window, one closed window, one
 # window not yet opened, one verified claim with no expiry. The fifth state, unset,
-# needs no fixture — the other 547 rows are it. No graded query targets
+# needs no fixture — the other 545 rows are it. No graded query targets
 # them, because a query whose answer is a row a correct retrieval must withhold is a
 # mislabelled query; the condition that scores validity is the assembler's own
 # (docs/superpowers/specs/2026-09-25-context-assembler-design.md, PR 7).

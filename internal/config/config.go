@@ -112,6 +112,25 @@ func (c LifecycleConfig) MinIntervalDuration() time.Duration {
 // fallback when config loading itself fails.
 const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 
+// DefaultRelevanceCutoff is the compiled value of context.relevance_cutoff, the
+// assembler's relative-to-top cutoff on query-mode blocks (#954). It lives here
+// rather than as a bare literal in the defaults map so the bench that measures
+// the cutoff (`ghost bench --context`, via ContextRequest) and the config layer
+// that ships it read ONE number and cannot drift. A value of 0 is off; see
+// ContextConfig.RelevanceCutoff.
+//
+// The number is chosen from the `ghost bench --cutoff-sweep` table in
+// docs/benchmarks.md, and the trade it makes is explicit rather than tuned: on
+// the graded corpus it admits 308 of the 310 baseline graded-relevant rows
+// (the ship floor is 304), holds the answerable result rate at 1.000, raises
+// context precision from 0.141 to 0.148 and lowers the estimated token cost per
+// answer from about 297 to about 280. 0.64 (306 relevant) and 0.65 (305) also
+// clear the floor but leave a margin of two rows and one; the floor is the
+// hard constraint and a ship that clears it barely is a ship one corpus edit
+// from failing it, so the default keeps the four-row margin rather than the
+// last few points of precision.
+const DefaultRelevanceCutoff float64 = 0.63
+
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
 type ScratchConfig struct {
@@ -149,6 +168,25 @@ type ContextConfig struct {
 	// inside the vector leg before fusion and therefore never sees a keyword-only
 	// result, which is exactly the case arm B is here to judge.
 	AbstainCosine float32 `koanf:"abstain_cosine"`
+	// RelevanceCutoff is the relative cutoff applied in the assembler to
+	// QUERY-mode blocks only (#954): once a row's fused score falls below this
+	// fraction of the top row's, the answer stops there, so a caller gets fewer,
+	// better rows instead of a window that always fills. It is a share of the
+	// top row's score, so 1.0 keeps only rows that tie the top and a smaller
+	// value keeps a longer tail; 0 (default) leaves the cutoff OFF, which is the
+	// state every caller runs in until a measured default is chosen.
+	//
+	// It can only ever SHORTEN an answer: `limit` remains the maximum, the top
+	// row is always kept (a result rate below 1.000 would be a regression) and a
+	// pinned row is never cut. PASSIVE surfaces are a digest and keep their
+	// slices, so the cutoff never touches them whatever this is set to.
+	//
+	// It is one rule and its parameter is this share, chosen from the
+	// `ghost bench --context` sweep in docs/benchmarks.md. search.min_similarity
+	// and AbstainCosine are different floors and neither feeds this: both judge a
+	// row's absolute score, and this judges it against the best row in the same
+	// block.
+	RelevanceCutoff float64 `koanf:"relevance_cutoff"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -335,6 +373,7 @@ var defaults = map[string]interface{}{
 	"injection.category_caps":                  map[string]interface{}{"gotcha": 4},
 	"search.min_similarity":                    0.0,
 	"context.abstain_cosine":                   float32(0.0),
+	"context.relevance_cutoff":                 DefaultRelevanceCutoff,
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
@@ -416,6 +455,15 @@ func Load() (*Config, error) {
 func checkContextValues(cfg *Config) error {
 	if v := float64(cfg.Context.AbstainCosine); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("context.abstain_cosine: a cosine is between 0 and 1, got %v", cfg.Context.AbstainCosine)
+	}
+	// The cutoff is a share of the top row's fused Base, so it is the same
+	// (0,1] range a fraction can be in: 0 leaves it off, and a value above 1
+	// would keep every row (a threshold above the top score admits nothing it
+	// would not already have). NaN compares false against both bounds and reads
+	// as off, which would tell a user who set a cutoff that there is none — the
+	// same reason abstain_cosine refuses it.
+	if v := cfg.Context.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("context.relevance_cutoff: a cutoff is a fraction in [0,1] where 0 is off, got %v", cfg.Context.RelevanceCutoff)
 	}
 	return nil
 }
@@ -620,6 +668,7 @@ func defaultConfig() *Config {
 		Injection: DefaultInjectionConfig(),
 		Obsidian:  ObsidianConfig{Interval: "30s"},
 		Scratch:   ScratchConfig{MaxBytes: DefaultScratchMaxBytes},
+		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff},
 	}
 }
 
@@ -1034,6 +1083,9 @@ var envOverrides = []envOverride{
 	// GHOST_CONTEXT_ABSTAIN_COSINE: the generic _→. transformer would produce
 	// context.abstain.cosine, missing the abstain_cosine key entirely.
 	{"GHOST_CONTEXT_ABSTAIN_COSINE", "context.abstain_cosine", cosineValue},
+	// GHOST_CONTEXT_RELEVANCE_CUTOFF: the same reason — the generic transformer
+	// would produce context.relevance.cutoff, missing the relevance_cutoff key.
+	{"GHOST_CONTEXT_RELEVANCE_CUTOFF", "context.relevance_cutoff", floatValue},
 	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
 	// scratch.max.bytes, missing the max_bytes key entirely.
 	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},

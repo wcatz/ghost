@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -206,6 +207,42 @@ func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), s
 		pid = ppid
 	}
 	return ""
+}
+
+// HostSessionEnv is the environment variable that names the session. The MCP
+// server reads its value through this same constant, so the detection rule and
+// the server agree on the key.
+const HostSessionEnv = "CLAUDE_CODE_SESSION_ID"
+
+// IsHostSession reports whether the current process is the session root — the
+// process that the host started with CLAUDE_CODE_SESSION_ID set in its initial
+// environment. A child process (subagent, CLI call) inherits the variable from
+// its parent, so its parent's initial environ also carries it. The host
+// session's parent (the shell or desktop launcher that started the host) does
+// not have the variable. This is a property of the process tree at exec time;
+// the initial environ in /proc/<pid>/environ is immutable and reflects what
+// the parent passed at spawn, not what the process later sets.
+// root is "/proc" in production and a fake tree in tests. pid is the current
+// process id; 0 means use os.Getpid().
+func IsHostSession(root string, pid int) bool {
+	if pid == 0 {
+		pid = os.Getpid()
+	}
+	ppid, err := parentPID(root, pid)
+	if err != nil || ppid <= 1 {
+		return false
+	}
+	// Read the parent's initial environment from /proc/<ppid>/environ.
+	// This is the env the parent was STARTED WITH, not what it currently has.
+	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(ppid), "environ"))
+	if err != nil {
+		return false
+	}
+	// The initial environ is NUL-separated. Scan for CLAUDE_CODE_SESSION_ID.
+	// If the parent lacks it, this process is the host session (the var was
+	// injected for this process at spawn). If the parent has it, this process
+	// inherited it and is a child.
+	return !bytes.Contains(data, []byte(HostSessionEnv+"="))
 }
 
 // parentPID reads ppid (field 4) from /proc/<pid>/stat. The comm field (field

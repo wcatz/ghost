@@ -531,9 +531,11 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(sna
 CREATE TABLE IF NOT EXISTS retrieval_record (
     project_id TEXT NOT NULL,
     -- The host's session id under Claude Code (the transport's when it assigns
-    -- one, else CLAUDE_CODE_SESSION_ID, or the session-start hook payload's);
-    -- empty when the host names no session (codex, opencode, goose, a bridge
-    -- such as mcpo) and no hook payload named one. Load-bearing alongside
+    -- one, else CLAUDE_CODE_SESSION_ID when the MCP server is the session root
+    -- itself, or the session-start hook payload's); empty when the host names no
+    -- session (codex, opencode, goose, a bridge such as mcpo), when the server
+    -- inherited the variable from a parent that already had it (a subagent or
+    -- CLI child), or when that could not be told, and no hook payload named one. Load-bearing alongside
     -- source: a session-start injection and a search in one session are
     -- indistinguishable by session alone.
     session_id TEXT NOT NULL DEFAULT '',
