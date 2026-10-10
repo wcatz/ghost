@@ -534,3 +534,24 @@ func TestBindNewProjectToCheckoutHasOneWinner(t *testing.T) {
 		t.Fatalf("%d projects record the checkout, want 1", bound)
 	}
 }
+
+// TestContainsOrIsComparesAcrossSeparators: git prints C:/Users/x/repo while the
+// home directory is C:\Users\x, and the guard must see through that.
+func TestContainsOrIsComparesAcrossSeparators(t *testing.T) {
+	for _, c := range []struct {
+		dir, path string
+		want      bool
+	}{
+		{"C:/Users/x", `C:\Users\x`, true},
+		{"C:/Users", `C:\Users\x`, true},
+		{"C:/Users/x/repo", `C:\Users\x`, false},
+		{"C:/Users/xy", `C:\Users\x`, false},
+		{"/home/u", "/home/u/", true},
+		{"/home", "/home/u", true},
+		{"/home/u/src", "/home/u", false},
+	} {
+		if got := containsOrIs(c.dir, c.path); got != c.want {
+			t.Errorf("containsOrIs(%q, %q) = %v, want %v", c.dir, c.path, got, c.want)
+		}
+	}
+}

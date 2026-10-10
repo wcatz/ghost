@@ -116,8 +116,11 @@ var workingDirResolver = workingDirFromEnv
 // repository — but project_id is sometimes a filesystem path, and that is
 // exactly the shape that produced duplicate projects when a session changed
 // working directory. Only git can say whether two such paths are one
-// repository, so detection is confined to that case: an ordinary named save
-// never spawns a process. The test is memory.IsPathShaped rather than
+// repository, so detection is confined to that case: a named save that finds
+// its project already there never spawns a process. The one exception is a named
+// save that is about to CREATE a project: it asks git for the top level and the
+// remote of the server's own directory (two bounded invocations) so the project
+// can be recorded against that checkout (#957). The test is memory.IsPathShaped rather than
 // filepath.IsAbs, the same predicate Store.ResolveProject applies, so a
 // drive-relative Windows path — which IsAbs reports as relative — cannot be
 // treated as a name by the writer and as a path by the reader, which is how a
@@ -296,9 +299,10 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 // /var, a download folder or a directory that merely holds checkouts is not in a
 // checkout at all, and a project recorded there with no remote would answer for
 // the whole subtree. A checkout that is the home directory or an ancestor of it
-// is declined for the same reason. Also declined: a directory some project
-// already claims (an ambiguous claim counts), and one the project-shape and
-// credential guards would refuse as a recorded path.
+// is declined for the same reason. Also declined: one the project-shape and
+// credential guards would refuse as a recorded path. A directory another project
+// already claims is declined by the store, inside the write transaction that
+// would record it, which is the only place that test can be made atomic.
 func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
 	if s.workingDir == "" {
 		return "", "", false
@@ -311,12 +315,9 @@ func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok boo
 		if h, err := filepath.EvalSymlinks(home); err == nil {
 			home = h
 		}
-		if home == dir || strings.HasPrefix(home, strings.TrimRight(dir, string(filepath.Separator))+string(filepath.Separator)) {
+		if containsOrIs(dir, home) {
 			return "", "", false
 		}
-	}
-	if id, _, err := s.store.ResolveProject(ctx, dir); err != nil || id != "" {
-		return "", "", false
 	}
 	if memory.RejectSecret("path", dir) != nil {
 		return "", "", false
@@ -325,6 +326,15 @@ func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok boo
 		return "", "", false
 	}
 	return dir, detectRemoteForSave(dir), true
+}
+
+// containsOrIs reports whether dir is path or an ancestor of it. Both are
+// compared in forward-slash form, because git prints a top level that way on
+// every platform while the home directory arrives with native separators.
+func containsOrIs(dir, path string) bool {
+	d := strings.TrimRight(strings.ReplaceAll(dir, `\`, "/"), "/")
+	p := strings.TrimRight(strings.ReplaceAll(path, `\`, "/"), "/")
+	return p == d || strings.HasPrefix(p, d+"/")
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
