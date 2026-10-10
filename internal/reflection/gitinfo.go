@@ -4,11 +4,12 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wcatz/ghost/internal/repo"
 )
 
 // gitContextTimeout bounds the git invocation so a hung repository or a slow
@@ -64,7 +65,7 @@ func CollectGitContext(dir string) (commits []string, language string) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitContextTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "log",
+	cmd := repo.GitCommand(ctx, "-C", dir, "log",
 		"--no-merges", "--pretty=format:%h %s", "-n", strconv.Itoa(maxGitCommits))
 	var out strings.Builder
 	cmd.Stdout = &out

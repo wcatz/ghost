@@ -1770,7 +1770,10 @@ Axis interaction rules:
 > Only a row that carries a cosine is ever withheld: a row the vector leg's list
 > did not carry is judged by its own stored cosine when the retriever can read it,
 > and a row with no embedding at all (an exact keyword hit on a never-embedded
-> memory) is never judged and always passes. The default is tied to the model it
+> memory) is never judged and always passes. Presence is the `ok` `rowCosine`
+> returns and never the sign: a cosine is in [-1, 1], so a genuinely negative one
+> is a judged (very weak) match that below the bar is withheld like any other, and
+> only the exact -1 mark means the leg did not carry the row. The default is tied to the model it
 > was measured on (`nomic-embed-text:v1.5`): with another `embedding.model` and no
 > explicit `context.no_answer_cosine` in the file or environment the effective bar
 > is 0 and the stage's trace note says "no_answer bar off: unmeasured embedding
