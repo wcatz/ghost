@@ -236,10 +236,43 @@ var singleTargetRe = regexp.MustCompile(
 		`|\b\d{1,3}(?:\.\d{1,3}){3}\b` +
 		`|\b[a-z0-9][a-z0-9-]*\.(?:internal|local|lan|home\.arpa)\b`)
 
+// nodeVersionRe is the one infrastructure noun that is also a runtime: "node20"
+// and "node-18" name a Node.js major version far more often than a machine, and
+// a two-digit number is how a version looks. A host called node-12 is still read
+// as a version; the cost of that is a project-scoped fact that stays a candidate
+// for the next pass, not a wrong global one.
+var nodeVersionRe = regexp.MustCompile(`^node-?\d{2}$`)
+
+// singleRepoRe matches a fact about ONE named repository: a hosted slug
+// ("github.com/owner/repo", "git@host:owner/repo"), or "<name> repo(sitory)"
+// after the/in/from/to. A bare owner/name pair is deliberately not a marker: it
+// is also a file path ("cmd/ghost"). The name is checked against
+// repoQuantifiers, so "from any repo" and "in every repo" stay cross-repo
+// language rather than naming a repository.
+var singleRepoRe = regexp.MustCompile(
+	`\bgithub\.com/[\w.-]+/[\w.-]+|\bgit@[\w.-]+:[\w.-]+/[\w.-]+` +
+		`|\b(?:the|in|from|to)\s+([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
+
+var repoQuantifiers = map[string]bool{
+	"a": true, "an": true, "any": true, "every": true, "all": true, "each": true,
+	"other": true, "another": true, "this": true, "that": true, "same": true,
+	"which": true, "one": true, "whole": true, "entire": true, "git": true,
+}
+
 // namesSingleTarget reports whether lower (already lowercased) names one
-// specific host, node or cluster.
+// specific host, node, cluster or repository.
 func namesSingleTarget(lower string) bool {
-	return singleTargetRe.MatchString(lower)
+	for _, m := range singleTargetRe.FindAllString(lower, -1) {
+		if !nodeVersionRe.MatchString(m) {
+			return true
+		}
+	}
+	for _, m := range singleRepoRe.FindAllStringSubmatch(lower, -1) {
+		if m[1] == "" || !repoQuantifiers[m[1]] {
+			return true
+		}
+	}
+	return false
 }
 
 // containment is the overlap coefficient |A∩B| / min(|A|,|B|): it catches a

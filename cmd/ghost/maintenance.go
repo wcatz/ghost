@@ -249,6 +249,8 @@ func runMaintenanceConsolidateGlobal(args []string) {
 // excludes (pinned, resolved, manual, builtin, persistent) never reach the
 // planner, so their content is never touched.
 func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w io.Writer) error {
+	out := func(a ...any) { _, _ = fmt.Fprintln(w, a...) }
+	outf := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	// Captured before the read, as reflect does: a row saved after this instant
 	// was not in the plan and ReplaceNonManual keeps it.
 	since, err := store.CurrentTimestamp(ctx)
@@ -271,36 +273,36 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	clusters, rows := reflection.PlanGlobalFold(live)
 
 	if !apply {
-		fmt.Fprintln(w, "DRY RUN (use --apply to fold)")
-		fmt.Fprintln(w)
+		out("DRY RUN (use --apply to fold)")
+		out()
 	}
 	folded := 0
 	for _, c := range clusters {
 		folded += len(c.Folded)
 	}
-	fmt.Fprintf(w, "_global: %d memories, %d consolidatable, %d near-duplicate cluster(s) covering %d rows\n",
+	outf("_global: %d memories, %d consolidatable, %d near-duplicate cluster(s) covering %d rows\n",
 		len(all), len(live), len(clusters), folded+len(clusters))
 	for i, c := range clusters {
-		fmt.Fprintf(w, "\ncluster %d: keep %s [%s] %s\n", i+1,
+		outf("\ncluster %d: keep %s [%s] %s\n", i+1,
 			assemble.Token(c.Survivor.ID), assemble.Label(c.Survivor.Category), assemble.Label(clipLine(c.Survivor.Content, 120)))
 		for _, f := range c.Folded {
-			fmt.Fprintf(w, "  fold %s [%s] %s\n",
+			outf("  fold %s [%s] %s\n",
 				assemble.Token(f.ID), assemble.Label(f.Category), assemble.Label(clipLine(f.Content, 120)))
 		}
 	}
 	if len(clusters) == 0 {
-		fmt.Fprintln(w, "nothing to fold")
+		out("nothing to fold")
 		return nil
 	}
 	if !apply {
-		fmt.Fprintf(w, "\nnothing written; pass --apply to fold %d row(s) into %d\n", folded, len(clusters))
+		outf("\nnothing written; pass --apply to fold %d row(s) into %d\n", folded, len(clusters))
 		return nil
 	}
 	preserved, err := store.ReplaceNonManual(ctx, "_global", rows, since)
 	if err != nil {
 		return fmt.Errorf("fold _global: %w", err)
 	}
-	fmt.Fprintf(w, "\nfolded %d row(s) into %d survivor(s); %d row(s) saved during the run were left as they were\n",
+	outf("\nfolded %d row(s) into %d survivor(s); %d row(s) saved during the run were left as they were\n",
 		folded, len(clusters), len(preserved))
 	return nil
 }

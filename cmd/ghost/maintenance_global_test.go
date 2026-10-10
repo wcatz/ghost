@@ -107,7 +107,16 @@ func TestConsolidateGlobalDryRunListsClustersAndWritesNothing(t *testing.T) {
 func TestConsolidateGlobalApplyFoldsClusterWithHistoryAndEvidence(t *testing.T) {
 	f := newGlobalFoldFixture(t)
 	ctx := context.Background()
-	pinnedBefore := globalIDs(t, f.store)[f.pinnedID]
+	beforeAll := globalIDs(t, f.store)
+	pinnedBefore := beforeAll[f.pinnedID]
+	histBefore := map[string]int{}
+	for _, id := range []string{f.distinctA, f.distinctB} {
+		h, err := f.store.MemoryHistory(ctx, id, 50)
+		if err != nil {
+			t.Fatalf("MemoryHistory(%s): %v", id, err)
+		}
+		histBefore[id] = len(h)
+	}
 	var out bytes.Buffer
 	if err := consolidateGlobal(ctx, f.store, true, &out); err != nil {
 		t.Fatalf("consolidateGlobal: %v", err)
@@ -174,8 +183,22 @@ func TestConsolidateGlobalApplyFoldsClusterWithHistoryAndEvidence(t *testing.T) 
 		t.Errorf("pinned row changed: %+v -> %+v", pinnedBefore, pinnedAfter)
 	}
 	for _, id := range []string{f.distinctA, f.distinctB} {
-		if _, ok := after[id]; !ok {
+		got, ok := after[id]
+		if !ok {
 			t.Errorf("unrelated row %s was lost", id)
+			continue
+		}
+		was := beforeAll[id]
+		if got.Content != was.Content || got.Category != was.Category || got.Importance != was.Importance ||
+			strings.Join(got.Tags, ",") != strings.Join(was.Tags, ",") || got.CreatedAt != was.CreatedAt {
+			t.Errorf("unrelated row %s was rewritten: %+v -> %+v", id, was, got)
+		}
+		hist, err := f.store.MemoryHistory(ctx, id, 50)
+		if err != nil {
+			t.Fatalf("MemoryHistory(%s): %v", id, err)
+		}
+		if histBefore[id] != len(hist) {
+			t.Errorf("unrelated row %s gained history: %d -> %d entries", id, histBefore[id], len(hist))
 		}
 	}
 	var snaps int
@@ -203,6 +226,11 @@ func TestConsolidateGlobalLeavesRowsSavedDuringTheRunAlone(t *testing.T) {
 		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: c, Source: "reflection"})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
+		}
+		// Stamped in the future so they are at or after the run's start however
+		// the clock ticks between here and the run.
+		if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = '2099-01-01 00:00:00' WHERE id = ?`, id); err != nil {
+			t.Fatalf("stamp created_at: %v", err)
 		}
 		fresh = append(fresh, id)
 	}

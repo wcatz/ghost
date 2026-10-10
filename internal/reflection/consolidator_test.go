@@ -263,6 +263,17 @@ func TestInferGlobalScope(t *testing.T) {
 		{"compound staging host stays project", "fact", "staging-app-2 has a memory leak on dev machine", "project"},
 		{"ipv4 address stays project", "fact", "ssh 10.0.0.12 and check the cluster logs", "project"},
 		{"internal dns name stays project", "fact", "ssh bp1.internal then deploy to the cluster", "project"},
+		// One named repository is project-scoped too; cross-repo language is not.
+		{"hosted repository slug stays project", "fact", "releases are cut from github.com/wcatz/ghost across all repos", "project"},
+		{"scp-style remote stays project", "fact", "push to git@github.com:wcatz/roller.git and use a dev machine", "project"},
+		{"named repository stays project", "fact", "in the infra repo always use helmfile diff before apply across all repos", "project"},
+		{"from any repo is not a named repository", "fact", "deploy to infra cluster from any repo", "global"},
+		{"every repo is not a named repository", "fact", "run go vet in every repo on the dev machine", "global"},
+		{"a file path is not a repository", "fact", "edit cmd/ghost/main.go across all repos", "global"},
+		// node followed by a two-digit number is a runtime version, not a machine.
+		{"node major version is not a host", "fact", "use node20 across all repos", "global"},
+		{"hyphenated node major version is not a host", "fact", "pin node-18 across all repos", "global"},
+		{"single digit node is a host", "fact", "restart node5 across all repos", "project"},
 		// The marker is a concrete identifier: bare nouns and version-like tokens
 		// do not make a fact host-specific.
 		{"bare cluster noun still promotes with a second weak hit", "fact", "ssh into the shared cluster for maintenance", "global"},
