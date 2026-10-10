@@ -259,7 +259,15 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	if err != nil {
 		return fmt.Errorf("read _global: %w", err)
 	}
-	live := consolidatable(all)
+	// A row stamped at or after `since` is one ReplaceNonManual keeps in place and
+	// never lets an emission claim, so planning it would insert a second copy of
+	// its text beside it. Leave it out of the plan; the next run sees it.
+	var live []memory.Memory
+	for _, m := range consolidatable(all) {
+		if m.CreatedAt < since {
+			live = append(live, m)
+		}
+	}
 	clusters, rows := reflection.PlanGlobalFold(live)
 
 	if !apply {

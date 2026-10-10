@@ -72,3 +72,18 @@ func TestPlanGlobalFoldIsDeterministicOnTies(t *testing.T) {
 		t.Fatalf("tie on created_at must resolve by id, got %+v", clusters)
 	}
 }
+
+// The cluster rule is Jaccard >= 0.5 as well as full containment, and a pair
+// below it stays two rows. None of these rows contains another, so only the
+// Jaccard bar decides them.
+func TestPlanGlobalFoldJaccardBar(t *testing.T) {
+	mems := []memory.Memory{
+		{ID: "a", Content: "restart the relay after kernel updates", CreatedAt: "2026-01-01 00:00:00"},
+		{ID: "b", Content: "restart the relay after kernel patches", CreatedAt: "2026-01-02 00:00:00"},
+		{ID: "c", Content: "restart the relay with care", CreatedAt: "2026-01-03 00:00:00"},
+	}
+	clusters, _ := PlanGlobalFold(mems)
+	if len(clusters) != 1 || clusters[0].Survivor.ID != "b" || len(clusters[0].Folded) != 1 || clusters[0].Folded[0].ID != "a" {
+		t.Fatalf("clusters = %+v, want a (0.67 similar) folded into b and c (0.33) left alone", clusters)
+	}
+}

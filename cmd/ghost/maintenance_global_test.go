@@ -192,6 +192,35 @@ func TestConsolidateGlobalApplyFoldsClusterWithHistoryAndEvidence(t *testing.T) 
 	}
 }
 
+// A row saved at or after the run's start is not in the plan: ReplaceNonManual
+// keeps it in place and would not let an emission claim it, so planning it would
+// leave two copies of its text.
+func TestConsolidateGlobalLeavesRowsSavedDuringTheRunAlone(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	var fresh []string
+	for _, c := range []string{"cardano mainnet uses network magic 764824073", "cardano mainnet uses the network magic 764824073"} {
+		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: c, Source: "reflection"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		fresh = append(fresh, id)
+	}
+	var out bytes.Buffer
+	if err := consolidateGlobal(ctx, f.store, true, &out); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	after := globalIDs(t, f.store)
+	for _, id := range fresh {
+		if _, ok := after[id]; !ok {
+			t.Errorf("row %s saved during the run was removed", id)
+		}
+	}
+	if len(after) != 6 {
+		t.Fatalf("_global holds %d rows, want the 4 left by the fold plus the 2 fresh rows: %+v", len(after), after)
+	}
+}
+
 func TestParseConsolidateGlobalArgs(t *testing.T) {
 	if apply, err := parseConsolidateGlobalArgs(nil); err != nil || apply {
 		t.Errorf("no args = (%v, %v), want a dry run", apply, err)
