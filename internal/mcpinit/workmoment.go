@@ -67,6 +67,7 @@ const (
 const (
 	workMomentStage             = "working_moment"
 	reasonAlreadyDelivered      = "already_delivered"
+	reasonUnclaimableID         = "unclaimable_id"
 	reasonBelowKeywordFloor     = "below_keyword_floor"
 	reasonWorkingMomentBudget   = "working_moment_budget"
 	reasonWorkingMomentGlobal   = "not_a_project_row"
@@ -207,7 +208,12 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 		switch {
 		case it.ProjectID == memory.GlobalProjectID || it.ProjectID != projectID:
 			withhold(it, reasonWorkingMomentGlobal)
-		case !momentIDOK(it.ID) || state.delivered[it.ID]:
+		case !momentIDOK(it.ID):
+			// An id that cannot travel on a marker line can never be claimed, so it
+			// is never delivered; the record says that, not a history that never
+			// happened.
+			withhold(it, reasonUnclaimableID)
+		case state.delivered[it.ID]:
 			withhold(it, reasonAlreadyDelivered)
 		case keywordScore(it, terms) < workMomentFloor:
 			withhold(it, reasonBelowKeywordFloor)

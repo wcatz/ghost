@@ -625,3 +625,26 @@ func TestATruncatedPreviewEndsInOneEllipsis(t *testing.T) {
 		t.Error("a row within the budget must be unchanged")
 	}
 }
+
+// A row whose id cannot be written on a marker line is never delivered, and the
+// record names that reason rather than a delivery that never happened.
+func TestAnUnclaimableIdIsRecordedAsSuch(t *testing.T) {
+	f := newMomentFixture(t)
+	db, err := memory.OpenDB(f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
+		VALUES ('bad id', 'p1', 'gotcha', 'quartzmigrate deadlock needs the sqlitebackup stopped', 'manual', 0.9)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	text, _ := momentContext(t, f.submit("sess-u2", "why does the quartzmigrate step deadlock on ci"))
+	if strings.Contains(text, "bad id") || !strings.Contains(text, "`mgotcha`") {
+		t.Fatalf("delivery wrong:\n%s", text)
+	}
+	calls := recordedCalls(t, f.dbPath)
+	if len(calls) != 1 || !strings.Contains(calls[0].verdicts, reasonUnclaimableID) || strings.Contains(calls[0].verdicts, reasonAlreadyDelivered) {
+		t.Errorf("verdicts must name %s and not %s: %+v", reasonUnclaimableID, reasonAlreadyDelivered, calls)
+	}
+}
