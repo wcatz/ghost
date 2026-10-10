@@ -5727,6 +5727,88 @@ func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandida
 	return matches[0], matches[1:], true
 }
 
+// pruneSnapshotsTx keeps the 10 most recent snapshots per project and drops the
+// evidence of any snapshot that is gone. A failure is logged, never returned:
+// an unpruned snapshot is a cost, not a reason to undo the write.
+func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID string) {
+	// Prune old snapshots — keep only the 10 most recent per project. Order by
+	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
+	// created_at is only second-precision, so same-second snapshots would
+	// otherwise prune in arbitrary order.
+	//
+	// Widened from 3: with a restore no longer consuming the snapshot it
+	// read, three was a handful of reflections of history — one bad round
+	// and there was nothing left to roll back to.
+	_, err := tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshots
+		WHERE project_id = ? AND snapshot_id NOT IN (
+			SELECT DISTINCT snapshot_id FROM memory_snapshots
+			WHERE project_id = ?
+			ORDER BY snapshot_id DESC
+			LIMIT 10
+		)
+	`, projectID, projectID)
+	if err != nil && s.logger != nil {
+		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
+	}
+	// The evidence goes with the snapshot it belongs to, and the same statement
+	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
+	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
+	// not a key), so a pruned snapshot's evidence would otherwise accumulate
+	// forever — the only unbounded growth this table would have had.
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshot_evidence
+		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
+	`); err != nil && s.logger != nil {
+		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
+	}
+}
+
+// snapshotReplaceableTx snapshots, and its evidence, every row ReplaceNonManual
+// may replace in the project, and returns the snapshot id. It is the one place
+// the snapshot is taken, shared by ReplaceNonManual and FoldRows, so a restore
+// reads the same shape whichever wrote it.
+func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID string) (snapshotID string, err error) {
+	snapshotID = fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
+		                              created_at, memory_id, access_count, last_accessed,
+		                              agent, session_id, source_ref, confidence,
+		                              valid_from, valid_until, verified_at, scope, scope_captured)
+		SELECT ?, project_id, category, content, importance, source, tags,
+		       created_at, id, access_count, last_accessed,
+		       agent, session_id, source_ref, confidence,
+		       valid_from, valid_until, verified_at, scope, 1
+		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		      AND `+retentionExemptSQL+`
+	`, snapshotID, projectID)
+	if err != nil {
+		return "", fmt.Errorf("snapshot memories: %w", err)
+	}
+	// The evidence those memories carry, in the second read rather than a column on
+	// the snapshot row: a memory can have several records, and this is the only
+	// copy that will exist by the time the rows are gone.
+	//
+	// It is here for the restore. A consolidation that rewrites a memory deletes
+	// the row, and the foreign key takes its evidence with it, so a restore that
+	// brought back only the text would return a memory that reads as never observed
+	// — in a database that still had the evidence to return. Joining through the
+	// snapshot's own rows bounds the read to the memories this snapshot covers, so
+	// nothing outside the replaced corpus is copied.
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshot_evidence
+			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
+		SELECT ?, s.memory_id, p.kind, p.agent, p.session_id, p.source_ref, p.confidence,
+		       p.observed_at, p.verified_at
+		FROM memory_snapshots s
+		JOIN memory_provenance p ON p.memory_id = s.memory_id
+		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
+	`, snapshotID, snapshotID); err != nil {
+		return "", fmt.Errorf("snapshot memory evidence: %w", err)
+	}
+	return snapshotID, nil
+}
+
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
 //
@@ -6086,42 +6168,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// it emits corresponds to a pinned/resolved one it never saw as such, so
 	// preservation has to mean "don't touch it" rather than "carry the flag
 	// through"). See issue #318.
-	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
-		                              created_at, memory_id, access_count, last_accessed,
-		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at, scope, scope_captured)
-		SELECT ?, project_id, category, content, importance, source, tags,
-		       created_at, id, access_count, last_accessed,
-		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at, scope, 1
-		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		      AND `+retentionExemptSQL+`
-	`, snapshotID, projectID)
+	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot memories: %w", err)
-	}
-	// The evidence those memories carry, in the second read rather than a column on
-	// the snapshot row: a memory can have several records, and this is the only
-	// copy that will exist by the time the rows are gone.
-	//
-	// It is here for the restore. A consolidation that rewrites a memory deletes
-	// the row, and the foreign key takes its evidence with it, so a restore that
-	// brought back only the text would return a memory that reads as never observed
-	// — in a database that still had the evidence to return. Joining through the
-	// snapshot's own rows bounds the read to the memories this snapshot covers, so
-	// nothing outside the replaced corpus is copied.
-	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_snapshot_evidence
-			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
-		SELECT ?, s.memory_id, p.kind, p.agent, p.session_id, p.source_ref, p.confidence,
-		       p.observed_at, p.verified_at
-		FROM memory_snapshots s
-		JOIN memory_provenance p ON p.memory_id = s.memory_id
-		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
-	`, snapshotID, snapshotID); err != nil {
-		return nil, fmt.Errorf("snapshot memory evidence: %w", err)
+		return nil, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -6328,15 +6377,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
 				return nil, err
 			}
-			// The same carry the fresh insert below makes, for the same reason: the
-			// rows this one stands in for are deleted at the end of this pass and the
-			// foreign key takes their evidence with them. It is a no-op for a
-			// verbatim re-emission (the only id named is the row's own), so it costs
-			// nothing on the common path and only moves support when a reuse is also
-			// a merge, which a global fold is.
-			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
-				return nil, err
-			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
 				successorOf[replaced] = id
@@ -6458,37 +6498,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
-	// Prune old snapshots — keep only the 10 most recent per project. Order by
-	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
-	// created_at is only second-precision, so same-second snapshots would
-	// otherwise prune in arbitrary order.
-	//
-	// Widened from 3: with a restore no longer consuming the snapshot it
-	// read, three was a handful of reflections of history — one bad round
-	// and there was nothing left to roll back to.
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM memory_snapshots
-		WHERE project_id = ? AND snapshot_id NOT IN (
-			SELECT DISTINCT snapshot_id FROM memory_snapshots
-			WHERE project_id = ?
-			ORDER BY snapshot_id DESC
-			LIMIT 10
-		)
-	`, projectID, projectID)
-	if err != nil {
-		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
-	}
-	// The evidence goes with the snapshot it belongs to, and the same statement
-	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
-	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
-	// not a key), so a pruned snapshot's evidence would otherwise accumulate
-	// forever — the only unbounded growth this table would have had.
-	if _, err = tx.ExecContext(ctx, `
-		DELETE FROM memory_snapshot_evidence
-		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
-	`); err != nil {
-		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
-	}
+	s.pruneSnapshotsTx(ctx, tx, projectID)
 
 	if s.logger != nil {
 		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)

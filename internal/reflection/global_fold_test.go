@@ -1,7 +1,6 @@
 package reflection
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -9,68 +8,46 @@ import (
 
 func TestPlanGlobalFold(t *testing.T) {
 	mems := []memory.Memory{
-		{ID: "a", Category: "preference", Content: "always run go vet before committing any change", Importance: 0.9, CreatedAt: "2026-01-01 00:00:00", Tags: []string{"x"}},
-		{ID: "b", Category: "preference", Content: "always run go vet before committing a change", Importance: 0.5, CreatedAt: "2026-02-01 00:00:00", Tags: []string{"y"}},
-		{ID: "c", Category: "preference", Content: "always run go vet before committing any change to the code", Importance: 0.6, CreatedAt: "2026-03-01 00:00:00", Tags: []string{"x", "z"}},
-		{ID: "d", Category: "fact", Content: "cardano preprod uses network magic 1", Importance: 0.5, CreatedAt: "2026-02-01 00:00:00"},
+		{ID: "a", Category: "preference", Content: "always run go vet before committing any change", Importance: 0.9, CreatedAt: "2026-01-01 00:00:00"},
+		{ID: "b", Category: "preference", Content: "always run go vet before committing a change", Importance: 0.5, CreatedAt: "2026-02-01 00:00:00"},
+		{ID: "c", Category: "preference", Content: "always run go vet before committing any change to the code", Importance: 0.6, CreatedAt: "2026-03-01 00:00:00"},
+		{ID: "d", Category: "fact", Content: "cardano preprod uses network magic 1", CreatedAt: "2026-02-01 00:00:00"},
 		// A numeric conflict is a different fact, not a duplicate.
-		{ID: "e", Category: "fact", Content: "cardano preprod uses network magic 2", Importance: 0.5, CreatedAt: "2026-02-02 00:00:00"},
+		{ID: "e", Category: "fact", Content: "cardano preprod uses network magic 2", CreatedAt: "2026-02-02 00:00:00"},
 	}
-	clusters, rows := PlanGlobalFold(mems)
+	clusters := PlanGlobalFold(mems)
 	if len(clusters) != 1 {
 		t.Fatalf("clusters = %d, want 1: %+v", len(clusters), clusters)
 	}
 	c := clusters[0]
 	if c.Survivor.ID != "c" || len(c.Folded) != 2 {
-		t.Fatalf("survivor %q folded %d, want the newest row c with two folded", c.Survivor.ID, len(c.Folded))
+		t.Fatalf("survivor %q folded %d, want the containing row c with two folded", c.Survivor.ID, len(c.Folded))
 	}
-	if len(rows) != 3 {
-		t.Fatalf("replacement set has %d rows, want cluster survivor + 2 untouched: %+v", len(rows), rows)
-	}
-	var fold *memory.Memory
-	for i := range rows {
-		if rows[i].Content == c.Survivor.Content {
-			fold = &rows[i]
-		}
-	}
-	if fold == nil {
-		t.Fatalf("no replacement row restates the survivor: %+v", rows)
-	}
-	if fold.Importance != 0.9 {
-		t.Errorf("importance = %v, want the cluster maximum", fold.Importance)
-	}
-	if !reflect.DeepEqual(fold.Tags, []string{"x", "y", "z"}) {
-		t.Errorf("tags = %v, want the sorted union", fold.Tags)
-	}
-	if len(fold.ReplacesIDs) != 3 || fold.ReplacesIDs[0] != "c" {
-		t.Errorf("ReplacesIDs = %v, want every member, the survivor first", fold.ReplacesIDs)
-	}
-	for _, r := range rows {
-		if r.Content != c.Survivor.Content && len(r.ReplacesIDs) != 0 {
-			t.Errorf("an untouched row claims to replace %v", r.ReplacesIDs)
+	for _, f := range c.Folded {
+		if f.ID == "c" || f.ID == "d" || f.ID == "e" {
+			t.Errorf("folded row %q does not belong", f.ID)
 		}
 	}
 }
 
 func TestPlanGlobalFoldNothingToFoldReturnsNil(t *testing.T) {
-	clusters, rows := PlanGlobalFold([]memory.Memory{
+	if got := PlanGlobalFold([]memory.Memory{
 		{ID: "a", Content: "use tabs not spaces"},
 		{ID: "b", Content: "cardano preprod uses network magic 1"},
-	})
-	if clusters != nil || rows != nil {
-		t.Fatalf("got (%v, %v), want nil so a caller cannot replace a corpus it has no reason to touch", clusters, rows)
+	}); got != nil {
+		t.Fatalf("got %v, want nil", got)
 	}
 }
 
-func TestPlanGlobalFoldNamesTheRowTheReplaceKeepsForIdenticalText(t *testing.T) {
+func TestPlanGlobalFoldNamesTheOldestRowForIdenticalText(t *testing.T) {
 	// The older row comes second in the input, so input order cannot be what picks it.
 	mems := []memory.Memory{
 		{ID: "2", Content: "run the linter before pushing", CreatedAt: "2026-02-01 00:00:00"},
 		{ID: "1", Content: "run the linter before pushing", CreatedAt: "2026-01-01 00:00:00"},
 	}
-	clusters, _ := PlanGlobalFold(mems)
+	clusters := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "1" {
-		t.Fatalf("byte-identical rows keep the oldest, which is the one the replace reuses, got %+v", clusters)
+		t.Fatalf("byte-identical rows keep the oldest, got %+v", clusters)
 	}
 }
 
@@ -83,53 +60,68 @@ func TestPlanGlobalFoldJaccardBar(t *testing.T) {
 		{ID: "b", Content: "restart the relay after kernel patches", CreatedAt: "2026-01-02 00:00:00"},
 		{ID: "c", Content: "restart the relay with care", CreatedAt: "2026-01-03 00:00:00"},
 	}
-	clusters, _ := PlanGlobalFold(mems)
+	clusters := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "b" || len(clusters[0].Folded) != 1 || clusters[0].Folded[0].ID != "a" {
 		t.Fatalf("clusters = %+v, want a (0.67 similar) folded into b and c (0.33) left alone", clusters)
 	}
 }
 
-// The older, longer wording carries a specific the newer subset lacks; keeping
-// the newer row would drop it.
+// The older, longer wording carries a specific the newer subset lacks.
 func TestPlanGlobalFoldKeepsTheRowThatContainsTheOthers(t *testing.T) {
 	mems := []memory.Memory{
 		{ID: "long", Content: "deploy requires helmfile diff then apply, and the sops age key must be exported first, and only from the dev machine", CreatedAt: "2026-01-01 00:00:00"},
 		{ID: "short", Content: "deploy requires helmfile diff then apply", CreatedAt: "2026-02-01 00:00:00"},
 	}
-	clusters, rows := PlanGlobalFold(mems)
+	clusters := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "long" {
 		t.Fatalf("survivor = %+v, want the older row that contains the newer", clusters)
 	}
-	if len(rows) != 1 || rows[0].Content != mems[0].Content {
-		t.Fatalf("replacement = %+v, want the long text", rows)
-	}
 }
 
-func TestPlanGlobalFoldNeverClustersOppositePolarity(t *testing.T) {
-	for _, pair := range [][2]string{
-		{"always run the full test suite before committing", "never run the full test suite before committing"},
-		{"deploys must go through helmfile diff first", "deploys must not go through helmfile diff first"},
-		{"do run the linter before pushing changes", "don't run the linter before pushing changes"},
-	} {
-		clusters, rows := PlanGlobalFold([]memory.Memory{
-			{ID: "a", Content: pair[0], CreatedAt: "2026-01-01 00:00:00"},
-			{ID: "b", Content: pair[1], CreatedAt: "2026-01-02 00:00:00"},
-		})
-		if clusters != nil || rows != nil {
-			t.Errorf("%q and %q were clustered: %+v", pair[0], pair[1], clusters)
-		}
-	}
-}
-
-// The containing row wins even when it is not the longest in characters: the
-// other row repeats words, so it is longer but holds fewer distinct tokens.
+// The containing row wins even when it is not the longest in characters.
 func TestPlanGlobalFoldContainmentBeatsLength(t *testing.T) {
 	mems := []memory.Memory{
 		{ID: "padded", Content: "run run run go go vet vet before before committing committing", CreatedAt: "2026-03-01 00:00:00"},
 		{ID: "full", Content: "run go vet before committing every change", CreatedAt: "2026-01-01 00:00:00"},
 	}
-	clusters, _ := PlanGlobalFold(mems)
+	clusters := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "full" {
 		t.Fatalf("survivor = %+v, want the row holding every token", clusters)
+	}
+}
+
+func TestPlanGlobalFoldNeverClustersOppositePairs(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"always run the full test suite before committing", "never run the full test suite before committing"},
+		{"deploys must go through helmfile diff first", "deploys must not go through helmfile diff first"},
+		{"do run the linter before pushing changes", "don't run the linter before pushing changes"},
+		{"use the shared cache when building the image", "avoid the shared cache when building the image"},
+		{"enable the vector index when building the store", "disable the vector index when building the store"},
+		{"allow direct pushes to the release branch for hotfixes", "deny direct pushes to the release branch for hotfixes"},
+		{"allow direct pushes to the release branch for hotfixes", "forbid direct pushes to the release branch for hotfixes"},
+		{"always rebase the feature branch before opening the pull request", "avoid rebase the feature branch before opening the pull request"},
+		{"prefer nerdctl over docker for running containers on the host", "prefer docker over nerdctl for running containers on the host"},
+	} {
+		if got := PlanGlobalFold([]memory.Memory{
+			{ID: "a", Content: pair[0], CreatedAt: "2026-01-01 00:00:00"},
+			{ID: "b", Content: pair[1], CreatedAt: "2026-01-02 00:00:00"},
+		}); got != nil {
+			t.Errorf("%q and %q were clustered: %+v", pair[0], pair[1], got)
+		}
+	}
+}
+
+// The same rows with matching stance still fold, so the guard is not a blanket.
+func TestPlanGlobalFoldStillFoldsMatchingStance(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"use the shared cache when building the image", "use the shared cache when building the image today"},
+		{"prefer nerdctl over docker for running containers on the host", "prefer nerdctl over docker for running containers on this host"},
+	} {
+		if got := PlanGlobalFold([]memory.Memory{
+			{ID: "a", Content: pair[0], CreatedAt: "2026-01-01 00:00:00"},
+			{ID: "b", Content: pair[1], CreatedAt: "2026-01-02 00:00:00"},
+		}); len(got) != 1 {
+			t.Errorf("%q and %q did not cluster", pair[0], pair[1])
+		}
 	}
 }

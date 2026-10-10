@@ -1411,20 +1411,32 @@ ghost maintenance consolidate-global --apply    # fold them
 
 "Near-duplicate" is the rule the SQLite consolidation tier applies to a project
 (token Jaccard of at least 0.5, or full containment of the smaller row, and never
-across a differing number), not a second one. The row whose text contains the others is kept verbatim (else the longest, newest
-as the tie-break; for byte-identical rows, the oldest, which is the one the replace
-reuses), so its embedding and links stay with it; it takes the highest importance
-and the union of the tags. Only `source = 'reflection'` rows are folded, and two
-rows that differ by a negation (always against never, must against must not) are
-never clustered. The dry run opens the store read-only, so a store behind this
-build's schema is reported and left as it was. The fold goes through the same replace `ghost reflect`
-uses: the rows are snapshotted first, each folded row's history ends in a `delete`
-naming the survivor, and its evidence is carried onto the survivor.
+across a differing number), not a second one. Two rows never cluster when one is
+negated and the other is not (always against never, must against must not, do
+against don't), when they take opposed stances (use against avoid, enable against
+disable, allow against deny or forbid, always against avoid), or when both prefer
+something and the preferred things differ. The list is deliberately conservative: a
+miss leaves a duplicate, a false cluster would delete an opposite instruction.
+
+The row whose text contains the others is kept verbatim (else the longest, newest
+as the tie-break; for byte-identical rows, the oldest), so its embedding and links
+stay with it. It takes the highest importance and the union of the tags, and its
+text is never written. Only `source = 'reflection'` rows are planned.
+
+`--apply` folds one cluster per transaction, naming rows by id and checking each
+again inside it: a row that is no longer reflection-written or has become pinned,
+resolved or persistent, was saved at or after the run's start, or was edited since
+the plan is skipped and reported, never reverted. The replaceable set is
+snapshotted first (the snapshot `ghost reflect --restore` reads), each folded row's
+history ends in a `delete` naming the survivor, and its evidence is carried onto
+the survivor. No row outside a cluster is written in any column, including an
+agent-saved row whose text is identical to a survivor's. The dry run opens the
+store read-only, so a store behind this build's schema is reported and left as it
+was.
 
 Pinned, resolved, `manual`, `builtin` and `persistent` rows are never planned by the
 pass, so their text is never rewritten and they are never folded, including a
-pinned row that is a near-duplicate of a cluster. A row saved while the run is in
-flight is kept as it is.
+pinned row that is a near-duplicate of a cluster.
 
 ## OpenCode sessions
 

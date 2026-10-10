@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -383,4 +384,239 @@ func TestConsolidateGlobalListingWithholdsACredentialInAPreGuardRow(t *testing.T
 		t.Fatalf("the fixture did not cluster, so nothing was printed to withhold:\n%s", out.String())
 	}
 	assertWithheld(t, "ghost maintenance consolidate-global", out.String())
+}
+
+// dumpStore returns every row of every ordinary table, as text, keyed by table.
+// Search-index tables and snapshot tables are left out: the first follow the
+// memories table, the second are the one place a fold is allowed to add rows.
+func dumpStore(t *testing.T, db *sql.DB) map[string][]string {
+	t.Helper()
+	trs, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+		AND name NOT LIKE '%fts%' AND name NOT LIKE 'memory_snapshot%' ORDER BY name`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var names []string
+	for trs.Next() {
+		var n string
+		if err := trs.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		names = append(names, n)
+	}
+	_ = trs.Close()
+	out := map[string][]string{}
+	for _, n := range names {
+		rows, err := db.Query(`SELECT * FROM "` + n + `"`)
+		if err != nil {
+			t.Fatalf("dump %s: %v", n, err)
+		}
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatalf("scan %s: %v", n, err)
+			}
+			var sb strings.Builder
+			for i, v := range vals {
+				if b, ok := v.([]byte); ok {
+					v = fmt.Sprintf("%x", b)
+				}
+				fmt.Fprintf(&sb, "%s=%v|", cols[i], v)
+			}
+			out[n] = append(out[n], sb.String())
+		}
+		_ = rows.Close()
+	}
+	return out
+}
+
+// diffDump returns, per table, the rows only in before (removed) and only in
+// after (added).
+func diffDump(before, after map[string][]string) (removed, added map[string][]string) {
+	removed, added = map[string][]string{}, map[string][]string{}
+	for table := range before {
+		inAfter := map[string]int{}
+		for _, r := range after[table] {
+			inAfter[r]++
+		}
+		for _, r := range before[table] {
+			if inAfter[r] > 0 {
+				inAfter[r]--
+			} else {
+				removed[table] = append(removed[table], r)
+			}
+		}
+	}
+	for table := range after {
+		inBefore := map[string]int{}
+		for _, r := range before[table] {
+			inBefore[r]++
+		}
+		for _, r := range after[table] {
+			if inBefore[r] > 0 {
+				inBefore[r]--
+			} else {
+				added[table] = append(added[table], r)
+			}
+		}
+	}
+	return removed, added
+}
+
+func rowMentions(row string, ids ...string) bool {
+	for _, id := range ids {
+		if strings.Contains(row, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// A byte-identical agent row beside a reflection cluster survivor must come out
+// of --apply unchanged in every table; a whole-set replace matched rows by text
+// and let the two trade columns. The full-store diff also proves the fold writes
+// nothing outside the cluster.
+func TestConsolidateGlobalApplyTouchesOnlyTheCluster(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	survivorText := "always run go vet before committing any change to the code"
+	twin, err := f.store.Create(ctx, "_global", memory.Memory{
+		Category: "preference", Content: survivorText, Source: "mcp", Importance: 0.31, Agent: "agent", Tags: []string{"mine"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-01-15 00:00:00' WHERE id = ?`, twin); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if err := f.store.StoreEmbedding(ctx, twin, []float32{0.1, 0.2, 0.3}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := f.store.CreateLink(ctx, twin, f.distinctA, "related", 0.5, "manual"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	before := dumpStore(t, f.db)
+
+	if err := consolidateGlobal(ctx, f.store, true, &bytes.Buffer{}); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	after := dumpStore(t, f.db)
+	removed, added := diffDump(before, after)
+	touched := []string{f.newID, f.oldID, f.midID}
+	for _, side := range []map[string][]string{removed, added} {
+		for table, rows := range side {
+			for _, r := range rows {
+				if !rowMentions(r, touched...) {
+					t.Errorf("%s changed a row outside the cluster: %s", table, r)
+				}
+				if rowMentions(r, twin) {
+					t.Errorf("%s changed the agent twin: %s", table, r)
+				}
+			}
+		}
+	}
+	// And the fold did happen.
+	if _, ok := globalIDs(t, f.store)[f.oldID]; ok {
+		t.Error("the cluster was not folded")
+	}
+	if len(added["memory_history"]) == 0 {
+		t.Error("the fold recorded no history")
+	}
+}
+
+// A row edited between the plan and the apply is skipped, and its text is not
+// reverted.
+func TestFoldRowsSkipsARowEditedSinceThePlan(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	all := globalIDs(t, f.store)
+	plan := func(id string) memory.FoldRow {
+		m := all[id]
+		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE memories SET content = 'always run go vet, edited by a person', updated_at = '2030-01-01 00:00:00' WHERE id = ?`, f.midID); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.oldID), plan(f.midID)}, "2999-01-01 00:00:00")
+	if err != nil {
+		t.Fatalf("FoldRows: %v", err)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].ID != f.midID {
+		t.Fatalf("skipped = %+v, want only the edited row", res.Skipped)
+	}
+	after := globalIDs(t, f.store)
+	if got := after[f.midID].Content; got != "always run go vet, edited by a person" {
+		t.Errorf("the edited row was reverted or rewritten: %q", got)
+	}
+	if _, ok := after[f.oldID]; ok {
+		t.Error("the unedited folded row was not folded")
+	}
+	// A survivor edited since the plan skips the whole cluster.
+	if _, err := f.db.ExecContext(ctx, `UPDATE memories SET updated_at = '2031-01-01 00:00:00' WHERE id = ?`, f.newID); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	res, err = f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.midID)}, "2999-01-01 00:00:00")
+	if err != nil || len(res.Folded) != 0 || len(res.Skipped) != 2 {
+		t.Fatalf("a changed survivor must skip everything: %+v (err %v)", res, err)
+	}
+}
+
+// The snapshot a fold takes is one a restore can use: it brings the folded rows
+// back and removes nothing else.
+func TestConsolidateGlobalFoldCanBeRestored(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	before := globalIDs(t, f.store)
+	if err := consolidateGlobal(ctx, f.store, true, &bytes.Buffer{}); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	if _, err := f.store.RestoreSnapshot(ctx, "_global"); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	after := globalIDs(t, f.store)
+	for id, m := range before {
+		got, ok := after[id]
+		if !ok {
+			t.Errorf("row %s (%q) is missing after the restore", id, m.Content)
+			continue
+		}
+		if got.Content != m.Content || got.Importance != m.Importance {
+			t.Errorf("row %s is not as it was: %+v -> %+v", id, m, got)
+		}
+	}
+	if len(after) != len(before) {
+		t.Errorf("restore left %d rows, want %d", len(after), len(before))
+	}
+}
+
+// A row that is not reflection-written, or is pinned, is refused by id even if a
+// caller names it.
+func TestFoldRowsRefusesRowsItMayNotTouch(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	all := globalIDs(t, f.store)
+	plan := func(id string) memory.FoldRow {
+		m := all[id]
+		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
+	}
+	res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.pinnedID)}, "2999-01-01 00:00:00")
+	if err != nil {
+		t.Fatalf("FoldRows: %v", err)
+	}
+	if len(res.Folded) != 0 || len(res.Skipped) != 1 {
+		t.Fatalf("the pinned agent row was not refused: %+v", res)
+	}
+	if _, ok := globalIDs(t, f.store)[f.pinnedID]; !ok {
+		t.Fatal("the pinned row was deleted")
+	}
+	// At or after `since`: refused.
+	res, err = f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.oldID)}, "2026-01-01 00:00:00")
+	if err != nil || len(res.Folded) != 0 {
+		t.Fatalf("a row created at or after since was folded: %+v (err %v)", res, err)
+	}
 }

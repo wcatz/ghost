@@ -262,12 +262,10 @@ func openConsolidateGlobalStore(dataDir string, apply bool) (*memory.Store, func
 }
 
 // consolidateGlobal lists the near-duplicate clusters in _global and, when apply
-// is set, folds them through ReplaceNonManual — the same snapshotted, history-
-// recording replace `ghost reflect` uses: the pre-fold rows are snapshotted, each
-// folded row's history ends in a delete naming its survivor, and its evidence is
-// carried onto the survivor. Rows ReplaceNonManual
-// excludes (pinned, resolved, manual, builtin, persistent) never reach the
-// planner, so their content is never touched.
+// is set, folds each through Store.FoldRows: a targeted, id-based fold that
+// snapshots, carries evidence, writes delete history naming the survivor and
+// touches no row outside the cluster. Only reflection-written rows that are not
+// pinned, resolved, persistent, or saved during the run are planned.
 func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w io.Writer) error {
 	out := func(a ...any) { _, _ = fmt.Fprintln(w, a...) }
 	outf := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
@@ -284,30 +282,16 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	// A row stamped at or after `since` is one ReplaceNonManual keeps in place and
 	// never lets an emission claim, so planning it would insert a second copy of
 	// its text beside it. Leave it out of the plan; the next run sees it.
-	var live, others []memory.Memory
+	var live []memory.Memory
 	for _, m := range consolidatable(all) {
-		if m.CreatedAt >= since {
-			continue
-		}
 		// Only what reflection wrote is planned: the backlog is reflection's, and
 		// an agent's own save is not this pass's to fold even when a near-twin
-		// exists. Such a row is still restated as it is below, because the replace
-		// deletes every replaceable row the emission set does not name.
-		if m.Source == "reflection" {
+		// exists. A row at or after `since` was saved during the run.
+		if m.Source == "reflection" && m.CreatedAt < since {
 			live = append(live, m)
-		} else {
-			others = append(others, m)
 		}
 	}
-	clusters, rows := reflection.PlanGlobalFold(live)
-	if len(clusters) > 0 {
-		for _, m := range others {
-			rows = append(rows, memory.Memory{
-				ProjectID: "_global", Category: m.Category, Content: m.Content,
-				Importance: m.Importance, Tags: m.Tags, Source: m.Source,
-			})
-		}
-	}
+	clusters := reflection.PlanGlobalFold(live)
 
 	if !apply {
 		out("DRY RUN (use --apply to fold)")
@@ -335,11 +319,28 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 		outf("\nnothing written; pass --apply to fold %d row(s) into %d\n", folded, len(clusters))
 		return nil
 	}
-	preserved, err := store.ReplaceNonManual(ctx, "_global", rows, since)
-	if err != nil {
-		return fmt.Errorf("fold _global: %w", err)
+	// One transaction per cluster, each naming its rows by id and checking them
+	// again inside it: a row edited since the plan, or saved since the run
+	// started, is skipped and reported, and no row outside a cluster is written.
+	asRow := func(m memory.Memory) memory.FoldRow {
+		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
 	}
-	outf("\nfolded %d row(s) into %d survivor(s); %d row(s) saved during the run were left as they were\n",
-		folded, len(clusters), len(preserved))
+	foldedN, skippedN := 0, 0
+	for _, c := range clusters {
+		rows := make([]memory.FoldRow, len(c.Folded))
+		for i, f := range c.Folded {
+			rows[i] = asRow(f)
+		}
+		res, err := store.FoldRows(ctx, "_global", asRow(c.Survivor), rows, since)
+		if err != nil {
+			return fmt.Errorf("fold _global: %w", err)
+		}
+		foldedN += len(res.Folded)
+		for _, sk := range res.Skipped {
+			skippedN++
+			outf("skipped %s: %s\n", assemble.Token(sk.ID), assemble.Label(sk.Reason))
+		}
+	}
+	outf("\nfolded %d row(s) into %d survivor(s); %d row(s) skipped\n", foldedN, len(clusters), skippedN)
 	return nil
 }

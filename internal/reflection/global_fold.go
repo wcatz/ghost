@@ -36,9 +36,69 @@ func negatesText(content string) bool {
 	return false
 }
 
-// samePolarity is the pairwise guard the _global fold adds to the project rule.
+// stanceWord maps the forms of the opposed verbs the fold knows to one stem.
+var stanceWord = map[string]string{
+	"use": "use", "uses": "use", "using": "use",
+	"avoid": "avoid", "avoids": "avoid", "avoiding": "avoid",
+	"enable": "enable", "enables": "enable", "enabled": "enable", "enabling": "enable",
+	"disable": "disable", "disables": "disable", "disabled": "disable", "disabling": "disable",
+	"allow": "allow", "allows": "allow", "allowed": "allow", "allowing": "allow",
+	"deny": "deny", "denies": "deny", "denied": "deny",
+	"forbid": "forbid", "forbids": "forbid", "forbidden": "forbid",
+	"always": "always",
+}
+
+// opposedStances are the pairs of stems that, split across two rows, make them
+// opposite instructions that the token rule would otherwise call duplicates.
+var opposedStances = [][2]string{
+	{"use", "avoid"}, {"enable", "disable"}, {"allow", "deny"}, {"allow", "forbid"}, {"always", "avoid"},
+}
+
+// stanceInfo is what the guard reads from a row: its stance stems and the object
+// of "prefer" (the first word after it that is not a connective), if any.
+func stanceInfo(content string) (stems map[string]bool, preferred string) {
+	stems = map[string]bool{}
+	words := strings.FieldsFunc(strings.ToLower(content), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for i, w := range words {
+		if st, ok := stanceWord[w]; ok {
+			stems[st] = true
+		}
+		switch w {
+		case "prefer", "prefers", "preferred", "preferring":
+			for _, n := range words[i+1:] {
+				if n == "to" || n == "using" || n == "use" || n == "the" || n == "a" || n == "an" {
+					continue
+				}
+				if preferred == "" {
+					preferred = n
+				}
+				break
+			}
+		}
+	}
+	return stems, preferred
+}
+
+// samePolarity is the pairwise guard the _global fold adds to the project rule:
+// two rows never cluster when one is negated and the other is not, when they take
+// opposed stances (use/avoid, enable/disable, allow/deny or forbid, always/avoid),
+// or when both prefer something and the preferred things differ. It is a
+// conservative list, not a classifier: a miss costs a duplicate that stays, a
+// false cluster would delete the opposite of an instruction.
 func samePolarity(a, b memory.Memory) bool {
-	return negatesText(a.Content) == negatesText(b.Content)
+	if negatesText(a.Content) != negatesText(b.Content) {
+		return false
+	}
+	sa, pa := stanceInfo(a.Content)
+	sb, pb := stanceInfo(b.Content)
+	for _, p := range opposedStances {
+		if (sa[p[0]] && sb[p[1]]) || (sa[p[1]] && sb[p[0]]) {
+			return false
+		}
+	}
+	return pa == pb || pa == "" || pb == ""
 }
 
 // containsAll reports whether every token of b is in a.
@@ -130,39 +190,22 @@ func olderRow(a, b memory.Memory) bool {
 }
 
 // PlanGlobalFold finds the near-duplicate clusters among the _global rows a
-// consolidation may touch and builds the replacement set that folds them. It is
-// pure: no store, no model, the same rows always give the same plan.
+// consolidation may touch. It is pure: no store, no model, the same rows always
+// give the same plan, and nil when there is nothing to fold.
 //
-// mems must already be limited to what ReplaceNonManual may replace (not
-// pinned, resolved, manual, builtin or persistent), which is what makes "a
-// pinned row is never touched" true here: such a row is never in the input, so
-// it is never a survivor, a fold target or a row whose content is rewritten.
+// mems should already be limited to what a fold may touch (reflection-written,
+// not pinned, resolved or persistent); the store re-checks each row when the
+// fold is applied.
 //
 // "Near-duplicate" is duplicateClusters, the rule the SQLite tier applies to a
-// project, not a second one, plus one guard: rows of opposite polarity (one
-// negated, one not) never cluster. The survivor is chooseSurvivor's pick, its
-// text kept verbatim so its embedding and links stay with it; it takes the
-// highest importance in the cluster and the union of its tags.
-//
-// rows is the complete replacement set for ReplaceNonManual: every input row not
-// in a cluster is restated as it is (a verbatim re-emission writes nothing), and
-// each cluster contributes its survivor with ReplacesIDs naming every member, so
-// the folded rows' delete history names the survivor and their evidence is
-// carried onto it. Nil when there is nothing to fold, so a caller cannot replace
-// a corpus it has no reason to touch.
-func PlanGlobalFold(mems []memory.Memory) (clusters []GlobalFoldCluster, rows []memory.Memory) {
-	var out []memory.Memory
+// project, not a second one, plus the guards in samePolarity: rows of opposite
+// polarity or stance never cluster. The survivor is chooseSurvivor's pick; the
+// store keeps its text verbatim and gives it the highest importance and the
+// union of the tags in the cluster.
+func PlanGlobalFold(mems []memory.Memory) []GlobalFoldCluster {
+	var clusters []GlobalFoldCluster
 	for _, idx := range duplicateClustersWhere(mems, samePolarity) {
 		if len(idx) == 1 {
-			m := mems[idx[0]]
-			out = append(out, memory.Memory{
-				ProjectID:  "_global",
-				Category:   m.Category,
-				Content:    m.Content,
-				Importance: m.Importance,
-				Tags:       m.Tags,
-				Source:     m.Source,
-			})
 			continue
 		}
 		members := make([]memory.Memory, len(idx))
@@ -171,40 +214,13 @@ func PlanGlobalFold(mems []memory.Memory) (clusters []GlobalFoldCluster, rows []
 		}
 		survivor := chooseSurvivor(members)
 		sort.SliceStable(members, func(a, b int) bool { return longerOrNewer(members[a], members[b]) })
-		merged := survivor
-		tagSet := map[string]bool{}
-		ids := []string{survivor.ID}
 		var folded []memory.Memory
 		for _, m := range members {
 			if m.ID != survivor.ID {
-				ids = append(ids, m.ID)
 				folded = append(folded, m)
 			}
-			if m.Importance > merged.Importance {
-				merged.Importance = m.Importance
-			}
-			for _, t := range m.Tags {
-				tagSet[t] = true
-			}
 		}
-		merged.Tags = make([]string, 0, len(tagSet))
-		for t := range tagSet {
-			merged.Tags = append(merged.Tags, t)
-		}
-		sort.Strings(merged.Tags)
 		clusters = append(clusters, GlobalFoldCluster{Survivor: survivor, Folded: folded})
-		out = append(out, memory.Memory{
-			ProjectID:   "_global",
-			Category:    survivor.Category,
-			Content:     survivor.Content,
-			Importance:  merged.Importance,
-			Tags:        merged.Tags,
-			Source:      survivor.Source,
-			ReplacesIDs: ids,
-		})
 	}
-	if len(clusters) == 0 {
-		return nil, nil
-	}
-	return clusters, out
+	return clusters
 }
