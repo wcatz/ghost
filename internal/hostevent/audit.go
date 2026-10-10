@@ -226,16 +226,21 @@ func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
 	}
 }
 
-// carriesNewText reports whether a tool call's JSON arguments hold a non-empty
-// `content`, which is what makes an update a rewrite of the memory's text.
+// carriesNewText reports whether an update's arguments rewrite the memory's text: a
+// non-empty `content`, tested as the store tests it (a blank but non-empty string is
+// still written). Arguments that cannot be decoded as an object, such as the raw
+// string codex passes through when its arguments are not JSON, answer true: nobody can
+// say the call did not rewrite the memory, and reading a possible rewrite as a use of
+// it is the one error this audit cannot afford, while reading it as nothing only costs
+// a citation.
 func carriesNewText(input json.RawMessage) bool {
 	var args struct {
 		Content string `json:"content"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
-		return false
+		return true
 	}
-	return strings.TrimSpace(args.Content) != ""
+	return args.Content != ""
 }
 
 // AddAuditToolCall files one tool call the way every scanner does, for a caller

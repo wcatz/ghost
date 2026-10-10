@@ -504,10 +504,23 @@ func TestScanAuditAnUpdateOfAMemoryIsReadAsNothing(t *testing.T) {
 	}
 	// An update that carries no new text (tags or a verification only) is the agent
 	// acting on the memory by id, like a pin, so its id is still a citation.
-	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","tags":["a"]}`, `{"memory_id":"` + auditMemoryID + `","verified":true,"content":"  "}`} {
+	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","tags":["a"]}`, `{"memory_id":"` + auditMemoryID + `","verified":true,"content":""}`} {
 		l := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_update","input":` + args + `}]}}` + "\n"
 		if sig := scanAudit(t, FormatClaudeJSONL, l+prose); !sig.HasID(auditMemoryID) {
 			t.Errorf("an update with no new text (%s) stopped being a citation of the memory it names", args)
+		}
+	}
+	// Cases that cannot be told from a rewrite are read as one: a blank but non-empty
+	// content is written by the store, and arguments that are not a JSON object (codex
+	// passes a raw string through when its arguments are not JSON) may hold anything.
+	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","content":"  "}`, `"memory_id=` + auditMemoryID + ` content=` + injectedText + `"`} {
+		l := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_update","input":` + args + `}]}}` + "\n"
+		sig := scanAudit(t, FormatClaudeJSONL, l+prose)
+		if sig.HasID(auditMemoryID) {
+			t.Errorf("an update that may rewrite the memory (%s) was read as a citation of it", args)
+		}
+		if v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText}); !ok || v.Outcome != audit.OutcomeIgnored {
+			t.Errorf("an update that may rewrite the memory (%s) judged %+v, want ignored", args, v)
 		}
 	}
 	// The controls, so the cases above are the routing's doing: the same arguments
