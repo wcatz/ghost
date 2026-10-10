@@ -367,6 +367,19 @@ func NewAuditCorpus() AuditCorpus {
 		Text: `{"memory_id":"` + editID + `","content":"Compactor watermark advances only after manifests are fsynced"}`})
 	minute++
 
+	// A save that names a memory by id (#1010). The save is a new memory's text, so the
+	// id in it is another memory the agent is talking about: as the rule it follows it
+	// is a citation, and as the rule it says is wrong or replaced it is a denial and
+	// never a use, the same as the id in prose. Neither memory's words are in any turn.
+	savedWrongID := fpMem("save/wrong", "Harbor pilot throttles dredger convoys beyond tidal windows")
+	add(AuditTurn{Minute: minute, Kind: AuditSaveArgs, Denies: []string{savedWrongID},
+		Text: "Memory " + savedWrongID + " is wrong, ignore it; the real rule is that convoys queue by draught"})
+	minute++
+	savedCitedID := fpMem("save/cited", "Kiln warden rotates glaze batches across firing shifts")
+	add(AuditTurn{Minute: minute, Kind: AuditSaveArgs, Cites: []string{savedCitedID},
+		Text: "Per " + savedCitedID + ", record the new batch order in the schedule"})
+	minute++
+
 	// Guards. A memory of three distinctive words that one turn repeats whole is the
 	// floor's own case and stays used; so does a long one restated in one turn.
 	shortID := fpMem("true/short", "Basalt lantern cipher")

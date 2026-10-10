@@ -419,6 +419,14 @@ func (s *Signals) addToTurn(fps []string) {
 // negative-sounding values ("return false") that are not denials of the memory.
 func (s *Signals) AddProse(text string) {
 	s.addWords(text)
+	s.addNegations(text, false)
+}
+
+// addNegations draws the negation segments out of text. With idsOnly set a segment
+// carries only the ids a cue is bound to and none of the sentence's wording, which
+// is what a save's arguments may contribute: the words of a save are never a denial,
+// but a memory it names beside a cue ("memory <id> is wrong") is denied by name.
+func (s *Signals) addNegations(text string, idsOnly bool) {
 	for _, seg := range segments(text) {
 		words, clauses := splitClauses(seg)
 		cues := cueSpans(words, clauses)
@@ -453,12 +461,15 @@ func (s *Signals) AddProse(text string) {
 				}
 			}
 		}
-		n := negSegment{
-			at:     s.at,
-			fps:    s.h.distinctTokens(words),
-			cueFps: s.h.distinctTokens(boundWords),
+		n := negSegment{at: s.at}
+		if !idsOnly {
+			n.fps = s.h.distinctTokens(words)
+			n.cueFps = s.h.distinctTokens(boundWords)
 		}
 		addUnseen(&n.cueIDs, boundIDs)
+		if idsOnly && len(n.cueIDs) == 0 {
+			continue
+		}
 		s.negated = append(s.negated, n)
 	}
 }
@@ -470,21 +481,28 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 //
-// An id in these arguments IS lifted, as a citation (#1010). A save is a NEW memory's
-// text, so the id in it names ANOTHER memory, and an agent that writes "per <id>, add
-// ..." while saving is relying on that memory as much as one that names it in prose.
-// The reason this once refused is gone: on a real store every stored identifier verdict
-// from a save's arguments was the agent's own update of the memory, and an update that
-// carries new text is now read as nothing before it reaches here (hostevent's
-// addToolCall), while a save cannot name the id of the row it is itself creating. The
-// words stay out of prose, so a save that restates a memory is still read as a
-// restatement (superseded) and never as a use of its wording; but an id in it outranks
-// that, exactly as an id in prose does, because the agent named the memory.
+// What an id in these arguments means (#1010):
+//   - An id in a save's text is a citation. A save is a NEW memory's text, so the id
+//     in it names ANOTHER memory, and an agent that writes "per <id>, add ..." while
+//     saving is relying on that memory as much as one that names it in prose. An id in
+//     the save's source_ref is read the same way.
+//   - It is held to the same negation rule as an id in prose: "memory <id> is wrong,
+//     the real rule is ..." binds the id to the cue and is a contradiction, never a
+//     use. Only the ids are checked for that; the save's words never draw a negation
+//     arm, as they never do from any tool's arguments.
+//   - The words stay out of prose, so a save that restates a memory is still read as a
+//     restatement (superseded) and never as a use of its wording.
+//   - An id named by decision_record's supersedes counted before this change and
+//     still does. An update that carries new text is read as nothing before it reaches
+//     here (hostevent's addToolCall); the reason this once refused ids was that every
+//     stored identifier verdict from a save's arguments was the agent's own update of
+//     the memory, and a save cannot name the row it is itself creating.
 func (s *Signals) AddSaveArgs(text string) {
 	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
+	s.addNegations(text, true)
 }
 
 // AddToolArgs records a non-save tool call's arguments.

@@ -667,7 +667,7 @@ What this does not fix: the bodies of Edit, Write and Bash tool arguments are st
 token set, which clears the token bar (three shared distinctive words and half of the
 memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
 skipped, a word in a quarter of the session's turns does not count toward a match, and the
-id in the arguments of an update that rewrites a memory's text is not a citation (an update with no text, such as tags-only, and a save, are, since #1010 for the save). It is measured by `ghost bench --audit`
+id in the arguments of an update that rewrites a memory's text is not a citation (an update with no text, such as tags-only, is one; so is an id in a save's text or source_ref, since #1010, unless a negation cue is bound to it, in which case it is a denial, as in prose). It is measured by `ghost bench --audit`
 ([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
 labelled offline session (forty memories, twenty of them in the session's own domain, a
 long scripted session of narrative and file bodies with hand-written labels) through

@@ -95,8 +95,8 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 		}
 		mem[m.ID] = m
 	}
-	if len(c.Memories) != 44+9 {
-		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures, four spread memories and nine false-positive cases", len(c.Memories))
+	if len(c.Memories) != 44+11 {
+		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures, four spread memories and eleven false-positive cases", len(c.Memories))
 	}
 	// A spread memory's words are in no single turn at the token bar: the bench's
 	// point is that the union of turns clears it and no one turn does.

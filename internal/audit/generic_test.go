@@ -344,3 +344,30 @@ func TestGenericWordsDoNotMakeASupersede(t *testing.T) {
 		t.Errorf("generic words in a save judged %s, want ignored", v.Outcome)
 	}
 }
+
+// TestANegatedIDInASaveIsADenialNotACitation: an id a save names beside a cue it is
+// bound to is the agent saying the memory is wrong, exactly as in prose, so it is
+// contradicted and never used by identifier. The save's words alone never draw a
+// negation arm.
+func TestANegatedIDInASaveIsADenialNotACitation(t *testing.T) {
+	s := newTestSignals(t)
+	s.AddSaveArgs("Memory " + testMemoryID + " is wrong, ignore it; the real rule is that convoys queue by draught")
+	v := compareOneAs(t, s, testMemoryID, "an unrelated memory about something else entirely")
+	if v.Outcome != OutcomeContradicted {
+		t.Errorf("a save denying the memory by id judged %s/%s, want contradicted", v.Outcome, v.Signal)
+	}
+
+	// The same id in prose agrees.
+	p := newTestSignals(t)
+	p.AddProse("Memory " + testMemoryID + " is wrong, ignore it; the real rule is that convoys queue by draught")
+	if v := compareOneAs(t, p, testMemoryID, "an unrelated memory about something else entirely"); v.Outcome != OutcomeContradicted {
+		t.Errorf("prose control judged %s, want contradicted", v.Outcome)
+	}
+
+	// A negation cue in a save that is not bound to the id is not a denial.
+	u := newTestSignals(t)
+	u.AddSaveArgs("Per " + testMemoryID + ", I now ignore the formatting rules")
+	if v := compareOneAs(t, u, testMemoryID, "an unrelated memory about something else entirely"); v.Outcome != OutcomeUsed {
+		t.Errorf("a cited id with an unrelated cue judged %s, want used", v.Outcome)
+	}
+}
