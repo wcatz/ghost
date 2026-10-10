@@ -265,8 +265,17 @@ func sessionRowsFrom(items []assemble.Item) (memories, globals []sessionMemory) 
 // loses nothing and is byte-identical to the uncapped render. Only when no
 // unpinned row is left does a pinned row go, because a block over the host's
 // limit delivers none of its rows. The framing itself (summary, tasks,
-// decisions) is counted but not trimmed: if it alone exceeds the cap, every row
-// is cut and the block is still over it.
+// decisions) is counted but not trimmed.
+//
+// WHETHER CUTTING CAN HELP IS DECIDED ONCE. The framing is not independent of the
+// cuts — the count line gains a clause per row cut — so the ceiling check reads a
+// framing that grows as rows are removed. It is therefore asked once, from the
+// framing as it stands with EVERY row cut, which is the longest the cuts can make
+// it and the only reading that does not depend on how many rows happen to have
+// been cut when the question is asked. A block whose framing reaches the host
+// limit even with every row cut keeps its rows: cutting cannot reach the cap and
+// would only empty the block. A framing between the cap and the host limit still
+// has rows cut, down to none if that is what it takes.
 func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink, sessionID string, frames ...sessionFrame) (memories, globals []sessionMemory, tally sessionTally) {
 	var frame sessionFrame
 	if len(frames) > 0 {
@@ -311,7 +320,9 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	}
 	budget.MaxBytes = sessionStartByteCap
 	budget.KeepPinned = true
-	// The host's own limit: a framing alone at or over it cannot be helped by cutting rows.
+	// The host's own limit: a framing that reaches it even with every row cut
+	// cannot be helped by cutting rows, so those rows are kept instead of cut for
+	// nothing. Decided once by the fit pass, against the all-cut framing.
 	budget.FramingCeiling = sessionHostLimit
 	budget.Measure = func(items []assemble.Item, trace *assemble.Trace) int {
 		mem, glob := sessionRowsFrom(items)
