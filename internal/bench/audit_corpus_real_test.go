@@ -14,18 +14,18 @@ import (
 // GHOST_UPDATE_GOLDEN=1 go test ./internal/bench -run TestRealAuditBaseline.
 const realAuditGoldenPath = "testdata/audit_report_real.golden"
 
-// The real-set floors: today's measured figures, held so a judge change that
-// regresses on hand-labelled real work fails CI rather than being found by the
-// next reader. Every one is a MEASURED value and not a target — the set's recall
-// is zero and that is a finding to report, not a number to tune here.
+// The real-set floors: the measured figures, held so a judge change that regresses
+// on hand-labelled real work fails CI rather than being found by the next reader.
+// Every one is a MEASURED value and not a target. The set has three positives, so a
+// change that moves them is a hypothesis about the judge, not a result.
 //
-// Two of the four are zero because today the judge files no `used` verdict at all
-// on this set: a count cannot fall below zero, so as GATES they are vacuous and
-// the comment on TestRealAuditFloors says so. They are still recorded here, and
-// pinned by the population constants beside them, because a floor is a claim
-// about a number and the number has to exist for the claim to mean anything.
+// The cited-id floor is 1 since #1010 (an id in a save's arguments is a citation).
+// The restatement floor stays 0, and that is a finding: the labelled restatements are
+// clipped excerpts of long memories, and in two of three the identical excerpt sits in
+// neighbouring turns the labels call NOT_USED or UNCLEAR, so no overlap statistic can
+// admit one without admitting the other (see docs/benchmarks.md).
 const (
-	realFloorCites        = 0
+	realFloorCites        = 1
 	realFloorRestatements = 0
 	realCeilingFalseUsed  = 0
 	// The populations those figures are fractions of, pinned so a corpus quietly
@@ -195,25 +195,15 @@ func TestRealAuditBaseline(t *testing.T) {
 // hand-labelled real work cannot fall below what they are today without CI going
 // red.
 //
-// Read the floors honestly, because two of them are zero and a zero floor stops
-// nothing. Today the judge files no `used` verdict at all on this set — every one
-// of the thirty-six pairs comes back `ignored` — so `cited ids caught` and
-// `restatements caught` cannot go lower, and token-arm precision is undefined
-// because the arm filed nothing. That is the finding this change reports, not a
-// gap in the test: the real set's recall is 0 of 3 and the reason is in the
-// corpus's own labels (one cited id sits in a save's arguments, which the judge
-// reads as nothing by design; the two restatements are long memories where the
-// turn clears the absolute floor of three shared words but not the half-the-memory
-// fraction). What the test can actually hold is the population — a corpus quietly
-// trimmed of its labels would meet every floor above — and the false-"used"
-// ceiling, which is the one direction a regression can move today and the one
-// number the real set exists to protect.
+// Read the floors honestly: the restatement floor is zero and gates nothing. Token-arm
+// precision is still undefined because the arm files nothing on this set. The cited-id
+// floor of 1 is a real gate on the single labelled citation. The false-"used" ceiling
+// is the number the real set exists to protect.
 func TestRealAuditFloors(t *testing.T) {
 	h := realAuditRun(t).Headlines()
-	// The two recall-side floors. Both are zero today (see above), so neither can
-	// fail yet; they are written as comparisons against the constants rather than
-	// as assertions on zero so that raising one is a one-constant edit and the gate
-	// is already in place the day the arm fires.
+	// The two recall-side floors; the restatement one is zero today (see above) and
+	// is written as a comparison against the constant so that raising it is a
+	// one-constant edit.
 	if h.CitesCaught < realFloorCites {
 		t.Errorf("cited ids caught %d of %d, floor %d", h.CitesCaught, h.CitesTotal, realFloorCites)
 	}

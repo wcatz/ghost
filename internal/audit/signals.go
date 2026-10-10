@@ -470,15 +470,21 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 //
-// An id in these arguments is NOT lifted: a save's arguments are the new memory's own
-// text, so an id in them is not the agent relying on the memory it names. (On a real
-// store every stored identifier verdict was the agent's own update of the memory,
-// counted as a citation; an update is now read as nothing, see hostevent's
-// addToolCall.) A save that restates a memory is still read, as a restatement, by the
-// words above. The cost is a save that names ANOTHER memory by id in order to cite it,
-// which goes unread.
+// An id in these arguments IS lifted, as a citation (#1010). A save is a NEW memory's
+// text, so the id in it names ANOTHER memory, and an agent that writes "per <id>, add
+// ..." while saving is relying on that memory as much as one that names it in prose.
+// The reason this once refused is gone: on a real store every stored identifier verdict
+// from a save's arguments was the agent's own update of the memory, and an update that
+// carries new text is now read as nothing before it reaches here (hostevent's
+// addToolCall), while a save cannot name the id of the row it is itself creating. The
+// words stay out of prose, so a save that restates a memory is still read as a
+// restatement (superseded) and never as a use of its wording; but an id in it outranks
+// that, exactly as an id in prose does, because the agent named the memory.
 func (s *Signals) AddSaveArgs(text string) {
 	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
+	for _, id := range memoryIDs(text) {
+		s.AddID(id)
+	}
 }
 
 // AddToolArgs records a non-save tool call's arguments.

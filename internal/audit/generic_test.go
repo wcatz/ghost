@@ -244,24 +244,25 @@ func TestGenericWordsDoNotSoftenAContradiction(t *testing.T) {
 	}
 }
 
-// TestASaveOrUpdateDoesNotCiteWhatItNames: the id in a write tool's arguments is the
-// memory being rewritten. Its words are still read as a restatement.
-func TestASaveOrUpdateDoesNotCiteWhatItNames(t *testing.T) {
+// TestASaveThatNamesAMemoryCitesIt: a save's arguments are a new memory's text, so an
+// id in them names another memory and is a citation (#1010); the save's words are still
+// read as a restatement, and a save with no id is still only that.
+func TestASaveThatNamesAMemoryCitesIt(t *testing.T) {
 	s := newTestSignals(t)
-	s.AddSaveArgs(testMemoryID + " " + memContent)
-	if s.HasID(testMemoryID) {
-		t.Error("an id in a save's arguments was recorded as a citation")
+	s.AddSaveArgs("per " + testMemoryID + " add the anchor rule: never mutate by the shared statement alone")
+	if !s.HasID(testMemoryID) {
+		t.Error("an id in a save's arguments was not recorded as a citation")
 	}
-	v := compareOneAs(t, s, testMemoryID, memContent)
-	if v.Outcome != OutcomeSuperseded {
-		t.Errorf("a save restating the memory judged %s, want superseded", v.Outcome)
+	v := compareOneAs(t, s, testMemoryID, "an unrelated memory about something else entirely")
+	if v.Outcome != OutcomeUsed || v.Signal != SignalIdentifier {
+		t.Errorf("a save naming the memory judged %s/%s, want used/identifier", v.Outcome, v.Signal)
 	}
 
-	// The control: the same id in any other tool call, or in prose, is a citation.
+	// The save's words alone, without the id, are still the superseded bucket.
 	s2 := newTestSignals(t)
-	s2.AddToolArgs("ghost_memory_search --note " + testMemoryID)
-	if !s2.HasID(testMemoryID) {
-		t.Error("an id in an ordinary tool call stopped being a citation")
+	s2.AddSaveArgs(memContent)
+	if v := compareOneAs(t, s2, testMemoryID, memContent); v.Outcome != OutcomeSuperseded {
+		t.Errorf("a save restating the memory judged %s, want superseded", v.Outcome)
 	}
 }
 

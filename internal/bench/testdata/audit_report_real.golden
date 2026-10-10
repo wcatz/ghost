@@ -2,7 +2,7 @@ retrieval audit (hand-labelled real sessions): 36 memories, 94 scripted turn ite
   audit.Run over a labelled corpus, scored against that corpus's own labels;
   no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves
 
-cited ids caught: 0 of 1
+cited ids caught: 1 of 1
 restatements caught: 0 of 2
 false "used" (labels expect ignored): 0 of 33
 token-arm precision: n/a
@@ -361,15 +361,15 @@ scenario record-69: the call is placed before turn 85, source session_start, kee
 
 scenario record-71: the call is placed before turn 90, source session_start, keeps 5 memories (0 same-domain)
   outcome                expected   got  precision        recall          
-  used/identifier               1     0  n/a              0.000 (0/1)     
+  used/identifier               1     1  1.000 (1/1)      1.000 (1/1)     
   used/token                    0     0  n/a              n/a             
-  used (either arm)             1     0  n/a              0.000 (0/1)     
+  used (either arm)             1     1  1.000 (1/1)      1.000 (1/1)     
   superseded_in_session         0     0  n/a              n/a             
   contradicted                  0     0  n/a              n/a             
-  ignored                       4     5  0.800 (4/5)      1.000 (4/4)     
+  ignored                       4     4  1.000 (4/4)      1.000 (4/4)     
   confusion (rows: expected, columns: got)
                            used/id  used/tok  supersed   contrad   ignored
-  used/identifier                0         0         0         0         1
+  used/identifier                1         0         0         0         0
   used/token                     0         0         0         0         0
   superseded_in_session          0         0         0         0         0
   contradicted                   0         0         0         0         0
