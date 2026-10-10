@@ -1203,7 +1203,16 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	// got stored. The rule still reaches that tool through the server
 	// instructions, which route design decisions to it by name.
 	if content != nil {
-		msg += repoFactHint(*content)
+		// The category the note will carry after this update, which is the
+		// one the advisory judges it as: a category passed here wins, and an
+		// omitted one leaves the stored row's, so a note already filed as a
+		// rule is not re-judged as a fact because this call left the field
+		// alone.
+		category := mems[0].Category
+		if args.Category != "" {
+			category = args.Category
+		}
+		msg += repoFactHint(*content, category)
 	}
 	if truncated {
 		msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1702,6 +1711,10 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	}, nil, nil
 }
 
+// maxHealthPinnedContradictions bounds how many pinned-contradiction entries
+// ghost_health renders; the count line carries the total.
+const maxHealthPinnedContradictions = 20
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -2093,7 +2106,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
@@ -2658,7 +2671,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
@@ -3166,6 +3179,29 @@ func (s *Server) registerTools() {
 
 		if links, scans, err := s.store.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
+		}
+
+		// Pinned rows with open contradictions (#975): a pin keeps a memory in
+		// every session start, and nothing else tells its owner that newer rows
+		// disagree with it. Report-only: no row is unpinned, resolved or withheld
+		// here. A failed read is reported rather than dropped, so the section's
+		// absence means only "nothing to review".
+		if pinned, total, perr := s.store.PinnedRowsWithContradictions(ctx, maxHealthPinnedContradictions); perr != nil {
+			fmt.Fprintf(&sb, "**Pinned rows with open contradictions:** could not be read: %v\n", perr)
+		} else if total > 0 {
+			fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d — unpin or update the pinned row\n", total)
+			for _, r := range pinned {
+				fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
+					assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
+					assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
+				if r.AlsoContradictedBy > 0 {
+					fmt.Fprintf(&sb, "  (+%d more contradicting rows)\n", r.AlsoContradictedBy)
+				}
+			}
+			if more := total - len(pinned); more > 0 {
+				fmt.Fprintf(&sb, "  ... and %d more\n", more)
+			}
+			sb.WriteString("\n")
 		}
 
 		// History growth (#729), additive: everything above keeps its name and

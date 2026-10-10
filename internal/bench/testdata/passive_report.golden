@@ -10,7 +10,7 @@ session start / ghost context (4 blocks)
   budget use             0.957 (88/92)   rows rendered / row caps
   budget cut             0.642 (158/246)   admissible rows left out
   duplicate rate         0.045 (4/88)   rendered beside the row they restate or replace
-  block size             mean 3894 B / 974 tok, max 4046 B / 1012 tok
+  block size             mean 3984 B / 996 tok, max 4136 B / 1034 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 session start, scope env=production (4 blocks)
@@ -21,7 +21,7 @@ session start, scope env=production (4 blocks)
   budget use             0.946 (87/92)   rows rendered / row caps
   budget cut             0.630 (148/235)   admissible rows left out
   duplicate rate         0.046 (4/87)   rendered beside the row they restate or replace
-  block size             mean 3724 B / 931 tok, max 3885 B / 972 tok
+  block size             mean 3814 B / 954 tok, max 3975 B / 994 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 ghost_project_context (limit 20) (4 blocks)
@@ -32,7 +32,7 @@ ghost_project_context (limit 20) (4 blocks)
   budget use             1.000 (80/80)   rows rendered / row caps
   budget cut             0.675 (166/246)   admissible rows left out
   duplicate rate         0.000 (0/80)   rendered beside the row they restate or replace
-  block size             mean 2725 B / 682 tok, max 2769 B / 693 tok
+  block size             mean 2814 B / 704 tok, max 2859 B / 715 tok
   header honesty         n/a    (this surface prints no count line)
 
 project resource / recall_project (4 blocks)
@@ -43,6 +43,6 @@ project resource / recall_project (4 blocks)
   budget use             0.736 (103/140)   rows rendered / row caps
   budget cut             0.581 (143/246)   admissible rows left out
   duplicate rate         0.000 (0/103)   rendered beside the row they restate or replace
-  block size             mean 3288 B / 822 tok, max 3455 B / 864 tok
+  block size             mean 3378 B / 845 tok, max 3545 B / 887 tok
   header honesty         n/a    (this surface prints no count line)
 
