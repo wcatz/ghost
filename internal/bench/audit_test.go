@@ -95,8 +95,8 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 		}
 		mem[m.ID] = m
 	}
-	if len(c.Memories) != 44 {
-		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures and four spread memories", len(c.Memories))
+	if len(c.Memories) != 44+9 {
+		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures, four spread memories and nine false-positive cases", len(c.Memories))
 	}
 	// A spread memory's words are in no single turn at the token bar: the bench's
 	// point is that the union of turns clears it and no one turn does.
@@ -149,7 +149,7 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 					shared++
 				}
 			}
-			if shared < 3 || shared*3 < len(mw) {
+			if shared < 3 || shared*2 < len(mw) {
 				t.Errorf("turn %d is labelled a restatement of %s but shares %d of its %d words", i, id, shared, len(mw))
 			}
 		}
@@ -169,6 +169,15 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 			labelled[id] = true
 			if turn.Kind != AuditSaveArgs {
 				t.Errorf("turn %d saves %s but is kind %q", i, id, turn.Kind)
+			}
+		}
+		for _, id := range turn.Edits {
+			labelled[id] = true
+			if !strings.Contains(strings.ToUpper(turn.Text), id) {
+				t.Errorf("turn %d edits %s but its text does not hold the full id", i, id)
+			}
+			if turn.Kind != AuditToolCall {
+				t.Errorf("turn %d edits %s but is kind %q, so nothing routes the id", i, id, turn.Kind)
 			}
 		}
 		if len(labelled) == 0 {

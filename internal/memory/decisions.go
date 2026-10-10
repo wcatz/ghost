@@ -561,3 +561,26 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	}
 	return decisions, rows.Err()
 }
+
+// FindLiveDecisionByTitle returns the id of the newest decision in the project
+// that is not superseded (active or revisit) and whose title equals title,
+// trimmed and case-insensitively, or "" when none does. It reads only the id
+// and title, so the advice it feeds does not scan decision or rationale text
+// under the read lock. The case fold is SQLite's, which is ASCII-only.
+func (s *Store) FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "", nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM decisions
+		  WHERE project_id = ? AND status != 'superseded' AND lower(trim(title)) = lower(?)
+		  ORDER BY created_at DESC LIMIT 1`, projectID, title).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}

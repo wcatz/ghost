@@ -252,6 +252,9 @@ func dispatchCommand(argv []string) int {
 			case "status":
 				runMaintenanceStatus()
 				return 0
+			case "consolidate-global":
+				runMaintenanceConsolidateGlobal(argv[2:])
+				return 0
 			case "clean-scratch":
 				runMaintenanceCleanScratch(argv[2:])
 				return 0

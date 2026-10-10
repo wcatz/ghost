@@ -27,7 +27,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
 | Tasks | `ghost_task_update` | Change task status, priority, or description |
 | Tasks | `ghost_task_complete` | Mark a task done with optional notes |
-| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports |
+| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
 
 `ghost_resolve` is dry-run by default. `ghost_project_delete` is also dry-run by default and is irreversible when applied. Core memory CRUD and search do not call an LLM; maintenance-oriented tools may use the calling session's CLI harness.

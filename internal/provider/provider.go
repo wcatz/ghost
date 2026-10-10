@@ -105,6 +105,9 @@ type MemoryStore interface {
 	// content was cut at memory.MaxContentLen even when no field was.
 	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
+	// FindLiveDecisionByTitle returns the id of a non-superseded decision in
+	// the project with the same title (trimmed, case-insensitive), or "".
+	FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
 	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
 	// decision's companion memory (retired, or left live because it is pinned).

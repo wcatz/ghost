@@ -662,23 +662,25 @@ for a call and a session that belong together. Four pieces make that hold
   `SweepSidecars` removes stale sidecars of any version.
 
 What this does not fix: the bodies of Edit, Write and Bash tool arguments are still in the
-token set, which clears the token bar (three shared distinctive words and a third of the
-memory's words) on ordinary development text. It is measured by `ghost bench --audit`
+token set, which clears the token bar (three shared distinctive words and half of the
+memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
+skipped, a word in a quarter of the session's turns does not count toward a match, and the
+id in a save or update's arguments is not a citation. It is measured by `ghost bench --audit`
 ([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
 labelled offline session (forty memories, twenty of them in the session's own domain, a
 long scripted session of narrative and file bodies with hand-written labels) through
 `audit.Run` and scores the verdicts against the labels. The numbers are the bench's golden
 (`internal/bench/testdata/audit_report.golden`), not a table kept here, so they cannot go
 stale. At the time of writing, same-domain memories no turn restates are judged `used` in
-10 of 11 cases for a call before turn 0 of 40 (a session-start injection), 10 of 15 for a
-call before turn 20, and 0 for a call after the last turn, while every labelled cite and
+3 of 11 cases for a call before turn 0 of 40 (a session-start injection), 3 of 15 for a
+call before turn 20 (10 of 11 and 10 of 15 before the half bar, the outlier line and the generic-word rule), and 0 for a call after the last turn, while every labelled cite and
 restatement is caught. The residual narrowed when the token arm was restricted to ONE
 turn (#932): the bar has to be cleared by the words that arrived together, so the four
 memories the corpus spreads across turns went from judged `used` 4 of 4 to 0 of 4, the
 session-start `used/token` false positives went 15 → 10 and `used` precision 0.318 →
 0.412, with recall 1.000 unchanged. What is left is a single turn that happens to repeat
-a third of an own-domain memory, which is the shape the floor and the fraction were
-chosen for.
+half of an own-domain memory in words the session does not repeat everywhere, which is the
+shape the floor and the fraction were chosen for.
 
 Ordering helps only for a call made late; a session-start injection still sees the whole
 session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 7 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
