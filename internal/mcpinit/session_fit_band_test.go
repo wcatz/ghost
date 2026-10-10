@@ -9,8 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// responseFitStage is the stage name a response-fit cut is filed under, spelled
+// here because the assembler's stage constants are unexported. It is the one
+// string `assemble.CountsFor` reads as a byte cut, so it has to be the one the
+// pass itself records.
+const responseFitStage = "response_fit"
 
 // bandNameBytes is the length of the band fixture's project name. The name is
 // the one framing field nothing bounds — it is printed twice, in the heading and
@@ -18,11 +25,11 @@ import (
 // few hundred bytes of the host limit with rows still in it.
 const bandNameBytes = 3184
 
-// bandFramingMargin is how close to the host limit the band fixture's framing
-// has to sit: the count line a cut adds is a couple of hundred bytes long, so a
-// framing this close crosses the limit the moment a single row is cut, which is
-// the whole of the band the fit pass has to decide about.
-const bandFramingMargin = 250
+// bandFramingMargin is how close to the host limit the band fixture's framing has
+// to sit: the count line a cut adds, and the heading it earns, are longer than
+// this, so a framing this close crosses the limit the moment a single row is cut
+// — which is the whole of the band the fit pass has to decide about.
+const bandFramingMargin = 300
 
 // seedFitBandStore builds the fixture for the band edge: a store whose
 // session-start block has a FRAMING — everything but the memory rows — within a
@@ -51,10 +58,6 @@ func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir project path: %v", err)
 	}
-	canonical, err := filepath.EvalSymlinks(projectPath)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
 	exec := func(q string, args ...any) {
 		t.Helper()
 		if _, err := db.Exec(q, args...); err != nil {
@@ -62,7 +65,13 @@ func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 		}
 	}
 	exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
-	exec(`INSERT INTO projects (id, path, name) VALUES ('pband', ?, ?)`, canonical, strings.Repeat("n", bandNameBytes))
+	// The path is recorded in the spelling the session will report, NOT resolved
+	// through EvalSymlinks: resolution compares the caller-reported directory
+	// against the recorded text before it resolves either of them, so a stored
+	// spelling the caller never types — the long form of a Windows 8.3 short name
+	// in a temp directory — reaches no candidate, and this project's name (below)
+	// is far too long to be the basename fallback the other fixtures lean on.
+	exec(`INSERT INTO projects (id, path, name) VALUES ('pband', ?, ?)`, projectPath, strings.Repeat("n", bandNameBytes))
 	// Past its 1,000-byte bound: the read decides how much the block spends.
 	exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('pband', ?)`,
 		strings.Repeat("Learned summary sentence. ", 200))
@@ -94,25 +103,48 @@ func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 	return dbPath, projectPath
 }
 
-// bandBlock renders the fixture the way the hook does, and returns the block
-// beside the framing alone — the same render with no memory row in it, which is
-// what Budget.Measure reads when the fit pass asks whether the framing is the
-// excess.
+// bandFramings renders the fixture the way the hook does, and returns the block
+// beside the two framings the fit pass compares.
 //
-// It is not a second renderer: both calls go through the production
-// formatSessionContext with the values loadSessionContextFrom just read, and the
-// no-row call is faithful to what Measure sees because the fixture's rows are all
-// inside their caps and none is withheld or deferred — so the heading block a
-// tally would add for a bucket with withheld rows is absent from both.
-func bandBlock(t *testing.T, dbPath, projectPath string) (block string, framing int) {
+//   - noCut is the framing with no row cut, which is what the pass reads on its
+//     first over-cap iteration. With nothing withheld and nothing cut, no bucket
+//     has a count line and the render is the framing alone.
+//   - allCut is the framing with EVERY row cut, which is what the ceiling decision
+//     is taken against. Each bucket now has byte-cut rows, so the render carries
+//     the Memories heading and the count line naming them — the clause the cuts
+//     earn — and that is what pushes the framing over the limit.
+//
+// Both are rendered through the production formatSessionContext with tallies taken
+// from the production projection (`assemble.CountsFor`) over a trace shaped the
+// way the pass shapes it, so neither number is this test's own arithmetic. The
+// all-cut trace is the one `allCutTrace` hands `Budget.Measure`: one
+// `response_fit` drop per row the answer holds.
+func bandFramings(t *testing.T, dbPath, projectPath string) (block string, noCut, allCut int) {
 	t.Helper()
 	cfg := mustHookConfig(t)
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally :=
 		loadSessionContextFrom(dbPath, projectPath, cfg, func() time.Time { return now }, "")
 	block = formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
-	framing = len(formatSessionContext(projectID, project, nil, nil, learned, tasks, decisions, interactionCount, nil, sessionTally{}))
-	return block, framing
+
+	render := func(tr *assemble.Trace) int {
+		return len(formatSessionContext(projectID, project, nil, nil, learned, tasks, decisions, interactionCount, nil,
+			sessionTally{
+				project: assemble.CountsFor(tr, projectID, 0),
+				globals: assemble.CountsFor(tr, memory.GlobalProjectID, 0),
+			}))
+	}
+	noCut = render(&assemble.Trace{})
+
+	cut := &assemble.Trace{}
+	for range memories {
+		cut.Decisions = append(cut.Decisions, assemble.Decision{ProjectID: projectID, Stage: responseFitStage})
+	}
+	for range globals {
+		cut.Decisions = append(cut.Decisions, assemble.Decision{ProjectID: memory.GlobalProjectID, Stage: responseFitStage})
+	}
+	allCut = render(cut)
+	return block, noCut, allCut
 }
 
 // TestSessionStartFitPassDecidesTheCeilingOnce is the band edge of issue #987.
@@ -132,13 +164,21 @@ func bandBlock(t *testing.T, dbPath, projectPath string) (block string, framing 
 // under the limit.
 func TestSessionStartFitPassDecidesTheCeilingOnce(t *testing.T) {
 	dbPath, projectPath := seedFitBandStore(t)
-	block, framing := bandBlock(t, dbPath, projectPath)
-	t.Logf("framing %d bytes, block %d bytes", framing, len(block))
+	block, noCut, allCut := bandFramings(t, dbPath, projectPath)
+	t.Logf("framing %d bytes uncut, %d with every row cut, block %d bytes", noCut, allCut, len(block))
 
 	// The fixture, not the behaviour: a framing outside the band tests nothing.
-	if framing < sessionHostLimit-bandFramingMargin || framing >= sessionHostLimit {
-		t.Fatalf("fixture framing is %d bytes, want within %d of the %d host limit: the band is the case under test",
-			framing, bandFramingMargin, sessionHostLimit)
+	// The uncut framing has to be UNDER the limit (or the pass would never have
+	// started cutting, and the bug could not reproduce) and within a few hundred
+	// bytes of it, and the all-cut framing has to be OVER it (or cutting could
+	// have helped and the rows should have gone).
+	if noCut < sessionHostLimit-bandFramingMargin || noCut >= sessionHostLimit {
+		t.Fatalf("fixture framing is %d bytes uncut, want within %d of the %d host limit: the band is the case under test",
+			noCut, bandFramingMargin, sessionHostLimit)
+	}
+	if allCut < sessionHostLimit {
+		t.Fatalf("fixture framing is %d bytes with every row cut, want at or over the %d host limit: cutting cannot "+
+			"reach the cap, so this block must keep its rows", allCut, sessionHostLimit)
 	}
 	if len(block) <= sessionStartByteCap {
 		t.Fatalf("fixture block is %d bytes, not over the %d cap — the cap has to bind for the band to be reached",
@@ -150,7 +190,7 @@ func TestSessionStartFitPassDecidesTheCeilingOnce(t *testing.T) {
 	// having kept the block under a limit it is over either way.
 	if strings.Contains(block, "cut to keep this block under the host's output limit") {
 		t.Errorf("the block is %d bytes with rows cut for size, and the framing alone is %d — cutting cannot "+
-			"reach the %d cap, so those rows were cut for nothing:\n%s", len(block), framing, sessionStartByteCap, block)
+			"reach the %d cap, so those rows were cut for nothing:\n%s", len(block), noCut, sessionStartByteCap, block)
 	}
 
 	// The record half: a cut that did not keep the block under the limit is
@@ -159,7 +199,7 @@ func TestSessionStartFitPassDecidesTheCeilingOnce(t *testing.T) {
 	cuts := recordedResponseFitCuts(t, dbPath)
 	if cuts != 0 {
 		t.Errorf("retrieval record holds %d response_fit cuts, want 0: the framing (%d) cannot reach the cap, "+
-			"so no row was cut for size", cuts, framing)
+			"so no row was cut for size", cuts, noCut)
 	}
 }
 
