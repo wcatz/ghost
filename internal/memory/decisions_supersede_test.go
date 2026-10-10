@@ -362,11 +362,15 @@ func TestSupersedeDecisionLegacyCompanionMatchIsUnambiguousOnly(t *testing.T) {
 		_, memB := rec("T")
 		decC, memC := rec("Other")
 		unlink(t, s, memA, memB, memC)
-		if err := s.SupersedeDecision(ctx, testProject, decA, decC); err != nil {
+		got, err := s.SupersedeDecisionReport(ctx, testProject, decA, decC)
+		if err != nil {
 			t.Fatal(err)
 		}
 		if decisionMemoryResolved(t, s, memA) || decisionMemoryResolved(t, s, memB) {
 			t.Error("an ambiguous legacy match retired a companion that may belong to another decision")
+		}
+		if len(got.Ambiguous) != 2 {
+			t.Errorf("ambiguous = %v, want both same-text companions reported", got.Ambiguous)
 		}
 	})
 }
@@ -489,21 +493,64 @@ func TestSupersedeDecisionLinkLookup(t *testing.T) {
 			t.Error("a companion with a downgraded source was not retired")
 		}
 	})
-	t.Run("copied link retires nothing", func(t *testing.T) {
-		s := testStore(t)
-		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
-		other, err := s.Create(ctx, testProject, Memory{Category: "decision", Content: "an unrelated memory", Source: "manual", Importance: 0.5})
+	copyOf := func(t *testing.T, s *Store, decisionID, source string) string {
+		id, err := s.Create(ctx, testProject, Memory{Category: "decision", Content: "a copy", Source: source, Importance: 0.5})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, decisionCompanionRef(oldDec), other); err != nil {
+		if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, decisionCompanionRef(decisionID), id); err != nil {
 			t.Fatal(err)
+		}
+		return id
+	}
+	t.Run("an import-shaped copy leaves the real companion retired", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		cp := copyOf(t, s, oldDec, "onboarding")
+		got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !decisionMemoryResolved(t, s, oldMem) {
+			t.Error("the real companion was not retired")
+		}
+		if decisionMemoryResolved(t, s, cp) || len(got.Retired) != 1 || len(got.Ambiguous) != 0 {
+			t.Errorf("the copy was touched or the report is wrong: %+v", got)
+		}
+	})
+	t.Run("two decision_log rows retire nothing and are reported", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		cp := copyOf(t, s, oldDec, "decision_log")
+		got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decisionMemoryResolved(t, s, cp) || decisionMemoryResolved(t, s, oldMem) {
+			t.Error("an ambiguous link retired a memory")
+		}
+		if len(got.Ambiguous) != 2 || len(got.Retired) != 0 {
+			t.Errorf("report = %+v, want both claimants ambiguous", got)
+		}
+	})
+	t.Run("a default import of a second claimant keeps the real companion retired", func(t *testing.T) {
+		s := testStore(t)
+		oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+		imp, _, downgraded, err := s.ImportMemory(ctx, PortableMemory{
+			ID: "IMPORTED1", ProjectID: testProject, Category: "decision", Content: "carried by an artifact",
+			Source: "decision_log", SourceRef: decisionCompanionRef(oldDec),
+		}, ImportOptions{Apply: true})
+		if err != nil || !imp || !downgraded {
+			t.Fatalf("ImportMemory created=%v downgraded=%v err=%v", imp, downgraded, err)
 		}
 		if err := s.SupersedeDecision(ctx, testProject, oldDec, newDec); err != nil {
 			t.Fatal(err)
 		}
-		if decisionMemoryResolved(t, s, other) || decisionMemoryResolved(t, s, oldMem) {
-			t.Error("an ambiguous link retired a memory")
+		if !decisionMemoryResolved(t, s, oldMem) {
+			t.Error("an imported claimant left the real companion live")
+		}
+		if decisionMemoryResolved(t, s, "IMPORTED1") {
+			t.Error("the imported claimant was retired")
 		}
 	})
 }

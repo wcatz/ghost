@@ -161,6 +161,10 @@ type DecisionRetirement struct {
 	// because the resolve guard refuses them (pinned, retention 'persistent', or a convention/preference category).
 	// Such a memory keeps being returned by search and session start.
 	Declined []string
+	// Ambiguous are live memory ids that claim the old decision (a link or a
+	// composed text more than one memory carries) when no single one could be
+	// chosen. Nothing was retired for them and they still rank.
+	Ambiguous []string
 }
 
 // SupersedeDecision marks oldID as superseded by newID within one project and
@@ -279,24 +283,66 @@ func checkReservedSourceRef(ref string) error {
 // in the project composing to it. Two decisions with identical text, or an
 // edited memory, match nothing rather than the wrong row: a stale decision left
 // live is recoverable, a wrong memory retired is not.
-func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) ([]string, error) {
-	// The writer tools refuse the reserved prefix, but an import can still carry
-	// one, so the link is trusted only for a decision-category memory and only when
-	// it is unambiguous: a copied value gives two rows and retires neither.
-	var linked int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM memories WHERE project_id = ? AND category = 'decision' AND source_ref = ?
-	`, projectID, decisionCompanionRef(decisionID)).Scan(&linked); err != nil {
-		return nil, fmt.Errorf("count linked companions: %w", err)
+func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous []string, err error) {
+	// The writer tools refuse the reserved prefix, but an import carries
+	// source_ref verbatim, so the link is trusted only for a decision-category
+	// memory. When more than one claims it, the one RecordDecision wrote is the
+	// one with source 'decision_log' — an import downgrades the source — and it
+	// is the companion only if it is the sole such row. Otherwise nothing is
+	// chosen and the live claimants are returned as ambiguous, so the caller can
+	// say the decision's memory was left standing.
+	type linkRow struct {
+		id     string
+		source string
+		live   bool
 	}
-	if linked > 1 {
-		return nil, nil
+	rows0, err := tx.QueryContext(ctx, `
+		SELECT id, source, resolved_at IS NULL FROM memories
+		WHERE project_id = ? AND category = 'decision' AND source_ref = ?
+		ORDER BY rowid
+	`, projectID, decisionCompanionRef(decisionID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
-	if linked == 1 {
-		return selectIDs(ctx, tx, `
-			SELECT id FROM memories
-			WHERE project_id = ? AND category = 'decision' AND source_ref = ? AND resolved_at IS NULL
-		`, projectID, decisionCompanionRef(decisionID))
+	var linked []linkRow
+	for rows0.Next() {
+		var r linkRow
+		if err := rows0.Scan(&r.id, &r.source, &r.live); err != nil {
+			_ = rows0.Close()
+			return nil, nil, fmt.Errorf("scan linked companion: %w", err)
+		}
+		linked = append(linked, r)
+	}
+	if err := rows0.Err(); err != nil {
+		_ = rows0.Close()
+		return nil, nil, fmt.Errorf("read linked companions: %w", err)
+	}
+	_ = rows0.Close()
+	if len(linked) == 1 {
+		if linked[0].live {
+			return []string{linked[0].id}, nil, nil
+		}
+		return nil, nil, nil
+	}
+	if len(linked) > 1 {
+		var logged []linkRow
+		for _, r := range linked {
+			if r.source == "decision_log" {
+				logged = append(logged, r)
+			}
+		}
+		if len(logged) == 1 {
+			if logged[0].live {
+				return []string{logged[0].id}, nil, nil
+			}
+			return nil, nil, nil
+		}
+		for _, r := range linked {
+			if r.live {
+				ambiguous = append(ambiguous, r.id)
+			}
+		}
+		return nil, ambiguous, nil
 	}
 
 	var title, decision, rationale string
@@ -304,23 +350,23 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
 		decisionID, projectID).Scan(&title, &decision, &rationale); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("read decision: %w", err)
+		return nil, nil, fmt.Errorf("read decision: %w", err)
 	}
 	content, _ := decisionCompanionContent(title, decision, rationale)
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT title, decision, rationale FROM decisions WHERE project_id = ?`, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	same := 0
 	for rows.Next() {
 		var t, d, r string
 		if err := rows.Scan(&t, &d, &r); err != nil {
 			_ = rows.Close()
-			return nil, fmt.Errorf("scan project decision: %w", err)
+			return nil, nil, fmt.Errorf("scan project decision: %w", err)
 		}
 		if c, _ := decisionCompanionContent(t, d, r); c == content {
 			same++
@@ -328,12 +374,9 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	_ = rows.Close()
-	if same != 1 {
-		return nil, nil
-	}
 
 	unlinked, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
@@ -342,12 +385,15 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		  AND resolved_at IS NULL
 	`, projectID, content)
 	if err != nil {
-		return nil, fmt.Errorf("find unlinked companion: %w", err)
+		return nil, nil, fmt.Errorf("find unlinked companion: %w", err)
 	}
-	if len(unlinked) != 1 {
-		return nil, nil
+	if same == 1 && len(unlinked) == 1 {
+		return unlinked, nil, nil
 	}
-	return unlinked, nil
+	if len(unlinked) == 0 {
+		return nil, nil, nil
+	}
+	return nil, unlinked, nil
 }
 
 // retireDecisionCompanionTx retires the companion memory of a decision that has
@@ -379,14 +425,15 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 // the same pair finds nothing to stamp and writes no second history row.
 func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
-	candidates, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
+	candidates, ambiguous, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
 	if err != nil {
 		return out, err
 	}
+	out.Ambiguous = ambiguous
 	// The replacement's companion names the reason. One with no companion (an
 	// imported decision) leaves the reason unstated rather than naming an id
 	// that is not a memory.
-	newCompanions, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
+	newCompanions, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
 	if err != nil {
 		return out, err
 	}

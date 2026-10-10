@@ -3043,6 +3043,9 @@ func (s *Server) registerTools() {
 				if len(retirement.Retired) > 0 {
 					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
+				if len(retirement.Ambiguous) > 0 {
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
+				}
 				if len(retirement.Declined) > 0 {
 					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
 				}
