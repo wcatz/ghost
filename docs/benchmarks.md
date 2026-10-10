@@ -18,7 +18,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Ranking-state suite | Graded corpus carrying `created_at` spread and `supersedes` edges | Demote alone **1.000** R@1, decay alone **0.071**, shipped pair **0.214** against **0.571** with both off — the two paths do not compose, because the rows decay pushes down are the rows the demote promotes |
 | Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
 | No-answer queries | What search returns when nothing in the corpus answers the query | False-positive rate **1.000** in every condition at the shipped `search.min_similarity: 0` — and still **0.875** for the shipped hybrid path at a 0.50 cosine, against the keyword leg's **0.625**; mean top cosine **0.584** vs **0.741** answerable, and 51/220 answerable queries sit at or below the no-answer maximum |
-| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old | **9/10** on the one shipped arc (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half |
+| Storyline eval (`eval/storyline`) | Whether a **reversal** recorded mid-stream reaches later sessions marked as old | **9/10** on the original arc (local run, `opencode-go/glm-5.3-flash`); the store held the reversal correctly and the failing check is that the session-start block did not mark the stale half |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a recency-trap fixture, a ranking-state fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
@@ -936,7 +936,7 @@ and fails if it grows past the 2048-byte budget, so the figure guarded is the
 one an agent pays. Selection is untouched by the row shape: the behavioral floor
 is still 8/8 and the cap is still 15.
 
-## Storyline evals (`eval/storyline`) — local only, one shipped arc
+## Storyline evals (`eval/storyline`) — local only, four shipped arcs
 
 `eval/storyline` measures a property no single-shot benchmark can: what a project
 looks like **across** sessions when the ground truth changes mid-stream. A
@@ -944,9 +944,9 @@ reversal that the store holds correctly and the session-start block still report
 as current is invisible to every suite above, because each of them renders a
 block once against a corpus whose answers never contradict each other.
 
-One storyline ships, `reversed-decision` (project `northwind-api`): sessions 1
+`reversed-decision` (project `northwind-api`) is the original arc: sessions 1
 and 2 establish a decision, session 3 records its reversal, and the grade asks
-whether the run's own lifecycle caught up —
+whether the run's own lifecycle caught up. Its block lines are —
 
 | check | what it reads |
 |---|---|
@@ -957,7 +957,7 @@ whether the run's own lifecycle caught up —
 | `supersede-edge:<newer>` | a live `supersedes` edge exists **and points the way the store's own stamps say it must** |
 | `reversal-live:<newer>` | the replacement was not itself resolved (a supersede that resolves both is not a reversal) |
 | `final-block-carries:<newer>` | the replacement survives into the last block |
-| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the reversal |
+| `judge:followed-reversal` | only with `-judge`: an LLM reading the final answer against the arc's record. **Advisory**: reported, never decides the verdict or the exit code |
 
 The grade reads **store state** — `memory_links` rows and `memories` stamps — not
 the CLI's stdout. Stdout is kept in the report because a warning is evidence, but
@@ -994,7 +994,8 @@ the ancestry of whatever launched the runner (which would bill Claude for
 verdicts about an opencode-driven arc, and fail outright when the sandbox holds
 only opencode's credential).
 
-Every record is written through the real MCP `ghost_memory_save`, the block is
+Every record is written through the real MCP `ghost_memory_save` (or
+`ghost_save_global` for a record a storyline marks cross-project), the block is
 rendered by the real `ghost context`, and the two lifecycle phases are the real
 `ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI
 for is a chronology restamp: `created_at` has second granularity, so a reversal
@@ -1039,6 +1040,99 @@ session by construction, so the runner cannot yet demonstrate the production
 ordering (a supersede caught in session 2's lifecycle changing session 3's
 block); it can only show what the block does when the reversal is already stored
 and unresolved. Both are follow-ups, not claims.
+
+### Usefulness: the without-Ghost arm and the answer grade
+
+The block lines above say whether Ghost *delivered* a claim. They cannot say
+whether delivery changed what an agent did, and a carry-forward check that reads
+the block would pass trivially with Ghost and fail without it without measuring
+anything. So every session is graded twice, on separate lines:
+
+- **Delivery lines** (`injection-present`, `carry-forward`, `stale-original`,
+  `expired-withheld`): what the block held. Unchanged from the table above.
+- **Answer lines**, the primary grade, read only what the agent *said*.
+  `answer-carries:session-N:<name>` passes when the answer contains one of a
+  check's spellings (case-insensitive). `answer-avoids:session-N:<name>` fails
+  when the answer *uses* a stale, expired or mistaken claim. Both read CLAUSES: the
+  answer is cut at sentence ends, `, ; : ( ) — –` and the word "but", and a
+  rejecting word (`not`, `no`, `never`, `don't`, `instead of`, `wrong`, `ignored`,
+  `dropped`, `removed`, `retired`, `gone`, `deprecated`, `replaced`, `old`, ...)
+  only counts within the clause of the spelling it rejects. A carried spelling
+  must appear in at least one clause that does not reject it; an avoided one must
+  appear in none. `instead of` and `rather than` reject the clause after them, and
+  a rejecting "but ..." clause with no spelling of its own rejects the clause
+  before it ("X would be the usual choice, but it is not honoured here"). A
+  negation about the speaker ("I don't know whether X is required", "don't forget
+  X") is not a rejection. A spelling in a URL's path is a link and is ignored; its
+  host is not. `correction-replay` additionally fails an answer that names the
+  natural wrong spelling without carrying the required one. Carries match whole
+  tokens (`6432` is not found in `16432`). The judge column counts readable
+  verdicts only; unreadable or failed judge replies are shown as a separate
+  `(+N unread)` count.
+
+  *Known misgrades of the clause rule*, pinned in `TestCorrectionReplaySentences`:
+  it errs **lenient** when a hedge sits in the rejecting clause ("Send X;
+  Idempotency-Key is not required but harmless" passes), and **strict** when the
+  right spelling shares a clause with an unrelated rejecting word ("X is not
+  optional" fails `answer-carries`). The speaker-hedge exemption is a pattern
+  (`I`/`we`, optional adverbs, `don't`/`do not`/`can't`... then `have`/`see`, or
+  `know`/`forget`/`remember`/...), so a hedge phrased any other way ("you don't
+  have the spec") reads as a rejection, which errs strict. None of these is
+  special-cased. All are verbatim readings and cannot see a paraphrase; the advisory
+  judge column is the second look.
+
+`Validate` refuses a storyline whose answer grade could pass for the wrong
+reason: a carried spelling that appears in the script of the stage graded on it
+(the answer could be read out of the prompt), or in no earlier record (nothing
+could have carried it).
+
+Three arcs ship beside `reversed-decision`, each with an invented value a model
+cannot guess and a record that exists only for the arc:
+
+| arc | what it asks | why the answer cannot leak from a script |
+|---|---|---|
+| `correction-replay` (`acme-billing`) | session 1 is corrected on which header carries the idempotency key (the natural answer is `Idempotency-Key`; the right one is `X-Acme-Dedupe-Token`); sessions 2 and 3 ask the same question | the correction is only in session 1's script; sessions 2 and 3 name neither header |
+| `ops-fact` (`invoice-worker`) | a broker host and port given in one repository, saved through `ghost_save_global`, are needed in another | only session 1's script states the address; the sessions have no tools, so the global bucket in the injection is the only cross-project route measured (`ghost_search_all` is not reachable from them) |
+| `stale-fact` (`ledger-client`) | an old endpoint is saved with a `valid_until` that closed in January 2025, and session 1 is told the new one | the old endpoint is in no script, its record's wording does not say it is old (only the validity filter can withhold it), and only session 1's script names the new one |
+
+**The without-Ghost arm.** `-without-ghost` runs each storyline a second time per
+run, on the same build, the same model, the same scripts and the same saves, with
+one difference: each session is handed an *empty* block inside the same prompt
+framing (an empty block, not a missing hook). The records are still written and
+the project still bound, so the store is identical; the arc stages and end-state
+reads are skipped because no session of the arm is told what they produce, and
+only the answer lines are graded. Its misses are the measurement, so the arm
+never decides the exit code (an error in it still does). `-runs N` repeats both
+arms, `-storyline` takes a key, a comma-separated list or `all`, and the run ends
+with a table per storyline, both arms side by side, with each session's block
+size:
+
+```sh
+go run ./eval/storyline -storyline all -without-ghost -runs 10 \
+  -model opencode-go/glm-5.3-flash -opencode-auth-file ~/.local/share/opencode/auth.json
+```
+
+**Targets, not measurements.** These are the numbers a 10-run table is read
+against; none of them has been measured, no results artifact ships, and nothing
+gates on them:
+
+- With Ghost, the carried-forward answer appears in at least 8 of 10 runs per arc;
+  without Ghost, at most 2 of 10. Both high means the script leaks the answer;
+  both low means delivery or recall failed, and the block-size column says which.
+- `correction-replay`: the mistake is repeated in at most 1 of 10 runs with Ghost
+  and at least 7 of 10 without (the "stale/mistake used" column).
+- The stale original is marked or absent in 10 of 10 runs: in the answer, the
+  "stale/mistake used" column reads 0 of 10 on `stale-fact` and
+  `reversed-decision`; in the block, the "block delivered" column reads 10 of 10,
+  because it folds in the `stale-original` and `expired-withheld` lines.
+
+Not covered: a tool-enabled arm with the Ghost MCP server registered (saving and
+searching), and a Claude Code arm through `claude -p` with the SessionStart hook
+in a sandbox HOME. Every run is sandboxed: `HOME`, `XDG_DATA_HOME` and
+`XDG_CONFIG_HOME` point into the run's scratch tree, and
+`GHOST_DEV_FORBID_DATA_DIR` names the data directory your own environment
+resolves, so a resolve that escapes the tree is refused by the development build
+instead of writing to your store.
 
 ## Reporting rules (all phases)
 
