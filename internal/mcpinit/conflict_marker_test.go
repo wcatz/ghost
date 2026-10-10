@@ -136,3 +136,28 @@ func TestSessionStartDoesNotMarkAWithdrawnEdge(t *testing.T) {
 		t.Errorf("a withdrawn edge is marked:\n%s", got)
 	}
 }
+
+// The marker the assembler draws on a pinned row reaches the session-start
+// block: mcpinit copies assembler fields into its own row type and back, and a
+// field the copy leaves out is silently lost on exactly this surface (#975).
+func TestSessionStartCarriesThePinnedContradictionMarker(t *testing.T) {
+	project := conflictStore(t, false)
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`UPDATE memories SET pinned = 1, updated_at = '2026-01-01 00:00:00' WHERE id = 'cfpa01'`); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memories SET updated_at = '2026-06-01 00:00:00' WHERE id = 'cfpb01'`); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	got := renderSessionStart(t, project)
+	if l := blockLine(t, got, "cfpa01"); !strings.Contains(l, "contradicted_by=`cfpb01`") {
+		t.Errorf("the pinned row does not name the newer row that contradicts it: %q", l)
+	}
+	if hasBlockLine(got, "cfpb01") {
+		t.Errorf("the withheld newer row rendered")
+	}
+}

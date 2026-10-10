@@ -103,7 +103,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 `internal/mcpinit` owns the host-specific setup paths:
 
-- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, file-memory migration, and redirects.
+- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
 - Codex: `config.toml` registration plus `hooks.json` entries that require user trust.
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
@@ -141,6 +141,28 @@ host SessionStart
 ```
 
 opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead.
+
+### Working moment
+
+```text
+host UserPromptSubmit / PostToolUse (Edit|Write|MultiEdit)
+  → ghost hook message-submit | edit --source claude-code
+  → read working-moment-<session>.log (rows delivered, bytes spent)
+  → keyword-only assemble.Run (source working_moment, no embedding, no model)
+  → drop delivered rows, apply the keyword floor, fit the remaining allowance
+  → claim the delivery in the marker, verify it won, print additionalContext
+  → record the delivery in the retrieval record
+```
+
+The record write has its own short deadline and runs after the output is printed. Under a held write lock the delivery still happens, but the record is dropped with one WARN line on stderr, so the audit misses that row; the silent path prints nothing on stderr.
+
+The block is a push for the moment of work: the session-start block is chosen without a query, and a gotcha about a file is rarely in view when that file is edited. Claude Code is the only host whose hooks are documented to add `additionalContext` beside a user message and beside a tool result, so it is the only source with the `WorkingMoment` capability; the other hosts get a silent no-op.
+
+**The floor is the channel's own.** On a keyword-only read the assembler's relevance cutoff cannot be the floor (it always keeps the top row) and the no-answer bar judges nothing (there is no cosine), so any hit on a common word would deliver. A row therefore has to carry, counted on its own text, one distinctive term of the query (an identifier-shaped or file-name-shaped term of at least 3 characters, matched on word boundaries) or three distinct ordinary words, with a short list of generic development words (fix, test, build, run, update, docs, fail, error, change, add, remove, code, file, go, make) never counted, so "fix the tests" delivers nothing from a store full of workflow memories. The relevance cutoff still applies first.
+
+**The session's allowance is one ledger.** The host caps a hook's `additionalContext` at 10,000 characters and replaces an over-limit block by a 2,000-character preview, so the session-start block and the deliveries share 10,000 bytes. The session-start block writes the first entry (the rows it rendered and the bytes it spent); a marker with no such entry assumes the start spent its whole 9,000-byte cap. One delivery is at most 1,500 bytes and at most what is left.
+
+**The marker is append-only and a claim wins by file order.** Parallel tool calls run their hooks at the same moment, so a read-modify-write would deliver a row twice. A hook appends one `D <token> <bytes> <ids>` line, re-reads the file, and delivers only if its own entry is valid: none of its ids was claimed by an earlier valid entry and its bytes fit what earlier valid entries left. Validity is a pure function of the file read in order, so racing hooks agree on the winner and the loser prints nothing. The assumed 9,000-byte start spend is part of the running total from the first entry (a real start entry replaces it), so racing hooks cannot each fit under a ledger that left it out. A second start entry for the same session (a clear fires the start hook again) is charged its bytes even though its ids repeat; any other entry repeating an id is a lost race and charges nothing.
 
 ### Stop and maintenance
 
@@ -642,23 +664,25 @@ for a call and a session that belong together. Four pieces make that hold
   `SweepSidecars` removes stale sidecars of any version.
 
 What this does not fix: the bodies of Edit, Write and Bash tool arguments are still in the
-token set, which clears the token bar (three shared distinctive words and a third of the
-memory's words) on ordinary development text. It is measured by `ghost bench --audit`
+token set, which clears the token bar (three shared distinctive words and half of the
+memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
+skipped, a word in a quarter of the session's turns does not count toward a match, and the
+id in a save or update's arguments is not a citation. It is measured by `ghost bench --audit`
 ([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
 labelled offline session (forty memories, twenty of them in the session's own domain, a
 long scripted session of narrative and file bodies with hand-written labels) through
 `audit.Run` and scores the verdicts against the labels. The numbers are the bench's golden
 (`internal/bench/testdata/audit_report.golden`), not a table kept here, so they cannot go
 stale. At the time of writing, same-domain memories no turn restates are judged `used` in
-10 of 11 cases for a call before turn 0 of 40 (a session-start injection), 10 of 15 for a
-call before turn 20, and 0 for a call after the last turn, while every labelled cite and
+3 of 11 cases for a call before turn 0 of 40 (a session-start injection), 3 of 15 for a
+call before turn 20 (10 of 11 and 10 of 15 before the half bar, the outlier line and the generic-word rule), and 0 for a call after the last turn, while every labelled cite and
 restatement is caught. The residual narrowed when the token arm was restricted to ONE
 turn (#932): the bar has to be cleared by the words that arrived together, so the four
 memories the corpus spreads across turns went from judged `used` 4 of 4 to 0 of 4, the
 session-start `used/token` false positives went 15 → 10 and `used` precision 0.318 →
 0.412, with recall 1.000 unchanged. What is left is a single turn that happens to repeat
-a third of an own-domain memory, which is the shape the floor and the fraction were
-chosen for.
+half of an own-domain memory in words the session does not repeat everywhere, which is the
+shape the floor and the fraction were chosen for.
 
 Ordering helps only for a call made late; a session-start injection still sees the whole
 session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 7 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
@@ -1653,7 +1677,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
 - **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
-- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled window; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Stage 5 of the assembler now ENFORCES it by separating the pair ([#925](https://github.com/wcatz/ghost/issues/925)): stage 5 walks the rows that have a live `contradicts` edge in keep-priority order and withholds any row that contradicts one it already kept, so a triangle keeps one winner rather than two rows standing, while a chain A-B-C whose winner is an end keeps both ends and drops only the middle (a chain whose winner is the middle keeps the middle alone, and a star whose winner is a leaf keeps every leaf and drops the centre). The winner is decided by one documented tie-break, in order — pinned beats unpinned; a later `verified_at` beats an earlier or absent one; a later `updated_at` (or `created_at` when `updated_at` is unset) beats an earlier one; and an exact tie falls to the rank the window already holds, because relevance rank is not evidence that a row is true. The withheld side is a normal stage-5 drop, recorded in the trace (`stageConflicts`, reason `contradiction_separated`, `Decision.Against` naming the kept row or rows it directly contradicts), in the retrieval record and in explain; the kept line names the rows it directly contradicts that were withheld, by rendered id (`assemble.Token`), in `conflicts_with=` on the same physical line, bounded at eight named partners in rank order with a trailing `(+N more)` count for the rest (`assemble.ConflictsLabel`), so a dense graph cannot cost an unbounded number of bytes on one line. A `contradicts` edge whose endpoints' scopes conflict (`memory.ScopesConflict`, `environment=production` against `environment=development`) is two true claims about two places, so it is not a conflict and is neither separated, marked nor noted — the exemption is stated on the edge, the same way every other reader of a link states it. A mixed-scope shape therefore resolves itself under the walk, and the two scope-conflicting rows are never separated against each other ([#945](https://github.com/wcatz/ghost/issues/945)): with A naming `environment=production` contradicting an unscoped B contradicting C naming `environment=development`, and no A-C edge, a scoped winner (A or C) stands beside the other scoped row and withholds only the middle it directly contradicts, while an unscoped B that wins withholds both scoped rows against itself. The rule that produces all three outcomes is that a row is withheld only against a kept row it has a direct `contradicts` edge to — so an unscoped row can still withhold two scope-conflicting rows, one real contradiction per edge. The separation is also per `assemble.Run`, and ONE shipped block composes two of them: `buildProjectContext` — behind the `ghost://project/{id}/context` resource and the `recall_project` prompt — reads the project/`_global` union (cap 20) and then a second, `_global`-only read (cap 15) whose `seen` filter removes only rows already shown, so a `_global` row outside the union's cap but inside the second read's cap is admitted having never been in the first request's window, and a `contradicts` pair spanning that seam is unread by either run: both rows render together, unmarked. The `ghost_project_context` TOOL runs no second read and is unaffected. This is the same per-request scope as the two per-request boundaries named here, and closing it would mean handing the second request the first's admitted ids. A pair split across an edge-read chunk boundary (`edgeChunkIDs`) is likewise unread, which the `edges_partial` note already reports. A pair whose winner the budget later cuts is not marked, because neither endpoint is in the block: the marker is rebuilt after the budget from the `contradicts` edges stage 5 recorded (each kept row's withheld direct partners, `conflictPartners`), not projected from the separations, since a kept row can contradict a row that was dropped against a different kept row, and it is drawn only on a kept row still in the block.
+- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled window; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Stage 5 of the assembler now ENFORCES it by separating the pair ([#925](https://github.com/wcatz/ghost/issues/925)): stage 5 walks the rows that have a live `contradicts` edge in keep-priority order and withholds any row that contradicts one it already kept, so a triangle keeps one winner rather than two rows standing, while a chain A-B-C whose winner is an end keeps both ends and drops only the middle (a chain whose winner is the middle keeps the middle alone, and a star whose winner is a leaf keeps every leaf and drops the centre). The winner is decided by one documented tie-break, in order — pinned beats unpinned; a later `verified_at` beats an earlier or absent one; a later `updated_at` (or `created_at` when `updated_at` is unset) beats an earlier one; and an exact tie falls to the rank the window already holds, because relevance rank is not evidence that a row is true. The withheld side is a normal stage-5 drop, recorded in the trace (`stageConflicts`, reason `contradiction_separated`, `Decision.Against` naming the kept row or rows it directly contradicts), in the retrieval record and in explain; the kept line names the rows it directly contradicts that were withheld, by rendered id (`assemble.Token`), in `conflicts_with=` on the same physical line, bounded at eight named partners in rank order with a trailing `(+N more)` count for the rest (`assemble.ConflictsLabel`), so a dense graph cannot cost an unbounded number of bytes on one line. A PINNED row is never withheld by this walk ([#975](https://github.com/wcatz/ghost/issues/975)): a pin promises delivery and says nothing about whether the claim is still true, so a pinned row stays whatever contradicts it — an unpinned row it beats is withheld as above, and two pinned rows that contradict each other are both kept. Instead the pinned row carries `contradicted_by=` naming the rows that contradict it and are NEWER than it (updated_at, or created_at when unset, the freshness key of the tie-break), each either withheld or another kept pinned row, bounded and counted the way `conflicts_with=` is (`assemble.ContradictedByLabel`, `Item.ContradictedBy`, set in `markConflicts` from the scope-filtered, de-duplicated adjacency, so the scope exemption and an edge stored both ways apply unchanged); a pinned row with no newer contradicting partner renders exactly as before. Nothing is resolved, unpinned or superseded: `ghost_health` lists the pinned rows with an open contradiction (`Store.PinnedRowsWithContradictions`, a live edge in either direction to a newer unresolved row, scope-conflicting edges exempt, bounded at 20 entries with the total counted) so the owner can unpin or update them. A `contradicts` edge whose endpoints' scopes conflict (`memory.ScopesConflict`, `environment=production` against `environment=development`) is two true claims about two places, so it is not a conflict and is neither separated, marked nor noted — the exemption is stated on the edge, the same way every other reader of a link states it. A mixed-scope shape therefore resolves itself under the walk, and the two scope-conflicting rows are never separated against each other ([#945](https://github.com/wcatz/ghost/issues/945)): with A naming `environment=production` contradicting an unscoped B contradicting C naming `environment=development`, and no A-C edge, a scoped winner (A or C) stands beside the other scoped row and withholds only the middle it directly contradicts, while an unscoped B that wins withholds both scoped rows against itself. The rule that produces all three outcomes is that a row is withheld only against a kept row it has a direct `contradicts` edge to — so an unscoped row can still withhold two scope-conflicting rows, one real contradiction per edge. The separation is also per `assemble.Run`, and ONE shipped block composes two of them: `buildProjectContext` — behind the `ghost://project/{id}/context` resource and the `recall_project` prompt — reads the project/`_global` union (cap 20) and then a second, `_global`-only read (cap 15) whose `seen` filter removes only rows already shown, so a `_global` row outside the union's cap but inside the second read's cap is admitted having never been in the first request's window, and a `contradicts` pair spanning that seam is unread by either run: both rows render together, unmarked. The `ghost_project_context` TOOL runs no second read and is unaffected. This is the same per-request scope as the two per-request boundaries named here, and closing it would mean handing the second request the first's admitted ids. A pair split across an edge-read chunk boundary (`edgeChunkIDs`) is likewise unread, which the `edges_partial` note already reports. A pair whose winner the budget later cuts is not marked, because neither endpoint is in the block: the marker is rebuilt after the budget from the `contradicts` edges stage 5 recorded (each kept row's withheld direct partners, `conflictPartners`), not projected from the separations, since a kept row can contradict a row that was dropped against a different kept row, and it is drawn only on a kept row still in the block.
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow before their window (`SearchVectorScoped`, in Go over the scan rather than inside a statement, so its top-k is the limit and there is no statement to fold the rule into), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. The rule is decided where the rows are read, in whichever form that read allows. Search applies it in Go over the widened pool `Store.Candidates` returns — both legs have already run by then, and fusion narrows the fused pool, so a SQL form there would narrow nothing it still had to decide about — and the assembler keeps it in Go over the same set. A reader whose candidate set *is* a statement's own `LIMIT` has no rows left to decide over once the cut is taken, and no corpus scan to decide them with, so it carries a SQL statement instead: `memory.ScopeMatchesSQL`, bound by the store's passive fetch. A test runs that form and the Go one over the same rows, and a second test pins the single divergence between them — a stored scope value that is not a string. The cosine writers in the bullet above are that difference made concrete: a brute-force pass over the corpus can decide before its own top-k, in Go, and backfill to fill it.
 - **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but none of them is a ranking input, and a confidence value is not a verdict anything computes. `memory_provenance` ([#673](https://github.com/wcatz/ghost/issues/673)) now keeps every observation rather than the last, and the assembler reports the count; it still does not rank on it. (Write-time authorship, the change log and the evidence records are three different things; see [Memory history](#memory-history) and [Evidence provenance](#evidence-provenance).)
@@ -1720,7 +1744,7 @@ Axis interaction rules:
 > the budget, on a QUERY only, that stops the answer where relevance falls off —
 > `ghost_memory_search` used to always fill its window, so a block that answered a
 > question whose useful row ranked first still carried nine rows of noise (context
-> precision 0.138). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
+> precision 0.141). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
 > of the top row's fused Base below which a row is cut), chosen from the
 > `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
 > stays the maximum, the top row is always kept (a result rate below 1.000 would
@@ -1732,6 +1756,28 @@ Axis interaction rules:
 > passive block and a machine with no configured cutoff are byte-identical to a
 > pipeline whose stage was absent. `ghost bench --context` is measured at the
 > shipped default (`docs/benchmarks.md`).
+> The no-answer step ([#955](https://github.com/wcatz/ghost/issues/955)) follows
+> stage 8 on a QUERY only and is numbered with it rather than as a new stage 9: a
+> question nothing in the store answers still filled its window (the bench's 24
+> no-answer queries got ten rows each), so when the best vector cosine among the
+> block's rows is strictly below one absolute bar (`context.no_answer_cosine`) the
+> block is withheld and the answer says "No memory answers this: nothing cleared
+> the bar", with the score shown. ONE rule, ONE parameter. A pinned row is never
+> withheld, a block with no comparable cosine (no vector leg) is never judged, a
+> passive read is a recorded pass-through, and each withheld row is recorded with
+> reason `nothing_cleared_the_bar` in the trace, the retrieval record and explain.
+> 0 is off and byte-identical. Chosen from `ghost bench --no-answer-sweep`.
+> Only a row that carries a cosine is ever withheld: a row the vector leg's list
+> did not carry is judged by its own stored cosine when the retriever can read it,
+> and a row with no embedding at all (an exact keyword hit on a never-embedded
+> memory) is never judged and always passes. Presence is the `ok` `rowCosine`
+> returns and never the sign: a cosine is in [-1, 1], so a genuinely negative one
+> is a judged (very weak) match that below the bar is withheld like any other, and
+> only the exact -1 mark means the leg did not carry the row. The default is tied to the model it
+> was measured on (`nomic-embed-text:v1.5`): with another `embedding.model` and no
+> explicit `context.no_answer_cosine` in the file or environment the effective bar
+> is 0 and the stage's trace note says "no_answer bar off: unmeasured embedding
+> model". An explicit value is always honoured.
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
@@ -2016,7 +2062,13 @@ What exists now:
   (a vector cosine) ships OFF**, because the bench no-answer report shows the
   answerable and no-answer cosine distributions overlap, so no constant
   separates them, and `context.abstain_cosine` is a decision a user makes rather
-  than one Ghost infers. The cosine is range-checked on BOTH sides of the seam —
+  than one Ghost infers. (This is deliberately different from the no-answer bar,
+  `context.no_answer_cosine`, which ships ON at 0.62: that rule WITHHOLDS rows
+  rather than labelling them, and it was measured on the default embedding model
+  only. It is tied to that model, so with any other `embedding.model` and no
+  explicit bar it is off, and the trace records "no_answer bar off: unmeasured
+  embedding model". `abstain_cosine` stays off for every model because no
+  constant separates the distributions at all.) The cosine is range-checked on BOTH sides of the seam —
   `config` on its environment and file paths, and `validateRequest` on the request
   itself — because a guard that lives only in the layer above the seam is one the
   next caller does not inherit, and all four unusable values fail silently rather
@@ -2031,7 +2083,15 @@ What exists now:
   "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
   current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
   `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
-  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+  blaming an embedder outage for a weak keyword hit, in the other direction. Presence is the exact -1
+  mark and never the sign, in both arms and in every reader of the score: a cosine is in [-1, 1], so
+  one at or below zero was MEASURED and is a very weak match. A block whose every cosine is at or
+  below zero is therefore `weak`/`below_floor` — the arm held a value and judged the rows low — and
+  counting it as "no vector value" would report `no_floor_arm` for a verdict the vector leg had
+  already made. That is the SEAM's rule and Ghost's own leg sits outside it: `*memory.Store` discards
+  every candidate whose cosine is not above 0 before fusion, so a shipped query whose rows matched
+  nothing on meaning still reports `no_floor_arm`, and a `Candidate.VectorScore` there is either the
+  sentinel or a positive cosine. The line and the trace both keep "a threshold" and "a
 threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
   vector leg never ran or ran and failed) or the number, and
 `Floors` carries `VectorArmOn` (what the request configured) beside
@@ -2365,6 +2425,8 @@ Three layers, and the third is about the artifact rather than the packages.
 **In-process tests** call into `internal/...` directly. That is where logic is tested, and it is the overwhelming majority of the tree: the store, the assembler, the consolidation tiers, the migration steps, the hook parsers. `go test ./...` runs them, and they run in CI on every leg.
 
 **Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
+
+**A fixture's rows are stamped, never clocked.** A ranking whose tie-break is `created_at` orders tied rows by which side of a wall-clock second each INSERT landed on, so a fixture that leaves the column to `datetime('now')` is a different fixture on every run — and the insert loop is long enough for the boundary to fall inside it. The bench corpus closed that hole with one stamp per seeding pass (#708), and the session-start fixture closed the same one by deriving every stamp from one fixed instant (#1002). The rule is what makes a guard a contract: two runs of the same fixture have to be the same fixture for any assertion about the second one to mean anything. The companion rule is about the assertion rather than the fixture — where a tie is legitimately broken by `id`, which row a cap cuts is a selection and not a ranking, so a test pins the ORDER it claims rather than the identity of the row it expects to lose.
 
 **End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
 

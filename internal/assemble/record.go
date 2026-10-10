@@ -250,3 +250,18 @@ func emit(ctx context.Context, sink RecordSink, req Request, res Result) {
 			"outcome", rec.Outcome, "error", err)
 	}
 }
+
+// RecordResult writes the retrieval record for a Result its caller narrowed
+// AFTER Run, through req.Record, with the same projection Run itself uses.
+//
+// It exists for a surface that makes a delivery decision Run cannot see (a
+// per-session dedup, a floor of its own, a byte budget shared with another
+// channel). Such a caller runs with Record nil, narrows res.Items to the rows it
+// actually delivered, appends a dropped Decision for each row it withheld, and
+// calls this once and only when it delivered something: a record written by Run
+// itself would claim rows the caller never sent. A nil req.Record writes
+// nothing, and a failure to write is logged and never returned, exactly as for
+// Run.
+func RecordResult(ctx context.Context, req Request, res Result) {
+	emit(ctx, req.Record, req, res)
+}

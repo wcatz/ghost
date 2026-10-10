@@ -97,6 +97,17 @@ func Status(w io.Writer) (bool, error) {
 			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code")
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
+			// The working-moment hooks are an addition, and a user who removed
+			// them on purpose is not unhealthy: reported, never counted against
+			// the overall verdict.
+			for _, c := range []struct{ event, token string }{{"UserPromptSubmit", "message-submit"}, {"PostToolUse", "edit"}} {
+				if contractHookWired(sf, c.event, c.token, "claude-code") {
+					_, _ = fmt.Fprintf(w, "  ✓ %s hook configured (working-moment context)\n", c.event)
+				} else {
+					_, _ = fmt.Fprintf(w, "  - %s hook not configured (optional; run ghost mcp init for working-moment context)\n", c.event)
+				}
+			}
+
 			// autoMemoryEnabled must be false to prevent competing file-memory.
 			autoMemVal, autoMemSet := sf.getAutoMemoryEnabled()
 			autoMemOff := autoMemSet && !autoMemVal

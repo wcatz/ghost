@@ -68,10 +68,76 @@ func FormatResults(results []Result) string {
 		fmt.Fprintf(&b, "%-14s %7.3f %7.3f %7.3f %8.3f %8.3f\n",
 			r.Condition, r.Recall1, r.Recall5, r.Recall10, r.MRR10, r.NDCG10)
 	}
+	// The table above is unchanged, line for line, because other tools
+	// parse it; the shares and the ceiling are new lines after it, which
+	// is where a reader looks for "what else did this table not say".
+	b.WriteString(FormatTopRowShares(results))
 	fmt.Fprintf(&b, "\n%d graded queries, %d memories. Retrieval-only, no LLM judge.\n", n, len(builtinMemoryKeys()))
 	b.WriteString(FormatNoAnswer(summariesOf(results)))
 	b.WriteString(FormatFusionGaps(results))
 	return b.String()
+}
+
+// FormatTopRowShares renders the two top-row shares and the R@1 ceiling,
+// printed after the table above it. They are a separate block rather than
+// two more columns in that table because the table's lines are fixed
+// width other tools parse, and because the ceiling is a property of the
+// labels rather than of a condition: it is the same figure for all three,
+// so printing it per row would print it three times and invite reading it
+// as a difference between them.
+//
+// Both shares are fractions of the ANSWERABLE queries, the same
+// population the R@1 column divides by — a query nothing in the corpus
+// answers has no top row to be relevant, and counting it in would put a
+// ceiling on a share that has none. Conditions that scored nothing are
+// skipped rather than printed as 0.000, which would read as a measured
+// absence.
+func FormatTopRowShares(results []Result) string {
+	// The population the shares are read against is the first result that
+	// actually scored something, which is the same source FormatResults
+	// reads the graded count from.
+	answerable := 0
+	for _, r := range results {
+		if r.Queries > 0 {
+			answerable = r.Queries
+			break
+		}
+	}
+	if answerable == 0 {
+		return ""
+	}
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "\ntop-row shares over the %d answerable queries\n", answerable)
+	for _, r := range results {
+		if r.Queries == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "  top row relevant           %-12s %.3f\n", r.Condition, r.TopRowRelevant)
+		fmt.Fprintf(&b, "  top row best-labelled      %-12s %.3f\n", r.Condition, r.TopRowBestLabelled)
+		fmt.Fprintf(&b, "  relevant row in top 5      %-12s %.3f\n", r.Condition, r.Top5Relevant)
+	}
+	if c, ok := ceilingOf(results); ok {
+		fmt.Fprintf(&b, "  R@1 ceiling on these labels %.3f\n", c)
+	}
+	b.WriteString("R@1 divides by the labelled rows, not by 1, so a query grading four\n")
+	b.WriteString("scores 0.250 at R@1 however well it ranks. The ceiling is what a perfect\n")
+	b.WriteString("ranking posts on these labels; read every R@1 above against it.\n")
+	return b.String()
+}
+
+// ceilingOf returns the R@1 ceiling of the first result that carries one,
+// for the single line the shares report is read against. The ceiling is
+// identical over every condition that scored the same query set, so a
+// condition's own value is the run's; a result with no scored queries
+// has none, and reporting one anyway would print a confident 0.000 for a
+// set that was never measured.
+func ceilingOf(results []Result) (float64, bool) {
+	for _, r := range results {
+		if r.Queries > 0 {
+			return r.Recall1Ceiling, true
+		}
+	}
+	return 0, false
 }
 
 // FormatFusionGaps renders the paired per-query NDCG@10 difference between the

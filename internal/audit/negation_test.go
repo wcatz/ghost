@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// A memory long enough that the three-token floor and the one-third fraction are both
+// A memory long enough that the three-token floor and the one-half fraction are both
 // satisfiable by a sentence that genuinely discusses it, and distinctive enough
 // that a sentence about something else cannot clear the bar by accident.
 const negMemoryContent = "the go build cache lockfile directory lives under GOCACHE " +
@@ -883,7 +883,7 @@ func TestACueIsMatchedAsWholeWords(t *testing.T) {
 // The memory below contains "is false", which is why it is the right fixture: the
 // sentence's cue and the memory's wording are the same two words, and nothing about
 // the sentence binds the cue to the memory. The intervening words are what make the
-// bar reachable at all — three-plus memory tokens and a third of them — so removing
+// bar reachable at all — three-plus memory tokens and a half of them — so removing
 // the binding has to be what stops this, and it has to stop it while the bar still
 // holds.
 func TestTheCuesOwnWordsAreNotWhatACueIsBoundTo(t *testing.T) {
@@ -898,7 +898,7 @@ func TestTheCuesOwnWordsAreNotWhatACueIsBoundTo(t *testing.T) {
 	// memory, and the fixture would pass on a binding that is too loose.
 	//
 	// The rest of each sentence quotes enough of the memory to clear the bar —
-	// three-plus tokens and a third of them — so removing the binding has to be
+	// three-plus tokens and a half of them — so removing the binding has to be
 	// what stops them, and it has to stop them while the bar still holds.
 	cases := []struct {
 		name  string

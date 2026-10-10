@@ -243,7 +243,7 @@ func TestStalenessDecayProof(t *testing.T) {
 // and that half is asserted structurally rather than by a fourth search pass:
 // the corpus declares no `supersedes` edge at all, and the demote is a hard no-op
 // unless an edge joins two rows inside one window. A measurement here would have
-// cost a whole pass over 551 memories to re-derive a fact about the fixture, and
+// cost a whole pass over 549 memories to re-derive a fact about the fixture, and
 // this package's CI budget for loading the corpus is spent: a corpus-wide test
 // costs ~10s and the package was within ~10s of Go's 600s per-binary default
 // when #677 added a sixth corpus-wide test, which is what failed `build-and-test`

@@ -66,6 +66,16 @@ type Item struct {
 	// that is the point of the marker. The list is held whole; ConflictsLabel
 	// bounds what the line renders of it.
 	ConflictsWith []string
+	// ContradictedBy lists the ids of the rows that directly contradict this
+	// PINNED row, are newer than it, and are not the ones a pin lets win: a
+	// withheld row (the pin outranks it, so it never reaches the reader) or
+	// another pinned row that stayed in the answer. A pin guarantees delivery and
+	// never says the claim is still true, so this marks the row as disputed by
+	// newer evidence without withholding it. It is set in one place
+	// (markConflicts) and names only rows a live, scope-compatible `contradicts`
+	// edge joins to this one. The list is held whole; ContradictedByLabel bounds
+	// what the line renders of it.
+	ContradictedBy []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
 	// replaced this one through a live `supersedes` edge. It is set only for a
 	// pinned row on a passive read (markSuperseded): a pin guarantees a slot and
@@ -107,7 +117,7 @@ func (i Item) Line() string {
 	return "- [" + i.Category + "] `" + Token(i.ID) + "` (" +
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
-		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts +
+		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts + ContradictedByLabel(i.ContradictedBy) +
 		SupersededByLabel(i.SupersededBy) +
 		") " + Data(i.Content)
 }
@@ -130,6 +140,19 @@ const maxRenderedConflictPartners = 8
 // trailing count, so a large component cannot spend the response budget on one
 // line. Item.ConflictsWith keeps the full list — only the rendering is bounded.
 func ConflictsLabel(ids []string) string {
+	return boundedIDLabel(" conflicts_with=", ids)
+}
+
+// ContradictedByLabel renders the newer rows that contradict a pinned row, with
+// the same bound as ConflictsLabel, or "" when none does.
+func ContradictedByLabel(ids []string) string {
+	return boundedIDLabel(" contradicted_by=", ids)
+}
+
+// boundedIDLabel renders ` <name>=` followed by at most
+// maxRenderedConflictPartners ids as they appear on their own lines, and a
+// trailing `(+N more)` for the rest.
+func boundedIDLabel(name string, ids []string) string {
 	if len(ids) == 0 {
 		return ""
 	}
@@ -142,7 +165,7 @@ func ConflictsLabel(ids []string) string {
 	for i, id := range shown {
 		toks[i] = "`" + Token(id) + "`"
 	}
-	label := " conflicts_with=" + strings.Join(toks, ",")
+	label := name + strings.Join(toks, ",")
 	if more > 0 {
 		label += " (+" + strconv.Itoa(more) + " more)"
 	}

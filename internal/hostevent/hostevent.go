@@ -33,6 +33,13 @@ const (
 	EventSessionStart Event = "session-start"
 	EventStop         Event = "stop"
 	EventSessionEnd   Event = "session-end"
+	// EventMessageSubmit fires when the user submits a message, before the host
+	// processes it (Claude Code's UserPromptSubmit). EventEdit fires after a
+	// file-editing tool ran (Claude Code's PostToolUse, matched to Edit, Write
+	// and MultiEdit). Both are the working-moment channel: a host that cannot add
+	// context beside a message or a tool result has no entry for them.
+	EventMessageSubmit Event = "message-submit"
+	EventEdit          Event = "edit"
 )
 
 // Source identifies the host adapter that produced the event.
@@ -58,6 +65,11 @@ type Capability struct {
 	// ghost also adds a top-level "reason" to the reminder for hosts that read
 	// only that shape (mcpinit.stopReminderFor).
 	StopGuidance bool
+	// WorkingMoment is true when the host adds a hook's additionalContext beside
+	// a user message and beside an edit tool's result. Only Claude Code is
+	// documented to; every other source stays false and the events are a silent
+	// no-op for it.
+	WorkingMoment bool
 }
 
 // capabilityMatrix mirrors the spec's v1 source-capability table. codex blocks
@@ -66,7 +78,7 @@ type Capability struct {
 // surface. StopGuidance records which hosts are known to deliver the
 // non-blocking Stop reminder (see Capability.StopGuidance).
 var capabilityMatrix = map[Source]Capability{
-	SourceClaudeCode: {BlockStop: true, InjectContext: true, StopGuidance: true},
+	SourceClaudeCode: {BlockStop: true, InjectContext: true, StopGuidance: true, WorkingMoment: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
 	SourceGoose:      {BlockStop: true, InjectContext: false},
 	SourceOpencode:   {BlockStop: false, InjectContext: false, StopGuidance: true},
@@ -125,6 +137,10 @@ func NormalizeEvent(name string) Event {
 		return EventStop
 	case "sessionend":
 		return EventSessionEnd
+	case "messagesubmit", "userpromptsubmit":
+		return EventMessageSubmit
+	case "edit", "posttooluse":
+		return EventEdit
 	default:
 		return ""
 	}

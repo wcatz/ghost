@@ -197,7 +197,26 @@ func walkArgText(v any) string {
 // usage would leave that bucket permanently empty. isGhostSaveTool already
 // resolves every host's naming convention, so a scanner passes the name it found
 // and this decides.
+//
+// An UPDATE of a stored memory that carries new text is read as nothing at all. Its
+// arguments are the id of the memory being rewritten and that memory's own new text,
+// and the audit judges a
+// memory against what is stored NOW, which is that text: so as prose the update would
+// file the memory used by its own wording, as a citation it would file it used by its
+// id, and as a save it would file it superseded by itself, a decision-bearing verdict
+// that inverts the finding (the memory holds the newest text there is). None of the
+// three is evidence about the memory, so none is recorded. An update that cites ANOTHER
+// memory by id or wording is lost with it; that is the conservative direction, since a
+// citation is the one claim a false `used` makes.
+//
+// The rule follows the ARGUMENTS and not the name, because every field of an update but
+// the ids is optional: a tags-only or verified-only update carries the id and no text,
+// which is the agent acting on the memory by id, the same deliberate reference as a pin,
+// and it falls through to the ordinary tool path where the id is a citation.
 func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
+	if isGhostUpdateTool(name) && carriesNewText(input) {
+		return
+	}
 	if text := toolArgText(input); text != "" {
 		if isGhostSaveTool(name) {
 			sig.AddSaveArgs(text)
@@ -205,6 +224,30 @@ func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
 			sig.AddToolArgs(text)
 		}
 	}
+}
+
+// carriesNewText reports whether an update's arguments rewrite the memory's text: a
+// non-empty `content`, tested as the store tests it (a blank but non-empty string is
+// still written). Arguments that cannot be decoded as an object, such as the raw
+// string codex passes through when its arguments are not JSON, answer true: nobody can
+// say the call did not rewrite the memory, and reading a possible rewrite as a use of
+// it is the one error this audit cannot afford, while reading it as nothing only costs
+// a citation.
+func carriesNewText(input json.RawMessage) bool {
+	var args struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return true
+	}
+	return args.Content != ""
+}
+
+// AddAuditToolCall files one tool call the way every scanner does, for a caller
+// that holds a call and not a transcript: the retrieval-audit bench scripts calls
+// through it so what it measures is the routing the product uses.
+func AddAuditToolCall(sig *audit.Signals, name string, input json.RawMessage) {
+	addToolCall(sig, name, input)
 }
 
 // claudeAuditLine is the assistant-authored shape of one Claude Code transcript

@@ -154,7 +154,7 @@ func distinctCreatedAt(t *testing.T, db *sql.DB) []string {
 }
 
 // firstDiffering names the first position where two id sets part company, and
-// the size of the difference. A 551-row dump is not a failure message anyone
+// the size of the difference. A 549-row dump is not a failure message anyone
 // reads; the question this test answers is whether the sets are equal, and where
 // they stopped being equal is the whole of the useful part.
 func firstDiffering(a, b []string) string {

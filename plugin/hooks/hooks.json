@@ -1,5 +1,5 @@
 {
-  "description": "Ghost lifecycle wiring: inject project memory at session start, and nudge a save (plus run consolidation) when the session goes idle.",
+  "description": "Ghost lifecycle wiring: inject project memory at session start, deliver a floored memory block beside a message or an edit when one matches, and nudge a save (plus run consolidation) when the session goes idle.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,7 +7,12 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
-            "args": ["hook", "session-start", "--source", "claude-code"]
+            "args": [
+              "hook",
+              "session-start",
+              "--source",
+              "claude-code"
+            ]
           }
         ]
       }
@@ -18,7 +23,45 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
-            "args": ["hook", "stop", "--source", "claude-code"]
+            "args": [
+              "hook",
+              "stop",
+              "--source",
+              "claude-code"
+            ]
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
+            "args": [
+              "hook",
+              "message-submit",
+              "--source",
+              "claude-code"
+            ]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
+            "args": [
+              "hook",
+              "edit",
+              "--source",
+              "claude-code"
+            ]
           }
         ]
       }

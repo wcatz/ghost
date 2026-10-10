@@ -87,6 +87,73 @@ func TestRunAllConditions(t *testing.T) {
 	}
 }
 
+// TestRunConditionTopRowSharesAreHandCountable: the two shares are
+// computed from the same ranked lists the graded ratios read, so a
+// fixture with known ranks makes them hand-countable. The rank function
+// returns lists the test wrote rather than lists a search produced,
+// which is what "known ranks" means here — the shares have to equal the
+// counts a reader takes off those lists, and a share that disagrees with
+// the list it was computed from is a bug this finds rather than a
+// reading.
+func TestRunConditionTopRowSharesAreHandCountable(t *testing.T) {
+	store, _ := seedRunnerStore(t)
+	ctx := context.Background()
+
+	queries := []Query{
+		{Name: "q1", ProjectID: "p", Text: "t", Vector: []float32{1, 0, 0}, Rel: Relevance{"a": 1, "b": 1}},
+		{Name: "q2", ProjectID: "p", Text: "t", Vector: []float32{1, 0, 0}, Rel: Relevance{"a": 2, "b": 1}},
+		{Name: "q3", ProjectID: "p", Text: "t", Vector: []float32{1, 0, 0}, Rel: Relevance{"a": 1}},
+	}
+	// q1: the top row is not labelled at all, and a first relevant row sits
+	// at rank 6, just outside the top five.
+	// q2: the top row is labelled, but a carries a higher gain.
+	// q3: the top row is labelled and nothing outranks it.
+	lists := map[string][]string{
+		"q1": {"x", "y", "z", "w", "v", "a", "b"},
+		"q2": {"b", "a"},
+		"q3": {"a"},
+	}
+	rank := func(q Query) ([]string, error) { return lists[q.Name], nil }
+
+	res, err := runCondition(ctx, store, CondHybrid, queries, rank)
+	if err != nil {
+		t.Fatalf("runCondition: %v", err)
+	}
+	if res.Queries != 3 {
+		t.Fatalf("scored %d queries, want 3", res.Queries)
+	}
+	// Two of the three top rows are labelled: q2 and q3.
+	if res.TopRowRelevant != 2.0/3.0 {
+		t.Errorf("top row relevant = %.3f, want 0.667 (q2 and q3 of 3)", res.TopRowRelevant)
+	}
+	// Only q3's top row carries the best label its query gives.
+	if res.TopRowBestLabelled != 1.0/3.0 {
+		t.Errorf("top row best-labelled = %.3f, want 0.333 (q3 of 3)", res.TopRowBestLabelled)
+	}
+	// q2 and q3 hold a relevant row in the first five; q1's is at rank 6.
+	if res.Top5Relevant != 2.0/3.0 {
+		t.Errorf("relevant in top 5 = %.3f, want 0.667 (q2 and q3 of 3)", res.Top5Relevant)
+	}
+	// The ceiling is a property of the labels: 1/2, 1/2 and 1/1.
+	if res.Recall1Ceiling != 2.0/3.0 {
+		t.Errorf("R@1 ceiling = %.3f, want 0.667 (mean of 1/2, 1/2, 1/1)", res.Recall1Ceiling)
+	}
+	// The shares and the ceiling are read against the same population the
+	// graded ratios are, so a query the corpus does not answer is in none
+	// of them.
+	queries = append(queries, Query{Name: "q4", ProjectID: "p", Text: "t", Vector: []float32{1, 0, 0}})
+	res, err = runCondition(ctx, store, CondHybrid, queries, rank)
+	if err != nil {
+		t.Fatalf("runCondition: %v", err)
+	}
+	if res.Queries != 3 {
+		t.Errorf("scored %d queries, want 3 (the no-answer query is measured, not scored)", res.Queries)
+	}
+	if res.TopRowRelevant != 2.0/3.0 || res.TopRowBestLabelled != 1.0/3.0 || res.Top5Relevant != 2.0/3.0 || res.Recall1Ceiling != 2.0/3.0 {
+		t.Errorf("the no-answer query moved a share or the ceiling: %+v", res)
+	}
+}
+
 func TestRunNoQueries(t *testing.T) {
 	store, _ := seedRunnerStore(t)
 	results, err := Run(context.Background(), store, nil)

@@ -457,6 +457,7 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"evidence.go:importEvidenceTx":          true,
 		"evidence.go:restoreSnapshotEvidenceTx": true,
 		"portable.go:portableEvidence":          true,
+		"store.go:snapshotReplaceableTx":        true, // memory_snapshots + memory_snapshot_evidence, shared by ReplaceNonManual and FoldRows
 	}
 	// migrations, readers, and the two functions the body scan cannot see.
 	//
@@ -744,6 +745,7 @@ func TestColumnListWritersAreClassified(t *testing.T) {
 // from here and from there should be visible in both.
 var classifiedNames = map[string]bool{
 	"store.go:ReplaceNonManual":             true,
+	"store.go:snapshotReplaceableTx":        true,
 	"store.go:inheritedClaims":              true,
 	"portable.go:anyCarriedVerification":    true,
 	"asof.go:ReadMemoriesAsOf":              true,

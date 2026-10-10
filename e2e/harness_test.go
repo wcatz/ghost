@@ -279,6 +279,9 @@ type configOpts struct {
 	// relevanceCutoff is written as context.relevance_cutoff. Empty keeps 0
 	// (off), the value every other sandbox runs with.
 	relevanceCutoff string
+	// noAnswerCosine is written as context.no_answer_cosine. Empty keeps 0 (off),
+	// the value every other sandbox runs with.
+	noAnswerCosine string
 	// extra is appended verbatim, for the handful of keys with no field here.
 	extra string
 }
@@ -309,7 +312,16 @@ func (s *sandbox) writeConfig(opts configOpts) {
 	if cutoff == "" {
 		cutoff = "0"
 	}
-	fmt.Fprintf(&sb, "context:\n  relevance_cutoff: %s\n", cutoff)
+	// The query-mode no-answer bar (#955) is off here for the same reason: the
+	// stub embedder's cosines are not real similarities, so a shipped bar would
+	// withhold answers underneath tests about other surfaces. The rule is asserted
+	// where its subject lives (internal/assemble, internal/mcpserver) and through
+	// the binary in TestMCPNoAnswerBar, which turns it on.
+	noAnswer := opts.noAnswerCosine
+	if noAnswer == "" {
+		noAnswer = "0"
+	}
+	fmt.Fprintf(&sb, "context:\n  relevance_cutoff: %s\n  no_answer_cosine: %s\n", cutoff, noAnswer)
 	sb.WriteString("obsidian:\n  auto_sync: false\n  interval: 30s\n")
 	fmt.Fprintf(&sb, "reflection:\n  auto_reflect: %t\n  auto_resolve: %t\n  auto_supersede: %t\n",
 		opts.autoReflect, opts.autoResolve, opts.autoSupersede)

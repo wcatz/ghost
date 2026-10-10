@@ -28,7 +28,8 @@ type pluginHookAction struct {
 
 // pluginHookEvent is one matcher block under a hook event.
 type pluginHookEvent struct {
-	Hooks []pluginHookAction `json:"hooks"`
+	Matcher string             `json:"matcher"`
+	Hooks   []pluginHookAction `json:"hooks"`
 }
 
 // pluginHooksDocument is the typed view of hooks.json used for per-event
@@ -146,6 +147,10 @@ func TestPluginHookTreesSync(t *testing.T) {
 	wantArgs := map[string][]string{
 		"SessionStart": {"hook", "session-start", "--source", "claude-code"},
 		"Stop":         {"hook", "stop", "--source", "claude-code"},
+		// The working-moment pair: a floored block beside a user message and
+		// beside an edit's result.
+		"UserPromptSubmit": {"hook", "message-submit", "--source", "claude-code"},
+		"PostToolUse":      {"hook", "edit", "--source", "claude-code"},
 	}
 
 	posixDoc, posixGeneric := readPluginHooks(t, posixRel)
@@ -186,6 +191,13 @@ func TestPluginHookTreesSync(t *testing.T) {
 			if len(entries[0].Hooks) != 1 {
 				t.Errorf("%s %s: want exactly 1 hook action, got %d", rel, event, len(entries[0].Hooks))
 				continue
+			}
+			wantMatcher := ""
+			if event == "PostToolUse" {
+				wantMatcher = "Edit|Write|MultiEdit"
+			}
+			if entries[0].Matcher != wantMatcher {
+				t.Errorf("%s %s matcher = %q, want %q", rel, event, entries[0].Matcher, wantMatcher)
 			}
 			action := entries[0].Hooks[0]
 			if action.Type != "command" {

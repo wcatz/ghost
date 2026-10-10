@@ -771,3 +771,112 @@ const linkInvalidateSQL = `
 		UPDATE memory_links SET invalidated_at = datetime('now')
 		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
 	`
+
+// PinnedContradictedRow is one open contradiction against a pinned memory: a
+// live `contradicts` edge joins it to a newer, unresolved memory.
+type PinnedContradictedRow struct {
+	ID        string
+	ProjectID string
+	Content   string
+	// ContradictedBy is the id of the newer row that contradicts this pinned row,
+	// and ContradictedByContent is its content.
+	ContradictedBy        string
+	ContradictedByContent string
+	// AlsoContradictedBy counts the other newer rows that contradict it too.
+	AlsoContradictedBy int
+}
+
+// The statement ghost_health reports pinned contradictions from. It starts from
+// the pinned rows and probes memory_links once per direction through the partial
+// indexes idx_links_target and idx_links_source, instead of scanning the table
+// behind an OR across both columns (CROSS JOIN pins the pinned rows as the outer loop) (TestPinnedContradictionQueryUsesTheLinkIndexes
+// holds the plan). `contradicts` may be stored either way round, so both arms
+// run, and UNION (not UNION ALL) makes a pair stored both ways one row. An edge
+// whose endpoints' scopes conflict is two true claims about two places and every
+// reader exempts it; an invalidated edge or a resolved row on either side is
+// closed. Content is cut to pinnedContradictionPreview characters in SQL, so the
+// read is bounded per row, and the newer-than test is made in Go (ParseStamp),
+// because the two stamp columns are not guaranteed one textual format.
+const pinnedContradictionArmTarget = `
+	SELECT m.id, m.project_id, substr(m.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(m.updated_at, ''), m.created_at),
+	       o.id, substr(o.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(o.updated_at, ''), o.created_at)
+	FROM memories m
+	CROSS JOIN memory_links ml ON ml.target_id = m.id AND ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
+	JOIN memories o ON o.id = ml.source_id
+	WHERE m.pinned = 1 AND m.resolved_at IS NULL AND o.resolved_at IS NULL AND o.id <> m.id
+	  AND NOT `
+
+const pinnedContradictionArmSource = `
+	SELECT m.id, m.project_id, substr(m.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(m.updated_at, ''), m.created_at),
+	       o.id, substr(o.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(o.updated_at, ''), o.created_at)
+	FROM memories m
+	CROSS JOIN memory_links ml ON ml.source_id = m.id AND ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
+	JOIN memories o ON o.id = ml.target_id
+	WHERE m.pinned = 1 AND m.resolved_at IS NULL AND o.resolved_at IS NULL AND o.id <> m.id
+	  AND NOT `
+
+// pinnedContradictionTail orders by project, pinned id, other id (output columns
+// 2, 1 and 5), so rows of one pinned row are adjacent.
+const pinnedContradictionTail = `
+	ORDER BY 2, 1, 5`
+
+const pinnedContradictionPreview = "200"
+
+// PinnedRowsWithContradictions reports the pinned memories a newer memory
+// contradicts through a live `contradicts` edge: one entry per PINNED row, at
+// most limit of them, and the total number of such pinned rows. Each entry
+// names the first contradicting row (by id) and counts the others. A pair
+// stored in both directions is one contradiction. Newer is the freshness key
+// the assembler's marker uses: updated_at, or created_at when unset. A pin keeps
+// such a row in every session start and nothing else tells its owner later
+// evidence disagrees, so this is the list to review: unpin or update the row.
+// Contents are cut to 200 characters. It only reads; it never changes a row or
+// an edge.
+func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]PinnedContradictedRow, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Composed here, from literals, so the write-seam scan can read its head.
+	scope := scopesConflictSQL("m.scope", "o.scope")
+	query := pinnedContradictionArmTarget + scope + " UNION " + pinnedContradictionArmSource + scope + pinnedContradictionTail
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, 0, fmt.Errorf("pinned rows with contradictions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []PinnedContradictedRow
+	total := 0
+	lastID, shown := "", false
+	for rows.Next() {
+		var r PinnedContradictedRow
+		var pinnedStamp, otherStamp string
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Content, &pinnedStamp, &r.ContradictedBy, &r.ContradictedByContent, &otherStamp); err != nil {
+			return nil, 0, err
+		}
+		pt, _ := ParseStamp(pinnedStamp)
+		ot, _ := ParseStamp(otherStamp)
+		if !ot.After(pt) {
+			continue
+		}
+		// Rows arrive ordered by pinned row, so a repeat of the previous pinned
+		// row is one more contradicting row for the same entry.
+		if r.ID == lastID {
+			if shown {
+				result[len(result)-1].AlsoContradictedBy++
+			}
+			continue
+		}
+		lastID = r.ID
+		total++
+		shown = len(result) < limit
+		if shown {
+			result = append(result, r)
+		}
+	}
+	return result, total, rows.Err()
+}

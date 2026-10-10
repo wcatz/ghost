@@ -18,6 +18,7 @@ package bench
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
+	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -286,6 +288,8 @@ func runAuditCall(ctx context.Context, c AuditCorpus, call AuditCall) (AuditScen
 			s.AddToolArgs(t.Text)
 		case AuditSaveArgs:
 			s.AddSaveArgs(t.Text)
+		case AuditToolCall:
+			hostevent.AddAuditToolCall(s, t.Tool, json.RawMessage(t.Text))
 		default:
 			return AuditScenario{}, fmt.Errorf("unknown turn kind %q", t.Kind)
 		}

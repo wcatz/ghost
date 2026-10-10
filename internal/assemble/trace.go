@@ -194,7 +194,12 @@ const (
 	// dual of stage 7: diversity divides a PASSIVE window by category, and this
 	// stops a QUERY answer where relevance falls off, and they never both act on
 	// one request because each is gated on the opposite mode.
-	stageCutoff      = "cutoff"
+	stageCutoff = "cutoff"
+	// stageNoAnswer is the absolute no-answer bar (#955), a query-mode step that
+	// runs right after the relevance cutoff and before the budget: it withholds a
+	// block whose best vector cosine is below the bar, so a question nothing in
+	// the store answers is told so rather than handed plausible rows.
+	stageNoAnswer    = "no_answer"
 	stageBudget      = "budget"
 	stageRender      = "render"
 	stageResponseFit = "response_fit"

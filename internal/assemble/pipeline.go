@@ -56,6 +56,16 @@ type pipeline struct {
 	// contradicts the middle, which the near end dropped), and the marker would
 	// under-name if it were built from the separations alone.
 	conflictPartners map[string][]string
+	// contradictedBy maps each PINNED row stage 5 kept to the rows that
+	// directly contradict it, through a live scope-compatible edge, and are newer
+	// than it, in rank order. A pin is never withheld, so the row stays and the
+	// marker is what tells the reader later evidence disagrees (#975). A partner
+	// is either withheld (the pin outranks it) or another pinned row that was
+	// kept; withheldIDs tells markConflicts which, so it can drop a partner the
+	// response-fit pass later cut.
+	contradictedBy map[string][]string
+	// withheldIDs is the set of rows stage 5 withheld.
+	withheldIDs map[string]bool
 	// windowDisclosure is the note explaining a window that is the pipeline's
 	// ceiling rather than the caller's. It is held here because it is set before
 	// the stages run and belongs to the stage that acts on it: stage 9 is what
@@ -78,6 +88,16 @@ type pipeline struct {
 	// droppedBy counts how many rows each stage removed, which is how an
 	// empty result names the stage responsible.
 	droppedBy map[string]int
+	// noAnswer is the no-answer step's verdict when it fired: the best cosine the
+	// block held and the bar it fell below. Nil when the step passed the block
+	// through, which is every passive request, every off state and every query
+	// whose best match cleared the bar. The abstention sentence reads it so the
+	// caller sees the score that was judged, not only that one was.
+	noAnswer *noAnswerVerdict
+	// exactCosine holds the stored-embedding cosine of the rows the vector leg's
+	// list did not carry, when the no-answer bar is on and the retriever can read
+	// them. A row absent from it has no comparable cosine.
+	exactCosine map[string]float64
 	// droppedByBound counts the same removals by WHICH cap in stage 9 cut the
 	// row, because the caps have different remedies: a row-count cap is fixed by
 	// raising the limit and a content-byte cap is not. One map for the stage and
@@ -127,6 +147,7 @@ var stages = []stage{
 	{name: stageDedup, run: runDedup},
 	{name: stageDiversity, run: runDiversity},
 	{name: stageCutoff, run: runCutoff},
+	{name: stageNoAnswer, run: runNoAnswer},
 	{name: stageBudget, run: runBudget},
 	{name: stageRender, run: runRender},
 }
@@ -468,7 +489,11 @@ func runConflicts(p *pipeline) {
 					against = append(against, nb)
 				}
 			}
-			if len(against) == 0 {
+			// A pinned row is never withheld by the walk: a pin is a promise of
+			// delivery, and a contradiction is reported on the row (contradicted_by)
+			// rather than settled by removing it (#975). It sorts ahead of every
+			// unpinned row, so only another pinned row can be in `against`.
+			if len(against) == 0 || candByID[id].Pinned {
 				keptSet[id] = true
 				continue
 			}
@@ -511,6 +536,26 @@ func runConflicts(p *pipeline) {
 			if len(partners) > 0 {
 				sort.Slice(partners, func(i, j int) bool { return rank[partners[i]] < rank[partners[j]] })
 				p.conflictPartners[id] = partners
+			}
+		}
+		// Each kept pinned row names the rows that contradict it and are newer: the
+		// adjacency is already scope-filtered and deduplicated, so this adds no
+		// second reading of the edges.
+		p.withheldIDs = withheld
+		p.contradictedBy = make(map[string][]string)
+		for _, id := range involved {
+			if !keptSet[id] || !candByID[id].Pinned {
+				continue
+			}
+			var newer []string
+			for _, nb := range adj[id] {
+				if contradictionStamp(candByID[nb]).After(contradictionStamp(candByID[id])) {
+					newer = append(newer, nb)
+				}
+			}
+			if len(newer) > 0 {
+				sort.Slice(newer, func(i, j int) bool { return rank[newer[i]] < rank[newer[j]] })
+				p.contradictedBy[id] = newer
 			}
 		}
 		// Remove the withheld rows, preserving rank order. A fresh slice, not
@@ -1151,6 +1196,134 @@ func cutoffShareLabel(share float64) string {
 	return fmt.Sprintf("%.0f%%", share*100)
 }
 
+// noAnswerVerdict is what the no-answer step saw when it withheld a block: the
+// best cosine among the rows it judged, the bar that cosine fell below, and how
+// many rows it withheld.
+type noAnswerVerdict struct {
+	top, bar float64
+	withheld int
+}
+
+// runNoAnswer is the no-answer step, on QUERY-mode requests only (#955). It runs
+// directly after the relevance cutoff (stage 8) and before the budget, and it is
+// numbered as part of that neighbourhood rather than as a new stage 9 so the
+// numbered stages the rest of the documentation cites keep their numbers.
+//
+// A query nothing in the store answers still fills its window: on the bench's 24
+// no-answer queries every condition returns ten rows for every query, and a model
+// handed ten plausible rows for a question the store cannot answer will often use
+// them. This step lets ghost_memory_search say "nothing here answers this" when
+// that is the honest answer.
+//
+// THE RULE is ONE rule with ONE parameter, Request.NoAnswerCosine (the
+// context.no_answer_cosine config key): the block is withheld when the BEST
+// vector cosine among the rows that reach it is strictly below that bar. It is
+// the absolute-floor family of the bench's three candidates (docs/benchmarks.md
+// gives the sweep and why the fused-score floor and the keyword-aware
+// combination were not built). The bar judges the best row rather than the first
+// one: a block is an answer if any row in it is a close match.
+//
+//   - Only a cosine can be judged, and its PRESENCE is the `ok` `rowCosine`
+//     returns, never its sign: a cosine is in [-1, 1], so a genuinely negative one
+//     is a judged (very weak) match rather than the sentinel, and only the exact
+//     -1 mark means the vector leg did not carry the row. When the vector leg was
+//     not in play (no embedder, or it failed) or no row carries a cosine, the step
+//     passes the block through: refusing every answer on a machine with no embedder
+//     would be the rule misreading its own blind spot as a verdict.
+//   - Only a row that carries a cosine is ever withheld. A row without one (a
+//     keyword hit on a memory that was never embedded) passes, and a block that
+//     still holds one is not "nothing cleared the bar".
+//   - A pinned row is never withheld. A pin is a slot guarantee (#936) and a
+//     step that dropped a pinned row would take the guarantee back. Pinned rows
+//     are not judged either: their cosine says nothing about whether the REST of
+//     the block answers the question.
+//   - A keyword-reserved row is NOT exempt, unlike at the cutoff. The reservation
+//     admits the best keyword hits into every window by design, so an exemption
+//     would keep ten plausible rows on exactly the near-miss queries the rule
+//     exists for; the bench measures the shipped behaviour.
+//   - It only ever removes rows, so `limit` stays the maximum.
+//
+// Each withheld row is recorded once, a decision at this step with reason
+// nothing_cleared_the_bar, which the retrieval record reads as a dropped verdict
+// and explain as an excluded row's sentence. A block that ends empty carries the
+// same reason as its outcome, with a sentence that states the score — and only a
+// block THIS step emptied claims it: the verdict field stays nil while any row it
+// cannot judge survives, so a block a later stage empties carries that stage's
+// reason (`all_over_budget`) rather than reading as an answer the bar refused.
+//
+// A passive request and a disabled bar (0) are both recorded as pass-throughs
+// with no note, so they are byte-identical to a pipeline without the step.
+func runNoAnswer(p *pipeline) {
+	in := len(p.rows)
+	bar := p.req.NoAnswerCosine
+	// A bar the configuration turned off (an embedding model the default was not
+	// measured on) is recorded in the trace, so a reader can tell "off because
+	// unmeasured" from "off because nobody set it". Trace only: the block, its
+	// notes and its response are those of a pipeline without the step.
+	if !p.passive && bar <= 0 && p.req.NoAnswerBarNote != "" {
+		p.trace.record(stageNoAnswer, in, in, nil, p.req.NoAnswerBarNote)
+		return
+	}
+	if p.passive || bar <= 0 || in == 0 || !p.vectorLegInPlay() {
+		p.trace.record(stageNoAnswer, in, in, nil)
+		return
+	}
+	top, judged := -1.0, false
+	for i := range p.rows {
+		c := p.rows[i]
+		cos, has := p.rowCosine(c)
+		if c.Pinned || !has {
+			continue
+		}
+		judged = true
+		if cos > top {
+			top = cos
+		}
+	}
+	if !judged || top >= bar {
+		p.trace.record(stageNoAnswer, in, in, nil)
+		return
+	}
+	// Fresh slices, for the reason the cutoff gives: the candidate set is the
+	// retriever's return value and items stay index-aligned with rows.
+	keptRows := make([]memory.Candidate, 0, in)
+	keptItems := make([]Item, 0, in)
+	var dropped []string
+	for i := range p.rows {
+		c := p.rows[i]
+		// A row with no cosine was never judged, so it is never withheld: an
+		// exact keyword hit on a memory that was never embedded has no cosine to
+		// compare, and the bar says nothing about it.
+		_, has := p.rowCosine(c)
+		if c.Pinned || !has {
+			keptRows = append(keptRows, c)
+			keptItems = append(keptItems, p.items[i])
+			continue
+		}
+		dropped = append(dropped, c.ID)
+		p.dropped[c.ID] = reasonNothingClearedBar
+		p.droppedBy[stageNoAnswer]++
+		p.trace.decide(c.ID, c.ProjectID, stageNoAnswer, reasonNothingClearedBar, c.Score)
+	}
+	p.rows, p.items = keptRows, keptItems
+
+	if len(keptRows) == 0 {
+		p.noAnswer = &noAnswerVerdict{top: top, bar: bar, withheld: len(dropped)}
+	} else {
+		p.noAnswer = nil
+	}
+	note := noAnswerNote(top, bar, len(dropped))
+	p.blockNotes = append(p.blockNotes, note)
+	p.trace.record(stageNoAnswer, in, len(keptRows), dropped, note)
+}
+
+// noAnswerNote is the step's block statement: the best cosine, the bar and how
+// many rows were withheld.
+func noAnswerNote(top, bar float64, n int) string {
+	return fmt.Sprintf("no-answer bar: the best vector match scored cosine %.3f, below the %.3f bar, so %d row(s) that carry a cosine were withheld",
+		top, bar, n)
+}
+
 // runBudget is stage 9: the final closure. The order the retriever returned is
 // authoritative and is preserved — it carries the keyword reservation, status
 // demotion, decay and both demotions, none of which can be recovered from a
@@ -1489,6 +1662,15 @@ func (p *pipeline) markConflicts() {
 	}
 	for i := range p.items {
 		p.items[i].ConflictsWith = nil
+		p.items[i].ContradictedBy = nil
+		// A partner is named only while the reader's answer matches what stage 5
+		// decided: a withheld row is out of it by construction, a kept pinned row
+		// must still be in it.
+		for _, w := range p.contradictedBy[p.items[i].ID] {
+			if present[w] != p.withheldIDs[w] {
+				p.items[i].ContradictedBy = append(p.items[i].ContradictedBy, w)
+			}
+		}
 		partners, ok := p.conflictPartners[p.items[i].ID]
 		if !ok {
 			continue
@@ -1560,7 +1742,7 @@ func (p *pipeline) removalBreakdown() string {
 	// response_fit is last because it runs last: it is a Run post-pass, not a
 	// stage, and counting it separately is what lets a reader tell a set the
 	// pipeline emptied from one the byte cap emptied.
-	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageCutoff, stageBudget, stageResponseFit}
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageCutoff, stageNoAnswer, stageBudget, stageResponseFit}
 	parts := make([]string, 0, len(order))
 	for _, stage := range order {
 		if n := p.droppedBy[stage]; n > 0 {

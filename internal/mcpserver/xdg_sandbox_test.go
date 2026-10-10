@@ -38,6 +38,9 @@ func TestMain(m *testing.M) {
 			panic("mcpserver tests: set " + kv[0] + ": " + err.Error())
 		}
 	}
+	// New captures the server's directory; a suite that ran in a checkout would
+	// bind to it. Only the bind tests set one, on the server they build.
+	workingDirResolver = func() string { return "" }
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

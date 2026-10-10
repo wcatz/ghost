@@ -256,6 +256,13 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			// this payload is always a query.
 			return fmt.Sprintf("cut by the relevance cutoff: the answer stops where relevance falls off, and this "+
 				"memory's fused Base was below %s of the top match's Base", cutoffShareLabel(p.req.RelevanceCutoff))
+		case reasonNothingClearedBar:
+			// The no-answer bar (#955): no row in the block was a close enough
+			// vector match, so the whole block was withheld. It names the rule and
+			// the bar so a caller diagnosing a missing answer knows it was a
+			// judgement made at a threshold it can change.
+			return fmt.Sprintf("withheld by the no-answer bar: the best vector match in the block scored below "+
+				"cosine %.3f (context.no_answer_cosine), so nothing here answers the query", p.req.NoAnswerCosine)
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
 		case reasonDiversityDeferred:

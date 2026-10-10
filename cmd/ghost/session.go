@@ -165,7 +165,9 @@ func runContext() {
 // unrecognized invocation rather than a question.
 const hookUsage = `Usage: ghost hook <event> --source <host>
 
-Lifecycle hook for MCP clients: events session-start, stop, session-end;
+Lifecycle hook for MCP clients: events session-start, stop, session-end,
+message-submit and edit (claude-code only: a floored memory block beside a user
+message or an edit's result; silent when nothing matches);
 sources claude-code, opencode, codex, goose. Normally called by a client
 adapter, not by hand. A missing or unknown source fails open with one
 diagnostic line and exit status 0 — re-run ghost mcp init to repair wiring.
