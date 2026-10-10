@@ -3095,7 +3095,7 @@ func (s *Server) registerTools() {
 		// arrays survive schema validation and are normalized in-handler.
 		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
-		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -3171,12 +3171,22 @@ func (s *Server) registerTools() {
 		}
 		supersedeNote := ""
 		if args.Supersedes != "" {
-			if err := s.store.SupersedeDecision(ctx, args.ProjectID, args.Supersedes, decisionID); err != nil {
+			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
+			if err != nil {
 				// The new decision is already committed; report the
 				// supersession failure without losing that ID.
 				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
 			} else {
-				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
+				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
+				if len(retirement.Retired) > 0 {
+					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
+				}
+				if len(retirement.Ambiguous) > 0 {
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
+				}
+				if len(retirement.Declined) > 0 {
+					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
+				}
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
@@ -4538,4 +4548,15 @@ func repairInstructions(project string, targets []string) string {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
 	}
 	return sb.String()
+}
+
+// joinTokens renders stored ids for a tool answer, each through assemble.Token
+// so an id carrying a newline, a guillemet or a control character cannot reach
+// the reader as anything but a bounded token.
+func joinTokens(ids []string) string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = assemble.Token(id)
+	}
+	return strings.Join(out, ", ")
 }

@@ -3626,6 +3626,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return "", "", 0, err
 	}
+	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return "", "", 0, err
 	}
@@ -5178,6 +5181,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	// every listing. Empty is skipped, so a caller that mentions no reference is
 	// not charged for a check.
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
+		return err
+	}
+	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return err
 	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
