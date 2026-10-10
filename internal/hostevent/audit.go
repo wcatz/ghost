@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -178,9 +179,17 @@ func walkArgText(v any) string {
 		}
 		return strings.Join(parts, " ")
 	case map[string]any:
+		// Sorted by key: the text is read for word adjacency (a negation cue bound to
+		// an id in a save), so its order must be a function of the arguments alone and
+		// not of Go's randomized map iteration.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		parts := make([]string, 0, len(t))
-		for _, e := range t {
-			if s := walkArgText(e); s != "" {
+		for _, k := range keys {
+			if s := walkArgText(t[k]); s != "" {
 				parts = append(parts, s)
 			}
 		}

@@ -1,6 +1,7 @@
 package hostevent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -531,5 +532,20 @@ func TestScanAuditAnUpdateOfAMemoryIsReadAsNothing(t *testing.T) {
 		if !sig.HasID(auditMemoryID) {
 			t.Errorf("%s: an id in this tool's arguments stopped being a citation", name)
 		}
+	}
+}
+
+// TestASaveWithAnIDAndACueIsJudgedTheSameOnEveryScan: the arguments of a call are
+// flattened to one string whose word adjacency decides whether a cue binds an id, so
+// the flattening must not depend on map iteration order.
+func TestASaveWithAnIDAndACueIsJudgedTheSameOnEveryScan(t *testing.T) {
+	a := toolArgText(json.RawMessage(`{"zeta":"ignore","alpha":"0123456789ABCDEF0123456789ABCDEF","mid":"x"}`))
+	for i := 0; i < 50; i++ {
+		if got := toolArgText(json.RawMessage(`{"zeta":"ignore","alpha":"0123456789ABCDEF0123456789ABCDEF","mid":"x"}`)); got != a {
+			t.Fatalf("flattened text changed between scans: %q then %q", a, got)
+		}
+	}
+	if want := "0123456789ABCDEF0123456789ABCDEF x ignore"; a != want {
+		t.Errorf("flattened %q, want keys in sorted order %q", a, want)
 	}
 }

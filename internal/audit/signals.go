@@ -414,9 +414,11 @@ func (s *Signals) addToTurn(fps []string) {
 // satisfied by an id (an id is evidence on its own arm, and hashing it as a word
 // would let a memory "match itself" without the agent saying anything).
 //
-// Negation segments are extracted ONLY from prose (the agent's own narrative),
-// never from tool-call arguments, because tool argument strings routinely contain
-// negative-sounding values ("return false") that are not denials of the memory.
+// Negation segments are extracted from prose (the agent's own narrative) and
+// never from a NON-SAVE tool call's arguments, because tool argument strings
+// routinely contain negative-sounding values ("return false") that are not denials
+// of the memory. The one exception is a save's arguments, which contribute the ids
+// a cue is bound to and nothing else: see AddSaveArgs.
 func (s *Signals) AddProse(text string) {
 	s.addWords(text)
 	s.addNegations(text, false)
