@@ -270,9 +270,10 @@ func TestInferGlobalScope(t *testing.T) {
 		{"from any repo is not a named repository", "fact", "deploy to infra cluster from any repo", "global"},
 		{"every repo is not a named repository", "fact", "run go vet in every repo on the dev machine", "global"},
 		{"a file path is not a repository", "fact", "edit cmd/ghost/main.go across all repos", "global"},
-		// node followed by a two-digit number is a runtime version, not a machine.
-		{"node major version is not a host", "fact", "use node20 across all repos", "global"},
-		{"hyphenated node major version is not a host", "fact", "pin node-18 across all repos", "global"},
+		// Any node plus a number is read as a machine, node20 included: a wrong
+		// project scope is recoverable, a host note replayed everywhere is not.
+		{"node with a two-digit number is a host", "fact", "restart node-12 across all repos", "project"},
+		{"node major version spelling is also read as a host", "fact", "use node20 across all repos", "project"},
 		{"single digit node is a host", "fact", "restart node5 across all repos", "project"},
 		// The marker is a concrete identifier: bare nouns and version-like tokens
 		// do not make a fact host-specific.

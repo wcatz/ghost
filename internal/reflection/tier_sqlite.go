@@ -236,13 +236,6 @@ var singleTargetRe = regexp.MustCompile(
 		`|\b\d{1,3}(?:\.\d{1,3}){3}\b` +
 		`|\b[a-z0-9][a-z0-9-]*\.(?:internal|local|lan|home\.arpa)\b`)
 
-// nodeVersionRe is the one infrastructure noun that is also a runtime: "node20"
-// and "node-18" name a Node.js major version far more often than a machine, and
-// a two-digit number is how a version looks. A host called node-12 is still read
-// as a version; the cost of that is a project-scoped fact that stays a candidate
-// for the next pass, not a wrong global one.
-var nodeVersionRe = regexp.MustCompile(`^node-?\d{2}$`)
-
 // singleRepoRe matches "<name> repo(sitory)" after the/in/from/to. The name is
 // checked against repoQuantifiers, so "from any repo" and "in every repo" stay
 // cross-repo language rather than naming a repository.
@@ -262,10 +255,8 @@ var repoQuantifiers = map[string]bool{
 // namesSingleTarget reports whether lower (already lowercased) names one
 // specific host, node, cluster or repository.
 func namesSingleTarget(lower string) bool {
-	for _, m := range singleTargetRe.FindAllString(lower, -1) {
-		if !nodeVersionRe.MatchString(m) {
-			return true
-		}
+	if singleTargetRe.MatchString(lower) {
+		return true
 	}
 	for _, h := range repoHostMarkers {
 		if strings.Contains(lower, h) {
