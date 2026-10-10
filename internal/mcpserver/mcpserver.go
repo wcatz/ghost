@@ -254,7 +254,8 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		remote = detectRemoteForSave(projectID)
 	}
 
-	// A save that CREATES a project from a name-shaped id binds it to the checkout
+	// A save that CREATES a project from a name-shaped id (neither separator-bearing
+	// nor a drive-relative `C:repo`, the shape the reader calls a path) binds it to the checkout
 	// the server was started in, so the next session in that directory resolves it
 	// instead of printing the no-project block (#957). Never an existing project:
 	// resolvedID == "" is the gate, and the store's upsert would not move a path
@@ -262,7 +263,7 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// remote: binding a second name there would silently fold it into the first,
 	// so the claim test and the insert are one store transaction and a claim
 	// declines the bind rather than merging.
-	if resolvedID == "" && !pathShaped {
+	if resolvedID == "" && !pathShaped && !memory.IsPathShaped(projectID) {
 		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
 			bound, err := s.store.BindNewProjectToCheckout(ctx, projectID, dir, projectID, dirRemote)
 			if err != nil {

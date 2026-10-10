@@ -555,3 +555,15 @@ func TestContainsOrIsComparesAcrossSeparators(t *testing.T) {
 		}
 	}
 }
+
+// TestDriveRelativeIdIsNotBoundAsAName: "C:notifier" carries no separator but the
+// reader calls it a path, so the writer must not bind a checkout to it as a name.
+func TestDriveRelativeIdIsNotBoundAsAName(t *testing.T) {
+	store := testStore(t)
+	top := physTemp(t)
+	gitInit(t, top)
+	saveUnder(t, checkoutServer(t, store, top), "ghost_memory_save", "C:notifier")
+	if got, ok := projectPath(t, store, "C:notifier"); ok && got == top {
+		t.Fatalf("a drive-relative id was bound to the checkout %q", got)
+	}
+}
