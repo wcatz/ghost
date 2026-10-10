@@ -573,3 +573,55 @@ func TestContainsBounded(t *testing.T) {
 		}
 	}
 }
+
+// Entries are judged against the total the caller is charged with, the assumed
+// session-start spend included: with no start entry, two ~600-byte deliveries
+// cannot both fit under the allowance (9,000 + 600 + 600 > 10,000).
+func TestTheAssumedStartSpendCountsInTheValidityCheck(t *testing.T) {
+	f := newMomentFixture(t)
+	path := filepath.Join(f.dataDir, "working-moment-assumed.log")
+	for _, e := range []momentEntry{
+		{token: "t1", bytes: 600, ids: []string{"a"}},
+		{token: "t2", bytes: 600, ids: []string{"b"}},
+	} {
+		if err := appendMomentEntry(path, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := readMomentState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.valid["t1"] || st.valid["t2"] || st.spent != sessionStartByteCap+600 {
+		t.Errorf("valid=%v spent=%d: the second delivery must lose against the assumed start spend", st.valid, st.spent)
+	}
+}
+
+// A start hook fired again for the same session (a clear) re-prints a block: its
+// ids repeat, its bytes are still spent.
+func TestARepeatedSessionStartStillChargesItsBytes(t *testing.T) {
+	f := newMomentFixture(t)
+	path := filepath.Join(f.dataDir, "working-moment-clear.log")
+	for _, e := range []momentEntry{
+		{token: startToken, bytes: 5000, ids: []string{"a", "b"}},
+		{token: startToken, bytes: 3000, ids: []string{"a", "b"}},
+	} {
+		if err := appendMomentEntry(path, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _ := readMomentState(path)
+	if st.spent != 8000 || !st.delivered["a"] {
+		t.Errorf("spent=%d delivered=%v, want both blocks charged (8000) and the ids kept", st.spent, st.delivered)
+	}
+}
+
+func TestATruncatedPreviewEndsInOneEllipsis(t *testing.T) {
+	got := momentPreview(strings.Repeat("word ", 100))
+	if strings.Count(got, "…") != 1 || !strings.HasSuffix(got, "…") {
+		t.Errorf("preview %q must end in exactly one ellipsis", got[len(got)-12:])
+	}
+	if short := "short row"; momentPreview(short) != short {
+		t.Error("a row within the budget must be unchanged")
+	}
+}

@@ -107,37 +107,49 @@ func readMomentState(path string) (momentState, error) {
 	defer f.Close() //nolint:errcheck
 	sc := bufio.NewScanner(io.LimitReader(f, workMomentMarkerMaxBytes))
 	sc.Buffer(make([]byte, 0, 64<<10), 64<<10)
-	sawStart := false
+	// The assumed start spend is part of the running total from the first entry,
+	// so every entry is judged against the same total the caller is charged with;
+	// adding it after the loop would let racing hooks each fit under a ledger
+	// that left it out. A real start entry replaces the assumption.
+	st.spent = sessionStartByteCap
+	assumed := true
 	for sc.Scan() {
 		e, ok := parseMomentEntry(sc.Text())
 		if !ok {
 			continue
 		}
+		base := st.spent
+		isStart := e.token == startToken
+		if isStart && assumed {
+			base -= sessionStartByteCap
+		}
+		// A second start entry (a clear fires the start hook again) re-printed a
+		// whole block: its bytes are charged even though its ids repeat. Any
+		// other entry that repeats an id is a lost race and charges nothing.
 		clash := false
-		for _, id := range e.ids {
-			if st.delivered[id] {
-				clash = true
-				break
+		if !isStart {
+			for _, id := range e.ids {
+				if st.delivered[id] {
+					clash = true
+					break
+				}
 			}
 		}
-		if clash || st.spent+e.bytes > workMomentBudget {
+		if clash || base+e.bytes > workMomentBudget {
 			st.valid[e.token] = false
 			continue
 		}
 		for _, id := range e.ids {
 			st.delivered[id] = true
 		}
-		st.spent += e.bytes
+		st.spent = base + e.bytes
 		st.valid[e.token] = true
-		if e.token == startToken {
-			sawStart = true
+		if isStart {
+			assumed = false
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return st, err
-	}
-	if !sawStart {
-		st.spent += sessionStartByteCap
 	}
 	return st, nil
 }

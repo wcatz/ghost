@@ -415,7 +415,8 @@ func momentPreview(s string) string {
 	if len(s) <= workMomentRowBytes {
 		return s
 	}
-	return truncateUTF8(s, workMomentRowBytes) + "…"
+	// truncateUTF8 already marks the cut.
+	return truncateUTF8(s, workMomentRowBytes)
 }
 
 // newMomentToken names one delivery's claim in the marker.
