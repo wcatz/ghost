@@ -198,8 +198,9 @@ func walkArgText(v any) string {
 // resolves every host's naming convention, so a scanner passes the name it found
 // and this decides.
 //
-// An UPDATE of a stored memory is read as nothing at all. Its arguments are the id of
-// the memory being rewritten and that memory's own new text, and the audit judges a
+// An UPDATE of a stored memory that carries new text is read as nothing at all. Its
+// arguments are the id of the memory being rewritten and that memory's own new text,
+// and the audit judges a
 // memory against what is stored NOW, which is that text: so as prose the update would
 // file the memory used by its own wording, as a citation it would file it used by its
 // id, and as a save it would file it superseded by itself, a decision-bearing verdict
@@ -207,8 +208,13 @@ func walkArgText(v any) string {
 // three is evidence about the memory, so none is recorded. An update that cites ANOTHER
 // memory by id or wording is lost with it; that is the conservative direction, since a
 // citation is the one claim a false `used` makes.
+//
+// The rule follows the ARGUMENTS and not the name, because every field of an update but
+// the ids is optional: a tags-only or verified-only update carries the id and no text,
+// which is the agent acting on the memory by id, the same deliberate reference as a pin,
+// and it falls through to the ordinary tool path where the id is a citation.
 func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
-	if isGhostUpdateTool(name) {
+	if isGhostUpdateTool(name) && carriesNewText(input) {
 		return
 	}
 	if text := toolArgText(input); text != "" {
@@ -218,6 +224,18 @@ func addToolCall(sig *audit.Signals, name string, input json.RawMessage) {
 			sig.AddToolArgs(text)
 		}
 	}
+}
+
+// carriesNewText reports whether a tool call's JSON arguments hold a non-empty
+// `content`, which is what makes an update a rewrite of the memory's text.
+func carriesNewText(input json.RawMessage) bool {
+	var args struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return false
+	}
+	return strings.TrimSpace(args.Content) != ""
 }
 
 // AddAuditToolCall files one tool call the way every scanner does, for a caller

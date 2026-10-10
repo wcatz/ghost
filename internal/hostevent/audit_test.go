@@ -502,6 +502,14 @@ func TestScanAuditAnUpdateOfAMemoryIsReadAsNothing(t *testing.T) {
 			t.Errorf("%s: verdict %+v, want %q: an update restating the memory it rewrites is evidence about nothing", name, v, audit.OutcomeIgnored)
 		}
 	}
+	// An update that carries no new text (tags or a verification only) is the agent
+	// acting on the memory by id, like a pin, so its id is still a citation.
+	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","tags":["a"]}`, `{"memory_id":"` + auditMemoryID + `","verified":true,"content":"  "}`} {
+		l := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_update","input":` + args + `}]}}` + "\n"
+		if sig := scanAudit(t, FormatClaudeJSONL, l+prose); !sig.HasID(auditMemoryID) {
+			t.Errorf("an update with no new text (%s) stopped being a citation of the memory it names", args)
+		}
+	}
 	// The controls, so the cases above are the routing's doing: the same arguments
 	// under a tool that acts on a memory by id are the agent naming it, and another
 	// server's tool of the same bare name is not Ghost's.
