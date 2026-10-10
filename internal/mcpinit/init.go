@@ -77,8 +77,11 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 7: Stop hook.
-	_, _ = fmt.Fprintln(w, "\n[7/10] Configuring Stop hook...")
+	_, _ = fmt.Fprintln(w, "\n[7/10] Configuring Stop and working-moment hooks...")
 	if err := ensureStopHook(w, settingsFile, ghostBin); err != nil {
+		return retryHint(err)
+	}
+	if err := ensureWorkingMomentHooks(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
@@ -400,13 +403,21 @@ const (
 // substring, so a hand-edited wrapper that happens to also mention cmdSubstr
 // is never rewritten.
 func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
+	return reconcileHookMatcher(sf, event, "", cmdSubstr, desiredCmd, legacyCmd, isWindows)
+}
+
+// reconcileHookMatcher is reconcileHook for an event whose entry carries a
+// matcher (PostToolUse is matched by tool name). The matcher is used only when
+// the hook is ADDED; an existing hook keeps whatever matcher it has, so a
+// hand-edited one is never rewritten.
+func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
 	existingCmd, exists, err := sf.findHookCommand(event, cmdSubstr)
 	if err != nil {
 		return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
 	}
 	if !exists {
 		entry := hookEntry{
-			Matcher: "",
+			Matcher: matcher,
 			Hooks: []hookAction{
 				{Type: "command", Command: desiredCmd},
 			},
@@ -582,6 +593,40 @@ func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to current invocation: %s\n", hookCmd)
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
+	}
+	return nil
+}
+
+// workMomentMatcher is the PostToolUse matcher of the edit hook: a list of exact
+// tool names, which the host matches exactly.
+const workMomentMatcher = "Edit|Write|MultiEdit"
+
+// ensureWorkingMomentHooks registers the two working-moment hooks: the
+// message-submit one (UserPromptSubmit, no matcher support) and the edit one
+// (PostToolUse, matched to Edit|Write|MultiEdit). Idempotent and
+// non-destructive like the hooks above: a re-run adds nothing, an existing
+// entry for the event is never duplicated or rewritten beyond a stale ghost
+// binary path, and every other hook is left alone.
+func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string) error {
+	for _, h := range []struct {
+		event, matcher, token, label string
+	}{
+		{"UserPromptSubmit", "", "message-submit", "message-submit"},
+		{"PostToolUse", workMomentMatcher, "edit", "edit"},
+	} {
+		hookCmd := shellQuote(ghostBin) + " hook " + h.token + " --source claude-code"
+		action, err := reconcileHookMatcher(sf, h.event, h.matcher, "hook "+h.token, hookCmd, hookCmd, runtime.GOOS == "windows")
+		if err != nil {
+			return err
+		}
+		switch action {
+		case hookAdded:
+			_, _ = fmt.Fprintf(w, "  + added %s hook (%s): %s\n", h.event, h.label, hookCmd)
+		case hookMigrated:
+			_, _ = fmt.Fprintf(w, "  + migrated %s hook to current invocation: %s\n", h.event, hookCmd)
+		default:
+			_, _ = fmt.Fprintf(w, "  ✓ %s hook already configured\n", h.event)
+		}
 	}
 	return nil
 }
