@@ -440,8 +440,9 @@ Save new discoveries with ghost_memory_save during work.
 // compares the live render to THIS constant and fails if the recorded BEFORE is
 // ever overwritten with it.
 //
-// The one non-row line difference from the recorded BEFORE is the globals count
-// line. The recorded BEFORE said "3 not shown, ranked by ..." for all three rows
+// Two non-row lines differ from the recorded BEFORE. The closing line is the
+// save guidance, which #959 reworded from the one-line pointer. The other is the
+// globals count line. The recorded BEFORE said "3 not shown, ranked by ..." for all three rows
 // missing from the 11; one of them (gmem03) is a near-duplicate loser the bucket
 // policy removes, which is not the ranking's cut, so the line now says "2 ranked
 // out ..., 1 withheld rather than ranked out". The total stays 11 (#897).

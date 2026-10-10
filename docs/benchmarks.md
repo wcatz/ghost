@@ -919,7 +919,7 @@ still compares them and the saving they record was real when it shipped, but
 they are no longer evidence about the shipped block — the claim "the compact
 render shrinks (never grows) the injected block" describes the old trade, not
 this one. The test now renders the shipped block through `formatSessionContext`
-and fails if it grows past the 2048-byte budget, so the figure guarded is the
+and fails if it grows past the 2560-byte budget, so the figure guarded is the
 one an agent pays. Selection is untouched by the row shape: the behavioral floor
 is still 8/8 and the cap is still 15.
 
