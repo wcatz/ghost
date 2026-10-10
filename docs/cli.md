@@ -1409,35 +1409,57 @@ ghost maintenance consolidate-global            # list clusters, write nothing
 ghost maintenance consolidate-global --apply    # fold them
 ```
 
+**Read the dry run before `--apply`.** The pass deletes rows, and the guards below
+are heuristics: a near-duplicate rule can still pair two rows that disagree, and a
+pair it wrongly clusters costs the folded row's text.
+
 "Near-duplicate" is the rule the SQLite consolidation tier applies to a project
 (token Jaccard of at least 0.5, or full containment of the smaller row, and never
-across a differing number), not a second one. Two rows never cluster when one is
-negated and the other is not (always against never, must against must not, do
-against don't), when they take opposed stances (use against avoid, enable against
-disable, allow against deny or forbid, always against avoid), or when both prefer
-something and the preferred things differ. The list is deliberately conservative: a
-miss leaves a duplicate, a false cluster would delete an opposite instruction.
+across a differing number), not a second one. The fold adds guards. Two rows never
+cluster when one is negated and the other is not (always against never, must
+against must not, do against don't), when they take opposed stances (use against
+avoid, enable against disable, allow against deny or forbid, always against avoid),
+when both prefer something and the preferred things differ, or when they differ by a
+swapped word rather than an addition: each row holds a token the other lacks and
+the smaller side of that difference is at most two tokens ("indent with tabs"
+against "indent with spaces", "turn on" against "turn off", "squash" against
+"rebase"). A row that only adds detail to another still folds. The guards are
+conservative but incomplete, and a miss is a false cluster, not a leftover
+duplicate; a harmless one-word paraphrase is kept as two rows.
 
 The row whose text contains the others is kept verbatim (else the longest, newest
 as the tie-break; for byte-identical rows, the oldest), so its embedding and links
-stay with it. It takes the highest importance and the union of the tags, and its
-text is never written. Only `source = 'reflection'` rows are planned.
+stay with it. It takes the highest importance, the union of the tags and the longest
+retention tier among the cluster, and its text is never written. Only
+`source = 'reflection'` rows are planned.
 
 `--apply` folds every cluster in one transaction, naming rows by id and checking each
-again inside it before anything is written: a row that is no longer reflection-written or has become pinned,
-resolved or persistent, was saved at or after the run's start, or was edited since
-the plan is skipped and reported, never reverted. The replaceable set is
-snapshotted once, before the first delete (the snapshot `ghost reflect --restore`
-reads, so one restore undoes the whole run), each folded row's
-history ends in a `delete` naming the survivor, and its evidence is carried onto
-the survivor. No row outside a cluster is written in any column, including an
-agent-saved row whose text is identical to a survivor's. The dry run opens the
-store read-only, so a store behind this build's schema is reported and left as it
-was.
+again inside it before anything is written: a row that is no longer
+reflection-written or has become pinned, resolved or persistent, was saved at or
+after the run's start, or was edited since the plan is skipped and reported, never
+reverted. The replaceable set is snapshotted once, before the first delete. Each
+folded row's history ends in a `delete` naming the survivor, and its evidence is
+carried onto the survivor. The fold writes only the survivors and deletes only the
+folded rows: an agent-saved row whose text is identical to a survivor's is not
+written in any column. The folded rows' own links and access counts go with them.
+The dry run opens the store read-only, so a store behind this build's schema is
+reported and left as it was.
 
 Pinned, resolved, `manual`, `builtin` and `persistent` rows are never planned by the
 pass, so their text is never rewritten and they are never folded, including a
 pinned row that is a near-duplicate of a cluster.
+
+**Undoing a fold is partial.** `ghost reflect _global --restore` replays the
+snapshot taken before the fold, and as measured it:
+
+- brings the folded rows back as rows, with their text, importance and tags;
+- reverts any edit made since the fold to every row in the snapshot, agent-saved
+  rows included, not only the rows the fold touched;
+- deletes reflection rows created after the fold;
+- does not bring back the folded rows' embeddings or links, which went with them;
+- leaves the survivor's raised retention tier as it is.
+
+Treat the dry run as the safeguard and the restore as a last resort.
 
 ## OpenCode sessions
 

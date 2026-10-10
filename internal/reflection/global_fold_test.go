@@ -52,17 +52,23 @@ func TestPlanGlobalFoldNamesTheOldestRowForIdenticalText(t *testing.T) {
 }
 
 // The cluster rule is Jaccard >= 0.5 as well as full containment, and a pair
-// below it stays two rows. None of these rows contains another, so only the
-// Jaccard bar decides them.
+// below it stays two rows. None of these rows contains another, and each side of
+// the difference is three tokens (a paraphrase, not a swap), so only the Jaccard
+// bar decides them.
 func TestPlanGlobalFoldJaccardBar(t *testing.T) {
 	mems := []memory.Memory{
-		{ID: "a", Content: "restart the relay after kernel updates", CreatedAt: "2026-01-01 00:00:00"},
-		{ID: "b", Content: "restart the relay after kernel patches", CreatedAt: "2026-01-02 00:00:00"},
-		{ID: "c", Content: "restart the relay with care", CreatedAt: "2026-01-03 00:00:00"},
+		{ID: "a", Content: "restart relay after kernel updates friday morning evening night", CreatedAt: "2026-01-01 00:00:00"},
+		{ID: "b", Content: "restart relay after kernel updates friday patches security hotfix", CreatedAt: "2026-01-02 00:00:00"},
+		{ID: "c", Content: "restart relay with care", CreatedAt: "2026-01-03 00:00:00"},
 	}
 	clusters := PlanGlobalFold(mems)
-	if len(clusters) != 1 || clusters[0].Survivor.ID != "b" || len(clusters[0].Folded) != 1 || clusters[0].Folded[0].ID != "a" {
-		t.Fatalf("clusters = %+v, want a (0.67 similar) folded into b and c (0.33) left alone", clusters)
+	if len(clusters) != 1 || len(clusters[0].Folded) != 1 {
+		t.Fatalf("clusters = %+v, want a and b (0.5 similar) together and c (0.3) left alone", clusters)
+	}
+	for _, id := range []string{clusters[0].Survivor.ID, clusters[0].Folded[0].ID} {
+		if id == "c" {
+			t.Fatalf("c was clustered: %+v", clusters)
+		}
 	}
 }
 
@@ -142,5 +148,36 @@ func TestPlanGlobalFoldGuardsEveryClusterMemberNotJustTheHead(t *testing.T) {
 		if ids["use"] && ids["avoid"] {
 			t.Fatalf("opposite rows were clustered through a neutral head: %+v", c)
 		}
+	}
+}
+
+// One word swapped for its opposite scores as a near-duplicate and no list of
+// opposites is complete, so a swap (each side holds a token the other lacks, the
+// smaller side at most two) never clusters, while one row adding detail to the
+// other still folds.
+func TestPlanGlobalFoldNeverClustersASwap(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"indent go files with tabs in this style guide", "indent go files with spaces in this style guide"},
+		{"turn on the vector index when building the store", "turn off the vector index when building the store"},
+		{"include the generated files when building the release", "exclude the generated files when building the release"},
+		{"run the slow integration tests before every release", "skip the slow integration tests before every release"},
+		{"the dry run flag defaults to true for the destructive commands", "the dry run flag defaults to false for the destructive commands"},
+		{"release commits must be signed before they are merged", "release commits must be unsigned before they are merged"},
+		{"squash the feature branch commits before merging to main", "rebase the feature branch commits before merging to main"},
+		{"add the sops age key to the runner before deploying", "remove the sops age key from the runner before deploying"},
+	} {
+		if got := PlanGlobalFold([]memory.Memory{
+			{ID: "a", Content: pair[0], CreatedAt: "2026-01-01 00:00:00"},
+			{ID: "b", Content: pair[1], CreatedAt: "2026-01-02 00:00:00"},
+		}); got != nil {
+			t.Errorf("%q and %q were clustered: %+v", pair[0], pair[1], got)
+		}
+	}
+	got := PlanGlobalFold([]memory.Memory{
+		{ID: "short", Content: "deploy requires helmfile diff then apply", CreatedAt: "2026-02-01 00:00:00"},
+		{ID: "long", Content: "deploy requires helmfile diff then apply, and the sops age key must be exported first, and only from the dev machine", CreatedAt: "2026-01-01 00:00:00"},
+	})
+	if len(got) != 1 || got[0].Survivor.ID != "long" {
+		t.Errorf("a pure addition must still fold into the longer row: %+v", got)
 	}
 }

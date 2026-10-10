@@ -81,14 +81,56 @@ func stanceInfo(content string) (stems map[string]bool, preferred string) {
 	return stems, preferred
 }
 
+// swapTokens is the tokenisation the swap guard compares: the project rule's
+// tokens, plus "on", which that rule drops as a stopword but which is half of
+// "turn on" against "turn off".
+func swapTokens(content string) map[string]bool {
+	t := tokenize(content)
+	for _, w := range strings.FieldsFunc(strings.ToLower(content), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if w == "on" {
+			t["on"] = true
+		}
+	}
+	return t
+}
+
+// swapped reports whether two rows differ by a swap rather than by an addition:
+// each has at least one token the other lacks, and the smaller side of that
+// difference is at most two tokens. "indent with tabs" against "indent with
+// spaces", "turn on the cache" against "turn off the cache", "squash then rebase"
+// against "rebase then squash" with a word changed: one word swapped for its
+// opposite scores as a near-duplicate under Jaccard, and no list of opposites is
+// complete. A pure addition (one row is the other plus detail) is not a swap and
+// still folds. Like numericConflict this is a guard on the pair, and it is
+// deliberately strict: a harmless paraphrase that swaps one word stays two rows.
+func swapped(a, b string) bool {
+	ta, tb := swapTokens(a), swapTokens(b)
+	onlyA, onlyB := 0, 0
+	for t := range ta {
+		if !tb[t] {
+			onlyA++
+		}
+	}
+	for t := range tb {
+		if !ta[t] {
+			onlyB++
+		}
+	}
+	return onlyA > 0 && onlyB > 0 && min(onlyA, onlyB) <= 2
+}
+
 // samePolarity is the pairwise guard the _global fold adds to the project rule:
 // two rows never cluster when one is negated and the other is not, when they take
 // opposed stances (use/avoid, enable/disable, allow/deny or forbid, always/avoid),
-// or when both prefer something and the preferred things differ. It is a
-// conservative list, not a classifier: a miss costs a duplicate that stays, a
-// false cluster would delete the opposite of an instruction.
+// when both prefer something and the preferred things differ, or when they differ
+// by a swapped word rather than an addition (swapped). The stance list is
+// conservative and not a classifier: an opposite it does not name is a FALSE
+// CLUSTER, which deletes the opposite of an instruction, so the swap rule is the
+// generic catch and a harmless paraphrase that swaps a word is left as two rows.
 func samePolarity(a, b memory.Memory) bool {
-	if negatesText(a.Content) != negatesText(b.Content) {
+	if negatesText(a.Content) != negatesText(b.Content) || swapped(a.Content, b.Content) {
 		return false
 	}
 	sa, pa := stanceInfo(a.Content)
@@ -117,10 +159,9 @@ func containsAll(a, b map[string]bool) bool {
 // the rest, or several do, the longest content wins, as SQLiteConsolidator keeps
 // the longest text. The newest row breaks a tie, then the id.
 //
-// ReplaceNonManual then claims the OLDEST stored row with identical text (the
-// first of its same-category rows in created_at, id order), so for byte-identical
-// members the survivor named here is that row, and the dry run names the row
-// that will actually be kept.
+// Among byte-identical members the OLDEST is kept (in the chosen row's category
+// first): it carries the age that belongs to the text, and the dry run names the
+// row the fold will actually keep.
 func chooseSurvivor(members []memory.Memory) memory.Memory {
 	toks := make([]map[string]bool, len(members))
 	for i, m := range members {
@@ -148,8 +189,8 @@ func chooseSurvivor(members []memory.Memory) memory.Memory {
 		}
 	}
 	chosen := members[best]
-	// The row ReplaceNonManual will reuse for this text: among the rows holding
-	// it, one in the survivor's category first, then the oldest.
+	// The row to keep for this text: among the rows holding it, one in the
+	// survivor's category first, then the oldest.
 	var kept *memory.Memory
 	for i := range members {
 		m := &members[i]

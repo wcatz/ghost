@@ -771,3 +771,40 @@ func TestConsolidateGlobalLeavesAnUntaggedSurvivorAlone(t *testing.T) {
 		t.Errorf("survivor history grew: %d -> %d", len(histBefore), len(histAfter))
 	}
 }
+
+// Raising the survivor's retention tier is a change to it like any other: the
+// row gets an updated_at bump and a history row.
+func TestConsolidateGlobalRetentionRaiseIsRecordedOnTheSurvivor(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	mk := func(content, tier, created string) string {
+		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: content, Source: "reflection", Importance: 0.5, Retention: tier})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = ?, updated_at = '2026-01-01 00:00:00' WHERE id = ?`, created, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		return id
+	}
+	mk("the relay restarts after kernel updates on friday", memory.RetentionProject, "2026-01-01 00:00:00")
+	survivor := mk("the relay restarts after kernel updates on friday evening", memory.RetentionSession, "2026-01-02 00:00:00")
+	histBefore, _ := f.store.MemoryHistory(ctx, survivor, 50)
+	if err := consolidateGlobal(ctx, f.store, true, &bytes.Buffer{}); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	var tier, updated string
+	if err := f.db.QueryRow(`SELECT retention, updated_at FROM memories WHERE id = ?`, survivor).Scan(&tier, &updated); err != nil {
+		t.Fatalf("read survivor: %v", err)
+	}
+	if tier != memory.RetentionProject {
+		t.Fatalf("survivor retention = %q, want it raised to project", tier)
+	}
+	if updated == "2026-01-01 00:00:00" {
+		t.Error("a retention raise did not bump updated_at")
+	}
+	histAfter, _ := f.store.MemoryHistory(ctx, survivor, 50)
+	if len(histAfter) != len(histBefore)+1 {
+		t.Errorf("survivor history %d -> %d, want one new row for the raise", len(histBefore), len(histAfter))
+	}
+}

@@ -205,8 +205,15 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 		if err := carryEvidenceTx(ctx, tx, p.survivor.ID, p.ids); err != nil {
 			return FoldResult{Skipped: res.Skipped}, err
 		}
+		var tierBefore, tierAfter string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(retention, 'project') FROM memories WHERE id = ?`, p.survivor.ID).Scan(&tierBefore); err != nil {
+			return FoldResult{Skipped: res.Skipped}, fmt.Errorf("read survivor retention: %w", err)
+		}
 		if err := raiseReusedRetentionTx(ctx, tx, projectID, p.survivor.ID, Memory{ReplacesIDs: p.ids}); err != nil {
 			return FoldResult{Skipped: res.Skipped}, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(retention, 'project') FROM memories WHERE id = ?`, p.survivor.ID).Scan(&tierAfter); err != nil {
+			return FoldResult{Skipped: res.Skipped}, fmt.Errorf("read survivor retention: %w", err)
 		}
 		if err := appendHistoryForIDsTx(ctx, tx, p.ids, phaseDelete, Provenance{}); err != nil {
 			return FoldResult{Skipped: res.Skipped}, err
@@ -220,7 +227,9 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 			}
 		}
 		tagsJSON, _ := json.Marshal(p.tags)
-		if p.importance != p.surv.importance || string(tagsJSON) != marshalTags(p.surv.tags) {
+		// A raised retention tier is a change to the survivor like any other: it
+		// gets the updated_at bump and its history row.
+		if p.importance != p.surv.importance || string(tagsJSON) != marshalTags(p.surv.tags) || tierAfter != tierBefore {
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE memories SET importance = ?, tags = ?, updated_at = datetime('now') WHERE id = ?`,
 				p.importance, string(tagsJSON), p.survivor.ID); err != nil {
