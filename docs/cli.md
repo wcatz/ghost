@@ -174,6 +174,7 @@ Events currently used by the host adapters include:
 - `session-start`
 - `stop`
 - `session-end`
+- `message-submit` and `edit` (Claude Code only): the working-moment events, wired to Claude Code's `UserPromptSubmit` and `PostToolUse` (matcher `Edit|Write|MultiEdit`) by `ghost mcp init` and by the plugin manifests. Each runs a keyword-only search of the project's own memories (the message text; for an edit, the file's name and the identifiers in what changed) and, only when a row clears the keyword floor, prints `{"hookSpecificOutput":{"hookEventName":…,"additionalContext":…}}` with at most 1,500 characters. Most turns print nothing. A row already shown in the session (including by the session-start block) is never repeated, and the session-start block and every delivery share one 10,000-byte allowance. No embedding or model call is made; a delivery under a held write lock still prints, but its retrieval record is dropped with a WARN on stderr, so the audit misses that row; and every error, refused data directory, missing session id or subagent payload is a silent exit `0`. Every other source gets a silent no-op for these two events. Re-running `ghost mcp init` adds neither hook twice and leaves other hooks in the same events alone; `ghost mcp status` reports them as optional.
 
 Supported source tokens include `claude-code`, `opencode`, `codex`, and `goose`. A missing or unknown source fails open with one diagnostic line and exit status `0`; it does not silently route through another host. Re-run `ghost mcp init` to repair legacy wiring.
 
@@ -591,7 +592,7 @@ The first argument is an existing project **id** — not a name or a path. A pro
 
 It is also the repair for a checkout that has moved or been deleted, which `ghost mcp status` does *not* report: the status notice tests the recorded path's shape, not whether the directory still exists, so a moved checkout needs this command with its new path.
 
-The directory is made absolute and cleaned, must exist and be a directory, and is stored as its **physical** path — symlinks resolved, because that is the directory a session reports. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project.
+The directory is made absolute and cleaned, must exist and be a directory, and is stored as its **physical** path — symlinks resolved, because that is the directory a session reports. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project. That remote is read with the inherited git location variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_CEILING_DIRECTORIES`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_PREFIX`) dropped from the git child, so a bind run from inside a git hook or from a shell that exports one of them records the remote of the checkout you named rather than the one the variable points at. Every git child Ghost runs is built the same way.
 
 The command refuses, writing nothing, when:
 
@@ -848,7 +849,7 @@ What is refused is everything the importer refuses, which is the whole of it:
 
 A tag's characters are the one place this table says **never**, and the row above says why. The class is refused where a NEW tag can arrive instead — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update` and `ghost_decision_record` each refuse a tag holding a control character, a backtick or a `«»`, naming the position and the tag and writing nothing. `ghost_decision_record` is the only writer of a decision's tag list, so a decision's tags follow the same rule and the same round trip: a decision carrying `["«urgent»"]` exports whole and imports whole. A tag over 64 bytes is trimmed on a rune boundary rather than refused, because a shortened LABEL is a different label and not a different row. A CREDENTIAL-shaped tag is the one thing that class does not cover, on a memory **and** on a decision: `CheckImportedMemory` and `CheckImportedDecision` each ask `rejectSecretList("tags", …)`, and since `ghost export` runs the importer's own predicates, a token in either tags column is refused on import AND named and left out of the artifact (#835). That is the one tag refusal which does cost you the row — a decision, along with the companion memory `RecordDecision` wrote beside it — and it is accepted for the reason the credential guard accepts the same cost on `content`, `source_ref`, `agent`, `session_id` and evidence: the VALUE is the leak and the label is not, so a `!` line naming the field is a repair rather than a silent loss. The SHAPE rule above is untouched by it: neither predicate judges a tag's characters, so `["«urgent»"]` still round-trips whole.
 
-The same predicates run on the way **in**, at the two places a project row can be created. `Store.EnsureProject`/`EnsureProjectWithRepo` and `Store.ResolveOrCreateRepoProject` each ask `memory.CheckImportedProject` — the exporter's and importer's own function, not a copy — so a project the table above would leave out cannot be opened by an ordinary `ghost_memory_save`, by a bench seeder, or by anything else that goes through the store. No CLI command creates a project row outside `ghost import`, which applies the same predicate ahead of its own INSERT. The check is on **creation**, and at both store routes that means it is asked on the arm about to `INSERT`, in the same transaction as the `INSERT` and after the lookups that decide whether a project exists at all. So a store that already holds a project of this shape — a pre-guard save, a restored snapshot, a hand edit — keeps working, including when the save names it by its **recorded path** rather than its id, which is the ordinary case: the reference resolves to the hostile id and the write still lands in the project you already have. The MCP boundary asks the same predicate, and gates it on the same question answered the same way, so an agent naming that project by its session directory is not refused either. `ghost project bind` is the one write of `projects.path` and it asks the predicate too, on the **new** path only: that closes the route by which a checkout whose **directory name** carries a refused character used to reach this state, while leaving a project that already records one repairable — binding it to a directory that passes is the way out, and the bind refuses nothing about the path it already holds.
+The same predicates run on the way **in**, at the three places a project row can be created. `Store.EnsureProject`/`EnsureProjectWithRepo`, `Store.ResolveOrCreateRepoProject` and `Store.BindNewProjectToCheckout` each ask `memory.CheckImportedProject` — the exporter's and importer's own function, not a copy — so a project the table above would leave out cannot be opened by an ordinary `ghost_memory_save`, by a bench seeder, or by anything else that goes through the store. No CLI command creates a project row outside `ghost import`, which applies the same predicate ahead of its own INSERT. The check is on **creation**, and at each store route that means it is asked on the arm about to `INSERT`, in the same transaction as the `INSERT` and after the lookups that decide whether a project exists at all. So a store that already holds a project of this shape — a pre-guard save, a restored snapshot, a hand edit — keeps working, including when the save names it by its **recorded path** rather than its id, which is the ordinary case: the reference resolves to the hostile id and the write still lands in the project you already have. The MCP boundary asks the same predicate, and gates it on the same question answered the same way, so an agent naming that project by its session directory is not refused either. `Store.BindProjectPath` (behind `ghost project bind`) and the INSERT in `Store.BindNewProjectToCheckout` (a save that creates a project from a name, recorded at the top level of the git checkout the server was started in) are the writes of a checkout path to `projects.path`, and both ask the predicate too; `BindProjectPath` asks it on the **new** path only: that closes the route by which a checkout whose **directory name** carries a refused character used to reach this state, while leaving a project that already records one repairable — binding it to a directory that passes is the way out, and the bind refuses nothing about the path it already holds.
 
 There is no re-keying: a different id is a different row, and the links, the recorded history and every `ghost history` read are attached to the one this store holds. What you can do about a left-out row depends on its kind, and only two kinds can be deleted **on their own**: a **project** through `ghost project delete <project>` and a **memory** through the `ghost_memory_delete` tool. A **task** and a **decision** have neither — there is no `ghost task delete`, no `ghost decision delete`, no MCP tool for either, and no `DELETE` against those two tables anywhere in Ghost — so removing one of those rows on its own means editing the database directly. They are not unremovable, though: both tables cascade from `projects`, so `ghost project delete <project>` **does** remove them along with every other row in that project. It is the blunt repair, and it is available. Until you run it the row stays in the store and out of every artifact, and the export report says which of the two cases you are in. (There is no top-level `ghost delete`: `delete` is a subcommand of `project`, so the full spelling is `ghost project delete`.)
 
@@ -1023,7 +1024,7 @@ Read it with these five things in mind:
 
 - **The scope is always one project.** With no `--project`, it is the project the current directory (or `--cwd`) resolves to. A name, an id or a directory Ghost has never heard of is an error that names the remedy — never a report pooled over every project, because a mistyped project name answered with the whole corpus is a report about a scope nobody asked for.
 - **Figures are per source and never pooled.** A search asks "did the agent use what it looked up"; an injection asks "did it use what it was handed". A ratio over both is a number about neither, so there is no total.
-- **A source with no rows says so.** It does not report 0% cited, which would read as a verdict on a source that has never run here. `session_start` and `project_context` record their own retrievals, so on a store whose sessions have run they carry figures; they say `no rows` on a store that has only ever searched, and a project with no session-start injection at all is the ordinary way to see that.
+- **A source with no rows says so.** It does not report 0% cited, which would read as a verdict on a source that has never run here. `session_start`, `project_context` and `working_moment` (a block delivered beside a message or an edit; one record per delivery, none for a silent turn) record their own retrievals, so on a store whose sessions have run they carry figures; they say `no rows` on a store that has only ever searched, and a project with no session-start injection at all is the ordinary way to see that.
 - **The percentage is a cited id.** `cited by id` is the share of scored verdicts whose `used` was proved by the agent naming the memory's id. A `used` proved only by wording overlap is `restated by wording (heuristic)`, printed beside it and in no percentage. Neither changes any decision: only negative verdicts reach `UsefulnessByMemory`.
 - **`ignored` is the residual, not a score.** It means the agent's own words never mentioned the memory. Nothing here ranks a memory, and a reader treating 60% ignored as advice about which memories to delete is reading a heuristic that never saw the session.
 
@@ -1346,9 +1347,10 @@ ghost bench --context
 ghost bench --passive
 ghost bench --audit
 ghost bench --cutoff-sweep
+ghost bench --no-answer-sweep
 ```
 
-Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then three things beneath it: the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
+Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then the **top-row shares and the R@1 ceiling** — the share of queries whose first result is relevant, the share whose first result carries the best label, the share with a relevant row in the first five, and the mean ceiling a perfect ranking hits on these labels — then the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
 
 `--sweep` is a different report: it grid-searches the vector-leg weight (FTS weight is the complement) and prints each point's NDCG@10, R@1, R@10 and MRR@10 **plus a paired 95% interval against the shipped default** — because a sort by point estimate is not a ranking of points the dataset cannot separate. It returns there, so it prints neither table above. See [Benchmarks and methodology](benchmarks.md).
 
@@ -1359,6 +1361,8 @@ Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) o
 `--audit` is a fifth report and scores the retrieval audit (`ghost lifecycle`'s used/ignored/superseded/contradicted verdicts) instead of retrieval. It builds a labelled offline session — forty memories, a scripted run of turns with hand-written labels for the ids a turn cites, the memories it restates, denies or saves — judges it through `audit.Run` in scratch stores, and prints per-outcome precision and recall (with `used` split by the identifier and token arms), a confusion table and three headline lines. It needs no model, network or data directory, and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#retrieval-audit-ghost-bench---audit).
 
 `--cutoff-sweep` is a sixth report: it sweeps the query-mode relevance cutoff (`context.relevance_cutoff`) over the same graded corpus and fixed clock `--context` uses, and prints per share the graded-relevant rows admitted, context precision, result rate and estimated tokens per answer — the gradient the shipped default (0.63) is chosen from. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-relevance-cutoff-ghost-bench---cutoff-sweep).
+
+`--no-answer-sweep` is a seventh report: it measures the query-mode no-answer bar (`context.no_answer_cosine`) over the same graded corpus and fixed clock, at the shipped relevance cutoff, with the 24 no-answer queries as the false-positive half. Per rule and setting it prints the no-answer false-positive rate (no-answer queries that still got rows), the answerable queries refused (of 220), the graded-relevant rows still admitted, context precision, estimated tokens per answer and whether the gate is met (false-positive rate at most 0.500, at most 7 answerable queries refused). Three rule families are in it: the cosine floor the assembler ships (every row is the real assembler path), and a fused-score floor and a cosine-plus-keyword rule that are measured from the block and not built. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-no-answer-bar-ghost-bench---no-answer-sweep).
 
 ## Scratch hygiene
 
@@ -1393,6 +1397,70 @@ ghost maintenance clean-scratch --apply    # remove strict-signature matches
 `lsof`/`fuser` probe reports as open or mmap'd, and — when neither probe tool
 is available (Windows, minimal containers) — refuses to remove anything and
 says so rather than risk deleting an open file.
+
+### `ghost maintenance consolidate-global`
+
+Folds near-duplicate rows in `_global`, the scope every project's context replays.
+Rows written before promotion began folding equivalent text accumulated there, and
+nothing folded them afterwards. Dry run by default: it lists each cluster (the row kept and
+the rows folded into it) and writes nothing, not even a snapshot.
+
+```bash
+ghost maintenance consolidate-global            # list clusters, write nothing
+ghost maintenance consolidate-global --apply    # fold them
+```
+
+**Read the dry run before `--apply`.** The pass deletes rows, and the guards below
+are heuristics: a near-duplicate rule can still pair two rows that disagree, and a
+pair it wrongly clusters costs the folded row's text.
+
+"Near-duplicate" is the rule the SQLite consolidation tier applies to a project
+(token Jaccard of at least 0.5, or full containment of the smaller row, and never
+across a differing number), not a second one. The fold adds guards. Two rows never
+cluster when one is negated and the other is not (always against never, must
+against must not, do against don't), when they take opposed stances (use against
+avoid, enable against disable, allow against deny or forbid, always against avoid),
+when both prefer something and the preferred things differ, or when they differ by a
+swapped word rather than an addition: each row holds a token the other lacks and
+the smaller side of that difference is at most two tokens ("indent with tabs"
+against "indent with spaces", "turn on" against "turn off", "squash" against
+"rebase"). A row that only adds detail to another still folds. The guards are
+conservative but incomplete, and a miss is a false cluster, not a leftover
+duplicate; a harmless one-word paraphrase is kept as two rows.
+
+The row whose text contains the others is kept verbatim (else the longest, newest
+as the tie-break; for byte-identical rows, the oldest), so its embedding and links
+stay with it. It takes the highest importance, the union of the tags and the longest
+retention tier among the cluster, and its text is never written. Only
+`source = 'reflection'` rows are planned.
+
+`--apply` folds every cluster in one transaction, naming rows by id and checking each
+again inside it before anything is written: a row that is no longer
+reflection-written or has become pinned, resolved or persistent, was saved at or
+after the run's start, or was edited since the plan is skipped and reported, never
+reverted. The replaceable set is snapshotted once, before the first delete. Each
+folded row's history ends in a `delete` naming the survivor, and its evidence is
+carried onto the survivor. The fold writes only the survivors and deletes only the
+folded rows: an agent-saved row whose text is identical to a survivor's is not
+written in any column. The folded rows' own links and access counts go with them.
+The dry run opens the store read-only, so a store behind this build's schema is
+reported and left as it was.
+
+Pinned, resolved, `manual`, `builtin` and `persistent` rows are never planned by the
+pass, so their text is never rewritten and they are never folded, including a
+pinned row that is a near-duplicate of a cluster.
+
+**Undoing a fold is partial.** `ghost reflect _global --restore` replays the
+snapshot taken before the fold, and as measured it:
+
+- brings the folded rows back as rows, with their text, importance and tags;
+- reverts any edit made since the fold to every row in the snapshot, agent-saved
+  rows included, not only the rows the fold touched;
+- deletes reflection rows created after the fold;
+- does not bring back the folded rows' embeddings or links, which went with them;
+- leaves the survivor's raised retention tier as it is.
+
+Treat the dry run as the safeguard and the restore as a last resort.
 
 ## OpenCode sessions
 

@@ -53,6 +53,27 @@ type Result struct {
 	Recall10  float64
 	MRR10     float64
 	NDCG10    float64
+	// TopRowRelevant and TopRowBestLabelled are the shares of the scored
+	// queries whose top-ranked row is relevant, and whose top-ranked row
+	// carries the best label the query gives any row. They answer the
+	// question the R@1 column is usually read as — "did the first row I
+	// was handed answer me" — which RecallAtK does not measure: recall@1
+	// divides by the number of labelled rows, so on a query grading four
+	// it scores 0.250 for a perfect ranking. Both are fractions of the same
+	// scored queries, so they are read against that population and not
+	// against the window.
+	TopRowRelevant     float64
+	TopRowBestLabelled float64
+	// Top5Relevant is the share of the scored queries with at least one
+	// relevant row among the first five results.
+	Top5Relevant float64
+	// Recall1Ceiling is what a perfect ranking of this query set scores at
+	// R@1 — the mean of 1/(labelled rows per query). A property of the
+	// LABELS rather than of the ranking, so it is one figure for the run
+	// and identical over every condition that scored the same query set.
+	// It is why an R@1 of 0.520 on a corpus where 163 of 220 queries grade
+	// 2-4 rows is 87% of what is reachable, not 52% of it.
+	Recall1Ceiling float64
 	// PerQuery holds this condition's score for every scored query, in
 	// query-set order. A slice rather than a map because the pairing is
 	// positional and a map would let a missing or duplicated key line two
@@ -131,6 +152,7 @@ type rankFn func(q Query) ([]string, error)
 func runCondition(ctx context.Context, store *memory.Store, name string, queries []Query, rank rankFn) (Result, error) {
 	res := Result{Condition: name}
 	var sumR1, sumR5, sumR10, sumMRR, sumNDCG float64
+	var sumTopRel, sumTopBest, sumTop5, sumCeiling float64
 	for _, q := range queries {
 		if q.Rel.relevantCount() == 0 {
 			// A query nothing in the corpus answers is undefined for these
@@ -160,6 +182,15 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		sumR10 += RecallAtK(ranked, q.Rel, 10)
 		sumMRR += mrr
 		sumNDCG += ndcg
+		// The top-row shares read the same ranked list the five sums
+		// above just read — one list per query, both questions about its
+		// head. The ceiling is a property of the labels alone and is
+		// summed over the same loop so a query one condition measured
+		// and another did not cannot shift the denominator.
+		sumTopRel += boolAsFloat(TopRowRelevant(ranked, q.Rel))
+		sumTopBest += boolAsFloat(TopRowBestLabelled(ranked, q.Rel))
+		sumTop5 += boolAsFloat(AnyRelevantInTopK(ranked, q.Rel, 5))
+		sumCeiling += Recall1Ceiling(q.Rel)
 		cosines, err := resultCosines(ctx, store, q.Vector, ranked)
 		if err != nil {
 			return Result{}, fmt.Errorf("%s: query %q: %w", name, q.Name, err)
@@ -177,8 +208,22 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		res.Recall10 = sumR10 / n
 		res.MRR10 = sumMRR / n
 		res.NDCG10 = sumNDCG / n
+		res.TopRowRelevant = sumTopRel / n
+		res.TopRowBestLabelled = sumTopBest / n
+		res.Top5Relevant = sumTop5 / n
+		res.Recall1Ceiling = sumCeiling / n
 	}
 	return res, nil
+}
+
+// boolAsFloat renders a per-query verdict as the 0 or 1 a share sums
+// over. A share is a mean over queries, so each query contributes one
+// unit and the sum is a count.
+func boolAsFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func idsFromMemories(ms []memory.Memory, err error) ([]string, error) {

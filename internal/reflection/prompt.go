@@ -372,6 +372,7 @@ Produce a JSON object with two fields:
    - Every category is a candidate: architecture, decision, pattern, convention, gotcha, dependency, preference, fact. Aim for a corpus of high-quality memories, not a short one — and get there by FOLDING inputs into survivors, never by omitting them. ` + countTail + `
    - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, keep that memory as it is rather than emitting a "corrected" version. A plausible-looking but unverified SHA, feature, or version is a hallucination.
    - Project-scoping: every operation must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than keep it.
+   - Global memories are not listed: facts that apply to every project already live in _global and reach every project's context from there. Never merge or rewrite a memory into a restatement of a cross-project preference or rule, and never phrase a fact about one host, cluster or repository as a general one; either would be written to _global as a near-duplicate of a row it already holds.
 
 Return ONLY the JSON object, no other text.`)
 

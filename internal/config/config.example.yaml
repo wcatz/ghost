@@ -74,6 +74,14 @@
 #   # 0 disables it. Chosen from the `ghost bench --cutoff-sweep`; see
 #   # docs/benchmarks.md.
 #   relevance_cutoff: 0.63
+#   # Absolute no-answer bar for query-mode blocks: when the BEST vector cosine
+#   # among the rows a block would carry is below this, the block is withheld and
+#   # the answer says nothing cleared the bar (with the score shown), instead of
+#   # ten plausible rows for a question the store cannot answer. Default 0.62,
+#   # chosen from `ghost bench --no-answer-sweep`; see docs/benchmarks.md. A
+#   # pinned row is never withheld, a block with no vector leg is never judged,
+#   # and the passive digest is never touched. 0 disables it.
+#   no_answer_cosine: 0.62
 
 # --- Subprocess LLM binary paths ---
 # Same as the defaults above: the harness path override applies to every

@@ -123,6 +123,22 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 	}
 }
 
+// The global-scope rule is part of the contract: a project pass does not see
+// _global, so the prompt has to say so and forbid the restatement that would
+// write a near-duplicate there.
+func TestBuildReflectionPrompt_DoesNotRestateGlobalFacts(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost"})
+	for _, want := range []string{
+		"Global memories are not listed",
+		"restatement of a cross-project preference",
+		"about one host, cluster or repository",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
+
 // TestBuildReflectionPrompt_AsksForPerIdOperations is the prompt half of #639.
 // The output contract only fixes identity churn if the model is told to name
 // the id it is acting on: a harness that answers in free text resets every

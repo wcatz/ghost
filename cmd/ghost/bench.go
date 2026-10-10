@@ -15,7 +15,7 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep]
+const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep | --no-answer-sweep]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
@@ -25,7 +25,10 @@ returns costs, how much of it is relevant, and how much of it should never have
 been in it. --cutoff-sweep sweeps the query-mode relevance cutoff over the same
 --context corpus and prints, per share, the graded-relevant rows admitted,
 context precision, result rate and estimated tokens per answer — the measurement
-the shipped default is chosen from. --passive measures the passive blocks instead
+the shipped default is chosen from. --no-answer-sweep does the same for the
+query-mode no-answer bar and prints, per rule and setting, the no-answer
+false-positive rate, the answerable queries refused, the graded-relevant rows
+admitted, context precision and estimated tokens. --passive measures the passive blocks instead
 — session start, ghost context and ghost_project_context — over a synthetic
 multi-project store with resolved, expired, out-of-scope and duplicate rows, and
 reports withheld leakage, recall, contamination and header honesty. --audit scores
@@ -40,12 +43,13 @@ docs/benchmarks.md.
 // different reports over two different questions, and a caller asking for both
 // gets neither rather than one of them.
 const (
-	benchModeResults = "results"
-	benchModeSweep   = "sweep"
-	benchModeContext = "context"
-	benchModePassive = "passive"
-	benchModeAudit   = "audit"
-	benchModeCutoff  = "cutoff-sweep"
+	benchModeResults  = "results"
+	benchModeSweep    = "sweep"
+	benchModeContext  = "context"
+	benchModePassive  = "passive"
+	benchModeAudit    = "audit"
+	benchModeCutoff   = "cutoff-sweep"
+	benchModeNoAnswer = "no-answer-sweep"
 )
 
 // benchModeOf reads the flags after the command. It is a named function because
@@ -75,6 +79,8 @@ func benchModeOf(args []string) (string, error) {
 			err = set(benchModeAudit, "audit")
 		case "--cutoff-sweep":
 			err = set(benchModeCutoff, "cutoff-sweep")
+		case "--no-answer-sweep":
+			err = set(benchModeNoAnswer, "no-answer-sweep")
 		default:
 			return "", fmt.Errorf("unknown flag %q", arg)
 		}
@@ -145,7 +151,7 @@ func runBench() {
 	// not the wall clock: a sweep row is the block --context would print at that
 	// share, and a table that moved with the calendar could neither reproduce nor
 	// be compared against the report it chooses a default for.
-	if mode == benchModeContext || mode == benchModeCutoff {
+	if mode == benchModeContext || mode == benchModeCutoff || mode == benchModeNoAnswer {
 		clock = bench.ContextInstant()
 	}
 	db, err := memory.OpenDB(":memory:")
@@ -214,6 +220,18 @@ func runBench() {
 			os.Exit(1)
 		}
 		fmt.Print(bench.FormatContextCutoffSweep(points))
+		return
+	}
+
+	// The no-answer sweep reads the same graded corpus, clock and stamped instant
+	// and adds the no-answer queries as the false-positive half.
+	if mode == benchModeNoAnswer {
+		points, err := bench.NoAnswerSweep(ctx, store, queries, noAnswer, stampedAt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatNoAnswerSweep(points))
 		return
 	}
 

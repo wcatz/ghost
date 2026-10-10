@@ -539,6 +539,92 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// BindNewProjectToCheckout opens project id at the checkout dir, recording the
+// physical path and, when repoRemote is not empty, the repository, and reports
+// whether it did. It is the write side of a save that creates a project from a
+// name (#957).
+//
+// It is not EnsureProjectWithRepo, and the difference is the point: that call
+// MERGES the incoming id into whatever project already owns the path or the
+// remote and deletes the incoming row, which for a save that is about to write
+// under id leaves the memory under a project that no longer exists. Here the
+// claim test and the INSERT share one write transaction, and a claim is
+// answered with bound=false and no write at all, so the caller opens the
+// project the ordinary unbound way. An id the store already holds is never
+// rebound (bound=false), nor is _global, nor a directory or remote any other
+// project records.
+func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	// The path predicate BindProjectPath asks: absolute, not a bare root, and not
+	// the id sentinel, so "usable" keeps one definition across the path writers.
+	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
+		return false, nil
+	}
+	// Every comparison below is between PHYSICAL paths, as in BindProjectPath: a
+	// caller's spelling (a symlink, a dot segment, native separators) would make
+	// the containment and equality rules inert. What is recorded is the physical
+	// path too, and a directory that cannot be resolved is not a checkout.
+	physical, err := canonicalPath(dir)
+	if err != nil || physical == id || !storedPathIsUsable(physical) {
+		return false, nil
+	}
+	dir = physical
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, _, err := s.beginWrite(ctx, "bind-checkout")
+	if err != nil {
+		return false, fmt.Errorf("begin bind checkout tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var claimed int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE id = ? OR path = ? OR (? != '' AND repo_remote = ?)
+	`, id, dir, repoRemote, repoRemote).Scan(&claimed); err != nil {
+		return false, fmt.Errorf("check checkout claim: %w", err)
+	}
+	if claimed > 0 {
+		return false, nil
+	}
+	// An OVERLAPPING claim is a claim too, and the guard is bind's own: a project
+	// inside dir would be swallowed by it, and dir inside a project that records
+	// no remote would be answered for by that project. Each declines the bind.
+	if err := checkBindPathConflicts(ctx, tx, id, dir); err != nil {
+		if errors.Is(err, ErrBindPathClaimed) || errors.Is(err, ErrBindPathContainsOther) || errors.Is(err, ErrBindPathInsideOther) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := CheckImportedProject(createdProject(id, dir, name)); err != nil {
+		return false, fmt.Errorf("create project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)`,
+		id, dir, name, repoRemote); err != nil {
+		return false, fmt.Errorf("bind project to checkout: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
+		return false, err
+	}
+	// A path the resolver could never return for this project is not a binding:
+	// the same check `ghost project bind` makes, on the row just written. It
+	// declines (the rollback undoes the insert) and the save opens the project
+	// unbound, rather than leaving one that looks bound and no session matches.
+	if err := checkPathResolvable(ctx, tx, id, dir, repoRemote); err != nil {
+		if errors.Is(err, ErrBindPathUnmatchable) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit bind checkout tx: %w", err)
+	}
+	return true, nil
+}
+
 // BindingRefusalKind names the rule that stopped a repository from claiming
 // the project its name matched.
 type BindingRefusalKind string
@@ -3540,6 +3626,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return "", "", 0, err
 	}
+	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return "", "", 0, err
 	}
@@ -5094,6 +5183,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return err
 	}
+	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return err
 	}
@@ -5635,6 +5727,88 @@ func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandida
 	return matches[0], matches[1:], true
 }
 
+// pruneSnapshotsTx keeps the 10 most recent snapshots per project and drops the
+// evidence of any snapshot that is gone. A failure is logged, never returned:
+// an unpruned snapshot is a cost, not a reason to undo the write.
+func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID string) {
+	// Prune old snapshots — keep only the 10 most recent per project. Order by
+	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
+	// created_at is only second-precision, so same-second snapshots would
+	// otherwise prune in arbitrary order.
+	//
+	// Widened from 3: with a restore no longer consuming the snapshot it
+	// read, three was a handful of reflections of history — one bad round
+	// and there was nothing left to roll back to.
+	_, err := tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshots
+		WHERE project_id = ? AND snapshot_id NOT IN (
+			SELECT DISTINCT snapshot_id FROM memory_snapshots
+			WHERE project_id = ?
+			ORDER BY snapshot_id DESC
+			LIMIT 10
+		)
+	`, projectID, projectID)
+	if err != nil && s.logger != nil {
+		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
+	}
+	// The evidence goes with the snapshot it belongs to, and the same statement
+	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
+	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
+	// not a key), so a pruned snapshot's evidence would otherwise accumulate
+	// forever — the only unbounded growth this table would have had.
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshot_evidence
+		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
+	`); err != nil && s.logger != nil {
+		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
+	}
+}
+
+// snapshotReplaceableTx snapshots, and its evidence, every row ReplaceNonManual
+// may replace in the project, and returns the snapshot id. It is the one place
+// the snapshot is taken, shared by ReplaceNonManual and FoldRows, so a restore
+// reads the same shape whichever wrote it.
+func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID string) (snapshotID string, err error) {
+	snapshotID = fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
+		                              created_at, memory_id, access_count, last_accessed,
+		                              agent, session_id, source_ref, confidence,
+		                              valid_from, valid_until, verified_at, scope, scope_captured)
+		SELECT ?, project_id, category, content, importance, source, tags,
+		       created_at, id, access_count, last_accessed,
+		       agent, session_id, source_ref, confidence,
+		       valid_from, valid_until, verified_at, scope, 1
+		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		      AND `+retentionExemptSQL+`
+	`, snapshotID, projectID)
+	if err != nil {
+		return "", fmt.Errorf("snapshot memories: %w", err)
+	}
+	// The evidence those memories carry, in the second read rather than a column on
+	// the snapshot row: a memory can have several records, and this is the only
+	// copy that will exist by the time the rows are gone.
+	//
+	// It is here for the restore. A consolidation that rewrites a memory deletes
+	// the row, and the foreign key takes its evidence with it, so a restore that
+	// brought back only the text would return a memory that reads as never observed
+	// — in a database that still had the evidence to return. Joining through the
+	// snapshot's own rows bounds the read to the memories this snapshot covers, so
+	// nothing outside the replaced corpus is copied.
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshot_evidence
+			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
+		SELECT ?, s.memory_id, p.kind, p.agent, p.session_id, p.source_ref, p.confidence,
+		       p.observed_at, p.verified_at
+		FROM memory_snapshots s
+		JOIN memory_provenance p ON p.memory_id = s.memory_id
+		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
+	`, snapshotID, snapshotID); err != nil {
+		return "", fmt.Errorf("snapshot memory evidence: %w", err)
+	}
+	return snapshotID, nil
+}
+
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
 //
@@ -5994,42 +6168,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// it emits corresponds to a pinned/resolved one it never saw as such, so
 	// preservation has to mean "don't touch it" rather than "carry the flag
 	// through"). See issue #318.
-	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
-		                              created_at, memory_id, access_count, last_accessed,
-		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at, scope, scope_captured)
-		SELECT ?, project_id, category, content, importance, source, tags,
-		       created_at, id, access_count, last_accessed,
-		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at, scope, 1
-		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		      AND `+retentionExemptSQL+`
-	`, snapshotID, projectID)
+	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot memories: %w", err)
-	}
-	// The evidence those memories carry, in the second read rather than a column on
-	// the snapshot row: a memory can have several records, and this is the only
-	// copy that will exist by the time the rows are gone.
-	//
-	// It is here for the restore. A consolidation that rewrites a memory deletes
-	// the row, and the foreign key takes its evidence with it, so a restore that
-	// brought back only the text would return a memory that reads as never observed
-	// — in a database that still had the evidence to return. Joining through the
-	// snapshot's own rows bounds the read to the memories this snapshot covers, so
-	// nothing outside the replaced corpus is copied.
-	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_snapshot_evidence
-			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
-		SELECT ?, s.memory_id, p.kind, p.agent, p.session_id, p.source_ref, p.confidence,
-		       p.observed_at, p.verified_at
-		FROM memory_snapshots s
-		JOIN memory_provenance p ON p.memory_id = s.memory_id
-		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
-	`, snapshotID, snapshotID); err != nil {
-		return nil, fmt.Errorf("snapshot memory evidence: %w", err)
+		return nil, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -6357,37 +6498,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
-	// Prune old snapshots — keep only the 10 most recent per project. Order by
-	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
-	// created_at is only second-precision, so same-second snapshots would
-	// otherwise prune in arbitrary order.
-	//
-	// Widened from 3: with a restore no longer consuming the snapshot it
-	// read, three was a handful of reflections of history — one bad round
-	// and there was nothing left to roll back to.
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM memory_snapshots
-		WHERE project_id = ? AND snapshot_id NOT IN (
-			SELECT DISTINCT snapshot_id FROM memory_snapshots
-			WHERE project_id = ?
-			ORDER BY snapshot_id DESC
-			LIMIT 10
-		)
-	`, projectID, projectID)
-	if err != nil {
-		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
-	}
-	// The evidence goes with the snapshot it belongs to, and the same statement
-	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
-	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
-	// not a key), so a pruned snapshot's evidence would otherwise accumulate
-	// forever — the only unbounded growth this table would have had.
-	if _, err = tx.ExecContext(ctx, `
-		DELETE FROM memory_snapshot_evidence
-		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
-	`); err != nil {
-		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
-	}
+	s.pruneSnapshotsTx(ctx, tx, projectID)
 
 	if s.logger != nil {
 		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)

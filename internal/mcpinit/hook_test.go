@@ -1194,6 +1194,20 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 // is what the stage exists to prevent, so the marker that used to be absent
 // is now the one the block gains; the decay ranking is unchanged, and the
 // gotcha still sorts last.
+//
+// EVERY STAMP COMES FROM ONE FIXED INSTANT rather than from the clock, and that
+// is what makes the fixture one answer on every run and every platform. The 15
+// fact rows tie on score (0.2), on importance (0.2) and on created_at, and the
+// ranking's next key after those is created_at DESC — so rows left to
+// datetime('now') are ordered by which side of a wall-clock second each INSERT
+// landed on. Fifteen INSERTs take long enough for the loop to straddle a second
+// boundary; when the boundary falls between the last two, created_at DESC
+// promotes the last fact and the cap then cuts a DIFFERENT fact, so a test
+// naming the 14th fact reads as intermittent (#1002 — the bench corpus had the
+// same hole before #708, and `TestGoldenFixtureIsStableAcrossRuns` is the
+// golden's guard against it). One instant per fixture removes the boundary
+// from the picture entirely, and the gotcha stays 400 days behind it whether
+// the host clock reads today or a decade from now.
 func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -1218,21 +1232,33 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
-	// 15 low-importance 'fact' rows — never decay, score stays 0.2 each.
+	// The one instant every stamp in this fixture is derived from. Written in
+	// memory.StoredStampLayout, which is the shape datetime('now') itself
+	// writes, so julianday() parses it exactly as it parses a stored one.
+	fixtureNow := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	freshStamp := fixtureNow.Format(memory.StoredStampLayout)
+	oldStamp := fixtureNow.AddDate(0, 0, -400).Format(memory.StoredStampLayout)
+	// 15 low-importance 'fact' rows — never decay, score stays 0.2 each. All
+	// fifteen share freshStamp, so the tie is broken by the ranking's last key
+	// (the id) and by nothing about the run.
 	for i := 0; i < 15; i++ {
 		id := fmt.Sprintf("factfil%02d", i)
 		if _, err := db.Exec(
-			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'fact', ?, ?, ?)`,
-			id, fmt.Sprintf("FACTMARKER%02d content", i), "manual", 0.2,
+			`INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
+			 VALUES (?, 'p1', 'fact', ?, ?, ?, ?)`,
+			id, fmt.Sprintf("FACTMARKER%02d content", i), "manual", 0.2, freshStamp,
 		); err != nil {
 			t.Fatalf("insert fact filler %d: %v", i, err)
 		}
 	}
 	// High-importance 'gotcha' with an old created_at — decays to the 0.15
-	// floor, decayed score 0.9*0.15=0.135, below every fact's 0.2.
+	// floor, decayed score 0.9*0.15=0.135, below every fact's 0.2. The 400-day
+	// age is a reading of the fixture's own instant, so the floor is reached by
+	// a wide margin rather than by however far the host clock has moved.
 	if _, err := db.Exec(
 		`INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
-		 VALUES ('gotcha01', 'p1', 'gotcha', 'GOTCHAMARKER old high-importance', 'manual', 0.9, datetime('now', '-400 days'))`,
+		 VALUES ('gotcha01', 'p1', 'gotcha', 'GOTCHAMARKER old high-importance', 'manual', 0.9, ?)`,
+		oldStamp,
 	); err != nil {
 		t.Fatalf("insert gotcha: %v", err)
 	}
@@ -1274,8 +1300,21 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	}
 	// The decay ranking is untouched: the gotcha sorts last in the block, below
 	// every fact, which is the assertion the raw-importance ordering fails.
-	if i, j := strings.Index(result, "FACTMARKER13"), strings.Index(result, "GOTCHAMARKER"); i < 0 || j < 0 || j < i {
-		t.Errorf("the decayed gotcha must sort last, below every fact: fact13 at %d, gotcha at %d", i, j)
+	//
+	// Every fact marker rather than one named fact, and that is deliberate.
+	// WHICH fact the 15-cap leaves out is the diversity share's business and a
+	// legitimate answer to a tie, so a test naming the 14th fact would fail on
+	// a selection that is correct and only re-sorted. What must not move is the
+	// gotcha's POSITION against all of them.
+	gotchaAt := strings.Index(result, "GOTCHAMARKER")
+	if gotchaAt < 0 {
+		t.Fatalf("the gotcha is absent from the block, so no ordering below it can be asserted:\n%s", result)
+	}
+	for i := 0; i < 15; i++ {
+		factAt := strings.Index(result, fmt.Sprintf("FACTMARKER%02d", i))
+		if factAt >= 0 && factAt > gotchaAt {
+			t.Errorf("the decayed gotcha must sort last, below every fact: fact%02d at %d, gotcha at %d", i, factAt, gotchaAt)
+		}
 	}
 }
 

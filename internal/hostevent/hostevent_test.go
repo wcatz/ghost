@@ -282,3 +282,27 @@ func TestParseGooseNativeAliases(t *testing.T) {
 		}
 	})
 }
+
+func TestWorkingMomentEventsAndCapability(t *testing.T) {
+	for in, want := range map[string]Event{
+		"message-submit": EventMessageSubmit, "UserPromptSubmit": EventMessageSubmit,
+		"edit": EventEdit, "PostToolUse": EventEdit,
+	} {
+		if got := NormalizeEvent(in); got != want {
+			t.Errorf("NormalizeEvent(%q) = %q, want %q", in, got, want)
+		}
+	}
+	p, err := Parse([]byte(`{"hook_event_name":"PostToolUse","session_id":"s"}`), "edit", "claude-code")
+	if err != nil || p.Event() != EventEdit {
+		t.Fatalf("Parse edit: %v %q", err, p.Event())
+	}
+	if _, err := Parse([]byte(`{"hook_event_name":"PostToolUse"}`), "message-submit", "claude-code"); err == nil {
+		t.Error("an argv/payload event disagreement must be rejected")
+	}
+	for _, s := range []Source{SourceClaudeCode, SourceCodex, SourceGoose, SourceOpencode} {
+		c, _ := CapabilityFor(s)
+		if c.WorkingMoment != (s == SourceClaudeCode) {
+			t.Errorf("%s WorkingMoment = %v", s, c.WorkingMoment)
+		}
+	}
+}

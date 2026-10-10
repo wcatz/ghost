@@ -124,7 +124,7 @@ var helpCases = []struct {
 	{name: "opencode", path: []string{"opencode"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "opencode cleanup-sessions", path: []string{"opencode", "cleanup-sessions"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "opencode cleanup-sessions with grace", path: []string{"opencode", "cleanup-sessions"}, pre: []string{"--grace", "24h"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
-	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep]"},
+	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep | --no-answer-sweep]"},
 	{name: "upgrade", path: []string{"upgrade"}, want: "ghost upgrade"},
 	{name: "context", path: []string{"context"}, want: "ghost context [--cwd <dir>] [--as-of <RFC3339>]"},
 	{name: "maintenance", path: []string{"maintenance"}, want: "ghost maintenance status"},

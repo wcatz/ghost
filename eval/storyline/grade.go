@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Check is one graded property of a finished run: a name a report can key on, a
@@ -16,10 +17,16 @@ type Check struct {
 	Name   string
 	Passed bool
 	Detail string
+	// Advisory marks a check that is reported but does not decide the run: the
+	// judge, which is a model's opinion and not a reading of the run. Result.Passed
+	// and FailedNames skip it, so an advisory column can disagree with the
+	// deterministic grade without flipping a verdict or an exit code.
+	Advisory bool
 }
 
-// grade is the whole deterministic grade, and it reads two sources and no
-// others: the blocks the run rendered, and the rows the store ended up holding.
+// grade is the whole deterministic grade, and it reads three sources and no
+// others: the blocks the run rendered, the agent's answers, and the rows the
+// store ended up holding.
 //
 // It is a pure function of the Result so it can be exercised against a hand-built
 // arc without a ghost binary, an embedding endpoint or a model. Two properties
@@ -30,6 +37,18 @@ type Check struct {
 //     stdout would pass on a wording change and fail on a rename.
 //   - Every check names the record keys it is about, so a failing check says
 //     which claim of the storyline broke rather than only that something did.
+//
+// There are two kinds of line per session and they answer different questions.
+// The DELIVERY lines (injection-present, carry-forward, stale-original,
+// expired-withheld) read the block: did Ghost hand the session the claim. The
+// ANSWER lines (answer-carries, answer-avoids) read what the agent said: did the
+// claim change what it did. Delivery without an answer is a block nobody used;
+// an answer without delivery is a script that leaked, which is what the without-
+// Ghost arm exists to expose.
+//
+// In the without-Ghost arm the block is empty by construction, so the delivery
+// lines and the store lines say nothing the arm's definition does not already
+// say, and only the answer lines are graded.
 func grade(res *Result) []Check {
 	var out []Check
 	s := res.Story
@@ -38,18 +57,35 @@ func grade(res *Result) []Check {
 		stages = stages[:len(res.Sessions)]
 	}
 	for i, sess := range res.Sessions {
-		out = append(out, injectionPresent(sess))
-		for _, key := range stages[i].Expect {
-			out = append(out, carryForward(sess, mustRecord(s, key)))
+		if !res.WithoutGhost {
+			out = append(out, injectionPresent(sess))
+			for _, key := range stages[i].Expect {
+				out = append(out, carryForward(sess, mustRecord(s, key)))
+			}
+			for _, stale := range supersededBefore(s, i) {
+				out = append(out, staleAbsent(sessionName(sess.Index), sess.Block, stale))
+			}
+			for _, old := range expiredBefore(s, i) {
+				out = append(out, expiredWithheld(sessionName(sess.Index), sess.Block, old))
+			}
 		}
-		for _, stale := range supersededBefore(s, i) {
-			out = append(out, staleAbsent(sessionName(sess.Index), sess.Block, stale))
+		for _, c := range stages[i].Carries {
+			out = append(out, answerCarries(sess, c))
 		}
+		for _, c := range stages[i].Avoids {
+			out = append(out, answerAvoids(sess, c))
+		}
+	}
+	if res.WithoutGhost {
+		return out
 	}
 	// The final block is graded on its own, because it is the one a reader of the
 	// report cares about: what the NEXT session of this project would be told.
 	for _, stale := range supersededBefore(s, len(s.Stages)) {
 		out = append(out, staleAbsent("final-block", res.FinalBlock, stale))
+	}
+	for _, old := range expiredBefore(s, len(s.Stages)) {
+		out = append(out, expiredWithheld("final-block", res.FinalBlock, old))
 	}
 	for _, pair := range reversals(s) {
 		out = append(out, supersedeEdge(res, pair))
@@ -57,6 +93,68 @@ func grade(res *Result) []Check {
 		out = append(out, finalBlockCarries(res, pair.newer))
 	}
 	return out
+}
+
+// expiredBefore is every record whose valid_until had passed by the time session
+// i was rendered and which already existed then: an opening record, or one an
+// earlier session wrote. A record is expired by the clock, not by a later record,
+// so it is the validity filter this grades and not supersede.
+func expiredBefore(s Storyline, session int) []Record {
+	var out []Record
+	for _, r := range s.Order() {
+		if r.ValidUntil == "" {
+			continue
+		}
+		until, err := parseValidUntil(r.ValidUntil)
+		if err != nil || !until.Before(time.Now()) {
+			continue
+		}
+		if at, ok := s.stageOf(r.Key); ok && at < session {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// expiredWithheld is a delivery line: a record whose window has closed must not
+// be in the block. Its wording does not say it is old, so only the validity
+// filter can have kept it out.
+func expiredWithheld(where, block string, old Record) Check {
+	name := "expired-withheld:" + where + ":" + old.Key
+	if !strings.Contains(block, old.Mark) {
+		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s (valid until %s) is not in %s", old.Key, old.ValidUntil, where)}
+	}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+		"%s (%s) expired on %s and is still in %s", old.Key, old.Mark, old.ValidUntil, where)}
+}
+
+// containsToken reports whether needle appears in hay with no identifier
+// character on either side, so "float" is not found in "floats" and
+// "Idempotency-Key" is not found in "Idempotency-Keys". Both arguments are
+// already lower-cased.
+func containsToken(hay, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	for from := 0; ; {
+		i := strings.Index(hay[from:], needle)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(needle)
+		if !identRuneAt(hay, start-1) && !identRuneAt(hay, end) {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func identRuneAt(s string, i int) bool {
+	if i < 0 || i >= len(s) {
+		return false
+	}
+	c := s[i]
+	return c == '_' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // reversal pairs a record with the one that replaced it. The arc is expressed in
@@ -113,9 +211,9 @@ func mustRecord(s Storyline, key string) Record {
 func injectionPresent(sess Session) Check {
 	name := "injection-present:" + sessionName(sess.Index)
 	if strings.TrimSpace(sess.Block) == "" {
-		return Check{name, false, "the session was injected nothing"}
+		return Check{Name: name, Passed: false, Detail: "the session was injected nothing"}
 	}
-	return Check{name, true, fmt.Sprintf("%d bytes of injected context", len(sess.Block))}
+	return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%d bytes of injected context", len(sess.Block))}
 }
 
 // carryForward grades what a session had to be told and was not. The block is
@@ -126,9 +224,9 @@ func injectionPresent(sess Session) Check {
 func carryForward(sess Session, want Record) Check {
 	name := "carry-forward:" + sessionName(sess.Index)
 	if strings.Contains(sess.Block, want.Mark) {
-		return Check{name, true, fmt.Sprintf("%s reached the session (%s)", want.Key, want.Mark)}
+		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s reached the session (%s)", want.Key, want.Mark)}
 	}
-	return Check{name, false, fmt.Sprintf("the block does not carry %s (mark %q)", want.Key, want.Mark)}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf("the block does not carry %s (mark %q)", want.Key, want.Mark)}
 }
 
 // staleAbsent is the finding this module exists to produce: a session told a
@@ -139,9 +237,9 @@ func carryForward(sess Session, want Record) Check {
 func staleAbsent(where, block string, stale Record) Check {
 	name := "stale-original:" + where
 	if !strings.Contains(block, stale.Mark) {
-		return Check{name, true, fmt.Sprintf("%s is not in %s", stale.Key, where)}
+		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not in %s", stale.Key, where)}
 	}
-	return Check{name, false, fmt.Sprintf(
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
 		"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
 		stale.Key, stale.Mark, stale.SupersededBy, where)}
 }
@@ -156,7 +254,7 @@ func supersedeEdge(res *Result, pair reversal) Check {
 	name := "supersede-edge:" + pair.newer.Key
 	newer, older := res.idOf(pair.newer.Key), res.idOf(pair.older.Key)
 	if newer == "" || older == "" {
-		return Check{name, false, fmt.Sprintf(
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
 			"no id reached the grade for %s/%s", pair.newer.Key, pair.older.Key)}
 	}
 	var found string
@@ -175,13 +273,13 @@ func supersedeEdge(res *Result, pair reversal) Check {
 			found = "the edge points the newer record at the older one, which is not what it was written for"
 			continue
 		default:
-			return Check{name, true, fmt.Sprintf("%s supersedes %s", pair.newer.Key, pair.older.Key)}
+			return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s supersedes %s", pair.newer.Key, pair.older.Key)}
 		}
 	}
 	if found == "" {
 		found = "no edge joins the two records"
 	}
-	return Check{name, false, found}
+	return Check{Name: name, Passed: false, Detail: found}
 }
 
 // olderThan reads the direction off the store's own stamps. A pair whose
@@ -204,17 +302,17 @@ func reversalLive(res *Result, pair reversal) Check {
 	name := "reversal-live:" + pair.newer.Key
 	id := res.idOf(pair.newer.Key)
 	if id == "" {
-		return Check{name, false, fmt.Sprintf("no id reached the grade for %s", pair.newer.Key)}
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("no id reached the grade for %s", pair.newer.Key)}
 	}
 	stamp, ok := res.State.Stamps[id]
 	if !ok {
-		return Check{name, false, fmt.Sprintf("no stamp reached the grade for %s", pair.newer.Key)}
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("no stamp reached the grade for %s", pair.newer.Key)}
 	}
 	if stamp.ResolvedAt != "" {
-		return Check{name, false, fmt.Sprintf("%s was resolved at %s, so the reversal is not live",
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("%s was resolved at %s, so the reversal is not live",
 			pair.newer.Key, stamp.ResolvedAt)}
 	}
-	return Check{name, true, pair.newer.Key + " is unresolved"}
+	return Check{Name: name, Passed: true, Detail: pair.newer.Key + " is unresolved"}
 }
 
 // finalBlockCarries grades what a reader of the report actually wants to know: a
@@ -223,9 +321,9 @@ func reversalLive(res *Result, pair reversal) Check {
 func finalBlockCarries(res *Result, want Record) Check {
 	name := "final-block-carries:" + want.Key
 	if strings.Contains(res.FinalBlock, want.Mark) {
-		return Check{name, true, fmt.Sprintf("the final block carries %s (%s)", want.Key, want.Mark)}
+		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("the final block carries %s (%s)", want.Key, want.Mark)}
 	}
-	return Check{name, false, fmt.Sprintf("the final block does not carry %s (mark %q)", want.Key, want.Mark)}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf("the final block does not carry %s (mark %q)", want.Key, want.Mark)}
 }
 
 // judgedCheck is the one check that is not a store or a block reading, and it is
@@ -235,10 +333,7 @@ func finalBlockCarries(res *Result, want Record) Check {
 // this module is not allowed to produce.
 func judgedCheck(followed bool, verdict string) Check {
 	name := "judge:followed-reversal"
-	if followed {
-		return Check{name, true, strings.TrimSpace(verdict)}
-	}
-	return Check{name, false, strings.TrimSpace(verdict)}
+	return Check{Name: name, Passed: followed, Detail: strings.TrimSpace(verdict), Advisory: true}
 }
 
 // judgeVerdict reads the judge's answer. The verdict is its FIRST FIELD being
@@ -273,6 +368,12 @@ func judgeVerdict(answer string) (bool, error) {
 // two arc stages' raw output, and the final block. The pass/fail verdict is the
 // FIRST line, because a report is read for its conclusion.
 func writeReport(dir string, res *Result, model string) (string, error) {
+	return writeReportAs(dir, res.Story.Key+".md", res, model)
+}
+
+// writeReportAs is writeReport under a caller-chosen file name, so several runs
+// of one storyline (two arms, n runs each) do not overwrite each other.
+func writeReportAs(dir, file string, res *Result, model string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create results dir: %w", err)
 	}
@@ -284,6 +385,7 @@ func writeReport(dir string, res *Result, model string) (string, error) {
 	fmt.Fprintf(&b, "%s — %s\n\n", verdict, res.Story.Title)
 	fmt.Fprintf(&b, "- storyline: %s\n", res.Story.Key)
 	fmt.Fprintf(&b, "- project: %s\n", res.Story.Project)
+	fmt.Fprintf(&b, "- arm: %s\n", res.Arm())
 	fmt.Fprintf(&b, "- model: %s\n", model)
 	fmt.Fprintf(&b, "- work dir: %s\n", res.WorkDir)
 	fmt.Fprintf(&b, "- judged: %v\n", res.Judged)
@@ -296,11 +398,7 @@ func writeReport(dir string, res *Result, model string) (string, error) {
 		b.WriteString("no checks were graded\n")
 	}
 	for _, c := range res.Checks {
-		mark := "FAIL"
-		if c.Passed {
-			mark = "PASS"
-		}
-		fmt.Fprintf(&b, "- %s %s — %s\n", mark, c.Name, oneLine(c.Detail))
+		fmt.Fprintf(&b, "- %s %s — %s\n", c.verdict(), c.Name, oneLine(c.Detail))
 	}
 
 	b.WriteString("\n## sessions\n")
@@ -310,19 +408,33 @@ func writeReport(dir string, res *Result, model string) (string, error) {
 		fmt.Fprintf(&b, "answer:\n\n```\n%s\n```\n\n", strings.TrimSpace(sess.Answer))
 	}
 
-	fmt.Fprintf(&b, "\n## stage: ghost supersede --apply\n\n```\n%s```\n", res.Supersede)
-	fmt.Fprintf(&b, "\n## stage: ghost resolve --apply\n\n```\n%s```\n", res.Resolve)
-
-	fmt.Fprintf(&b, "\n## final injection (%d bytes)\n\n```\n%s```\n", len(res.FinalBlock), res.FinalBlock)
+	if !res.WithoutGhost {
+		fmt.Fprintf(&b, "\n## stage: ghost supersede --apply\n\n```\n%s```\n", res.Supersede)
+		fmt.Fprintf(&b, "\n## stage: ghost resolve --apply\n\n```\n%s```\n", res.Resolve)
+		fmt.Fprintf(&b, "\n## final injection (%d bytes)\n\n```\n%s```\n", len(res.FinalBlock), res.FinalBlock)
+	}
 	if res.Judged {
 		fmt.Fprintf(&b, "\n## judge\n\n```\n%s\n```\n", strings.TrimSpace(res.Verdict))
 	}
 
-	path := filepath.Join(dir, res.Story.Key+".md")
+	path := filepath.Join(dir, file)
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write report: %w", err)
 	}
 	return path, nil
+}
+
+// verdict is the report word for a check; an advisory line says so, because a
+// FAIL that does not decide the run is otherwise read as one that does.
+func (c Check) verdict() string {
+	v := "FAIL"
+	if c.Passed {
+		v = "PASS"
+	}
+	if c.Advisory {
+		v += " (advisory)"
+	}
+	return v
 }
 
 // oneLine keeps a detail on one report line: a check's detail names records, and

@@ -36,6 +36,10 @@ const (
 	SourceSessionStart Source = "session_start"
 	SourceAllProjects  Source = "all_projects"
 	SourceBench        Source = "bench"
+	// SourceWorkingMoment is a block delivered at the moment of work: next to a
+	// user message or to an edit's tool result, by a host hook. It is its own
+	// source so the audit counts it apart from a session start and a search.
+	SourceWorkingMoment Source = "working_moment"
 )
 
 // Outcome is the relevance verdict for a result. It is derived from the trace
@@ -231,6 +235,19 @@ type Request struct {
 	// is off and 1 keeps only rows that tie the top. See the stage's own comment
 	// in pipeline.go for the rule and for why it sits where it does.
 	RelevanceCutoff float64
+	// NoAnswerCosine is the caller-resolved cfg.Context.NoAnswerCosine: the
+	// absolute bar the assembler applies to a QUERY-mode block after the relevance
+	// cutoff and before the budget (#955). When the best vector cosine among the
+	// block's rows is strictly below it, the block is withheld and the answer says
+	// nothing cleared the bar. 0 leaves it OFF, and a passive request ignores it
+	// whatever its value. A pinned row is never withheld, a block with no
+	// comparable cosine (no vector leg) is never judged, and it only removes rows.
+	// It is validated against a cosine's [0,1] range. See runNoAnswer.
+	NoAnswerCosine float64
+	// NoAnswerBarNote, when set with NoAnswerCosine 0, says why the configured bar
+	// is off (the embedding model is not the one the default was measured on). It
+	// is recorded in the trace only and never changes a block.
+	NoAnswerBarNote string
 	// Explain asks Run to project the trace of THIS run into Result.Explain, the
 	// ghost_memory_search explain payload. It is a request for a second reading
 	// of the same run and never for a second run: the candidate request, the
@@ -422,6 +439,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		dropped:        map[string]string{},
 		qualifiers:     qualifiersFor(req, set),
 	}
+	p.loadExactCosines(ctx, r)
 	// A window that had to fall back to the ceiling is disclosed, because the
 	// block's size is then decided by a number the caller did not state. The note
 	// also says what does bound the block, and that half is derived from the
@@ -715,7 +733,7 @@ func projectMode(req Request) memory.ProjectMode {
 // absence it can misread.
 func validateRequest(req Request) error {
 	switch req.Source {
-	case SourceSearch, SourceProjectCtx, SourceSessionStart, SourceAllProjects, SourceBench:
+	case SourceSearch, SourceProjectCtx, SourceSessionStart, SourceAllProjects, SourceBench, SourceWorkingMoment:
 	default:
 		return fmt.Errorf("assemble: unknown source %q", req.Source)
 	}
@@ -782,6 +800,12 @@ func validateRequest(req Request) error {
 	// not refused here; the stage reads it rather than rejecting it.
 	if v := req.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("assemble: RelevanceCutoff is a fraction in [0,1], where 0 is off, got %v", req.RelevanceCutoff)
+	}
+	// The no-answer bar is a cosine, so it is refused the way a cosine and the
+	// cutoff are: NaN would read as OFF and tell a caller who set a bar there is
+	// none, and a value above 1 would withhold every answer.
+	if v := req.NoAnswerCosine; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("assemble: NoAnswerCosine is a cosine in [0,1], where 0 is off, got %v", req.NoAnswerCosine)
 	}
 	for _, s := range req.Budget.Slices {
 		if s.MaxItems < 0 || s.MaxBytes < 0 || s.ClampBytes < 0 {
@@ -985,4 +1009,62 @@ func anySliceBound(slices []Slice) bool {
 		}
 	}
 	return false
+}
+
+// cosineReader is the optional capability the no-answer bar uses to judge a row
+// the vector leg's own list did not carry. *memory.Store has it; a retriever that
+// does not leaves such rows unjudged, which the bar never withholds.
+type cosineReader interface {
+	EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error)
+}
+
+// loadExactCosines reads, for the rows that carry no vector-leg cosine
+// (VectorScore is exactly -1), the cosine of their own stored embedding. A hybrid
+// window admits keyword hits whatever their cosine, so such a row can be embedded
+// and weakly similar (judged by the bar) or have no embedding at all (absent from
+// the answer, and never judged). It runs only for a query-mode request with the
+// bar on, and a failed read leaves every such row unjudged, which only ever keeps
+// rows.
+func (p *pipeline) loadExactCosines(ctx context.Context, r Retriever) {
+	if p.passive || p.req.NoAnswerCosine <= 0 || len(p.req.QueryVec) == 0 {
+		return
+	}
+	cr, ok := r.(cosineReader)
+	if !ok {
+		return
+	}
+	var ids []string
+	for _, c := range p.rows {
+		if c.VectorScore == -1 {
+			ids = append(ids, c.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	got, err := cr.EmbeddingCosines(ctx, ids, p.req.QueryVec)
+	if err != nil || len(got) == 0 {
+		return
+	}
+	p.exactCosine = make(map[string]float64, len(got))
+	for id, v := range got {
+		p.exactCosine[id] = float64(v)
+	}
+}
+
+// rowCosine is the cosine the bar judges a row by: the vector leg's own score
+// when it carried one, else the cosine of the row's stored embedding. ok is false
+// when no cosine exists, and the row is then never judged. Presence is decided by
+// ok and never by the sign: a cosine is in [-1, 1], so a genuinely negative one is
+// a judged (very weak) match, and only the exact -1 mark means "the leg did not
+// carry this row". A stored cosine is present because it is IN the map, so an
+// entry of exactly -1 is a cosine too.
+func (p *pipeline) rowCosine(c memory.Candidate) (float64, bool) {
+	if c.VectorScore != -1 {
+		return c.VectorScore, true
+	}
+	if v, ok := p.exactCosine[c.ID]; ok {
+		return v, true
+	}
+	return 0, false
 }

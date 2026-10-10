@@ -275,7 +275,7 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 	}
 
 	// The headline corpus is deliberately NOT re-seeded and re-measured here.
-	// It is 551 memories with 768-dim vectors, and this package's CI budget for
+	// It is 549 memories with 768-dim vectors, and this package's CI budget for
 	// loading it is spent: a corpus-wide test costs ~10s and the package was within
 	// ~10s of Go's 600s per-binary default when #677 added a sixth one, which is what
 	// failed `build-and-test` at 600.038s (see the budget note in sweep_test.go). The

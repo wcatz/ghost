@@ -100,6 +100,14 @@ var detectCallingSource = ai.DetectSource
 // MCP saves. Tests replace it to prove named saves never cross this boundary.
 var detectRemoteForSave = repo.DetectRemote
 
+// repoTopLevel is the process boundary that says which git checkout a directory
+// is inside.
+var repoTopLevel = repo.TopLevel
+
+// workingDirResolver is how New learns the server's directory; a test replaces it
+// so no suite depends on where it happens to run.
+var workingDirResolver = workingDirFromEnv
+
 // ensureProjectFor resolves or creates the project for a save and returns the
 // id the caller must write to, adding repository identity when the caller
 // identified it by a filesystem path.
@@ -108,8 +116,11 @@ var detectRemoteForSave = repo.DetectRemote
 // repository — but project_id is sometimes a filesystem path, and that is
 // exactly the shape that produced duplicate projects when a session changed
 // working directory. Only git can say whether two such paths are one
-// repository, so detection is confined to that case: an ordinary named save
-// never spawns a process. The test is memory.IsPathShaped rather than
+// repository, so detection is confined to that case: a named save that finds
+// its project already there never spawns a process. The one exception is a named
+// save that is about to CREATE a project: it asks git for the top level and the
+// remote of the server's own directory (two bounded invocations) so the project
+// can be recorded against that checkout (#957). The test is memory.IsPathShaped rather than
 // filepath.IsAbs, the same predicate Store.ResolveProject applies, so a
 // drive-relative Windows path — which IsAbs reports as relative — cannot be
 // treated as a name by the writer and as a path by the reader, which is how a
@@ -242,6 +253,29 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	if pathShaped {
 		remote = detectRemoteForSave(projectID)
 	}
+
+	// A save that CREATES a project from a name-shaped id (neither separator-bearing
+	// nor a drive-relative `C:repo`, the shape the reader calls a path) binds it to the checkout
+	// the server was started in, so the next session in that directory resolves it
+	// instead of printing the no-project block (#957). Never an existing project:
+	// resolvedID == "" is the gate, and the store's upsert would not move a path
+	// anyway. Never a checkout another project already claims, by path or by
+	// remote: binding a second name there would silently fold it into the first,
+	// so the claim test and the insert are one store transaction and a claim
+	// declines the bind rather than merging.
+	if resolvedID == "" && !pathShaped && !memory.IsPathShaped(projectID) {
+		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
+			bound, err := s.store.BindNewProjectToCheckout(ctx, projectID, dir, projectID, dirRemote)
+			if err != nil {
+				return "", nil, err
+			}
+			if bound {
+				return projectID, nil, nil
+			}
+			// Claimed between the probe and the write: open it unbound below.
+		}
+	}
+
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
 		// resolution without the basename fallback. Going through its own
@@ -255,6 +289,53 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		projectID = resolvedID
 	}
 	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+}
+
+// checkoutToBind reports the directory a newly created name-shaped project is
+// recorded against, and the repository remote there, or ok=false when the save
+// must open the project unbound as it always did.
+//
+// The directory is the TOP LEVEL of the git checkout the server was started in,
+// physically resolved, never an arbitrary directory: a server started in /tmp,
+// /var, a download folder or a directory that merely holds checkouts is not in a
+// checkout at all, and a project recorded there with no remote would answer for
+// the whole subtree. A checkout that is the home directory or an ancestor of it
+// is declined for the same reason. Also declined: one the project-shape and
+// credential guards would refuse as a recorded path. A directory another project
+// already claims is declined by the store, inside the write transaction that
+// would record it, which is the only place that test can be made atomic.
+func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
+	if s.workingDir == "" {
+		return "", "", false
+	}
+	dir = repoTopLevel(s.workingDir)
+	if dir == "" || filepath.Dir(dir) == dir {
+		return "", "", false
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if h, err := filepath.EvalSymlinks(home); err == nil {
+			home = h
+		}
+		if containsOrIs(dir, home) {
+			return "", "", false
+		}
+	}
+	if memory.RejectSecret("path", dir) != nil {
+		return "", "", false
+	}
+	if memory.CheckImportedProject(memory.PortableProject{ID: "x", Name: "x", Path: dir}) != nil {
+		return "", "", false
+	}
+	return dir, detectRemoteForSave(dir), true
+}
+
+// containsOrIs reports whether dir is path or an ancestor of it. Both are
+// compared in forward-slash form, because git prints a top level that way on
+// every platform while the home directory arrives with native separators.
+func containsOrIs(dir, path string) bool {
+	d := strings.TrimRight(strings.ReplaceAll(dir, `\`, "/"), "/")
+	p := strings.TrimRight(strings.ReplaceAll(path, `\`, "/"), "/")
+	return p == d || strings.HasPrefix(p, d+"/")
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
@@ -696,6 +777,11 @@ type Server struct {
 	// surface (search, project-context tool, resources, prompt) reads this one
 	// field, and nothing reads /proc after construction.
 	hostSessionID string
+	// workingDir is the directory the MCP server process was started in, captured
+	// ONCE at construction. It is used to bind a newly created project to the
+	// checkout the agent is working in, so the session-start resolver can match it.
+	// Empty if the working directory could not be determined.
+	workingDir string
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
@@ -713,6 +799,39 @@ const hostSessionEnv = ai.HostSessionEnv
 // recording the old one, and the call then matches no scan; a server behind a bridge that
 // does not forward the host's environment records none.
 func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
+
+// workingDirFromEnv is the directory the server process was started in, or "".
+//
+// It is captured once at construction so the environment is touched in one place.
+// Returns "" if the working directory cannot be determined, or if it is the user's
+// home directory or the filesystem root — those are not real project checkouts.
+func workingDirFromEnv() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Resolve symlinks so cwd matches the canonical path stored in the DB.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	// Never bind to home or filesystem root — they are not project checkouts.
+	if filepath.Dir(cwd) == cwd {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cwd == home {
+			return ""
+		}
+		// The session cwd may reach home through a symlink or trailing form;
+		// compare resolved paths too.
+		if evalHome, err := filepath.EvalSymlinks(home); err == nil {
+			if cwd == evalHome {
+				return ""
+			}
+		}
+	}
+	return cwd
+}
 
 // resolveHostSessionID decides the session id retrieval records carry. On Linux
 // it is the environment's id only when this process IS the host session (the
@@ -832,11 +951,14 @@ When the user states a date after which something changes — a rotation, an exp
 
 Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.
 
+## Changed Decisions
+When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision.
+
 ## Reading Search Results
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
 - answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
 - weak — the memories are listed, but NONE cleared the relevance floor. They are leads, not answers: verify against the source before acting on one, and say the result is weak if you rely on it anyway.
-- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
+- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, nothing_cleared_the_bar means the best vector match was below the configured no-answer bar so the rows were withheld as a judgement (the sentence states the score and the bar; it is not an absence claim, and the bar is lowered or set to 0 to see them), and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
 - abstain_cosine is the configured cosine floor, and its three states are three different facts: off means none is configured, not_applied means one IS configured and no cosine could be compared because the vector leg never ran OR ran and failed (reason= and legs= say which), and a number means the arm was configured AND the vector leg ran, so a cosine was available to compare — it does not mean any particular row was judged against it. not_applied is how a floor you set tells you it did nothing.
 - admitted is how many rows the answer carries. It is lower than candidates whenever something was cut, and after a byte-cap trim it is the only place that shows: a too-large answer is shortened, not refused. legs names each retrieval leg as ok, failed, not_run (asked for, never executed) or absent — and absent means the leg does not APPLY to this request rather than that nobody asked for it, which is what an as_of read reports for the vector leg.
 - legs=vector:not_run means the vector leg did not execute — either no embedder is configured or the query could not be embedded; legs=vector:failed means it ran and broke. Either way the answer is narrower than a full hybrid search, so treat a surprising miss as worth retrying rather than as proof the memory is gone. A search with NO surviving rows and a failed leg comes back as a tool error instead of a verdict — so if you got a line, at least one leg answered.
@@ -849,6 +971,18 @@ Use ghost_search_all to find knowledge that might be in another project.
 ## Project IDs
 Pass the project name (e.g. "ghost", "web-app", "platform-ops") as project_id. Ghost resolves names automatically. Never pass raw filesystem paths.`
 
+// sameTitleDecisionAdvice names a live decision in the project whose title
+// equals the new one's (case-insensitive, trimmed), so a caller that forgot
+// supersedes is told to pass it. Advice only: it never refuses the record and
+// never links anything, and a lookup failure yields no advice.
+func (s *Server) sameTitleDecisionAdvice(ctx context.Context, projectID, title string) string {
+	id, err := s.store.FindLiveDecisionByTitle(ctx, projectID, title)
+	if err != nil || id == "" {
+		return ""
+	}
+	return fmt.Sprintf(" NOTE: a live decision in this project has the same title (decision_id: %s). If this one replaces it, pass supersedes=%s so the old one is retired; the two are otherwise listed side by side.", assemble.Token(id), assemble.Token(id))
+}
+
 // New creates and configures the MCP server with all Ghost tools.
 func New(store provider.MemoryStore, logger *slog.Logger, version string) *Server {
 	if version == "" {
@@ -859,6 +993,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
 		hostSessionID:  hostSessionResolver(),
+		workingDir:     workingDirResolver(),
 	}
 
 	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {
@@ -1213,7 +1348,16 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	// got stored. The rule still reaches that tool through the server
 	// instructions, which route design decisions to it by name.
 	if content != nil {
-		msg += repoFactHint(*content)
+		// The category the note will carry after this update, which is the
+		// one the advisory judges it as: a category passed here wins, and an
+		// omitted one leaves the stored row's, so a note already filed as a
+		// rule is not re-judged as a fact because this call left the field
+		// alone.
+		category := mems[0].Category
+		if args.Category != "" {
+			category = args.Category
+		}
+		msg += repoFactHint(*content, category)
 	}
 	if truncated {
 		msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1712,6 +1856,10 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	}, nil, nil
 }
 
+// maxHealthPinnedContradictions bounds how many pinned-contradiction entries
+// ghost_health renders; the count line carries the total.
+const maxHealthPinnedContradictions = 20
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -1830,6 +1978,11 @@ func (s *Server) registerTools() {
 			// The query-mode relevance cutoff (#954): the assembler shortens the
 			// block where relevance falls off. 0 leaves it off.
 			RelevanceCutoff: s.contextCfg.RelevanceCutoff,
+			// The query-mode no-answer bar (#955): a block whose best vector
+			// cosine is below it is withheld and the answer says so. 0 leaves it
+			// off.
+			NoAnswerCosine:  s.contextCfg.NoAnswerCosine,
+			NoAnswerBarNote: s.contextCfg.NoAnswerBarNote,
 			// The retrieval record (#646). Set here and not inside the assembler,
 			// because this is the only place that knows the session the call
 			// arrived on — and the assembler writes the row, so nothing about the
@@ -2099,7 +2252,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
@@ -2664,7 +2817,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
 			}
 		}
-		msg += repoFactHint(args.Content)
+		msg += repoFactHint(args.Content, args.Category)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
@@ -2967,13 +3120,13 @@ func (s *Server) registerTools() {
 		// arrays survive schema validation and are normalized in-handler.
 		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
-		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
 		Title:       "Record Decision",
-		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory — the response returns both a decision_id and a memory_id; they are different rows, and pin/update need memory_id. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory — the response returns both a decision_id and a memory_id; they are different rows, and pin/update need memory_id. If the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with supersedes=<that decision_id>, never a second unlinked decision. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -3037,24 +3190,41 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 		args.ProjectID = canonical
+		// Looked up BEFORE the write, so the row this call is about to create
+		// cannot match itself.
+		sameTitleAdvice := ""
+		if args.Supersedes == "" {
+			sameTitleAdvice = s.sameTitleDecisionAdvice(ctx, args.ProjectID, args.Title)
+		}
 		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
 		if args.Supersedes != "" {
-			if err := s.store.SupersedeDecision(ctx, args.ProjectID, args.Supersedes, decisionID); err != nil {
+			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
+			if err != nil {
 				// The new decision is already committed; report the
 				// supersession failure without losing that ID.
 				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
 			} else {
-				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
+				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
+				if len(retirement.Retired) > 0 {
+					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
+				}
+				if len(retirement.Ambiguous) > 0 {
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
+				}
+				if len(retirement.Declined) > 0 {
+					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
+				}
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
+		msg += sameTitleAdvice
 		// A decision routed to a project of its own while a same-named project
 		// kept the name (#613) has to say so, for the reason the save result
 		// does: the decision landed and the caller's address did not, and the
@@ -3172,6 +3342,29 @@ func (s *Server) registerTools() {
 
 		if links, scans, err := s.store.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
+		}
+
+		// Pinned rows with open contradictions (#975): a pin keeps a memory in
+		// every session start, and nothing else tells its owner that newer rows
+		// disagree with it. Report-only: no row is unpinned, resolved or withheld
+		// here. A failed read is reported rather than dropped, so the section's
+		// absence means only "nothing to review".
+		if pinned, total, perr := s.store.PinnedRowsWithContradictions(ctx, maxHealthPinnedContradictions); perr != nil {
+			fmt.Fprintf(&sb, "**Pinned rows with open contradictions:** could not be read: %v\n", perr)
+		} else if total > 0 {
+			fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d — unpin or update the pinned row\n", total)
+			for _, r := range pinned {
+				fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
+					assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
+					assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
+				if r.AlsoContradictedBy > 0 {
+					fmt.Fprintf(&sb, "  (+%d more contradicting rows)\n", r.AlsoContradictedBy)
+				}
+			}
+			if more := total - len(pinned); more > 0 {
+				fmt.Fprintf(&sb, "  ... and %d more\n", more)
+			}
+			sb.WriteString("\n")
 		}
 
 		// History growth (#729), additive: everything above keeps its name and
@@ -4387,4 +4580,15 @@ func repairInstructions(project string, targets []string) string {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
 	}
 	return sb.String()
+}
+
+// joinTokens renders stored ids for a tool answer, each through assemble.Token
+// so an id carrying a newline, a guillemet or a control character cannot reach
+// the reader as anything but a bounded token.
+func joinTokens(ids []string) string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = assemble.Token(id)
+	}
+	return strings.Join(out, ", ")
 }

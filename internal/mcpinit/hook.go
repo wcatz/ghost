@@ -252,8 +252,10 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// best-effort; with no (fresh, matching) marker this writes nothing, so
 	// session-start stdout stays byte-identical to what it was without this
 	// feature.
+	spent := 0
 	if alert := lifecycleFailureAlert(projectID, project); alert != "" {
 		_, _ = fmt.Fprintln(stdout, alert)
+		spent += len(alert) + 1
 	}
 
 	// Count this session. Context loading above is read-only; this handler's
@@ -280,7 +282,21 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally))
+	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	_, _ = fmt.Fprintln(stdout, block)
+
+	// The working-moment channel shares this session's output allowance and must
+	// not repeat what this block carried: leave the rows rendered and the bytes
+	// spent for it (silent, and a no-op for a payload with no session id or a
+	// data directory this process may not resolve).
+	ids := make([]string, 0, len(memories)+len(globals))
+	for _, m := range memories {
+		ids = append(ids, m.ID)
+	}
+	for _, m := range globals {
+		ids = append(ids, m.ID)
+	}
+	recordSessionStartDelivery(input.SessionID, ids, spent+len(block)+1)
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
@@ -318,26 +334,27 @@ func globalOriginGuidance(globals []sessionMemory) string {
 // assembler's stage 2.
 func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 	it := assemble.Item{
-		ID:            m.ID,
-		Category:      m.Category,
-		Content:       m.Content,
-		Tags:          m.Tags,
-		Importance:    m.Importance,
-		Pinned:        m.Pinned,
-		CreatedAt:     m.CreatedAt,
-		Scope:         m.Scope,
-		ProjectID:     m.ProjectID,
-		Source:        m.Source,
-		ResolvedAt:    m.ResolvedAt,
-		ValidFrom:     m.ValidFrom,
-		ValidUntil:    m.ValidUntil,
-		VerifiedAt:    m.VerifiedAt,
-		ValidityState: m.ValidityState,
-		Confidence:    m.Confidence,
-		Agent:         m.Agent,
-		SourceRef:     m.SourceRef,
-		ConflictsWith: m.ConflictsWith,
-		SupersededBy:  m.SupersededBy,
+		ID:             m.ID,
+		Category:       m.Category,
+		Content:        m.Content,
+		Tags:           m.Tags,
+		Importance:     m.Importance,
+		Pinned:         m.Pinned,
+		CreatedAt:      m.CreatedAt,
+		Scope:          m.Scope,
+		ProjectID:      m.ProjectID,
+		Source:         m.Source,
+		ResolvedAt:     m.ResolvedAt,
+		ValidFrom:      m.ValidFrom,
+		ValidUntil:     m.ValidUntil,
+		VerifiedAt:     m.VerifiedAt,
+		ValidityState:  m.ValidityState,
+		Confidence:     m.Confidence,
+		Agent:          m.Agent,
+		SourceRef:      m.SourceRef,
+		ConflictsWith:  m.ConflictsWith,
+		SupersededBy:   m.SupersededBy,
+		ContradictedBy: m.ContradictedBy,
 	}
 	// For historical reads, judge the window at T. The passive path already has
 	// the state set from the assembler's stage 2.
@@ -939,6 +956,9 @@ type sessionMemory struct {
 	// SupersededBy is the assembler's marker for a pinned row whose replacement is
 	// in the same block (assemble.Item.SupersededBy), carried through unchanged.
 	SupersededBy []string
+	// ContradictedBy is the assembler's marker for a pinned row that newer rows
+	// contradict (assemble.Item.ContradictedBy), carried through unchanged.
+	ContradictedBy []string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

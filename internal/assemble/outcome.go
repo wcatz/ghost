@@ -94,6 +94,14 @@ const (
 	// empty result. The retrieval record carries it as a dropped verdict, the
 	// trace as a decision, and explain as an excluded row's reason sentence.
 	reasonRelevanceCutoff = "relevance_cutoff"
+	// reasonNothingClearedBar is the no-answer step's reason (#955), both as a
+	// per-row reason and as the outcome reason of a block it emptied: the best
+	// vector cosine in the block was below context.no_answer_cosine, so the
+	// block was withheld rather than shown. Unlike the cutoff it CAN empty an
+	// answer, and the outcome is then empty with this reason and a sentence that
+	// states the score — an honest "nothing here answers this", not an absence
+	// claim about the store.
+	reasonNothingClearedBar = "nothing_cleared_the_bar"
 	// reasonRetrievalPartial is the answerable verdict when a leg failed. It is
 	// the same token the machine line's modifier uses, and the two are not
 	// redundant: the reason says why the answer is answerable (no floor verdict
@@ -247,6 +255,12 @@ func (p *pipeline) emptyReason() string {
 // claim a set the item budget actually emptied, because the caller's next move
 // differs — one looks for a date problem, the other raises the limit.
 func (p *pipeline) removalReason() string {
+	// The no-answer step is named first when it fired and nothing after it
+	// removed rows: it withholds the whole non-pinned block at once, so it is the
+	// proximate cause, not one stage among several whose counts could outvote it.
+	if p.noAnswer != nil && p.droppedBy[stageBudget] == 0 {
+		return reasonNothingClearedBar
+	}
 	stage, reason := p.dominantRemoval()
 	if stage == "" {
 		return reasonNoCandidates
@@ -310,6 +324,20 @@ func (p *pipeline) predicateReason() string {
 // not retrieve it" sentinel — and a threshold applied to a sentinel is a
 // comparison nobody made, which is how a result with no judgement at all came back
 // `weak`/`below_floor` against a floor the corpus never had a chance to miss.
+//
+// Presence is the exact -1 mark and never the sign. A cosine is in [-1, 1], so a
+// score at or below zero was MEASURED — a very weak match, which is a value the
+// arm judges and reports below the floor — while only the sentinel means the leg
+// did not carry the row. Reading a low score as absence told a caller that no arm
+// held anything to compare, which sends them after an embedder for a verdict the
+// vector leg had already made.
+//
+// That is the seam's rule, and the shipped retriever sits outside it: *memory.Store
+// discards every candidate whose cosine is not above 0 before fusion
+// (`minVectorSimilarity`), so on the production path a row's VectorScore is
+// either that sentinel or a positive cosine and the two predicates agree. The
+// sentinel is what the rule is written against because it is what the leg
+// actually marks, and a second one is what a reader of a score must not invent.
 func (p *pipeline) armValues() (ftsApplied, vectorApplied bool) {
 	for _, it := range p.items {
 		sig, ok := p.trace.Signals[it.ID]
@@ -319,7 +347,7 @@ func (p *pipeline) armValues() (ftsApplied, vectorApplied bool) {
 		if sig.FTSRank >= 0 {
 			ftsApplied = true
 		}
-		if sig.VectorScore >= 0 {
+		if sig.VectorScore != -1 {
 			vectorApplied = true
 		}
 	}
@@ -580,6 +608,16 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
 				"of date, their validity windows having closed or not yet opened." + p.stageNote() + " The query was " +
 				"not wrong — the answer is withheld, not absent."
+		case reasonNothingClearedBar:
+			// An explicit judgement, not an absence claim: rows were found and
+			// then withheld because none was a close enough match, and the
+			// sentence says so with the score, so the caller can see it was a
+			// decision it can overrule by lowering the bar.
+			return fmt.Sprintf("No memory answers this: nothing cleared the bar. The best vector match scored cosine "+
+				"%.3f, below the %.3f no-answer bar (context.no_answer_cosine), so the %d candidate(s) found "+
+				"were withheld rather than shown. The query was not wrong \u2014 the store holds nothing close "+
+				"enough to answer it; set the bar to 0 to see the rows anyway.%s",
+				p.noAnswer.top, p.noAnswer.bar, p.noAnswer.withheld, p.stageNote())
 		case reasonAllOutOfCategory:
 			return "No sufficiently trustworthy memory found: nothing found passed the category filter." +
 				p.stageNote()

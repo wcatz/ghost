@@ -440,6 +440,7 @@ func TestTheInstructionsOnlyPromiseReachableReasons(t *testing.T) {
 	for _, reachable := range []string{
 		"answerable", "weak", "no_candidates", "all_invalid", "all_over_budget", "all_out_of_scope",
 		"all_out_of_retention", "not_run", "no_floor_arm", "retrieval_partial", "vector_backend_unavailable",
+		"nothing_cleared_the_bar",
 	} {
 		if !strings.Contains(mcpInstructions, reachable) {
 			t.Errorf("mcpInstructions does not explain %q, which a ghost_memory_search caller can meet", reachable)

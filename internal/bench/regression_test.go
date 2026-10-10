@@ -38,22 +38,31 @@ func TestBenchRegressionFloors(t *testing.T) {
 		cond           string
 		ndcg, recall10 float64
 	}{
-		// Observed on the v2 dataset (551 memories / 220 paraphrase-heavy
-		// graded queries, committed embedding fixture): fts 0.749/0.697,
-		// vector 0.800/0.764, hybrid 0.818/0.763 — the rows
+		// Observed on the v3 dataset (549 memories / 220 paraphrase-heavy
+		// graded queries, committed embedding fixture): fts 0.759/0.702,
+		// vector 0.814/0.766, hybrid 0.831/0.765 — the rows
 		// docs/benchmarks.md publishes. Floors sit just below those, the
 		// tightest being hybrid recall@10 with 0.013 of headroom.
-		{CondFTS, 0.73, 0.67},
-		{CondVector, 0.78, 0.75},
-		{CondHybrid, 0.80, 0.75},
+		//
+		// #965 re-floored these against a corrected LABEL SET, not a changed
+		// ranking: 16 queries had a gain added or raised and two
+		// byte-identical corpus rows were dropped, so the measurement moved
+		// and each floor moved with it. The floors are written to three
+		// decimals so that every row keeps exactly the margin it already
+		// carried (observed minus floor, NDCG@10 / recall@10: fts 0.019 /
+		// 0.027, vector 0.020 / 0.014, hybrid 0.018 / 0.013); two decimals
+		// would have loosened five of the six.
+		{CondFTS, 0.740, 0.675},
+		{CondVector, 0.794, 0.752},
+		{CondHybrid, 0.813, 0.752},
 	}
 	for _, f := range floors {
 		res := r[f.cond]
 		if res.NDCG10 < f.ndcg {
-			t.Errorf("%s: NDCG@10 = %.3f, below floor %.2f", f.cond, res.NDCG10, f.ndcg)
+			t.Errorf("%s: NDCG@10 = %.3f, below floor %.3f", f.cond, res.NDCG10, f.ndcg)
 		}
 		if res.Recall10 < f.recall10 {
-			t.Errorf("%s: recall@10 = %.3f, below floor %.2f", f.cond, res.Recall10, f.recall10)
+			t.Errorf("%s: recall@10 = %.3f, below floor %.3f", f.cond, res.Recall10, f.recall10)
 		}
 	}
 
@@ -68,8 +77,8 @@ func TestBenchRegressionFloors(t *testing.T) {
 	// The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a thin point
 	// estimate, which fails on a 0.001 dataset edit while the interval still
 	// excludes zero. The intervals are logged because they are the result: on the
-	// committed v2 dataset hybrid beats vector by +0.0179 [+0.0028, +0.0335] and
-	// fts by +0.0686 [+0.0466, +0.0919].
+	// committed v3 dataset hybrid beats vector by +0.0175 [+0.0029, +0.0325] and
+	// fts by +0.0722 [+0.0504, +0.0951].
 	for _, leg := range []string{CondVector, CondFTS} {
 		ci, err := CompareFusion(r[CondHybrid], r[leg])
 		if err != nil {

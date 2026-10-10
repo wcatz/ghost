@@ -168,7 +168,10 @@ func TestMemorySaveWithoutRefusalReportsNothing(t *testing.T) {
 	const origin = "https://github.com/wcatz/infra.git"
 	first := repoDir(t, "infra", origin)
 	second := repoDir(t, "infra-elsewhere", origin)
-	_, session := newCapSession(t)
+	srv, session := newCapSession(t)
+	// The server's own directory is the test binary's, a real checkout of another
+	// repository; this test is about an unbound server, so it has none.
+	srv.workingDir = ""
 
 	for i, projectID := range []string{"infra", first, second} {
 		res := callTool(t, session, "ghost_memory_save", map[string]any{

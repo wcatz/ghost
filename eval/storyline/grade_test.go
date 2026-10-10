@@ -20,6 +20,16 @@ func saveAll(t *testing.T, s Storyline) *fakeGhost {
 	return g
 }
 
+// cleanAnswers are what the CLEAN fixture's sessions said. Only the last stage is
+// graded on its answer: it names the current variable and mentions the superseded
+// one marked as wrong, which is the answer the arc is looking for.
+var cleanAnswers = []string{
+	"",
+	"",
+	"Per-session state goes in Postgres; the bootstrap must set SESSION_STORE=postgres. " +
+		"A reader on the old choice would set SESSION_STORE=redis, which is wrong now.",
+}
+
 // gradedResult is a reversed-decision run whose arc came out clean: the reversal
 // was carried into the final session, the superseded claim was not injected
 // again, supersede linked the two, and the reversal is still live. Every table
@@ -87,7 +97,7 @@ func gradedResult(t *testing.T) *Result {
 		for _, r := range s.Stages[i].Records {
 			saved[r.Key] = g.idOf(r.Key)
 		}
-		res.Sessions = append(res.Sessions, Session{Index: i, Block: block(i), Saved: saved})
+		res.Sessions = append(res.Sessions, Session{Index: i, Block: block(i), Saved: saved, Answer: cleanAnswers[i]})
 	}
 	for _, r := range s.Order() {
 		if !rendered[r.Key] {

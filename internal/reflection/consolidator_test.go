@@ -255,6 +255,37 @@ func TestInferGlobalScope(t *testing.T) {
 		{"credential fact stays project", "fact", "the deploy credential rotates every 90 days", "project"},
 		{"bearer token stays project", "gotcha", "requests need a bearer token in the header", "project"},
 		{"password in cross-repo phrasing stays project", "fact", "the grafana password works across all repos", "project"},
+		// #966: a fact naming one host, node or cluster is an operations note
+		// for the project that runs it, even with two weak hits or a strong one.
+		{"numbered relay with two weak hits stays project", "fact", "ssh into relay-3 on the cluster to restart the block producer", "project"},
+		{"numbered node with deploy phrasing stays project", "fact", "deploy to node-7 from CI", "project"},
+		{"unhyphenated host number stays project", "fact", "restart node5 after the kernel update across all repos", "project"},
+		{"compound staging host stays project", "fact", "staging-app-2 has a memory leak on dev machine", "project"},
+		{"ipv4 address stays project", "fact", "ssh 10.0.0.12 and check the cluster logs", "project"},
+		{"internal dns name stays project", "fact", "ssh bp1.internal then deploy to the cluster", "project"},
+		// One named repository is project-scoped too; cross-repo language is not.
+		{"hosted repository slug stays project", "fact", "releases are cut from github.com/wcatz/ghost across all repos", "project"},
+		{"scp-style remote stays project", "fact", "push to git@github.com:wcatz/roller.git and use a dev machine", "project"},
+		{"named repository stays project", "fact", "in the infra repo always use helmfile diff before apply across all repos", "project"},
+		{"docs site link is not a repository", "fact", "workflow syntax is documented at docs.github.com/en/actions, use it across all repos", "global"},
+		{"www host is the same repository host", "fact", "mirror www.github.com/wcatz/ghost across all repos", "project"},
+		{"bare forge host is not a repository", "fact", "mirror everything on github.com/ across all repos", "global"},
+		{"git@ without a remote path is not a repository", "fact", "ssh as git@ across all repos", "global"},
+		{"a determiner is not a repository name", "fact", "run the migrations from the repo across all repos", "global"},
+		{"our repo is not a repository name", "fact", "rebase in our repo before pushing across all projects", "global"},
+		{"from any repo is not a named repository", "fact", "deploy to infra cluster from any repo", "global"},
+		{"every repo is not a named repository", "fact", "run go vet in every repo on the dev machine", "global"},
+		{"a file path is not a repository", "fact", "edit cmd/ghost/main.go across all repos", "global"},
+		// Any node plus a number is read as a machine, node20 included: a wrong
+		// project scope is recoverable, a host note replayed everywhere is not.
+		{"node with a two-digit number is a host", "fact", "restart node-12 across all repos", "project"},
+		{"node major version spelling is also read as a host", "fact", "use node20 across all repos", "project"},
+		{"single digit node is a host", "fact", "restart node5 across all repos", "project"},
+		// The marker is a concrete identifier: bare nouns and version-like tokens
+		// do not make a fact host-specific.
+		{"bare cluster noun still promotes with a second weak hit", "fact", "ssh into the shared cluster for maintenance", "global"},
+		{"version-like token is not a host", "fact", "use sha-256 and utf-8 across all repos", "global"},
+		{"strong pattern without a host stays global", "fact", "deploy to infra cluster from any repo", "global"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

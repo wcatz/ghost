@@ -81,7 +81,7 @@ If the plugin is not installed:
 ghost mcp init --client claude
 ```
 
-The initializer registers the MCP server, installs the SessionStart and Stop hooks, grants the required tool permissions, disables Claude Code's built-in file memory, imports existing memories, and writes project redirects. Restart Claude Code after setup.
+The initializer registers the MCP server, installs the SessionStart and Stop hooks plus the optional working-moment hooks (a floored memory block beside a message or an edit; `ghost mcp status` reports them), grants the required tool permissions, disables Claude Code's built-in file memory, imports existing memories, and writes project redirects. Restart Claude Code after setup.
 
 If the plugin is installed, the initializer detects that the plugin owns the integration and defers instead of double-wiring it.
 

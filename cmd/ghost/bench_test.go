@@ -29,6 +29,8 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 		{"context", []string{"--context"}, benchModeContext},
 		{"passive", []string{"--passive"}, benchModePassive},
 		{"audit", []string{"--audit"}, benchModeAudit},
+		{"cutoff sweep", []string{"--cutoff-sweep"}, benchModeCutoff},
+		{"no-answer sweep", []string{"--no-answer-sweep"}, benchModeNoAnswer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := benchModeOf(tc.args)
@@ -50,13 +52,14 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 	// to drop one of them silently.
 	for _, args := range [][]string{{"--sweep", "--context"}, {"--context", "--sweep"},
 		{"--passive", "--context"}, {"--sweep", "--passive"}, {"--passive", "--sweep"},
-		{"--audit", "--passive"}, {"--passive", "--audit"}, {"--audit", "--sweep"}, {"--context", "--audit"}} {
+		{"--audit", "--passive"}, {"--passive", "--audit"}, {"--audit", "--sweep"}, {"--context", "--audit"},
+		{"--no-answer-sweep", "--cutoff-sweep"}, {"--no-answer-sweep", "--context"}, {"--passive", "--no-answer-sweep"}} {
 		if _, err := benchModeOf(args); err == nil {
 			t.Errorf("benchModeOf(%v) was accepted, so one of the two reports is dropped without saying so", args)
 		}
 	}
 
-	for _, flag := range []string{"--sweep", "--context", "--passive", "--audit"} {
+	for _, flag := range []string{"--sweep", "--context", "--passive", "--audit", "--cutoff-sweep", "--no-answer-sweep"} {
 		if !strings.Contains(benchUsage, flag) {
 			t.Errorf("benchUsage does not mention %s, so the mode is undiscoverable", flag)
 		}

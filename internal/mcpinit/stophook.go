@@ -66,6 +66,13 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 			finalizePlugin(stderr)
 		}
 		runSessionStart(payload.Raw, stdout)
+	case hostevent.EventMessageSubmit, hostevent.EventEdit:
+		// Capability-scoped like session start: a host that does not add
+		// additionalContext beside a message or a tool result gets a silent no-op.
+		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.WorkingMoment {
+			return
+		}
+		runWorkingMoment(payload, stdout)
 	case hostevent.EventStop:
 		runStop(payload, stdout, stderr, true)
 	case hostevent.EventSessionEnd:

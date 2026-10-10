@@ -110,7 +110,7 @@ func ContextInstant() time.Time {
 // category — is the tool's request, spelled the tool's way. A bench that measured
 // a hand-tuned request would be reporting on its own configuration.
 func ContextRequest(q Query, at time.Time) assemble.Request {
-	return contextRequestWithCutoff(q, at, config.DefaultRelevanceCutoff)
+	return contextRequestAt(q, at, config.DefaultRelevanceCutoff, config.DefaultNoAnswerCosine)
 }
 
 // contextRequestWithCutoff is ContextRequest with the cutoff made explicit, so a
@@ -119,13 +119,24 @@ func ContextRequest(q Query, at time.Time) assemble.Request {
 // config.DefaultRelevanceCutoff, which is what makes `ghost bench --context` a
 // measurement of the surface as shipped — a report run at cutoff off would be a
 // report about a call no caller makes.
+//
+// The no-answer bar (#955) is held OFF here, so the cutoff sweep stays a
+// measurement of the cutoff alone and its published table is the one it was
+// before the bar existed.
 func contextRequestWithCutoff(q Query, at time.Time, cutoff float64) assemble.Request {
+	return contextRequestAt(q, at, cutoff, 0)
+}
+
+// contextRequestAt is the request with both query-mode relevance parameters made
+// explicit: the relative cutoff (#954) and the absolute no-answer bar (#955).
+func contextRequestAt(q Query, at time.Time, cutoff, bar float64) assemble.Request {
 	return assemble.Request{
 		ProjectID:       q.ProjectID,
 		Query:           q.Text,
 		QueryVec:        q.Vector,
 		Source:          assemble.SourceBench,
 		RelevanceCutoff: cutoff,
+		NoAnswerCosine:  bar,
 		Budget: assemble.Budget{
 			MaxItems: ContextItems,
 			MaxBytes: ContextBytes,
@@ -328,13 +339,27 @@ type ContextCost struct {
 // a hole in the measurement, and a pooled ratio with a hole in it is a number
 // whose denominator nobody can account for.
 func RunContext(ctx context.Context, store *memory.Store, queries []Query, at time.Time) (ContextReport, error) {
-	return runContextAt(ctx, store, queries, at, config.DefaultRelevanceCutoff)
+	return runContextBar(ctx, store, queries, at, config.DefaultRelevanceCutoff, config.DefaultNoAnswerCosine)
 }
 
 // runContextAt is RunContext over one explicit cutoff. It is the seam the cutoff
 // sweep drives, so the sweep measures the same real Store.Candidates → assemble.Run
 // path at every share of the parameter that a shipped request would run.
 func runContextAt(ctx context.Context, store *memory.Store, queries []Query, at time.Time, cutoff float64) (ContextReport, error) {
+	return runContextBar(ctx, store, queries, at, cutoff, 0)
+}
+
+// runContextBar is runContextAt with the no-answer bar (#955) explicit.
+func runContextBar(ctx context.Context, store *memory.Store, queries []Query, at time.Time, cutoff, bar float64) (ContextReport, error) {
+	return runContextWith(ctx, store, queries, at, cutoff, bar, nil)
+}
+
+// runContextWith is runContextBar with an optional refusal predicate: when it
+// returns true for a block, that block is scored as if it had been withheld (no
+// rows). It exists for the no-answer sweep's two rules that are measured but not
+// built, which are judged from the block the assembler produced rather than by
+// the assembler.
+func runContextWith(ctx context.Context, store *memory.Store, queries []Query, at time.Time, cutoff, bar float64, refuse func(assemble.Result) bool) (ContextReport, error) {
 	rep := ContextReport{Queries: len(queries)}
 	// Every arm, in the assembler's order, before any query runs: the report's
 	// shape cannot depend on what happened to leak.
@@ -356,9 +381,12 @@ func runContextAt(ctx context.Context, store *memory.Store, queries []Query, at 
 		if q.Rel.relevantCount() == 0 {
 			continue
 		}
-		res, err := assemble.Run(ctx, store, contextRequestWithCutoff(q, at, cutoff))
+		res, err := assemble.Run(ctx, store, contextRequestAt(q, at, cutoff, bar))
 		if err != nil {
 			return ContextReport{}, fmt.Errorf("assemble %q: %w", q.Name, err)
+		}
+		if refuse != nil && refuse(res) {
+			res.Items = nil
 		}
 		if err := measureQuery(res, q, &rep); err != nil {
 			return ContextReport{}, err
