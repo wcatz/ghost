@@ -187,6 +187,11 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // had dropped it. See retireDecisionCompanionTx for what retiring means and how
 // the two rows are matched.
 //
+// A companion already retired (by this pair or by an earlier replacement) is
+// left exactly as the first retirement recorded it: its edge and history row
+// keep naming the decision that retired it, and only the decisions row is
+// repointed. History is append-only and ghost_link_withdraw repairs a wrong edge.
+//
 // Both IDs must belong to projectID and must differ; a decision cannot
 // supersede itself. Superseding an already-superseded decision just repoints
 // it, so re-running is safe.
