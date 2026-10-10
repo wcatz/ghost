@@ -2083,7 +2083,15 @@ What exists now:
   "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
   current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
   `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
-  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+  blaming an embedder outage for a weak keyword hit, in the other direction. Presence is the exact -1
+  mark and never the sign, in both arms and in every reader of the score: a cosine is in [-1, 1], so
+  one at or below zero was MEASURED and is a very weak match. A block whose every cosine is at or
+  below zero is therefore `weak`/`below_floor` — the arm held a value and judged the rows low — and
+  counting it as "no vector value" would report `no_floor_arm` for a verdict the vector leg had
+  already made. That is the SEAM's rule and Ghost's own leg sits outside it: `*memory.Store` discards
+  every candidate whose cosine is not above 0 before fusion, so a shipped query whose rows matched
+  nothing on meaning still reports `no_floor_arm`, and a `Candidate.VectorScore` there is either the
+  sentinel or a positive cosine. The line and the trace both keep "a threshold" and "a
 threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
   vector leg never ran or ran and failed) or the number, and
 `Floors` carries `VectorArmOn` (what the request configured) beside
