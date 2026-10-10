@@ -14,11 +14,12 @@ import (
 // git is unavailable — detection is worthless to test without it, and the
 // suite must not depend on a particular host being installed.
 //
-// The fixture is built through withoutGitLocation for the same reason the
+// The fixture is built through withoutGitOverrides for the same reason the
 // product builds its children through it: a `go test` run from inside a git
 // hook, or from a shell that exports one, would otherwise hand git init a
-// GIT_DIR of its own and the fixture would describe a different repository
-// than the one this test is about.
+// GIT_DIR — or a GIT_CONFIG_PARAMETERS naming another remote — of its own and
+// the fixture would describe a different repository than the one this test is
+// about.
 func gitIn(t *testing.T, dir, remote string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -31,7 +32,7 @@ func gitIn(t *testing.T, dir, remote string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(withoutGitLocation(os.Environ()),
+		cmd.Env = append(withoutGitOverrides(os.Environ()),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -230,17 +231,130 @@ func TestInheritedGitLocationVariablesAreIgnored(t *testing.T) {
 	}
 }
 
-// TestWithoutGitLocationKeepsOtherVariables: the scrub is narrow, and a scrub
+// TestInheritedGitConfigOverridesAreIgnored: git hands its own configuration
+// layer to every child it spawns, and three separate variable families can supply
+// a value for the one key DetectRemote reads — remote.origin.url.
+// GIT_CONFIG_PARAMETERS is what `git -c key=value` exports, and a hook is a child
+// of exactly that command; GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n /
+// GIT_CONFIG_VALUE_n is the same job in an indexed spelling; GIT_CONFIG,
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM replace the config files that are read.
+// The command-line layer outranks the checkout's own .git/config, and the file
+// variables supply a key the local config does not carry, so a ghost process
+// started from inside a hook — or under a wrapper that sets any of them — derives
+// the project from a remote that is not the checkout's own.
+func TestInheritedGitConfigOverridesAreIgnored(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	gitIn(t, target, "git@example.com:target/repo.git")
+	top := evalDir(t, target)
+	targetRemote := "git@example.com:target/repo.git"
+	otherRemote := "git@example.com:other/repo.git"
+
+	// The file variables need something real to point at: the answer they supply
+	// has to come from a file git can actually read.
+	evil := filepath.Join(t.TempDir(), "inherited.config")
+	evilBody := []byte("[remote \"origin\"]\n\turl = " + otherRemote + "\n")
+	if err := os.WriteFile(evil, evilBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// answersBoth: the directory named with -C is the only thing that decides
+	// which repository answers, so both detectors must still describe it.
+	answersBoth := func(t *testing.T) {
+		t.Helper()
+		if got := DetectRemote(target); got != targetRemote {
+			t.Errorf("DetectRemote = %q, want the checkout's own remote", got)
+		}
+		if got := TopLevel(target); got != top {
+			t.Errorf("TopLevel = %q, want %q", got, top)
+		}
+	}
+
+	// setConfigOverrides puts every inherited config-override variable into the
+	// environment, each of them answering remote.origin.url from `other` rather
+	// than from the checkout. COUNT counts the pairs that follow it, and git
+	// reads every pair it was given, so a partial set would make the child fail
+	// rather than answer — the aggregate case is the one a hook's environment
+	// actually presents.
+	setConfigOverrides := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("GIT_CONFIG_PARAMETERS", "'remote.origin.url'='"+otherRemote+"'")
+		t.Setenv("GIT_CONFIG_COUNT", "2")
+		t.Setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+		t.Setenv("GIT_CONFIG_VALUE_0", otherRemote)
+		t.Setenv("GIT_CONFIG_KEY_1", "remote.origin.url")
+		t.Setenv("GIT_CONFIG_VALUE_1", otherRemote)
+		t.Setenv("GIT_CONFIG", evil)
+		t.Setenv("GIT_CONFIG_GLOBAL", evil)
+		t.Setenv("GIT_CONFIG_SYSTEM", evil)
+	}
+
+	// A command-line layer on its own: the spelling git itself exports.
+	t.Run("parameters", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG_PARAMETERS", "'remote.origin.url'='"+otherRemote+"'")
+		answersBoth(t)
+	})
+
+	// The indexed twin, which does the same job without the quoting.
+	t.Run("count key and value", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+		t.Setenv("GIT_CONFIG_VALUE_0", otherRemote)
+		answersBoth(t)
+	})
+
+	// GIT_CONFIG replaces the file read outright, so it outranks even a local
+	// remote.origin.url.
+	t.Run("config file", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG", evil)
+		answersBoth(t)
+	})
+
+	// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM cannot outrank a local value — a
+	// repository that carries its own origin wins over a global one — so the case
+	// that matters is a checkout whose own config does not carry one, which is
+	// also the ordinary case for a project bound before its origin was recorded.
+	noOrigin := filepath.Join(root, "no-origin")
+	gitIn(t, noOrigin, "")
+	t.Run("global and system supply a remote the checkout does not carry", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG_GLOBAL", evil)
+		t.Setenv("GIT_CONFIG_SYSTEM", evil)
+		if got := DetectRemote(noOrigin); got != "" {
+			t.Errorf("DetectRemote = %q, want empty: an inherited config file may not answer about a repository that carries no origin", got)
+		}
+	})
+
+	// A hook's environment carries several of them at once, and the pairs are
+	// consumed as a set: the aggregate is its own case, because dropping one
+	// family while leaving the rest would still let the remaining one name
+	// another repository's remote.
+	t.Run("every family at once", func(t *testing.T) {
+		setConfigOverrides(t)
+		answersBoth(t)
+	})
+}
+
+// TestWithoutGitOverridesKeepsOtherVariables: the scrub is narrow, and a scrub
 // that took the wrong variable would break the child rather than answer a
-// different question. A git variable that is not about location (a commit's
-// author, a template directory) and an ordinary one (PATH, HOME) all have to
-// survive.
-func TestWithoutGitLocationKeepsOtherVariables(t *testing.T) {
-	got := withoutGitLocation([]string{
+// different question. A git variable that is not about location or config (a
+// commit's author, a template directory), and one that is not about a repository
+// at all (the ssh command, SSL verification), have to survive beside the ordinary
+// ones.
+func TestWithoutGitOverridesKeepsOtherVariables(t *testing.T) {
+	got := withoutGitOverrides([]string{
 		"PATH=/bin", "GIT_DIR=/x", "GIT_AUTHOR_NAME=t",
 		"GIT_PREFIX=p", "HOME=/h", "GIT_TEMPLATE_DIR=/t", "GIT_NAMESPACE=n",
+		"GIT_CONFIG_PARAMETERS=x", "GIT_CONFIG_COUNT=2", "GIT_CONFIG=/c",
+		"GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_SYSTEM=/s",
+		"GIT_CONFIG_KEY_0=k", "GIT_CONFIG_VALUE_0=v", "GIT_CONFIG_KEY_17=k",
+		"GIT_CONFIG_VALUE_17=v", "GIT_DISCOVERY_ACROSS_FILESYSTEM=1",
+		"GIT_SSH_COMMAND=ssh", "GIT_SSL_NO_VERIFY=1",
 	})
-	want := []string{"PATH=/bin", "GIT_AUTHOR_NAME=t", "HOME=/h", "GIT_TEMPLATE_DIR=/t"}
+	want := []string{
+		"PATH=/bin", "GIT_AUTHOR_NAME=t", "HOME=/h", "GIT_TEMPLATE_DIR=/t",
+		"GIT_SSH_COMMAND=ssh", "GIT_SSL_NO_VERIFY=1",
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}

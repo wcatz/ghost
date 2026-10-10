@@ -68,13 +68,14 @@ func TestCollectGitContextNonRepo(t *testing.T) {
 // This used to set GIT_CEILING_DIRECTORIES, git's own opt-out from the upward
 // walk, and that worked while the ceiling reached CollectGitContext's child. It
 // no longer does, and the change is the product's: every git child Ghost runs is
-// built by repo.GitCommand, which drops the inherited git location variables
-// (GIT_CEILING_DIRECTORIES among them) so a parent cannot rename the repository
-// a caller's directory answers for. A test can no longer confine the product's
-// walk-up through the child's inherited variables, so the premise is asked of
-// git under the SAME conditions the product runs it in, through the same helper:
-// if that reports a top level, the directory is in a repository and the test
-// skips rather than asserting commits it would not get.
+// built by repo.GitCommand, which drops every inherited git variable that can
+// relocate the repository or replace its configuration (GIT_CEILING_DIRECTORIES
+// among them) so a parent cannot rename the repository a caller's directory
+// answers for. A test can no longer confine the product's walk-up through the
+// child's inherited variables, so the premise is asked of git under the SAME
+// conditions the product runs it in, through the same helper: if that reports a
+// top level, the directory is in a repository and the test skips rather than
+// asserting commits it would not get.
 func excludeEnclosingRepo(t *testing.T, dir string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

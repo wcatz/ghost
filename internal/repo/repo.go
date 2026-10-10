@@ -7,8 +7,9 @@
 //
 // Every git child this package spawns is built by GitCommand, which is also the
 // one helper internal/reflection uses for its own commit log: a caller anywhere
-// in Ghost asks git about a directory it named, and an inherited git location
-// variable must not be able to answer about a different one.
+// in Ghost asks git about a directory it named, and neither an inherited git
+// location variable nor an inherited git config override may be able to answer
+// about a different one.
 package repo
 
 import (
@@ -84,14 +85,15 @@ func TopLevel(dir string) string {
 	return top
 }
 
-// gitLocationVars are the variables that tell git WHERE a repository is rather
-// than how to behave. Inherited, they override the directory a caller names with
-// -C: a server started from inside a git hook, or from a shell that exports one,
-// would resolve a different top level or remote than its working directory
-// implies. Every git child Ghost runs is built by GitCommand, which drops them,
-// so the directory passed with -C is the only thing that decides which
-// repository answers.
-var gitLocationVars = []string{
+// gitOverridingVars are the inherited variables a git child honours that can
+// make it answer about a repository other than the one the caller named, or
+// about a configuration that is not the checkout's own. A server started from
+// inside a git hook, or from a shell that exports one, must resolve the same
+// repository its working directory implies, so GitCommand drops every one of
+// them. Nothing else is dropped — see withoutGitOverrides.
+var gitOverridingVars = []string{
+	// Location: each of these answers "which repository is this?", and an
+	// inherited value overrides the directory the caller named with -C.
 	"GIT_DIR",
 	"GIT_WORK_TREE",
 	"GIT_COMMON_DIR",
@@ -101,18 +103,71 @@ var gitLocationVars = []string{
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
 	"GIT_NAMESPACE",
 	"GIT_PREFIX",
+	// GIT_DISCOVERY_ACROSS_FILESYSTEM is in the same family as the ceiling: it
+	// widens where discovery may walk to, so it changes which repository a
+	// directory resolves to just as the ceiling narrows it.
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+
+	// Config: each of these decides WHICH configuration the child reads, and
+	// they can answer the one key DetectRemote reads.
+	//
+	// GIT_CONFIG_PARAMETERS is what `git -c key=value` exports to the child it
+	// spawns — a hook included — and GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n and
+	// GIT_CONFIG_VALUE_n is the same job in an indexed spelling. That layer
+	// outranks the checkout's own .git/config, so either one can name another
+	// remote.origin.url.
+	"GIT_CONFIG_PARAMETERS",
+	"GIT_CONFIG_COUNT",
+	// GIT_CONFIG, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM replace the files the
+	// child reads. GIT_CONFIG replaces the whole read, so it outranks even a
+	// local value; the global and system ones cannot outrank a local one, but
+	// they still supply a key the checkout does not carry — and a repository
+	// with no origin of its own is exactly the ordinary case for a project
+	// bound before its remote was recorded.
+	"GIT_CONFIG",
+	"GIT_CONFIG_GLOBAL",
+	"GIT_CONFIG_SYSTEM",
 }
 
-// withoutGitLocation returns vars minus every inherited git location variable.
-// It keeps everything else, including the git variables that are not about
-// location: GIT_AUTHOR_NAME and friends name a commit, and PATH and HOME decide
-// which git runs at all, so dropping them would break the child rather than
-// answer a different question.
-func withoutGitLocation(vars []string) []string {
+// gitOverridingVarPrefixes are the indexed form of the command-line config
+// layer: GIT_CONFIG_COUNT says how many pairs follow, and each pair is
+// GIT_CONFIG_KEY_<n> beside GIT_CONFIG_VALUE_<n>. The count goes in the list
+// above and the pairs are matched by prefix, because the index is unbounded.
+//
+// The count is the load-bearing half. Dropping only the pairs while leaving the
+// count makes the child fail outright — git reports a missing config key and
+// exits non-zero — so DetectRemote would answer "no repository known" rather
+// than answering about the directory it was handed. Both halves go, or neither.
+var gitOverridingVarPrefixes = []string{
+	"GIT_CONFIG_KEY_",
+	"GIT_CONFIG_VALUE_",
+}
+
+// isGitOverriding reports whether name is a variable a git child would honour
+// into answering about a repository or a configuration it was not asked about.
+func isGitOverriding(name string) bool {
+	if slices.Contains(gitOverridingVars, name) {
+		return true
+	}
+	for _, prefix := range gitOverridingVarPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutGitOverrides returns vars minus every inherited git variable that can
+// relocate the repository or replace its configuration. It keeps everything
+// else, including the git variables that are not about location or config:
+// GIT_AUTHOR_NAME and friends name a commit, and PATH and HOME decide which git
+// runs at all, so dropping them would break the child rather than answer a
+// different question.
+func withoutGitOverrides(vars []string) []string {
 	out := make([]string, 0, len(vars))
 	for _, kv := range vars {
 		name, _, _ := strings.Cut(kv, "=")
-		if slices.Contains(gitLocationVars, name) {
+		if isGitOverriding(name) {
 			continue
 		}
 		out = append(out, kv)
@@ -120,19 +175,22 @@ func withoutGitLocation(vars []string) []string {
 	return out
 }
 
-// GitCommand builds a git child process that does not inherit the git location
-// variables. Every git child Ghost runs goes through here — TopLevel,
-// DetectRemote and internal/reflection's commit log — so the -C directory a
-// caller passes is the only input that decides which repository answers, and a
-// parent that carries GIT_DIR cannot rename the one it gets.
+// GitCommand builds a git child process that does not inherit the git variables
+// that can relocate the repository or replace its configuration. Every git child
+// Ghost runs goes through here — TopLevel, DetectRemote and
+// internal/reflection's commit log — so the -C directory a caller passes is the
+// only input that decides which repository answers, and a parent that carries
+// GIT_DIR cannot rename the one it gets, nor can GIT_CONFIG_PARAMETERS name a
+// different remote.origin.url for it.
 //
 // The scrub is deliberately narrow. A location variable is dropped because it
-// answers a question the caller already answered with -C, and a value inherited
-// from a hook overrides that answer; everything else the git child needs is
-// passed through untouched, so the child behaves exactly as the caller asked and
-// no more.
+// answers a question the caller already answered with -C, and a config variable
+// is dropped because it answers a question the checkout's own config already
+// answers; in both cases a value inherited from a hook overrides that answer.
+// Everything else the git child needs is passed through untouched, so the child
+// behaves exactly as the caller asked and no more.
 func GitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = withoutGitLocation(os.Environ())
+	cmd.Env = withoutGitOverrides(os.Environ())
 	return cmd
 }
