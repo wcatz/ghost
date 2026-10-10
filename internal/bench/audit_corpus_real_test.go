@@ -130,8 +130,9 @@ func TestRealAuditCorpusLabelsAreConsistent(t *testing.T) {
 		t.Errorf("labels: %d cites, %d restates; want the one cited id and the three restatements the study labelled USED", cites, restates)
 	}
 	// The population the false-"used" figure is a fraction of: every turn that
-	// carries no label slice is a pair the judge called used and the labels say
-	// was not, so it has to be nearly all of them.
+	// carries no label slice is scored as expected-ignored. That is the study's
+	// NOT_USED turns and also its UNCLEAR ones, so the figure covers undecided
+	// pairs as well as settled negatives.
 	if plain != len(c.Turns)-cites-restates {
 		t.Errorf("%d unlabelled turns, want %d", plain, len(c.Turns)-cites-restates)
 	}
@@ -230,6 +231,6 @@ func TestRealAuditFloors(t *testing.T) {
 		t.Errorf("the token arm filed %s, want the %d pairs it files today: a real-set precision floor can only be written once the arm has a population", h.TokenPrecision, realTokenArmPairs)
 	}
 	if h.SessionStart {
-		t.Error("the real-work corpus has no call before its first turn; a start scenario here would read its headline off a population the corpus does not have")
+		t.Error("the real-work corpus has no scenario named start; a start scenario here would read its headline off a population the corpus does not have")
 	}
 }

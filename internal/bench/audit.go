@@ -167,11 +167,11 @@ func (r AuditReport) scenario(name string) AuditScenario {
 	return AuditScenario{}
 }
 
-// startScenario returns the scenario placed before the session's first turn, and
-// whether the corpus has one. It is the only call every labelled turn follows, so
-// the corpus's own labels are all in its pairs; a corpus whose calls all sit
-// mid-session has no such scenario, and its figures are read over every call
-// instead (see Headlines).
+// startScenario returns the scenario named "start", and whether the report has one.
+// The labelled offline corpus names its session-start call that, and every labelled
+// turn follows it, so the corpus's own labels are all in its pairs; a report with no
+// scenario of that name (the real-work corpus) has its figures read over every call
+// instead (see Headlines). The name is the mechanism, not the call's position.
 func (r AuditReport) startScenario() (AuditScenario, bool) {
 	for _, s := range r.Scenarios {
 		if s.Name == "start" {
@@ -209,19 +209,18 @@ type AuditHeadlines struct {
 	// it filed used-by-wording that the labels agree with, over every pair it
 	// filed there.
 	TokenPrecision Ratio
-	// SessionStart reports whether the corpus has a call before its first turn.
-	// The labelled offline session does, so every labelled turn follows it and its
-	// pairs carry the whole corpus's labels. The real-work corpus does not — every
-	// one of its calls sits mid-session — so its catch lines are read over all of
-	// its calls, and the two domain lines below have no population to be a
-	// fraction of and are not printed.
+	// SessionStart reports whether the report has a scenario named "start". The
+	// labelled offline session does, so every labelled turn follows it and its
+	// pairs carry the whole corpus's labels. The real-work corpus has none, so its
+	// catch lines are read over all of its calls, and the two domain lines below
+	// have no population to be a fraction of and are not printed.
 	SessionStart bool
 }
 
 // Headlines reads the figures the report leads with. The two catch lines are read
 // off the session-start call when the corpus has one — the only call every labelled
 // turn follows, so its pairs carry the whole corpus's labels — and over every call
-// when it does not, which is the only population a mid-session corpus has.
+// when it does not, which is the only population such a corpus has.
 func (r AuditReport) Headlines() AuditHeadlines {
 	var h AuditHeadlines
 	start, ok := r.startScenario()
