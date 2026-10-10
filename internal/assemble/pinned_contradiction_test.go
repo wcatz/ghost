@@ -129,3 +129,30 @@ func TestNoContradictionMarkerWithoutAPinnedContradiction(t *testing.T) {
 		t.Errorf("an unpinned pair carries the pinned marker:\n%s", res.Response)
 	}
 }
+
+// The marker names a kept pinned partner only while that partner is still in the
+// answer: the response-fit pass can cut it after stage 5, and the surviving row
+// must not point at a row the reader no longer has. (The withheld side is the
+// opposite case: out of the answer by construction, and named.)
+func TestPinnedMarkerDropsAKeptPartnerTheResponseFitCut(t *testing.T) {
+	older := pinnedStamped("OLD", 0.9, "2026-01-01 00:00:00")
+	newer := pinnedStamped("NEW", 0.5, "2026-06-01 00:00:00")
+	set := contradicting([][2]string{{"NEW", "OLD"}}, older, newer)
+	req := separationRequest()
+	full := run(t, &fakeRetriever{set: set}, req)
+	if got := itemIDs(full.Items); !eq(got, []string{"OLD", "NEW"}) {
+		t.Fatalf("precondition: both pinned rows are delivered, got %v", got)
+	}
+	if line := lineOf(t, full.Response, "OLD"); !strings.Contains(line, "contradicted_by=`NEW`") {
+		t.Fatalf("precondition: OLD names NEW while NEW is in the answer: %q", line)
+	}
+
+	req.Budget.MaxBytes = len(full.Response) - 1
+	tight := run(t, &fakeRetriever{set: set}, req)
+	if got := itemIDs(tight.Items); !eq(got, []string{"OLD"}) {
+		t.Fatalf("precondition: the cap must cut the lowest row NEW, got %v", got)
+	}
+	if line := lineOf(t, tight.Response, "OLD"); strings.Contains(line, "contradicted_by=") {
+		t.Errorf("OLD still names the cut NEW: %q", line)
+	}
+}

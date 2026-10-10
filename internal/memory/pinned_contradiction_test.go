@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +107,38 @@ func TestPinnedContradictedRowStaysOutOfTheResolvePools(t *testing.T) {
 	}
 	if len(cands) != 1 || cands[0].ID != newer {
 		t.Fatalf("resolve candidates = %d rows, want only the unpinned one", len(cands))
+	}
+}
+
+// The report must not scan memory_links: it starts from the pinned rows and
+// reaches the edges through the partial indexes, once per direction.
+func TestPinnedContradictionQueryUsesTheLinkIndexes(t *testing.T) {
+	s := testStore(t)
+	scope := scopesConflictSQL("m.scope", "o.scope")
+	query := pinnedContradictionArmTarget + scope + " UNION " + pinnedContradictionArmSource + scope + pinnedContradictionTail
+	rows, err := s.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	var sawTarget, sawSource bool
+	for _, d := range plan {
+		if strings.HasPrefix(d, "SCAN ml") {
+			t.Errorf("full scan of memory_links in the plan: %q\n%s", d, strings.Join(plan, "\n"))
+		}
+		sawTarget = sawTarget || strings.Contains(d, "idx_links_target")
+		sawSource = sawSource || strings.Contains(d, "idx_links_source")
+	}
+	if !sawTarget || !sawSource {
+		t.Errorf("the plan does not use both link indexes (target %v, source %v):\n%s", sawTarget, sawSource, strings.Join(plan, "\n"))
 	}
 }

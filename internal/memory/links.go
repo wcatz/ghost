@@ -786,28 +786,43 @@ type PinnedContradictedRow struct {
 	AlsoContradictedBy int
 }
 
-// pinnedContradictionHead and pinnedContradictionTail are the statement ghost_health reports pinned
-// contradictions from. `contradicts` is symmetric and may be stored either way
-// round, so the edge is read in both directions; an edge whose endpoints' scopes
-// conflict is two true claims about two places and every reader exempts it; an
-// invalidated edge or a resolved row on either side is closed. Content is cut
-// to pinnedContradictionPreview characters in SQL, so the read is bounded per
-// row, and the newer-than test is made in Go (ParseStamp), because the two
-// stamp columns are not guaranteed one textual format.
-const pinnedContradictionHead = `
+// The statement ghost_health reports pinned contradictions from. It starts from
+// the pinned rows and probes memory_links once per direction through the partial
+// indexes idx_links_target and idx_links_source, instead of scanning the table
+// behind an OR across both columns (CROSS JOIN pins the pinned rows as the outer loop) (TestPinnedContradictionQueryUsesTheLinkIndexes
+// holds the plan). `contradicts` may be stored either way round, so both arms
+// run, and UNION (not UNION ALL) makes a pair stored both ways one row. An edge
+// whose endpoints' scopes conflict is two true claims about two places and every
+// reader exempts it; an invalidated edge or a resolved row on either side is
+// closed. Content is cut to pinnedContradictionPreview characters in SQL, so the
+// read is bounded per row, and the newer-than test is made in Go (ParseStamp),
+// because the two stamp columns are not guaranteed one textual format.
+const pinnedContradictionArmTarget = `
 	SELECT m.id, m.project_id, substr(m.content, 1, ` + pinnedContradictionPreview + `),
 	       COALESCE(NULLIF(m.updated_at, ''), m.created_at),
 	       o.id, substr(o.content, 1, ` + pinnedContradictionPreview + `),
 	       COALESCE(NULLIF(o.updated_at, ''), o.created_at)
 	FROM memories m
-	JOIN memory_links ml ON ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
-	 AND (ml.target_id = m.id OR ml.source_id = m.id)
-	JOIN memories o ON o.id = CASE WHEN ml.target_id = m.id THEN ml.source_id ELSE ml.target_id END
+	CROSS JOIN memory_links ml ON ml.target_id = m.id AND ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
+	JOIN memories o ON o.id = ml.source_id
 	WHERE m.pinned = 1 AND m.resolved_at IS NULL AND o.resolved_at IS NULL AND o.id <> m.id
 	  AND NOT `
 
+const pinnedContradictionArmSource = `
+	SELECT m.id, m.project_id, substr(m.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(m.updated_at, ''), m.created_at),
+	       o.id, substr(o.content, 1, ` + pinnedContradictionPreview + `),
+	       COALESCE(NULLIF(o.updated_at, ''), o.created_at)
+	FROM memories m
+	CROSS JOIN memory_links ml ON ml.source_id = m.id AND ml.relation = 'contradicts' AND ml.invalidated_at IS NULL
+	JOIN memories o ON o.id = ml.target_id
+	WHERE m.pinned = 1 AND m.resolved_at IS NULL AND o.resolved_at IS NULL AND o.id <> m.id
+	  AND NOT `
+
+// pinnedContradictionTail orders by project, pinned id, other id (output columns
+// 2, 1 and 5), so rows of one pinned row are adjacent.
 const pinnedContradictionTail = `
-	ORDER BY m.project_id, m.id, o.id`
+	ORDER BY 2, 1, 5`
 
 const pinnedContradictionPreview = "200"
 
@@ -825,7 +840,9 @@ func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := pinnedContradictionHead + scopesConflictSQL("m.scope", "o.scope") + pinnedContradictionTail
+	// Composed here, from literals, so the write-seam scan can read its head.
+	scope := scopesConflictSQL("m.scope", "o.scope")
+	query := pinnedContradictionArmTarget + scope + " UNION " + pinnedContradictionArmSource + scope + pinnedContradictionTail
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, 0, fmt.Errorf("pinned rows with contradictions: %w", err)
@@ -833,7 +850,6 @@ func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]
 	defer func() { _ = rows.Close() }()
 
 	var result []PinnedContradictedRow
-	pairs := map[[2]string]bool{}
 	total := 0
 	lastID, shown := "", false
 	for rows.Next() {
@@ -844,11 +860,9 @@ func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]
 		}
 		pt, _ := ParseStamp(pinnedStamp)
 		ot, _ := ParseStamp(otherStamp)
-		pair := [2]string{r.ID, r.ContradictedBy}
-		if !ot.After(pt) || pairs[pair] {
+		if !ot.After(pt) {
 			continue
 		}
-		pairs[pair] = true
 		// Rows arrive ordered by pinned row, so a repeat of the previous pinned
 		// row is one more contradicting row for the same entry.
 		if r.ID == lastID {
