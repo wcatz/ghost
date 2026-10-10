@@ -90,6 +90,7 @@ var KnownSources = []string{
 	string(assemble.SourceSearch),
 	string(assemble.SourceSessionStart),
 	string(assemble.SourceProjectCtx),
+	string(assemble.SourceWorkingMoment),
 }
 
 // ReportOptions is one report's request.

@@ -33,6 +33,13 @@ const (
 	EventSessionStart Event = "session-start"
 	EventStop         Event = "stop"
 	EventSessionEnd   Event = "session-end"
+	// EventMessageSubmit fires when the user submits a message, before the host
+	// processes it (Claude Code's UserPromptSubmit). EventEdit fires after a
+	// file-editing tool ran (Claude Code's PostToolUse, matched to Edit, Write
+	// and MultiEdit). Both are the working-moment channel: a host that cannot add
+	// context beside a message or a tool result has no entry for them.
+	EventMessageSubmit Event = "message-submit"
+	EventEdit          Event = "edit"
 )
 
 // Source identifies the host adapter that produced the event.
@@ -51,6 +58,11 @@ const (
 type Capability struct {
 	BlockStop     bool
 	InjectContext bool
+	// WorkingMoment is true when the host adds a hook's additionalContext beside
+	// a user message and beside an edit tool's result. Only Claude Code is
+	// documented to; every other source stays false and the events are a silent
+	// no-op for it.
+	WorkingMoment bool
 }
 
 // capabilityMatrix mirrors the spec's v1 source-capability table. codex blocks
@@ -58,7 +70,7 @@ type Capability struct {
 // goose blocks Stop subject to a host-side consecutive-block cap we never rely
 // on; opencode plugins have no stop-blocking or injection surface.
 var capabilityMatrix = map[Source]Capability{
-	SourceClaudeCode: {BlockStop: true, InjectContext: true},
+	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
 	SourceGoose:      {BlockStop: true, InjectContext: false},
 	SourceOpencode:   {BlockStop: false, InjectContext: false},
@@ -117,6 +129,10 @@ func NormalizeEvent(name string) Event {
 		return EventStop
 	case "sessionend":
 		return EventSessionEnd
+	case "messagesubmit", "userpromptsubmit":
+		return EventMessageSubmit
+	case "edit", "posttooluse":
+		return EventEdit
 	default:
 		return ""
 	}
