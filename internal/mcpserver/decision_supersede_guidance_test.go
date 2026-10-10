@@ -52,7 +52,7 @@ func recordTitled(t *testing.T, session *mcp.ClientSession, project, title strin
 func TestDecisionRecordAdvisesSupersedesOnASameTitleLiveDecision(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
-	plantDecision(t, db, "abc123", "OLD1", "Max 5 attempts", "5", "r", "active")
+	plantDecision(t, db, "abc123", "OLD1", " Max 5 attempts ", "5", "r", "active")
 
 	out := recordTitled(t, session, "abc123", "  max 5 ATTEMPTS ", nil)
 	if !strings.Contains(out, "OLD1") || !strings.Contains(out, "supersedes=OLD1") {
@@ -101,5 +101,16 @@ func TestDecisionRecordGivesNoAdviceWhenSupersedesIsPassed(t *testing.T) {
 	out := recordTitled(t, session, "abc123", "Max 5 attempts", map[string]any{"supersedes": "OLD1"})
 	if strings.Contains(out, "NOTE:") {
 		t.Errorf("advice given although supersedes was passed:\n%s", out)
+	}
+}
+
+// A decision flagged for revisit is live, not superseded, so it draws the advice.
+func TestDecisionRecordAdvisesSupersedesOnARevisitDecision(t *testing.T) {
+	db, _, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	plantDecision(t, db, "abc123", "REV1", "Max 5 attempts", "5", "r", "revisit")
+
+	if out := recordTitled(t, session, "abc123", "Max 5 attempts", nil); !strings.Contains(out, "supersedes=REV1") {
+		t.Errorf("no advice naming the revisit decision:\n%s", out)
 	}
 }

@@ -966,21 +966,11 @@ Pass the project name (e.g. "ghost", "web-app", "platform-ops") as project_id. G
 // supersedes is told to pass it. Advice only: it never refuses the record and
 // never links anything, and a lookup failure yields no advice.
 func (s *Server) sameTitleDecisionAdvice(ctx context.Context, projectID, title string) string {
-	want := strings.ToLower(strings.TrimSpace(title))
-	if want == "" {
+	id, err := s.store.FindLiveDecisionByTitle(ctx, projectID, title)
+	if err != nil || id == "" {
 		return ""
 	}
-	live, err := s.store.ListDecisions(ctx, projectID, "active", 1000)
-	if err != nil {
-		return ""
-	}
-	for _, d := range live {
-		if d.Status == "superseded" || strings.ToLower(strings.TrimSpace(d.Title)) != want {
-			continue
-		}
-		return fmt.Sprintf(" NOTE: a live decision in this project has the same title (decision_id: %s). If this one replaces it, pass supersedes=%s so the old one is retired; the two are otherwise listed side by side.", assemble.Token(d.ID), assemble.Token(d.ID))
-	}
-	return ""
+	return fmt.Sprintf(" NOTE: a live decision in this project has the same title (decision_id: %s). If this one replaces it, pass supersedes=%s so the old one is retired; the two are otherwise listed side by side.", assemble.Token(id), assemble.Token(id))
 }
 
 // New creates and configures the MCP server with all Ghost tools.
