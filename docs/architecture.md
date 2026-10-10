@@ -1734,6 +1734,25 @@ Axis interaction rules:
 > passive block and a machine with no configured cutoff are byte-identical to a
 > pipeline whose stage was absent. `ghost bench --context` is measured at the
 > shipped default (`docs/benchmarks.md`).
+> The no-answer step ([#955](https://github.com/wcatz/ghost/issues/955)) follows
+> stage 8 on a QUERY only and is numbered with it rather than as a new stage 9: a
+> question nothing in the store answers still filled its window (the bench's 24
+> no-answer queries got ten rows each), so when the best vector cosine among the
+> block's rows is strictly below one absolute bar (`context.no_answer_cosine`) the
+> block is withheld and the answer says "No memory answers this: nothing cleared
+> the bar", with the score shown. ONE rule, ONE parameter. A pinned row is never
+> withheld, a block with no comparable cosine (no vector leg) is never judged, a
+> passive read is a recorded pass-through, and each withheld row is recorded with
+> reason `nothing_cleared_the_bar` in the trace, the retrieval record and explain.
+> 0 is off and byte-identical. Chosen from `ghost bench --no-answer-sweep`.
+> Only a row that carries a cosine is ever withheld: a row the vector leg's list
+> did not carry is judged by its own stored cosine when the retriever can read it,
+> and a row with no embedding at all (an exact keyword hit on a never-embedded
+> memory) is never judged and always passes. The default is tied to the model it
+> was measured on (`nomic-embed-text:v1.5`): with another `embedding.model` and no
+> explicit `context.no_answer_cosine` in the file or environment the effective bar
+> is 0 and the stage's trace note says "no_answer bar off: unmeasured embedding
+> model". An explicit value is always honoured.
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
@@ -2018,7 +2037,13 @@ What exists now:
   (a vector cosine) ships OFF**, because the bench no-answer report shows the
   answerable and no-answer cosine distributions overlap, so no constant
   separates them, and `context.abstain_cosine` is a decision a user makes rather
-  than one Ghost infers. The cosine is range-checked on BOTH sides of the seam —
+  than one Ghost infers. (This is deliberately different from the no-answer bar,
+  `context.no_answer_cosine`, which ships ON at 0.62: that rule WITHHOLDS rows
+  rather than labelling them, and it was measured on the default embedding model
+  only. It is tied to that model, so with any other `embedding.model` and no
+  explicit bar it is off, and the trace records "no_answer bar off: unmeasured
+  embedding model". `abstain_cosine` stays off for every model because no
+  constant separates the distributions at all.) The cosine is range-checked on BOTH sides of the seam —
   `config` on its environment and file paths, and `validateRequest` on the request
   itself — because a guard that lives only in the layer above the seam is one the
   next caller does not inherit, and all four unusable values fail silently rather

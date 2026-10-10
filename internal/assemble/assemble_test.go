@@ -555,7 +555,7 @@ func TestTraceRecordsEveryStage(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
-	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "budget", "render", "response_fit"}
+	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "no_answer", "budget", "render", "response_fit"}
 	got := make([]string, 0, len(res.Trace.Stages))
 	for _, st := range res.Trace.Stages {
 		got = append(got, st.Stage)

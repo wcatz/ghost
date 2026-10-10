@@ -100,6 +100,14 @@ var detectCallingSource = ai.DetectSource
 // MCP saves. Tests replace it to prove named saves never cross this boundary.
 var detectRemoteForSave = repo.DetectRemote
 
+// repoTopLevel is the process boundary that says which git checkout a directory
+// is inside.
+var repoTopLevel = repo.TopLevel
+
+// workingDirResolver is how New learns the server's directory; a test replaces it
+// so no suite depends on where it happens to run.
+var workingDirResolver = workingDirFromEnv
+
 // ensureProjectFor resolves or creates the project for a save and returns the
 // id the caller must write to, adding repository identity when the caller
 // identified it by a filesystem path.
@@ -108,8 +116,11 @@ var detectRemoteForSave = repo.DetectRemote
 // repository — but project_id is sometimes a filesystem path, and that is
 // exactly the shape that produced duplicate projects when a session changed
 // working directory. Only git can say whether two such paths are one
-// repository, so detection is confined to that case: an ordinary named save
-// never spawns a process. The test is memory.IsPathShaped rather than
+// repository, so detection is confined to that case: a named save that finds
+// its project already there never spawns a process. The one exception is a named
+// save that is about to CREATE a project: it asks git for the top level and the
+// remote of the server's own directory (two bounded invocations) so the project
+// can be recorded against that checkout (#957). The test is memory.IsPathShaped rather than
 // filepath.IsAbs, the same predicate Store.ResolveProject applies, so a
 // drive-relative Windows path — which IsAbs reports as relative — cannot be
 // treated as a name by the writer and as a path by the reader, which is how a
@@ -242,6 +253,29 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	if pathShaped {
 		remote = detectRemoteForSave(projectID)
 	}
+
+	// A save that CREATES a project from a name-shaped id (neither separator-bearing
+	// nor a drive-relative `C:repo`, the shape the reader calls a path) binds it to the checkout
+	// the server was started in, so the next session in that directory resolves it
+	// instead of printing the no-project block (#957). Never an existing project:
+	// resolvedID == "" is the gate, and the store's upsert would not move a path
+	// anyway. Never a checkout another project already claims, by path or by
+	// remote: binding a second name there would silently fold it into the first,
+	// so the claim test and the insert are one store transaction and a claim
+	// declines the bind rather than merging.
+	if resolvedID == "" && !pathShaped && !memory.IsPathShaped(projectID) {
+		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
+			bound, err := s.store.BindNewProjectToCheckout(ctx, projectID, dir, projectID, dirRemote)
+			if err != nil {
+				return "", nil, err
+			}
+			if bound {
+				return projectID, nil, nil
+			}
+			// Claimed between the probe and the write: open it unbound below.
+		}
+	}
+
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
 		// resolution without the basename fallback. Going through its own
@@ -255,6 +289,53 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		projectID = resolvedID
 	}
 	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+}
+
+// checkoutToBind reports the directory a newly created name-shaped project is
+// recorded against, and the repository remote there, or ok=false when the save
+// must open the project unbound as it always did.
+//
+// The directory is the TOP LEVEL of the git checkout the server was started in,
+// physically resolved, never an arbitrary directory: a server started in /tmp,
+// /var, a download folder or a directory that merely holds checkouts is not in a
+// checkout at all, and a project recorded there with no remote would answer for
+// the whole subtree. A checkout that is the home directory or an ancestor of it
+// is declined for the same reason. Also declined: one the project-shape and
+// credential guards would refuse as a recorded path. A directory another project
+// already claims is declined by the store, inside the write transaction that
+// would record it, which is the only place that test can be made atomic.
+func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
+	if s.workingDir == "" {
+		return "", "", false
+	}
+	dir = repoTopLevel(s.workingDir)
+	if dir == "" || filepath.Dir(dir) == dir {
+		return "", "", false
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if h, err := filepath.EvalSymlinks(home); err == nil {
+			home = h
+		}
+		if containsOrIs(dir, home) {
+			return "", "", false
+		}
+	}
+	if memory.RejectSecret("path", dir) != nil {
+		return "", "", false
+	}
+	if memory.CheckImportedProject(memory.PortableProject{ID: "x", Name: "x", Path: dir}) != nil {
+		return "", "", false
+	}
+	return dir, detectRemoteForSave(dir), true
+}
+
+// containsOrIs reports whether dir is path or an ancestor of it. Both are
+// compared in forward-slash form, because git prints a top level that way on
+// every platform while the home directory arrives with native separators.
+func containsOrIs(dir, path string) bool {
+	d := strings.TrimRight(strings.ReplaceAll(dir, `\`, "/"), "/")
+	p := strings.TrimRight(strings.ReplaceAll(path, `\`, "/"), "/")
+	return p == d || strings.HasPrefix(p, d+"/")
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
@@ -696,6 +777,11 @@ type Server struct {
 	// surface (search, project-context tool, resources, prompt) reads this one
 	// field, and nothing reads /proc after construction.
 	hostSessionID string
+	// workingDir is the directory the MCP server process was started in, captured
+	// ONCE at construction. It is used to bind a newly created project to the
+	// checkout the agent is working in, so the session-start resolver can match it.
+	// Empty if the working directory could not be determined.
+	workingDir string
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
@@ -713,6 +799,39 @@ const hostSessionEnv = ai.HostSessionEnv
 // recording the old one, and the call then matches no scan; a server behind a bridge that
 // does not forward the host's environment records none.
 func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
+
+// workingDirFromEnv is the directory the server process was started in, or "".
+//
+// It is captured once at construction so the environment is touched in one place.
+// Returns "" if the working directory cannot be determined, or if it is the user's
+// home directory or the filesystem root — those are not real project checkouts.
+func workingDirFromEnv() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Resolve symlinks so cwd matches the canonical path stored in the DB.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	// Never bind to home or filesystem root — they are not project checkouts.
+	if filepath.Dir(cwd) == cwd {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cwd == home {
+			return ""
+		}
+		// The session cwd may reach home through a symlink or trailing form;
+		// compare resolved paths too.
+		if evalHome, err := filepath.EvalSymlinks(home); err == nil {
+			if cwd == evalHome {
+				return ""
+			}
+		}
+	}
+	return cwd
+}
 
 // resolveHostSessionID decides the session id retrieval records carry. On Linux
 // it is the environment's id only when this process IS the host session (the
@@ -826,7 +945,7 @@ A memory holds durable knowledge: what survives the conversation and is expensiv
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
 - answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
 - weak — the memories are listed, but NONE cleared the relevance floor. They are leads, not answers: verify against the source before acting on one, and say the result is weak if you rely on it anyway.
-- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
+- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, nothing_cleared_the_bar means the best vector match was below the configured no-answer bar so the rows were withheld as a judgement (the sentence states the score and the bar; it is not an absence claim, and the bar is lowered or set to 0 to see them), and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
 - abstain_cosine is the configured cosine floor, and its three states are three different facts: off means none is configured, not_applied means one IS configured and no cosine could be compared because the vector leg never ran OR ran and failed (reason= and legs= say which), and a number means the arm was configured AND the vector leg ran, so a cosine was available to compare — it does not mean any particular row was judged against it. not_applied is how a floor you set tells you it did nothing.
 - admitted is how many rows the answer carries. It is lower than candidates whenever something was cut, and after a byte-cap trim it is the only place that shows: a too-large answer is shortened, not refused. legs names each retrieval leg as ok, failed, not_run (asked for, never executed) or absent — and absent means the leg does not APPLY to this request rather than that nobody asked for it, which is what an as_of read reports for the vector leg.
 - legs=vector:not_run means the vector leg did not execute — either no embedder is configured or the query could not be embedded; legs=vector:failed means it ran and broke. Either way the answer is narrower than a full hybrid search, so treat a surprising miss as worth retrying rather than as proof the memory is gone. A search with NO surviving rows and a failed leg comes back as a tool error instead of a verdict — so if you got a line, at least one leg answered.
@@ -849,6 +968,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
 		hostSessionID:  hostSessionResolver(),
+		workingDir:     workingDirResolver(),
 	}
 
 	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {
@@ -1833,6 +1953,11 @@ func (s *Server) registerTools() {
 			// The query-mode relevance cutoff (#954): the assembler shortens the
 			// block where relevance falls off. 0 leaves it off.
 			RelevanceCutoff: s.contextCfg.RelevanceCutoff,
+			// The query-mode no-answer bar (#955): a block whose best vector
+			// cosine is below it is withheld and the answer says so. 0 leaves it
+			// off.
+			NoAnswerCosine:  s.contextCfg.NoAnswerCosine,
+			NoAnswerBarNote: s.contextCfg.NoAnswerBarNote,
 			// The retrieval record (#646). Set here and not inside the assembler,
 			// because this is the only place that knows the session the call
 			// arrived on — and the assembler writes the row, so nothing about the

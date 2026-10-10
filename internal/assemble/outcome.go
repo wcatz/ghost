@@ -94,6 +94,14 @@ const (
 	// empty result. The retrieval record carries it as a dropped verdict, the
 	// trace as a decision, and explain as an excluded row's reason sentence.
 	reasonRelevanceCutoff = "relevance_cutoff"
+	// reasonNothingClearedBar is the no-answer step's reason (#955), both as a
+	// per-row reason and as the outcome reason of a block it emptied: the best
+	// vector cosine in the block was below context.no_answer_cosine, so the
+	// block was withheld rather than shown. Unlike the cutoff it CAN empty an
+	// answer, and the outcome is then empty with this reason and a sentence that
+	// states the score — an honest "nothing here answers this", not an absence
+	// claim about the store.
+	reasonNothingClearedBar = "nothing_cleared_the_bar"
 	// reasonRetrievalPartial is the answerable verdict when a leg failed. It is
 	// the same token the machine line's modifier uses, and the two are not
 	// redundant: the reason says why the answer is answerable (no floor verdict
@@ -247,6 +255,12 @@ func (p *pipeline) emptyReason() string {
 // claim a set the item budget actually emptied, because the caller's next move
 // differs — one looks for a date problem, the other raises the limit.
 func (p *pipeline) removalReason() string {
+	// The no-answer step is named first when it fired and nothing after it
+	// removed rows: it withholds the whole non-pinned block at once, so it is the
+	// proximate cause, not one stage among several whose counts could outvote it.
+	if p.noAnswer != nil && p.droppedBy[stageBudget] == 0 {
+		return reasonNothingClearedBar
+	}
 	stage, reason := p.dominantRemoval()
 	if stage == "" {
 		return reasonNoCandidates
@@ -580,6 +594,16 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
 				"of date, their validity windows having closed or not yet opened." + p.stageNote() + " The query was " +
 				"not wrong — the answer is withheld, not absent."
+		case reasonNothingClearedBar:
+			// An explicit judgement, not an absence claim: rows were found and
+			// then withheld because none was a close enough match, and the
+			// sentence says so with the score, so the caller can see it was a
+			// decision it can overrule by lowering the bar.
+			return fmt.Sprintf("No memory answers this: nothing cleared the bar. The best vector match scored cosine "+
+				"%.3f, below the %.3f no-answer bar (context.no_answer_cosine), so the %d candidate(s) found "+
+				"were withheld rather than shown. The query was not wrong \u2014 the store holds nothing close "+
+				"enough to answer it; set the bar to 0 to see the rows anyway.%s",
+				p.noAnswer.top, p.noAnswer.bar, p.noAnswer.withheld, p.stageNote())
 		case reasonAllOutOfCategory:
 			return "No sufficiently trustworthy memory found: nothing found passed the category filter." +
 				p.stageNote()
