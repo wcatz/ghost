@@ -69,6 +69,9 @@ type Record struct {
 type AnswerCheck struct {
 	Name string
 	Any  []string
+	// Needs is for an Avoids check: when the answer mentions an Any spelling at all
+	// (rejected or not) it must also carry one of these, or the check fails.
+	Needs []string
 }
 
 // Stage is one simulated session: the script the session is given, the records

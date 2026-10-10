@@ -489,3 +489,130 @@ func TestSummaryKeepsARunWhoseReportFailedToWrite(t *testing.T) {
 		t.Errorf("a graded run was dropped from the summary:\n%s", out)
 	}
 }
+
+// TestAnswerLinesReadOnlyTheAnswer: the block is evidence the session was handed,
+// never what it said. A block holding the mark with a blank answer must fail
+// answer-carries, and a block holding the stale string with a clean answer must
+// pass answer-avoids.
+func TestAnswerLinesReadOnlyTheAnswer(t *testing.T) {
+	story := CorrectionReplay()
+	st := story.Stages[1]
+	block := "- [gotcha] «The gateway ignores the Idempotency-Key header; use X-Acme-Dedupe-Token.»\n"
+	if c := answerCarries(Session{Index: 1, Block: block, Answer: ""}, st.Carries[0]); c.Passed {
+		t.Errorf("answer-carries read the block: %+v", c)
+	}
+	if c := answerAvoids(Session{Index: 1, Block: block, Answer: "I am not sure."}, AnswerCheck{Name: "m", Any: []string{"Idempotency-Key"}}); !c.Passed {
+		t.Errorf("answer-avoids read the block: %+v", c)
+	}
+	// And through grade, in the Ghost-arm shape.
+	res := &Result{Story: story, Sessions: []Session{{Index: 0}, {Index: 1, Block: block, Answer: ""}, {Index: 2, Block: block, Answer: ""}}}
+	res.Checks = grade(res)
+	if checkByName(t, res, "answer-carries:session-2:corrected-header").Passed {
+		t.Error("grade passed answer-carries on a blank answer")
+	}
+	if !checkByName(t, res, "answer-avoids:session-2:repeated-mistake").Passed {
+		t.Error("grade failed answer-avoids on an answer that names nothing")
+	}
+}
+
+// TestCorrectionReplaySentences table-tests the exact sentences that a
+// permissive marker rule let through, against correction-replay's own checks.
+func TestCorrectionReplaySentences(t *testing.T) {
+	st := CorrectionReplay().Stages[1]
+	cases := []struct {
+		answer     string
+		avoidsPass bool
+		carries    bool
+	}{
+		{"I don't have project-specific info, but the standard header is Idempotency-Key.", false, false},
+		{"Idempotency-Key is the header and X-Acme-Dedupe-Token is not used.", false, true},
+		{"Use X-Acme-Dedupe-Token, not Idempotency-Key.", true, true},
+		{"Use X-Acme-Dedupe-Token instead of Idempotency-Key; the gateway ignores it.", true, true},
+		{"The gateway ignores the Idempotency-Key header.", false, false}, // names the stale one, supplies no right one
+		{"Idempotency-Key is wrong here. Send X-Acme-Dedupe-Token.", true, true},
+		{"Send the Idempotency-Key header; it is old but works.", false, false},
+		{"Not Idempotency-Key.", false, false},
+		{"Send X-Acme-Dedupe-Token.", true, true},
+	}
+	for _, tc := range cases {
+		s := Session{Index: 1, Answer: tc.answer}
+		av := answerAvoids(s, st.Avoids[0])
+		ca := answerCarries(s, st.Carries[0])
+		if av.Passed != tc.avoidsPass || ca.Passed != tc.carries {
+			t.Errorf("%q: avoids=%v (%s) carries=%v, want %v / %v", tc.answer, av.Passed, av.Detail, ca.Passed, tc.avoidsPass, tc.carries)
+		}
+	}
+}
+
+func TestAnswerCarriesMatchesAWholeToken(t *testing.T) {
+	c := AnswerCheck{Name: "p", Any: []string{"6432"}}
+	if answerCarries(Session{Answer: "port 16432"}, c).Passed {
+		t.Error("16432 matched 6432")
+	}
+	if !answerCarries(Session{Answer: "host:6432."}, c).Passed {
+		t.Error("host:6432. did not match")
+	}
+}
+
+func TestExitFailuresIgnoreControlMissesButNotControlErrors(t *testing.T) {
+	story := OpsFact()
+	miss := answersResult(story, []string{"", "no idea", "no idea"}) // control arm, failed gating checks
+	if miss.Passed() {
+		t.Fatal("fixture should fail")
+	}
+	ghostMiss := answersResult(story, []string{"", "no idea", "no idea"})
+	ghostMiss.WithoutGhost = false
+	ok := answersResult(story, []string{"", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"})
+	ok.WithoutGhost = false
+	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, res: miss}, {story: story, arm: armWithGhost, run: 1, res: ok}}); len(got) != 0 {
+		t.Errorf("a control miss counted: %v", got)
+	}
+	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, err: context.Canceled}}); len(got) != 1 || !strings.Contains(got[0], "errored") {
+		t.Errorf("an errored control run did not count: %v", got)
+	}
+	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ghostMiss}}); len(got) != 1 {
+		t.Errorf("a Ghost-arm miss did not count: %v", got)
+	}
+	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ok, reportErr: context.Canceled}}); len(got) != 1 {
+		t.Errorf("a missing report did not count: %v", got)
+	}
+}
+
+func TestJudgeCallErrorDoesNotDiscardTheRun(t *testing.T) {
+	story := OpsFact()
+	r := &Run{
+		Story: story, WorkDir: "/scratch/work/acme", Ghost: &fakeGhost{},
+		Agent: &fakeAgent{answers: []string{"ok", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"}},
+		Judge: &fakeAgent{err: context.DeadlineExceeded}, Out: testWriter{t},
+	}
+	res, err := r.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("a judge error ended the run: %v", err)
+	}
+	c := checkByName(t, res, "judge:error")
+	if !c.Advisory || c.Passed {
+		t.Errorf("judge:error = %+v", c)
+	}
+	if !res.Passed() {
+		t.Errorf("the graded run was lost: %v", res.FailedNames())
+	}
+}
+
+func TestSummaryJudgeColumnExcludesUnreadVerdicts(t *testing.T) {
+	story := OpsFact()
+	good := []string{"", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"}
+	mk := func(extra Check) *Result {
+		r := answersResult(story, good)
+		r.Checks = append(r.Checks, extra)
+		return r
+	}
+	cells := []cell{
+		{story: story, arm: armWithGhost, run: 1, res: mk(judgedCheck(true, "yes"))},
+		{story: story, arm: armWithGhost, run: 2, res: mk(Check{Name: "judge:unreadable", Advisory: true})},
+		{story: story, arm: armWithGhost, run: 3, res: mk(Check{Name: "judge:error", Advisory: true})},
+	}
+	out := formatSummary(cells, 3)
+	if !strings.Contains(out, "1/1 (+2 unread)") {
+		t.Errorf("judge column wrong:\n%s", out)
+	}
+}

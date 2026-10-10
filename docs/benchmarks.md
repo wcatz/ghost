@@ -995,9 +995,14 @@ anything. So every session is graded twice, on separate lines:
   `answer-carries:session-N:<name>` passes when the answer contains one of a
   check's spellings (case-insensitive). `answer-avoids:session-N:<name>` fails
   when the answer *uses* a stale, expired or mistaken claim: the spelling appears
-  as a whole token in a sentence with no marker of being old or wrong (`not`,
-  `instead of`, `old`, `deprecated`, `expired`, `ignores`, ...), so "use X, not Y"
-  is not a use of Y. Both are verbatim readings and cannot see a paraphrase; the
+  as a whole token with no rejecting word scoped to it: one of the four words
+  before it (`not`, `instead of`, `old`, `ignores`, ...) or right after it (`is
+  wrong`, `is not used`, ...), so "use X, not Y" is not a use of Y while "I don't
+  know, but the standard header is Y" is. `correction-replay` additionally fails
+  an answer that names the natural wrong spelling without carrying the required
+  one. Carries match whole tokens too (`6432` is not found in `16432`). The judge
+  column counts readable verdicts only; unreadable or failed judge replies are
+  shown as a separate `(+N unread)` count. Both are verbatim readings and cannot see a paraphrase; the
   advisory judge column is the second look.
 
 `Validate` refuses a storyline whose answer grade could pass for the wrong

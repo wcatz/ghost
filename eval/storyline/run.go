@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -276,8 +277,13 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	res.Checks = grade(res)
 	if r.Judge != nil {
 		verdict, err := r.judge(ctx, res)
-		if err != nil {
+		if errors.Is(err, errNoJudgeTarget) {
 			return nil, err
+		}
+		if err != nil {
+			// A judge that could not be asked must not discard a graded run.
+			res.Checks = append(res.Checks, Check{Name: "judge:error", Detail: err.Error(), Advisory: true})
+			return res, nil
 		}
 		res.Judged, res.Verdict = true, verdict
 		ok, err := judgeVerdict(verdict)
@@ -367,6 +373,10 @@ func (r *Run) callState(ctx context.Context) (State, error) {
 // defaultJudgeQuestion is the reversal arc's question; the other arcs name their
 // own in Storyline.Judge. Its two verbs take the expected record's mark and
 // content.
+// errNoJudgeTarget is a storyline that cannot be judged: a configuration
+// error that ends the run, unlike a judge call that merely failed.
+var errNoJudgeTarget = errors.New("judge")
+
 const defaultJudgeQuestion = "Did the session act on the current decision (%s: %s) rather than the one it replaced?"
 
 // judge asks the harness whether the final session acted on the record it was
@@ -384,11 +394,11 @@ func (r *Run) judge(ctx context.Context, res *Result) (string, error) {
 	// a panic this deep in a run is a crash after three model sessions spent.
 	final := res.Story.Stages[len(res.Story.Stages)-1]
 	if len(final.Expect) == 0 {
-		return "", fmt.Errorf("judge: the final stage of %s expects no record, so there is no reversal to ask about", res.Story.Key)
+		return "", fmt.Errorf("%w: the final stage of %s expects no record, so there is no reversal to ask about", errNoJudgeTarget, res.Story.Key)
 	}
 	reversal, ok := res.Story.RecordByKey(final.Expect[0])
 	if !ok {
-		return "", fmt.Errorf("judge: the final stage expects no record in this storyline")
+		return "", fmt.Errorf("%w: the final stage expects no record in this storyline", errNoJudgeTarget)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are grading one session of a coding agent.\n\n"+

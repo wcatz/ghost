@@ -25,6 +25,9 @@ type armTally struct {
 	hasAvoids   bool
 	// judged and judgeYes are the advisory paraphrase column.
 	judged, judgeYes int
+	// judgeUnread counts runs whose judge gave no readable verdict or failed; they
+	// are outside the judged denominator.
+	judgeUnread int
 	// delivered counts runs in which every delivery line passed (Ghost arm).
 	delivered int
 	// blocks[run][session] is the size in bytes of the block the session was handed.
@@ -63,10 +66,15 @@ func tally(arm string, results []*Result, errored, noReport int) armTally {
 		if deliveryFail == 0 {
 			t.delivered++
 		}
-		if res.Judged {
-			t.judged++
-			for _, c := range res.Checks {
-				if c.Advisory && c.Passed {
+		// The judge column counts readable verdicts only; a reply that was neither
+		// yes nor no, or a call that failed, is shown as its own count.
+		for _, c := range res.Checks {
+			switch {
+			case c.Name == "judge:unreadable" || c.Name == "judge:error":
+				t.judgeUnread++
+			case c.Advisory && strings.HasPrefix(c.Name, "judge:"):
+				t.judged++
+				if c.Passed {
 					t.judgeYes++
 				}
 			}
@@ -159,6 +167,13 @@ func formatSummary(cells []cell, runs int) string {
 			}
 			if t.judged > 0 {
 				judge = fmt.Sprintf("%d/%d", t.judgeYes, t.judged)
+			}
+			if t.judgeUnread > 0 {
+				if judge == "n/a" {
+					judge = ""
+				}
+				judge += fmt.Sprintf(" (+%d unread)", t.judgeUnread)
+				judge = strings.TrimSpace(judge)
 			}
 			if arm == armWithoutGhost {
 				delivered = "n/a (empty block)"

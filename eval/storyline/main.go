@@ -183,18 +183,7 @@ func run(cfg config) error {
 	// The without-Ghost arm is the control, so a miss there is the measurement
 	// and does not decide the exit code; an error in it still does, because a
 	// control that did not run measures nothing.
-	var failed []string
-	for _, c := range cells {
-		if c.reportErr != nil {
-			failed = append(failed, fmt.Sprintf("%s %s run %d: report not written: %v", c.story.Key, c.arm, c.run, c.reportErr))
-		}
-		switch {
-		case c.err != nil:
-			failed = append(failed, fmt.Sprintf("%s %s run %d errored", c.story.Key, c.arm, c.run))
-		case c.arm == armWithGhost && !c.res.Passed():
-			failed = append(failed, fmt.Sprintf("%s run %d: %s", c.story.Key, c.run, strings.Join(c.res.FailedNames(), ", ")))
-		}
-	}
+	failed := exitFailures(cells)
 	if len(failed) > 0 {
 		return fmt.Errorf("%d run(s) failed: %s", len(failed), strings.Join(failed, "; "))
 	}
@@ -277,4 +266,24 @@ func printCell(c cell) {
 // run overwrites another.
 func writeCellReport(dir string, story Storyline, arm string, n int, res *Result, model string) (string, error) {
 	return writeReportAs(dir, fmt.Sprintf("%s-%s-run%d.md", story.Key, arm, n), res, model)
+}
+
+// exitFailures is what decides the exit code: the Ghost arm's gating failures,
+// every errored run in either arm (a control that did not run measures
+// nothing), and every report that could not be written. A control-arm run that
+// ran and missed is the measurement and never counts.
+func exitFailures(cells []cell) []string {
+	var failed []string
+	for _, c := range cells {
+		if c.reportErr != nil {
+			failed = append(failed, fmt.Sprintf("%s %s run %d: report not written: %v", c.story.Key, c.arm, c.run, c.reportErr))
+		}
+		switch {
+		case c.err != nil:
+			failed = append(failed, fmt.Sprintf("%s %s run %d errored", c.story.Key, c.arm, c.run))
+		case c.arm == armWithGhost && c.res != nil && !c.res.Passed():
+			failed = append(failed, fmt.Sprintf("%s run %d: %s", c.story.Key, c.run, strings.Join(c.res.FailedNames(), ", ")))
+		}
+	}
+	return failed
 }
