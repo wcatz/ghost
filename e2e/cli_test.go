@@ -235,6 +235,12 @@ func runMaintenanceCommands(t *testing.T, s *sandbox) {
 	r := s.mustFail("maintenance", "clean-scratch", "--aply")
 	mustMatch(t, "mistyped clean-scratch flag", r.stderr, "(?i)unknown|flag")
 
+	// The global fold is a preview unless told otherwise, and says so.
+	global := s.mustRun("maintenance", "consolidate-global")
+	mustMatch(t, "maintenance consolidate-global (dry run)", global.stdout, "(?i)no Ghost database|nothing to fold|DRY RUN")
+	g := s.mustFail("maintenance", "consolidate-global", "--aply")
+	mustMatch(t, "mistyped consolidate-global flag", g.stderr, "(?i)unknown|flag")
+
 	// maintenance with no verb is a usage error, not a silent success.
 	none := s.mustFail("maintenance")
 	mustMatch(t, "bare `ghost maintenance`", none.stderr, "(?i)Usage: ghost maintenance")

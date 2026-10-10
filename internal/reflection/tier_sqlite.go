@@ -2,8 +2,11 @@ package reflection
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // SQLiteConsolidator performs mechanical deduplication using Jaccard similarity.
@@ -28,16 +31,6 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 		return ReflectionResult{LearnedContext: input.CurrentContext}, nil
 	}
 
-	// Build token sets for each memory.
-	type tokenized struct {
-		tokens map[string]bool
-	}
-
-	items := make([]tokenized, len(mems))
-	for i, m := range mems {
-		items[i] = tokenized{tokens: tokenize(m.Content)}
-	}
-
 	// Find and merge duplicates (Jaccard >= 0.5 / full containment, ANY
 	// category — the pairing used to be gated on category equality, which
 	// let this consolidator re-emit one rule as paraphrases split across
@@ -48,49 +41,31 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 	// union of tags, exactly how same-category merges have always behaved;
 	// ReplaceNonManual's exact-content reuse at apply time handles the
 	// surviving row's embedding/links the same way it already does for
-	// same-category merges.
-	absorbed := make([]bool, len(items))
+	// same-category merges. The grouping itself is duplicateClusters, shared
+	// with the _global fold so the two can never disagree about what a
+	// near-duplicate is.
 	var result []ReflectMemory
 
-	for i := range items {
-		if absorbed[i] {
-			continue
-		}
-
-		best := mems[i]
-		for j := i + 1; j < len(items); j++ {
-			if absorbed[j] {
-				continue
+	for _, cluster := range duplicateClusters(mems) {
+		best := mems[cluster[0]]
+		for _, j := range cluster[1:] {
+			if mems[j].Importance > best.Importance {
+				best.Importance = mems[j].Importance
 			}
-
-			sim := jaccard(items[i].tokens, items[j].tokens)
-			// Containment only fires on full subsumption (the smaller token set
-			// entirely inside the larger). A lower bar would merge partial
-			// overlaps ("deploy staging" vs "deploy production") that are
-			// distinct facts; Jaccard already handles same-length restatements.
-			if c := containment(items[i].tokens, items[j].tokens); c == 1.0 {
-				sim = 1.0
+			if len(mems[j].Content) > len(best.Content) {
+				best.Content = mems[j].Content
 			}
-			if sim >= 0.5 && !numericConflict(items[i].tokens, items[j].tokens) {
-				absorbed[j] = true
-				if mems[j].Importance > best.Importance {
-					best.Importance = mems[j].Importance
-				}
-				if len(mems[j].Content) > len(best.Content) {
-					best.Content = mems[j].Content
-				}
-				// Union tags.
-				tagSet := make(map[string]bool)
-				for _, t := range best.Tags {
-					tagSet[t] = true
-				}
-				for _, t := range mems[j].Tags {
-					tagSet[t] = true
-				}
-				best.Tags = make([]string, 0, len(tagSet))
-				for t := range tagSet {
-					best.Tags = append(best.Tags, t)
-				}
+			// Union tags.
+			tagSet := make(map[string]bool)
+			for _, t := range best.Tags {
+				tagSet[t] = true
+			}
+			for _, t := range mems[j].Tags {
+				tagSet[t] = true
+			}
+			best.Tags = make([]string, 0, len(tagSet))
+			for t := range tagSet {
+				best.Tags = append(best.Tags, t)
 			}
 		}
 
@@ -107,6 +82,47 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 		LearnedContext: input.CurrentContext,
 		Memories:       result,
 	}, nil
+}
+
+// duplicateClusters groups memories by the near-duplicate rule the SQLite tier
+// has always used: Jaccard >= 0.5, or full containment of the smaller token set,
+// and never across a differing purely-numeric token. Each cluster lists indexes
+// into mems, the first being the earliest member in input order; a memory with
+// no twin is a cluster of one. Comparison is always against the cluster's first
+// member, not against a growing union, so the grouping is a function of input
+// order alone.
+func duplicateClusters(mems []memory.Memory) [][]int {
+	tokens := make([]map[string]bool, len(mems))
+	for i, m := range mems {
+		tokens[i] = tokenize(m.Content)
+	}
+	absorbed := make([]bool, len(mems))
+	var clusters [][]int
+	for i := range mems {
+		if absorbed[i] {
+			continue
+		}
+		cluster := []int{i}
+		for j := i + 1; j < len(mems); j++ {
+			if absorbed[j] {
+				continue
+			}
+			sim := jaccard(tokens[i], tokens[j])
+			// Containment only fires on full subsumption (the smaller token set
+			// entirely inside the larger). A lower bar would merge partial
+			// overlaps ("deploy staging" vs "deploy production") that are
+			// distinct facts; Jaccard already handles same-length restatements.
+			if c := containment(tokens[i], tokens[j]); c == 1.0 {
+				sim = 1.0
+			}
+			if sim >= 0.5 && !numericConflict(tokens[i], tokens[j]) {
+				absorbed[j] = true
+				cluster = append(cluster, j)
+			}
+		}
+		clusters = append(clusters, cluster)
+	}
+	return clusters
 }
 
 // stopwords are filler words that carry no consolidation signal; dropping them
@@ -145,12 +161,6 @@ func tokenize(s string) map[string]bool {
 // global scope: the shared check in secrets.go applies to both reflection
 // tiers, and global memories are replayed into every project's injected
 // context, so promoting a credential here would widen its blast radius.
-//
-// A fact naming a single host, cluster, or repository stays project-scoped.
-// This is the narrow fix for #966: the previous weak patterns promoted
-// host-specific operational facts to global because they matched "cluster" or
-// "deploy to" phrasing. We now check for explicit single-host language before
-// the weak patterns can promote.
 func inferGlobalScope(category, content string) string {
 	lower := strings.ToLower(content)
 
@@ -170,23 +180,13 @@ func inferGlobalScope(category, content string) string {
 		}
 	}
 
-	// Single-host/cluster/repo language: explicit mentions of one host,
-	// cluster, or repository keep the fact project-scoped. This prevents
-	// operational facts like "SSH into relay-3 to restart the block producer"
-	// from being promoted to global just because they contain "cluster" or
-	// "deploy to" phrasing. The check is for singular, specific references
-	// that include a distinguishing identifier (number, name, hyphenated).
-	singleHostPatterns := []string{
-		"relay-", "node-", "host-",
-		"cluster-",
-		"infra-",
-		"production-", "staging-",
-		"bastion", "bastion-",
-	}
-	for _, p := range singleHostPatterns {
-		if strings.Contains(lower, p) {
-			return "project"
-		}
+	// A fact that names one specific host, cluster or node is an operations
+	// note about that machine, whatever else the sentence says: promoting it
+	// replayed "relay-3 needs a restart after a kernel update" into every
+	// project's context (#966). The marker is a concrete identifier, never a
+	// bare noun, so "the shared cluster" is still a weak hit like any other.
+	if namesSingleTarget(lower) {
+		return "project"
 	}
 
 	// Unambiguous cross-repo/personal-environment language: one hit is enough.
@@ -224,6 +224,22 @@ func inferGlobalScope(category, content string) string {
 	}
 
 	return "project"
+}
+
+// singleTargetRe matches an identifier for ONE machine: an infrastructure noun
+// followed by a number ("relay-3", "node5", "staging-app-2", "bp-1a"), an IPv4
+// address, or an internal DNS name. A bare noun ("cluster", "host") does not
+// match, and neither does a version-like token ("sha-256", "utf-8"), because the
+// prefix has to be an infrastructure noun.
+var singleTargetRe = regexp.MustCompile(
+	`\b(?:relay|node|host|server|cluster|worker|master|bp|vm|bastion|prod|production|staging|dev)(?:-[a-z0-9]+)*-?\d[a-z0-9-]*\b` +
+		`|\b\d{1,3}(?:\.\d{1,3}){3}\b` +
+		`|\b[a-z0-9][a-z0-9-]*\.(?:internal|local|lan|home\.arpa)\b`)
+
+// namesSingleTarget reports whether lower (already lowercased) names one
+// specific host, node or cluster.
+func namesSingleTarget(lower string) bool {
+	return singleTargetRe.MatchString(lower)
 }
 
 // containment is the overlap coefficient |A∩B| / min(|A|,|B|): it catches a

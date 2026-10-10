@@ -6236,6 +6236,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
 				return nil, err
 			}
+			// The same carry the fresh insert below makes, for the same reason: the
+			// rows this one stands in for are deleted at the end of this pass and the
+			// foreign key takes their evidence with them. It is a no-op for a
+			// verbatim re-emission (the only id named is the row's own), so it costs
+			// nothing on the common path and only moves support when a reuse is also
+			// a merge, which a global fold is.
+			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
+				return nil, err
+			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
 				successorOf[replaced] = id

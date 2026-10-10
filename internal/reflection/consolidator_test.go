@@ -255,16 +255,19 @@ func TestInferGlobalScope(t *testing.T) {
 		{"credential fact stays project", "fact", "the deploy credential rotates every 90 days", "project"},
 		{"bearer token stays project", "gotcha", "requests need a bearer token in the header", "project"},
 		{"password in cross-repo phrasing stays project", "fact", "the grafana password works across all repos", "project"},
-		// #966: single host/cluster/repo mentions stay project-scoped
-		{"single relay host stays project", "fact", "SSH into relay-3 to restart the block producer", "project"},
-		{"single node host stays project", "fact", "restart node-5 for maintenance", "project"},
-		{"single cluster name stays project", "fact", "deploy to cluster-prod from any repo", "project"},
-		{"single infra host stays project", "fact", "infra-bastion is the jump host", "project"},
-		{"single production host stays project", "fact", "production-db1 needs a password rotation", "project"},
-		{"single staging host stays project", "fact", "staging-app-2 has a memory leak", "project"},
-		{"bastion host stays project", "fact", "SSH via bastion to reach the cluster", "project"},
-		{"explicit single host still project despite weak patterns", "fact", "SSH into relay-3 cluster for maintenance", "project"},
-		{"explicit single node still project despite deploy phrasing", "fact", "deploy to node-7 from CI", "project"},
+		// #966: a fact naming one host, node or cluster is an operations note
+		// for the project that runs it, even with two weak hits or a strong one.
+		{"numbered relay with two weak hits stays project", "fact", "ssh into relay-3 on the cluster to restart the block producer", "project"},
+		{"numbered node with deploy phrasing stays project", "fact", "deploy to node-7 from CI", "project"},
+		{"unhyphenated host number stays project", "fact", "restart node5 after the kernel update across all repos", "project"},
+		{"compound staging host stays project", "fact", "staging-app-2 has a memory leak on dev machine", "project"},
+		{"ipv4 address stays project", "fact", "ssh 10.0.0.12 and check the cluster logs", "project"},
+		{"internal dns name stays project", "fact", "ssh bp1.internal then deploy to the cluster", "project"},
+		// The marker is a concrete identifier: bare nouns and version-like tokens
+		// do not make a fact host-specific.
+		{"bare cluster noun still promotes with a second weak hit", "fact", "ssh into the shared cluster for maintenance", "global"},
+		{"version-like token is not a host", "fact", "use sha-256 and utf-8 across all repos", "global"},
+		{"strong pattern without a host stays global", "fact", "deploy to infra cluster from any repo", "global"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

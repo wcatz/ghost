@@ -1394,6 +1394,31 @@ ghost maintenance clean-scratch --apply    # remove strict-signature matches
 is available (Windows, minimal containers) — refuses to remove anything and
 says so rather than risk deleting an open file.
 
+### `ghost maintenance consolidate-global`
+
+Folds near-duplicate rows in `_global`, the scope every project's context replays.
+Rows written before promotion folded equivalent text accumulated there, and nothing
+folded them afterwards. Dry run by default: it lists each cluster (the row kept and
+the rows folded into it) and writes nothing, not even a snapshot.
+
+```bash
+ghost maintenance consolidate-global            # list clusters, write nothing
+ghost maintenance consolidate-global --apply    # fold them
+```
+
+"Near-duplicate" is the rule the SQLite consolidation tier applies to a project
+(token Jaccard of at least 0.5, or full containment of the smaller row, and never
+across a differing number), not a second one. The newest row in a cluster is kept
+verbatim, so its embedding and links stay with it; it takes the highest importance
+and the union of the tags. The fold goes through the same replace `ghost reflect`
+uses: the rows are snapshotted first, each folded row's history ends in a `delete`
+naming the survivor, and its evidence is carried onto the survivor.
+
+Pinned, resolved, `manual`, `builtin` and `persistent` rows are never read by the
+pass, so their text is never rewritten and they are never folded, including a
+pinned row that is a near-duplicate of a cluster. A row saved while the run is in
+flight is kept as it is.
+
 ## OpenCode sessions
 
 ### `ghost opencode cleanup-sessions`
