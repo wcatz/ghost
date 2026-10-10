@@ -63,9 +63,10 @@ func TestPlanGlobalFoldNothingToFoldReturnsNil(t *testing.T) {
 }
 
 func TestPlanGlobalFoldNamesTheRowTheReplaceKeepsForIdenticalText(t *testing.T) {
+	// The older row comes second in the input, so input order cannot be what picks it.
 	mems := []memory.Memory{
+		{ID: "2", Content: "run the linter before pushing", CreatedAt: "2026-02-01 00:00:00"},
 		{ID: "1", Content: "run the linter before pushing", CreatedAt: "2026-01-01 00:00:00"},
-		{ID: "2", Content: "run the linter before pushing", CreatedAt: "2026-01-01 00:00:00"},
 	}
 	clusters, _ := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "1" {
@@ -117,5 +118,18 @@ func TestPlanGlobalFoldNeverClustersOppositePolarity(t *testing.T) {
 		if clusters != nil || rows != nil {
 			t.Errorf("%q and %q were clustered: %+v", pair[0], pair[1], clusters)
 		}
+	}
+}
+
+// The containing row wins even when it is not the longest in characters: the
+// other row repeats words, so it is longer but holds fewer distinct tokens.
+func TestPlanGlobalFoldContainmentBeatsLength(t *testing.T) {
+	mems := []memory.Memory{
+		{ID: "padded", Content: "run run run go go vet vet before before committing committing", CreatedAt: "2026-03-01 00:00:00"},
+		{ID: "full", Content: "run go vet before committing every change", CreatedAt: "2026-01-01 00:00:00"},
+	}
+	clusters, _ := PlanGlobalFold(mems)
+	if len(clusters) != 1 || clusters[0].Survivor.ID != "full" {
+		t.Fatalf("survivor = %+v, want the row holding every token", clusters)
 	}
 }
