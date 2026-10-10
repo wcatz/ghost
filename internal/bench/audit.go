@@ -1,7 +1,10 @@
 package bench
 
 // This file measures the RETRIEVAL AUDIT: audit.Run's verdicts against a labelled
-// offline session (audit_corpus.go).
+// corpus. Two corpora are scored and printed beside each other — the synthetic
+// session in audit_corpus.go and the hand-labelled real-work set in
+// audit_corpus_real.go — because a judge change that moves one and not the other
+// is the thing the second set exists to show.
 //
 // Everything is offline and judge-free. A scratch in-memory store is seeded from Go
 // literals; a scripted session is built straight into audit.Signals over a hasher
@@ -146,6 +149,9 @@ type AuditScenario struct {
 
 // AuditReport is the whole measurement.
 type AuditReport struct {
+	// Label names the corpus it measured. The bench scores two of them and prints
+	// them beside each other, so a figure has to say which set it came from.
+	Label     string
 	Memories  int
 	Turns     int
 	Scenarios []AuditScenario
@@ -161,7 +167,21 @@ func (r AuditReport) scenario(name string) AuditScenario {
 	return AuditScenario{}
 }
 
-// AuditHeadlines are the three figures the report leads with.
+// startScenario returns the scenario placed before the session's first turn, and
+// whether the corpus has one. It is the only call every labelled turn follows, so
+// the corpus's own labels are all in its pairs; a corpus whose calls all sit
+// mid-session has no such scenario, and its figures are read over every call
+// instead (see Headlines).
+func (r AuditReport) startScenario() (AuditScenario, bool) {
+	for _, s := range r.Scenarios {
+		if s.Name == "start" {
+			return s, true
+		}
+	}
+	return AuditScenario{}, false
+}
+
+// AuditHeadlines are the figures the report leads with.
 type AuditHeadlines struct {
 	// SameDomainUsed is how many of the session's own-domain memories a session-start
 	// call kept and the audit judged used.
@@ -181,12 +201,41 @@ type AuditHeadlines struct {
 	// RestatementsCaught is the restatements the audit filed as used on the token
 	// arm, over every pair the labels expect there, in the session-start call alone.
 	RestatementsCaught, RestatementsTotal int
+	// FalseUsed is the pairs the labels expect ignored that the audit judged used,
+	// over the same population the two catch lines read: the corpus's own
+	// false-positive figure, which is the number a judge change moves.
+	FalseUsed, FalseTotal int
+	// TokenPrecision is the token arm's precision over that population: the pairs
+	// it filed used-by-wording that the labels agree with, over every pair it
+	// filed there.
+	TokenPrecision Ratio
+	// SessionStart reports whether the corpus has a call before its first turn.
+	// The labelled offline session does, so every labelled turn follows it and its
+	// pairs carry the whole corpus's labels. The real-work corpus does not — every
+	// one of its calls sits mid-session — so its catch lines are read over all of
+	// its calls, and the two domain lines below have no population to be a
+	// fraction of and are not printed.
+	SessionStart bool
 }
 
-// Headlines reads the three lines off the scenarios.
+// Headlines reads the figures the report leads with. The two catch lines are read
+// off the session-start call when the corpus has one — the only call every labelled
+// turn follows, so its pairs carry the whole corpus's labels — and over every call
+// when it does not, which is the only population a mid-session corpus has.
 func (r AuditReport) Headlines() AuditHeadlines {
 	var h AuditHeadlines
-	for _, p := range r.scenario("start").Pairs {
+	start, ok := r.startScenario()
+	var pairs []AuditPair
+	if ok {
+		h.SessionStart = true
+		pairs = start.Pairs
+	} else {
+		for _, sc := range r.Scenarios {
+			pairs = append(pairs, sc.Pairs...)
+		}
+	}
+	var tokenHit, tokenGot int
+	for _, p := range pairs {
 		switch p.Expected {
 		case ClassUsedIdentifier:
 			h.CitesTotal++
@@ -198,6 +247,21 @@ func (r AuditReport) Headlines() AuditHeadlines {
 			if p.Got == p.Expected {
 				h.RestatementsCaught++
 			}
+		}
+		if p.Got == ClassUsedToken {
+			tokenGot++
+			if p.Expected == ClassUsedToken {
+				tokenHit++
+			}
+		}
+		if p.Expected == ClassIgnored {
+			h.FalseTotal++
+			if p.Got == ClassUsedIdentifier || p.Got == ClassUsedToken {
+				h.FalseUsed++
+			}
+		}
+		if !h.SessionStart {
+			continue
 		}
 		if p.Domain == "spread" {
 			h.SpreadTotal++
@@ -220,13 +284,38 @@ func (r AuditReport) Headlines() AuditHeadlines {
 			}
 		}
 	}
+	h.TokenPrecision = Ratio{tokenHit, tokenGot}
 	return h
 }
 
-// RunAuditTemp runs every call of the corpus, each against its own scratch store.
+// RunAuditTemp runs every call of the labelled offline session, each against its
+// own scratch store.
 func RunAuditTemp(ctx context.Context) (AuditReport, error) {
-	c := NewAuditCorpus()
-	rep := AuditReport{Memories: len(c.Memories)}
+	return runAuditCorpus(ctx, NewAuditCorpus(), auditLabelSynthetic)
+}
+
+// RunRealAuditTemp runs every call of the hand-labelled real-work corpus, each
+// against its own scratch store.
+func RunRealAuditTemp(ctx context.Context) (AuditReport, error) {
+	return runAuditCorpus(ctx, NewRealAuditCorpus(), auditLabelReal)
+}
+
+// The two corpora the audit bench scores, named in the report header so a figure
+// printed beside the other set's can be told apart. Nothing in the measurement
+// reads them.
+const (
+	auditLabelSynthetic = "labelled offline session"
+	auditLabelReal      = "hand-labelled real sessions"
+)
+
+// runAuditCorpus runs every call of the corpus, each against its own scratch
+// store. The corpus is a parameter because the judge is measured on two of them:
+// the synthetic session the audit package's own fixtures build, and a set labelled
+// by hand from real working sessions. A change that moves one and not the other is
+// exactly what the second set exists to show, so neither report is reachable
+// except through this one function.
+func runAuditCorpus(ctx context.Context, c AuditCorpus, label string) (AuditReport, error) {
+	rep := AuditReport{Label: label, Memories: len(c.Memories)}
 	rep.Turns = len(c.Turns)
 	for _, call := range c.Calls {
 		sc, err := runAuditCall(ctx, c, call)
@@ -341,16 +430,25 @@ func runAuditCall(ctx context.Context, c AuditCorpus, call AuditCall) (AuditScen
 // order), with no time, path or map-order dependence.
 func FormatAudit(rep AuditReport) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "retrieval audit: %d memories, %d scripted turn items, %d calls\n", rep.Memories, rep.Turns, len(rep.Scenarios))
-	b.WriteString("  audit.Run over a labelled offline session, scored against the corpus's labels;\n")
+	fmt.Fprintf(&b, "retrieval audit (%s): %d memories, %d scripted turn items, %d calls\n", rep.Label, rep.Memories, rep.Turns, len(rep.Scenarios))
+	b.WriteString("  audit.Run over a labelled corpus, scored against that corpus's own labels;\n")
 	b.WriteString("  no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves\n\n")
 
 	h := rep.Headlines()
-	fmt.Fprintf(&b, "same-domain used at session start: %d of %d\n", h.SameDomainUsed, h.SameDomainTotal)
-	fmt.Fprintf(&b, "  of which no turn labels them: %d of %d\n", h.UnlabelledUsed, h.UnlabelledTotal)
+	// The two domain lines are a property of the synthetic session's own domains,
+	// so a corpus that has none prints nothing for them rather than a zero over
+	// an empty population.
+	if h.SessionStart {
+		fmt.Fprintf(&b, "same-domain used at session start: %d of %d\n", h.SameDomainUsed, h.SameDomainTotal)
+		fmt.Fprintf(&b, "  of which no turn labels them: %d of %d\n", h.UnlabelledUsed, h.UnlabelledTotal)
+	}
 	fmt.Fprintf(&b, "cited ids caught: %d of %d\n", h.CitesCaught, h.CitesTotal)
 	fmt.Fprintf(&b, "restatements caught: %d of %d\n", h.RestatementsCaught, h.RestatementsTotal)
-	fmt.Fprintf(&b, "spread across turns, judged used: %d of %d\n", h.SpreadUsed, h.SpreadTotal)
+	fmt.Fprintf(&b, "false \"used\" (labels expect ignored): %d of %d\n", h.FalseUsed, h.FalseTotal)
+	fmt.Fprintf(&b, "token-arm precision: %s\n", h.TokenPrecision)
+	if h.SessionStart {
+		fmt.Fprintf(&b, "spread across turns, judged used: %d of %d\n", h.SpreadUsed, h.SpreadTotal)
+	}
 
 	for _, sc := range rep.Scenarios {
 		fmt.Fprintf(&b, "\nscenario %s: the call is placed before turn %d, source %s, keeps %d memories (%d same-domain)\n",

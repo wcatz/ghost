@@ -147,6 +147,10 @@ confident wrong answer:
   positive claim the comparison can make exactly. A `used` proved only by wording
   overlap is printed beside it as `restated by wording (heuristic)` and is in no
   percentage. A positive verdict changes no decision anywhere; the figure is all it is for.
+  That heuristic is measured offline, on a set hand-labelled from real sessions, and the
+  measurement is in [benchmarks.md](benchmarks.md#the-real-work-set-internalbenchaudit_corpus_realgo)
+  rather than here: this block reports what THIS store's calls produced, and a figure
+  about a fixture belongs beside the fixture.
 - **`ignored` is the residual, not a score.** It is the only field here that an
   agent is likely to misread as a judgement about memory quality, and nothing in
   this package ranks a memory. The sentence is printed whenever any verdict
