@@ -370,3 +370,71 @@ func TestNoAnswerStrongStoredCosineRescuesTheBlock(t *testing.T) {
 		t.Errorf("items = %v, want both rows: the keyword hit's own cosine clears the bar", itemIDs(res.Items))
 	}
 }
+
+// TestNoAnswerJudgesAKeywordOnlyRowWhoseStoredCosineIsNegative: a cosine is in
+// [-1, 1], so a stored cosine that is genuinely negative is a JUDGED (very weak)
+// match and not "no cosine". The row is withheld with the rest of the block, and it
+// counts as judged, so it alone is enough for the bar to fire — which a sign test
+// (`cos < 0`) could never do, reading the negative as the sentinel and keeping the
+// row.
+func TestNoAnswerJudgesAKeywordOnlyRowWhoseStoredCosineIsNegative(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw)}, stored: map[string]float32{"kw": -0.25}}
+	res := run(t, r, noAnswerRequest(0.62))
+	if len(res.Items) != 0 || res.Reason != reasonNothingClearedBar {
+		t.Errorf("items = %v reason = %q, want the row withheld: its stored cosine (-0.25) is a judgeable value below the bar", itemIDs(res.Items), res.Reason)
+	}
+	if !strings.Contains(res.Abstention, "-0.250") {
+		t.Errorf("abstention %q does not state the negative score that was judged", res.Abstention)
+	}
+	if got := decisionsAt(res, stageNoAnswer); len(got) != 1 || got[0].Kept {
+		t.Errorf("no-answer decisions = %+v, want one drop", got)
+	}
+}
+
+// TestNoAnswerJudgesAVectorLegRowWithANegativeCosine: the same rule for the vector
+// leg's own score; only the exact -1 mark means the leg did not carry the row, so a
+// negative score is judged and, below the bar, withheld.
+func TestNoAnswerJudgesAVectorLegRowWithANegativeCosine(t *testing.T) {
+	res := noAnswerRun(t, 0.6, hybridSet(cosRow("a", -0.3), cosRow("b", -0.1)))
+	if len(res.Items) != 0 || res.Reason != reasonNothingClearedBar {
+		t.Errorf("items = %v reason = %q, want both withheld: negative cosines are judged, not read as the sentinel", itemIDs(res.Items), res.Reason)
+	}
+}
+
+// TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied: the bar kept the
+// one row it could not judge, so it did not withhold the block. When the response
+// byte cap then removes that last row the empty block is the cap's doing, and it
+// has to read that way: "nothing cleared the bar" sends a caller to lower a bar
+// that already passed the row they were shown, while the cap is the thing to raise.
+func TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	kw.Content = strings.Repeat("x", 400)
+	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v", 0.30))}, stored: map[string]float32{}}
+	req := noAnswerRequest(0.62)
+	// Between the two envelopes: the block holding the keyword row renders at 567
+	// bytes and the empty one at 477, so this cap cuts the last row instead of
+	// failing the request outright.
+	req.Budget.MaxBytes = 500
+	res := run(t, r, req)
+	if len(res.Items) != 0 {
+		t.Fatalf("items = %v, want the cap to have emptied the block", itemIDs(res.Items))
+	}
+	if res.Reason != reasonAllOverBudget {
+		t.Errorf("reason = %q, want all_over_budget: the bar kept a row, so it did not withhold the block", res.Reason)
+	}
+	if strings.Contains(res.Abstention, "nothing cleared the bar") {
+		t.Errorf("abstention = %q: the bar did not empty the block, so it may not claim the answer", res.Abstention)
+	}
+	if !strings.Contains(res.Abstention, "response budget") {
+		t.Errorf("abstention = %q, want the sentence to name the response cap that emptied the block", res.Abstention)
+	}
+	// The fixture is only worth the assertions above if the bar really did fire:
+	// the breakdown names the row it withheld and the row the cap removed, apart.
+	notes := strings.Join(res.Notes, "\n")
+	if !strings.Contains(notes, "no_answer 1") || !strings.Contains(notes, "response_fit 1") {
+		t.Errorf("breakdown note = %q, want the bar's row and the cap's row named apart", notes)
+	}
+}

@@ -1223,12 +1223,13 @@ type noAnswerVerdict struct {
 // combination were not built). The bar judges the best row rather than the first
 // one: a block is an answer if any row in it is a close match.
 //
-//   - Only a cosine can be judged. A row the vector leg did not retrieve carries
-//     the -1 sentinel, which is "no cosine", not "a low one", so it never counts
-//     as weak evidence. When the vector leg was not in play (no embedder, or it
-//     failed) or no row carries a cosine, the step passes the block through:
-//     refusing every answer on a machine with no embedder would be the rule
-//     misreading its own blind spot as a verdict.
+//   - Only a cosine can be judged, and its PRESENCE is the `ok` `rowCosine`
+//     returns, never its sign: a cosine is in [-1, 1], so a genuinely negative one
+//     is a judged (very weak) match rather than the sentinel, and only the exact
+//     -1 mark means the vector leg did not carry the row. When the vector leg was
+//     not in play (no embedder, or it failed) or no row carries a cosine, the step
+//     passes the block through: refusing every answer on a machine with no embedder
+//     would be the rule misreading its own blind spot as a verdict.
 //   - Only a row that carries a cosine is ever withheld. A row without one (a
 //     keyword hit on a memory that was never embedded) passes, and a block that
 //     still holds one is not "nothing cleared the bar".
@@ -1245,7 +1246,10 @@ type noAnswerVerdict struct {
 // Each withheld row is recorded once, a decision at this step with reason
 // nothing_cleared_the_bar, which the retrieval record reads as a dropped verdict
 // and explain as an excluded row's sentence. A block that ends empty carries the
-// same reason as its outcome, with a sentence that states the score.
+// same reason as its outcome, with a sentence that states the score — and only a
+// block THIS step emptied claims it: the verdict field stays nil while any row it
+// cannot judge survives, so a block a later stage empties carries that stage's
+// reason (`all_over_budget`) rather than reading as an answer the bar refused.
 //
 // A passive request and a disabled bar (0) are both recorded as pass-throughs
 // with no note, so they are byte-identical to a pipeline without the step.
@@ -1267,8 +1271,8 @@ func runNoAnswer(p *pipeline) {
 	top, judged := -1.0, false
 	for i := range p.rows {
 		c := p.rows[i]
-		cos := p.rowCosine(c)
-		if c.Pinned || cos < 0 {
+		cos, has := p.rowCosine(c)
+		if c.Pinned || !has {
 			continue
 		}
 		judged = true
@@ -1288,9 +1292,10 @@ func runNoAnswer(p *pipeline) {
 	for i := range p.rows {
 		c := p.rows[i]
 		// A row with no cosine was never judged, so it is never withheld: an
-		// exact keyword hit on a memory that was never embedded carries the -1
-		// sentinel, and the bar says nothing about it.
-		if c.Pinned || p.rowCosine(c) < 0 {
+		// exact keyword hit on a memory that was never embedded has no cosine to
+		// compare, and the bar says nothing about it.
+		_, has := p.rowCosine(c)
+		if c.Pinned || !has {
 			keptRows = append(keptRows, c)
 			keptItems = append(keptItems, p.items[i])
 			continue

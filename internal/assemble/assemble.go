@@ -1014,12 +1014,13 @@ type cosineReader interface {
 	EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error)
 }
 
-// loadExactCosines reads, for the rows that carry no vector-leg cosine (VectorScore
-// -1), the cosine of their own stored embedding. A hybrid window admits keyword
-// hits whatever their cosine, so such a row can be embedded and weakly similar
-// (judged by the bar) or have no embedding at all (absent from the answer, and
-// never judged). It runs only for a query-mode request with the bar on, and a
-// failed read leaves every such row unjudged, which only ever keeps rows.
+// loadExactCosines reads, for the rows that carry no vector-leg cosine
+// (VectorScore is exactly -1), the cosine of their own stored embedding. A hybrid
+// window admits keyword hits whatever their cosine, so such a row can be embedded
+// and weakly similar (judged by the bar) or have no embedding at all (absent from
+// the answer, and never judged). It runs only for a query-mode request with the
+// bar on, and a failed read leaves every such row unjudged, which only ever keeps
+// rows.
 func (p *pipeline) loadExactCosines(ctx context.Context, r Retriever) {
 	if p.passive || p.req.NoAnswerCosine <= 0 || len(p.req.QueryVec) == 0 {
 		return
@@ -1030,7 +1031,7 @@ func (p *pipeline) loadExactCosines(ctx context.Context, r Retriever) {
 	}
 	var ids []string
 	for _, c := range p.rows {
-		if c.VectorScore < 0 {
+		if c.VectorScore == -1 {
 			ids = append(ids, c.ID)
 		}
 	}
@@ -1048,14 +1049,18 @@ func (p *pipeline) loadExactCosines(ctx context.Context, r Retriever) {
 }
 
 // rowCosine is the cosine the bar judges a row by: the vector leg's own score
-// when it carried one, else the cosine of the row's stored embedding, else -1
-// (no cosine exists, so the row is never judged).
-func (p *pipeline) rowCosine(c memory.Candidate) float64 {
-	if c.VectorScore >= 0 {
-		return c.VectorScore
+// when it carried one, else the cosine of the row's stored embedding. ok is false
+// when no cosine exists, and the row is then never judged. Presence is decided by
+// ok and never by the sign: a cosine is in [-1, 1], so a genuinely negative one is
+// a judged (very weak) match, and only the exact -1 mark means "the leg did not
+// carry this row". A stored cosine is present because it is IN the map, so an
+// entry of exactly -1 is a cosine too.
+func (p *pipeline) rowCosine(c memory.Candidate) (float64, bool) {
+	if c.VectorScore != -1 {
+		return c.VectorScore, true
 	}
 	if v, ok := p.exactCosine[c.ID]; ok {
-		return v
+		return v, true
 	}
-	return -1
+	return 0, false
 }
