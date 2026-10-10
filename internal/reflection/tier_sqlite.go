@@ -241,10 +241,55 @@ var singleTargetRe = regexp.MustCompile(
 // cross-repo language rather than naming a repository.
 var singleRepoRe = regexp.MustCompile(`\b(?:the|in|from|to)\s+([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
 
-// repoHostMarkers are substrings of a hosted repository reference
-// ("github.com/owner/repo", "git@host:owner/repo"). A bare owner/name pair is
-// deliberately not a marker: it is also a file path ("cmd/ghost").
-var repoHostMarkers = []string{"github.com/", "gitlab.com/", "git@"}
+// hostedRepoRef reports whether lower holds a hosted repository reference: a
+// forge host followed by owner/name ("github.com/owner/repo"), or an scp-style
+// remote ("git@host:owner/repo"). A bare host is not one (a link to a docs site
+// is not a repository), and neither is an owner/name pair on its own, which is
+// also a file path ("cmd/ghost"). Done with string scans rather than a pattern
+// on the host: this classifies free prose, it does not validate a URL.
+func hostedRepoRef(lower string) bool {
+	isName := func(r rune) bool {
+		return r == '.' || r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+	}
+	// ownerRepo reports whether rest begins owner<sep>name with both non-empty.
+	ownerRepo := func(rest string) bool {
+		owner := 0
+		for owner < len(rest) && isName(rune(rest[owner])) {
+			owner++
+		}
+		if owner == 0 || owner >= len(rest) || rest[owner] != '/' {
+			return false
+		}
+		return owner+1 < len(rest) && isName(rune(rest[owner+1]))
+	}
+	for _, host := range []string{"github.com/", "gitlab.com/"} {
+		for from := 0; ; {
+			i := strings.Index(lower[from:], host)
+			if i < 0 {
+				break
+			}
+			i += from
+			// A host label before it (docs.github.com, api.github.com) is a
+			// different site.
+			if (i == 0 || !isName(rune(lower[i-1]))) && ownerRepo(lower[i+len(host):]) {
+				return true
+			}
+			from = i + len(host)
+		}
+	}
+	for from := 0; ; {
+		i := strings.Index(lower[from:], "git@")
+		if i < 0 {
+			return false
+		}
+		i += from
+		rest := lower[i+len("git@"):]
+		if colon := strings.IndexByte(rest, ':'); colon > 0 && ownerRepo(rest[colon+1:]) {
+			return true
+		}
+		from = i + len("git@")
+	}
+}
 
 var repoQuantifiers = map[string]bool{
 	"a": true, "an": true, "any": true, "every": true, "all": true, "each": true,
@@ -258,10 +303,8 @@ func namesSingleTarget(lower string) bool {
 	if singleTargetRe.MatchString(lower) {
 		return true
 	}
-	for _, h := range repoHostMarkers {
-		if strings.Contains(lower, h) {
-			return true
-		}
+	if hostedRepoRef(lower) {
+		return true
 	}
 	for _, m := range singleRepoRe.FindAllStringSubmatch(lower, -1) {
 		if !repoQuantifiers[m[1]] {
