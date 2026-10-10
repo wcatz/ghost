@@ -2418,6 +2418,8 @@ Three layers, and the third is about the artifact rather than the packages.
 
 **Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
 
+**A fixture's rows are stamped, never clocked.** A ranking whose tie-break is `created_at` orders tied rows by which side of a wall-clock second each INSERT landed on, so a fixture that leaves the column to `datetime('now')` is a different fixture on every run — and the insert loop is long enough for the boundary to fall inside it. The bench corpus closed that hole with one stamp per seeding pass (#708), and the session-start fixture closed the same one by deriving every stamp from one fixed instant (#1002). The rule is what makes a guard a contract: two runs of the same fixture have to be the same fixture for any assertion about the second one to mean anything. The companion rule is about the assertion rather than the fixture — where a tie is legitimately broken by `id`, which row a cap cuts is a selection and not a ranking, so a test pins the ORDER it claims rather than the identity of the row it expects to lose.
+
 **End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
 
 ```bash
