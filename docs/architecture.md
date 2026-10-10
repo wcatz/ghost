@@ -2083,7 +2083,15 @@ What exists now:
   "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
   current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
   `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
-  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+  blaming an embedder outage for a weak keyword hit, in the other direction. Presence is the exact -1
+  mark and never the sign, in both arms and in every reader of the score: a cosine is in [-1, 1], so
+  one at or below zero was MEASURED and is a very weak match. A block whose every cosine is at or
+  below zero is therefore `weak`/`below_floor` — the arm held a value and judged the rows low — and
+  counting it as "no vector value" would report `no_floor_arm` for a verdict the vector leg had
+  already made. That is the SEAM's rule and Ghost's own leg sits outside it: `*memory.Store` discards
+  every candidate whose cosine is not above 0 before fusion, so a shipped query whose rows matched
+  nothing on meaning still reports `no_floor_arm`, and a `Candidate.VectorScore` there is either the
+  sentinel or a positive cosine. The line and the trace both keep "a threshold" and "a
 threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
   vector leg never ran or ran and failed) or the number, and
 `Floors` carries `VectorArmOn` (what the request configured) beside
@@ -2424,6 +2432,8 @@ Three layers, and the third is about the artifact rather than the packages.
 **In-process tests** call into `internal/...` directly. That is where logic is tested, and it is the overwhelming majority of the tree: the store, the assembler, the consolidation tiers, the migration steps, the hook parsers. `go test ./...` runs them, and they run in CI on every leg.
 
 **Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
+
+**A fixture's rows are stamped, never clocked.** A ranking whose tie-break is `created_at` orders tied rows by which side of a wall-clock second each INSERT landed on, so a fixture that leaves the column to `datetime('now')` is a different fixture on every run — and the insert loop is long enough for the boundary to fall inside it. The bench corpus closed that hole with one stamp per seeding pass (#708), and the session-start fixture closed the same one by deriving every stamp from one fixed instant (#1002). The rule is what makes a guard a contract: two runs of the same fixture have to be the same fixture for any assertion about the second one to mean anything. The companion rule is about the assertion rather than the fixture — where a tie is legitimately broken by `id`, which row a cap cuts is a selection and not a ranking, so a test pins the ORDER it claims rather than the identity of the row it expects to lose.
 
 **End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
 
