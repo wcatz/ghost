@@ -349,9 +349,8 @@ func editTerms(in workMomentInput) []memory.QueryTerm {
 func keywordScore(it assemble.Item, terms []memory.QueryTerm) int {
 	text := strings.ToLower(it.Content + " " + strings.Join(it.Tags, " "))
 	words := map[string]bool{}
-	for _, w := range strings.FieldsFunc(text, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 0x7f)
-	}) {
+	isWord := func(r rune) bool { return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 0x7f }
+	for _, w := range strings.FieldsFunc(text, func(r rune) bool { return !isWord(r) }) {
 		words[w] = true
 	}
 	score := 0
