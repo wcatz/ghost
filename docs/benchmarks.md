@@ -92,6 +92,21 @@ margins the test already carried (NDCG@10 / recall@10, observed minus floor: fts
 0.019 / 0.027, vector 0.020 / 0.014, hybrid 0.018 / 0.013); two-decimal floors
 would have loosened five of the six.
 This is a label/corpus correction, not a ranking change — the ranking is unchanged.
+- **The four `validity_*` rows are inert in these conditions, on purpose.** The
+  corpus carries four rows with `valid_from`/`valid_until`/`verified_at` (and the
+  other 545 are unset). Nothing in the plain conditions reads a validity column:
+  they call `SearchFTS`, `SearchVector` and `SearchHybrid` directly, so the four
+  rows only add candidates to a ten-row window here. What the corpus carries is a
+  validity window for the assembler's own condition to act on, which is where a
+  stage-2 filter becomes measurable (PR 7 of
+  [`docs/superpowers/specs/2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md)).
+  `TestBuiltinDatasetCarriesValidityIntoRetrieval` keeps that claim honest: it
+  reads the rows back out of `Store.Candidates` — the read stage 2 consumes
+  — with the stamps still attached, and
+  `TestValidityFixtureCoversEveryStage2State` fails if the four stop covering
+  every state stage 2 reads. The earlier addition of these rows (547 → 551
+  memories) moved the gated metrics by at most 0.001, which was the cost of a
+  larger corpus rather than a ranking change.
 - **The `embeddings.json` fixture is untouched.** This change edits no vector:
   the two dropped keys' vectors remain in the fixture unused, and the vectors for
   every remaining key are exactly as before. A future regeneration goes through
