@@ -117,6 +117,12 @@ type Signals struct {
 	// claim about ONE session's text: Run judges only the calls recorded under this id,
 	// and an empty one judges none (see Run).
 	session string
+	// generic is the session's own generic vocabulary (see genericFingerprints),
+	// pinned on a view by Since and on a comparison's input by pinned. nil means
+	// nobody has computed it, which is not the same as an empty set: a view over a few
+	// late turns must not recompute it from those turns alone, so a computed set is
+	// never nil.
+	generic map[string]bool
 }
 
 // turn is everything the agent wrote under ONE SetAt instant: one assistant line of
@@ -215,6 +221,9 @@ func (s *Signals) Ordered() bool {
 // returns an empty view for the same reason: a call with no instant has no "after".
 func (s *Signals) Since(cutoff time.Time) *Signals {
 	out := &Signals{h: s.h, degraded: s.degraded, session: s.session}
+	// The generic vocabulary is a fact about the WHOLE session, and a view keeps only
+	// the turns after one call, so it is taken here, from every turn, and carried.
+	out.generic = s.pinned().generic
 	if cutoff.IsZero() {
 		return out
 	}
@@ -460,11 +469,16 @@ func (s *Signals) AddProse(text string) {
 // declaring the same knowledge again, which is the superseded-in-session bucket and
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
+//
+// An id in these arguments is NOT lifted: a save's arguments are the new memory's own
+// text, so an id in them is not the agent relying on the memory it names. (On a real
+// store every stored identifier verdict was the agent's own update of the memory,
+// counted as a citation; an update is now read as nothing, see hostevent's
+// addToolCall.) A save that restates a memory is still read, as a restatement, by the
+// words above. The cost is a save that names ANOTHER memory by id in order to cite it,
+// which goes unread.
 func (s *Signals) AddSaveArgs(text string) {
 	s.addAt(&s.saves, &s.savesAt, s.h.DistinctTokens(text))
-	for _, id := range memoryIDs(text) {
-		s.AddID(id)
-	}
 }
 
 // AddToolArgs records a non-save tool call's arguments.

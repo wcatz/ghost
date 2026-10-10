@@ -1,9 +1,9 @@
-retrieval audit: 44 memories, 122 scripted turn items, 3 calls
+retrieval audit: 53 memories, 168 scripted turn items, 4 calls
   audit.Run over a labelled offline session, scored against the corpus's labels;
   no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves
 
-same-domain used at session start: 16 of 20
-  of which no turn labels them: 10 of 11
+same-domain used at session start: 9 of 20
+  of which no turn labels them: 3 of 11
 cited ids caught: 3 of 3
 restatements caught: 4 of 4
 spread across turns, judged used: 0 of 4
@@ -11,34 +11,34 @@ spread across turns, judged used: 0 of 4
 scenario start: the call is placed before turn 0, source session_start, keeps 44 memories (20 same-domain)
   outcome                expected   got  precision        recall          
   used/identifier               3     3  1.000 (3/3)      1.000 (3/3)     
-  used/token                    4    14  0.286 (4/14)     1.000 (4/4)     
-  used (either arm)             7    17  0.412 (7/17)     1.000 (7/7)     
+  used/token                    4     7  0.571 (4/7)      1.000 (4/4)     
+  used (either arm)             7    10  0.700 (7/10)     1.000 (7/7)     
   superseded_in_session         1     1  1.000 (1/1)      1.000 (1/1)     
   contradicted                  2     2  1.000 (2/2)      1.000 (2/2)     
-  ignored                      34    24  1.000 (24/24)    0.706 (24/34)   
+  ignored                      34    31  1.000 (31/31)    0.912 (31/34)   
   confusion (rows: expected, columns: got)
                            used/id  used/tok  supersed   contrad   ignored
   used/identifier                3         0         0         0         0
   used/token                     0         4         0         0         0
   superseded_in_session          0         0         1         0         0
   contradicted                   0         0         0         2         0
-  ignored                        0        10         0         0        24
+  ignored                        0         3         0         0        31
 
 scenario middle: the call is placed before turn 20, source search, keeps 24 memories (20 same-domain)
   outcome                expected   got  precision        recall          
   used/identifier               1     1  1.000 (1/1)      1.000 (1/1)     
-  used/token                    2    12  0.167 (2/12)     1.000 (2/2)     
-  used (either arm)             3    13  0.231 (3/13)     1.000 (3/3)     
+  used/token                    2     5  0.400 (2/5)      1.000 (2/2)     
+  used (either arm)             3     6  0.500 (3/6)      1.000 (3/3)     
   superseded_in_session         1     1  1.000 (1/1)      1.000 (1/1)     
   contradicted                  1     1  1.000 (1/1)      1.000 (1/1)     
-  ignored                      19     9  1.000 (9/9)      0.474 (9/19)    
+  ignored                      19    16  1.000 (16/16)    0.842 (16/19)   
   confusion (rows: expected, columns: got)
                            used/id  used/tok  supersed   contrad   ignored
   used/identifier                1         0         0         0         0
   used/token                     0         2         0         0         0
   superseded_in_session          0         0         1         0         0
   contradicted                   0         0         0         1         0
-  ignored                        0        10         0         0         9
+  ignored                        0         3         0         0        16
 
 scenario end: the call is placed before turn 40, source search, keeps 24 memories (20 same-domain)
   outcome                expected   got  precision        recall          
@@ -55,3 +55,19 @@ scenario end: the call is placed before turn 40, source search, keeps 24 memorie
   superseded_in_session          0         0         0         0         0
   contradicted                   0         0         0         0         0
   ignored                        0         0         0         0        24
+
+scenario fp: the call is placed before turn 0, source search, keeps 9 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    3     2  1.000 (2/2)      0.667 (2/3)     
+  used (either arm)             3     2  1.000 (2/2)      0.667 (2/3)     
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       6     7  0.857 (6/7)      1.000 (6/6)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         2         0         0         1
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         6

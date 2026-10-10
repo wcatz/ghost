@@ -129,7 +129,7 @@ func TestCompareContradictedByIdentifier(t *testing.T) {
 
 // TestCompareTokenArmNeedsEnoughOfTheMemory is the bar that keeps `used` honest:
 // two coincidental words in a long transcript are not evidence that a memory
-// was read.
+// was read. The fraction is 1/2, so for an 8-token memory we need 4 matches.
 func TestCompareTokenArmNeedsEnoughOfTheMemory(t *testing.T) {
 	toks := memTokens(t)
 	s := newTestSignals(t)
@@ -139,9 +139,16 @@ func TestCompareTokenArmNeedsEnoughOfTheMemory(t *testing.T) {
 		t.Fatal("two matching fingerprints satisfied the token arm")
 	}
 
+	// Three matches is still under the 1/2 bar for an 8-token memory.
 	s.AddProse("and " + memWords[2])
+	if s.matches(toks) {
+		t.Error("three matching fingerprints satisfied the token arm (need 4 for 8 tokens)")
+	}
+
+	// Four matches clears the bar.
+	s.AddProse("and " + memWords[3])
 	if !s.matches(toks) {
-		t.Error("three matching fingerprints did not satisfy the token arm")
+		t.Error("four matching fingerprints did not satisfy the token arm")
 	}
 }
 
@@ -157,21 +164,17 @@ func nineWords() []string {
 // domain vocabulary spread over forty turns must not be told the agent used a
 // memory no single turn was about.
 //
-// The issue's example — three turns each carrying three of a nine-word memory
-// — is arithmetically a use under the unchanged thresholds: three shared words
-// is the floor and nine is a third of nine, so ANY turn carrying three of nine
-// clears the bar on its own and it would be used/token whichever way the arm
-// read the text. The split that distinguishes the two readings has to be
-// thinner than the bar at every instant, so the cases below are six-of-nine over
-// three turns of two (the union clears, the best turn is under the floor) and
-// nine-of-twelve over three turns of three (the union clears the fraction, no
-// turn reaches a third of twelve). Both are ignored, the one-turn forms of the
-// same words are used/token, and the thresholds themselves are untouched.
+// The fraction is 1/2, so for a 9-token memory we need 5 matches to clear.
+// The cases below are six-of-nine over three turns of two (the union clears at
+// 6/9 > 1/2, the best turn is 2 < floor) and nine-of-twelve over three turns
+// of three (the union clears at 9/12 > 1/2, no turn reaches 6/12 = 1/2).
+// Both are ignored, the one-turn forms of the same words are used/token when
+// they clear the bar, and the thresholds themselves are untouched.
 func TestTheTokenArmNeedsTheWordsInOneTurn(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	turns := []time.Time{now, now.Add(time.Minute), now.Add(2 * time.Minute)}
 
-	// Six of the memory's nine words, two per turn: the union clears the bar,
+	// Six of the memory's nine words, two per turn: the union clears at 6/9,
 	// no single turn reaches the floor of three.
 	nine := nineWords()
 	toks := testTokens(strings.Join(nine, " "))
@@ -190,8 +193,8 @@ func TestTheTokenArmNeedsTheWordsInOneTurn(t *testing.T) {
 		t.Errorf("two words in each of three turns judged used/%s: the arm read the union, not one turn", SignalToken)
 	}
 
-	// Twelve words, three per turn: the union of nine clears the fraction, and
-	// no turn reaches a third of twelve.
+	// Twelve words, three per turn: the union of nine clears at 9/12 > 1/2,
+	// no turn reaches half of twelve.
 	long := append(append([]string{}, nine...), "migration", "assembler", "verdicts")
 	longToks := testTokens(strings.Join(long, " "))
 	if len(longToks) != 12 {
@@ -209,13 +212,12 @@ func TestTheTokenArmNeedsTheWordsInOneTurn(t *testing.T) {
 		t.Errorf("three words in each of three turns judged used/%s: the arm read the union, not one turn", SignalToken)
 	}
 
-	// One turn carrying the words clears, whichever memory is judged: this is
-	// the use the arm exists to catch, and the split must not cost it.
+	// One turn carrying five of the nine words clears (5/9 > 1/2).
 	s = NewWithHasher(testHasher)
 	s.SetAt(now)
-	s.AddProse(nine[0] + " " + nine[1] + " " + nine[2])
+	s.AddProse(nine[0] + " " + nine[1] + " " + nine[2] + " " + nine[3] + " " + nine[4])
 	if !s.matches(toks) {
-		t.Errorf("three of the nine words in one turn judged ignored: one turn must clear the bar")
+		t.Errorf("five of the nine words in one turn judged ignored: one turn must clear the bar")
 	}
 	s = NewWithHasher(testHasher)
 	s.SetAt(now)
