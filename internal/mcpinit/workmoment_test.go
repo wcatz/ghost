@@ -26,7 +26,7 @@ type momentFixture struct {
 }
 
 const (
-	momentGotcha = "Gotcha: the quartzmigrate step deadlocks when sqlitebackup runs at the same time; always stop sqlitebackup before it."
+	momentGotcha = "Gotcha: the quartz_migrate step deadlocks when sqlitebackup runs at the same time; always stop sqlitebackup before it."
 	momentFile   = "Editing stophook.go needs the lifecycle cooldown stamp cleared first, otherwise the spawn is silently skipped."
 	// momentFiller shares ordinary words with the unrelated message used below
 	// ("cloud", "build"), so the keyword leg RETRIEVES it and only the floor
@@ -63,7 +63,7 @@ func newMomentFixture(t *testing.T) momentFixture {
 		{"mfile", "p1", "gotcha", momentFile},
 		{"mfiller", "p1", "fact", momentFiller},
 		{"mhooks", "p1", "gotcha", "Helm hooks run before the migrate job, and hook weights decide the order."},
-		{"mglobal", memory.GlobalProjectID, "preference", "Global preference: quartzmigrate deadlock reports are always verbose."},
+		{"mglobal", memory.GlobalProjectID, "preference", "Global preference: quartz_migrate deadlock reports are always verbose."},
 	} {
 		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
 			VALUES (?, ?, ?, ?, 'manual', 0.8)`, r.id, r.project, r.category, r.content); err != nil {
@@ -116,7 +116,7 @@ func momentContext(t *testing.T, out string) (text, event string) {
 
 func TestAMessageNamingASavedGotchaDeliversItOnce(t *testing.T) {
 	f := newMomentFixture(t)
-	out := f.submit("sess-a", "why does the quartzmigrate step deadlock on ci")
+	out := f.submit("sess-a", "why does the quartz_migrate step deadlock on ci")
 	text, event := momentContext(t, out)
 	if event != "UserPromptSubmit" {
 		t.Errorf("hookEventName = %q, want UserPromptSubmit", event)
@@ -130,11 +130,11 @@ func TestAMessageNamingASavedGotchaDeliversItOnce(t *testing.T) {
 	if len(text) > workMomentBlockBytes {
 		t.Errorf("block is %d bytes, cap is %d", len(text), workMomentBlockBytes)
 	}
-	if again := f.submit("sess-a", "remind me about quartzmigrate and sqlitebackup"); again != "" {
+	if again := f.submit("sess-a", "remind me about quartz_migrate and sqlitebackup"); again != "" {
 		t.Fatalf("a second matching message repeated a delivered row:\n%s", again)
 	}
 	// Another session has its own marker and is shown it again.
-	if other := f.submit("sess-b", "why does the quartzmigrate step deadlock on ci"); other == "" {
+	if other := f.submit("sess-b", "why does the quartz_migrate step deadlock on ci"); other == "" {
 		t.Error("a different session was denied the row; the marker is per session")
 	}
 }
@@ -146,7 +146,7 @@ func TestARowFromTheSessionStartBlockIsNotRepeated(t *testing.T) {
 	if !strings.Contains(block, "`mgotcha`") {
 		t.Fatalf("the fixture's session start did not render the gotcha, so this test would prove nothing:\n%s", block)
 	}
-	if out := f.submit("sess-s", "why does the quartzmigrate step deadlock on ci"); out != "" {
+	if out := f.submit("sess-s", "why does the quartz_migrate step deadlock on ci"); out != "" {
 		t.Fatalf("a row the session-start block already delivered was repeated:\n%s", out)
 	}
 }
@@ -157,8 +157,8 @@ func TestAnUnrelatedMessageEmitsNothing(t *testing.T) {
 	// keyword leg, kept out by the floor.
 	msg := "what is the weather in the cloud today"
 	terms := memory.DistinctiveTerms(msg, workMomentTerms)
-	if s := keywordScore(assemble.Item{Content: momentFiller}, terms); s == 0 {
-		t.Fatalf("the filler row shares no term with the message (score 0), so the floor is not what silences it")
+	if _, w := keywordMatch(assemble.Item{Content: momentFiller}, terms); w == 0 {
+		t.Fatalf("the filler row shares no word with the message, so the floor is not what silences it")
 	}
 	if out := f.submit("sess-u", msg); out != "" {
 		t.Fatalf("an unrelated message emitted:\n%s", out)
@@ -196,7 +196,7 @@ func TestAnEditOfAFileNamedInAMemoryDeliversIt(t *testing.T) {
 
 func TestTheDeliveryIsRecordedWithItsOwnSource(t *testing.T) {
 	f := newMomentFixture(t)
-	if out := f.submit("sess-r", "why does the quartzmigrate step deadlock on ci"); out == "" {
+	if out := f.submit("sess-r", "why does the quartz_migrate step deadlock on ci"); out == "" {
 		t.Fatal("no delivery")
 	}
 	calls := recordedCalls(t, f.dbPath)
@@ -207,7 +207,7 @@ func TestTheDeliveryIsRecordedWithItsOwnSource(t *testing.T) {
 	if c.source != string(assemble.SourceWorkingMoment) || c.projectID != "p1" || c.sessionID != "sess-r" {
 		t.Errorf("record = %+v, want source working_moment, project p1, session sess-r", c)
 	}
-	if c.queryHash == "" || strings.Contains(c.verdicts, "quartzmigrate") {
+	if c.queryHash == "" || strings.Contains(c.verdicts, "quartz_migrate") {
 		t.Errorf("the record must carry a digest and no text: hash=%q verdicts=%s", c.queryHash, c.verdicts)
 	}
 	var vs []memory.RowVerdict
@@ -227,7 +227,7 @@ func TestTheDeliveryIsRecordedWithItsOwnSource(t *testing.T) {
 
 func TestTheSharedBudgetIsRespected(t *testing.T) {
 	f := newMomentFixture(t)
-	msg := "why does the quartzmigrate step deadlock on ci"
+	msg := "why does the quartz_migrate step deadlock on ci"
 
 	// Session start spent nearly everything: nothing fits, nothing is sent.
 	recordSessionStartDelivery("sess-b1", nil, workMomentBudget-100)
@@ -236,7 +236,7 @@ func TestTheSharedBudgetIsRespected(t *testing.T) {
 	}
 
 	// Two rows match; 300 bytes left holds one of them and not both.
-	both := "quartzmigrate sqlitebackup stophook.go cooldown"
+	both := "quartz_migrate sqlitebackup stophook.go cooldown"
 	full, _ := momentContext(t, f.submit("sess-b0", both))
 	if !strings.Contains(full, "`mgotcha`") || !strings.Contains(full, "`mfile`") || len(full) <= 300 {
 		t.Fatalf("control: with room, both rows must be delivered in more than 300 bytes (%d):\n%s", len(full), full)
@@ -272,7 +272,7 @@ func TestParallelHooksDeliverARowExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			outs[i] = f.submit("sess-p", "why does the quartzmigrate step deadlock on ci")
+			outs[i] = f.submit("sess-p", "why does the quartz_migrate step deadlock on ci")
 		}(i)
 	}
 	wg.Wait()
@@ -290,7 +290,7 @@ func TestParallelHooksDeliverARowExactlyOnce(t *testing.T) {
 func TestWorkingMomentErrorPathsEmitNothing(t *testing.T) {
 	f := newMomentFixture(t)
 	good := map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "sess-x", "cwd": f.projDir,
-		"prompt": "why does the quartzmigrate step deadlock on ci"}
+		"prompt": "why does the quartz_migrate step deadlock on ci"}
 	n := 0
 	with := func(k string, v any) string {
 		m := map[string]any{}
@@ -349,7 +349,7 @@ func TestARefusedDataDirEmitsNothingAndWritesNothing(t *testing.T) {
 	f := newMomentFixture(t)
 	t.Setenv(config.DevForbidDataDirEnv, realPath(t, f.dataDir))
 	before := dirEntries(t, f.dataDir)
-	if out := f.submit("sess-f", "why does the quartzmigrate step deadlock on ci"); out != "" {
+	if out := f.submit("sess-f", "why does the quartz_migrate step deadlock on ci"); out != "" {
 		t.Fatalf("emitted from a forbidden data dir:\n%s", out)
 	}
 	recordSessionStartDelivery("sess-f", []string{"mgotcha"}, 100)
@@ -512,7 +512,7 @@ func TestWorkingMomentCapabilityIsClaudeCodeOnly(t *testing.T) {
 func TestAGlobalRowIsNeverDelivered(t *testing.T) {
 	f := newMomentFixture(t)
 	t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", "0")
-	text, _ := momentContext(t, f.submit("sess-g", "why does the quartzmigrate step deadlock on ci"))
+	text, _ := momentContext(t, f.submit("sess-g", "why does the quartz_migrate step deadlock on ci"))
 	if !strings.Contains(text, "`mgotcha`") {
 		t.Fatalf("control: the project row must be delivered:\n%s", text)
 	}
@@ -530,10 +530,10 @@ func TestAGlobalRowIsNeverDelivered(t *testing.T) {
 // delivery nor is repeated.
 func TestADeliveredRowDoesNotHideANewMatch(t *testing.T) {
 	f := newMomentFixture(t)
-	if out := f.submit("sess-n", "why does the quartzmigrate step deadlock on ci"); out == "" {
+	if out := f.submit("sess-n", "why does the quartz_migrate step deadlock on ci"); out == "" {
 		t.Fatal("no first delivery")
 	}
-	text, _ := momentContext(t, f.submit("sess-n", "quartzmigrate sqlitebackup stophook.go cooldown"))
+	text, _ := momentContext(t, f.submit("sess-n", "quartz_migrate sqlitebackup stophook.go cooldown"))
 	if !strings.Contains(text, "`mfile`") || strings.Contains(text, "`mgotcha`") {
 		t.Errorf("want only the new row (mfile):\n%s", text)
 	}
@@ -635,16 +635,118 @@ func TestAnUnclaimableIdIsRecordedAsSuch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
-		VALUES ('bad id', 'p1', 'gotcha', 'quartzmigrate deadlock needs the sqlitebackup stopped', 'manual', 0.9)`); err != nil {
+		VALUES ('bad id', 'p1', 'gotcha', 'quartz_migrate deadlock needs the sqlitebackup stopped', 'manual', 0.9)`); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	text, _ := momentContext(t, f.submit("sess-u2", "why does the quartzmigrate step deadlock on ci"))
+	text, _ := momentContext(t, f.submit("sess-u2", "why does the quartz_migrate step deadlock on ci"))
 	if strings.Contains(text, "bad id") || !strings.Contains(text, "`mgotcha`") {
 		t.Fatalf("delivery wrong:\n%s", text)
 	}
 	calls := recordedCalls(t, f.dbPath)
 	if len(calls) != 1 || !strings.Contains(calls[0].verdicts, reasonUnclaimableID) || strings.Contains(calls[0].verdicts, reasonAlreadyDelivered) {
 		t.Errorf("verdicts must name %s and not %s: %+v", reasonUnclaimableID, reasonAlreadyDelivered, calls)
+	}
+}
+
+// A store of ordinary development-workflow memories: every one of them shares
+// words with the most generic things a person types ("fix the tests"), which is
+// exactly why a generic message must deliver none of them.
+var workflowMemories = []string{
+	"Run the tests with the race detector before merging and fix any data race first.",
+	"Update the docs whenever a CLI flag changes; the build fails if the docs index is stale.",
+	"The go build fails when cgo is enabled for the release target; set CGO_ENABLED=0 for it.",
+	"The go test run fails on Windows when paths use backslashes; fix the test helper to use filepath.",
+	"Fix the build by running make tidy and then run the tests again.",
+	"Add a regression test for every bug fix and remove the flaky test only with a ticket.",
+	"Code review comes before merge; change requests are fixed in a follow-up commit.",
+	"When the build fails in CI, run the same make target locally before pushing a fix.",
+	"Error messages must name the file and the fix; an error without a remedy is a bug.",
+	"Update the changelog and the docs in the same change that adds a flag.",
+	"The test suite fails when the clock is skewed; run it with the fake clock.",
+	"Remove dead code in its own commit so the build and the test diff stay readable.",
+	"Make the build reproducible: pin the go version and run go mod tidy before a release.",
+	"Docs live in docs/ and are built with make docs; a failed docs build blocks the merge.",
+	"Retries are capped at 3 attempts before the job is marked failed.",
+	"Release signing step in release.yml must run before the publish step or the artifact is unsigned.",
+}
+
+func TestGenericMessagesDeliverNothingFromAnOrdinaryStore(t *testing.T) {
+	f := newMomentFixture(t)
+	db, err := memory.OpenDB(f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range workflowMemories {
+		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
+			VALUES (?, 'p1', 'convention', ?, 'manual', 0.7)`, fmt.Sprintf("wf%02d", i), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	for i, msg := range []string{
+		"fix the tests",
+		"update the docs",
+		"go build fails",
+		"go test fails",
+		"run the tests and fix the build",
+		"fix the build error and add a test",
+		"please make the code change",
+		"fix 3 tests",
+	} {
+		if out := f.submit(fmt.Sprintf("sess-generic-%d", i), msg); out != "" {
+			t.Errorf("%q delivered:\n%s", msg, out)
+		}
+	}
+	if calls := recordedCalls(t, f.dbPath); len(calls) != 0 {
+		t.Errorf("silent turns wrote %d record(s)", len(calls))
+	}
+
+	// Naming something specific still delivers.
+	for i, c := range []struct{ msg, want string }{
+		{"update release.yml before the next tag", "release.yml"},
+		{"why is the release signing publish ordering wrong", "release.yml"},
+	} {
+		text, _ := momentContext(t, f.submit(fmt.Sprintf("sess-specific-%d", i), c.msg))
+		if !strings.Contains(text, c.want) {
+			t.Errorf("%q should deliver the row naming %s:\n%s", c.msg, c.want, text)
+		}
+	}
+	// And so does an edit of a file a memory names, while an edit of build.go
+	// (whose stem is generic) delivers none of the build memories.
+	if text, _ := momentContext(t, f.edit("sess-edit-r", "Edit", filepath.Join(f.projDir, ".github", "release.yml"), "x")); !strings.Contains(text, "release.yml") {
+		t.Errorf("edit of release.yml did not deliver:\n%s", text)
+	}
+	if out := f.edit("sess-edit-b", "Edit", filepath.Join(f.projDir, "build.go"), "x := 1"); out != "" {
+		t.Errorf("edit of build.go delivered:\n%s", out)
+	}
+}
+
+// Under a held write lock the delivery still prints: the record write has its own
+// short deadline and runs after the output. What is lost is the record, and the
+// loss is one WARN on stderr, so the audit misses that row.
+func TestADeliveryUnderAHeldWriteLockStillDeliversButItsRecordIsDropped(t *testing.T) {
+	f := newMomentFixture(t)
+	db, err := memory.OpenDB(f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO ghost_state (project_id, interaction_count) VALUES ('p1', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	holdWriteLock(t, f.dbPath, 2*time.Second)
+
+	var out string
+	stderr := captureStderr(t, func() {
+		out = f.submit("sess-lock", "why does the quartz_migrate step deadlock on ci")
+	})
+	text, _ := momentContext(t, strings.SplitN(out, "\nSTDERR:", 2)[0])
+	if !strings.Contains(text, "`mgotcha`") {
+		t.Fatalf("a held write lock must not stop the delivery:\n%s", out)
+	}
+	if !strings.Contains(stderr, "retrieval record not written") {
+		t.Errorf("the dropped record must be a WARN on stderr, got %q", stderr)
 	}
 }

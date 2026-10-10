@@ -154,9 +154,11 @@ host UserPromptSubmit / PostToolUse (Edit|Write|MultiEdit)
   → record the delivery in the retrieval record
 ```
 
+The record write has its own short deadline and runs after the output is printed. Under a held write lock the delivery still happens, but the record is dropped with one WARN line on stderr, so the audit misses that row; the silent path prints nothing on stderr.
+
 The block is a push for the moment of work: the session-start block is chosen without a query, and a gotcha about a file is rarely in view when that file is edited. Claude Code is the only host whose hooks are documented to add `additionalContext` beside a user message and beside a tool result, so it is the only source with the `WorkingMoment` capability; the other hosts get a silent no-op.
 
-**The floor is the channel's own.** On a keyword-only read the assembler's relevance cutoff cannot be the floor (it always keeps the top row) and the no-answer bar judges nothing (there is no cosine), so any hit on a common word would deliver. A row therefore has to carry two points of the query's terms counted on its own text: an identifier-shaped term (a file name, a symbol, a path) is two, an ordinary word one. The relevance cutoff still applies first.
+**The floor is the channel's own.** On a keyword-only read the assembler's relevance cutoff cannot be the floor (it always keeps the top row) and the no-answer bar judges nothing (there is no cosine), so any hit on a common word would deliver. A row therefore has to carry, counted on its own text, one distinctive term of the query (an identifier-shaped or file-name-shaped term of at least 3 characters, matched on word boundaries) or three distinct ordinary words, with a short list of generic development words (fix, test, build, run, update, docs, fail, error, change, add, remove, code, file, go, make) never counted, so "fix the tests" delivers nothing from a store full of workflow memories. The relevance cutoff still applies first.
 
 **The session's allowance is one ledger.** The host caps a hook's `additionalContext` at 10,000 characters and replaces an over-limit block by a 2,000-character preview, so the session-start block and the deliveries share 10,000 bytes. The session-start block writes the first entry (the rows it rendered and the bytes it spent); a marker with no such entry assumes the start spent its whole 9,000-byte cap. One delivery is at most 1,500 bytes and at most what is left.
 

@@ -52,12 +52,16 @@ const (
 	workMomentRowBytes = 240
 	// workMomentTerms is how many distinctive terms make the keyword query.
 	workMomentTerms = 10
-	// workMomentFloor is the keyword floor: an identifier-shaped term that a row
-	// contains is worth 2, a content word 1, and a row needs at least this much.
-	// One identifier (a file name, a symbol) or two distinct words clears it;
-	// one ordinary word never does. The assembler's relevance cutoff cannot be
-	// the floor on a keyword-only read, because it always keeps the top row.
-	workMomentFloor = 2
+	// workMomentFloorWords is the keyword floor for a row that matches no
+	// distinctive term: it needs this many DISTINCT ordinary words in common with
+	// the query, not counting the generic development words below. A row that
+	// contains one distinctive term (an identifier, a file name) clears it alone.
+	// The assembler's relevance cutoff cannot be the floor on a keyword-only
+	// read, because it always keeps the top row.
+	workMomentFloorWords = 3
+	// workMomentMinDistinctive is the shortest identifier or file-name term that
+	// counts as distinctive: a bare "3" or "v1" names too many rows.
+	workMomentMinDistinctive = 3
 	// workMomentEditTextTerms bounds the identifiers taken from an edit's text.
 	workMomentEditTextTerms = 8
 )
@@ -215,7 +219,7 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 			withhold(it, reasonUnclaimableID)
 		case state.delivered[it.ID]:
 			withhold(it, reasonAlreadyDelivered)
-		case keywordScore(it, terms) < workMomentFloor:
+		case !clearsKeywordFloor(it, terms):
 			withhold(it, reasonBelowKeywordFloor)
 		case len(delivered) >= workMomentMaxRows:
 			withhold(it, reasonWorkingMomentRowLimit)
@@ -349,28 +353,52 @@ func editTerms(in workMomentInput) []memory.QueryTerm {
 	return terms
 }
 
-// keywordScore is how much of the query a row carries, counted on the row's own
-// text: 2 for each identifier-shaped term it contains, 1 for each content word
-// it contains as a whole word.
-func keywordScore(it assemble.Item, terms []memory.QueryTerm) int {
+// genericWords are the development words every project's memories and every
+// working message share ("fix the tests", "go build fails"). They are real words
+// and a memory may say them, but matching one says nothing about WHICH memory is
+// wanted, so they never count toward the ordinary-word floor.
+var genericWords = map[string]bool{
+	"fix": true, "fixes": true, "fixed": true, "test": true, "tests": true,
+	"testing": true, "build": true, "builds": true, "run": true, "runs": true,
+	"update": true, "updates": true, "docs": true, "doc": true, "fail": true,
+	"fails": true, "failed": true, "failing": true, "failure": true,
+	"error": true, "errors": true, "change": true, "changes": true,
+	"add": true, "remove": true, "code": true, "file": true, "files": true,
+	"go": true, "make": true,
+}
+
+// clearsKeywordFloor reports whether a row matches the query strongly enough to
+// be worth a delivery, counted on the row's own text: at least one distinctive
+// term (an identifier-shaped or file-name term, matched on word boundaries), or
+// at least workMomentFloorWords distinct ordinary words as whole words, generic
+// development words excluded.
+func clearsKeywordFloor(it assemble.Item, terms []memory.QueryTerm) bool {
+	distinctive, words := keywordMatch(it, terms)
+	return distinctive || words >= workMomentFloorWords
+}
+
+// keywordMatch counts what the row carries of the query: whether any distinctive
+// term matched, and how many distinct non-generic ordinary words did.
+func keywordMatch(it assemble.Item, terms []memory.QueryTerm) (distinctive bool, words int) {
 	text := strings.ToLower(it.Content + " " + strings.Join(it.Tags, " "))
-	words := map[string]bool{}
+	have := map[string]bool{}
 	isWord := func(r rune) bool { return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 0x7f }
 	for _, w := range strings.FieldsFunc(text, func(r rune) bool { return !isWord(r) }) {
-		words[w] = true
+		have[w] = true
 	}
-	score := 0
+	counted := map[string]bool{}
 	for _, t := range terms {
 		low := strings.ToLower(t.Text)
 		if t.Identifier {
-			if containsBounded(text, low) {
-				score += 2
+			if len(low) >= workMomentMinDistinctive && containsBounded(text, low) {
+				distinctive = true
 			}
-		} else if words[low] {
-			score++
+		} else if have[low] && !genericWords[low] && !counted[low] {
+			counted[low] = true
+			words++
 		}
 	}
-	return score
+	return distinctive, words
 }
 
 // containsBounded reports whether text holds term with no letter or digit
