@@ -124,6 +124,15 @@ var gitOverridingVars = []string{
 	// they still supply a key the checkout does not carry — and a repository
 	// with no origin of its own is exactly the ordinary case for a project
 	// bound before its remote was recorded.
+	//
+	// What dropping these three costs is stated rather than hidden: they are
+	// also the supported way to RELOCATE that config — a container or a CI
+	// sandbox pointing the global at a file of its own. Dropped, the child falls
+	// back to $HOME/.gitconfig and /etc/gitconfig, which is where safe.directory
+	// normally lives anyway, so a checkout owned by another uid still resolves.
+	// One whose safe.directory was parked only in the relocated file stops
+	// resolving and both detectors answer "". The alternative is a parent that
+	// can name the global file, so the pointers go.
 	"GIT_CONFIG",
 	"GIT_CONFIG_GLOBAL",
 	"GIT_CONFIG_SYSTEM",
@@ -158,11 +167,11 @@ func isGitOverriding(name string) bool {
 }
 
 // withoutGitOverrides returns vars minus every inherited git variable that can
-// relocate the repository or replace its configuration. It keeps everything
-// else, including the git variables that are not about location or config:
-// GIT_AUTHOR_NAME and friends name a commit, and PATH and HOME decide which git
-// runs at all, so dropping them would break the child rather than answer a
-// different question.
+// relocate the repository or replace the file its configuration is read from. It
+// keeps everything else, including the git variables that are not about location
+// or config: GIT_AUTHOR_NAME and friends name a commit, and PATH and HOME decide
+// which git runs at all, so dropping them would break the child rather than
+// answer a different question.
 func withoutGitOverrides(vars []string) []string {
 	out := make([]string, 0, len(vars))
 	for _, kv := range vars {
@@ -176,8 +185,8 @@ func withoutGitOverrides(vars []string) []string {
 }
 
 // GitCommand builds a git child process that does not inherit the git variables
-// that can relocate the repository or replace its configuration. Every git child
-// Ghost runs goes through here — TopLevel, DetectRemote and
+// that can relocate the repository or replace the file its configuration is read
+// from. Every git child Ghost runs goes through here — TopLevel, DetectRemote and
 // internal/reflection's commit log — so the -C directory a caller passes is the
 // only input that decides which repository answers, and a parent that carries
 // GIT_DIR cannot rename the one it gets, nor can GIT_CONFIG_PARAMETERS name a
@@ -185,8 +194,14 @@ func withoutGitOverrides(vars []string) []string {
 //
 // The scrub is deliberately narrow. A location variable is dropped because it
 // answers a question the caller already answered with -C, and a config variable
-// is dropped because it answers a question the checkout's own config already
-// answers; in both cases a value inherited from a hook overrides that answer.
+// is dropped because it names a config FILE for a question the checkout's own
+// config already answers; a value inherited from a hook overrides that answer in
+// both cases. What the scrub does NOT reach is stated with the same precision: the checkout's own .git/config,
+// and the user's own global and system config. `git config --get` reads local
+// first, so the checkout's own value still wins, and when the checkout carries
+// none the user's own $HOME/.gitconfig answers — the answer git gives at the
+// user's own shell, which is not something a parent process can point anywhere.
+//
 // Everything else the git child needs is passed through untouched, so the child
 // behaves exactly as the caller asked and no more.
 func GitCommand(ctx context.Context, args ...string) *exec.Cmd {

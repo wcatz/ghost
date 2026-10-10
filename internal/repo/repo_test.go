@@ -315,9 +315,13 @@ func TestInheritedGitConfigOverridesAreIgnored(t *testing.T) {
 	// repository that carries its own origin wins over a global one — so the case
 	// that matters is a checkout whose own config does not carry one, which is
 	// also the ordinary case for a project bound before its origin was recorded.
+	// HOME is emptied so the only global config that could answer is the one the
+	// pointer variables name, and those are dropped: the assertion is about the
+	// scrub and not about whatever this host's own global config happens to hold.
 	noOrigin := filepath.Join(root, "no-origin")
 	gitIn(t, noOrigin, "")
 	t.Run("global and system supply a remote the checkout does not carry", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
 		t.Setenv("GIT_CONFIG_GLOBAL", evil)
 		t.Setenv("GIT_CONFIG_SYSTEM", evil)
 		if got := DetectRemote(noOrigin); got != "" {
@@ -333,6 +337,71 @@ func TestInheritedGitConfigOverridesAreIgnored(t *testing.T) {
 		setConfigOverrides(t)
 		answersBoth(t)
 	})
+}
+
+// TestTheDroppedConfigFilePointersFallBackToTheUsersOwnConfig pins the one thing
+// dropping GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM costs, so a later change cannot
+// trade it away unnoticed. Those variables are also the supported way to RELOCATE
+// the config git reads — a container or CI sandbox pointing the global at a file of
+// its own — and the setting parked there most often is safe.directory, which is
+// what lets git read a checkout owned by another uid at all. Dropped, the child
+// must fall back to the user's own files, which is where that setting normally
+// lives; a fallback to nothing would silently cost every such checkout its
+// repository identity on both detectors.
+func TestTheDroppedConfigFilePointersFallBackToTheUsersOwnConfig(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	noOrigin := filepath.Join(root, "no-origin")
+	gitIn(t, target, "git@example.com:target/repo.git")
+	gitIn(t, noOrigin, "")
+	targetRemote := "git@example.com:target/repo.git"
+	ownRemote := "git@example.com:own/global.git"
+	pointerRemote := "git@example.com:pointer/global.git"
+
+	// The user's own global config, reached through HOME.
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"),
+		[]byte("[remote \"origin\"]\n\turl = "+ownRemote+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The file the pointer variables name, as a sandbox would set it up.
+	pointer := filepath.Join(t.TempDir(), "relocated.config")
+	if err := os.WriteFile(pointer,
+		[]byte("[remote \"origin\"]\n\turl = "+pointerRemote+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+
+	// Premise, asked of git the same way the product asks it but BEFORE the
+	// pointers are installed, so it is about this host rather than about the
+	// scrub: git here reads $HOME/.gitconfig as the global config. A host where
+	// it does not (a HOME git ignores, an empty global) cannot observe the
+	// fallback, so the case is skipped rather than asserted vacuously.
+	out, err := GitCommand(context.Background(), "-C", noOrigin,
+		"config", "--get", "remote.origin.url").Output()
+	if err != nil || strings.TrimSpace(string(out)) != ownRemote {
+		t.Skipf("git on this host does not read $HOME/.gitconfig (out=%q err=%v), "+
+			"so the fallback is not a question it can answer", strings.TrimSpace(string(out)), err)
+	}
+
+	t.Setenv("GIT_CONFIG_GLOBAL", pointer)
+	t.Setenv("GIT_CONFIG_SYSTEM", pointer)
+
+	if got := DetectRemote(noOrigin); got != ownRemote {
+		t.Errorf("DetectRemote = %q, want the user's own global config to answer: "+
+			"a dropped pointer must fall back, or a safe.directory parked in a relocated "+
+			"file stops every dubiously-owned checkout resolving", got)
+	}
+	// The checkout's own config still outranks the user's global one, so the
+	// fallback only ever answers for a repository that is silent.
+	if got := DetectRemote(target); got != targetRemote {
+		t.Errorf("DetectRemote = %q, want the checkout's own remote", got)
+	}
 }
 
 // TestWithoutGitOverridesKeepsOtherVariables: the scrub is narrow, and a scrub
