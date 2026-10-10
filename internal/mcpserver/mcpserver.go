@@ -1836,7 +1836,8 @@ func (s *Server) registerTools() {
 			// The query-mode no-answer bar (#955): a block whose best vector
 			// cosine is below it is withheld and the answer says so. 0 leaves it
 			// off.
-			NoAnswerCosine: s.contextCfg.NoAnswerCosine,
+			NoAnswerCosine:  s.contextCfg.NoAnswerCosine,
+			NoAnswerBarNote: s.contextCfg.NoAnswerBarNote,
 			// The retrieval record (#646). Set here and not inside the assembler,
 			// because this is the only place that knows the session the call
 			// arrived on — and the assembler writes the row, so nothing about the

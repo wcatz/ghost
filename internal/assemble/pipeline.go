@@ -94,6 +94,10 @@ type pipeline struct {
 	// whose best match cleared the bar. The abstention sentence reads it so the
 	// caller sees the score that was judged, not only that one was.
 	noAnswer *noAnswerVerdict
+	// exactCosine holds the stored-embedding cosine of the rows the vector leg's
+	// list did not carry, when the no-answer bar is on and the retriever can read
+	// them. A row absent from it has no comparable cosine.
+	exactCosine map[string]float64
 	// droppedByBound counts the same removals by WHICH cap in stage 9 cut the
 	// row, because the caps have different remedies: a row-count cap is fixed by
 	// raising the limit and a content-byte cap is not. One map for the stage and
@@ -1225,6 +1229,9 @@ type noAnswerVerdict struct {
 //     failed) or no row carries a cosine, the step passes the block through:
 //     refusing every answer on a machine with no embedder would be the rule
 //     misreading its own blind spot as a verdict.
+//   - Only a row that carries a cosine is ever withheld. A row without one (a
+//     keyword hit on a memory that was never embedded) passes, and a block that
+//     still holds one is not "nothing cleared the bar".
 //   - A pinned row is never withheld. A pin is a slot guarantee (#936) and a
 //     step that dropped a pinned row would take the guarantee back. Pinned rows
 //     are not judged either: their cosine says nothing about whether the REST of
@@ -1245,6 +1252,14 @@ type noAnswerVerdict struct {
 func runNoAnswer(p *pipeline) {
 	in := len(p.rows)
 	bar := p.req.NoAnswerCosine
+	// A bar the configuration turned off (an embedding model the default was not
+	// measured on) is recorded in the trace, so a reader can tell "off because
+	// unmeasured" from "off because nobody set it". Trace only: the block, its
+	// notes and its response are those of a pipeline without the step.
+	if !p.passive && bar <= 0 && p.req.NoAnswerBarNote != "" {
+		p.trace.record(stageNoAnswer, in, in, nil, p.req.NoAnswerBarNote)
+		return
+	}
 	if p.passive || bar <= 0 || in == 0 || !p.vectorLegInPlay() {
 		p.trace.record(stageNoAnswer, in, in, nil)
 		return
@@ -1252,12 +1267,13 @@ func runNoAnswer(p *pipeline) {
 	top, judged := -1.0, false
 	for i := range p.rows {
 		c := p.rows[i]
-		if c.Pinned || c.VectorScore < 0 {
+		cos := p.rowCosine(c)
+		if c.Pinned || cos < 0 {
 			continue
 		}
 		judged = true
-		if c.VectorScore > top {
-			top = c.VectorScore
+		if cos > top {
+			top = cos
 		}
 	}
 	if !judged || top >= bar {
@@ -1271,7 +1287,10 @@ func runNoAnswer(p *pipeline) {
 	var dropped []string
 	for i := range p.rows {
 		c := p.rows[i]
-		if c.Pinned {
+		// A row with no cosine was never judged, so it is never withheld: an
+		// exact keyword hit on a memory that was never embedded carries the -1
+		// sentinel, and the bar says nothing about it.
+		if c.Pinned || p.rowCosine(c) < 0 {
 			keptRows = append(keptRows, c)
 			keptItems = append(keptItems, p.items[i])
 			continue
@@ -1282,8 +1301,12 @@ func runNoAnswer(p *pipeline) {
 		p.trace.decide(c.ID, c.ProjectID, stageNoAnswer, reasonNothingClearedBar, c.Score)
 	}
 	p.rows, p.items = keptRows, keptItems
-	p.noAnswer = &noAnswerVerdict{top: top, bar: bar, withheld: len(dropped)}
 
+	if len(keptRows) == 0 {
+		p.noAnswer = &noAnswerVerdict{top: top, bar: bar, withheld: len(dropped)}
+	} else {
+		p.noAnswer = nil
+	}
 	note := noAnswerNote(top, bar, len(dropped))
 	p.blockNotes = append(p.blockNotes, note)
 	p.trace.record(stageNoAnswer, in, len(keptRows), dropped, note)
@@ -1292,7 +1315,7 @@ func runNoAnswer(p *pipeline) {
 // noAnswerNote is the step's block statement: the best cosine, the bar and how
 // many rows were withheld.
 func noAnswerNote(top, bar float64, n int) string {
-	return fmt.Sprintf("no-answer bar: the best vector match scored cosine %.3f, below the %.3f bar, so %d row(s) were withheld",
+	return fmt.Sprintf("no-answer bar: the best vector match scored cosine %.3f, below the %.3f bar, so %d row(s) that carry a cosine were withheld",
 		top, bar, n)
 }
 

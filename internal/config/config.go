@@ -140,7 +140,34 @@ const DefaultRelevanceCutoff float64 = 0.63
 //
 // The number is chosen from the `ghost bench --no-answer-sweep` table in
 // docs/benchmarks.md, which also shows the two rules that were not built.
+//
+// It was measured on ONE embedding model, DefaultEmbeddingModel, and a cosine
+// is a property of the model that produced it. So the default applies only while
+// embedding.model is that model: with any other model and no explicit
+// context.no_answer_cosine (file or environment), the effective bar is 0 and the
+// retrieval trace says so. An explicit value is always honoured.
 const DefaultNoAnswerCosine float64 = 0.62
+
+// DefaultEmbeddingModel is the compiled value of embedding.model, and the model
+// DefaultNoAnswerCosine was measured against.
+const DefaultEmbeddingModel = "nomic-embed-text:v1.5"
+
+// noAnswerKey is the config key whose explicitness decides the model tie.
+const noAnswerKey = "context.no_answer_cosine"
+
+// NoAnswerBarOffUnmeasured is the note carried when the model tie turned the bar
+// off, so the retrieval trace can say why a bar that ships on is not applied.
+const NoAnswerBarOffUnmeasured = "no_answer bar off: unmeasured embedding model"
+
+// resolveNoAnswerBar applies the model tie. explicit says the user set the key in
+// a config file or the environment.
+func resolveNoAnswerBar(cfg *Config, explicit bool) {
+	if explicit || cfg.Embedding.Model == DefaultEmbeddingModel {
+		return
+	}
+	cfg.Context.NoAnswerCosine = 0
+	cfg.Context.NoAnswerBarNote = NoAnswerBarOffUnmeasured
+}
 
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
@@ -213,6 +240,10 @@ type ContextConfig struct {
 	// a block weak while still showing it. It is a float64 (not abstain_cosine's
 	// float32) so the generic float parser lands on the field's own type.
 	NoAnswerCosine float64 `koanf:"no_answer_cosine"`
+	// NoAnswerBarNote is not a setting: it is set by Load when the bar was turned
+	// off because embedding.model is not the model the default was measured on and
+	// the user set no explicit bar. The assembler records it in the trace.
+	NoAnswerBarNote string `koanf:"-"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -378,7 +409,7 @@ type ObsidianConfig struct {
 var defaults = map[string]interface{}{
 	"embedding.enabled":                        true,
 	"embedding.ollama_url":                     "http://localhost:11434",
-	"embedding.model":                          "nomic-embed-text:v1.5",
+	"embedding.model":                          DefaultEmbeddingModel,
 	"embedding.dimensions":                     768,
 	"reflection.auto_resolve":                  false,
 	"reflection.auto_supersede":                false,
@@ -433,6 +464,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// The bar's default is applied after the layers load, because whether it
+	// applies depends on the embedding model, and "the user set it" must be told
+	// apart from "the default is there". Drop it here so an explicit file or
+	// environment value is the only way the key can exist afterwards.
+	k.Delete(noAnswerKey)
+
 	parser := yaml.Parser()
 
 	// Layer 2: /etc/ghost/config.yaml (system-wide).
@@ -457,6 +494,11 @@ func Load() (*Config, error) {
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
+	explicitBar := k.Exists(noAnswerKey)
+	if !explicitBar {
+		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
+	}
+	resolveNoAnswerBar(cfg, explicitBar)
 	if err := checkScopeValues(cfg); err != nil {
 		return nil, err
 	}
@@ -684,7 +726,7 @@ func defaultConfig() *Config {
 		Embedding: EmbeddingConfig{
 			Enabled:    true,
 			OllamaURL:  "http://localhost:11434",
-			Model:      "nomic-embed-text:v1.5",
+			Model:      DefaultEmbeddingModel,
 			Dimensions: 768,
 		},
 		Reflection: ReflectionConfig{
@@ -715,6 +757,7 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		warnf("compiled defaults are unusable: %v", err)
 		return nil, false
 	}
+	k.Delete(noAnswerKey)
 	if err := applyEnv(k); err != nil {
 		warnf("%v — those variables were skipped", err)
 	}
@@ -723,6 +766,11 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		warnf("%v — using the built-in defaults", err)
 		return nil, false
 	}
+	explicitBar := k.Exists(noAnswerKey)
+	if !explicitBar {
+		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
+	}
+	resolveNoAnswerBar(cfg, explicitBar)
 	return cfg, true
 }
 

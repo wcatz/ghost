@@ -1,6 +1,7 @@
 package assemble
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -257,5 +258,115 @@ func TestNoAnswerBarIsValidated(t *testing.T) {
 		if _, err := Run(t.Context(), &fakeRetriever{set: hybridSet()}, req); err == nil {
 			t.Errorf("Run accepted NoAnswerCosine %v", bad)
 		}
+	}
+}
+
+// TestNoAnswerKeepsARowThatCarriesNoCosine: a partially embedded store returns an
+// exact keyword hit on a memory that was never embedded (VectorScore -1) beside a
+// weakly similar embedded row. The bar judges only rows that carry a cosine, so
+// the unembedded hit survives, the weak embedded row goes, and the answer is not
+// the "nothing cleared the bar" abstention.
+func TestNoAnswerKeepsARowThatCarriesNoCosine(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	res := noAnswerRun(t, 0.62, hybridSet(kw, cosRow("v1", 0.50)))
+
+	if !eq(itemIDs(res.Items), []string{"kw"}) {
+		t.Fatalf("items = %v, want only the unembedded keyword hit", itemIDs(res.Items))
+	}
+	if res.Outcome == OutcomeEmpty || res.Reason == reasonNothingClearedBar {
+		t.Errorf("outcome = %q reason = %q: a block holding an unjudged row is not 'nothing cleared the bar'", res.Outcome, res.Reason)
+	}
+	if strings.Contains(res.Response, "No memory answers this") || strings.Contains(res.Abstention, "nothing cleared the bar") {
+		t.Errorf("the response carries the abstention sentence:\n%s", res.Response)
+	}
+	if got := decisionsAt(res, stageNoAnswer); len(got) != 1 || got[0].ID != "v1" {
+		t.Errorf("no-answer decisions = %+v, want only the scored weak row v1", got)
+	}
+}
+
+// TestNoAnswerMixedBlockWithAStrongCosineIsUnchanged: the same mixed block where
+// the embedded row clears the bar is byte-identical to the bar off.
+func TestNoAnswerMixedBlockWithAStrongCosineIsUnchanged(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	rows := []memory.Candidate{kw, cosRow("v1", 0.70)}
+	on := noAnswerRun(t, 0.62, hybridSet(rows...))
+	off := noAnswerRun(t, 0, hybridSet(rows...))
+	if !eq(itemIDs(on.Items), []string{"kw", "v1"}) || on.Response != off.Response {
+		t.Errorf("a mixed block that cleared the bar changed:\n on: %q\noff: %q", on.Response, off.Response)
+	}
+}
+
+// TestNoAnswerBarOffForAnUnmeasuredModelIsRecordedInTheTrace: a bar the
+// configuration turned off carries its reason in the trace and nothing else.
+func TestNoAnswerBarOffForAnUnmeasuredModelIsRecordedInTheTrace(t *testing.T) {
+	rows := []memory.Candidate{cosRow("a", 0.30)}
+	req := noAnswerRequest(0)
+	req.NoAnswerBarNote = "no_answer bar off: unmeasured embedding model"
+	res := run(t, &fakeRetriever{set: hybridSet(rows...)}, req)
+	plain := noAnswerRun(t, 0, hybridSet(rows...))
+
+	if st := stageTraceFor(res, stageNoAnswer); len(st.Notes) != 1 || !strings.Contains(st.Notes[0], "unmeasured embedding model") {
+		t.Errorf("stage notes = %v, want the unmeasured-model note", st.Notes)
+	}
+	if res.Response != plain.Response || len(res.Items) != 1 {
+		t.Errorf("the note changed the block:\n%q\nvs\n%q", res.Response, plain.Response)
+	}
+}
+
+// cosineRetriever is a retriever that can also read a row's own stored cosine, as
+// *memory.Store can. A row absent from `stored` has no embedding.
+type cosineRetriever struct {
+	fakeRetriever
+	stored map[string]float32
+}
+
+func (c *cosineRetriever) EmbeddingCosines(_ context.Context, ids []string, _ []float32) (map[string]float32, error) {
+	out := map[string]float32{}
+	for _, id := range ids {
+		if v, ok := c.stored[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
+// TestNoAnswerJudgesAKeywordOnlyRowByItsStoredCosine: the vector leg's list does
+// not carry every embedded row (a keyword hit rides a reserved slot whatever its
+// cosine), so a keyword-only row is judged by its own stored cosine. Here every
+// row is embedded and weak, so the block is withheld; this is the common case on a
+// fully embedded store.
+func TestNoAnswerJudgesAKeywordOnlyRowByItsStoredCosine(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v1", 0.50))}, stored: map[string]float32{"kw": 0.30}}
+	res := run(t, r, noAnswerRequest(0.62))
+	if len(res.Items) != 0 || res.Reason != reasonNothingClearedBar {
+		t.Errorf("items = %v reason = %q, want the whole block withheld: both rows are embedded and weak", itemIDs(res.Items), res.Reason)
+	}
+}
+
+// TestNoAnswerKeepsAnUnembeddedKeywordRowWhenTheRetrieverCanRead: the row is absent
+// from the stored cosines (never embedded), so it is never judged and survives.
+func TestNoAnswerKeepsAnUnembeddedKeywordRowWhenTheRetrieverCanRead(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v1", 0.50))}, stored: map[string]float32{}}
+	res := run(t, r, noAnswerRequest(0.62))
+	if !eq(itemIDs(res.Items), []string{"kw"}) || res.Reason == reasonNothingClearedBar {
+		t.Errorf("items = %v reason = %q, want the unembedded keyword hit kept", itemIDs(res.Items), res.Reason)
+	}
+}
+
+// TestNoAnswerStrongStoredCosineRescuesTheBlock: a keyword-only row whose stored
+// cosine clears the bar is an answer, so nothing is withheld.
+func TestNoAnswerStrongStoredCosineRescuesTheBlock(t *testing.T) {
+	kw := cosRow("kw", -1)
+	kw.FTSRank = 0
+	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v1", 0.50))}, stored: map[string]float32{"kw": 0.80}}
+	res := run(t, r, noAnswerRequest(0.62))
+	if len(res.Items) != 2 {
+		t.Errorf("items = %v, want both rows: the keyword hit's own cosine clears the bar", itemIDs(res.Items))
 	}
 }

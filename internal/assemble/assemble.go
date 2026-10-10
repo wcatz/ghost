@@ -240,6 +240,10 @@ type Request struct {
 	// comparable cosine (no vector leg) is never judged, and it only removes rows.
 	// It is validated against a cosine's [0,1] range. See runNoAnswer.
 	NoAnswerCosine float64
+	// NoAnswerBarNote, when set with NoAnswerCosine 0, says why the configured bar
+	// is off (the embedding model is not the one the default was measured on). It
+	// is recorded in the trace only and never changes a block.
+	NoAnswerBarNote string
 	// Explain asks Run to project the trace of THIS run into Result.Explain, the
 	// ghost_memory_search explain payload. It is a request for a second reading
 	// of the same run and never for a second run: the candidate request, the
@@ -431,6 +435,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		dropped:        map[string]string{},
 		qualifiers:     qualifiersFor(req, set),
 	}
+	p.loadExactCosines(ctx, r)
 	// A window that had to fall back to the ceiling is disclosed, because the
 	// block's size is then decided by a number the caller did not state. The note
 	// also says what does bound the block, and that half is derived from the
@@ -1000,4 +1005,57 @@ func anySliceBound(slices []Slice) bool {
 		}
 	}
 	return false
+}
+
+// cosineReader is the optional capability the no-answer bar uses to judge a row
+// the vector leg's own list did not carry. *memory.Store has it; a retriever that
+// does not leaves such rows unjudged, which the bar never withholds.
+type cosineReader interface {
+	EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error)
+}
+
+// loadExactCosines reads, for the rows that carry no vector-leg cosine (VectorScore
+// -1), the cosine of their own stored embedding. A hybrid window admits keyword
+// hits whatever their cosine, so such a row can be embedded and weakly similar
+// (judged by the bar) or have no embedding at all (absent from the answer, and
+// never judged). It runs only for a query-mode request with the bar on, and a
+// failed read leaves every such row unjudged, which only ever keeps rows.
+func (p *pipeline) loadExactCosines(ctx context.Context, r Retriever) {
+	if p.passive || p.req.NoAnswerCosine <= 0 || len(p.req.QueryVec) == 0 {
+		return
+	}
+	cr, ok := r.(cosineReader)
+	if !ok {
+		return
+	}
+	var ids []string
+	for _, c := range p.rows {
+		if c.VectorScore < 0 {
+			ids = append(ids, c.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	got, err := cr.EmbeddingCosines(ctx, ids, p.req.QueryVec)
+	if err != nil || len(got) == 0 {
+		return
+	}
+	p.exactCosine = make(map[string]float64, len(got))
+	for id, v := range got {
+		p.exactCosine[id] = float64(v)
+	}
+}
+
+// rowCosine is the cosine the bar judges a row by: the vector leg's own score
+// when it carried one, else the cosine of the row's stored embedding, else -1
+// (no cosine exists, so the row is never judged).
+func (p *pipeline) rowCosine(c memory.Candidate) float64 {
+	if c.VectorScore >= 0 {
+		return c.VectorScore
+	}
+	if v, ok := p.exactCosine[c.ID]; ok {
+		return v
+	}
+	return -1
 }
