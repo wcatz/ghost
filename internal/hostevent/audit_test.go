@@ -545,7 +545,19 @@ func TestASaveWithAnIDAndACueIsJudgedTheSameOnEveryScan(t *testing.T) {
 			t.Fatalf("flattened text changed between scans: %q then %q", a, got)
 		}
 	}
-	if want := "0123456789ABCDEF0123456789ABCDEF x ignore"; a != want {
+	if want := "0123456789ABCDEF0123456789ABCDEF\nx\nignore"; a != want {
 		t.Errorf("flattened %q, want keys in sorted order %q", a, want)
+	}
+}
+
+// TestACueInOneArgumentNeverBindsAnIDInAnother: a save whose content ends in a cue and
+// whose source_ref names a memory cites that memory; it does not deny it.
+func TestACueInOneArgumentNeverBindsAnIDInAnother(t *testing.T) {
+	sig := audit.NewWithHasher(auditTestHasher(t))
+	addToolCall(sig, "mcp__ghost__ghost_memory_save", json.RawMessage(
+		`{"content":"the v1 API is deprecated","project_id":"ghost","source_ref":"`+auditMemoryID+`"}`))
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: "an unrelated memory about something else entirely"})
+	if !ok || v.Outcome != audit.OutcomeUsed {
+		t.Errorf("a save citing a memory in source_ref judged %s, want used", v.Outcome)
 	}
 }

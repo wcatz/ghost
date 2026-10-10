@@ -177,11 +177,13 @@ func walkArgText(v any) string {
 				parts = append(parts, s)
 			}
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(parts, "\n")
 	case map[string]any:
-		// Sorted by key: the text is read for word adjacency (a negation cue bound to
-		// an id in a save), so its order must be a function of the arguments alone and
-		// not of Go's randomized map iteration.
+		// Sorted by key, so the text is a function of the arguments alone and not of
+		// Go's randomized map iteration. Joined with a newline, which the audit reads
+		// as a sentence boundary: a negation cue binds an id only when both stand in the
+		// same argument, never across two (a content ending "is deprecated" beside a
+		// source_ref that names a memory).
 		keys := make([]string, 0, len(t))
 		for k := range t {
 			keys = append(keys, k)
@@ -193,7 +195,7 @@ func walkArgText(v any) string {
 				parts = append(parts, s)
 			}
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(parts, "\n")
 	}
 	return ""
 }
