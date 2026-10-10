@@ -269,18 +269,45 @@ func TestFormatResultsCarriesTheFusionGaps(t *testing.T) {
 // docs/benchmarks.md promise a report that nothing produces.
 func TestFormatResultsCarriesTheTopRowShares(t *testing.T) {
 	results := []Result{
-		{Condition: CondHybrid, Queries: 2, Recall1: 0.5, Recall5: 0.7, Recall10: 0.8, MRR10: 0.9, NDCG10: 0.8, TopRowRelevant: 0.8, TopRowBestLabelled: 0.6, Recall1Ceiling: 0.6},
-		{Condition: CondVector, Queries: 2, Recall1: 0.4, Recall5: 0.6, Recall10: 0.7, MRR10: 0.8, NDCG10: 0.7, TopRowRelevant: 0.7, TopRowBestLabelled: 0.5, Recall1Ceiling: 0.6},
-		{Condition: CondFTS, Queries: 2, Recall1: 0.3, Recall5: 0.5, Recall10: 0.6, MRR10: 0.7, NDCG10: 0.6, TopRowRelevant: 0.6, TopRowBestLabelled: 0.4, Recall1Ceiling: 0.6},
+		{Condition: CondHybrid, Queries: 2, Recall1: 0.5, Recall5: 0.7, Recall10: 0.8, MRR10: 0.9, NDCG10: 0.8, TopRowRelevant: 0.8, Top5Relevant: 0.95, TopRowBestLabelled: 0.6, Recall1Ceiling: 0.6},
+		{Condition: CondVector, Queries: 2, Recall1: 0.4, Recall5: 0.6, Recall10: 0.7, MRR10: 0.8, NDCG10: 0.7, TopRowRelevant: 0.7, Top5Relevant: 0.85, TopRowBestLabelled: 0.5, Recall1Ceiling: 0.6},
+		{Condition: CondFTS, Queries: 2, Recall1: 0.3, Recall5: 0.5, Recall10: 0.6, MRR10: 0.7, NDCG10: 0.6, TopRowRelevant: 0.6, Top5Relevant: 0.75, TopRowBestLabelled: 0.4, Recall1Ceiling: 0.6},
 	}
 	out := FormatResults(results)
 	if !strings.Contains(out, "top-row shares over the 2 answerable queries") {
 		t.Errorf("`ghost bench` output carries no top-row shares block, so the doc's promise is not runnable:\n%s", out)
 	}
-	for _, want := range []string{"top row relevant", "top row best-labelled", "relevant row in top 5", "R@1 ceiling on these labels"} {
+	// Each share has a distinct value per condition, so printing the wrong
+	// field fails here rather than passing on a label match.
+	for _, want := range []string{
+		"  top row relevant           hybrid       0.800\n",
+		"  top row best-labelled      hybrid       0.600\n",
+		"  relevant row in top 5      hybrid       0.950\n",
+		"  top row relevant           vector-only  0.700\n",
+		"  top row best-labelled      vector-only  0.500\n",
+		"  relevant row in top 5      vector-only  0.850\n",
+		"  top row relevant           fts-only     0.600\n",
+		"  top row best-labelled      fts-only     0.400\n",
+		"  relevant row in top 5      fts-only     0.750\n",
+		"  R@1 ceiling on these labels 0.600\n",
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("the shares block is present but %q is not:\n%s", want, out)
+			t.Errorf("the shares block lacks the exact line %q:\n%s", want, out)
 		}
+	}
+	// The pre-existing table is the exact prefix of the output, and the new
+	// block follows it before the graded-queries line.
+	table := fmt.Sprintf("%-14s %7s %7s %7s %8s %8s\n", "condition", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10")
+	for _, r := range results {
+		table += fmt.Sprintf("%-14s %7.3f %7.3f %7.3f %8.3f %8.3f\n", r.Condition, r.Recall1, r.Recall5, r.Recall10, r.MRR10, r.NDCG10)
+	}
+	if !strings.HasPrefix(out, table) {
+		t.Errorf("output does not start with the unchanged table:\n%s", out)
+	}
+	shares := strings.Index(out, "top-row shares over")
+	graded := strings.Index(out, "graded queries,")
+	if shares != len(table)+1 || graded < shares {
+		t.Errorf("the shares block is not directly after the table and before the graded-queries line (table %d, shares %d, graded %d)", len(table), shares, graded)
 	}
 	// A results slice with no scored queries prints none of it.
 	empty := []Result{{Condition: CondHybrid}}

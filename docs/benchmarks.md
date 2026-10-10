@@ -186,7 +186,7 @@ The R@1 column in the table above is **recall at 1** — the fraction of all rel
 
 On the v2 corpus, 163 of 220 queries carry 2–4 labelled rows, so a perfect ranking scores only about 0.599 at R@1. That is the **R@1 ceiling**: the mean of 1/(labelled rows per query) over the answerable query set. Against that ceiling, the shipped hybrid R@1 of 0.520 is 87% of what is reachable, not 52%.
 
-`ghost bench` prints three additional lines per condition and the ceiling after the table, leaving the table itself unchanged:
+`ghost bench` prints a block of new lines after the table, before the "graded queries" line, leaving the table itself unchanged: three shares per condition and one ceiling.
 - **top row relevant** — the share of answerable queries whose first result is a relevant row.
 - **top row best-labelled** — the share whose first result carries the highest gain the query labels any row with (a tie for the best gain counts as best-labelled).
 - **relevant row in top 5** — the share of answerable queries with at least one relevant row among the first five results.
