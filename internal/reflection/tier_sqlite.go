@@ -248,7 +248,7 @@ var singleTargetRe = regexp.MustCompile(
 // singleRepoRe matches "<name> repo(sitory)" after the/in/from/to. The name is
 // checked against repoQuantifiers, so "from any repo" and "in every repo" stay
 // cross-repo language rather than naming a repository.
-var singleRepoRe = regexp.MustCompile(`\b(?:the|in|from|to)\s+([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
+var singleRepoRe = regexp.MustCompile(`\b(?:the|in|from|to)\s+(?:(?:the|our|your|their|my)\s+)?([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
 
 // hostedRepoRef reports whether lower holds a hosted repository reference: a
 // forge host followed by owner/name ("github.com/owner/repo"), or an scp-style
@@ -307,7 +307,7 @@ func hostedRepoRef(lower string) bool {
 var repoQuantifiers = map[string]bool{
 	"a": true, "an": true, "any": true, "every": true, "all": true, "each": true,
 	"other": true, "another": true, "this": true, "that": true, "same": true,
-	"which": true, "one": true, "whole": true, "entire": true, "git": true,
+	"which": true, "the": true, "our": true, "your": true, "their": true, "my": true, "one": true, "whole": true, "entire": true, "git": true,
 }
 
 // namesSingleTarget reports whether lower (already lowercased) names one

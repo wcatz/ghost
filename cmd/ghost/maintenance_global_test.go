@@ -357,3 +357,30 @@ func TestConsolidateGlobalDryRunDoesNotMigrateAStaleStore(t *testing.T) {
 		t.Fatalf("user_version = %d (err %v), the dry run migrated the store", v, err)
 	}
 }
+
+// A store written before the write-boundary guard can hold a credential in a
+// _global row. The listing a person reads before approving a fold withholds it.
+func TestConsolidateGlobalListingWithholdsACredentialInAPreGuardRow(t *testing.T) {
+	s, db, _ := preGuardStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for _, content := range []string{preGuardContent, preGuardContent + " today"} {
+		id, err := s.CreateFromCorpus(ctx, "_global", memory.Memory{Category: "gotcha", Content: content, Source: "reflection", Importance: 0.7})
+		if err != nil {
+			t.Fatalf("CreateFromCorpus: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-01-01 00:00:00' WHERE id = ?`, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+	}
+	var out bytes.Buffer
+	if err := consolidateGlobal(ctx, s, false, &out); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	if !strings.Contains(out.String(), "cluster 1") {
+		t.Fatalf("the fixture did not cluster, so nothing was printed to withhold:\n%s", out.String())
+	}
+	assertWithheld(t, "ghost maintenance consolidate-global", out.String())
+}

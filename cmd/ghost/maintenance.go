@@ -321,10 +321,10 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 		len(all), len(live), len(clusters), folded+len(clusters))
 	for i, c := range clusters {
 		outf("\ncluster %d: keep %s [%s, source %s] %s\n", i+1,
-			assemble.Token(c.Survivor.ID), assemble.Label(c.Survivor.Category), assemble.Label(c.Survivor.Source), assemble.Label(clipLine(c.Survivor.Content, 120)))
+			assemble.Token(c.Survivor.ID), assemble.Label(c.Survivor.Category), assemble.Label(c.Survivor.Source), assemble.Label(displayStored(c.Survivor.Content, c.Survivor.Category, 120)))
 		for _, f := range c.Folded {
 			outf("  fold %s [%s, source %s] %s\n",
-				assemble.Token(f.ID), assemble.Label(f.Category), assemble.Label(f.Source), assemble.Label(clipLine(f.Content, 120)))
+				assemble.Token(f.ID), assemble.Label(f.Category), assemble.Label(f.Source), assemble.Label(displayStored(f.Content, f.Category, 120)))
 		}
 	}
 	if len(clusters) == 0 {
@@ -342,13 +342,4 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	outf("\nfolded %d row(s) into %d survivor(s); %d row(s) saved during the run were left as they were\n",
 		folded, len(clusters), len(preserved))
 	return nil
-}
-
-// clipLine cuts s to at most n runes for a one-line listing.
-func clipLine(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "..."
 }

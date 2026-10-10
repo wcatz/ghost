@@ -271,6 +271,8 @@ func TestInferGlobalScope(t *testing.T) {
 		{"www host is the same repository host", "fact", "mirror www.github.com/wcatz/ghost across all repos", "project"},
 		{"bare forge host is not a repository", "fact", "mirror everything on github.com/ across all repos", "global"},
 		{"git@ without a remote path is not a repository", "fact", "ssh as git@ across all repos", "global"},
+		{"a determiner is not a repository name", "fact", "run the migrations from the repo across all repos", "global"},
+		{"our repo is not a repository name", "fact", "rebase in our repo before pushing across all projects", "global"},
 		{"from any repo is not a named repository", "fact", "deploy to infra cluster from any repo", "global"},
 		{"every repo is not a named repository", "fact", "run go vet in every repo on the dev machine", "global"},
 		{"a file path is not a repository", "fact", "edit cmd/ghost/main.go across all repos", "global"},

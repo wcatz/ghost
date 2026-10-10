@@ -1418,7 +1418,7 @@ build's schema is reported and left as it was. The fold goes through the same re
 uses: the rows are snapshotted first, each folded row's history ends in a `delete`
 naming the survivor, and its evidence is carried onto the survivor.
 
-Pinned, resolved, `manual`, `builtin` and `persistent` rows are never read by the
+Pinned, resolved, `manual`, `builtin` and `persistent` rows are never planned by the
 pass, so their text is never rewritten and they are never folded, including a
 pinned row that is a near-duplicate of a cluster. A row saved while the run is in
 flight is kept as it is.
