@@ -982,6 +982,10 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	dropped := []string(nil)
 	var fitNotes []string
 	prev := p.notes()
+	// Whether the framing alone is the excess, and whether that has been asked
+	// yet. It is asked ONCE, on the first over-cap iteration, and never re-asked:
+	// see framingIsTheExcess for why re-reading it is the bug.
+	var framingIsExcess, framingAsked bool
 
 	for {
 		// Re-derive everything a row or note drop can change, and nothing else.
@@ -1013,7 +1017,17 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		// be helped by cutting rows: the framing alone is the excess, and cutting
 		// every row would deliver nothing for no gain. Keep the rows, stop. Between
 		// the cap and the ceiling cutting still helps, so it carries on.
-		if p.req.Budget.Measure != nil && p.req.Budget.FramingCeiling > 0 && len(p.items) > 0 && p.req.Budget.Measure(nil, p.trace) >= p.req.Budget.FramingCeiling {
+		//
+		// Decided ONCE, from a framing measure that does not depend on the cuts —
+		// the framing is measured as it stands with EVERY row cut, which is the
+		// longest the cuts can make it. A check that re-read the framing each
+		// iteration would read a different question each time (see
+		// framingIsTheExcess).
+		if !framingAsked {
+			framingAsked = true
+			framingIsExcess = p.framingIsTheExcess()
+		}
+		if framingIsExcess {
 			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
 			p.trace.Notes = res.Notes
 			return res, nil
@@ -1063,6 +1077,49 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
 	p.trace.Notes = res.Notes
 	return res, nil
+}
+
+// framingIsTheExcess reports whether cutting rows cannot help this caller's own
+// render, so the rows are kept rather than cut for nothing: its framing, measured
+// with every row it holds cut, is at or over Budget.FramingCeiling.
+//
+// WHY THE MEASURE IS OF AN ALL-CUT BLOCK. A caller's framing is not independent
+// of the cuts it makes — the session-start block's count line gains a clause for
+// every row cut, so the framing grows as rows are removed. A check that read the
+// framing on every iteration would therefore ask a different question each time,
+// and the order of the two readings is the bug: a framing just under the ceiling
+// passes the first iteration, a row is cut, the clause that cut earned pushes the
+// framing over the ceiling, and the next iteration stops — leaving the block over
+// its cap with rows recorded as cut for nothing and a count line claiming the cut
+// kept it under the limit. Asking once, from the longest framing the cuts can
+// produce, makes the answer independent of how many rows happen to have been cut
+// when the question is asked.
+//
+// The longest framing is the all-cut one, and it is handed to Measure as a COPY
+// of the trace carrying a `response_fit` decision per row: that is the state a
+// caller's own measure reads as "every row was cut for size", and a decision per
+// row is the only thing this seam can tell it that with. The real trace is
+// untouched — a hypothetical cut recorded as a real one would name rows in the
+// retrieval record that this run never dropped.
+func (p *pipeline) framingIsTheExcess() bool {
+	if p.req.Budget.Measure == nil || p.req.Budget.FramingCeiling <= 0 || len(p.items) == 0 {
+		// No ceiling to be at, or no row to cut: cutting is not what makes this
+		// block too large either way, so the caps that do apply carry on below.
+		return false
+	}
+	return p.req.Budget.Measure(nil, p.allCutTrace()) >= p.req.Budget.FramingCeiling
+}
+
+// allCutTrace is a copy of the trace as it would stand if the fit pass cut every
+// row it holds: the state in which a caller's framing is longest, because each
+// cut adds to what its count line says. The real trace is not touched.
+func (p *pipeline) allCutTrace() *Trace {
+	t := *p.trace
+	t.Decisions = append(make([]Decision, 0, len(p.trace.Decisions)+len(p.items)), p.trace.Decisions...)
+	for _, it := range p.items {
+		t.decide(it.ID, it.ProjectID, stageResponseFit, reasonBudgetDropped, it.Score)
+	}
+	return &t
 }
 
 // vanished returns the notes that were in before and are not in after — the

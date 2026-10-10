@@ -2096,7 +2096,14 @@ and whose vector leg then failed.)
   itself cannot fit, `Run` returns `ErrResponseBudgetExceeded` rather than an
   outcome. A trim also suppresses the window caveat, which would otherwise blame
   the window for a shortfall the byte cap caused and advise raising a limit that
-  only makes the response larger. The window note an incomplete-coverage empty
+  only makes the response larger. Whether cutting can help at all is decided
+  ONCE, on the first over-cap iteration, and against the caller's framing as it
+  stands with every row cut — the longest its own count line can make it. A
+  caller's framing grows with its cuts, so a per-iteration reading of it asked a
+  different question each time: a framing just under the ceiling passed, the cut
+  that followed pushed the framing over it, and the pass stopped over the cap
+  with rows recorded as cut for nothing. Measured at its longest, the same
+  framing answers for every number of cuts. The window note an incomplete-coverage empty
   result carries names each knob the request actually set and no other: the item
   limit when one was set, the scope filter when one was set, and the category
   filter when one was set. An unfiltered hybrid search is the shipped default,
