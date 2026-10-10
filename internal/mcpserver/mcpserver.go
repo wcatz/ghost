@@ -100,6 +100,14 @@ var detectCallingSource = ai.DetectSource
 // MCP saves. Tests replace it to prove named saves never cross this boundary.
 var detectRemoteForSave = repo.DetectRemote
 
+// repoTopLevel is the process boundary that says which git checkout a directory
+// is inside.
+var repoTopLevel = repo.TopLevel
+
+// workingDirResolver is how New learns the server's directory; a test replaces it
+// so no suite depends on where it happens to run.
+var workingDirResolver = workingDirFromEnv
+
 // ensureProjectFor resolves or creates the project for a save and returns the
 // id the caller must write to, adding repository identity when the caller
 // identified it by a filesystem path.
@@ -108,8 +116,11 @@ var detectRemoteForSave = repo.DetectRemote
 // repository — but project_id is sometimes a filesystem path, and that is
 // exactly the shape that produced duplicate projects when a session changed
 // working directory. Only git can say whether two such paths are one
-// repository, so detection is confined to that case: an ordinary named save
-// never spawns a process. The test is memory.IsPathShaped rather than
+// repository, so detection is confined to that case: a named save that finds
+// its project already there never spawns a process. The one exception is a named
+// save that is about to CREATE a project: it asks git for the top level and the
+// remote of the server's own directory (two bounded invocations) so the project
+// can be recorded against that checkout (#957). The test is memory.IsPathShaped rather than
 // filepath.IsAbs, the same predicate Store.ResolveProject applies, so a
 // drive-relative Windows path — which IsAbs reports as relative — cannot be
 // treated as a name by the writer and as a path by the reader, which is how a
@@ -242,6 +253,29 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	if pathShaped {
 		remote = detectRemoteForSave(projectID)
 	}
+
+	// A save that CREATES a project from a name-shaped id (neither separator-bearing
+	// nor a drive-relative `C:repo`, the shape the reader calls a path) binds it to the checkout
+	// the server was started in, so the next session in that directory resolves it
+	// instead of printing the no-project block (#957). Never an existing project:
+	// resolvedID == "" is the gate, and the store's upsert would not move a path
+	// anyway. Never a checkout another project already claims, by path or by
+	// remote: binding a second name there would silently fold it into the first,
+	// so the claim test and the insert are one store transaction and a claim
+	// declines the bind rather than merging.
+	if resolvedID == "" && !pathShaped && !memory.IsPathShaped(projectID) {
+		if dir, dirRemote, ok := s.checkoutToBind(ctx); ok {
+			bound, err := s.store.BindNewProjectToCheckout(ctx, projectID, dir, projectID, dirRemote)
+			if err != nil {
+				return "", nil, err
+			}
+			if bound {
+				return projectID, nil, nil
+			}
+			// Claimed between the probe and the write: open it unbound below.
+		}
+	}
+
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
 		// resolution without the basename fallback. Going through its own
@@ -255,6 +289,53 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		projectID = resolvedID
 	}
 	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+}
+
+// checkoutToBind reports the directory a newly created name-shaped project is
+// recorded against, and the repository remote there, or ok=false when the save
+// must open the project unbound as it always did.
+//
+// The directory is the TOP LEVEL of the git checkout the server was started in,
+// physically resolved, never an arbitrary directory: a server started in /tmp,
+// /var, a download folder or a directory that merely holds checkouts is not in a
+// checkout at all, and a project recorded there with no remote would answer for
+// the whole subtree. A checkout that is the home directory or an ancestor of it
+// is declined for the same reason. Also declined: one the project-shape and
+// credential guards would refuse as a recorded path. A directory another project
+// already claims is declined by the store, inside the write transaction that
+// would record it, which is the only place that test can be made atomic.
+func (s *Server) checkoutToBind(ctx context.Context) (dir, remote string, ok bool) {
+	if s.workingDir == "" {
+		return "", "", false
+	}
+	dir = repoTopLevel(s.workingDir)
+	if dir == "" || filepath.Dir(dir) == dir {
+		return "", "", false
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if h, err := filepath.EvalSymlinks(home); err == nil {
+			home = h
+		}
+		if containsOrIs(dir, home) {
+			return "", "", false
+		}
+	}
+	if memory.RejectSecret("path", dir) != nil {
+		return "", "", false
+	}
+	if memory.CheckImportedProject(memory.PortableProject{ID: "x", Name: "x", Path: dir}) != nil {
+		return "", "", false
+	}
+	return dir, detectRemoteForSave(dir), true
+}
+
+// containsOrIs reports whether dir is path or an ancestor of it. Both are
+// compared in forward-slash form, because git prints a top level that way on
+// every platform while the home directory arrives with native separators.
+func containsOrIs(dir, path string) bool {
+	d := strings.TrimRight(strings.ReplaceAll(dir, `\`, "/"), "/")
+	p := strings.TrimRight(strings.ReplaceAll(path, `\`, "/"), "/")
+	return p == d || strings.HasPrefix(p, d+"/")
 }
 
 // ensureProjectForWithRemote performs the write-side half of project
@@ -696,6 +777,11 @@ type Server struct {
 	// surface (search, project-context tool, resources, prompt) reads this one
 	// field, and nothing reads /proc after construction.
 	hostSessionID string
+	// workingDir is the directory the MCP server process was started in, captured
+	// ONCE at construction. It is used to bind a newly created project to the
+	// checkout the agent is working in, so the session-start resolver can match it.
+	// Empty if the working directory could not be determined.
+	workingDir string
 }
 
 // hostSessionEnv is the environment variable Claude Code sets, on the processes it
@@ -713,6 +799,39 @@ const hostSessionEnv = ai.HostSessionEnv
 // recording the old one, and the call then matches no scan; a server behind a bridge that
 // does not forward the host's environment records none.
 func hostSessionIDFromEnv() string { return strings.TrimSpace(os.Getenv(hostSessionEnv)) }
+
+// workingDirFromEnv is the directory the server process was started in, or "".
+//
+// It is captured once at construction so the environment is touched in one place.
+// Returns "" if the working directory cannot be determined, or if it is the user's
+// home directory or the filesystem root — those are not real project checkouts.
+func workingDirFromEnv() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	// Resolve symlinks so cwd matches the canonical path stored in the DB.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	// Never bind to home or filesystem root — they are not project checkouts.
+	if filepath.Dir(cwd) == cwd {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cwd == home {
+			return ""
+		}
+		// The session cwd may reach home through a symlink or trailing form;
+		// compare resolved paths too.
+		if evalHome, err := filepath.EvalSymlinks(home); err == nil {
+			if cwd == evalHome {
+				return ""
+			}
+		}
+	}
+	return cwd
+}
 
 // resolveHostSessionID decides the session id retrieval records carry. On Linux
 // it is the environment's id only when this process IS the host session (the
@@ -849,6 +968,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
 		hostSessionID:  hostSessionResolver(),
+		workingDir:     workingDirResolver(),
 	}
 
 	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {

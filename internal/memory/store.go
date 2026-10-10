@@ -539,6 +539,92 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// BindNewProjectToCheckout opens project id at the checkout dir, recording the
+// physical path and, when repoRemote is not empty, the repository, and reports
+// whether it did. It is the write side of a save that creates a project from a
+// name (#957).
+//
+// It is not EnsureProjectWithRepo, and the difference is the point: that call
+// MERGES the incoming id into whatever project already owns the path or the
+// remote and deletes the incoming row, which for a save that is about to write
+// under id leaves the memory under a project that no longer exists. Here the
+// claim test and the INSERT share one write transaction, and a claim is
+// answered with bound=false and no write at all, so the caller opens the
+// project the ordinary unbound way. An id the store already holds is never
+// rebound (bound=false), nor is _global, nor a directory or remote any other
+// project records.
+func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	// The path predicate BindProjectPath asks: absolute, not a bare root, and not
+	// the id sentinel, so "usable" keeps one definition across the path writers.
+	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
+		return false, nil
+	}
+	// Every comparison below is between PHYSICAL paths, as in BindProjectPath: a
+	// caller's spelling (a symlink, a dot segment, native separators) would make
+	// the containment and equality rules inert. What is recorded is the physical
+	// path too, and a directory that cannot be resolved is not a checkout.
+	physical, err := canonicalPath(dir)
+	if err != nil || physical == id || !storedPathIsUsable(physical) {
+		return false, nil
+	}
+	dir = physical
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, _, err := s.beginWrite(ctx, "bind-checkout")
+	if err != nil {
+		return false, fmt.Errorf("begin bind checkout tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var claimed int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE id = ? OR path = ? OR (? != '' AND repo_remote = ?)
+	`, id, dir, repoRemote, repoRemote).Scan(&claimed); err != nil {
+		return false, fmt.Errorf("check checkout claim: %w", err)
+	}
+	if claimed > 0 {
+		return false, nil
+	}
+	// An OVERLAPPING claim is a claim too, and the guard is bind's own: a project
+	// inside dir would be swallowed by it, and dir inside a project that records
+	// no remote would be answered for by that project. Each declines the bind.
+	if err := checkBindPathConflicts(ctx, tx, id, dir); err != nil {
+		if errors.Is(err, ErrBindPathClaimed) || errors.Is(err, ErrBindPathContainsOther) || errors.Is(err, ErrBindPathInsideOther) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := CheckImportedProject(createdProject(id, dir, name)); err != nil {
+		return false, fmt.Errorf("create project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)`,
+		id, dir, name, repoRemote); err != nil {
+		return false, fmt.Errorf("bind project to checkout: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
+		return false, err
+	}
+	// A path the resolver could never return for this project is not a binding:
+	// the same check `ghost project bind` makes, on the row just written. It
+	// declines (the rollback undoes the insert) and the save opens the project
+	// unbound, rather than leaving one that looks bound and no session matches.
+	if err := checkPathResolvable(ctx, tx, id, dir, repoRemote); err != nil {
+		if errors.Is(err, ErrBindPathUnmatchable) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit bind checkout tx: %w", err)
+	}
+	return true, nil
+}
+
 // BindingRefusalKind names the rule that stopped a repository from claiming
 // the project its name matched.
 type BindingRefusalKind string

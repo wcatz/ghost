@@ -478,9 +478,9 @@ the session's directory resolves by path prefix to the project's stored id, and 
 write still lands in the project you already have instead of being refused as an
 invalid id. The full resolution is what makes that true, because a project can hold
 a refused character in a field the write boundary does not own: `ghost project bind`
-is the only writer of `projects.path`, and it asks the exporter's own shape rule
-(`CheckImportedProjectText("path", …)`, after the credential guard) about the path
-**about to be recorded** — never about the one already stored, which is what keeps
+and the INSERT in `Store.BindNewProjectToCheckout` are the writers of `projects.path`,
+and each asks the exporter's own shape rule (`CheckImportedProjectText("path", …)`,
+after the credential guard) about the path **about to be recorded** — never about the one already stored, which is what keeps
 a project that already records such a path repairable by binding it to a directory
 that passes. The credential guard below is gated the same way, so a bound path
 carrying a token cannot make a project unwritable by the address a session actually
@@ -500,8 +500,8 @@ format and never the value. Asking FIRST rather than branching on what comes bac
 the load-bearing part, because the predicate judges shape before credentials, and a
 value that is both hostile and credential-shaped returns a shape error with the
 credential hidden behind it.
-`Store.EnsureProject*` and
-`Store.ResolveOrCreateRepoProject` ask the same function, so a non-MCP caller
+`Store.EnsureProject*`,
+`Store.ResolveOrCreateRepoProject` and `Store.BindNewProjectToCheckout` ask the same function, so a non-MCP caller
 cannot reach a project the exporter would have to drop either. No CLI command
 creates a project row outside `ghost import`, which applies the same predicate
 before its own INSERT.
