@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -475,9 +476,13 @@ func contextTrimReport(t *testing.T) ContextReport {
 	if err != nil {
 		t.Fatalf("seed the trim fixture: %v", err)
 	}
-	rep, err := RunContext(context.Background(), store, queries, at)
+	// The no-answer bar (#955) is off here: this fixture's query vectors are
+	// synthetic and sit below any real cosine bar, and what it measures is the
+	// budget's trim, which is a statement about a block that was ANSWERED. The bar
+	// has its own tests (noanswer_sweep_test.go and the assembler's).
+	rep, err := runContextBar(context.Background(), store, queries, at, config.DefaultRelevanceCutoff, 0)
 	if err != nil {
-		t.Fatalf("RunContext: %v", err)
+		t.Fatalf("runContextBar: %v", err)
 	}
 	return rep
 }

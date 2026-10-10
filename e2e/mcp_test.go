@@ -1278,3 +1278,34 @@ func TestMCPRelevanceCutoff(t *testing.T) {
 		t.Errorf("cutoff 1 returned %d rows, cutoff off %d: want a shorter, non-empty answer\n%s", got, off, on)
 	}
 }
+
+// TestMCPNoAnswerBar turns the query-mode no-answer bar (#955) on through the
+// built binary. Every other sandbox runs with it off; here the same store answers
+// the same query twice, with the bar off and then at 1 (no cosine is strictly
+// above it), and the second answer must withhold the rows and say so with the
+// stated reason, while the first still carries them.
+func TestMCPNoAnswerBar(t *testing.T) {
+	s := newSandbox(t)
+	seed := s.mcpSession(t)
+	call(t, seed, "ghost_memory_save", map[string]any{"project_id": e2eProject, "content": "the relay noanswerprobe listens on port 2222 in production", "category": "architecture"})
+	args := map[string]any{"project_id": e2eProject, "query": "noanswerprobe"}
+
+	off := call(t, s.mcpSession(t), "ghost_memory_search", args)
+	if !strings.Contains(off, "relay noanswerprobe") {
+		t.Fatalf("bar off did not return the matching row, so the comparison means nothing:\n%s", off)
+	}
+	if strings.Contains(off, "No memory answers this") {
+		t.Errorf("bar off states an abstention:\n%s", off)
+	}
+
+	s.reconfigure(configOpts{noAnswerCosine: "1"})
+	on := call(t, s.mcpSession(t), "ghost_memory_search", args)
+	if strings.Contains(on, "relay noanswerprobe") {
+		t.Errorf("bar at 1 still returned the row:\n%s", on)
+	}
+	for _, want := range []string{"No memory answers this", "nothing cleared the bar", "reason=nothing_cleared_the_bar"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("the withheld answer is missing %q:\n%s", want, on)
+		}
+	}
+}

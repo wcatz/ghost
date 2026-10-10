@@ -1346,6 +1346,7 @@ ghost bench --context
 ghost bench --passive
 ghost bench --audit
 ghost bench --cutoff-sweep
+ghost bench --no-answer-sweep
 ```
 
 Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then the **top-row shares and the R@1 ceiling** — the share of queries whose first result is relevant, the share whose first result carries the best label, the share with a relevant row in the first five, and the mean ceiling a perfect ranking hits on these labels — then the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
@@ -1359,6 +1360,8 @@ Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) o
 `--audit` is a fifth report and scores the retrieval audit (`ghost lifecycle`'s used/ignored/superseded/contradicted verdicts) instead of retrieval. It builds a labelled offline session — forty memories, a scripted run of turns with hand-written labels for the ids a turn cites, the memories it restates, denies or saves — judges it through `audit.Run` in scratch stores, and prints per-outcome precision and recall (with `used` split by the identifier and token arms), a confusion table and three headline lines. It needs no model, network or data directory, and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#retrieval-audit-ghost-bench---audit).
 
 `--cutoff-sweep` is a sixth report: it sweeps the query-mode relevance cutoff (`context.relevance_cutoff`) over the same graded corpus and fixed clock `--context` uses, and prints per share the graded-relevant rows admitted, context precision, result rate and estimated tokens per answer — the gradient the shipped default (0.63) is chosen from. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-relevance-cutoff-ghost-bench---cutoff-sweep).
+
+`--no-answer-sweep` is a seventh report: it measures the query-mode no-answer bar (`context.no_answer_cosine`) over the same graded corpus and fixed clock, at the shipped relevance cutoff, with the 24 no-answer queries as the false-positive half. Per rule and setting it prints the no-answer false-positive rate (no-answer queries that still got rows), the answerable queries refused (of 220), the graded-relevant rows still admitted, context precision, estimated tokens per answer and whether the gate is met (false-positive rate at most 0.500, at most 7 answerable queries refused). Three rule families are in it: the cosine floor the assembler ships (every row is the real assembler path), and a fused-score floor and a cosine-plus-keyword rule that are measured from the block and not built. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-no-answer-bar-ghost-bench---no-answer-sweep).
 
 ## Scratch hygiene
 
