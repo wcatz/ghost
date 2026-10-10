@@ -320,3 +320,26 @@ func TestTheGenericLineIsPinnedAtItsEdges(t *testing.T) {
 		t.Errorf("constants moved to %d and %d: the documented rule is twelve turns and a quarter", genericMinTurns, genericShare)
 	}
 }
+
+// TestGenericWordsDoNotMakeASupersede: a save whose words are the session's own
+// vocabulary does not file a memory superseded, for the same reason prose does not
+// file it used. The save arm reads the same generic set.
+func TestGenericWordsDoNotMakeASupersede(t *testing.T) {
+	build := func(common bool) *Signals {
+		s := NewWithHasher(testHasher)
+		texts := repeatTurns(12, "unrelated filler text")
+		if common {
+			texts = repeatTurns(12, "opencode plugin transcript")
+		}
+		start := turnsAt(s, texts)
+		s.SetAt(start.Add(30 * time.Minute))
+		s.AddSaveArgs("opencode plugin transcript mkdtemp directory")
+		return s
+	}
+	if v := compareOne(t, build(false), memContent); v.Outcome != OutcomeSuperseded {
+		t.Fatalf("the control judged %s, want superseded", v.Outcome)
+	}
+	if v := compareOne(t, build(true), memContent); v.Outcome != OutcomeIgnored {
+		t.Errorf("generic words in a save judged %s, want ignored", v.Outcome)
+	}
+}

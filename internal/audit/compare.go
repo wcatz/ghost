@@ -180,9 +180,10 @@ const outlierTurnTokens = 150
 // Generic fingerprints leave the NUMERATOR of the token arm only. The memory's total
 // stays whole, because shrinking it would shrink the bar with it and let a memory
 // of which most words are generic clear a half with a handful: the bar is a share of
-// what the memory says, and a generic word is still something it says. The negation
-// and save-restatement arms are unchanged, since they are judged on their own bars
-// and a contradiction's bar is never to get looser.
+// what the memory says, and a generic word is still something it says. The save-restatement arm
+// reads the same set, since its false positive is the decision-bearing one and comes
+// from the same session vocabulary; the negation arm does not, since a
+// contradiction's bar is never to get looser.
 const (
 	genericMinTurns = 12
 	genericShare    = 4 // a word is generic at 1/genericShare of the turns or more
@@ -323,7 +324,7 @@ func clearsTokenBar(matched, total int) bool {
 // (see AddSaveArgs). It uses the same threshold, because the evidence is the same
 // shape: the agent's own words, about the same subject.
 func (s *Signals) matchesSaves(toks []string) bool {
-	return clearsTokenBar(sharedTokens(s.saves, toks), len(toks))
+	return clearsTokenBar(sharedTokensExcept(s.saves, toks, s.generic), len(toks))
 }
 
 // contradicts reports whether the agent denied THIS memory, in one sentence.
