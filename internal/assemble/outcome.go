@@ -326,12 +326,18 @@ func (p *pipeline) predicateReason() string {
 // `weak`/`below_floor` against a floor the corpus never had a chance to miss.
 //
 // Presence is the exact -1 mark and never the sign. A cosine is in [-1, 1], so a
-// score that came back negative was MEASURED — it is a very weak match, which is
-// a value the arm judges and reports below the floor — while only the sentinel
-// means the leg did not carry the row. Reading a negative score as absent told a
-// caller whose every row scored below zero that no arm held anything to compare,
-// which sends them after an embedder for a verdict the vector leg had already
-// made.
+// score at or below zero was MEASURED — a very weak match, which is a value the
+// arm judges and reports below the floor — while only the sentinel means the leg
+// did not carry the row. Reading a low score as absence told a caller that no arm
+// held anything to compare, which sends them after an embedder for a verdict the
+// vector leg had already made.
+//
+// That is the seam's rule, and the shipped retriever sits outside it: *memory.Store
+// discards every candidate whose cosine is not above 0 before fusion
+// (`minVectorSimilarity`), so on the production path a row's VectorScore is
+// either that sentinel or a positive cosine and the two predicates agree. The
+// sentinel is what the rule is written against because it is what the leg
+// actually marks, and a second one is what a reader of a score must not invent.
 func (p *pipeline) armValues() (ftsApplied, vectorApplied bool) {
 	for _, it := range p.items {
 		sig, ok := p.trace.Signals[it.ID]

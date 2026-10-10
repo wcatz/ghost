@@ -1766,11 +1766,17 @@ func TestTheCosineArmIgnoresTheSentinelToo(t *testing.T) {
 // decided by the exact -1 mark the retriever leaves on a row the leg did not
 // retrieve, and never by the sign of the score. A cosine is in [-1, 1], so one
 // that came back negative was MEASURED and is a very weak match; counting it as
-// "no vector value" made a block whose every row scored below zero report
+// "no vector value" makes a block whose every row scored below zero report
 // `no_floor_arm` — the reason that says no arm held a value to compare — when
 // the arm was holding one and judging it. That is the difference between "the
 // corpus was judged and found wanting" and "nothing here was measured at all",
 // and a caller told the second would go looking for an embedder.
+//
+// The fixtures are a retriever's choice rather than the shipped one's:
+// *memory.Store drops every candidate whose cosine is not above 0 before
+// fusion, so no production path carries this shape today. The rule is the
+// seam's, the same one the no-answer bar beside it reads, and it is pinned
+// here against the leg that can produce it.
 func TestANegativeVectorScoreIsAValueNotAnAbsence(t *testing.T) {
 	req := hybridRequest()
 	req.AbstainCosine = 0.6
