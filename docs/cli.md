@@ -1400,8 +1400,8 @@ says so rather than risk deleting an open file.
 ### `ghost maintenance consolidate-global`
 
 Folds near-duplicate rows in `_global`, the scope every project's context replays.
-Rows written before promotion folded equivalent text accumulated there, and nothing
-folded them afterwards. Dry run by default: it lists each cluster (the row kept and
+Rows written before promotion began folding equivalent text accumulated there, and
+nothing folded them afterwards. Dry run by default: it lists each cluster (the row kept and
 the rows folded into it) and writes nothing, not even a snapshot.
 
 ```bash
@@ -1423,11 +1423,12 @@ as the tie-break; for byte-identical rows, the oldest), so its embedding and lin
 stay with it. It takes the highest importance and the union of the tags, and its
 text is never written. Only `source = 'reflection'` rows are planned.
 
-`--apply` folds one cluster per transaction, naming rows by id and checking each
-again inside it: a row that is no longer reflection-written or has become pinned,
+`--apply` folds every cluster in one transaction, naming rows by id and checking each
+again inside it before anything is written: a row that is no longer reflection-written or has become pinned,
 resolved or persistent, was saved at or after the run's start, or was edited since
 the plan is skipped and reported, never reverted. The replaceable set is
-snapshotted first (the snapshot `ghost reflect --restore` reads), each folded row's
+snapshotted once, before the first delete (the snapshot `ghost reflect --restore`
+reads, so one restore undoes the whole run), each folded row's
 history ends in a `delete` naming the survivor, and its evidence is carried onto
 the survivor. No row outside a cluster is written in any column, including an
 agent-saved row whose text is identical to a survivor's. The dry run opens the

@@ -262,7 +262,7 @@ func openConsolidateGlobalStore(dataDir string, apply bool) (*memory.Store, func
 }
 
 // consolidateGlobal lists the near-duplicate clusters in _global and, when apply
-// is set, folds each through Store.FoldRows: a targeted, id-based fold that
+// is set, folds them through Store.FoldRows: a targeted, id-based fold that
 // snapshots, carries evidence, writes delete history naming the survivor and
 // touches no row outside the cluster. Only reflection-written rows that are not
 // pinned, resolved, persistent, or saved during the run are planned.
@@ -325,22 +325,30 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	asRow := func(m memory.Memory) memory.FoldRow {
 		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
 	}
-	foldedN, skippedN := 0, 0
-	for _, c := range clusters {
-		rows := make([]memory.FoldRow, len(c.Folded))
-		for i, f := range c.Folded {
-			rows[i] = asRow(f)
-		}
-		res, err := store.FoldRows(ctx, "_global", asRow(c.Survivor), rows, since)
-		if err != nil {
-			return fmt.Errorf("fold _global: %w", err)
-		}
-		foldedN += len(res.Folded)
-		for _, sk := range res.Skipped {
-			skippedN++
-			outf("skipped %s: %s\n", assemble.Token(sk.ID), assemble.Label(sk.Reason))
+	plan := make([]memory.FoldCluster, len(clusters))
+	for i, c := range clusters {
+		plan[i].Survivor = asRow(c.Survivor)
+		for _, f := range c.Folded {
+			plan[i].Folded = append(plan[i].Folded, asRow(f))
 		}
 	}
-	outf("\nfolded %d row(s) into %d survivor(s); %d row(s) skipped\n", foldedN, len(clusters), skippedN)
+	res, err := store.FoldRows(ctx, "_global", plan, since)
+	if err != nil {
+		return fmt.Errorf("fold _global: %w", err)
+	}
+	printFoldOutcome(w, res)
 	return nil
+}
+
+// printFoldOutcome reports what FoldRows did, not what was planned: a survivor is
+// counted only when a row was folded into it, and a run that wrote nothing says so.
+func printFoldOutcome(w io.Writer, res memory.FoldResult) {
+	for _, sk := range res.Skipped {
+		_, _ = fmt.Fprintf(w, "skipped %s: %s\n", assemble.Token(sk.ID), assemble.Label(sk.Reason))
+	}
+	if len(res.Folded) == 0 {
+		_, _ = fmt.Fprintf(w, "\nnothing written; %d row(s) skipped\n", len(res.Skipped))
+		return
+	}
+	_, _ = fmt.Fprintf(w, "\nfolded %d row(s) into %d survivor(s); %d row(s) skipped\n", len(res.Folded), res.Clusters, len(res.Skipped))
 }

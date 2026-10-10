@@ -18,6 +18,12 @@ type FoldRow struct {
 	UpdatedAt string
 }
 
+// FoldCluster is one survivor and the rows to fold into it.
+type FoldCluster struct {
+	Survivor FoldRow
+	Folded   []FoldRow
+}
+
 // FoldSkip is a row FoldRows refused, and why.
 type FoldSkip struct {
 	ID     string
@@ -26,8 +32,10 @@ type FoldSkip struct {
 
 // FoldResult reports what one FoldRows call did.
 type FoldResult struct {
-	// Folded are the ids deleted into the survivor.
+	// Folded are the ids deleted into their survivors.
 	Folded []string
+	// Clusters is how many clusters had at least one row folded.
+	Clusters int
 	// Skipped are the rows refused. When the survivor is refused every row is
 	// listed, because nothing is written.
 	Skipped []FoldSkip
@@ -35,8 +43,8 @@ type FoldResult struct {
 	SnapshotID string
 }
 
-// FoldRows folds the near-duplicate rows `folded` into `survivor` in ONE write
-// transaction, touching no other row in the store.
+// FoldRows folds each cluster's rows into its survivor in ONE write transaction,
+// touching no other row in the store.
 //
 // It exists because whole-set replace is the wrong primitive for a fold: it
 // matches emissions to stored rows by text alone, so a byte-identical row from
@@ -49,19 +57,20 @@ type FoldResult struct {
 // `since`, and unchanged since the plan (same content and updated_at). A row that
 // fails is skipped and reported; a refused survivor skips the whole cluster.
 //
-// On the rows that pass:
-//   - the replaceable set of the project is snapshotted with the evidence, by the
+// Every cluster is checked before anything is written. On the rows that pass:
+//   - the replaceable set of the project is snapshotted ONCE, with the evidence, by the
 //     same code ReplaceNonManual uses, so a restore reads a snapshot of the shape
 //     it expects (a snapshot of only these rows would make a restore delete every
-//     other reflection row it did not find there);
+//     other reflection row it did not find there), and old snapshots are pruned
+//     as ReplaceNonManual does;
 //   - the folded rows' evidence is carried onto the survivor;
 //   - each folded row gets a delete history row naming the survivor, then goes;
 //   - the survivor takes the highest importance and the union of the tags (and the
 //     longest retention tier, as every merge does) with one history row. Its
 //     content is never written.
-func (s *Store) FoldRows(ctx context.Context, projectID string, survivor FoldRow, folded []FoldRow, since string) (FoldResult, error) {
+func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldCluster, since string) (FoldResult, error) {
 	var res FoldResult
-	if survivor.ID == "" || len(folded) == 0 {
+	if len(clusters) == 0 {
 		return res, nil
 	}
 	s.mu.Lock()
@@ -119,45 +128,68 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, survivor FoldRow
 		return st, "", nil
 	}
 
-	surv, why, err := check(survivor)
-	if err != nil {
-		return res, err
+	// Every row is checked before anything is written, so the one snapshot below
+	// is taken before the first delete and holds the pre-fold state of the whole
+	// run, which is what a restore of the latest snapshot needs.
+	type plan struct {
+		survivor   FoldRow
+		surv       stored
+		ids        []string
+		importance float64
+		tags       []string
 	}
-	if why != "" {
-		res.Skipped = append(res.Skipped, FoldSkip{ID: survivor.ID, Reason: "survivor " + why})
-		for _, f := range folded {
-			res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: "survivor " + why})
-		}
-		return res, nil
-	}
-	importance := surv.importance
-	tagSet := map[string]bool{}
-	for _, t := range surv.tags {
-		tagSet[t] = true
-	}
-	var ids []string
-	for _, f := range folded {
-		if f.ID == survivor.ID {
-			res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: "is the survivor"})
+	var plans []plan
+	for _, c := range clusters {
+		if c.Survivor.ID == "" || len(c.Folded) == 0 {
 			continue
 		}
-		st, why, err := check(f)
+		surv, why, err := check(c.Survivor)
 		if err != nil {
 			return res, err
 		}
 		if why != "" {
-			res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: why})
+			res.Skipped = append(res.Skipped, FoldSkip{ID: c.Survivor.ID, Reason: "survivor " + why})
+			for _, f := range c.Folded {
+				res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: "survivor " + why})
+			}
 			continue
 		}
-		ids = append(ids, f.ID)
-		if st.importance > importance {
-			importance = st.importance
-		}
-		for _, t := range st.tags {
+		p := plan{survivor: c.Survivor, surv: surv, importance: surv.importance}
+		tagSet := map[string]bool{}
+		for _, t := range surv.tags {
 			tagSet[t] = true
 		}
+		for _, f := range c.Folded {
+			if f.ID == c.Survivor.ID {
+				res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: "is the survivor"})
+				continue
+			}
+			st, why, err := check(f)
+			if err != nil {
+				return res, err
+			}
+			if why != "" {
+				res.Skipped = append(res.Skipped, FoldSkip{ID: f.ID, Reason: why})
+				continue
+			}
+			p.ids = append(p.ids, f.ID)
+			if st.importance > p.importance {
+				p.importance = st.importance
+			}
+			for _, t := range st.tags {
+				tagSet[t] = true
+			}
+		}
+		if len(p.ids) == 0 {
+			continue
+		}
+		for t := range tagSet {
+			p.tags = append(p.tags, t)
+		}
+		sort.Strings(p.tags)
+		plans = append(plans, p)
 	}
-	if len(ids) == 0 {
+	if len(plans) == 0 {
 		return res, nil
 	}
 
@@ -167,47 +199,45 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, survivor FoldRow
 	}
 	res.SnapshotID = snapshotID
 
-	// Before the delete: the foreign key takes the folded rows' evidence with them.
-	if err := carryEvidenceTx(ctx, tx, survivor.ID, ids); err != nil {
-		return res, err
-	}
-	if err := raiseReusedRetentionTx(ctx, tx, projectID, survivor.ID, Memory{ReplacesIDs: ids}); err != nil {
-		return res, err
-	}
-	if err := appendHistoryForIDsTx(ctx, tx, ids, phaseDelete, Provenance{}); err != nil {
-		return res, err
-	}
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ? AND project_id = ?`, id, projectID); err != nil {
-			return res, fmt.Errorf("delete folded memory: %w", err)
-		}
-		if err := linkSuccessorTx(ctx, tx, id, survivor.ID); err != nil {
+	for _, p := range plans {
+		// Before the delete: the foreign key takes the folded rows' evidence with them.
+		if err := carryEvidenceTx(ctx, tx, p.survivor.ID, p.ids); err != nil {
 			return res, err
 		}
-	}
-
-	tags := make([]string, 0, len(tagSet))
-	for t := range tagSet {
-		tags = append(tags, t)
-	}
-	sort.Strings(tags)
-	tagsJSON, _ := json.Marshal(tags)
-	if importance != surv.importance || string(tagsJSON) != marshalTags(surv.tags) {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE memories SET importance = ?, tags = ?, updated_at = datetime('now') WHERE id = ?`,
-			importance, string(tagsJSON), survivor.ID); err != nil {
-			return res, fmt.Errorf("update survivor: %w", err)
-		}
-		if err := appendHistoryForIDsTx(ctx, tx, []string{survivor.ID}, phaseReflect, Provenance{}); err != nil {
+		if err := raiseReusedRetentionTx(ctx, tx, projectID, p.survivor.ID, Memory{ReplacesIDs: p.ids}); err != nil {
 			return res, err
 		}
+		if err := appendHistoryForIDsTx(ctx, tx, p.ids, phaseDelete, Provenance{}); err != nil {
+			return res, err
+		}
+		for _, id := range p.ids {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ? AND project_id = ?`, id, projectID); err != nil {
+				return res, fmt.Errorf("delete folded memory: %w", err)
+			}
+			if err := linkSuccessorTx(ctx, tx, id, p.survivor.ID); err != nil {
+				return res, err
+			}
+		}
+		tagsJSON, _ := json.Marshal(p.tags)
+		if p.importance != p.surv.importance || string(tagsJSON) != marshalTags(p.surv.tags) {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memories SET importance = ?, tags = ?, updated_at = datetime('now') WHERE id = ?`,
+				p.importance, string(tagsJSON), p.survivor.ID); err != nil {
+				return res, fmt.Errorf("update survivor: %w", err)
+			}
+			if err := appendHistoryForIDsTx(ctx, tx, []string{p.survivor.ID}, phaseReflect, Provenance{}); err != nil {
+				return res, err
+			}
+		}
+		res.Folded = append(res.Folded, p.ids...)
+		res.Clusters++
 	}
+	s.pruneSnapshotsTx(ctx, tx, projectID)
 
 	if err := tx.Commit(); err != nil {
-		return res, fmt.Errorf("commit fold: %w", err)
+		return FoldResult{Skipped: res.Skipped}, fmt.Errorf("commit fold: %w", err)
 	}
 	lock.reportHold("fold-rows", time.Now())
-	res.Folded = ids
 	if s.onSave != nil {
 		s.onSave(projectID)
 	}

@@ -542,7 +542,7 @@ func TestFoldRowsSkipsARowEditedSinceThePlan(t *testing.T) {
 	if _, err := f.db.ExecContext(ctx, `UPDATE memories SET content = 'always run go vet, edited by a person', updated_at = '2030-01-01 00:00:00' WHERE id = ?`, f.midID); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.oldID), plan(f.midID)}, "2999-01-01 00:00:00")
+	res, err := f.store.FoldRows(ctx, "_global", []memory.FoldCluster{{Survivor: plan(f.newID), Folded: []memory.FoldRow{plan(f.oldID), plan(f.midID)}}}, "2999-01-01 00:00:00")
 	if err != nil {
 		t.Fatalf("FoldRows: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestFoldRowsSkipsARowEditedSinceThePlan(t *testing.T) {
 	if _, err := f.db.ExecContext(ctx, `UPDATE memories SET updated_at = '2031-01-01 00:00:00' WHERE id = ?`, f.newID); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	res, err = f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.midID)}, "2999-01-01 00:00:00")
+	res, err = f.store.FoldRows(ctx, "_global", []memory.FoldCluster{{Survivor: plan(f.newID), Folded: []memory.FoldRow{plan(f.midID)}}}, "2999-01-01 00:00:00")
 	if err != nil || len(res.Folded) != 0 || len(res.Skipped) != 2 {
 		t.Fatalf("a changed survivor must skip everything: %+v (err %v)", res, err)
 	}
@@ -619,7 +619,7 @@ func TestFoldRowsRefusesRowsItMayNotTouch(t *testing.T) {
 	}
 	all = globalIDs(t, f.store)
 	for name, id := range map[string]string{"pinned agent row": f.pinnedID, "unpinned agent row": agent, "pinned reflection row": pinnedRefl} {
-		res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(id)}, "2999-01-01 00:00:00")
+		res, err := f.store.FoldRows(ctx, "_global", []memory.FoldCluster{{Survivor: plan(f.newID), Folded: []memory.FoldRow{plan(id)}}}, "2999-01-01 00:00:00")
 		if err != nil {
 			t.Fatalf("FoldRows: %v", err)
 		}
@@ -632,8 +632,88 @@ func TestFoldRowsRefusesRowsItMayNotTouch(t *testing.T) {
 	}
 	var res memory.FoldResult
 	// At or after `since`: refused.
-	res, err = f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.oldID)}, "2026-01-01 00:00:00")
+	res, err = f.store.FoldRows(ctx, "_global", []memory.FoldCluster{{Survivor: plan(f.newID), Folded: []memory.FoldRow{plan(f.oldID)}}}, "2026-01-01 00:00:00")
 	if err != nil || len(res.Folded) != 0 {
 		t.Fatalf("a row created at or after since was folded: %+v (err %v)", res, err)
+	}
+}
+
+// One run, one snapshot taken before the first delete: a single restore of the
+// latest snapshot undoes every cluster, and repeated runs do not pile snapshots up.
+func TestConsolidateGlobalTakesOneSnapshotPerRunAndPrunes(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	mk := func(content string) {
+		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: content, Source: "reflection"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-01-01 00:00:00' WHERE id = ?`, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+	}
+	// A second cluster beside the fixture's.
+	mk("the relay restarts after kernel updates on friday")
+	mk("the relay restarts after kernel updates on friday evening")
+	before := globalIDs(t, f.store)
+	var out bytes.Buffer
+	if err := consolidateGlobal(ctx, f.store, true, &out); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	if !strings.Contains(out.String(), "into 2 survivor(s)") {
+		t.Fatalf("want two clusters folded:\n%s", out.String())
+	}
+	var snaps int
+	if err := f.db.QueryRow(`SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = '_global'`).Scan(&snaps); err != nil || snaps != 1 {
+		t.Fatalf("snapshots after a two-cluster run = %d (err %v), want 1", snaps, err)
+	}
+	if _, err := f.store.RestoreSnapshot(ctx, "_global"); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	after := globalIDs(t, f.store)
+	if len(after) != len(before) {
+		t.Errorf("one restore left %d rows, want all %d back", len(after), len(before))
+	}
+	for id := range before {
+		if _, ok := after[id]; !ok {
+			t.Errorf("row %s was not restored", id)
+		}
+	}
+	// Snapshots are bounded: the fold prunes as the replace does.
+	for i := 0; i < 14; i++ {
+		a, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: fmt.Sprintf("round %d alpha uses the shared cache on host one", i), Source: "reflection"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		b, err := f.store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: fmt.Sprintf("round %d alpha uses the shared cache on host one today", i), Source: "reflection"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		for _, id := range []string{a, b} {
+			if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-01-01 00:00:00' WHERE id = ?`, id); err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+		}
+		if err := consolidateGlobal(ctx, f.store, true, &bytes.Buffer{}); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+	}
+	if err := f.db.QueryRow(`SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = '_global'`).Scan(&snaps); err != nil || snaps > 10 {
+		t.Fatalf("snapshots after many runs = %d (err %v), want at most 10", snaps, err)
+	}
+}
+
+// When every row is refused the report says nothing was written, not that
+// survivors absorbed anything.
+func TestPrintFoldOutcomeStatesWhatHappened(t *testing.T) {
+	var none bytes.Buffer
+	printFoldOutcome(&none, memory.FoldResult{Skipped: []memory.FoldSkip{{ID: "A", Reason: "pinned"}, {ID: "B", Reason: "pinned"}}})
+	if strings.Contains(none.String(), "survivor(s)") || !strings.Contains(none.String(), "nothing written; 2 row(s) skipped") {
+		t.Errorf("a run that folded nothing reported:\n%s", none.String())
+	}
+	var some bytes.Buffer
+	printFoldOutcome(&some, memory.FoldResult{Folded: []string{"X", "Y", "Z"}, Clusters: 2})
+	if !strings.Contains(some.String(), "folded 3 row(s) into 2 survivor(s)") {
+		t.Errorf("a run that folded rows reported:\n%s", some.String())
 	}
 }
