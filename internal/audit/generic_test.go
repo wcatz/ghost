@@ -284,3 +284,39 @@ func TestAGiantTurnDoesNotMakeWordsCommon(t *testing.T) {
 		t.Error("a word in 2 of 12 ordinary turns became generic through two outlier turns")
 	}
 }
+
+// TestTheGenericLineIsPinnedAtItsEdges pins both constants where a change to either
+// moves a verdict: a word in 25 of 100 turns is generic and in 24 is not (a quarter,
+// not a fifth), and the same word in a session one turn under the minimum is not
+// generic at all (so the minimum is twelve).
+func TestTheGenericLineIsPinnedAtItsEdges(t *testing.T) {
+	withWord := func(turns, holding int) map[string]bool {
+		s := NewWithHasher(testHasher)
+		texts := make([]string, turns)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("working on step%dx of the change", i)
+			if i < holding {
+				texts[i] += " transcript"
+			}
+		}
+		turnsAt(s, texts)
+		return genericFingerprints(s.turns)
+	}
+	fp := testHasher.Fingerprint("transcript")
+	if !withWord(100, 25)[fp] {
+		t.Error("a word in 25 of 100 turns is not generic: the share is no longer a quarter")
+	}
+	if withWord(100, 24)[fp] {
+		t.Error("a word in 24 of 100 turns is generic: the share is looser than a quarter")
+	}
+	if !withWord(genericMinTurns, 3)[fp] {
+		t.Errorf("a word in 3 of %d turns is not generic", genericMinTurns)
+	}
+	// 11 turns, the word in 3 of them (27%): over the share, under the minimum.
+	if withWord(11, 3)[fp] {
+		t.Error("a session of 11 turns has generic words: the minimum is below twelve")
+	}
+	if genericMinTurns != 12 || genericShare != 4 {
+		t.Errorf("constants moved to %d and %d: the documented rule is twelve turns and a quarter", genericMinTurns, genericShare)
+	}
+}
