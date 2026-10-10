@@ -558,6 +558,10 @@ func TestCorrectionReplaySentences(t *testing.T) {
 		{correct, "Send X-Acme-Dedupe-Token, but I do not have the spec.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token, but we do not have the spec.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token, but we really don't have the spec.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token, but we do not really have the spec.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token, but I can't really see the spec.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token; I know it can't see the Idempotency-Key header.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token; I promise you can't have Idempotency-Key here.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token, but I honestly just can't see the spec.", true, true},
 		{correct, "Idempotency-Key won't have any effect on this gateway. Send X-Acme-Dedupe-Token.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token; the gateway can't see the Idempotency-Key header.", true, true},
@@ -572,6 +576,9 @@ func TestCorrectionReplaySentences(t *testing.T) {
 		// Strict: the correct token shares a clause with an unrelated "not", so a
 		// right answer is read as rejecting it and fails.
 		{known, "X-Acme-Dedupe-Token is not optional.", true, false},
+		// Strict: a hedge outside the I/we pattern reads as a rejection and, after a
+		// "but", rejects the clause before it.
+		{known, "Send X-Acme-Dedupe-Token, but you don't have the spec.", true, false},
 	}
 	st := CorrectionReplay().Stages[1]
 	for _, tc := range cases {

@@ -1016,9 +1016,12 @@ anything. So every session is graded twice, on separate lines:
   it errs **lenient** when a hedge sits in the rejecting clause ("Send X;
   Idempotency-Key is not required but harmless" passes), and **strict** when the
   right spelling shares a clause with an unrelated rejecting word ("X is not
-  optional" fails `answer-carries`). Neither is special-cased. Both are verbatim readings and cannot see a
-  paraphrase; the
-  advisory judge column is the second look.
+  optional" fails `answer-carries`). The speaker-hedge exemption is a pattern
+  (`I`/`we`, optional adverbs, `don't`/`do not`/`can't`... then `have`/`see`, or
+  `know`/`forget`/`remember`/...), so a hedge phrased any other way ("you don't
+  have the spec") reads as a rejection, which errs strict. None of these is
+  special-cased. All are verbatim readings and cannot see a paraphrase; the advisory
+  judge column is the second look.
 
 `Validate` refuses a storyline whose answer grade could pass for the wrong
 reason: a carried spelling that appears in the script of the stage graded on it
