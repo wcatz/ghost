@@ -243,15 +243,15 @@ var singleTargetRe = regexp.MustCompile(
 // for the next pass, not a wrong global one.
 var nodeVersionRe = regexp.MustCompile(`^node-?\d{2}$`)
 
-// singleRepoRe matches a fact about ONE named repository: a hosted slug
-// ("github.com/owner/repo", "git@host:owner/repo"), or "<name> repo(sitory)"
-// after the/in/from/to. A bare owner/name pair is deliberately not a marker: it
-// is also a file path ("cmd/ghost"). The name is checked against
-// repoQuantifiers, so "from any repo" and "in every repo" stay cross-repo
-// language rather than naming a repository.
-var singleRepoRe = regexp.MustCompile(
-	`\bgithub\.com/[\w.-]+/[\w.-]+|\bgit@[\w.-]+:[\w.-]+/[\w.-]+` +
-		`|\b(?:the|in|from|to)\s+([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
+// singleRepoRe matches "<name> repo(sitory)" after the/in/from/to. The name is
+// checked against repoQuantifiers, so "from any repo" and "in every repo" stay
+// cross-repo language rather than naming a repository.
+var singleRepoRe = regexp.MustCompile(`\b(?:the|in|from|to)\s+([a-z0-9][\w.-]*)\s+repo(?:sitory)?\b`)
+
+// repoHostMarkers are substrings of a hosted repository reference
+// ("github.com/owner/repo", "git@host:owner/repo"). A bare owner/name pair is
+// deliberately not a marker: it is also a file path ("cmd/ghost").
+var repoHostMarkers = []string{"github.com/", "gitlab.com/", "git@"}
 
 var repoQuantifiers = map[string]bool{
 	"a": true, "an": true, "any": true, "every": true, "all": true, "each": true,
@@ -267,8 +267,13 @@ func namesSingleTarget(lower string) bool {
 			return true
 		}
 	}
+	for _, h := range repoHostMarkers {
+		if strings.Contains(lower, h) {
+			return true
+		}
+	}
 	for _, m := range singleRepoRe.FindAllStringSubmatch(lower, -1) {
-		if m[1] == "" || !repoQuantifiers[m[1]] {
+		if !repoQuantifiers[m[1]] {
 			return true
 		}
 	}
