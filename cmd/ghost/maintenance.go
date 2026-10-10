@@ -229,16 +229,36 @@ func runMaintenanceConsolidateGlobal(args []string) {
 		fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
 		os.Exit(1)
 	}
-	db, err := memory.OpenDB(dbPath)
+	store, closeStore, err := openConsolidateGlobalStore(dataDir, apply)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
-		os.Exit(1)
-	}
-	defer db.Close() //nolint:errcheck
-	if err := consolidateGlobal(context.Background(), memory.NewStore(db, nil), apply, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	defer closeStore()
+	if err := consolidateGlobal(context.Background(), store, apply, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// openConsolidateGlobalStore opens the store for a fold. A dry run opens it
+// read-only, like the portable export and dry-run import: no migration runs, so
+// a database whose schema is behind this build is reported and left as it was
+// rather than migrated by a command that promises to write nothing. Only an
+// apply opens read-write.
+func openConsolidateGlobalStore(dataDir string, apply bool) (*memory.Store, func(), error) {
+	if !apply {
+		store, err := openReadOnlyTransferStore(dataDir, "previewing the _global fold")
+		if err != nil {
+			return nil, nil, err
+		}
+		return store, func() { _ = store.Close() }, nil
+	}
+	db, err := memory.OpenDB(filepath.Join(dataDir, "ghost.db"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("database: %w", err)
+	}
+	return memory.NewStore(db, nil), func() { _ = db.Close() }, nil
 }
 
 // consolidateGlobal lists the near-duplicate clusters in _global and, when apply
@@ -264,13 +284,30 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	// A row stamped at or after `since` is one ReplaceNonManual keeps in place and
 	// never lets an emission claim, so planning it would insert a second copy of
 	// its text beside it. Leave it out of the plan; the next run sees it.
-	var live []memory.Memory
+	var live, others []memory.Memory
 	for _, m := range consolidatable(all) {
-		if m.CreatedAt < since {
+		if m.CreatedAt >= since {
+			continue
+		}
+		// Only what reflection wrote is planned: the backlog is reflection's, and
+		// an agent's own save is not this pass's to fold even when a near-twin
+		// exists. Such a row is still restated as it is below, because the replace
+		// deletes every replaceable row the emission set does not name.
+		if m.Source == "reflection" {
 			live = append(live, m)
+		} else {
+			others = append(others, m)
 		}
 	}
 	clusters, rows := reflection.PlanGlobalFold(live)
+	if len(clusters) > 0 {
+		for _, m := range others {
+			rows = append(rows, memory.Memory{
+				ProjectID: "_global", Category: m.Category, Content: m.Content,
+				Importance: m.Importance, Tags: m.Tags, Source: m.Source,
+			})
+		}
+	}
 
 	if !apply {
 		out("DRY RUN (use --apply to fold)")
@@ -280,14 +317,14 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	for _, c := range clusters {
 		folded += len(c.Folded)
 	}
-	outf("_global: %d memories, %d consolidatable, %d near-duplicate cluster(s) covering %d rows\n",
+	outf("_global: %d memories, %d reflection-written and consolidatable, %d near-duplicate cluster(s) covering %d rows\n",
 		len(all), len(live), len(clusters), folded+len(clusters))
 	for i, c := range clusters {
-		outf("\ncluster %d: keep %s [%s] %s\n", i+1,
-			assemble.Token(c.Survivor.ID), assemble.Label(c.Survivor.Category), assemble.Label(clipLine(c.Survivor.Content, 120)))
+		outf("\ncluster %d: keep %s [%s, source %s] %s\n", i+1,
+			assemble.Token(c.Survivor.ID), assemble.Label(c.Survivor.Category), assemble.Label(c.Survivor.Source), assemble.Label(clipLine(c.Survivor.Content, 120)))
 		for _, f := range c.Folded {
-			outf("  fold %s [%s] %s\n",
-				assemble.Token(f.ID), assemble.Label(f.Category), assemble.Label(clipLine(f.Content, 120)))
+			outf("  fold %s [%s, source %s] %s\n",
+				assemble.Token(f.ID), assemble.Label(f.Category), assemble.Label(f.Source), assemble.Label(clipLine(f.Content, 120)))
 		}
 	}
 	if len(clusters) == 0 {

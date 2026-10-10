@@ -42,8 +42,8 @@ func TestPlanGlobalFold(t *testing.T) {
 	if !reflect.DeepEqual(fold.Tags, []string{"x", "y", "z"}) {
 		t.Errorf("tags = %v, want the sorted union", fold.Tags)
 	}
-	if !reflect.DeepEqual(append([]string(nil), fold.ReplacesIDs...), []string{"c", "b", "a"}) {
-		t.Errorf("ReplacesIDs = %v, want every member, newest first", fold.ReplacesIDs)
+	if len(fold.ReplacesIDs) != 3 || fold.ReplacesIDs[0] != "c" {
+		t.Errorf("ReplacesIDs = %v, want every member, the survivor first", fold.ReplacesIDs)
 	}
 	for _, r := range rows {
 		if r.Content != c.Survivor.Content && len(r.ReplacesIDs) != 0 {
@@ -62,14 +62,14 @@ func TestPlanGlobalFoldNothingToFoldReturnsNil(t *testing.T) {
 	}
 }
 
-func TestPlanGlobalFoldIsDeterministicOnTies(t *testing.T) {
+func TestPlanGlobalFoldNamesTheRowTheReplaceKeepsForIdenticalText(t *testing.T) {
 	mems := []memory.Memory{
 		{ID: "1", Content: "run the linter before pushing", CreatedAt: "2026-01-01 00:00:00"},
 		{ID: "2", Content: "run the linter before pushing", CreatedAt: "2026-01-01 00:00:00"},
 	}
 	clusters, _ := PlanGlobalFold(mems)
-	if len(clusters) != 1 || clusters[0].Survivor.ID != "2" {
-		t.Fatalf("tie on created_at must resolve by id, got %+v", clusters)
+	if len(clusters) != 1 || clusters[0].Survivor.ID != "1" {
+		t.Fatalf("byte-identical rows keep the oldest, which is the one the replace reuses, got %+v", clusters)
 	}
 }
 
@@ -85,5 +85,37 @@ func TestPlanGlobalFoldJaccardBar(t *testing.T) {
 	clusters, _ := PlanGlobalFold(mems)
 	if len(clusters) != 1 || clusters[0].Survivor.ID != "b" || len(clusters[0].Folded) != 1 || clusters[0].Folded[0].ID != "a" {
 		t.Fatalf("clusters = %+v, want a (0.67 similar) folded into b and c (0.33) left alone", clusters)
+	}
+}
+
+// The older, longer wording carries a specific the newer subset lacks; keeping
+// the newer row would drop it.
+func TestPlanGlobalFoldKeepsTheRowThatContainsTheOthers(t *testing.T) {
+	mems := []memory.Memory{
+		{ID: "long", Content: "deploy requires helmfile diff then apply, and the sops age key must be exported first, and only from the dev machine", CreatedAt: "2026-01-01 00:00:00"},
+		{ID: "short", Content: "deploy requires helmfile diff then apply", CreatedAt: "2026-02-01 00:00:00"},
+	}
+	clusters, rows := PlanGlobalFold(mems)
+	if len(clusters) != 1 || clusters[0].Survivor.ID != "long" {
+		t.Fatalf("survivor = %+v, want the older row that contains the newer", clusters)
+	}
+	if len(rows) != 1 || rows[0].Content != mems[0].Content {
+		t.Fatalf("replacement = %+v, want the long text", rows)
+	}
+}
+
+func TestPlanGlobalFoldNeverClustersOppositePolarity(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"always run the full test suite before committing", "never run the full test suite before committing"},
+		{"deploys must go through helmfile diff first", "deploys must not go through helmfile diff first"},
+		{"do run the linter before pushing changes", "don't run the linter before pushing changes"},
+	} {
+		clusters, rows := PlanGlobalFold([]memory.Memory{
+			{ID: "a", Content: pair[0], CreatedAt: "2026-01-01 00:00:00"},
+			{ID: "b", Content: pair[1], CreatedAt: "2026-01-02 00:00:00"},
+		})
+		if clusters != nil || rows != nil {
+			t.Errorf("%q and %q were clustered: %+v", pair[0], pair[1], clusters)
+		}
 	}
 }

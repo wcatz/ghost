@@ -268,6 +268,7 @@ func TestInferGlobalScope(t *testing.T) {
 		{"scp-style remote stays project", "fact", "push to git@github.com:wcatz/roller.git and use a dev machine", "project"},
 		{"named repository stays project", "fact", "in the infra repo always use helmfile diff before apply across all repos", "project"},
 		{"docs site link is not a repository", "fact", "workflow syntax is documented at docs.github.com/en/actions, use it across all repos", "global"},
+		{"www host is the same repository host", "fact", "mirror www.github.com/wcatz/ghost across all repos", "project"},
 		{"bare forge host is not a repository", "fact", "mirror everything on github.com/ across all repos", "global"},
 		{"git@ without a remote path is not a repository", "fact", "ssh as git@ across all repos", "global"},
 		{"from any repo is not a named repository", "fact", "deploy to infra cluster from any repo", "global"},

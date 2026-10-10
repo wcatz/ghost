@@ -1408,9 +1408,13 @@ ghost maintenance consolidate-global --apply    # fold them
 
 "Near-duplicate" is the rule the SQLite consolidation tier applies to a project
 (token Jaccard of at least 0.5, or full containment of the smaller row, and never
-across a differing number), not a second one. The newest row in a cluster is kept
-verbatim, so its embedding and links stay with it; it takes the highest importance
-and the union of the tags. The fold goes through the same replace `ghost reflect`
+across a differing number), not a second one. The row whose text contains the others is kept verbatim (else the longest, newest
+as the tie-break; for byte-identical rows, the oldest, which is the one the replace
+reuses), so its embedding and links stay with it; it takes the highest importance
+and the union of the tags. Only `source = 'reflection'` rows are folded, and two
+rows that differ by a negation (always against never, must against must not) are
+never clustered. The dry run opens the store read-only, so a store behind this
+build's schema is reported and left as it was. The fold goes through the same replace `ghost reflect`
 uses: the rows are snapshotted first, each folded row's history ends in a `delete`
 naming the survivor, and its evidence is carried onto the survivor.
 

@@ -260,3 +260,100 @@ func TestParseConsolidateGlobalArgs(t *testing.T) {
 		t.Error("a mistyped flag was accepted")
 	}
 }
+
+// Only reflection-written rows are folded: an agent's own near-twin stays, and
+// so does a row of opposite polarity.
+func TestConsolidateGlobalOnlyFoldsReflectionRowsOfTheSamePolarity(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	mk := func(content, source string) string {
+		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "preference", Content: content, Source: source})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-05-01 00:00:00' WHERE id = ?`, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		return id
+	}
+	always := mk("always run the full test suite before committing", "reflection")
+	never := mk("never run the full test suite before committing", "reflection")
+	agentA := mk("prefer small commits with one concern each", "mcp")
+	agentB := mk("prefer small commits with one concern each, always", "mcp")
+	var out bytes.Buffer
+	if err := consolidateGlobal(ctx, f.store, true, &out); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	after := globalIDs(t, f.store)
+	for name, id := range map[string]string{"always": always, "never": never, "agent A": agentA, "agent B": agentB} {
+		if _, ok := after[id]; !ok {
+			t.Errorf("%s row %s was folded", name, id)
+		}
+	}
+	if !strings.Contains(out.String(), "source reflection") {
+		t.Errorf("the listing does not show each row's source:\n%s", out.String())
+	}
+}
+
+// The long older row carries specifics the newer subset lacks.
+func TestConsolidateGlobalKeepsTheContainingRow(t *testing.T) {
+	f := newGlobalFoldFixture(t)
+	ctx := context.Background()
+	mk := func(content, created string) string {
+		id, err := f.store.Create(ctx, "_global", memory.Memory{Category: "convention", Content: content, Source: "reflection"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := f.db.ExecContext(ctx, `UPDATE memories SET created_at = ? WHERE id = ?`, created, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		return id
+	}
+	long := mk("deploy requires helmfile diff then apply, and the sops age key must be exported first, and only from the dev machine", "2026-05-01 00:00:00")
+	short := mk("deploy requires helmfile diff then apply", "2026-06-01 00:00:00")
+	var dry bytes.Buffer
+	if err := consolidateGlobal(ctx, f.store, false, &dry); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !strings.Contains(dry.String(), "keep "+long) {
+		t.Errorf("dry run does not keep the containing row:\n%s", dry.String())
+	}
+	if err := consolidateGlobal(ctx, f.store, true, &bytes.Buffer{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	after := globalIDs(t, f.store)
+	if _, ok := after[long]; !ok {
+		t.Errorf("the long row did not survive")
+	}
+	if _, ok := after[short]; ok {
+		t.Errorf("the short row survived the fold")
+	}
+}
+
+// A dry run opens read-only: a store behind this build's schema is reported and
+// stays behind, where a read-write open would have migrated it.
+func TestConsolidateGlobalDryRunDoesNotMigrateAStaleStore(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("rewind user_version: %v", err)
+	}
+	_ = db.Close()
+
+	_, _, err = openConsolidateGlobalStore(dir, false)
+	if err == nil || !strings.Contains(err.Error(), "schema v3") {
+		t.Fatalf("dry run on a stale store = %v, want it to name the schema version and stop", err)
+	}
+	db, err = memory.OpenReadDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if v, err := memory.DBUserVersion(db); err != nil || v != 3 {
+		t.Fatalf("user_version = %d (err %v), the dry run migrated the store", v, err)
+	}
+}

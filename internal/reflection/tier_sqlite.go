@@ -92,6 +92,14 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 // member, not against a growing union, so the grouping is a function of input
 // order alone.
 func duplicateClusters(mems []memory.Memory) [][]int {
+	return duplicateClustersWhere(mems, nil)
+}
+
+// duplicateClustersWhere is duplicateClusters with an extra pairwise condition:
+// a pair that passes the near-duplicate rule is still kept apart when
+// compatible (if not nil) says no. The _global fold uses it for the polarity
+// guard; the SQLite tier passes nil and keeps its rule as it was.
+func duplicateClustersWhere(mems []memory.Memory, compatible func(a, b memory.Memory) bool) [][]int {
 	tokens := make([]map[string]bool, len(mems))
 	for i, m := range mems {
 		tokens[i] = tokenize(m.Content)
@@ -115,7 +123,8 @@ func duplicateClusters(mems []memory.Memory) [][]int {
 			if c := containment(tokens[i], tokens[j]); c == 1.0 {
 				sim = 1.0
 			}
-			if sim >= 0.5 && !numericConflict(tokens[i], tokens[j]) {
+			if sim >= 0.5 && !numericConflict(tokens[i], tokens[j]) &&
+				(compatible == nil || compatible(mems[i], mems[j])) {
 				absorbed[j] = true
 				cluster = append(cluster, j)
 			}
@@ -271,7 +280,11 @@ func hostedRepoRef(lower string) bool {
 			i += from
 			// A host label before it (docs.github.com, api.github.com) is a
 			// different site.
-			if (i == 0 || !isName(rune(lower[i-1]))) && ownerRepo(lower[i+len(host):]) {
+			start := i
+			if strings.HasSuffix(lower[:i], "www.") {
+				start -= len("www.") // the same host
+			}
+			if (start == 0 || !isName(rune(lower[start-1]))) && ownerRepo(lower[i+len(host):]) {
 				return true
 			}
 			from = i + len(host)
