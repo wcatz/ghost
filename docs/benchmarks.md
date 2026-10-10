@@ -92,19 +92,14 @@ margins the test already carried (NDCG@10 / recall@10, observed minus floor: fts
 0.019 / 0.027, vector 0.020 / 0.014, hybrid 0.018 / 0.013); two-decimal floors
 would have loosened five of the six.
 This is a label/corpus correction, not a ranking change — the ranking is unchanged.
-- **The `embeddings.json` fixture was added to, never rewritten.** The vectors
-  for the remaining keys are exactly as before; the two dropped keys' vectors
-  remain in the fixture unused. A future regeneration goes through the route
+- **The `embeddings.json` fixture is untouched.** This change edits no vector:
+  the two dropped keys' vectors remain in the fixture unused, and the vectors for
+  every remaining key are exactly as before. A future regeneration goes through
+  the route
   [in this section](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped) — `EmbedDocument` for memory keys and
   `EmbedQuery` for query names, not raw `/api/embed` calls, which is the mistake
   the prefix-free fixture used to carry — and that route rewrites every key, so
-  its diff is expected to be whole-file. Re-embedding an existing key reproduces
-  the committed vector exactly on the current model, so this table is measured in
-  the same space as the one before it. Reproduce the additive shape against this
-  PR's own base with
-  `git diff --numstat $(git merge-base origin/main HEAD) -- internal/bench/testdata/embeddings.json`
-  — 3080 insertions, 0 deletions, and the 3080 is four keys of 770 lines (one key
-  line, 768 floats, one closing line). Reproduce the numbers with
+  its diff is expected to be whole-file. Reproduce the numbers above with
   `go run ./cmd/ghost bench`.
 
 The bullets below record the earlier fixture regeneration, which is what moved
@@ -264,7 +259,7 @@ cutoff     relevant     items context precision      result rate                
 0.700           298      1489 0.200 (298/1489)       1.000 (220/220)        199.000 (43780/220)
 ```
 
-**Why 0.63, and the shape of the trade.** The ranking is not the problem — hybrid MRR@10 is 0.902, so the useful row is usually first; the block simply never stopped. The cutoff compares the fused **Base** (the score before the age decay), so a relevant month-old decision is not cut for being old, and it exempts pinned and keyword-reserved rows (the reservation admits a keyword hit whose fused score is below the cut by design). The graded corpus's relevant and noise rows are interleaved in fused score, so a single relative-to-top threshold cannot cut only the noise: at 0.50 and 0.60 no answer shortens (every row is still within the share, and the table equals the baseline), and at ~0.70 the top rows of many queries fall off together, so the block shrinks a lot **and** graded-relevant rows are cut with it. The honest knee is between those. **0.63 admits 308 of the 310 baseline relevant rows** — a 4-row margin over the ship floor of 304 — holds the result rate at **1.000**, raises context precision **0.141 → 0.148** and lowers estimated tokens **296.9 → 280.282** per answer. 0.64 (306 relevant, precision 0.154, 267.2 tokens) and 0.65 (305 relevant, precision 0.162, 254.0 tokens) also clear the gate but leave a margin of two rows and one; the relevant floor is the hard constraint, so the default keeps the larger margin rather than the last points of precision.
+**Why 0.63, and the shape of the trade.** The ranking is not the problem — hybrid MRR@10 is 0.911, so the useful row is usually first; the block simply never stopped. The cutoff compares the fused **Base** (the score before the age decay), so a relevant month-old decision is not cut for being old, and it exempts pinned and keyword-reserved rows (the reservation admits a keyword hit whose fused score is below the cut by design). The graded corpus's relevant and noise rows are interleaved in fused score, so a single relative-to-top threshold cannot cut only the noise: at 0.50 and 0.60 no answer shortens (every row is still within the share, and the table equals the baseline), and at ~0.70 the top rows of many queries fall off together, so the block shrinks a lot **and** graded-relevant rows are cut with it. The honest knee is between those. **0.63 admits 308 of the 310 baseline relevant rows** — a 4-row margin over the ship floor of 304 — holds the result rate at **1.000**, raises context precision **0.141 → 0.148** and lowers estimated tokens **296.9 → 280.282** per answer. 0.64 (306 relevant, precision 0.154, 267.2 tokens) and 0.65 (305 relevant, precision 0.162, 254.0 tokens) also clear the gate but leave a margin of two rows and one; the relevant floor is the hard constraint, so the default keeps the larger margin rather than the last points of precision.
 
 **The gate, and what does not move.** graded-relevant admitted 308 (floor 304, +4); result rate 1.000; context precision 0.141 → 0.148 (up); est. tokens 296.9 → 280.3 (down); contamination 0.000 unchanged (still a corpus property). Plain `ghost bench` is **unchanged** — the retriever is not touched, and the two results tables are byte-identical before and after. `ghost bench --passive` is **byte-identical** — the cutoff is a recorded pass-through on a passive request, so no passive block, note or verdict moves. Setting `context.relevance_cutoff: 0` reproduces the pre-cutoff block exactly, which is the byte-identity the disabled state promises.
 
