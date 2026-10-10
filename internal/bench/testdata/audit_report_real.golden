@@ -1,0 +1,376 @@
+retrieval audit (hand-labelled real sessions): 36 memories, 94 scripted turn items, 23 calls
+  audit.Run over a labelled corpus, scored against that corpus's own labels;
+  no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves
+
+cited ids caught: 0 of 1
+restatements caught: 0 of 2
+false "used" (labels expect ignored): 0 of 33
+token-arm precision: n/a
+
+scenario record-56: the call is placed before turn 1, source search, keeps 2 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       2     2  1.000 (2/2)      1.000 (2/2)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         2
+
+scenario record-57: the call is placed before turn 7, source search, keeps 6 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       6     6  1.000 (6/6)      1.000 (6/6)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         6
+
+scenario record-59: the call is placed before turn 13, source search, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-60: the call is placed before turn 18, source search, keeps 5 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       5     5  1.000 (5/5)      1.000 (5/5)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         5
+
+scenario record-65: the call is placed before turn 23, source project_context, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-31: the call is placed before turn 26, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-32: the call is placed before turn 31, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-33: the call is placed before turn 40, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-35: the call is placed before turn 43, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-37: the call is placed before turn 45, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-38: the call is placed before turn 47, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-40: the call is placed before turn 50, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-41: the call is placed before turn 51, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-47: the call is placed before turn 54, source session_start, keeps 0 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     0  n/a              n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-52: the call is placed before turn 57, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-54: the call is placed before turn 61, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-55: the call is placed before turn 65, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    1     0  n/a              0.000 (0/1)     
+  used (either arm)             1     0  n/a              0.000 (0/1)     
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       0     1  0.000 (0/1)      n/a             
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         1
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         0
+
+scenario record-58: the call is placed before turn 68, source session_start, keeps 1 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     1  1.000 (1/1)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-61: the call is placed before turn 72, source session_start, keeps 2 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       2     2  1.000 (2/2)      1.000 (2/2)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         2
+
+scenario record-64: the call is placed before turn 77, source session_start, keeps 2 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    1     0  n/a              0.000 (0/1)     
+  used (either arm)             1     0  n/a              0.000 (0/1)     
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       1     2  0.500 (1/2)      1.000 (1/1)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         1
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         1
+
+scenario record-68: the call is placed before turn 82, source session_start, keeps 2 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       2     2  1.000 (2/2)      1.000 (2/2)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         2
+
+scenario record-69: the call is placed before turn 85, source session_start, keeps 4 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               0     0  n/a              n/a             
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             0     0  n/a              n/a             
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       4     4  1.000 (4/4)      1.000 (4/4)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         0
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         4
+
+scenario record-71: the call is placed before turn 90, source session_start, keeps 5 memories (0 same-domain)
+  outcome                expected   got  precision        recall          
+  used/identifier               1     0  n/a              0.000 (0/1)     
+  used/token                    0     0  n/a              n/a             
+  used (either arm)             1     0  n/a              0.000 (0/1)     
+  superseded_in_session         0     0  n/a              n/a             
+  contradicted                  0     0  n/a              n/a             
+  ignored                       4     5  0.800 (4/5)      1.000 (4/4)     
+  confusion (rows: expected, columns: got)
+                           used/id  used/tok  supersed   contrad   ignored
+  used/identifier                0         0         0         0         1
+  used/token                     0         0         0         0         0
+  superseded_in_session          0         0         0         0         0
+  contradicted                   0         0         0         0         0
+  ignored                        0         0         0         0         4

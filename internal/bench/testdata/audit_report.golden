@@ -1,11 +1,13 @@
-retrieval audit: 53 memories, 168 scripted turn items, 4 calls
-  audit.Run over a labelled offline session, scored against the corpus's labels;
+retrieval audit (labelled offline session): 53 memories, 168 scripted turn items, 4 calls
+  audit.Run over a labelled corpus, scored against that corpus's own labels;
   no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves
 
 same-domain used at session start: 9 of 20
   of which no turn labels them: 3 of 11
 cited ids caught: 3 of 3
 restatements caught: 4 of 4
+false "used" (labels expect ignored): 3 of 34
+token-arm precision: 0.571 (4/7)
 spread across turns, judged used: 0 of 4
 
 scenario start: the call is placed before turn 0, source session_start, keeps 44 memories (20 same-domain)
