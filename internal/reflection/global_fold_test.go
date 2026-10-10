@@ -125,3 +125,22 @@ func TestPlanGlobalFoldStillFoldsMatchingStance(t *testing.T) {
 		}
 	}
 }
+
+// A neutral head is near both of two opposite rows; the guard has to hold between
+// the rows themselves, not only against the head.
+func TestPlanGlobalFoldGuardsEveryClusterMemberNotJustTheHead(t *testing.T) {
+	mems := []memory.Memory{
+		{ID: "head", Content: "the shared cache when building the image", CreatedAt: "2026-01-01 00:00:00"},
+		{ID: "use", Content: "use the shared cache when building the image", CreatedAt: "2026-01-02 00:00:00"},
+		{ID: "avoid", Content: "avoid the shared cache when building the image", CreatedAt: "2026-01-03 00:00:00"},
+	}
+	for _, c := range PlanGlobalFold(mems) {
+		ids := map[string]bool{c.Survivor.ID: true}
+		for _, f := range c.Folded {
+			ids[f.ID] = true
+		}
+		if ids["use"] && ids["avoid"] {
+			t.Fatalf("opposite rows were clustered through a neutral head: %+v", c)
+		}
+	}
+}

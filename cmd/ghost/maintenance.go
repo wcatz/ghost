@@ -270,7 +270,7 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	out := func(a ...any) { _, _ = fmt.Fprintln(w, a...) }
 	outf := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	// Captured before the read, as reflect does: a row saved after this instant
-	// was not in the plan and ReplaceNonManual keeps it.
+	// was not in the plan and FoldRows refuses it.
 	since, err := store.CurrentTimestamp(ctx)
 	if err != nil {
 		return fmt.Errorf("get timestamp: %w", err)
@@ -279,9 +279,8 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 	if err != nil {
 		return fmt.Errorf("read _global: %w", err)
 	}
-	// A row stamped at or after `since` is one ReplaceNonManual keeps in place and
-	// never lets an emission claim, so planning it would insert a second copy of
-	// its text beside it. Leave it out of the plan; the next run sees it.
+	// A row stamped at or after `since` was saved during the run and FoldRows
+	// refuses it, so it stays out of the plan; the next run sees it.
 	var live []memory.Memory
 	for _, m := range consolidatable(all) {
 		// Only what reflection wrote is planned: the backlog is reflection's, and

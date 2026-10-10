@@ -95,6 +95,22 @@ func duplicateClusters(mems []memory.Memory) [][]int {
 	return duplicateClustersWhere(mems, nil)
 }
 
+// compatibleWithAll reports whether mems[j] is compatible with every member
+// already in the cluster, not only its head: a neutral head can be near both of
+// two rows that are opposites of each other, and checking the head alone would
+// put them in one cluster. A nil check accepts everything.
+func compatibleWithAll(compatible func(a, b memory.Memory) bool, mems []memory.Memory, cluster []int, j int) bool {
+	if compatible == nil {
+		return true
+	}
+	for _, m := range cluster {
+		if !compatible(mems[m], mems[j]) {
+			return false
+		}
+	}
+	return true
+}
+
 // duplicateClustersWhere is duplicateClusters with an extra pairwise condition:
 // a pair that passes the near-duplicate rule is still kept apart when
 // compatible (if not nil) says no. The _global fold uses it for the polarity
@@ -124,7 +140,7 @@ func duplicateClustersWhere(mems []memory.Memory, compatible func(a, b memory.Me
 				sim = 1.0
 			}
 			if sim >= 0.5 && !numericConflict(tokens[i], tokens[j]) &&
-				(compatible == nil || compatible(mems[i], mems[j])) {
+				compatibleWithAll(compatible, mems, cluster, j) {
 				absorbed[j] = true
 				cluster = append(cluster, j)
 			}
