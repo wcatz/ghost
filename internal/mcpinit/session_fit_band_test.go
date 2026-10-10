@@ -227,7 +227,7 @@ func recordedResponseFitCuts(t *testing.T, dbPath string) int {
 	}
 	cuts := 0
 	for _, r := range rows {
-		if !r.Kept && r.Stage == "response_fit" {
+		if !r.Kept && r.Stage == responseFitStage {
 			cuts++
 		}
 	}
