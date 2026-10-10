@@ -38,7 +38,7 @@ func TestHandleSessionStartHook(t *testing.T) {
 	// The session instruction was updated in #959 to say "Save to Ghost as it
 	// happens, not at the end: when the user corrects you..." and references
 	// ghost_memory_update. Check for the distinctive opening of the new text.
-	if !strings.Contains(output, "Save to Ghost as it happens") && !strings.Contains(output, "Ghost context") {
+	if !strings.Contains(output, "Save to Ghost with ghost_memory_save as it happens") && !strings.Contains(output, "Ghost context") {
 		t.Error("hook output should mention the new save instruction or Ghost context")
 	}
 }

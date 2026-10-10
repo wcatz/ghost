@@ -197,7 +197,12 @@ func TestBenchInjectionBudget(t *testing.T) {
 // a failure but a real growth of the injected block is. It is a byte budget
 // because bytes are what the block costs the context window — there is no
 // tokenizer in this package.
-const sessionBlockByteBudget = 2048
+//
+// The closing save guidance (sessionSaveInstruction) is about 600 bytes of the
+// whole block: it replaced a one-line pointer, took the block from 1459 to 1988
+// bytes, and the budget was raised from 2048 to leave the same kind of slack
+// over the new figure rather than 60 bytes.
+const sessionBlockByteBudget = 2560
 
 // formatMemoriesMarkdown renders the session memory lines in the compact shape
 // session start used before the assembler migration: category and content, no

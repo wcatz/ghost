@@ -893,8 +893,8 @@ slots. Measured under the default `injection.behavior_floor: 8`:
 | legacy render, the shape before that (32-hex ID per line) | 852 bytes |
 | byte saving the compact shape made over the legacy one | **120 bytes (~14%)** |
 | shipped render — the 15 row lines through `assemble.Item.Line()` (#907) | **942 bytes** |
-| shipped block, whole (headings, count lines, closing instruction) | **1459 bytes** |
-| shipped-block budget the test now enforces | **2048 bytes** |
+| shipped block, whole (headings, count lines, closing instruction) | **1988 bytes** |
+| shipped-block budget the test now enforces | **2560 bytes** |
 
 This evidences that the trade is a net win on selection: the category-priority
 selection hits its behavioral floor even when high-importance descriptive rows
@@ -911,7 +911,7 @@ row shapes that agree on labels but not on bytes would be two shapes for a
 reader who compares session start with search. The cost is measured on the same
 corpus and selection: **942 bytes of rows against the compact shape's 732 (+210
 bytes, +29%) and the legacy with-id shape's 852 (+90 bytes, +11%), 1459 bytes
-for the whole block** (measured 2026-10-07).
+for the whole block** (measured 2026-10-07). The longer closing save guidance (#959) then took the whole block to **1988 bytes**, and the budget to 2560.
 
 The compact and legacy columns are therefore the pre-#907 measurement of two
 shapes neither of which reaches an agent any more; they stay because the test

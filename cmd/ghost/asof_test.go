@@ -101,7 +101,7 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 	// mcpinit's constant, and the CLI reads the block the hook renders,
 	// so a distinctive prefix is what this side can pin without reaching
 	// into mcpinit's unexported constant.
-	if !strings.Contains(stdout, "Save to Ghost as it happens, not at the end") {
+	if !strings.Contains(stdout, "Save to Ghost with ghost_memory_save as it happens, not at the end") {
 		t.Errorf("the current block lost its session instruction:\n%s", stdout)
 	}
 }

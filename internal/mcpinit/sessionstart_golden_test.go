@@ -298,7 +298,7 @@ func TestSessionStartInstructionIsOneStatementOnBothBranches(t *testing.T) {
 		t.Errorf("the project branch carries the instruction %d times, so a second copy has drifted:\n%s", n, projectBlock)
 	}
 	for _, want := range []string{
-		"Save to Ghost as it happens, not at the end",
+		"Save to Ghost with ghost_memory_save as it happens, not at the end",
 		"when the user corrects you or states a rule",
 		"when a bug's root cause is found",
 		"when a choice is made for a reason",
@@ -422,7 +422,7 @@ Use project_id: "goldproj" for all ghost_* tool calls.
 - [preference] «global memory 08 content for the golden block»
 
 
-Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, not that a value in an example, template, test fixture or sample file is a placeholder, never a key or token value.
+Save new discoveries with ghost_memory_save during work.
 `
 
 // goldenBlockAfter is the block the session-start surface renders on this

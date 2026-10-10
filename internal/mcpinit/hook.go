@@ -565,7 +565,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 // 43 saves of which 32 were good: 4 duplicates, 2 repository restatements, 2
 // transient progress notes, and 4 of 8 global rows wrong. A historical block
 // (asOf != nil) omits it on purpose: it is an instruction about the present.
-const sessionSaveInstruction = "Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, not that a value in an example, template, test fixture or sample file is a placeholder, never a key or token value."
+const sessionSaveInstruction = "Save to Ghost with ghost_memory_save as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, not that a value in an example, template, test fixture or sample file is a placeholder, never a key or token value."
 
 // The two rank phrases and the two tool pointers are the session-start block's
 // own wording for each bucket, kept beside the helper that splices them: the
