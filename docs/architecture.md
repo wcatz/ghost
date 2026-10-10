@@ -1720,7 +1720,7 @@ Axis interaction rules:
 > the budget, on a QUERY only, that stops the answer where relevance falls off —
 > `ghost_memory_search` used to always fill its window, so a block that answered a
 > question whose useful row ranked first still carried nine rows of noise (context
-> precision 0.138). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
+> precision 0.141). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
 > of the top row's fused Base below which a row is cut), chosen from the
 > `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
 > stays the maximum, the top row is always kept (a result rate below 1.000 would

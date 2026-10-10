@@ -121,11 +121,11 @@ const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 //
 // The number is chosen from the `ghost bench --cutoff-sweep` table in
 // docs/benchmarks.md, and the trade it makes is explicit rather than tuned: on
-// the graded corpus it admits 302 of the 304 baseline graded-relevant rows
-// (the ship floor is 298), holds the answerable result rate at 1.000, raises
-// context precision from 0.138 to 0.145 and lowers the estimated token cost per
-// answer from about 297 to about 280. 0.64 (300 relevant) and 0.65 (298) also
-// clear the floor but leave a margin of two rows and none; the floor is the
+// the graded corpus it admits 308 of the 310 baseline graded-relevant rows
+// (the ship floor is 304), holds the answerable result rate at 1.000, raises
+// context precision from 0.141 to 0.148 and lowers the estimated token cost per
+// answer from about 297 to about 280. 0.64 (306 relevant) and 0.65 (305) also
+// clear the floor but leave a margin of two rows and one; the floor is the
 // hard constraint and a ship that clears it barely is a ship one corpus edit
 // from failing it, so the default keeps the four-row margin rather than the
 // last few points of precision.

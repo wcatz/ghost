@@ -31,7 +31,7 @@ func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 // tinySweepFixture is a four-memory corpus with two queries, for the sweep
 // behaviours that are about the CODEPATH (which point is the reference, what
 // happens when there is none) rather than about this corpus's ranking. The
-// committed dataset's 551 embeddings are the expensive part of this package and
+// committed dataset's 549 embeddings are the expensive part of this package and
 // both of those properties hold over four memories exactly as well.
 func tinySweepFixture(t *testing.T) (*memory.Store, []Query) {
 	t.Helper()
