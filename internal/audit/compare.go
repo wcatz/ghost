@@ -128,8 +128,8 @@ type Verdict struct {
 // `ghost context --audit`, and since #930 a wrong `restated by wording` count
 // beside the precision. An absolute floor alone is the same mistake scaled: three
 // matched words out of a three-word memory is the whole memory, while three out
-// of ninety is noise. So a memory is claimed when the agent repeated at least a
-// third of its distinctive words AND at least three of them.
+// of ninety is noise. So a memory is claimed when the agent repeated at least
+// half of its distinctive words AND at least three of them.
 //
 // The rule is pinned by TestCompareTokenArmNeedsEnoughOfTheMemory and
 // TestCompareTokenArmNeedsEveryTokenOfAShortMemory rather than only stated here,
@@ -141,8 +141,91 @@ type Verdict struct {
 // loose bar there reports ordinary use as a finding the operator would act on.
 const (
 	tokenFloor    = 3
-	tokenFraction = 3
+	tokenFraction = 2
 )
+
+// outlierTurnTokens is the number of distinct fingerprints at which a turn stops being
+// something a person wrote and starts being a file or a pasted document: a typical turn
+// holds a few tens, and a 100 KB file write or a long agent instruction holds hundreds
+// (a real store's turns that matched nearly every memory had a median of 229 distinct
+// tokens against 14 for an ordinary one). A turn that large repeats half of almost any
+// memory by size alone, so the token arm does not read it at all.
+//
+// Decided when the turn is JUDGED and not when it is added, so it covers a turn that
+// grew past the line across several Add calls (a scanner steps the instant once per
+// line and adds every block of the line under it), and reads the same on a Signals
+// built in process and one read back from a sidecar. Nothing is dropped from storage:
+// Empty, Ordered and Unplaced still see the turn, and the other arms are unchanged.
+//
+// The cost is a real restatement that shares a turn with a giant write, which is
+// skipped with it; the bench's `fp` call carries one such case so the miss is reported.
+const outlierTurnTokens = 150
+
+// Generic vocabulary is a session's own words that turn up in so many of its turns that
+// repeating them says nothing about any one memory: the project's name, its nouns, the
+// words of the file the agent is editing. On a real store these were the largest cause
+// of a false `used` (22 of 48), because a memory about the project is made of them and
+// any turn about the project repeats them.
+//
+// A word is generic in a session when it is in at least a quarter of the session's
+// turns, over a session of at least twelve (a short one has no vocabulary to call
+// common). The turns counted are the placed ones that are not outliers, so a giant
+// file does not make every word in it common, and the count is over the WHOLE session
+// even when the comparison sees only the turns after a call (Since carries it).
+//
+// It is computed from fingerprints the turns already carry, so it crosses the sidecar
+// with no new field and no word ever leaves the hook; a rule that needed the words
+// themselves could not run in the child that judges.
+//
+// Generic fingerprints leave the NUMERATOR of the token arm only. The memory's total
+// stays whole, because shrinking it would shrink the bar with it and let a memory
+// of which most words are generic clear a half with a handful: the bar is a share of
+// what the memory says, and a generic word is still something it says. The save-restatement arm
+// reads the same set, since its false positive is the decision-bearing one and comes
+// from the same session vocabulary; the negation arm does not, since a
+// contradiction's bar is never to get looser.
+const (
+	genericMinTurns = 12
+	genericShare    = 4 // a word is generic at 1/genericShare of the turns or more
+)
+
+// genericFingerprints returns the fingerprints in at least a quarter of turns. The
+// result is never nil.
+func genericFingerprints(turns []turn) map[string]bool {
+	out := map[string]bool{}
+	var counted int
+	freq := map[string]int{}
+	for _, tn := range turns {
+		if tn.at <= 0 || len(tn.fps) >= outlierTurnTokens {
+			continue
+		}
+		counted++
+		for _, fp := range tn.fps {
+			freq[fp]++
+		}
+	}
+	if counted < genericMinTurns {
+		return out
+	}
+	for fp, n := range freq {
+		if n*genericShare >= counted {
+			out[fp] = true
+		}
+	}
+	return out
+}
+
+// pinned returns s with its generic vocabulary computed: s itself when it already
+// is, and otherwise a shallow copy that holds it, so a comparison reads it once for
+// every memory it judges and nothing the caller holds is written to.
+func (s *Signals) pinned() *Signals {
+	if s.generic != nil {
+		return s
+	}
+	c := *s
+	c.generic = genericFingerprints(s.turns)
+	return &c
+}
 
 // Compare judges every retrieved memory against the signals, and returns one
 // verdict per memory it could judge.
@@ -153,6 +236,7 @@ const (
 // to notice if it ever matters — it does not, because the store's own write
 // refuses such a row too.
 func Compare(s *Signals, judged []Judged) []Verdict {
+	s = s.pinned()
 	out := make([]Verdict, 0, len(judged))
 	for _, j := range judged {
 		v, ok := CompareAgainst(s, j)
@@ -176,6 +260,7 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 	if j.MemoryID == "" {
 		return Verdict{}, false
 	}
+	s = s.pinned()
 	toks := s.h.DistinctTokens(j.Content)
 
 	switch {
@@ -214,10 +299,10 @@ func (s *Signals) matches(toks []string) bool {
 	for _, tn := range s.turns {
 		// An unplaced turn is carried, never evidence: the scanner could not say
 		// when it was written, so it cannot be after any call.
-		if tn.at <= 0 {
+		if tn.at <= 0 || len(tn.fps) >= outlierTurnTokens {
 			continue
 		}
-		if clearsTokenBar(sharedTokens(tn.fps, toks), len(toks)) {
+		if clearsTokenBar(sharedTokensExcept(tn.fps, toks, s.generic), len(toks)) {
 			return true
 		}
 	}
@@ -239,7 +324,7 @@ func clearsTokenBar(matched, total int) bool {
 // (see AddSaveArgs). It uses the same threshold, because the evidence is the same
 // shape: the agent's own words, about the same subject.
 func (s *Signals) matchesSaves(toks []string) bool {
-	return clearsTokenBar(sharedTokens(s.saves, toks), len(toks))
+	return clearsTokenBar(sharedTokensExcept(s.saves, toks, s.generic), len(toks))
 }
 
 // contradicts reports whether the agent denied THIS memory, in one sentence.
@@ -265,7 +350,7 @@ func (s *Signals) matchesSaves(toks []string) bool {
 //
 //  3. The denial must be about this memory's OWN WORDING, on the arm that reads
 //     wording: the sentence must share the SAME token bar the `used` arm uses
-//     (>=3 distinct fingerprints AND >= a third of the memory's tokens), not a
+//     (>=3 distinct fingerprints AND >= a half of the memory's tokens), not a
 //     lower threshold. Two shared tokens is too loose: a memory about "cache
 //     lockfile directory" would be contradicted by any sentence mentioning two of
 //     those three words in a denial context, even when the denial is about
@@ -304,6 +389,12 @@ func (s *Signals) contradicts(toks []string, memoryID string) bool {
 // and addFingerprints does the same on the read path), so a count here is a
 // count of DISTINCT shared words.
 func sharedTokens(transcript, memory []string) int {
+	return sharedTokensExcept(transcript, memory, nil)
+}
+
+// sharedTokensExcept is sharedTokens with a set of fingerprints that do not count as
+// shared however often the transcript holds them (nil counts every one).
+func sharedTokensExcept(transcript, memory []string, skip map[string]bool) int {
 	if len(memory) == 0 {
 		return 0
 	}
@@ -313,7 +404,7 @@ func sharedTokens(transcript, memory []string) int {
 	}
 	matched := 0
 	for _, fp := range memory {
-		if have[fp] {
+		if have[fp] && !skip[fp] {
 			matched++
 		}
 	}

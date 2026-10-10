@@ -35,6 +35,11 @@ const (
 	AuditProse    AuditKind = "prose"
 	AuditToolArgs AuditKind = "tool_args"
 	AuditSaveArgs AuditKind = "save_args"
+	// AuditToolCall is a whole tool call as the host wrote it: Tool is its name and
+	// Text is its JSON arguments, so the bench drives the same routing the scanners
+	// do (which words are prose, which are a save's, which ids are citations)
+	// instead of choosing the entry point for the product.
+	AuditToolCall AuditKind = "tool_call"
 )
 
 // AuditMemory is one stored memory: its id, its text, and the domain it is about
@@ -50,13 +55,19 @@ type AuditMemory struct {
 // several items may share a minute, in list order. The label slices name memory
 // ids.
 type AuditTurn struct {
-	Minute   int
-	Kind     AuditKind
+	Minute int
+	Kind   AuditKind
+	// Tool names the tool of an AuditToolCall turn, and is empty for every other kind.
+	Tool     string
 	Text     string
 	Cites    []string
 	Restates []string
 	Denies   []string
 	Saves    []string
+	// Edits names a memory whose full id the turn holds as the argument of an EDIT
+	// of that same memory. It is not a citation: the agent was rewriting the memory,
+	// not relying on it, so no verdict follows from the label.
+	Edits []string
 }
 
 // AuditCall is one retrieval the session made: the turn it is placed before (every
@@ -139,7 +150,7 @@ func auditOpsMemories() []string {
 // three in each, and never all in one. No single turn restates it, so the labels
 // expect it ignored; a comparison that pools the whole session's words reads the
 // union and calls it used. Each memory has at least ten distinctive words, so three
-// in one turn is under a third of it.
+// in one turn is under a half of it.
 type auditSpread struct {
 	content string
 	turns   [3]string
@@ -179,6 +190,25 @@ func auditBody(n int) string {
 		fmt.Fprintf(&b, "\t// the schema migration guards the verdicts column so the sink never fails the search %d\n", i)
 		fmt.Fprintf(&b, "\tif err := s.sink.RecordRetrieval(ctx, rec); err != nil { return fmt.Errorf(\"record session %d: %%w\", err) }\n", i)
 		fmt.Fprintf(&b, "\treturn s.assembler.Stage(ctx, rec.ProjectID, rec.SessionID, rec.Verdicts)\n}\n")
+	}
+	return b.String()
+}
+
+// auditGiant is a tool argument of n distinct made-up words, followed by the given
+// sentences: the shape of a generated file or a long agent instruction. The made-up
+// words are letters only, four or more of them, so each is a token of its own.
+func auditGiant(n int, sentences ...string) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString("zqxv")
+		for v := i + 1; v > 0; v /= 26 {
+			b.WriteByte(byte('a' + v%26))
+		}
+		b.WriteByte(' ')
+	}
+	for _, sent := range sentences {
+		b.WriteString(sent)
+		b.WriteByte(' ')
 	}
 	return b.String()
 }
@@ -278,10 +308,89 @@ func NewAuditCorpus() AuditCorpus {
 	add(AuditTurn{Minute: 32, Kind: AuditSaveArgs, Saves: []string{dev[19]},
 		Text: "Session scoped reads keep one session's calls apart from another's"})
 
+	// The false-positive classes the issue measured on real work, one hand-written case
+	// each, kept in their own domain and their own call so the figures above keep the
+	// denominators they had. The vocabulary is disjoint from the dev, ops and spread
+	// memories, except where a case is ABOUT the session's own generic words, and its
+	// turns come after the forty narrative minutes.
+	//
+	// Every case but the two guards is a memory no turn restates, cites or saves, so
+	// the labels expect it ignored; the audit saying used is a false positive by the
+	// corpus's own account. The guards are restatements the audit has to keep finding,
+	// and one of them is a known cost, labelled as one.
+	fpMem := func(name, content string) string {
+		id := auditID("fp/" + name)
+		c.Memories = append(c.Memories, AuditMemory{ID: id, Content: content, Domain: "fp"})
+		return id
+	}
+	minute := auditTurnCount + 1
+
+	// Generic project words: the session's own vocabulary is in every turn (the file
+	// bodies name the record, the sink, the stage, the session and the verdicts each
+	// minute), so a memory built from it is matched by any turn at all. The second is
+	// the short form: every one of its four words is generic, so the floor of three is
+	// the whole memory.
+	fpMem("generic/long", "Session verdicts column rows keep the retrieval record stage")
+	fpMem("generic/short", "Session record sink verdicts")
+
+	// Code the agent wrote: forty consecutive edits of one file, each carrying the
+	// same words in a comment and a log line, which is a third of the session's turns.
+	// The memory is about that file's subject, and each edit repeats most of it. Twenty
+	// edits (a fifth of the turns) is under the generic-word line and does not flip it.
+	fpMem("code", "Ledger sweeper deletes orphaned snapshots before compaction starts")
+	for i := 0; i < 40; i++ {
+		add(AuditTurn{Minute: minute, Kind: AuditToolArgs, Text: fmt.Sprintf(
+			"func (l *Ledger) pass%d(ctx context.Context) error {\n"+
+				"\t// the ledger sweeper deletes orphaned snapshots before compaction starts\n"+
+				"\tlog.Printf(\"ledger sweeper deletes orphaned snapshots before compaction starts, pass %d\")\n"+
+				"\treturn l.next(ctx)\n}\n", i, i)})
+		minute++
+	}
+
+	// One giant tool-argument turn: a generated file of two hundred distinct words that
+	// happens to hold the words of two memories whole. A turn that size matches
+	// whatever it is asked about.
+	fpMem("giant/a", "Quorum arbiter rebalances shard leases whenever replicas lag beyond threshold")
+	fpMem("giant/b", "Mirror cutover drains pending journals once standby promotes cleanly")
+	add(AuditTurn{Minute: minute, Kind: AuditToolArgs, Text: auditGiant(200,
+		"quorum arbiter rebalances shard leases whenever replicas lag beyond threshold",
+		"mirror cutover drains pending journals once standby promotes cleanly")})
+	minute++
+
+	// An id inside an update of the same memory: the agent rewrote the memory and the
+	// call carries its id as the argument that says which one, and the text it carries
+	// is the memory's own wording, which is what the store holds when the call is
+	// judged. That is an edit: not a citation, not a use by wording, and not a
+	// restatement that supersedes the memory by itself.
+	editID := fpMem("edit", "Compactor watermark advances only after manifests are fsynced")
+	add(AuditTurn{Minute: minute, Kind: AuditToolCall, Tool: "mcp__ghost__ghost_memory_update", Edits: []string{editID},
+		Text: `{"memory_id":"` + editID + `","content":"Compactor watermark advances only after manifests are fsynced"}`})
+	minute++
+
+	// Guards. A memory of three distinctive words that one turn repeats whole is the
+	// floor's own case and stays used; so does a long one restated in one turn.
+	shortID := fpMem("true/short", "Basalt lantern cipher")
+	add(AuditTurn{Minute: minute, Kind: AuditProse, Restates: []string{shortID},
+		Text: "Rotating the basalt lantern cipher before the handover"})
+	minute++
+	longID := fpMem("true/long", "Orchard tether syncs bundles through relay brokers nightly")
+	add(AuditTurn{Minute: minute, Kind: AuditProse, Restates: []string{longID},
+		Text: "The orchard tether syncs bundles through the relay brokers nightly, so the handover waits"})
+	minute++
+
+	// The known cost of skipping a giant turn: a real restatement that shares its turn
+	// with a giant file write is skipped with it. Labelled a use, because it is one, so
+	// the report shows the miss instead of hiding it.
+	costID := fpMem("cost", "Pylon rotor torque resets whenever gearbox oil warms")
+	add(AuditTurn{Minute: minute, Kind: AuditProse, Restates: []string{costID},
+		Text: "The pylon rotor torque resets whenever gearbox oil warms, which the next file relies on"})
+	add(AuditTurn{Minute: minute, Kind: AuditToolArgs, Text: auditGiant(200)})
+
 	c.Calls = []AuditCall{
 		{Name: "start", Source: "session_start", Before: 0, Domains: []string{"dev", "ops", "spread"}},
 		{Name: "middle", Source: "search", Before: auditTurnCount / 2, Domains: []string{"dev", "spread"}},
 		{Name: "end", Source: "search", Before: auditTurnCount, Domains: []string{"dev", "spread"}},
+		{Name: "fp", Source: "search", Before: 0, Domains: []string{"fp"}},
 	}
 	return c
 }

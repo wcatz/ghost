@@ -479,3 +479,57 @@ func TestEveryAuditScannerStampsWhenTheAgentWrote(t *testing.T) {
 		})
 	}
 }
+
+// TestScanAuditAnUpdateOfAMemoryIsReadAsNothing: an update's arguments are the id of
+// the memory being rewritten and the text that is now stored, so the verdict on that
+// memory must not come from them: not used by its id, not used by its wording, and not
+// superseded, which would file the newest text there is as out of date. Any other tool
+// call that carries the id is still a citation.
+func TestScanAuditAnUpdateOfAMemoryIsReadAsNothing(t *testing.T) {
+	line := func(tool string) string {
+		return `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"` + tool +
+			`","input":{"memory_id":"` + auditMemoryID + `","content":"` + injectedText + `"}}]}}` + "\n"
+	}
+	// Prose after the update, so the scan is not empty and the judgement is reached.
+	prose := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"text","text":"moving on to the next file"}]}}` + "\n"
+	for _, name := range []string{"mcp__ghost__ghost_memory_update", "ghost_memory_update", "ghost_ghost_memory_update", "ghost.ghost_memory_update"} {
+		sig := scanAudit(t, FormatClaudeJSONL, line(name)+prose)
+		if sig.HasID(auditMemoryID) {
+			t.Errorf("%s: the id of the memory being edited was recorded as a citation", name)
+		}
+		v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+		if !ok || v.Outcome != audit.OutcomeIgnored {
+			t.Errorf("%s: verdict %+v, want %q: an update restating the memory it rewrites is evidence about nothing", name, v, audit.OutcomeIgnored)
+		}
+	}
+	// An update that carries no new text (tags or a verification only) is the agent
+	// acting on the memory by id, like a pin, so its id is still a citation.
+	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","tags":["a"]}`, `{"memory_id":"` + auditMemoryID + `","verified":true,"content":""}`} {
+		l := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_update","input":` + args + `}]}}` + "\n"
+		if sig := scanAudit(t, FormatClaudeJSONL, l+prose); !sig.HasID(auditMemoryID) {
+			t.Errorf("an update with no new text (%s) stopped being a citation of the memory it names", args)
+		}
+	}
+	// Cases that cannot be told from a rewrite are read as one: a blank but non-empty
+	// content is written by the store, and arguments that are not a JSON object (codex
+	// passes a raw string through when its arguments are not JSON) may hold anything.
+	for _, args := range []string{`{"memory_id":"` + auditMemoryID + `","content":"  "}`, `"memory_id=` + auditMemoryID + ` content=` + injectedText + `"`} {
+		l := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_update","input":` + args + `}]}}` + "\n"
+		sig := scanAudit(t, FormatClaudeJSONL, l+prose)
+		if sig.HasID(auditMemoryID) {
+			t.Errorf("an update that may rewrite the memory (%s) was read as a citation of it", args)
+		}
+		if v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText}); !ok || v.Outcome != audit.OutcomeIgnored {
+			t.Errorf("an update that may rewrite the memory (%s) judged %+v, want ignored", args, v)
+		}
+	}
+	// The controls, so the cases above are the routing's doing: the same arguments
+	// under a tool that acts on a memory by id are the agent naming it, and another
+	// server's tool of the same bare name is not Ghost's.
+	for _, name := range []string{"mcp__ghost__ghost_memory_pin", "mcp__other__ghost_memory_update"} {
+		sig := scanAudit(t, FormatClaudeJSONL, line(name)+prose)
+		if !sig.HasID(auditMemoryID) {
+			t.Errorf("%s: an id in this tool's arguments stopped being a citation", name)
+		}
+	}
+}
