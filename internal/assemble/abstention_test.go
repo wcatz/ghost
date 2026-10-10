@@ -1762,6 +1762,64 @@ func TestTheCosineArmIgnoresTheSentinelToo(t *testing.T) {
 	}
 }
 
+// TestANegativeVectorScoreIsAValueNotAnAbsence: presence in the vector arm is
+// decided by the exact -1 mark the retriever leaves on a row the leg did not
+// retrieve, and never by the sign of the score. A cosine is in [-1, 1], so one
+// that came back negative was MEASURED and is a very weak match; counting it as
+// "no vector value" made a block whose every row scored below zero report
+// `no_floor_arm` — the reason that says no arm held a value to compare — when
+// the arm was holding one and judging it. That is the difference between "the
+// corpus was judged and found wanting" and "nothing here was measured at all",
+// and a caller told the second would go looking for an embedder.
+func TestANegativeVectorScoreIsAValueNotAnAbsence(t *testing.T) {
+	req := hybridRequest()
+	req.AbstainCosine = 0.6
+
+	res := run(t, &fakeRetriever{set: hybridSet(
+		vectorScored("A1", -1, -0.85, "a match the vector leg measured as its opposite"),
+		vectorScored("A2", -1, -0.10, "a match the vector leg measured as near-orthogonal"),
+	)}, req)
+
+	if res.Outcome != OutcomeWeak || res.Reason != reasonBelowFloor {
+		t.Fatalf("outcome/reason = %q/%q, want weak/below_floor: the vector leg measured both rows "+
+			"and neither cleared the 0.6 floor, which is a verdict about the corpus rather than "+
+			"an arm that held nothing", res.Outcome, res.Reason)
+	}
+	// The arm is the one that judged, so its threshold is on the line: a vector
+	// arm read as absent renders `not_applied` and would send the reader after
+	// an embedder.
+	if !strings.Contains(res.Machine, "abstain_cosine=0.600") {
+		t.Errorf("machine line = %q, want the configured cosine printed: the arm ran and held a "+
+			"value to compare", res.Machine)
+	}
+	if !res.Trace.Floors.VectorApplied {
+		t.Error("VectorApplied is false for a result whose rows all carry a measured cosine")
+	}
+	// The keyword arm had no value on this set, so the verdict is the vector
+	// arm's alone and the line has to say the keyword one did not apply.
+	if !strings.Contains(res.Machine, "floor_fts_rank=not_applied") {
+		t.Errorf("machine line = %q, want the keyword arm's unapplied state beside it", res.Machine)
+	}
+	// And the -1 mark is still what absence looks like, so the boundary is
+	// local: only the exact sentinel, never a low score, means "not retrieved".
+	absent := run(t, &fakeRetriever{set: hybridSet(
+		vectorScored("A1", -1, -0.85, "a match the vector leg measured as its opposite"),
+		vectorScored("A2", -1, -1, "a row the vector leg never retrieved"),
+	)}, req)
+	if absent.Outcome != OutcomeWeak || absent.Reason != reasonBelowFloor {
+		t.Errorf("outcome/reason = %q/%q, want weak/below_floor: one measured row is enough for the "+
+			"arm to hold a value", absent.Outcome, absent.Reason)
+	}
+	none := run(t, &fakeRetriever{set: hybridSet(
+		vectorScored("A1", -1, -1, "a row the vector leg never retrieved"),
+		vectorScored("A2", -1, -1, "another row the vector leg never retrieved"),
+	)}, req)
+	if none.Outcome != OutcomeAnswerable || none.Reason != reasonNoFloorArm {
+		t.Errorf("outcome/reason = %q/%q, want answerable/no_floor_arm: the -1 sentinel is still "+
+			"the mark for a leg that did not retrieve the row", none.Outcome, none.Reason)
+	}
+}
+
 // TestAFailedVectorLegIsNotAConfiguration: the two halves of one rule must not
 // disagree on the same shape. "No floor verdict was possible" is either a
 // configuration state (no arm had a value) or an incident (a retrieval broke),
