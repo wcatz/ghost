@@ -131,8 +131,16 @@ var gitOverridingVars = []string{
 	// back to $HOME/.gitconfig and /etc/gitconfig, which is where safe.directory
 	// normally lives anyway, so a checkout owned by another uid still resolves.
 	// One whose safe.directory was parked only in the relocated file stops
-	// resolving and both detectors answer "". The alternative is a parent that
-	// can name the global file, so the pointers go.
+	// resolving and both detectors answer "". The same holds for a safe.directory
+	// supplied through GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n or
+	// through `git -c` (GIT_CONFIG_PARAMETERS): it is no longer honoured either,
+	// and that is the common CI and container spelling. The remedy is to set
+	// safe.directory in $HOME/.gitconfig or the system config. The alternative is
+	// a parent that can name the global file or supply the key, so they go.
+	//
+	// GIT_CONFIG_NOSYSTEM is deliberately kept: it can only DISABLE the system
+	// config, never point the child at a different one, so it cannot redirect
+	// the remote.
 	"GIT_CONFIG",
 	"GIT_CONFIG_GLOBAL",
 	"GIT_CONFIG_SYSTEM",
@@ -193,11 +201,17 @@ func withoutGitOverrides(vars []string) []string {
 // different remote.origin.url for it.
 //
 // The scrub is deliberately narrow. A location variable is dropped because it
-// answers a question the caller already answered with -C, and a config variable
-// is dropped because it names a config FILE for a question the checkout's own
-// config already answers; a value inherited from a hook overrides that answer in
-// both cases. What the scrub does NOT reach is stated with the same precision: the checkout's own .git/config,
-// and the user's own global and system config. `git config --get` reads local
+// answers a question the caller already answered with -C. A config variable is
+// dropped because it either names a config file (GIT_CONFIG, GIT_CONFIG_GLOBAL,
+// GIT_CONFIG_SYSTEM) or carries config values (GIT_CONFIG_PARAMETERS,
+// GIT_CONFIG_COUNT with its pairs) for a question the checkout's own config
+// already answers. A value inherited from a hook overrides that answer in
+// both cases.
+//
+// What the scrub does NOT reach is stated with the same precision: the
+// checkout's own .git/config, and the user's own global and system config.
+// GIT_CONFIG_NOSYSTEM is kept on purpose, since it can only disable the system
+// config and so cannot redirect the remote. `git config --get` reads local
 // first, so the checkout's own value still wins, and when the checkout carries
 // none the user's own $HOME/.gitconfig answers — the answer git gives at the
 // user's own shell, which is not something a parent process can point anywhere.

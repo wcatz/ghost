@@ -522,7 +522,7 @@ location variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
 `GIT_DISCOVERY_ACROSS_FILESYSTEM`) decide where a repository is; the config
 variables (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` with its
 `GIT_CONFIG_KEY_`/`GIT_CONFIG_VALUE_` pairs, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`,
-`GIT_CONFIG_SYSTEM`) decide which configuration file the child reads. Without the
+`GIT_CONFIG_SYSTEM`) decide which configuration the child reads, by naming a file or by carrying values. Without the
 location scrub a server started from inside a git hook, or from a shell that
 exports one of them, would read a different repository's top level and bind the
 new project to a checkout nobody is working in. Without the config scrub the same
@@ -534,6 +534,15 @@ checkout that carries no origin of its own is still answered from the user's own
 `$HOME/.gitconfig`, the answer git gives at their own shell — and it is contained
 rather than cross-project: the store's claim and containment guards still apply to
 whatever path or remote is recorded.
+
+The scrub has one cost. A `safe.directory` supplied through the three file
+pointers, through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, or
+through `git -c` (`GIT_CONFIG_PARAMETERS`) is no longer honoured; the last two
+are the common CI and container spelling. A checkout owned by another uid that
+relied on one resolves to no remote until `safe.directory` is set in
+`$HOME/.gitconfig` or the system config. `GIT_CONFIG_NOSYSTEM` is deliberately
+kept, because it can only disable the system config and so cannot redirect the
+remote.
 
 Those checks run **after** the importer's id-presence check and before every
 message that would interpolate the id, and both positions are load-bearing. After
