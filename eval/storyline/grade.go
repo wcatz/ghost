@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -127,125 +126,6 @@ func expiredWithheld(where, block string, old Record) Check {
 	}
 	return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
 		"%s (%s) expired on %s and is still in %s", old.Key, old.Mark, old.ValidUntil, where)}
-}
-
-// answerCarries is the primary grade: the agent's answer contains one of the
-// check's spellings, matched case-insensitively and as a whole token (so 6432 is
-// not found in 16432). It reads the answer and never the block, so a session
-// handed the claim and ignoring it fails, and a session that never saw it and
-// guessed it right passes — which is why the script may not contain the
-// spelling (Validate).
-func answerCarries(sess Session, c AnswerCheck) Check {
-	name := "answer-carries:" + sessionName(sess.Index) + ":" + c.Name
-	low := strings.ToLower(sess.Answer)
-	for _, a := range c.Any {
-		if containsToken(low, strings.ToLower(a)) {
-			return Check{Name: name, Passed: true, Detail: fmt.Sprintf("the answer carries %q", a)}
-		}
-	}
-	return Check{Name: name, Passed: false, Detail: fmt.Sprintf("the answer carries none of %q", c.Any)}
-}
-
-// answerAvoids is the negative answer grade: the answer must not USE the stale,
-// expired or mistaken claim. A mention of a spelling is a use unless a rejecting
-// word SCOPES it: one within staleBefore words before it ("not X", "instead of
-// X", "the old X"), or one of staleAfter right after it ("X is wrong", "X is
-// not used"). A rejecting word elsewhere in the sentence does not excuse it, so
-// "I don't have project info, but the standard header is X" is a use of X.
-//
-// When the check names Needs, an answer that mentions the spelling AT ALL
-// without carrying one of the Needs spellings fails too, marked or not: naming
-// the natural wrong answer while not supplying the right one is not a pass.
-//
-// It is a deliberately narrow reading: verbatim, and blind to a paraphrase,
-// which is what the judge column is for.
-func answerAvoids(sess Session, c AnswerCheck) Check {
-	name := "answer-avoids:" + sessionName(sess.Index) + ":" + c.Name
-	low := strings.ToLower(sess.Answer)
-	var mentioned string
-	for _, sentence := range splitSentences(sess.Answer) {
-		ls := strings.ToLower(sentence)
-		for _, a := range c.Any {
-			la := strings.ToLower(a)
-			for _, at := range tokenIndexes(ls, la) {
-				mentioned = a
-				if !scopedRejection(ls, at, len(la)) {
-					return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
-						"the answer uses %q with nothing rejecting it: %s", a, oneLine(sentence))}
-				}
-			}
-		}
-	}
-	if mentioned != "" && len(c.Needs) > 0 {
-		for _, n := range c.Needs {
-			if containsToken(low, strings.ToLower(n)) {
-				return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%q is rejected and %q is carried", mentioned, n)}
-			}
-		}
-		return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
-			"the answer names %q without carrying any of %q", mentioned, c.Needs)}
-	}
-	return Check{Name: name, Passed: true, Detail: fmt.Sprintf("the answer does not use %q", c.Any)}
-}
-
-const (
-	staleBefore = 4
-	staleAfter  = 4
-)
-
-var (
-	wordRe       = regexp.MustCompile(`[a-z0-9_'’-]+`)
-	rejectBefore = regexp.MustCompile(`\b(not|never|no|without|avoid|avoiding|instead of|rather than|no longer|stop|stopped|old|older|previous|previously|former|formerly|obsolete|outdated|deprecated|expired|stale|wrong|incorrect|ignore|ignores|ignored|ignoring|replaced|replaces|replacing|superseded|don't|doesn't|isn't|shouldn't|won't)\b`)
-	rejectAfter  = regexp.MustCompile(`\b(wrong|incorrect|deprecated|obsolete|outdated|replaced|superseded|expired|stale|ignored|unused|not|isn't|no longer)\b`)
-)
-
-// scopedRejection reports whether a rejecting word is attached to the mention at
-// [at, at+n) of the lower-cased sentence.
-func scopedRejection(sentence string, at, n int) bool {
-	before := wordRe.FindAllString(sentence[:at], -1)
-	if len(before) > staleBefore {
-		before = before[len(before)-staleBefore:]
-	}
-	after := wordRe.FindAllString(sentence[at+n:], -1)
-	if len(after) > staleAfter {
-		after = after[:staleAfter]
-	}
-	return rejectBefore.MatchString(strings.Join(before, " ")) || rejectAfter.MatchString(strings.Join(after, " "))
-}
-
-// tokenIndexes is every offset at which needle appears in hay as a whole token
-// (see containsToken). Both arguments are already lower-cased.
-func tokenIndexes(hay, needle string) []int {
-	var out []int
-	if needle == "" {
-		return nil
-	}
-	for from := 0; from < len(hay); {
-		i := strings.Index(hay[from:], needle)
-		if i < 0 {
-			break
-		}
-		start, end := from+i, from+i+len(needle)
-		if !identRuneAt(hay, start-1) && !identRuneAt(hay, end) {
-			out = append(out, start)
-		}
-		from = start + 1
-	}
-	return out
-}
-
-var sentenceEnd = regexp.MustCompile(`[.!?]+(?:\s+|$)|\n+`)
-
-// splitSentences splits on sentence punctuation followed by space or the end,
-// and on newlines, so a dot inside a hostname does not end a sentence.
-func splitSentences(s string) []string {
-	var out []string
-	for _, p := range sentenceEnd.Split(s, -1) {
-		if strings.TrimSpace(p) != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // containsToken reports whether needle appears in hay with no identifier

@@ -370,13 +370,13 @@ func (r *Run) callState(ctx context.Context) (State, error) {
 	return r.Ghost.State(c)
 }
 
-// defaultJudgeQuestion is the reversal arc's question; the other arcs name their
-// own in Storyline.Judge. Its two verbs take the expected record's mark and
-// content.
 // errNoJudgeTarget is a storyline that cannot be judged: a configuration
 // error that ends the run, unlike a judge call that merely failed.
 var errNoJudgeTarget = errors.New("judge")
 
+// defaultJudgeQuestion is the reversal arc's question; the other arcs name their
+// own in Storyline.Judge. Its two verbs take the expected record's mark and
+// content.
 const defaultJudgeQuestion = "Did the session act on the current decision (%s: %s) rather than the one it replaced?"
 
 // judge asks the harness whether the final session acted on the record it was

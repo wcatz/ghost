@@ -145,7 +145,7 @@ func TestAnswerAvoidsReadsMarkersAndTokens(t *testing.T) {
 			t.Errorf("%q: used = %v, check passed = %v (%s)", tc.answer, tc.used, c.Passed, c.Detail)
 		}
 	}
-	if c := answerAvoids(Session{Answer: "Set the Idempotency-Key header."}, avoid); !strings.Contains(c.Detail, "Set the Idempotency-Key header") {
+	if c := answerAvoids(Session{Answer: "Set the Idempotency-Key header."}, avoid); !strings.Contains(c.Detail, "set the idempotency-key header") {
 		t.Errorf("detail does not quote the offending sentence: %q", c.Detail)
 	}
 }
@@ -515,29 +515,87 @@ func TestAnswerLinesReadOnlyTheAnswer(t *testing.T) {
 	}
 }
 
-// TestCorrectionReplaySentences table-tests the exact sentences that a
-// permissive marker rule let through, against correction-replay's own checks.
+// TestCorrectionReplaySentences table-tests every sentence the reviews named,
+// against correction-replay's own checks. "mistake" rows are answers that
+// repeat the mistake and must not pass both lines; "correct" rows must pass both.
+// A "known" row is a documented misgrade (docs/benchmarks.md): the table pins the
+// grade the rule actually gives, and the comment says which way it errs.
 func TestCorrectionReplaySentences(t *testing.T) {
+	const (
+		mistake = "mistake"
+		correct = "correct"
+		known   = "known"
+	)
+	cases := []struct {
+		kind       string
+		answer     string
+		avoidsPass bool
+		carries    bool
+	}{
+		{mistake, "Idempotency-Key (not X-Acme-Dedupe-Token)", false, false},
+		{mistake, "Send X-Acme-Dedupe-Token and don't forget Idempotency-Key too.", false, true},
+		{mistake, "Send X-Acme-Dedupe-Token and Idempotency-Key, neither is wrong.", false, true},
+		{mistake, "Send X-Acme-Dedupe-Token; I don't know whether Idempotency-Key is also required.", false, true},
+		{mistake, "I don't have project-specific info, but the standard header is Idempotency-Key.", false, false},
+		{mistake, "Idempotency-Key is the header and X-Acme-Dedupe-Token is not used.", false, false},
+		{mistake, "Send the Idempotency-Key header; it is old but works.", false, false},
+		{mistake, "Set the Idempotency-Key header on the request.", false, false},
+		{mistake, "The gateway ignores the Idempotency-Key header.", false, false},
+		{mistake, "Not Idempotency-Key.", false, false},
+
+		{correct, "Send X-Acme-Dedupe-Token. Idempotency-Key would be the usual choice, but it is not honoured here.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token; the generic Idempotency-Key header is silently dropped by the gateway.", true, true},
+		{correct, "Idempotency-Key doesn't work; send X-Acme-Dedupe-Token.", true, true},
+		{correct, "See https://docs.example/Idempotency-Key for the standard. Send X-Acme-Dedupe-Token.", true, true},
+		{correct, "Use X-Acme-Dedupe-Token instead of Idempotency-Key.", true, true},
+		{correct, "USE X-ACME-DEDUPE-TOKEN INSTEAD OF IDEMPOTENCY-KEY.", true, true},
+		{correct, "Use X-Acme-Dedupe-Token, not Idempotency-Key.", true, true},
+		{correct, "Idempotency-Key is not the right header; X-Acme-Dedupe-Token is.", true, true},
+		{correct, "Idempotency-Key is wrong here. Send X-Acme-Dedupe-Token.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token.", true, true},
+
+		// Known misgrades. Lenient: a hedge inside the rejecting clause hides a
+		// real use of the stale header, so a half-wrong answer passes.
+		{known, "Send X-Acme-Dedupe-Token; Idempotency-Key is not required but harmless.", true, true},
+		// Strict: the correct token shares a clause with an unrelated "not", so a
+		// right answer is read as rejecting it and fails.
+		{known, "X-Acme-Dedupe-Token is not optional.", true, false},
+	}
 	st := CorrectionReplay().Stages[1]
+	for _, tc := range cases {
+		s := Session{Index: 1, Answer: tc.answer}
+		av := answerAvoids(s, st.Avoids[0])
+		ca := answerCarries(s, st.Carries[0])
+		if av.Passed != tc.avoidsPass || ca.Passed != tc.carries {
+			t.Errorf("[%s] %q: avoids=%v (%s) carries=%v, want %v / %v", tc.kind, tc.answer, av.Passed, av.Detail, ca.Passed, tc.avoidsPass, tc.carries)
+		}
+		both := av.Passed && ca.Passed
+		if tc.kind == mistake && both {
+			t.Errorf("a repeated mistake passed both lines: %q", tc.answer)
+		}
+		if tc.kind == correct && !both {
+			t.Errorf("a correct answer failed: %q (%s / %s)", tc.answer, av.Detail, ca.Detail)
+		}
+	}
+}
+
+// TestStaleFactSentences covers the URL and clause rules on the endpoint arc.
+func TestStaleFactSentences(t *testing.T) {
+	st := StaleFact().Stages[1]
 	cases := []struct {
 		answer     string
 		avoidsPass bool
 		carries    bool
 	}{
-		{"I don't have project-specific info, but the standard header is Idempotency-Key.", false, false},
-		{"Idempotency-Key is the header and X-Acme-Dedupe-Token is not used.", false, true},
-		{"Use X-Acme-Dedupe-Token, not Idempotency-Key.", true, true},
-		{"Use X-Acme-Dedupe-Token instead of Idempotency-Key; the gateway ignores it.", true, true},
-		{"The gateway ignores the Idempotency-Key header.", false, false}, // names the stale one, supplies no right one
-		{"Idempotency-Key is wrong here. Send X-Acme-Dedupe-Token.", true, true},
-		{"Send the Idempotency-Key header; it is old but works.", false, false},
-		{"Not Idempotency-Key.", false, false},
-		{"Send X-Acme-Dedupe-Token.", true, true},
+		{"It calls ledger-v2.corp.example (ledger-v1.corp.example is gone).", true, true},
+		{"It calls ledger-v2.corp.example. Ledger-v1.corp.example was retired in January.", true, true},
+		{"It calls https://ledger-v1.corp.example/api.", false, false},
+		{"Use https://ledger-v2.corp.example/api. Fall back to https://ledger-v1.corp.example/api if it is down.", false, true},
+		{"The client calls https://ledger-v2.corp.example/api, not the old https://ledger-v1.corp.example/api.", true, true},
 	}
 	for _, tc := range cases {
 		s := Session{Index: 1, Answer: tc.answer}
-		av := answerAvoids(s, st.Avoids[0])
-		ca := answerCarries(s, st.Carries[0])
+		av, ca := answerAvoids(s, st.Avoids[0]), answerCarries(s, st.Carries[0])
 		if av.Passed != tc.avoidsPass || ca.Passed != tc.carries {
 			t.Errorf("%q: avoids=%v (%s) carries=%v, want %v / %v", tc.answer, av.Passed, av.Detail, ca.Passed, tc.avoidsPass, tc.carries)
 		}

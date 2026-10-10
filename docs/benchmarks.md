@@ -936,7 +936,8 @@ the ancestry of whatever launched the runner (which would bill Claude for
 verdicts about an opencode-driven arc, and fail outright when the sandbox holds
 only opencode's credential).
 
-Every record is written through the real MCP `ghost_memory_save` (or `ghost_save_global` for a record a storyline marks cross-project), the block is
+Every record is written through the real MCP `ghost_memory_save` (or
+`ghost_save_global` for a record a storyline marks cross-project), the block is
 rendered by the real `ghost context`, and the two lifecycle phases are the real
 `ghost supersede`/`ghost resolve`. The only thing the runner reaches past the CLI
 for is a chronology restamp: `created_at` has second granularity, so a reversal
@@ -994,15 +995,29 @@ anything. So every session is graded twice, on separate lines:
 - **Answer lines**, the primary grade, read only what the agent *said*.
   `answer-carries:session-N:<name>` passes when the answer contains one of a
   check's spellings (case-insensitive). `answer-avoids:session-N:<name>` fails
-  when the answer *uses* a stale, expired or mistaken claim: the spelling appears
-  as a whole token with no rejecting word scoped to it: one of the four words
-  before it (`not`, `instead of`, `old`, `ignores`, ...) or right after it (`is
-  wrong`, `is not used`, ...), so "use X, not Y" is not a use of Y while "I don't
-  know, but the standard header is Y" is. `correction-replay` additionally fails
-  an answer that names the natural wrong spelling without carrying the required
-  one. Carries match whole tokens too (`6432` is not found in `16432`). The judge
-  column counts readable verdicts only; unreadable or failed judge replies are
-  shown as a separate `(+N unread)` count. Both are verbatim readings and cannot see a paraphrase; the
+  when the answer *uses* a stale, expired or mistaken claim. Both read CLAUSES: the
+  answer is cut at sentence ends, `, ; : ( ) — –` and the word "but", and a
+  rejecting word (`not`, `no`, `never`, `don't`, `instead of`, `wrong`, `ignored`,
+  `dropped`, `removed`, `retired`, `gone`, `deprecated`, `replaced`, `old`, ...)
+  only counts within the clause of the spelling it rejects. A carried spelling
+  must appear in at least one clause that does not reject it; an avoided one must
+  appear in none. `instead of` and `rather than` reject the clause after them, and
+  a rejecting "but ..." clause with no spelling of its own rejects the clause
+  before it ("X would be the usual choice, but it is not honoured here"). A
+  negation about the speaker ("I don't know whether X is required", "don't forget
+  X") is not a rejection. A spelling in a URL's path is a link and is ignored; its
+  host is not. `correction-replay` additionally fails an answer that names the
+  natural wrong spelling without carrying the required one. Carries match whole
+  tokens (`6432` is not found in `16432`). The judge column counts readable
+  verdicts only; unreadable or failed judge replies are shown as a separate
+  `(+N unread)` count.
+
+  *Known misgrades of the clause rule*, pinned in `TestCorrectionReplaySentences`:
+  it errs **lenient** when a hedge sits in the rejecting clause ("Send X;
+  Idempotency-Key is not required but harmless" passes), and **strict** when the
+  right spelling shares a clause with an unrelated rejecting word ("X is not
+  optional" fails `answer-carries`). Neither is special-cased. Both are verbatim readings and cannot see a
+  paraphrase; the
   advisory judge column is the second look.
 
 `Validate` refuses a storyline whose answer grade could pass for the wrong
