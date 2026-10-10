@@ -941,6 +941,9 @@ Also do NOT save credential values — an API key, access token, password, priva
 
 A memory holds durable knowledge: what survives the conversation and is expensive or inconvenient to rediscover. Save the rule and its reason, not what the repository already states. Good: 'Production schema changes require explicit approval.' and 'Deployment keeps database migrations separate from application rollout, on purpose.' Bad: 'foo.go contains HandleFoo()' — the repository is authoritative for that, so the note goes stale silently and is cheap to re-read from the code. This rule guides and never refuses: a save that reads as a repository fact is still stored, with a note saying so.
 
+## Changed Decisions
+When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision.
+
 ## Reading Search Results
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
 - answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
@@ -957,6 +960,28 @@ Use ghost_search_all to find knowledge that might be in another project.
 
 ## Project IDs
 Pass the project name (e.g. "ghost", "web-app", "platform-ops") as project_id. Ghost resolves names automatically. Never pass raw filesystem paths.`
+
+// sameTitleDecisionAdvice names a live decision in the project whose title
+// equals the new one's (case-insensitive, trimmed), so a caller that forgot
+// supersedes is told to pass it. Advice only: it never refuses the record and
+// never links anything, and a lookup failure yields no advice.
+func (s *Server) sameTitleDecisionAdvice(ctx context.Context, projectID, title string) string {
+	want := strings.ToLower(strings.TrimSpace(title))
+	if want == "" {
+		return ""
+	}
+	live, err := s.store.ListDecisions(ctx, projectID, "active", 1000)
+	if err != nil {
+		return ""
+	}
+	for _, d := range live {
+		if d.Status == "superseded" || strings.ToLower(strings.TrimSpace(d.Title)) != want {
+			continue
+		}
+		return fmt.Sprintf(" NOTE: a live decision in this project has the same title (decision_id: %s). If this one replaces it, pass supersedes=%s so the old one is retired; the two are otherwise listed side by side.", assemble.Token(d.ID), assemble.Token(d.ID))
+	}
+	return ""
+}
 
 // New creates and configures the MCP server with all Ghost tools.
 func New(store provider.MemoryStore, logger *slog.Logger, version string) *Server {
@@ -3101,7 +3126,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
 		Title:       "Record Decision",
-		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory — the response returns both a decision_id and a memory_id; they are different rows, and pin/update need memory_id. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory — the response returns both a decision_id and a memory_id; they are different rows, and pin/update need memory_id. If the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with supersedes=<that decision_id>, never a second unlinked decision. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -3165,6 +3190,12 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 		args.ProjectID = canonical
+		// Looked up BEFORE the write, so the row this call is about to create
+		// cannot match itself.
+		sameTitleAdvice := ""
+		if args.Supersedes == "" {
+			sameTitleAdvice = s.sameTitleDecisionAdvice(ctx, args.ProjectID, args.Title)
+		}
 		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
@@ -3193,6 +3224,7 @@ func (s *Server) registerTools() {
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
+		msg += sameTitleAdvice
 		// A decision routed to a project of its own while a same-named project
 		// kept the name (#613) has to say so, for the reason the save result
 		// does: the decision landed and the caller's address did not, and the
