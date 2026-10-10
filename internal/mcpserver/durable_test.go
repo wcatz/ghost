@@ -319,10 +319,11 @@ var saveGuidanceGolden = []string{
 	// one fact per memory, refined rather than re-saved (#959: 4 duplicates)
 	"One memory per fact",
 	"ghost_memory_update",
-	// the three shapes that are not a memory (#959: 2 repository restatements,
-	// 2 transient progress notes)
+	// the shapes that are not a memory (#959: 2 repository restatements,
+	// 2 transient progress notes, and the placeholder notes the save audit found)
 	"not what the repository says",
 	"not the current task's progress",
+	"not that a value in an example, template, test fixture or sample file is a placeholder",
 	"never a key or token value",
 	// a constraint has a home: convention, or dependency for a toolchain or
 	// version limit (#959: two runs refused a save for using a category that

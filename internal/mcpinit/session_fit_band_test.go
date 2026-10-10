@@ -23,7 +23,10 @@ const responseFitStage = "response_fit"
 // the one framing field nothing bounds — it is printed twice, in the heading and
 // in the project_id line — so it is what carries a block's framing to within a
 // few hundred bytes of the host limit with rows still in it.
-const bandNameBytes = 3184
+//
+// The length is tuned against the rest of the framing, the closing save
+// guidance included: a longer instruction needs a shorter name.
+const bandNameBytes = 2934
 
 // bandFramingMargin is how close to the host limit the band fixture's framing has
 // to sit: the count line a cut adds, and the heading it earns, are longer than
