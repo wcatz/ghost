@@ -604,16 +604,33 @@ func TestFoldRowsRefusesRowsItMayNotTouch(t *testing.T) {
 		m := all[id]
 		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
 	}
-	res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.pinnedID)}, "2999-01-01 00:00:00")
+	// An unpinned agent row, and a pinned reflection row: each is refused for one
+	// reason only.
+	agent, err := f.store.Create(ctx, "_global", memory.Memory{Category: "preference", Content: "always run go vet before committing any change", Source: "mcp"})
 	if err != nil {
-		t.Fatalf("FoldRows: %v", err)
+		t.Fatalf("Create: %v", err)
 	}
-	if len(res.Folded) != 0 || len(res.Skipped) != 1 {
-		t.Fatalf("the pinned agent row was not refused: %+v", res)
+	pinnedRefl, err := f.store.Create(ctx, "_global", memory.Memory{Category: "preference", Content: "always run go vet before committing a change", Source: "reflection"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
-	if _, ok := globalIDs(t, f.store)[f.pinnedID]; !ok {
-		t.Fatal("the pinned row was deleted")
+	if err := f.store.TogglePin(ctx, pinnedRefl, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
 	}
+	all = globalIDs(t, f.store)
+	for name, id := range map[string]string{"pinned agent row": f.pinnedID, "unpinned agent row": agent, "pinned reflection row": pinnedRefl} {
+		res, err := f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(id)}, "2999-01-01 00:00:00")
+		if err != nil {
+			t.Fatalf("FoldRows: %v", err)
+		}
+		if len(res.Folded) != 0 || len(res.Skipped) != 1 {
+			t.Fatalf("the %s was not refused: %+v", name, res)
+		}
+		if _, ok := globalIDs(t, f.store)[id]; !ok {
+			t.Fatalf("the %s was deleted", name)
+		}
+	}
+	var res memory.FoldResult
 	// At or after `since`: refused.
 	res, err = f.store.FoldRows(ctx, "_global", plan(f.newID), []memory.FoldRow{plan(f.oldID)}, "2026-01-01 00:00:00")
 	if err != nil || len(res.Folded) != 0 {
