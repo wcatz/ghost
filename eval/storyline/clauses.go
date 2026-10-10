@@ -41,7 +41,7 @@ var (
 	// notRejection is a negation that is not about the spelling: a statement about
 	// the speaker ("I don't know whether X is required", "don't forget X") rather
 	// than a rejection of X. It is removed before rejectRe is applied.
-	notRejection = regexp.MustCompile(`(?i)\b(?:don't|do not|doesn't|does not|won't|can't|cannot|didn't)\s+(?:know|forget|remember|think|recall|care|mind|omit|skip)\b|\b(?:i|we|you)\s+(?:do not|don't|won't|can't|didn't)\s+(?:have|see)\b|\bnot sure\b|\bno idea\b`)
+	notRejection = regexp.MustCompile(`(?i)\b(?:don't|do not|doesn't|does not|won't|can't|cannot|didn't)\s+(?:know|forget|remember|think|recall|care|mind|omit|skip)\b|\b(?:i|we|you)(?:\s+\w+){0,2}?\s+(?:do not|don't|won't|can't|didn't)\s+(?:have|see)\b|\bnot sure\b|\bno idea\b`)
 )
 
 // hostOnly replaces each URL with its host, keeping trailing punctuation as

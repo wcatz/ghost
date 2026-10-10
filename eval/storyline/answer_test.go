@@ -557,6 +557,8 @@ func TestCorrectionReplaySentences(t *testing.T) {
 		{correct, "Use X-Acme-Dedupe-Token, but I don't see a note about it.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token, but I do not have the spec.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token, but we do not have the spec.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token, but we really don't have the spec.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token, but I honestly just can't see the spec.", true, true},
 		{correct, "Idempotency-Key won't have any effect on this gateway. Send X-Acme-Dedupe-Token.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token; the gateway can't see the Idempotency-Key header.", true, true},
 		{correct, "The Idempotency-Key header is unused by this gateway; send X-Acme-Dedupe-Token.", true, true},
