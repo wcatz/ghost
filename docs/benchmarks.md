@@ -179,6 +179,21 @@ Two findings, both honest:
 
 **What this table cannot see.** The v2 corpus is the *graded retrieval* dataset, and it is deliberately clean: every memory is seeded in one pass under the same `created_at`, so the decay factor is identical across every candidate — inert, and pinned by `TestDecayDoesNotPerturbGradedBench`. That sameness is now written down rather than incidental: `Seed` stamps the whole corpus itself (`corpusStamp`), because `store.Create` stamped each row with its own `datetime('now')` and a seed loop that straddled a second boundary gave two tied rows different ages, which reordered them — the second half of [#708](https://github.com/wcatz/ghost/issues/708), found by measurement after the id half was fixed. It also holds no resolved row, no `_global` row and no `supersedes` edge. A ranking change that acts on any of that measures 0.000 on this table, which is exactly what happened when the resolved/`_global` demotion shipped: measured on one fixture, `f3a80f7` (pre-#634) and `main` both read 0.818 here. That is a property of the corpus, not a bug in the harness, so the coverage lives elsewhere: the [maintenance-state suite](#phase-3b--maintenance-state-suite-report-only) and the [no-answer queries](#no-answer-queries-the-abstention-baseline-report-only).
 The v2 dataset overshoots the original ~150/~40 growth target (551/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
+
+### What R@1 measures and the R@1 ceiling
+
+The R@1 column in the table above is **recall at 1** — the fraction of all relevant items that appear in the top-1 position. It is NOT "the right row is first on X% of searches". A query that labels four relevant memories and puts one of them first scores 0.250 at R@1, however well it ranks, because recall@1 divides by the number of labelled rows, not by 1.
+
+On the v2 corpus, 163 of 220 queries carry 2–4 labelled rows, so a perfect ranking scores only about 0.599 at R@1. That is the **R@1 ceiling**: the mean of 1/(labelled rows per query) over the answerable query set. Against that ceiling, the shipped hybrid R@1 of 0.520 is 87% of what is reachable, not 52%.
+
+`ghost bench` prints a block of new lines after the table, before the "graded queries" line, leaving the table itself unchanged: three shares per condition and one ceiling.
+- **top row relevant** — the share of answerable queries whose first result is a relevant row.
+- **top row best-labelled** — the share whose first result carries the highest gain the query labels any row with (a tie for the best gain counts as best-labelled).
+- **relevant row in top 5** — the share of answerable queries with at least one relevant row among the first five results.
+- **R@1 ceiling on these labels** — the mean ceiling over the answerable query set.
+
+The shares count queries, not labelled rows, so a query labelling four rows counts once whether one or all four are in the window. Recall@1 is the one ranking metric here that divides by the number of labelled rows; MRR@10 (1/rank of the first relevant hit) and NDCG@10 (normalised by the ideal DCG of the label set) score 1.000 for a perfect ranking however many rows a query labels. That is why only R@1 needs a ceiling, and why the shares read as "did the first row I was handed answer me" rather than "what fraction of the answer was found".
+
 ### Parameter sweep (`ghost bench --sweep`)
 
 The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Every point but the default also prints a **paired 95% interval against the default**, so the findings below are read off the tool's own output rather than asserted alongside it. This is one captured run of that command:
