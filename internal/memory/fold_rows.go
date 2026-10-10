@@ -183,6 +183,7 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 		if len(p.ids) == 0 {
 			continue
 		}
+		p.tags = make([]string, 0, len(tagSet)) // non-nil, so an untagged cluster marshals to []
 		for t := range tagSet {
 			p.tags = append(p.tags, t)
 		}
@@ -195,27 +196,27 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return res, err
+		return FoldResult{Skipped: res.Skipped}, err
 	}
 	res.SnapshotID = snapshotID
 
 	for _, p := range plans {
 		// Before the delete: the foreign key takes the folded rows' evidence with them.
 		if err := carryEvidenceTx(ctx, tx, p.survivor.ID, p.ids); err != nil {
-			return res, err
+			return FoldResult{Skipped: res.Skipped}, err
 		}
 		if err := raiseReusedRetentionTx(ctx, tx, projectID, p.survivor.ID, Memory{ReplacesIDs: p.ids}); err != nil {
-			return res, err
+			return FoldResult{Skipped: res.Skipped}, err
 		}
 		if err := appendHistoryForIDsTx(ctx, tx, p.ids, phaseDelete, Provenance{}); err != nil {
-			return res, err
+			return FoldResult{Skipped: res.Skipped}, err
 		}
 		for _, id := range p.ids {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ? AND project_id = ?`, id, projectID); err != nil {
-				return res, fmt.Errorf("delete folded memory: %w", err)
+				return FoldResult{Skipped: res.Skipped}, fmt.Errorf("delete folded memory: %w", err)
 			}
 			if err := linkSuccessorTx(ctx, tx, id, p.survivor.ID); err != nil {
-				return res, err
+				return FoldResult{Skipped: res.Skipped}, err
 			}
 		}
 		tagsJSON, _ := json.Marshal(p.tags)
@@ -223,10 +224,10 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE memories SET importance = ?, tags = ?, updated_at = datetime('now') WHERE id = ?`,
 				p.importance, string(tagsJSON), p.survivor.ID); err != nil {
-				return res, fmt.Errorf("update survivor: %w", err)
+				return FoldResult{Skipped: res.Skipped}, fmt.Errorf("update survivor: %w", err)
 			}
 			if err := appendHistoryForIDsTx(ctx, tx, []string{p.survivor.ID}, phaseReflect, Provenance{}); err != nil {
-				return res, err
+				return FoldResult{Skipped: res.Skipped}, err
 			}
 		}
 		res.Folded = append(res.Folded, p.ids...)

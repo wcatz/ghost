@@ -319,9 +319,10 @@ func consolidateGlobal(ctx context.Context, store *memory.Store, apply bool, w i
 		outf("\nnothing written; pass --apply to fold %d row(s) into %d\n", folded, len(clusters))
 		return nil
 	}
-	// One transaction per cluster, each naming its rows by id and checking them
-	// again inside it: a row edited since the plan, or saved since the run
-	// started, is skipped and reported, and no row outside a cluster is written.
+	// One transaction for the whole run, naming rows by id and checking each again
+	// inside it before anything is written: a row edited since the plan, or saved
+	// since the run started, is skipped and reported, and no row outside a cluster
+	// is written.
 	asRow := func(m memory.Memory) memory.FoldRow {
 		return memory.FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
 	}

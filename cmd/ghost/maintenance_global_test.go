@@ -717,3 +717,57 @@ func TestPrintFoldOutcomeStatesWhatHappened(t *testing.T) {
 		t.Errorf("a run that folded rows reported:\n%s", some.String())
 	}
 }
+
+// A cluster of untagged rows changes its survivor in no way, so the fold writes
+// nothing to it: no column, no updated_at bump, no history row.
+func TestConsolidateGlobalLeavesAnUntaggedSurvivorAlone(t *testing.T) {
+	db, err := memory.OpenDB(filepath.Join(t.TempDir(), "untagged.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	var ids []string
+	for _, c := range []string{"the relay restarts after kernel updates on friday", "the relay restarts after kernel updates on friday evening"} {
+		id, err := store.Create(ctx, "_global", memory.Memory{Category: "fact", Content: c, Source: "reflection", Importance: 0.5})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = '2026-01-01 00:00:00' WHERE id = ?`, id); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	survivor := ids[1] // the longer row contains the other
+	before := globalIDs(t, store)[survivor]
+	var tagsBefore string
+	if err := db.QueryRow(`SELECT tags FROM memories WHERE id = ?`, survivor).Scan(&tagsBefore); err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	histBefore, _ := store.MemoryHistory(ctx, survivor, 50)
+	if err := consolidateGlobal(ctx, store, true, &bytes.Buffer{}); err != nil {
+		t.Fatalf("consolidateGlobal: %v", err)
+	}
+	after, ok := globalIDs(t, store)[survivor]
+	if !ok {
+		t.Fatal("the survivor is gone")
+	}
+	if after.UpdatedAt != before.UpdatedAt {
+		t.Errorf("updated_at moved: %s -> %s", before.UpdatedAt, after.UpdatedAt)
+	}
+	var tags string
+	if err := db.QueryRow(`SELECT tags FROM memories WHERE id = ?`, survivor).Scan(&tags); err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if tags != tagsBefore {
+		t.Errorf("tags column was rewritten: %q -> %q", tagsBefore, tags)
+	}
+	histAfter, _ := store.MemoryHistory(ctx, survivor, 50)
+	if len(histAfter) != len(histBefore) {
+		t.Errorf("survivor history grew: %d -> %d", len(histBefore), len(histAfter))
+	}
+}
