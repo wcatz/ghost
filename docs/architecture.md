@@ -2136,7 +2136,9 @@ and whose vector leg then failed.)
   different question each time: a framing just under the ceiling passed, the cut
   that followed pushed the framing over it, and the pass stopped over the cap
   with rows recorded as cut for nothing. Measured at its longest, the same
-  framing answers for every number of cuts. The window note an incomplete-coverage empty
+  framing answers for every number of cuts.
+
+  The window note an incomplete-coverage empty
   result carries names each knob the request actually set and no other: the item
   limit when one was set, the scope filter when one was set, and the category
   filter when one was set. An unfiltered hybrid search is the shipped default,

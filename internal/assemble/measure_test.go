@@ -190,6 +190,35 @@ func TestTheFramingCeilingStillCutsWhenTheFramingCannotReachIt(t *testing.T) {
 	}
 }
 
+// TestAFramingAtOrOverTheCeilingKeepsEveryRowAndRecordsNoCut is the documented
+// edge: when even the all-cut framing is at or over the host ceiling, cutting
+// cannot help, so the pass keeps every row and records no response_fit cut. The
+// ceiling itself is inside the band (at, not only over).
+func TestAFramingAtOrOverTheCeilingKeepsEveryRowAndRecordsNoCut(t *testing.T) {
+	for _, framing := range []int{10000, 12000} {
+		rows := []string{"A1", "A2", "A3", "A4"}
+		var cands []memory.Candidate
+		for i, id := range rows {
+			cands = append(cands, ranked(id, i, strings.Repeat("x", 100)))
+		}
+		req := baseRequest()
+		req.Budget.MaxItems = 10
+		req.Budget.MaxBytes = 9000
+		req.Budget.FramingCeiling = 10000
+		req.Budget.Measure = func(items []Item, _ *Trace) int { return framing + 10*len(items) }
+		res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
+
+		if len(res.Items) != len(rows) {
+			t.Errorf("framing %d: kept %d rows, want %d", framing, len(res.Items), len(rows))
+		}
+		for _, d := range res.Trace.Decisions {
+			if d.Stage == stageResponseFit {
+				t.Errorf("framing %d: response_fit decision recorded for %s (kept=%v), want none", framing, d.ID, d.Kept)
+			}
+		}
+	}
+}
+
 // TestKeepPinnedCutsUnpinnedRowsFirst: with KeepPinned the cut order is the
 // lowest-ranked unpinned row each time, so a pinned row ranked above unpinned
 // ones outlives them and is the last to go.
