@@ -49,6 +49,80 @@ func RecallAtK(ranked []string, rel Relevance, k int) float64 {
 	return float64(hit) / float64(total)
 }
 
+// TopRowRelevant reports whether the row a search put first is one the
+// query grades relevant. It is a statement about ONE row, not about how
+// many relevant rows the window holds, so a query that labels four
+// rows and puts one of them first scores 1 here and 0.25 at
+// RecallAtK 1 — which is the difference between "the first row
+// answered me" and the share RecallAtK actually measures. An empty
+// list has no top row, so it reports false rather than panicking on
+// ranked[0].
+func TopRowRelevant(ranked []string, rel Relevance) bool {
+	if len(ranked) == 0 {
+		return false
+	}
+	return rel[ranked[0]] > 0
+}
+
+// AnyRelevantInTopK reports whether at least one of the first k rows is
+// one the query grades relevant. It is the share-friendly cousin of
+// RecallAtK: a query that labels four rows and has one of them in the
+// window scores 1 here and 0.25 there, so it answers "did the window
+// hold something that answers me" rather than "what fraction of the
+// answer was found". A k below 1 or an empty list has no window, so it
+// reports false.
+func AnyRelevantInTopK(ranked []string, rel Relevance, k int) bool {
+	if k > len(ranked) {
+		k = len(ranked)
+	}
+	for i := 0; i < k; i++ {
+		if rel[ranked[i]] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// TopRowBestLabelled reports whether the top row carries the highest
+// gain the query labels any row with. A tie for the best label counts:
+// two rows at the same gain are both best-labelled, so a query grading
+// {a:1, b:1} with a first reports true, because nothing the query
+// labels was ranked above it. A top row with no positive gain is never
+// best-labelled — it is not a labelled row at all.
+func TopRowBestLabelled(ranked []string, rel Relevance) bool {
+	if len(ranked) == 0 {
+		return false
+	}
+	g := rel[ranked[0]]
+	if g <= 0 {
+		return false
+	}
+	for _, gain := range rel {
+		if gain > g {
+			return false
+		}
+	}
+	return true
+}
+
+// Recall1Ceiling is the RecallAtK(ranked, rel, 1) no ranking of the
+// query can beat: rank 1 holds one row, so a query labelling N rows
+// scores at most 1/N, however good the ranking is. It is a property of
+// the LABELS, not of any ranking, which is why it takes no ranked list
+// — averaged over a query set it is the score a perfect ranking posts
+// at R@1, and it is what every R@1 has to be read against, because a
+// corpus labelling 2-4 rows per query caps a perfect R@1 well below 1
+// and a plain R@1 number cannot tell that from a ranking failure.
+// Undefined for a query with no labelled rows, like every other ratio
+// here, so callers exclude those from the mean.
+func Recall1Ceiling(rel Relevance) float64 {
+	total := rel.relevantCount()
+	if total == 0 {
+		return 0
+	}
+	return 1.0 / float64(total)
+}
+
 // ReciprocalRankAtK returns 1/rank of the first relevant result within the
 // top-k (rank is 1-based), or 0 if none of the top-k are relevant. Averaging
 // this across queries yields MRR@k.

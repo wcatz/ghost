@@ -38,6 +38,8 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 The `source_ref` argument of `ghost_memory_save`, `ghost_save_global` and `ghost_memory_update` may not start with `decision:`: that prefix is reserved for the link `ghost_decision_record` writes between a decision and its companion memory, and a save or update that carries it is refused. (`ghost import` keeps the link of an exported companion. If more than one memory claims a decision and none is uniquely the one the decision tool wrote, nothing is retired and the `ghost_decision_record` answer warns that the old memory is still live.)
 
+`ghost_health` also lists the pinned memories a newer memory contradicts through a live `contradicts` edge, under `**Pinned rows with open contradictions:** N` (at most 20 entries, then `... and M more`; a failed read says `could not be read`). It is report-only: nothing is unpinned, resolved or withheld, and the owner decides whether to unpin or update the row.
+
 `ghost_health` also reports how fast `memory_history` is filling, in one appended
 `**History:**` line, with a `⚠` line per finding:
 
@@ -349,7 +351,7 @@ followed by the rows it directly contradicts that were withheld, each rendered t
 that row's own line would render it (`` `id` ``, comma-separated, in the rank order
 the window holds them). The list is bounded: at most eight partners are named, and any
 remainder is reported as a trailing count (`` (+N more)``), so a dense graph cannot
-spend one line's share of the response budget. It is a field on the memory's one line,
+spend one line's share of the response budget. A **pinned** row is never withheld: when newer rows contradict it, it stays and carries **`contradicted_by=`** naming them (same rendering and bound as `conflicts_with=`; a pinned row no newer row contradicts has neither). It is a field on the memory's one line,
 on `ghost_memory_search`, `ghost_project_context`, the session-start block and the
 `ghost://memories/global` resource alike. The two rows do **not** both remain: stage 5
 walks the rows that have a live `contradicts` edge in keep-priority order and withholds

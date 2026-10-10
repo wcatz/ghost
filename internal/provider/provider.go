@@ -76,6 +76,10 @@ type MemoryStore interface {
 	// Links
 	LinkStats(ctx context.Context) (links, scans int, err error)
 
+	// PinnedRowsWithContradictions returns up to limit pinned memories a newer
+	// memory contradicts through a live edge, and the total there are.
+	PinnedRowsWithContradictions(ctx context.Context, limit int) ([]memory.PinnedContradictedRow, int, error)
+
 	// HistoryGrowth reports how fast memory_history is growing into its
 	// retention caps and how much of that growth is version rows that restated
 	// the version before them. Read-only, store-wide (the caps are), and the
