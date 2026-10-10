@@ -553,6 +553,10 @@ func TestCorrectionReplaySentences(t *testing.T) {
 		{correct, "Idempotency-Key is not the right header; X-Acme-Dedupe-Token is.", true, true},
 		{correct, "Idempotency-Key is wrong here. Send X-Acme-Dedupe-Token.", true, true},
 		{correct, "Send X-Acme-Dedupe-Token.", true, true},
+		{correct, "The Idempotency-Key header is unused by this gateway; send X-Acme-Dedupe-Token.", true, true},
+		{correct, "You shouldn't send Idempotency-Key; send X-Acme-Dedupe-Token.", true, true},
+		{correct, "Idempotency-Key does not have any effect here. Send X-Acme-Dedupe-Token.", true, true},
+		{correct, "Send X-Acme-Dedupe-Token; the gateway can't use Idempotency-Key.", true, true},
 
 		// Known misgrades. Lenient: a hedge inside the rejecting clause hides a
 		// real use of the stale header, so a half-wrong answer passes.
