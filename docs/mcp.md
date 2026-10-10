@@ -116,6 +116,8 @@ header line states; the per-project report is named in the same line.
   "ignored" means the agent's own words never mentioned the memory, and "restated by wording" is a token-overlap heuristic; neither is a relevance or usefulness score
 ```
 
+**Working-moment delivery (Claude Code).** Beside the session-start block, Ghost pushes a small block when a memory matches the work in front of the agent, because a memory that arrives only at session start is rarely in view when the file it is about is edited. It is not a tool and adds none to the count above: `ghost hook message-submit` (the user's message) and `ghost hook edit` (after `Edit`, `Write` or `MultiEdit`) run a keyword-only search and answer with `additionalContext` only when a project memory clears the floor — one identifier-shaped term (a file name, a symbol) or two distinct words in common. At most three rows and 1,500 characters; a row already delivered this session, by the hook or by the session-start block, is never repeated; and the block and the session-start block together stay under the host's 10,000-character limit. Every delivery is recorded with source `working_moment`, so the audit judges it apart from session start and search.
+
 That is one store's real block, cut at the retrieval part (the split of its 12 `used` verdicts into 2 cited and 10 restated is illustrative; the other figures were measured) — the same rows
 [`ghost context --audit`](cli.md#ghost-context---audit) prints for one project,
 with the `⚠` line the compact form adds under the source it is about.

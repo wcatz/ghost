@@ -103,7 +103,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 `internal/mcpinit` owns the host-specific setup paths:
 
-- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, file-memory migration, and redirects.
+- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
 - Codex: `config.toml` registration plus `hooks.json` entries that require user trust.
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
@@ -141,6 +141,26 @@ host SessionStart
 ```
 
 opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead.
+
+### Working moment
+
+```text
+host UserPromptSubmit / PostToolUse (Edit|Write|MultiEdit)
+  → ghost hook message-submit | edit --source claude-code
+  → read working-moment-<session>.log (rows delivered, bytes spent)
+  → keyword-only assemble.Run (source working_moment, no embedding, no model)
+  → drop delivered rows, apply the keyword floor, fit the remaining allowance
+  → claim the delivery in the marker, verify it won, print additionalContext
+  → record the delivery in the retrieval record
+```
+
+The block is a push for the moment of work: the session-start block is chosen without a query, and a gotcha about a file is rarely in view when that file is edited. Claude Code is the only host whose hooks are documented to add `additionalContext` beside a user message and beside a tool result, so it is the only source with the `WorkingMoment` capability; the other hosts get a silent no-op.
+
+**The floor is the channel's own.** On a keyword-only read the assembler's relevance cutoff cannot be the floor (it always keeps the top row) and the no-answer bar judges nothing (there is no cosine), so any hit on a common word would deliver. A row therefore has to carry two points of the query's terms counted on its own text: an identifier-shaped term (a file name, a symbol, a path) is two, an ordinary word one. The relevance cutoff still applies first.
+
+**The session's allowance is one ledger.** The host caps a hook's `additionalContext` at 10,000 characters and replaces an over-limit block by a 2,000-character preview, so the session-start block and the deliveries share 10,000 bytes. The session-start block writes the first entry (the rows it rendered and the bytes it spent); a marker with no such entry assumes the start spent its whole 9,000-byte cap. One delivery is at most 1,500 bytes and at most what is left.
+
+**The marker is append-only and a claim wins by file order.** Parallel tool calls run their hooks at the same moment, so a read-modify-write would deliver a row twice. A hook appends one `D <token> <bytes> <ids>` line, re-reads the file, and delivers only if its own entry is valid: none of its ids was claimed by an earlier valid entry and its bytes fit what earlier valid entries left. Validity is a pure function of the file read in order, so racing hooks agree on the winner and the loser prints nothing.
 
 ### Stop and maintenance
 

@@ -252,8 +252,10 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// best-effort; with no (fresh, matching) marker this writes nothing, so
 	// session-start stdout stays byte-identical to what it was without this
 	// feature.
+	spent := 0
 	if alert := lifecycleFailureAlert(projectID, project); alert != "" {
 		_, _ = fmt.Fprintln(stdout, alert)
+		spent += len(alert) + 1
 	}
 
 	// Count this session. Context loading above is read-only; this handler's
@@ -280,7 +282,21 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally))
+	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	_, _ = fmt.Fprintln(stdout, block)
+
+	// The working-moment channel shares this session's output allowance and must
+	// not repeat what this block carried: leave the rows rendered and the bytes
+	// spent for it (silent, and a no-op for a payload with no session id or a
+	// data directory this process may not resolve).
+	ids := make([]string, 0, len(memories)+len(globals))
+	for _, m := range memories {
+		ids = append(ids, m.ID)
+	}
+	for _, m := range globals {
+		ids = append(ids, m.ID)
+	}
+	recordSessionStartDelivery(input.SessionID, ids, spent+len(block)+1)
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
