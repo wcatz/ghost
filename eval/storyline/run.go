@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,19 +99,39 @@ type Result struct {
 	State      State
 	Checks     []Check
 	// Judged records whether the opt-in judge ran, and Verdict is its raw answer.
-	// An unreadable verdict is an error the run stops on, never a silent fail.
+	// An unreadable verdict is recorded as a failed ADVISORY check naming it
+	// (never read as a yes or a no): the judge is a second column, and one reply
+	// that is neither word must not discard the run's deterministic grade.
 	Judged  bool
 	Verdict string
+	// WithoutGhost marks the control arm: the same scripts, model and saves, with
+	// the session block replaced by an empty one. Only the answer lines are graded
+	// (see grade), and the arm's verdict is a measurement, not a finding.
+	WithoutGhost bool
 }
 
-// Passed reports whether every graded check passed. A run with no checks has
-// graded nothing and does not pass.
+// Arm names the arm a result came from, for reports and summaries.
+func (r *Result) Arm() string {
+	if r.WithoutGhost {
+		return armWithoutGhost
+	}
+	return armWithGhost
+}
+
+const (
+	armWithGhost    = "with-ghost"
+	armWithoutGhost = "without-ghost"
+)
+
+// Passed reports whether every GATING check passed; an advisory check (the
+// judge) is reported but never decides. A run with no checks has graded nothing
+// and does not pass.
 func (r *Result) Passed() bool {
 	if len(r.Checks) == 0 {
 		return false
 	}
 	for _, c := range r.Checks {
-		if !c.Passed {
+		if !c.Passed && !c.Advisory {
 			return false
 		}
 	}
@@ -121,7 +142,7 @@ func (r *Result) Passed() bool {
 func (r *Result) FailedNames() []string {
 	var out []string
 	for _, c := range r.Checks {
-		if !c.Passed {
+		if !c.Passed && !c.Advisory {
 			out = append(out, c.Name)
 		}
 	}
@@ -155,6 +176,13 @@ type Run struct {
 	// Judge is opt-in and nil in a default run: the deterministic checks are the
 	// grade, and a check nothing measured is not a check.
 	Judge Agent
+	// WithoutGhost runs the control arm: every record is still saved and the
+	// project still bound, exactly as in the Ghost arm, but each session is handed
+	// an EMPTY block in place of the real one. The injection framing stays in the
+	// prompt, so the arm differs by the block's contents and by nothing else — an
+	// empty block, not a missing hook. The arc stages and the end-state reads are
+	// skipped, because no session of the arm is told what they produce.
+	WithoutGhost bool
 	// Timeout bounds one harness call and one arc stage. Zero means defaultTimeout.
 	Timeout time.Duration
 	Out     io.Writer
@@ -180,7 +208,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	if r.Timeout <= 0 {
 		r.Timeout = defaultTimeout
 	}
-	res := &Result{Story: r.Story, WorkDir: r.WorkDir}
+	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost}
 
 	// The project's own history first, then the location its sessions stand in.
 	// Both happen before the first block is rendered: a project with no recorded
@@ -206,11 +234,19 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	for i, stage := range r.Story.Stages {
 		// The block is rendered BEFORE this stage's records exist, so what the
 		// session received is exactly what the earlier sessions left behind.
-		block, err := r.call(ctx, func(c context.Context) (string, error) {
-			return r.Ghost.Context(c, r.WorkDir)
-		})
-		if err != nil {
-			return nil, fmt.Errorf("stage %d injection: %w", i+1, err)
+		//
+		// The control arm renders nothing: the records are all saved above and
+		// below, so the store is the one the Ghost arm has, and the session is
+		// handed an empty block inside the same prompt framing.
+		var block string
+		if !r.WithoutGhost {
+			var err error
+			block, err = r.call(ctx, func(c context.Context) (string, error) {
+				return r.Ghost.Context(c, r.WorkDir)
+			})
+			if err != nil {
+				return nil, fmt.Errorf("stage %d injection: %w", i+1, err)
+			}
 		}
 		prompt := stagePrompt(stage.Script, block)
 		answer, err := r.call(ctx, func(c context.Context) (string, error) {
@@ -233,20 +269,50 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			i+1, len(r.Story.Stages), len(block), len(answer), len(stage.Records))
 	}
 
+	if !r.WithoutGhost {
+		if err := r.arcStages(ctx, res, order); err != nil {
+			return nil, err
+		}
+	}
+	res.Checks = grade(res)
+	if r.Judge != nil {
+		verdict, err := r.judge(ctx, res)
+		if errors.Is(err, errNoJudgeTarget) {
+			return nil, err
+		}
+		if err != nil {
+			// A judge that could not be asked must not discard a graded run.
+			res.Checks = append(res.Checks, Check{Name: "judge:error", Detail: err.Error(), Advisory: true})
+			return res, nil
+		}
+		res.Judged, res.Verdict = true, verdict
+		ok, err := judgeVerdict(verdict)
+		if err != nil {
+			res.Checks = append(res.Checks, Check{Name: "judge:unreadable", Detail: err.Error(), Advisory: true})
+			return res, nil
+		}
+		res.Checks = append(res.Checks, judgedCheck(ok, verdict))
+	}
+	return res, nil
+}
+
+// arcStages is everything after the last session in the Ghost arm: restamp,
+// settle, the two arc stages, and the end state the store checks grade.
+func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error {
 	// Chronology is restamped once, over the whole arc, so the supersedes
 	// direction between two records seeded in the same second is the storyline's
 	// order rather than an arbitrary tie-break.
 	if err := r.Ghost.Restamp(ctx, order); err != nil {
-		return nil, fmt.Errorf("restamp chronology: %w", err)
+		return fmt.Errorf("restamp chronology: %w", err)
 	}
 	if err := r.callDo(ctx, r.Ghost.Settle); err != nil {
-		return nil, fmt.Errorf("settle: %w", err)
+		return fmt.Errorf("settle: %w", err)
 	}
 	sup, err := r.call(ctx, func(c context.Context) (string, error) {
 		return r.Ghost.Supersede(c, r.Story.Project)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("supersede: %w", err)
+		return fmt.Errorf("supersede: %w", err)
 	}
 	res.Supersede = sup
 
@@ -256,32 +322,19 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		return r.Ghost.Resolve(c, r.Story.Project)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve: %w", err)
+		return fmt.Errorf("resolve: %w", err)
 	}
 	res.Resolve = resOut
 
 	if res.FinalBlock, err = r.call(ctx, func(c context.Context) (string, error) {
 		return r.Ghost.Context(c, r.WorkDir)
 	}); err != nil {
-		return nil, fmt.Errorf("final injection: %w", err)
+		return fmt.Errorf("final injection: %w", err)
 	}
 	if res.State, err = r.callState(ctx); err != nil {
-		return nil, fmt.Errorf("graded state: %w", err)
+		return fmt.Errorf("graded state: %w", err)
 	}
-	res.Checks = grade(res)
-	if r.Judge != nil {
-		verdict, err := r.judge(ctx, res)
-		if err != nil {
-			return nil, err
-		}
-		res.Judged, res.Verdict = true, verdict
-		ok, err := judgeVerdict(verdict)
-		if err != nil {
-			return nil, err
-		}
-		res.Checks = append(res.Checks, judgedCheck(ok, verdict))
-	}
-	return res, nil
+	return nil
 }
 
 func (r *Run) save(ctx context.Context, rec Record) (string, error) {
@@ -317,9 +370,21 @@ func (r *Run) callState(ctx context.Context) (State, error) {
 	return r.Ghost.State(c)
 }
 
-// judge asks the harness whether the final session acted on the reversal, and
-// returns its raw answer. The prompt states the rule the verdict has to follow:
-// the session's own words, not the store's contents.
+// errNoJudgeTarget is a storyline that cannot be judged: a configuration
+// error that ends the run, unlike a judge call that merely failed.
+var errNoJudgeTarget = errors.New("judge")
+
+// defaultJudgeQuestion is the reversal arc's question; the other arcs name their
+// own in Storyline.Judge. Its two verbs take the expected record's mark and
+// content.
+const defaultJudgeQuestion = "Did the session act on the current decision (%s: %s) rather than the one it replaced?"
+
+// judge asks the harness whether the final session acted on the record it was
+// expected to carry, and returns its raw answer. It is the paraphrase column: the
+// deterministic answer lines match spellings, and a paraphrase of the claim
+// passes this one and not those. Its check is advisory. The prompt states the
+// rule the verdict has to follow: the session's own words, not the store's
+// contents.
 func (r *Run) judge(ctx context.Context, res *Result) (string, error) {
 	last := res.Sessions[len(res.Sessions)-1]
 	// The judge is asked about the final stage's expected record, and Validate
@@ -329,18 +394,22 @@ func (r *Run) judge(ctx context.Context, res *Result) (string, error) {
 	// a panic this deep in a run is a crash after three model sessions spent.
 	final := res.Story.Stages[len(res.Story.Stages)-1]
 	if len(final.Expect) == 0 {
-		return "", fmt.Errorf("judge: the final stage of %s expects no record, so there is no reversal to ask about", res.Story.Key)
+		return "", fmt.Errorf("%w: the final stage of %s expects no record, so there is no reversal to ask about", errNoJudgeTarget, res.Story.Key)
 	}
 	reversal, ok := res.Story.RecordByKey(final.Expect[0])
 	if !ok {
-		return "", fmt.Errorf("judge: the final stage expects no record in this storyline")
+		return "", fmt.Errorf("%w: the final stage expects no record in this storyline", errNoJudgeTarget)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are grading one session of a coding agent.\n\n"+
 		"This is the whole of what that session was given:\n\n%s\n\n"+
 		"This is what the session answered:\n\n%s\n\n",
 		last.Prompt, last.Answer)
-	fmt.Fprintf(&b, "Did the session act on the current decision (%s: %s) rather than the one it replaced?\n"+
+	question := res.Story.Judge
+	if question == "" {
+		question = defaultJudgeQuestion
+	}
+	fmt.Fprintf(&b, question+"\n"+
 		"Answer with the single word yes or no, then at most one sentence of justification. "+
 		"Judge only what the answer says — the injected block is the session's evidence, not proof it used it.\n",
 		reversal.Mark, reversal.Content)
@@ -439,33 +508,50 @@ func arcPhaseArgs(phase, project string) []string {
 }
 
 // savedIDRe extracts the memory id from a ghost_memory_save response
-// ("Memory saved (id: <hex>), ...)"). The real save path is the only way a
+// ("Memory saved (id: <hex>), ...)", or "Global memory saved (id: ..." from
+// ghost_save_global, hence the case-insensitive match). The real save path is the only way a
 // storyline writes: a direct INSERT would skip the dedup, the credential guard
 // and the embedding notification, and the grade would be of a store no session
 // ever touched.
-var savedIDRe = regexp.MustCompile(`Memory saved \(id:\s*([0-9a-fA-F]+)\)`)
+var savedIDRe = regexp.MustCompile(`(?i)memory saved \(id:\s*([0-9a-fA-F]+)\)`)
+
+// saveCall is the tool and arguments one record is saved with. A global record
+// goes through ghost_save_global, which takes no project, and a record with a
+// valid_until passes it through as written. Exposed as a function so the routing
+// is testable without a binary.
+func saveCall(project string, rec Record) (string, map[string]any) {
+	tags := rec.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	args := map[string]any{
+		"content":    rec.Content,
+		"category":   rec.Category,
+		"importance": recordImportance,
+		"tags":       tags,
+	}
+	if rec.ValidUntil != "" {
+		args["valid_until"] = rec.ValidUntil
+	}
+	if rec.Global {
+		return "ghost_save_global", args
+	}
+	args["project_id"] = project
+	return "ghost_memory_save", args
+}
 
 func (g *binaryGhost) Save(ctx context.Context, project string, rec Record) (string, error) {
 	if g.mcp == nil {
 		return "", fmt.Errorf("mcp session is not open")
 	}
-	tags := rec.Tags
-	if tags == nil {
-		tags = []string{}
-	}
-	out, err := g.mcp.callText(ctx, "ghost_memory_save", map[string]any{
-		"project_id": project,
-		"content":    rec.Content,
-		"category":   rec.Category,
-		"importance": recordImportance,
-		"tags":       tags,
-	})
+	tool, args := saveCall(project, rec)
+	out, err := g.mcp.callText(ctx, tool, args)
 	if err != nil {
 		return "", err
 	}
 	m := savedIDRe.FindStringSubmatch(out)
 	if m == nil {
-		return "", fmt.Errorf("unrecognized ghost_memory_save response %q", out)
+		return "", fmt.Errorf("unrecognized %s response %q", tool, out)
 	}
 	return m[1], nil
 }

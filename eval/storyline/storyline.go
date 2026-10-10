@@ -11,8 +11,9 @@
 //
 // Usage:
 //
-//	go run ./eval/storyline [-storyline reversed-decision] [-repo .] [-keep]
-//	    [-judge] [-model opencode/big-pickle] [-ollama http://localhost:11434]
+//	go run ./eval/storyline [-storyline reversed-decision|a,b|all] [-repo .] [-keep]
+//	    [-without-ghost] [-runs 1] [-judge] [-model opencode/big-pickle]
+//	    [-ollama http://localhost:11434]
 //	    [-drain-timeout 3m] [-auth-file path/to/auth.json]
 //	    [-results-dir eval/storyline/results]
 //
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Record is one memory a stage's agent wrote. Everything about it that is
@@ -46,6 +48,30 @@ type Record struct {
 	// reversal is the whole point of the shipped storyline, and an edge that
 	// pointed the wrong way would pass a direction-blind grade.
 	SupersededBy string
+	// Global saves the record through ghost_save_global, into the cross-project
+	// bucket every project's session start reads. It is how a fact learned in one
+	// repository reaches a session in another: the sessions run with no tools, so
+	// ghost_search_all is not reachable and the global bucket in the injection is
+	// the only cross-project path they have. A global record needs a project
+	// record beside it (Validate) because the project is what binds the work dir
+	// and what the embedding drain waits on.
+	Global bool
+	// ValidUntil is the record's valid_until, an RFC 3339 stamp or a date, passed
+	// to the save tool as written. A record whose window has already closed is one
+	// the session start must withhold, and the grade checks that it did and that
+	// no answer used it.
+	ValidUntil string
+}
+
+// AnswerCheck is one deterministic reading of a session's ANSWER. Any is a list
+// of alternative spellings, matched case-insensitively as substrings for Carries
+// and as whole tokens for Avoids; Name is what the report keys on.
+type AnswerCheck struct {
+	Name string
+	Any  []string
+	// Needs is for an Avoids check: when the answer mentions an Any spelling at all
+	// (rejected or not) it must also carry one of these, or the check fails.
+	Needs []string
 }
 
 // Stage is one simulated session: the script the session is given, the records
@@ -55,7 +81,20 @@ type Record struct {
 type Stage struct {
 	Script  string
 	Records []Record
-	Expect  []string
+	// Expect is the DELIVERY property: the keys whose Mark the session's block
+	// must carry. It says nothing about what the agent did with the block.
+	Expect []string
+	// Carries is the ANSWER property, and the primary grade: each check passes
+	// when the agent's answer contains one of its spellings. Every spelling must
+	// come from an earlier record and must not appear in this stage's own script
+	// (Validate), which is what makes a pass mean the answer was remembered
+	// rather than read out of the prompt.
+	Carries []AnswerCheck
+	// Avoids lists claims the answer must not USE: a superseded or expired fact,
+	// or the mistake a correction was about. A spelling counts as used when it
+	// appears in a sentence with nothing marking it as old or wrong (see
+	// answerAvoids), so "use X, not Y" is not a use of Y.
+	Avoids []AnswerCheck
 }
 
 // Storyline is a whole arc. Project is the Ghost project the run works in;
@@ -67,6 +106,10 @@ type Storyline struct {
 	Project string
 	Opening []Record
 	Stages  []Stage
+	// Judge is the yes/no question the opt-in judge asks about the final session's
+	// answer, as a format string taking the expected record's mark and content.
+	// Empty means defaultJudgeQuestion.
+	Judge string
 }
 
 // validCategories mirrors memory's own CHECK constraint, so a typo'd category
@@ -145,6 +188,9 @@ func (s Storyline) Validate() error {
 		if strings.TrimSpace(st.Script) == "" {
 			return fmt.Errorf("storyline %s: stage %d has no script", s.Key, i+1)
 		}
+		if err := s.validateAnswerChecks(i, st); err != nil {
+			return err
+		}
 		for _, want := range st.Expect {
 			at, ok := s.stageOf(want)
 			if !ok {
@@ -154,6 +200,9 @@ func (s Storyline) Validate() error {
 				return fmt.Errorf("storyline %s: stage %d expects %q, which is its own or a later stage's record; a session is injected before it records anything, so only an earlier stage's record can have carried forward", s.Key, i+1, want)
 			}
 		}
+	}
+	if err := s.validateScope(); err != nil {
+		return err
 	}
 	for _, r := range s.Order() {
 		if r.SupersededBy == "" {
@@ -166,6 +215,98 @@ func (s Storyline) Validate() error {
 		here, _ := s.stageOf(r.Key)
 		if at <= here {
 			return fmt.Errorf("storyline %s: record %s names superseded_by %q, which is not from a later stage; a supersedes edge only points newer to older, so this would invert the arc", s.Key, r.Key, r.SupersededBy)
+		}
+	}
+	return nil
+}
+
+// validateScope refuses the shapes the project-scoped machinery cannot grade.
+// A project record must exist (the bind and the embedding drain read the
+// project), and a global record cannot take part in a reversal because the
+// supersede stage and the graded state both read the project's rows only.
+func (s Storyline) validateScope() error {
+	project := false
+	for _, r := range s.Order() {
+		if !r.Global {
+			project = true
+		}
+		if r.ValidUntil != "" {
+			if _, err := parseValidUntil(r.ValidUntil); err != nil {
+				return fmt.Errorf("storyline %s: record %s: %w", s.Key, r.Key, err)
+			}
+		}
+		if !r.Global {
+			continue
+		}
+		if r.SupersededBy != "" {
+			return fmt.Errorf("storyline %s: global record %s cannot be superseded: the arc stages read the project's rows only", s.Key, r.Key)
+		}
+		for _, o := range s.Order() {
+			if o.SupersededBy == r.Key {
+				return fmt.Errorf("storyline %s: global record %s cannot supersede %s: the arc stages read the project's rows only", s.Key, r.Key, o.Key)
+			}
+		}
+	}
+	if !project {
+		return fmt.Errorf("storyline %s: every record is global, and the run needs a project record to bind and to drain", s.Key)
+	}
+	return nil
+}
+
+// parseValidUntil reads a valid_until the way the save tool does: an RFC 3339
+// stamp or a whole date. A bare date is the END of that day in the store, so it
+// is returned as the last second of it.
+func parseValidUntil(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02", v); err == nil {
+		return t.Add(24*time.Hour - time.Second), nil
+	}
+	return time.Time{}, fmt.Errorf("valid_until %q is neither RFC 3339 nor a date", v)
+}
+
+// validateAnswerChecks is the anti-leak rule for the answer grade. A Carries
+// spelling that the stage's own script contains would be graded as remembered
+// when the prompt handed it over, and one that no earlier record contains could
+// only be matched by luck. Avoids spellings are not leak-checked: a script may
+// name the thing it asks the agent to avoid.
+func (s Storyline) validateAnswerChecks(i int, st Stage) error {
+	earlier := strings.Builder{}
+	for _, r := range s.Opening {
+		earlier.WriteString(strings.ToLower(r.Content) + "\n")
+	}
+	for j := 0; j < i; j++ {
+		for _, r := range s.Stages[j].Records {
+			earlier.WriteString(strings.ToLower(r.Content) + "\n")
+		}
+	}
+	script := strings.ToLower(st.Script)
+	for _, c := range st.Carries {
+		if strings.TrimSpace(c.Name) == "" || len(c.Any) == 0 {
+			return fmt.Errorf("storyline %s: stage %d has a carries check with no name or no spelling", s.Key, i+1)
+		}
+		for _, a := range c.Any {
+			a = strings.ToLower(strings.TrimSpace(a))
+			if a == "" {
+				return fmt.Errorf("storyline %s: stage %d carries %q has an empty spelling", s.Key, i+1, c.Name)
+			}
+			if strings.Contains(script, a) {
+				return fmt.Errorf("storyline %s: stage %d carries %q, but its own script contains %q; the answer could be read out of the prompt", s.Key, i+1, c.Name, a)
+			}
+			if !strings.Contains(earlier.String(), a) {
+				return fmt.Errorf("storyline %s: stage %d carries %q, but no earlier record contains %q; nothing could have carried it forward", s.Key, i+1, c.Name, a)
+			}
+		}
+	}
+	for _, c := range st.Avoids {
+		if strings.TrimSpace(c.Name) == "" || len(c.Any) == 0 {
+			return fmt.Errorf("storyline %s: stage %d has an avoids check with no name or no spelling", s.Key, i+1)
+		}
+		for _, a := range c.Any {
+			if strings.TrimSpace(a) == "" {
+				return fmt.Errorf("storyline %s: stage %d avoids %q has an empty spelling", s.Key, i+1, c.Name)
+			}
 		}
 	}
 	return nil
@@ -188,12 +329,14 @@ func validateRecord(r Record, seen map[string]bool) error {
 	return nil
 }
 
-// storylines is the registry of shipped storylines. One ships in this change
-// (reversed-decision); the service-migration, on-call and config-clutter
-// candidates from the design are follow-ups, and each is a Storyline literal
-// here rather than a new mechanism.
+// storylines is the registry of shipped storylines: the reversed decision, and
+// the three arcs the usefulness measurement needs (a correction that must not
+// be repeated, a fact learned in one repository and needed in another, and a
+// fact whose validity window has closed). The service-migration, on-call and
+// config-clutter candidates from the design are follow-ups, and each is a
+// Storyline literal here rather than a new mechanism.
 func storylines() []Storyline {
-	return []Storyline{ReversedDecision()}
+	return []Storyline{ReversedDecision(), CorrectionReplay(), OpsFact(), StaleFact()}
 }
 
 // StorylineByKey resolves a -storyline value, naming the ones it does not have
@@ -301,6 +444,10 @@ func ReversedDecision() Storyline {
 				// find the reversal in its block, and it has to find it unmarked
 				// as the current answer.
 				Expect: []string{"session-store-postgres"},
+				// The answer grade. Nothing in this stage's script names a store or a
+				// variable value; both come from the block or from nowhere.
+				Carries: []AnswerCheck{{Name: "current-store", Any: []string{"SESSION_STORE=postgres"}}},
+				Avoids:  []AnswerCheck{{Name: "superseded-store", Any: []string{"SESSION_STORE=redis"}}},
 			},
 		},
 	}

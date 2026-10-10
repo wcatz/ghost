@@ -121,15 +121,53 @@ const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 //
 // The number is chosen from the `ghost bench --cutoff-sweep` table in
 // docs/benchmarks.md, and the trade it makes is explicit rather than tuned: on
-// the graded corpus it admits 302 of the 304 baseline graded-relevant rows
-// (the ship floor is 298), holds the answerable result rate at 1.000, raises
-// context precision from 0.138 to 0.145 and lowers the estimated token cost per
-// answer from about 297 to about 280. 0.64 (300 relevant) and 0.65 (298) also
-// clear the floor but leave a margin of two rows and none; the floor is the
+// the graded corpus it admits 308 of the 310 baseline graded-relevant rows
+// (the ship floor is 304), holds the answerable result rate at 1.000, raises
+// context precision from 0.141 to 0.148 and lowers the estimated token cost per
+// answer from about 297 to about 280. 0.64 (306 relevant) and 0.65 (305) also
+// clear the floor but leave a margin of two rows and one; the floor is the
 // hard constraint and a ship that clears it barely is a ship one corpus edit
 // from failing it, so the default keeps the four-row margin rather than the
 // last few points of precision.
 const DefaultRelevanceCutoff float64 = 0.63
+
+// DefaultNoAnswerCosine is the compiled value of context.no_answer_cosine, the
+// assembler's absolute no-answer bar on query-mode blocks (#955): a block whose
+// best vector cosine is below it is withheld and the answer says nothing cleared
+// the bar. Like DefaultRelevanceCutoff it lives here so the bench that measures
+// the bar (`ghost bench --no-answer-sweep`, via ContextRequest) and the config
+// layer that ships it read ONE number. 0 is off.
+//
+// The number is chosen from the `ghost bench --no-answer-sweep` table in
+// docs/benchmarks.md, which also shows the two rules that were not built.
+//
+// It was measured on ONE embedding model, DefaultEmbeddingModel, and a cosine
+// is a property of the model that produced it. So the default applies only while
+// embedding.model is that model: with any other model and no explicit
+// context.no_answer_cosine (file or environment), the effective bar is 0 and the
+// retrieval trace says so. An explicit value is always honoured.
+const DefaultNoAnswerCosine float64 = 0.62
+
+// DefaultEmbeddingModel is the compiled value of embedding.model, and the model
+// DefaultNoAnswerCosine was measured against.
+const DefaultEmbeddingModel = "nomic-embed-text:v1.5"
+
+// noAnswerKey is the config key whose explicitness decides the model tie.
+const noAnswerKey = "context.no_answer_cosine"
+
+// NoAnswerBarOffUnmeasured is the note carried when the model tie turned the bar
+// off, so the retrieval trace can say why a bar that ships on is not applied.
+const NoAnswerBarOffUnmeasured = "no_answer bar off: unmeasured embedding model"
+
+// resolveNoAnswerBar applies the model tie. explicit says the user set the key in
+// a config file or the environment.
+func resolveNoAnswerBar(cfg *Config, explicit bool) {
+	if explicit || cfg.Embedding.Model == DefaultEmbeddingModel {
+		return
+	}
+	cfg.Context.NoAnswerCosine = 0
+	cfg.Context.NoAnswerBarNote = NoAnswerBarOffUnmeasured
+}
 
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
@@ -187,6 +225,25 @@ type ContextConfig struct {
 	// row's absolute score, and this judges it against the best row in the same
 	// block.
 	RelevanceCutoff float64 `koanf:"relevance_cutoff"`
+	// NoAnswerCosine is the absolute no-answer bar applied in the assembler to
+	// QUERY-mode blocks only (#955): when the BEST vector cosine among the rows a
+	// block would carry is strictly below this value, the block is withheld and
+	// the answer says nothing cleared the bar, with the score shown, instead of
+	// ten plausible rows for a question the store cannot answer. 0 leaves the
+	// rule OFF (the pre-#955 block, byte-identical).
+	//
+	// One rule, one parameter. A pinned row is never withheld, a block with no
+	// comparable cosine (no embedder, or the vector leg failed) is never judged,
+	// and passive surfaces never see it. It is a cosine, not a share:
+	// relevance_cutoff compares a row with the best row in its own block, this
+	// compares the best row with an absolute bar, and abstain_cosine only labels
+	// a block weak while still showing it. It is a float64 (not abstain_cosine's
+	// float32) so the generic float parser lands on the field's own type.
+	NoAnswerCosine float64 `koanf:"no_answer_cosine"`
+	// NoAnswerBarNote is not a setting: it is set by Load when the bar was turned
+	// off because embedding.model is not the model the default was measured on and
+	// the user set no explicit bar. The assembler records it in the trace.
+	NoAnswerBarNote string `koanf:"-"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -352,7 +409,7 @@ type ObsidianConfig struct {
 var defaults = map[string]interface{}{
 	"embedding.enabled":                        true,
 	"embedding.ollama_url":                     "http://localhost:11434",
-	"embedding.model":                          "nomic-embed-text:v1.5",
+	"embedding.model":                          DefaultEmbeddingModel,
 	"embedding.dimensions":                     768,
 	"reflection.auto_resolve":                  false,
 	"reflection.auto_supersede":                false,
@@ -374,6 +431,7 @@ var defaults = map[string]interface{}{
 	"search.min_similarity":                    0.0,
 	"context.abstain_cosine":                   float32(0.0),
 	"context.relevance_cutoff":                 DefaultRelevanceCutoff,
+	"context.no_answer_cosine":                 DefaultNoAnswerCosine,
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
@@ -406,6 +464,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// The bar's default is applied after the layers load, because whether it
+	// applies depends on the embedding model, and "the user set it" must be told
+	// apart from "the default is there". Drop it here so an explicit file or
+	// environment value is the only way the key can exist afterwards.
+	k.Delete(noAnswerKey)
+
 	parser := yaml.Parser()
 
 	// Layer 2: /etc/ghost/config.yaml (system-wide).
@@ -430,6 +494,11 @@ func Load() (*Config, error) {
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
+	explicitBar := k.Exists(noAnswerKey)
+	if !explicitBar {
+		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
+	}
+	resolveNoAnswerBar(cfg, explicitBar)
 	if err := checkScopeValues(cfg); err != nil {
 		return nil, err
 	}
@@ -464,6 +533,12 @@ func checkContextValues(cfg *Config) error {
 	// same reason abstain_cosine refuses it.
 	if v := cfg.Context.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 		return fmt.Errorf("context.relevance_cutoff: a cutoff is a fraction in [0,1] where 0 is off, got %v", cfg.Context.RelevanceCutoff)
+	}
+	// The no-answer bar is a cosine in [0,1] where 0 is off. NaN compares false
+	// against both bounds and would read as off, telling a user who set a bar
+	// that there is none; a value above 1 would withhold every answer.
+	if v := cfg.Context.NoAnswerCosine; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("context.no_answer_cosine: a cosine is in [0,1] where 0 is off, got %v", cfg.Context.NoAnswerCosine)
 	}
 	return nil
 }
@@ -651,7 +726,7 @@ func defaultConfig() *Config {
 		Embedding: EmbeddingConfig{
 			Enabled:    true,
 			OllamaURL:  "http://localhost:11434",
-			Model:      "nomic-embed-text:v1.5",
+			Model:      DefaultEmbeddingModel,
 			Dimensions: 768,
 		},
 		Reflection: ReflectionConfig{
@@ -668,7 +743,7 @@ func defaultConfig() *Config {
 		Injection: DefaultInjectionConfig(),
 		Obsidian:  ObsidianConfig{Interval: "30s"},
 		Scratch:   ScratchConfig{MaxBytes: DefaultScratchMaxBytes},
-		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff},
+		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff, NoAnswerCosine: DefaultNoAnswerCosine},
 	}
 }
 
@@ -682,6 +757,7 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		warnf("compiled defaults are unusable: %v", err)
 		return nil, false
 	}
+	k.Delete(noAnswerKey)
 	if err := applyEnv(k); err != nil {
 		warnf("%v — those variables were skipped", err)
 	}
@@ -690,6 +766,11 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		warnf("%v — using the built-in defaults", err)
 		return nil, false
 	}
+	explicitBar := k.Exists(noAnswerKey)
+	if !explicitBar {
+		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
+	}
+	resolveNoAnswerBar(cfg, explicitBar)
 	return cfg, true
 }
 
@@ -1086,6 +1167,9 @@ var envOverrides = []envOverride{
 	// GHOST_CONTEXT_RELEVANCE_CUTOFF: the same reason — the generic transformer
 	// would produce context.relevance.cutoff, missing the relevance_cutoff key.
 	{"GHOST_CONTEXT_RELEVANCE_CUTOFF", "context.relevance_cutoff", floatValue},
+	// GHOST_CONTEXT_NO_ANSWER_COSINE: the same reason — the generic transformer
+	// would produce context.no.answer.cosine, missing the no_answer_cosine key.
+	{"GHOST_CONTEXT_NO_ANSWER_COSINE", "context.no_answer_cosine", floatValue},
 	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
 	// scratch.max.bytes, missing the max_bytes key entirely.
 	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},

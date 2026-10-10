@@ -2007,6 +2007,13 @@ func TestCLIBench(t *testing.T) {
 	mustMatch(t, "bench --cutoff-sweep (values)", cutoff.stdout, `[0-9]+\.[0-9]+`)
 	mustMatch(t, "bench --cutoff-sweep has 0.63 row", cutoff.stdout, "0\\.630")
 
+	// --no-answer-sweep prints the no-answer rule's table: the shipped cosine bar
+	// is one of its rows, marked, with the gate verdict beside every row.
+	noAnswer := s.mustRun("bench", "--no-answer-sweep")
+	mustMatch(t, "bench --no-answer-sweep has the shipped bar row", noAnswer.stdout, "0\\.6200")
+	mustMatch(t, "bench --no-answer-sweep marks the default", noAnswer.stdout, "shipped default")
+	mustMatch(t, "bench --no-answer-sweep reports the gate", noAnswer.stdout, "ship gate")
+
 	// An unknown flag is an error, and the usage goes with it.
 	bad := s.mustFail("bench", "--nope")
 	mustMatch(t, "bench with an unknown flag", bad.stderr, "(?i)unknown flag")

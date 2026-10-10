@@ -46,6 +46,8 @@ func scratchEnv(scratch, model string) []string {
 		"XDG_DATA_HOME": true, "XDG_CONFIG_HOME": true, "HOME": true,
 		"ANTHROPIC_API_KEY": true, "USERPROFILE": true,
 		"GHOST_OPENCODE_MODEL": true,
+		// Re-added below with the developer's real data dir listed.
+		"GHOST_DEV_FORBID_DATA_DIR": true,
 	}
 	env := make([]string, 0, len(os.Environ())+4)
 	for _, kv := range os.Environ() {
@@ -59,11 +61,40 @@ func scratchEnv(scratch, model string) []string {
 		"XDG_DATA_HOME="+filepath.Join(scratch, "data"),
 		"XDG_CONFIG_HOME="+filepath.Join(scratch, "config"),
 		"HOME="+filepath.Join(scratch, "home"),
+		// A development build refuses to resolve any data dir listed here, so a
+		// resolve that escaped the scratch tree and landed on the developer's own
+		// store fails instead of writing to it. The list is taken from the
+		// ORIGINAL environment, before HOME and XDG_DATA_HOME were replaced.
+		"GHOST_DEV_FORBID_DATA_DIR="+forbiddenDataDirs(os.Getenv),
 	)
 	if strings.TrimSpace(model) != "" {
 		env = append(env, "GHOST_OPENCODE_MODEL="+model)
 	}
 	return env
+}
+
+// forbiddenDataDirs is the GHOST_DEV_FORBID_DATA_DIR value a run's children get:
+// whatever the caller already forbids, plus the data directory the CALLER's own
+// environment resolves (XDG_DATA_HOME, else $HOME/.local/share, then "ghost"),
+// deduplicated and joined with the OS path-list separator.
+func forbiddenDataDirs(getenv func(string) string) string {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if d != "" && !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	for _, d := range filepath.SplitList(getenv("GHOST_DEV_FORBID_DATA_DIR")) {
+		add(d)
+	}
+	if xdg := getenv("XDG_DATA_HOME"); filepath.IsAbs(xdg) {
+		add(filepath.Join(xdg, "ghost"))
+	} else if home := getenv("HOME"); home != "" {
+		add(filepath.Join(home, ".local", "share", "ghost"))
+	}
+	return strings.Join(dirs, string(os.PathListSeparator))
 }
 
 // seedOpencodeAuth copies an opencode credential into the run's own data dir, so

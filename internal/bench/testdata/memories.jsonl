@@ -1,4 +1,4 @@
-# Ghost retrieval benchmark dataset v2. Domain: Cardano stake-pool infra,
+# Ghost retrieval benchmark dataset v3. Domain: Cardano stake-pool infra,
 # Ghost internals, SRE/security/Go engineering (paraphrase-heavy queries).
 # Keys are stable; embeddings.json is keyed by these keys (and by query names
 # in queries.jsonl). When this file changes, regenerate embeddings through
@@ -16,7 +16,7 @@
 # and a fixture that changes meaning on its own is not a fixture. The four together
 # are the four states a CLAIM can be in: one open window, one closed window, one
 # window not yet opened, one verified claim with no expiry. The fifth state, unset,
-# needs no fixture — the other 547 rows are it. No graded query targets
+# needs no fixture — the other 545 rows are it. No graded query targets
 # them, because a query whose answer is a row a correct retrieval must withhold is a
 # mislabelled query; the condition that scores validity is the assembler's own
 # (docs/superpowers/specs/2026-09-25-context-assembler-design.md, PR 7).
@@ -559,8 +559,6 @@
 {"key": "ouroboros_ntp", "category": "dependency", "content": "cardano-node trusts NTP for slot timing; unsynchronized clocks cause needless peer churn and missed slots.", "importance": 0.5, "tags": ["cardano", "time"]}
 {"key": "grafana_ingress_port", "category": "fact", "content": "Grafana on the monitoring host is served on port 80 behind the ingress.", "importance": 0.5, "tags": ["infra", "grafana"]}
 {"key": "helmfile_selector_required", "category": "gotcha", "content": "Applying without a release selector can drag unrelated releases into the change set; always scope with -l when the blast radius matters.", "importance": 0.9, "tags": ["helmfile", "safety"]}
-{"key": "yaml_two_space", "category": "convention", "content": "YAML files use two-space indentation everywhere; never change the indentation width.", "importance": 0.6, "tags": ["convention", "yaml"]}
-{"key": "no_main_direct", "category": "preference", "content": "Never push directly to main; every change goes through a feature branch and a pull request, no matter how small.", "importance": 1.0, "tags": ["workflow", "git"]}
 {"key": "sops_never_plain", "category": "preference", "content": "Never commit unencrypted secrets; SOPS-encrypted files only, and verify with git diff before pushing.", "importance": 1.0, "tags": ["secrets", "policy"]}
 {"key": "pr_always", "category": "preference", "content": "Open a PR for every change including one-liners; direct pushes to main are blocked by branch protection on this repository.", "importance": 0.9, "tags": ["workflow", "git"]}
 {"key": "evidence_or_unknown", "category": "preference", "content": "If unsure whether something exists, verify it; when citing a finding, show evidence — a grep result, a line number, a reference — not a summary of what you think you saw.", "importance": 0.9, "tags": ["process", "quality"]}

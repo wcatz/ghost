@@ -227,7 +227,7 @@ func TestQueryModeOverflowIsByteIdenticalToTheRanking(t *testing.T) {
 				stageDiversity, st.In, st.Out, st.DroppedIDs)
 		}
 	}
-	wantStages := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "budget", "render", "response_fit"}
+	wantStages := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "no_answer", "budget", "render", "response_fit"}
 	if !eq(gotStages, wantStages) {
 		t.Errorf("stage list = %v, want %v", gotStages, wantStages)
 	}

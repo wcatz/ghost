@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -30,7 +31,7 @@ const contextFixtureKey = "global_rule"
 // contextFixture is the small corpus the context metrics are measured on, and it
 // exists because the graded corpus cannot measure them.
 //
-// The 551-row corpus holds no resolved row, no `_global` row and no supersession
+// The 549-row corpus holds no resolved row, no `_global` row and no supersession
 // edge — docs/benchmarks.md says so — and the only contamination arm reachable
 // through a real assemble.Run is the resolved one, because stage 2 drops an
 // expired or not-yet-valid row and stage 3 drops a scope contradiction before
@@ -475,9 +476,13 @@ func contextTrimReport(t *testing.T) ContextReport {
 	if err != nil {
 		t.Fatalf("seed the trim fixture: %v", err)
 	}
-	rep, err := RunContext(context.Background(), store, queries, at)
+	// The no-answer bar (#955) is off here: this fixture's query vectors are
+	// synthetic and sit below any real cosine bar, and what it measures is the
+	// budget's trim, which is a statement about a block that was ANSWERED. The bar
+	// has its own tests (noanswer_sweep_test.go and the assembler's).
+	rep, err := runContextBar(context.Background(), store, queries, at, config.DefaultRelevanceCutoff, 0)
 	if err != nil {
-		t.Fatalf("RunContext: %v", err)
+		t.Fatalf("runContextBar: %v", err)
 	}
 	return rep
 }

@@ -106,6 +106,9 @@ type MemoryStore interface {
 	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
+	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
+	// decision's companion memory (retired, or left live because it is pinned).
+	SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (memory.DecisionRetirement, error)
 
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
@@ -115,6 +118,10 @@ type MemoryStore interface {
 	// single project. Empty means "no repository known" and never clears a
 	// remote already recorded.
 	EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error
+	// BindNewProjectToCheckout opens a NEW project at a checkout in one write
+	// transaction and reports whether it did; a claimed id, path or remote
+	// answers false with no write and never merges.
+	BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error)
 	// ResolveOrCreateRepoProject resolves repository identity and creates the
 	// fallback project in one write transaction. projectRef is the ordinary
 	// resolved id/path; repoName is derived from the remote, not a directory.
