@@ -284,19 +284,15 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		}
 	}
 
-	// Compared as EXACT text against the physical path, and that strictness is
-	// the point: the candidate query matches on stored text, so a row holding
-	// "/x/checkout/" is returned by no clause of it — not equal to the session's
-	// "/x/checkout", and not a prefix of it followed by "/" — and a project
-	// stored that way resolves from nowhere. Treating two spellings of one
-	// location as "already bound" would leave exactly that state unrepairable:
-	// the refusal rolls back, the row keeps the spelling, and re-running fails
-	// identically forever. It is also not in the unbound notice, whose shape
-	// test passes, so nothing else would ever suggest the bind.
-	//
-	// The cost is that a row another writer spelled with backslashes is rewritten
-	// once to the physical spelling, which the query does match. That is a
-	// normalization, stable after the first bind.
+	// Compared as EXACT text against the physical path, as a normalisation and
+	// not as a resolvability rule: lookup compares in resolved form, so a row
+	// holding "/x/checkout/" or a backslash spelling already resolves, but
+	// recording the physical spelling keeps every project's stored path in the
+	// one form the bind conflict checks, status and exports compare. Treating
+	// two spellings of one location as "already bound" would leave a row in
+	// its odd spelling for good, because a re-run would find nothing to change.
+	// A row spelled another way is therefore rewritten once to the physical
+	// spelling, which is stable after the first bind.
 	pathChanged := storedPath != physical
 	newPath := storedPath
 	if pathChanged {
@@ -308,11 +304,12 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		newRemote = remote
 	}
 
-	// The write happens before the resolvability check, not after: the check has
-	// to ask the resolver's own query about the row as it will be once written
-	// (its length filter, its prefix match and its longest-path rule all read
-	// the stored value). Both are inside one transaction, so a refusal rolls the
-	// write back and still leaves nothing written.
+	// The write happens before the resolvability check, not after: the check
+	// applies the resolver's own rule (usable path, resolved-form comparison,
+	// ranking by resolved length) to every recorded row, and the project's own
+	// row has to take part as it will be once written. Both are inside one
+	// transaction, so a refusal rolls the write back and still leaves nothing
+	// written.
 	if pathChanged || remoteSet {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE projects SET path = ?, repo_remote = ?, updated_at = datetime('now') WHERE id = ?`,
@@ -509,13 +506,6 @@ func scanBindCandidates(rows *sql.Rows) ([]basenameCandidate, error) {
 	}
 	return candidates, nil
 }
-
-// sameRecordedPath compared two recorded paths as locations rather than as text:
-// separators normalized and dot segments cleaned on both sides. It is gone
-// because resolution does not compare them that way. The candidate query matches
-// the stored TEXT, so "/x/checkout/" and "/x/checkout" are not interchangeable
-// there, and bind must write the spelling the query can return — see the
-// pathChanged comparison in BindProjectPath.
 
 // ListUnboundProjects returns the projects a session directory can never
 // resolve: no usable recorded path and no repository remote, in name order.
