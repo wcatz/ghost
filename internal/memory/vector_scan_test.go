@@ -278,7 +278,8 @@ func setDuringVectorSeams(copyFn, scoreFn func()) {
 // pass that follows is the O(corpus × dims) half of the search and needs neither
 // the lock nor the connection, so it must not be holding them.
 //
-// The test parks the search inside its scoring pass and asserts a writer
+// The test parks the search inside its scoring pass, after its first row has
+// been scored, and asserts a writer
 // completes. A search that still held the read lock across the pass would park
 // the writer until the pass finished, and the pass is waiting for the test —
 // which is exactly the stall the timeout below reports.
@@ -286,8 +287,8 @@ func setDuringVectorSeams(copyFn, scoreFn func()) {
 // The other half of the property is TestVectorSearchCopiesTheCorpusUnderTheStoreReadLock.
 func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 	store, ctx := setupTestStore(t)
-	// A corpus big enough that the scoring pass is a real wait rather than a
-	// rounding error, so the assertion is about the lock and not about timing.
+	// The scoring seam fires only after a row has been scored, so a corpus with
+	// no rows never reaches it and this test fails instead of passing vacuously.
 	//
 	// The rows and their vectors are written in one transaction rather than as
 	// four thousand Create and StoreEmbedding calls: what is asserted is who can

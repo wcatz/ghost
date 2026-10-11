@@ -30,7 +30,8 @@ const vectorScanColumns = `
 	JOIN memories m ON m.id = e.memory_id`
 
 // duringVectorCopyFn and duringVectorScoreFn are test seams inside a vector
-// search, one in each of its two phases. Production leaves both no-ops. A test
+// search, one in each of its two phases (the scoring seam fires once, after the first
+// row is scored). Production leaves both no-ops. A test
 // parks in one of them to find out what the search is and is not holding at that
 // point, which is the property #556 is about and the only way to assert it
 // without measuring a duration.
@@ -359,8 +360,6 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 // rather than on the k survivors: a compatible row ranked below the cut is
 // exactly the one a post-filter would never see.
 func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]string) []ScoredMemory {
-	duringVectorScore()
-
 	// A non-positive limit cannot be satisfied by any window. (The cut it
 	// replaces sliced to `limit` without checking, which panicked on a negative
 	// one.)
@@ -386,6 +385,12 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		// float32s cannot overflow), but the old shape was right and this one
 		// would quietly stop being right the day either stops holding.
 		sim := cosineFromBytes(queryVec, v.embed(sp.embed))
+		if i == 0 {
+			// Once per search, after the first row has been scored, so a test
+			// that parks here is inside the scoring loop over a real row and
+			// not merely at the top of a search that may have nothing to score.
+			duringVectorScore()
+		}
 		if !(sim > minVectorSimilarity) {
 			continue
 		}
