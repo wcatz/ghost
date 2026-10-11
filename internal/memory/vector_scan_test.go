@@ -288,20 +288,38 @@ func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	// A corpus big enough that the scoring pass is a real wait rather than a
 	// rounding error, so the assertion is about the lock and not about timing.
+	//
+	// The rows and their vectors are written in one transaction rather than as
+	// four thousand Create and StoreEmbedding calls: what is asserted is who can
+	// take the store lock while the scoring pass runs, not how the corpus got
+	// there, and each of those calls is its own committed write whose per-call
+	// cost under the race detector adds up to tens of seconds. The corpus is the
+	// same rows and the same vectors, and it carries the same model identity.
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin seed: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 	for i := range 2000 {
-		id, err := store.Create(ctx, "test-proj", Memory{
-			Category: "fact", Content: fmt.Sprintf("row %d", i), Source: "manual",
-		})
-		if err != nil {
-			t.Fatalf("Create: %v", err)
+		var id string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source)
+			VALUES ('test-proj', 'fact', ?, 'manual') RETURNING id`,
+			fmt.Sprintf("row %d", i)).Scan(&id); err != nil {
+			t.Fatalf("seed memory %d: %v", i, err)
 		}
 		vec := make([]float32, 64)
 		for d := range vec {
 			vec[d] = float32(i%17) + float32(d)/100
 		}
-		if err := store.StoreEmbedding(ctx, id, vec, identityCurrent); err != nil {
-			t.Fatalf("StoreEmbedding: %v", err)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memory_embeddings (memory_id, embedding, model) VALUES (?, ?, ?)`,
+			id, float32sToBytes(vec), identityCurrent); err != nil {
+			t.Fatalf("seed embedding %d: %v", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed: %v", err)
 	}
 	store.SetEmbeddingIdentity(identityCurrent)
 

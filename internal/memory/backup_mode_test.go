@@ -4,7 +4,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,13 +70,21 @@ func TestBackupIsNeverGroupReadableWhileItIsBeingWritten(t *testing.T) {
 	// enough to sample. A hundred-row database is written in under a
 	// millisecond, which is not a window anybody can lose data through and is
 	// also not a window this test can see.
+	//
+	// The rows go in with one INSERT rather than four thousand Create calls, for
+	// the reason seedPruneRow gives: what is asserted here is the mode of the
+	// copy while it is written, not how the rows got into the source. Under the
+	// race detector Create's per-row cost (the write guard's regexp scan of a
+	// two-kilobyte body, the history append) is minutes, and the INSERT's
+	// triggers still index every row. The size is the part that matters, so it
+	// is kept: the source stays tens of megabytes, which is what makes the
+	// vacuum last long enough for the watcher below to sample it.
 	big := strings.Repeat("x", 2000)
-	for i := 0; i < 4000; i++ {
-		if _, err := store.Create(ctx, "p1", Memory{
-			Category: "fact", Content: fmt.Sprintf("%d %s", i, big), Source: "mcp",
-		}); err != nil {
-			t.Fatalf("Create %d: %v", i, err)
-		}
+	if _, err := store.db.ExecContext(ctx, `
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < 7999)
+		INSERT INTO memories (project_id, category, content, source)
+		SELECT 'p1', 'fact', i || ' ' || ?, 'mcp' FROM n`, big); err != nil {
+		t.Fatalf("seed memories: %v", err)
 	}
 
 	// A directory with no shield, and a umask that would let a default-width
