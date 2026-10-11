@@ -226,9 +226,12 @@ func openCodePolicyFor(major int) string {
 // is "ask", and V2's non-interactive `run` auto-rejects each ask, so no tool
 // call executes; Ghost never passes an auto-approve flag (--auto, --yolo,
 // --dangerously-skip-permissions). V2 cannot use a deny policy: a deny rule or
-// a disabled tool strips tools from the request, and OpenCode's free tier
-// answers such a request with 403 provider.auth ("free tier can only be used
-// from within OpenCode"), which failed every lifecycle phase. An empty MCP map
+// a disabled tool strips that tool from the request, and when the stripped
+// tool is the shell OpenCode's free tier answers with 403 provider.auth ("free
+// tier can only be used from within OpenCode"), which failed every lifecycle
+// phase. A bisect on 2.0.18 (2026-10-11) found the shell is the only tool the
+// free tier insists on; "ask" for every tool is still the policy here because
+// it is total and needs no per-tool list. An empty MCP map
 // and an empty plugin list keep the user's servers and plugins out of the child.
 //
 // `opencode run` has no flag to disable tools — its only permission flag is

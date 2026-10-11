@@ -286,8 +286,9 @@ permission deny/ask in the isolated config Ghost already writes, and the WILDCAR
 is what makes it total: opencode defaults every unset permission to `allow`, so a
 name it adds later is covered by `*` on the day it ships rather than the day
 someone remembers it. V2 must use `ask` (a non-interactive `run` auto-declines
-each ask) because a deny rule or a disabled tool strips tools from the request and
-the free tier answers that with 403 `provider.auth`; V1 keeps `deny` since its
+each ask) because a deny rule or a disabled tool strips that tool from the request,
+and the free tier answers a request without the shell tool with 403 `provider.auth`
+(the shell is the only tool it insists on, bisected on 2.0.18); V1 keeps `deny` since its
 non-interactive ask behaviour is unverified.
 
 **goose has NO flag for this at all** (its extension options only ADD extensions;

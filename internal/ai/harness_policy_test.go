@@ -103,13 +103,13 @@ func TestConfigureOpenCodeIsolationWritesAskConfig(t *testing.T) {
 		t.Fatalf("isolated config is not JSON: %v", err)
 	}
 	// Every tool is "ask": a non-interactive `opencode run` declines each call.
-	// A deny rule or a disabled tool strips tools from the request, and
-	// OpenCode's free tier answers such a request with 403 provider.auth.
+	// A deny rule or a disabled tool strips that tool from the request, and
+	// OpenCode's free tier answers 403 provider.auth when the shell is gone.
 	if len(config.Permission) != 1 || config.Permission["*"] != "ask" {
 		t.Errorf("permission rules = %v, want only {\"*\": \"ask\"}", config.Permission)
 	}
 	if len(config.Tools) != 0 {
-		t.Errorf("tool map = %v, want none (a disabled tool trips the free-tier check)", config.Tools)
+		t.Errorf("tool map = %v, want none (a disabled shell trips the free-tier check)", config.Tools)
 	}
 	if len(config.MCP) != 0 || len(config.Plugin) != 0 {
 		t.Errorf("MCP/plugins survived isolation: mcp=%v plugin=%v", config.MCP, config.Plugin)
