@@ -1036,7 +1036,7 @@ func TestVectorCacheDoesNotPublishACopyANewerWriteOverlapped(t *testing.T) {
 }
 
 // Tied cosines. Rows with identical embeddings (duplicate content embeds to the
-// same bytes) tie exactly, and a tie is broken by memory id, not by the order the
+// same bytes) tie exactly, and a tie is broken by creation order (the older memory first), not by the order the
 // database yielded the rows in. The uncached project leg is answered through a
 // project index and the cache scans the embeddings table once, so the two scan in
 // different orders; the answers must still be identical, row for row, at every
@@ -1044,14 +1044,20 @@ func TestVectorCacheDoesNotPublishACopyANewerWriteOverlapped(t *testing.T) {
 func TestCachedVectorSearchAgreesWithTheUncachedPathOnTies(t *testing.T) {
 	ctx := context.Background()
 	s, _ := cacheStore(t)
+	var created []string // creation order of the tied rows
 	for i := range 4 {
-		cacheMemory(t, s, cacheProj, fmt.Sprintf("dup %d", i), 50, nil)
+		created = append(created, cacheMemory(t, s, cacheProj, fmt.Sprintf("dup %d", i), 50, nil))
 	}
 	for i := range 3 {
 		g := cacheMemory(t, s, cacheProj, fmt.Sprintf("global dup %d", i), 50, nil)
 		if err := s.PromoteToGlobal(ctx, cacheProj, g); err != nil {
 			t.Fatal(err)
 		}
+		created = append(created, g)
+	}
+	rank := map[string]int{}
+	for i, id := range created {
+		rank[id] = i
 	}
 	for i := range 6 {
 		cacheMemory(t, s, cacheProj, fmt.Sprintf("distinct %d", i), uint64(70+i), nil)
@@ -1073,8 +1079,10 @@ func TestCachedVectorSearchAgreesWithTheUncachedPathOnTies(t *testing.T) {
 			t.Errorf("limit %d: cached and uncached differ on ties:\n cached   %v\n uncached %v", limit, idsOf(got), idsOf(want))
 		}
 		for i := 1; i < len(got); i++ {
-			if got[i].Score == got[i-1].Score && got[i].MemoryID < got[i-1].MemoryID {
-				t.Errorf("limit %d: tied rows %d and %d are not in memory id order", limit, i-1, i)
+			a, aok := rank[got[i-1].MemoryID]
+			b, bok := rank[got[i].MemoryID]
+			if got[i].Score == got[i-1].Score && aok && bok && b < a {
+				t.Errorf("limit %d: tied rows %d and %d are not in creation order", limit, i-1, i)
 			}
 		}
 	}

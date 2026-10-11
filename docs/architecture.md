@@ -378,7 +378,7 @@ plus the rows of any other identity as (project, model) pairs. The project and
 facts and warnings run per search over the copy (`viewVectorCorpus`), so the
 reported facts and the once-per-identity warning behave as on the uncached path.
 Scores are the same `cosineFromBytes` over the same bytes, so a cached search is
-bit-identical to an uncached one, and exact ties are ordered by memory id so the
+bit-identical to an uncached one, and exact ties are ordered by creation order (rowid) so the
 rows and their order are identical too, whichever order the database scanned them
 in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 `TestCachedVectorSearchAgreesWithTheUncachedPathOnTies`).

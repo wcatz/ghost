@@ -268,7 +268,7 @@ func loadVectorCorpus(rows *sql.Rows, identity string) (*vectorCorpus, error) {
 	var d vectorScanDest
 	first := true
 	for rows.Next() {
-		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt); err != nil {
+		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq); err != nil {
 			return nil, err
 		}
 		if identity != "" && !bytes.Equal(d.model, identityBytes) {
@@ -285,6 +285,7 @@ func loadVectorCorpus(rows *sql.Rows, identity string) (*vectorCorpus, error) {
 			project:  vecSpan{len(cp.projects), len(d.project)},
 			embed:    vecSpan{len(cp.embeds), len(d.embed)},
 			resolved: len(d.resolvedAt) > 0,
+			seq:      d.seq,
 		})
 		cp.rowModel = append(cp.rowModel, intern(d.model))
 		cp.ids = append(cp.ids, d.id...)

@@ -25,7 +25,7 @@ import (
 // on every unscoped memory; an empty string means no scope exactly as NULL does,
 // so the coalesce changes no answer — see parseScopeJSON.
 const vectorScanColumns = `
-	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at
+	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at, m.rowid
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
 
@@ -82,6 +82,8 @@ type vectorRowSpan struct {
 	// resolved is the row's own resolved_at, read here so fusion can demote it
 	// without a second lookup per candidate.
 	resolved bool
+	// seq is the memory's rowid, its creation order, which breaks exact ties.
+	seq int64
 }
 
 // vecCandidate is one row competing for the result window, held as a score and a
@@ -91,17 +93,17 @@ type vectorRowSpan struct {
 type vecCandidate struct {
 	score float32
 	row   int
-	// id is a view into the snapshot's id buffer (no copy), the tiebreak below.
-	id []byte
+	// seq is the memory's creation order (its rowid), the tiebreak below.
+	seq int64
 }
 
 // betterThan reports whether a outranks b: the higher cosine wins, and on an
-// exact tie the lower memory id wins.
+// exact tie the older memory (lower rowid) wins.
 //
 // The tiebreak is what makes the bounded top-k a total order. Without one, two
 // rows with equal float32 cosines have no order between them, and a bounded
 // heap hands back whichever of them happened to reach the cut last. Ordering by
-// (score, memory id) makes the returned rows a function of the stored data
+// (score, creation order) makes the returned rows a function of the stored data
 // alone, whatever order the database yielded them in (the project index, the
 // embeddings scan the corpus cache uses, a VACUUM), so the cached and uncached
 // paths agree on ties too.
@@ -123,11 +125,15 @@ func compareCandidates(a, b vecCandidate) int {
 	case a.score < b.score:
 		return 1
 	}
-	// Exact ties order by memory id, so the answer does not depend on the order
-	// the database yielded the rows in: the project index, the embeddings scan
-	// and a VACUUM all agree. Ids are unique; the row is a last resort.
-	if c := bytes.Compare(a.id, b.id); c != 0 {
-		return c
+	// Exact ties order by creation order (the memory's rowid: older first), so the
+	// answer does not depend on the order the database yielded the rows in: the
+	// project index and the embeddings scan agree. Rowids are unique; the row is a
+	// last resort.
+	if a.seq != b.seq {
+		if a.seq < b.seq {
+			return -1
+		}
+		return 1
 	}
 	if a.row < b.row {
 		return -1
@@ -189,6 +195,7 @@ type vectorRows struct {
 // the column buffers before it moves on.
 type vectorScanDest struct {
 	id, embed, model, scope, project, resolvedAt sql.RawBytes
+	seq                                          int64
 }
 
 func (v *vectorRows) reset() {
@@ -278,7 +285,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		// is coalesced: a NULL column assigns nil to the destination, and this
 		// is the one place the scan would otherwise have to notice.)
 		d := &v.dest
-		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt); err != nil {
+		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq); err != nil {
 			return err
 		}
 		if identity != "" && !bytes.Equal(d.model, identityBytes) {
@@ -308,6 +315,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 			project:  vecSpan{len(v.projects), len(d.project)},
 			embed:    vecSpan{len(v.embeds), len(d.embed)},
 			resolved: len(d.resolvedAt) > 0,
+			seq:      d.seq,
 		}
 		v.ids = append(v.ids, d.id...)
 		v.scopes = append(v.scopes, d.scope...)
@@ -419,7 +427,7 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {
 			continue
 		}
-		v.offer(limit, vecCandidate{score: sim, row: i, id: v.column(v.ids, sp.id)})
+		v.offer(limit, vecCandidate{score: sim, row: i, seq: sp.seq})
 	}
 	if len(v.cands) == 0 {
 		return nil
