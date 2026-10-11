@@ -34,7 +34,9 @@ multi-project store with resolved, expired, out-of-scope and duplicate rows, and
 reports withheld leakage, recall, contamination and header honesty. --audit scores
 the retrieval audit instead: a scripted offline session with hand-written labels
 (ids cited, memories restated, denied or saved) is judged by the audit's own
-comparison, and the verdicts are scored against the labels per outcome. See
+comparison, and the verdicts are scored against the labels per outcome — twice,
+over the synthetic session and over a hand-labelled set built from real working
+sessions, so a judge change that helps one and not the other is visible. See
 docs/benchmarks.md.
 `
 
@@ -119,16 +121,26 @@ func runBench() {
 		return
 	}
 
-	// The audit mode has its own corpus and its own scratch stores, so it returns
-	// before the graded dataset is loaded too.
+	// The audit mode has its own corpora and its own scratch stores, so it returns
+	// before the graded dataset is loaded too. Both corpora run in one invocation
+	// and print one after the other: the synthetic session's figures and the
+	// hand-labelled real-work set's are the two halves of one question, and a judge
+	// that improves on the first while the second stays flat is the failure the
+	// second set exists to expose.
 	if mode == benchModeAudit {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		rep, err := bench.RunAuditTemp(context.Background())
+		synth, err := bench.RunAuditTemp(context.Background())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Print(bench.FormatAudit(rep))
+		real, err := bench.RunRealAuditTemp(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatAudit(synth))
+		fmt.Print(bench.FormatAudit(real))
 		return
 	}
 

@@ -667,7 +667,7 @@ What this does not fix: the bodies of Edit, Write and Bash tool arguments are st
 token set, which clears the token bar (three shared distinctive words and half of the
 memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
 skipped, a word in a quarter of the session's turns does not count toward a match, and the
-id in a save or update's arguments is not a citation. It is measured by `ghost bench --audit`
+id in the arguments of an update that rewrites a memory's text is not a citation (an update with no text, such as tags-only, is one; so is an id in a save's text or source_ref, since #1010, unless a negation cue is bound to it, in which case it is a denial, as in prose). It is measured by `ghost bench --audit`
 ([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
 labelled offline session (forty memories, twenty of them in the session's own domain, a
 long scripted session of narrative and file bodies with hand-written labels) through
@@ -2129,7 +2129,16 @@ and whose vector leg then failed.)
   itself cannot fit, `Run` returns `ErrResponseBudgetExceeded` rather than an
   outcome. A trim also suppresses the window caveat, which would otherwise blame
   the window for a shortfall the byte cap caused and advise raising a limit that
-  only makes the response larger. The window note an incomplete-coverage empty
+  only makes the response larger. Whether cutting can help at all is decided
+  ONCE, on the first over-cap iteration, and against the caller's framing as it
+  stands with every row cut — the longest its own count line can make it. A
+  caller's framing grows with its cuts, so a per-iteration reading of it asked a
+  different question each time: a framing just under the ceiling passed, the cut
+  that followed pushed the framing over it, and the pass stopped over the cap
+  with rows recorded as cut for nothing. Measured at its longest, the same
+  framing answers for every number of cuts.
+
+  The window note an incomplete-coverage empty
   result carries names each knob the request actually set and no other: the item
   limit when one was set, the scope filter when one was set, and the category
   filter when one was set. An unfiltered hybrid search is the shipped default,

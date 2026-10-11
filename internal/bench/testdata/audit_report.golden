@@ -1,11 +1,13 @@
-retrieval audit: 53 memories, 168 scripted turn items, 4 calls
-  audit.Run over a labelled offline session, scored against the corpus's labels;
+retrieval audit (labelled offline session): 55 memories, 170 scripted turn items, 4 calls
+  audit.Run over a labelled corpus, scored against that corpus's own labels;
   no model, no network, no real store. A label is a memory the turn cites, restates, denies or saves
 
 same-domain used at session start: 9 of 20
   of which no turn labels them: 3 of 11
 cited ids caught: 3 of 3
 restatements caught: 4 of 4
+false "used" (labels expect ignored): 3 of 34
+token-arm precision: 0.571 (4/7)
 spread across turns, judged used: 0 of 4
 
 scenario start: the call is placed before turn 0, source session_start, keeps 44 memories (20 same-domain)
@@ -56,18 +58,18 @@ scenario end: the call is placed before turn 40, source search, keeps 24 memorie
   contradicted                   0         0         0         0         0
   ignored                        0         0         0         0        24
 
-scenario fp: the call is placed before turn 0, source search, keeps 9 memories (0 same-domain)
+scenario fp: the call is placed before turn 0, source search, keeps 11 memories (0 same-domain)
   outcome                expected   got  precision        recall          
-  used/identifier               0     0  n/a              n/a             
+  used/identifier               1     1  1.000 (1/1)      1.000 (1/1)     
   used/token                    3     2  1.000 (2/2)      0.667 (2/3)     
-  used (either arm)             3     2  1.000 (2/2)      0.667 (2/3)     
+  used (either arm)             4     3  1.000 (3/3)      0.750 (3/4)     
   superseded_in_session         0     0  n/a              n/a             
-  contradicted                  0     0  n/a              n/a             
+  contradicted                  1     1  1.000 (1/1)      1.000 (1/1)     
   ignored                       6     7  0.857 (6/7)      1.000 (6/6)     
   confusion (rows: expected, columns: got)
                            used/id  used/tok  supersed   contrad   ignored
-  used/identifier                0         0         0         0         0
+  used/identifier                1         0         0         0         0
   used/token                     0         2         0         0         1
   superseded_in_session          0         0         0         0         0
-  contradicted                   0         0         0         0         0
+  contradicted                   0         0         0         1         0
   ignored                        0         0         0         0         6

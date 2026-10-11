@@ -147,6 +147,10 @@ confident wrong answer:
   positive claim the comparison can make exactly. A `used` proved only by wording
   overlap is printed beside it as `restated by wording (heuristic)` and is in no
   percentage. A positive verdict changes no decision anywhere; the figure is all it is for.
+  That heuristic is measured offline, on a set hand-labelled from real sessions, and the
+  measurement is in [benchmarks.md](benchmarks.md#the-real-work-set-internalbenchaudit_corpus_realgo)
+  rather than here: this block reports what THIS store's calls produced, and a figure
+  about a fixture belongs beside the fixture.
 - **`ignored` is the residual, not a score.** It is the only field here that an
   agent is likely to misread as a judgement about memory quality, and nothing in
   this package ranks a memory. The sentence is printed whenever any verdict
@@ -514,14 +518,35 @@ A project a save OPENS from a name-shaped id is bound to the checkout the server
 is actually in — the git top level of its own working directory, plus that
 checkout's origin remote — so a session in the same checkout resolves it. Both
 answers come from `repo.GitCommand`, the one helper every git child in Ghost is
-built by, which drops the inherited git location variables (`GIT_DIR`,
-`GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_CEILING_DIRECTORIES`,
-`GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`,
-`GIT_PREFIX`) from the child. Without that scrub a server started from inside a
-git hook, or from a shell that exports one of them, would read a different
-repository's top level and origin and bind the new project to a checkout nobody
-is working in. It is contained rather than cross-project: the store's claim and
-containment guards still apply to whatever path is recorded.
+built by, which drops from the child every inherited git variable that can
+relocate the repository or replace the file its configuration is read from. The
+location variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_CEILING_DIRECTORIES`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, `GIT_PREFIX`,
+`GIT_DISCOVERY_ACROSS_FILESYSTEM`) decide where a repository is; the config
+variables (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` with its
+`GIT_CONFIG_KEY_`/`GIT_CONFIG_VALUE_` pairs, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM`) decide which configuration the child reads, by naming a file or by carrying values. Without the
+location scrub a server started from inside a git hook, or from a shell that
+exports one of them, would read a different repository's top level and bind the
+new project to a checkout nobody is working in. Without the config scrub the same
+server would read the `remote.origin.url` a parent supplied instead of the
+checkout's own: the config layer `git -c` exports to a hook child outranks the
+repository's `.git/config`, so the inherited value is the one that answers. What
+the scrub does not reach is the checkout's own config and the user's own — a
+checkout that carries no origin of its own is still answered from the user's own
+`$HOME/.gitconfig`, the answer git gives at their own shell — and it is contained
+rather than cross-project: the store's claim and containment guards still apply to
+whatever path or remote is recorded.
+
+The scrub has one cost. A `safe.directory` supplied through the three file
+pointers, through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, or
+through `git -c` (`GIT_CONFIG_PARAMETERS`) is no longer honoured; the last two
+are the common CI and container spelling. A checkout owned by another uid that
+relied on one resolves to no remote until `safe.directory` is set in
+`$HOME/.gitconfig` or the system config. `GIT_CONFIG_NOSYSTEM` is deliberately
+kept, because it can only disable the system config and so cannot redirect the
+remote.
 
 Those checks run **after** the importer's id-presence check and before every
 message that would interpolate the id, and both positions are load-bearing. After
