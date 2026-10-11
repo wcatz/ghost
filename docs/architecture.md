@@ -298,13 +298,12 @@ with it, so the substring test can save a parse but never decides membership.
 Ranking holds a bounded window rather than the corpus: candidates are offered to
 a min-heap whose root is the worst row held, so a row that cannot win a slot
 costs one comparison, and the order is imposed once at the end over at most
-`limit` rows. The order is total — cosine descending, exact ties broken by scan
-position — so the answer is a function of the stored data *and* of the order the
-scan yielded it in, rather than of the heap's internals. That is not independence
-from the scan order and does not claim to be: the query has no `ORDER BY`, so a
-`VACUUM` or an index rebuild can reorder a tie. What it does buy is that two
-searches over the same rows in the same order return the same rows, which the
-unstable `sort.Slice` it replaces did not promise either.
+`limit` rows. The order is total — cosine descending, exact ties broken by the
+memory's creation order (its rowid, older first) — so the answer is a function of
+the stored data alone, rather than of the heap's internals or of the order the
+scan yielded the rows in. A rowid does not move under `VACUUM` or an index
+rebuild. The scan position is only the last resort for equal rowids, which a real
+corpus cannot produce. The unstable `sort.Slice` this replaced promised neither.
 
 The scratch is recycled through a `sync.Pool` on the store, so a steady-state
 search refills buffers it grew last time; an oversized embedding buffer is

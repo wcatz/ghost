@@ -15,7 +15,8 @@ import (
 
 // vectorScanColumns is the projection both vector searches read: a candidate's
 // id, its embedding, the vector space that embedding was written in, and the
-// three status fields fusion applies to the returned row. Nothing else — a
+// three status fields fusion applies to the returned row, plus the memory's
+// rowid (an 8-byte integer, not a copied column) that breaks exact ties. Nothing else — a
 // search that read a column it does not return would be paying the single
 // connection for bytes it throws away.
 //
