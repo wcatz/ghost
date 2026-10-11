@@ -911,7 +911,7 @@ row shapes that agree on labels but not on bytes would be two shapes for a
 reader who compares session start with search. The cost is measured on the same
 corpus and selection: **942 bytes of rows against the compact shape's 732 (+210
 bytes, +29%) and the legacy with-id shape's 852 (+90 bytes, +11%), 1459 bytes
-for the whole block** (measured 2026-10-07). The longer closing save guidance (#959) then took the whole block to **1988 bytes**, and the budget to 2560.
+for the whole block** (measured 2026-10-07). The longer closing save guidance (#959) then took the whole block to **1988 bytes**, and the budget to 2560. The save guidance costs about 530 bytes of the 9000-byte session-start cap, room taken from memory rows (about 7 to 8 rows when the cap binds).
 
 The compact and legacy columns are therefore the pre-#907 measurement of two
 shapes neither of which reaches an agent any more; they stay because the test

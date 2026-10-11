@@ -198,7 +198,7 @@ func TestBenchInjectionBudget(t *testing.T) {
 // because bytes are what the block costs the context window — there is no
 // tokenizer in this package.
 //
-// The closing save guidance (sessionSaveInstruction) is about 600 bytes of the
+// The closing save guidance (sessionSaveInstruction) is about 530 bytes of the
 // whole block: it replaced a one-line pointer, took the block from 1459 to 1988
 // bytes, and the budget was raised from 2048 to leave the same kind of slack
 // over the new figure rather than 60 bytes.

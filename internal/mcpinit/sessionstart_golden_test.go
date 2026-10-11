@@ -442,10 +442,11 @@ Save new discoveries with ghost_memory_save during work.
 //
 // Two non-row lines differ from the recorded BEFORE. The closing line is the
 // save guidance, which #959 reworded from the one-line pointer. The other is the
-// globals count line. The recorded BEFORE said "3 not shown, ranked by ..." for all three rows
-// missing from the 11; one of them (gmem03) is a near-duplicate loser the bucket
-// policy removes, which is not the ranking's cut, so the line now says "2 ranked
-// out ..., 1 withheld rather than ranked out". The total stays 11 (#897).
+// globals count line. The recorded BEFORE said "3 not shown, ranked by ..." for
+// all three rows missing from the 11; one of them (gmem03) is a near-duplicate
+// loser the bucket policy removes, which is not the ranking's cut, so the line
+// now says "2 ranked out ..., 1 withheld rather than ranked out". The total
+// stays 11 (#897).
 
 const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"Use project_id: \"goldproj\" for all ghost_* tool calls.\n" +
