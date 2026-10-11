@@ -57,6 +57,9 @@ func loadStalenessTestdata(t *testing.T) []StalenessScenario {
 // RETRIEVED for every probe under the production default (decay on) — decay
 // only reorders the window, never dropping a relevant memory (findability).
 func TestStalenessReport(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	scenarios := loadStalenessTestdata(t)
 	if len(scenarios) < 20 {
 		t.Fatalf("fixture has %d scenarios, want >= 20", len(scenarios))
@@ -92,6 +95,9 @@ func TestStalenessReport(t *testing.T) {
 // number someone typed: a headline that cannot be derived from the rows above it
 // is a headline nobody can check.
 func TestStalenessReportNamesFreshAt1(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	scenarios := loadStalenessTestdata(t)
 	outcomes, err := RunStaleness(context.Background(), scenarios, memory.DefaultSearchParams(), false)
 	if err != nil {
@@ -199,6 +205,9 @@ func freshWins(outcomes []ProbeOutcome) float64 {
 // DecayEnabled false fresh-wins is low, and with decay on it rises to a
 // majority — the dependency-category fixture makes decay observable.
 func TestStalenessDecayProof(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	scenarios := loadStalenessTestdata(t)
 	ctx := context.Background()
 
@@ -254,7 +263,7 @@ func TestStalenessDecayProof(t *testing.T) {
 // that exist.
 func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 	// Parallel: this test seeds and searches the immutable headline corpus and only
-	// reads it, and at 60-130s under -race it is one of the five that decide whether
+	// reads it, and at 60-130s under -race it is one of the corpus-wide tests that decide whether
 	// this package fits Go's 600s per-binary default — a budget it had already
 	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
 	// rows cost. There is no shared state to order against — the
@@ -304,6 +313,9 @@ func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 // touch the trap" is a claim about scenarios decay cannot reorder either, so
 // mixing in the decaying ones (#561) would attribute their movement to demote.
 func TestSupersedeDemoteClearsFrontier(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	stale := loadStalenessTestdata(t)
 	traps := neverDecayScenarios(loadTrapTestdata(t))
 	ctx := context.Background()

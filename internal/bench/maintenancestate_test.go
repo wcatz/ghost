@@ -51,6 +51,9 @@ func newSeedingStore(t *testing.T) (*memory.Store, *sql.DB) {
 // docs/benchmarks.md ("Maintenance state") for the numbers and for why each one
 // is a report rather than a gate.
 func TestMaintenanceStateReport(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	mems, qs, vecs := loadMaintenanceFixture(t)
 	results, err := RunMaintenance(context.Background(), mems, qs, vecs, memory.DefaultSearchParams())
 	if err != nil {
@@ -440,6 +443,9 @@ func decaysWithAge(category string) bool {
 // decay with resolve state, documented in docs/benchmarks.md for the ranking
 // work — not an invariant this suite should freeze.
 func TestMaintenanceSupersedeEdgesMoveLiveWins(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	mems, qs, vecs := loadMaintenanceFixture(t)
 	noDecay := memory.DefaultSearchParams()
 	noDecay.DecayEnabled = false

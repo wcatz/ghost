@@ -175,6 +175,9 @@ func TestRealAuditCorpusLabelsAreConsistent(t *testing.T) {
 // the comparison, a threshold or a scanner that moves any figure fails here and
 // has to say so in the golden, which is the review surface.
 func TestRealAuditBaseline(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	got := FormatAudit(realAuditRun(t))
 	if os.Getenv("GHOST_UPDATE_GOLDEN") != "" {
 		if err := os.WriteFile(realAuditGoldenPath, []byte(got), 0o644); err != nil {
@@ -200,6 +203,9 @@ func TestRealAuditBaseline(t *testing.T) {
 // floor of 1 is a real gate on the single labelled citation. The false-"used" ceiling
 // is the number the real set exists to protect.
 func TestRealAuditFloors(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	h := realAuditRun(t).Headlines()
 	// The two recall-side floors; the restatement one is zero today (see above) and
 	// is written as a comparison against the constant so that raising it is a

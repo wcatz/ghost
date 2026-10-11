@@ -22,7 +22,7 @@ import (
 // never asserted; see the comment inside for why that line must stay unset.
 func TestFalsePositiveReport(t *testing.T) {
 	// Parallel: this test seeds and searches the immutable headline corpus and only
-	// reads it, and at 60-130s under -race it is one of the five that decide whether
+	// reads it, and at 60-130s under -race it is one of the corpus-wide tests that decide whether
 	// this package fits Go's 600s per-binary default — a budget it had already
 	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
 	// rows cost. There is no shared state to order against — the

@@ -57,6 +57,9 @@ func instant(t *testing.T, key, field string, s *string) time.Time {
 // row is fetched with a term only it contains, so the assertion is about that row
 // and not about whichever rows happen to rank near it.
 func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	ds, vecs := loadTestdataDataset(t)
 	// The connection as well as the store: this branch's Seed takes the db so it
 	// can backdate created_at, which is not something the store's API can do, and
