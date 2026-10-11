@@ -357,9 +357,10 @@ upgraded one, and by `ensurePostMigrationIndexes` (all `IF NOT EXISTS`) for a
 current one. A later migration that rebuilds `memories` or `memory_embeddings`
 drops these triggers with the table and must recreate them.
 
-**A hit is exact.** A search reads the counter (and the row count, in the same
-statement) under the store's read lock, on the handle the rows would come from —
-inside `Candidates` that is its pinned read transaction, so a transaction whose
+**A hit is exact.** A search reads the counter under the store's read lock, on
+the handle the rows would come from (on a miss a second statement reads the row
+count before the bound is applied). Inside `Candidates` that handle is its pinned
+read transaction, so a transaction whose
 snapshot is older than the held copy reads its own epoch, misses, and scores its
 own snapshot. The cache key is (epoch, configured embedding identity). A copy is
 published only when it is exactly the state its epoch describes: read inside one
