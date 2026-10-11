@@ -17,6 +17,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -2290,7 +2291,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			return "", "", fmt.Errorf("resolve project by path: %w", qErr)
 		}
 		survivors := make([]basenameCandidate, 0, len(pathMatches))
-		for _, candidate := range pathMatches {
+		consider := func(candidate basenameCandidate) {
 			// The session's remote is read for one reason only: to reject a
 			// candidate that asserts a different one. A candidate that
 			// asserts none can neither agree nor disagree, so a prefix hit
@@ -2300,6 +2301,22 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			}
 			if candidate.agreesWithSession(input, remote) {
 				survivors = append(survivors, candidate)
+			}
+		}
+		for _, candidate := range pathMatches {
+			consider(candidate)
+		}
+		if len(survivors) == 0 {
+			seen := make(map[string]bool, len(pathMatches))
+			for _, candidate := range pathMatches {
+				seen[candidate.id] = true
+			}
+			rest, rErr := s.resolvedPathCandidates(ctx, hasRepoRemote, seen)
+			if rErr != nil {
+				return "", "", fmt.Errorf("resolve project by resolved path: %w", rErr)
+			}
+			for _, candidate := range rest {
+				consider(candidate)
 			}
 		}
 		if len(survivors) > 0 {
@@ -2508,6 +2525,16 @@ const pathCandidatesQuery = `SELECT id, name, path, %s FROM projects
 // pathCandidates returns rows whose recorded path text could contain input.
 // The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
 // this query is only a narrowing step, never proof of a project match.
+//
+// The narrowing is textual, so it is run for the caller's directory in both
+// spellings it has: as reported, and resolved through symlinks (the form
+// pathsAgree compares in). Without the second, a project recorded at the
+// resolved spelling is invisible to a session that reports the same directory
+// through a symlink, or through a Windows 8.3 short name. That is one extra
+// indexed-free query over the projects table, and one EvalSymlinks on the
+// caller's path, per resolve. The recorded side's other spellings are
+// reached by resolvedPathCandidates, which is a fallback and not a part of
+// this step.
 func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote bool) ([]basenameCandidate, error) {
 	remoteColumn := "''"
 	if hasRepoRemote {
@@ -2518,7 +2545,70 @@ func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote 
 	if err != nil {
 		return nil, err
 	}
-	return scanProjectCandidates(rows)
+	candidates, err := scanProjectCandidates(rows)
+	if err != nil {
+		return nil, err
+	}
+	resolved, rErr := canonicalPath(norm)
+	if rErr != nil || resolved == norm {
+		return candidates, nil
+	}
+	rows, err = s.db.QueryContext(ctx, fmt.Sprintf(pathCandidatesQuery, remoteColumn), resolved, resolved, resolved)
+	if err != nil {
+		return nil, err
+	}
+	more, err := scanProjectCandidates(rows)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		seen[c.id] = true
+	}
+	for _, c := range more {
+		if !seen[c.id] {
+			candidates = append(candidates, c)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return pathRankLength(candidates[i].path) > pathRankLength(candidates[j].path)
+	})
+	return candidates, nil
+}
+
+// resolvedPathCandidates is the fallback for a recorded path whose TEXT shares
+// nothing with either spelling of the caller's directory — the project was
+// recorded through a symlink and the caller reports the resolved directory.
+// No text query can find that row, so it reads every recorded path longer than
+// ten characters, skips the ids already examined, and lets agreesWithSession
+// (which resolves both sides) decide.
+//
+// Cost: it runs only when the textual narrowing produced no surviving
+// candidate, and is then one pass over the projects table (no joins, three
+// columns) plus two EvalSymlinks per usable row — linear in the number of
+// projects, a handful of lstat calls each. A directory that belongs to no
+// project pays it on every resolve.
+func (s *Store) resolvedPathCandidates(ctx context.Context, hasRepoRemote bool, skip map[string]bool) ([]basenameCandidate, error) {
+	remoteColumn := "''"
+	if hasRepoRemote {
+		remoteColumn = "COALESCE(repo_remote, '')"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, path, `+remoteColumn+` FROM projects WHERE LENGTH(path) > 10 ORDER BY LENGTH(path) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	all, err := scanProjectCandidates(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, c := range all {
+		if !skip[c.id] {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 // agreesWithSession applies the three rules in ResolveProject to one
