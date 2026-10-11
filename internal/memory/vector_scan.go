@@ -15,7 +15,8 @@ import (
 
 // vectorScanColumns is the projection both vector searches read: a candidate's
 // id, its embedding, the vector space that embedding was written in, and the
-// three status fields fusion applies to the returned row. Nothing else — a
+// three status fields fusion applies to the returned row, plus the memory's
+// rowid (an 8-byte integer, not a copied column) that breaks exact ties. Nothing else — a
 // search that read a column it does not return would be paying the single
 // connection for bytes it throws away.
 //
@@ -25,9 +26,18 @@ import (
 // on every unscoped memory; an empty string means no scope exactly as NULL does,
 // so the coalesce changes no answer — see parseScopeJSON.
 const vectorScanColumns = `
-	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at
+	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at, m.rowid
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
+
+// queryVectorCorpus runs the corpus cache's query: the shared projection with no
+// predicate, so one copy serves every project. It lives beside the constant it
+// runs for the reason the structural write scan reads statements — a name bound
+// to a name in another file cannot be resolved there, and an unresolved
+// statement is reported as a write.
+func queryVectorCorpus(ctx context.Context, q Queryer) (*sql.Rows, error) {
+	return q.QueryContext(ctx, vectorScanColumns)
+}
 
 // duringVectorCopyFn and duringVectorScoreFn are test seams inside a vector
 // search, one in each of its two phases (the scoring seam fires once, after the first
@@ -73,6 +83,8 @@ type vectorRowSpan struct {
 	// resolved is the row's own resolved_at, read here so fusion can demote it
 	// without a second lookup per candidate.
 	resolved bool
+	// seq is the memory's rowid, its creation order, which breaks exact ties.
+	seq int64
 }
 
 // vecCandidate is one row competing for the result window, held as a score and a
@@ -82,21 +94,20 @@ type vectorRowSpan struct {
 type vecCandidate struct {
 	score float32
 	row   int
+	// seq is the memory's creation order (its rowid), the tiebreak below.
+	seq int64
 }
 
 // betterThan reports whether a outranks b: the higher cosine wins, and on an
-// exact tie the row the scan yielded first wins.
+// exact tie the older memory (lower rowid) wins.
 //
 // The tiebreak is what makes the bounded top-k a total order. Without one, two
 // rows with equal float32 cosines have no order between them, and a bounded
-// heap hands back whichever of them happened to reach the cut last, so the
-// answer would depend on the heap's internals rather than on the scan. Ordering
-// by (score, scan position) makes the returned rows a function of the stored
-// data AND the order the scan yielded it in. That is a weaker guarantee than
-// independence from the scan order, and deliberately so: the query has no ORDER
-// BY, so a VACUUM or an index rebuild can reorder a tie. What it does buy is
-// that two searches over the same rows in the same order return the same rows,
-// which the old unstable sort.Slice did not promise either.
+// heap hands back whichever of them happened to reach the cut last. Ordering by
+// (score, creation order) makes the returned rows a function of the stored data
+// alone, whatever order the database yielded them in (the project index, the
+// embeddings scan the corpus cache uses, a VACUUM), so the cached and uncached
+// paths agree on ties too.
 func (c vecCandidate) betterThan(o vecCandidate) bool {
 	return compareCandidates(c, o) < 0
 }
@@ -114,11 +125,21 @@ func compareCandidates(a, b vecCandidate) int {
 		return -1
 	case a.score < b.score:
 		return 1
-	case a.row < b.row:
-		return -1
-	default:
+	}
+	// Exact ties order by creation order (the memory's rowid: older first), so the
+	// answer does not depend on the order the database yielded the rows in: the
+	// project index and the embeddings scan agree. Rowids are unique; the row is a
+	// last resort.
+	if a.seq != b.seq {
+		if a.seq < b.seq {
+			return -1
+		}
 		return 1
 	}
+	if a.row < b.row {
+		return -1
+	}
+	return 1
 }
 
 // vectorRows is one vector search's private copy of the rows it may score.
@@ -175,6 +196,7 @@ type vectorRows struct {
 // the column buffers before it moves on.
 type vectorScanDest struct {
 	id, embed, model, scope, project, resolvedAt sql.RawBytes
+	seq                                          int64
 }
 
 func (v *vectorRows) reset() {
@@ -264,7 +286,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		// is coalesced: a NULL column assigns nil to the destination, and this
 		// is the one place the scan would otherwise have to notice.)
 		d := &v.dest
-		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt); err != nil {
+		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq); err != nil {
 			return err
 		}
 		if identity != "" && !bytes.Equal(d.model, identityBytes) {
@@ -294,6 +316,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 			project:  vecSpan{len(v.projects), len(d.project)},
 			embed:    vecSpan{len(v.embeds), len(d.embed)},
 			resolved: len(d.resolvedAt) > 0,
+			seq:      d.seq,
 		}
 		v.ids = append(v.ids, d.id...)
 		v.scopes = append(v.scopes, d.scope...)
@@ -322,6 +345,15 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	for m := range foreign {
 		v.facts.foreign += foreign[m]
 	}
+	s.reportSkippedVectors(foreign, mismatched, mismatchedModel, len(v.rows), identity, len(queryVec))
+	return nil
+}
+
+// reportSkippedVectors logs what a scan could not use: rows from another vector
+// space (once per retired identity) and rows of the wrong width (every scan).
+// It is shared by the uncached load and the cached corpus's per-search view, so
+// the two cannot drift apart on what an operator is told.
+func (s *Store) reportSkippedVectors(foreign map[string]int, mismatched int, mismatchedModel string, usable int, identity string, queryDims int) {
 	if s.logger != nil && len(foreign) > 0 {
 		// Sorted so a log is deterministic whichever row order the planner
 		// happened to yield.
@@ -333,15 +365,14 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		for _, m := range models {
 			if s.warnForeignOnce(m) {
 				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
-					"skipped", foreign[m], "usable", len(v.rows), "configured_identity", identity, "stored_identity", m)
+					"skipped", foreign[m], "usable", usable, "configured_identity", identity, "stored_identity", m)
 			}
 		}
 	}
 	if s.logger != nil && mismatched > 0 {
 		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-			"skipped", mismatched, "usable", len(v.rows), "query_dims", len(queryVec), "stored_model", mismatchedModel)
+			"skipped", mismatched, "usable", usable, "query_dims", queryDims, "stored_model", mismatchedModel)
 	}
-	return nil
 }
 
 // search scores the snapshot against queryVec and returns at most limit
@@ -397,7 +428,7 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {
 			continue
 		}
-		v.offer(limit, vecCandidate{score: sim, row: i})
+		v.offer(limit, vecCandidate{score: sim, row: i, seq: sp.seq})
 	}
 	if len(v.cands) == 0 {
 		return nil

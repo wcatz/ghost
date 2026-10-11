@@ -212,6 +212,12 @@ type Store struct {
 	// be allocated per query and dropped with the store, which is the cost this
 	// exists to avoid.
 	scratch *vectorScratch
+
+	// vcache is the store's one shared copy of the vector corpus, valid while the
+	// database's vector_epoch has not moved (#1031). A pointer for the same
+	// reason scratch is: the snapshot store Candidates builds shares it, and a
+	// cache of its own would be dropped with that store.
+	vcache *vectorCache
 }
 
 // foreignWarnGate is the per-identity warning gate: the set of retired
@@ -296,6 +302,7 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	}
 	s := &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: &foreignWarnGate{warned: make(map[string]bool)}}
 	s.scratch = newVectorScratch()
+	s.vcache = newVectorCache()
 	return s
 }
 

@@ -504,9 +504,9 @@ func TestVectorSearchScoresWithoutAllocatingTheCorpus(t *testing.T) {
 }
 
 // TestVectorSearchTopKTieBreakIsScanOrder: the bounded heap needs a total order,
-// and for rows at exactly the same float32 cosine the only stable one is the
-// order the scan yielded them in. Without it the answer would depend on which
-// row happened to reach the cut last rather than on the scan at all.
+// and for rows at exactly the same float32 cosine it is the memory's creation
+// order (seq, its rowid), which the fixture assigns in scan order. Without a
+// tiebreak the answer would depend on which row happened to reach the cut last.
 //
 // The rows are alternated {1,0} and {2,0} against a {1,0} query, so every
 // cosine is exactly 1.0 while no two rows are byte-identical — a tie produced by
@@ -526,6 +526,7 @@ func TestVectorSearchTopKTieBreakIsScanOrder(t *testing.T) {
 				id:      vecSpan{len(v.ids), len(id)},
 				project: vecSpan{len(v.projects), len("test-proj")},
 				embed:   vecSpan{len(v.embeds), len(blob)},
+				seq:     int64(i + 1),
 			}
 			v.ids = append(v.ids, id...)
 			v.projects = append(v.projects, "test-proj"...)

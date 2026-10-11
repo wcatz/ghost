@@ -283,8 +283,8 @@ A writer is still kept out for the duration of the copy, and releasing the mutex
 is not what fixes that: `OpenDB` pins the pool at one connection, so a write
 cannot start while a query is streaming whether or not a mutex says so. The
 connection, not the lock, is what a corpus scan contends on — which is why the
-next change here is a cache that stops asking SQLite for the bytes, not finer
-lock work.
+change that followed is a cache that stops asking SQLite for the bytes, not finer
+lock work (see [the corpus cache](#the-vector-corpus-cache) below).
 
 The copy keeps the bytes as the database handed them over rather than decoding
 them, and the score loop reads the little-endian `float32`s back out of the
@@ -298,22 +298,96 @@ with it, so the substring test can save a parse but never decides membership.
 Ranking holds a bounded window rather than the corpus: candidates are offered to
 a min-heap whose root is the worst row held, so a row that cannot win a slot
 costs one comparison, and the order is imposed once at the end over at most
-`limit` rows. The order is total — cosine descending, exact ties broken by scan
-position — so the answer is a function of the stored data *and* of the order the
-scan yielded it in, rather than of the heap's internals. That is not independence
-from the scan order and does not claim to be: the query has no `ORDER BY`, so a
-`VACUUM` or an index rebuild can reorder a tie. What it does buy is that two
-searches over the same rows in the same order return the same rows, which the
-unstable `sort.Slice` it replaces did not promise either.
+`limit` rows. The order is total — cosine descending, exact ties broken by the
+memory's creation order (its rowid, older first) — so the answer is a function of
+the stored data alone, rather than of the heap's internals or of the order the
+scan yielded the rows in. A rowid does not move under `VACUUM` or an index
+rebuild. The scan position is only the last resort for equal rowids, which a real
+corpus cannot produce. The unstable `sort.Slice` this replaced promised neither.
 
 The scratch is recycled through a `sync.Pool` on the store, so a steady-state
 search refills buffers it grew last time; an oversized embedding buffer is
 dropped on return rather than retained for a query that may not return. What a
 query still allocates is the database driver: `modernc.org/sqlite` copies every
 BLOB and every TEXT column into a fresh Go allocation per row, which is the
-floor for any `database/sql` scan and is the reason the next step here is a
-decoded-vector cache invalidated by `PRAGMA data_version` rather than more work
-on the scoring loop ([#556](https://github.com/wcatz/ghost/issues/556)).
+floor for any `database/sql` scan and is the reason the next step was a corpus
+cache rather than more work on the scoring loop
+([#556](https://github.com/wcatz/ghost/issues/556)).
+
+### The vector corpus cache
+
+Without a cache every search re-read and re-copied the whole corpus, and that row
+load was 53% / 59% / 73% of a hybrid search at 1k / 10k / 50k memories
+([#1031](https://github.com/wcatz/ghost/issues/1031)): SQLite stepping the join
+of `memory_embeddings` to `memories`, about 8 microseconds a row, which a larger
+page cache or `mmap` does not move. `internal/memory/vector_cache.go` keeps ONE
+immutable copy of the corpus per store and re-uses it while the database says it
+is still the corpus.
+
+**The signal is in the database.** Schema v24 adds `vector_epoch`, a one-row
+counter (created by its first bump, read as 0 until then) that triggers bump in the writing transaction, on exactly the writes that
+change what the vector query (`vectorScanColumns`) returns:
+
+| Trigger | Fires on |
+|---|---|
+| `vector_epoch_emb_ai` | INSERT on `memory_embeddings` |
+| `vector_epoch_emb_au` | UPDATE on `memory_embeddings` that changes `memory_id`, `embedding` or `model` |
+| `vector_epoch_emb_ad` | DELETE on `memory_embeddings` |
+| `vector_epoch_mem_au` | UPDATE OF `resolved_at`, `scope`, `project_id` on `memories` that changes one of them |
+| `vector_epoch_mem_ad` | DELETE on `memories` (which covers a delete that did not cascade, e.g. under `foreign_keys=OFF`) |
+| `vector_epoch_mem_ai` | INSERT on `memories` whose id already has an embedding row (an orphan from a delete under `foreign_keys=OFF`) |
+
+Everything else a memory carries (access count, `last_accessed`, tags,
+importance, content, `pinned`), and every other table (retrieval records, links,
+flags), does not fire it. That is the point of a counter that is not
+`PRAGMA data_version`: that pragma does not report this connection's own
+writes, and it moves on every commit by any other process, including the
+retrieval record each search writes, so under the supported multi-process mode it
+would invalidate every process's copy on every query. An `UPDATE OF` column list
+alone is not enough — `UpdateMemory` names `resolved_at` in its `SET` on every
+edit — so the update triggers compare old and new values. `TestVectorEpoch*`
+pins both lists, once per write kind through the searching store's handle and
+through a second handle, and `TestVectorEpochSeesAnotherProcessWrite` does it
+across a real process. The DDL (`vectorEpochSQL`) is not in `initSQL`: that
+runs on every open before a lagging database is migrated, and the update
+trigger's `WHEN` names `memories.scope`, which a pre-v12 database lacks, so a
+trigger created that early breaks the legacy steps that alter `memories`. It is
+created right after `initSQL` for a fresh database, by `migrateV24` for an
+upgraded one, and by `ensurePostMigrationIndexes` (all `IF NOT EXISTS`) for a
+current one. A later migration that rebuilds `memories` or `memory_embeddings`
+drops these triggers with the table and must recreate them.
+
+**A hit is exact.** A search reads the counter under the store's read lock, on
+the handle the rows would come from (on a miss a second statement reads the row
+count before the bound is applied). Inside `Candidates` that handle is its pinned
+read transaction, so a transaction whose
+snapshot is older than the held copy reads its own epoch, misses, and scores its
+own snapshot. The cache key is (epoch, configured embedding identity). A copy is
+published only when it is exactly the state its epoch describes: read inside one
+transaction, or bracketed by two epoch reads that agree. A load a concurrent
+writer overlapped is used once, by the search that made it, and never kept, and a
+copy older than the one held is never published over it. Scoring runs on the
+immutable copy with the store lock released, as before (#556); the counter read
+and, on a miss, the load are the only parts under the lock.
+
+**What is cached.** The corpus without the query's questions: every row of the
+configured identity, whatever its width, in the order the database yielded it,
+plus the rows of any other identity as (project, model) pairs. The project and
+`_global` filter, the width filter, the scope probe and the foreign / mismatched
+facts and warnings run per search over the copy (`viewVectorCorpus`), so the
+reported facts and the once-per-identity warning behave as on the uncached path.
+Scores are the same `cosineFromBytes` over the same bytes, so a cached search is
+bit-identical to an uncached one, and exact ties are ordered by creation order (rowid) so the
+rows and their order are identical too, whichever order the database scanned them
+in (`TestCachedVectorSearchMatchesTheUncachedPath`,
+`TestCachedVectorSearchAgreesWithTheUncachedPathOnTies`).
+
+**Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
+scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
+Above the bound it is never loaded for the cache — on a miss the row count at the
+query's width is checked first; a hit reads only the counter — and the search is the uncached path exactly as before,
+pooled scratch included. A database without the counter (a schema older than v24
+opened read-only) is "do not cache", not an error.
 
 ### Hybrid fusion and window selection
 
@@ -600,6 +674,7 @@ The main schema tables are:
 | `retrieval_audit` | One row per (call, KEPT memory) (schema v21, [#646](https://github.com/wcatz/ghost/issues/646); `content_hash` added in schema v22, [#879](https://github.com/wcatz/ghost/issues/879)) — the verdict the comparison reached (`used`, `ignored`, `superseded_in_session`, `contradicted`), the signal that proved a positive one, the scanner's degradation reason, and the hash of the CONTENT that verdict judged, so `UsefulnessByMemory` can tell a real rewrite (withdraw the verdict) from a retag, a re-weight or a `verified` flip (keep it): `updated_at` cannot tell them apart, because metadata-only writes move it too. The grain is the pair, so a second pass over the same call REPLACES exactly that call's verdicts, which is what lets a hook that fires after every turn keep this table proportional to calls. `record_rowid` is the `retrieval_record` rowid it belongs to, read rather than inferred because `recorded_at` is second-precision. IDs, outcomes, signals and reasons only: `signal` names the arm that proved a positive verdict, and since [#930](https://github.com/wcatz/ghost/issues/930) the reports read it to split `used` into cited-by-id and `restated by wording`; no transcript text, no query, no memory content — what went in is read, compared against fingerprints and dropped. `content_hash` is a 64-character hex DIGEST of the memory's text and never that text: it fingerprints what was judged, is `''` on every row written before v22, and nothing is backfilled onto those rows (nobody holds the text they judged, and hashing against today's text would make a stale row look current) — they are read by the NAMED LEGACY RULE instead, `recorded_at >= updated_at`, the pre-v22 rule verbatim, which `TestAVerdictWithNoHashFollowsTheLegacyStampRule` pins. Oldest-first 50000-row cap; `ghost history purge` removes the rows naming a purged memory AND the verdicts filed against the calls it removes, in the same transaction and by the record delete's own predicate rather than by memory id — a freed `record_rowid` is reused (the record table has no AUTOINCREMENT), so a verdict left behind would be re-attributed to a call that never admitted its memory — and the pairing is TWO-SIDED, so the write refuses it too: a verdict naming a call that has since been purged is DROPPED (a hole in the report, which is a lost pair) rather than filed against the rowid the purge freed, because a re-filed verdict is a WRONG pair and is indistinguishable from a real one afterwards; the check is on the call's CONTENT — did it KEPT that memory — and not on the rowid, since a freed rowid can be re-let by the next call before the late write lands, and it RETURNS the rows it refused so `audit.Run` can take them out of the figures it already counted and print the loss beside them (`Summary.Unfiled`) rather than print a number the table does not hold; the same guard also gates the batch's replace-DELETE, so a refused row cannot wipe the verdicts a successor holding the freed rowid already filed; the same pairing rides with the record cap's eviction, which takes them by its rowid bound and leaves `record_rowid = 0` alone; a project MERGE reassigns them and `ghost project delete` removes them (and counts them in its dry run), like every other `project_id`-bearing child table |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
+| `vector_epoch` | One row, one counter (schema v24, [#1031](https://github.com/wcatz/ghost/issues/1031)) — bumped by triggers, in the writing transaction, on exactly the writes that change what the vector query returns, so a process can tell from one point read whether its cached copy of the vector corpus is still the database's. See [the vector corpus cache](#the-vector-corpus-cache) |
 
 ### Retrieval
 
@@ -2285,6 +2360,7 @@ A read-only connection deliberately sets no `journal_mode`: setting it writes th
 - **The write lock is measured where a process can see it.** Contention is between processes, so `internal/memory/writelock.go`'s observer is a seam rather than a `_test.go` file: `SetWriteLockObserver` is nil in production, and the multi-process test installs one in each child so the fleet can report, per write path, the distribution of the wait (`BeginTx` in) and of the hold (`BeginTx` to `Commit`). A transaction that never took the lock is reported as a *lost* write with its whole wait and no hold, because a distribution over committed transactions alone describes only the contention that was survivable. The save path's retries are counted, not asserted on: a fleet leaning on the second attempt is a number to read, not a failure.
 - **A handle is one connection.** Process-level concurrency is the number of open handles, not the number of goroutines. Goroutines within one process contend with each other for that single connection.
 - **Holding a pinned connection blocks the pool.** `Store.beginScopedWrite` is the first production caller of `db.Conn(ctx)` on a *`Store`* — `migrate` has pinned one since before this rule existed, and holds it across `PRAGMA foreign_keys=OFF`, every step's `conn.BeginTx` and the `foreign_key_check`, so the rule already had a production case. What `beginScopedWrite` adds is a pin held inside a *live* store's retrieval path, and it obeys the rule the same way: it holds the pin for the whole transaction and issues only `conn.*` calls, because a `s.db.*` call made while the pin is held would wait for the one connection the pinning code can release. Code that pins `db.Conn(ctx)` must not then issue a `db.*` call on the same handle: with `MaxOpenConns(1)` that call waits for a connection only the pinning code can release, and blocks forever.
+- **A process's cached copy of the vector corpus is valid only while `vector_epoch` is unchanged.** Several processes share one file and SQLite is the only thing they share, so the invalidation signal lives in the database: triggers bump it in the writer's transaction, a reader reads it on the handle (or inside the pinned transaction) it reads the rows from, and a copy is published only when it is exactly the state its epoch describes. A new write path that changes `memory_embeddings`, or a memory's `resolved_at`, `scope` or `project_id`, needs nothing — the triggers see it; a new column the vector query reads needs a trigger and an entry in `TestVectorEpoch*`. See [the vector corpus cache](#the-vector-corpus-cache).
 - **This contract is solo mode.** It bounds one machine and one database file. A networked multi-writer backend is a separate deployment mode, not a relaxation of these settings; see `ROADMAP.md`.
 
 ### Tests
@@ -2292,6 +2368,8 @@ A read-only connection deliberately sets no `journal_mode`: setting it writes th
 `TestConcurrentProcessesMixedReadWrite` opens several handles against one file and runs two phases against each other: concurrent inserts with FTS readers, then concurrent content rewrites with FTS readers. It asserts no `SQLITE_BUSY` failures, no dropped writes, and no row returned by a search whose stored content does not contain the searched terms. The rewrite phase exists because `memories_au`, the trigger keeping the index in step with content, fires only `WHEN old.content != new.content` — inserts alone never exercise it. `TestOpenDBPinsPoolToSingleConnection` pins the pool setting directly. Both are contract guards: they pass while the contract holds and fail if a setting that provides it is removed.
 
 Every handle in that test comes from the same binary and the same DSN builder, so it cannot see a setting that only one open path carries. `TestMultiProcessSharedDatabase` closes that gap with real processes: it builds a helper program (`internal/memory/testdata/multiproc`) once and runs the entry points the contract names against one database file — two MCP servers driving the real `ghost_memory_save` and `ghost_memory_search` over the real stdio transport, two CLI children doing `Upsert` and `UpdateMemory`, two read-only handles searching the rows those children are rewriting, and one lifecycle writer applying a single `ApplyReflection` batch plus a `maintenance_runs` row. Ten processes, ten handles, one file.
+
+`TestVectorEpochSeesAnotherProcessWrite` is the corpus cache's multi-process case, built on the same helper program (`vecwrite` role) and, like it, never a self-exec: this process holds a warm cache on a file, a child process embeds, resolves or deletes a memory through `memory.OpenDB`, and the next search here must reflect it, while a child's touch and retrieval record must leave the copy standing.
 
 What it asserts, beyond "nothing crashed":
 

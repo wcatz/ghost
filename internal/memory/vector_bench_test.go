@@ -101,3 +101,37 @@ func BenchmarkSearchVector(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkSearchHybrid measures one hybrid search (keyword leg, vector leg and
+// fusion) at 1k and 10k memories. It is the measurement behind #1031: the row
+// load of the vector leg was most of a hybrid search, and every search
+// re-read the whole corpus from SQLite. The FTS query matches every row of the
+// corpus (all contents share its words), which is the worst case for the
+// keyword leg and does not change what the vector leg costs.
+//
+// The corpus is a temp dir and the vectors are generated, so nothing here reads
+// or writes a real Ghost store.
+func BenchmarkSearchHybrid(b *testing.B) {
+	for _, n := range []int{1000, 10000} {
+		b.Run(fmt.Sprintf("memories=%d", n), func(b *testing.B) {
+			s, query := benchCorpus(b, n)
+
+			ctx := context.Background()
+			if _, err := s.SearchHybrid(ctx, testProject, "benchmark memory", query, 10); err != nil {
+				b.Fatalf("SearchHybrid: %v", err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				res, err := s.SearchHybrid(ctx, testProject, "benchmark memory", query, 10)
+				if err != nil {
+					b.Fatalf("SearchHybrid: %v", err)
+				}
+				if len(res) == 0 {
+					b.Fatal("SearchHybrid returned no results")
+				}
+			}
+		})
+	}
+}

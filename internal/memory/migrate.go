@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 23
+const schemaVersion = 24
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -86,6 +86,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV21,
 	migrateV22,
 	migrateV23,
+	migrateV24,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1794,3 +1795,72 @@ func migrateV14(tx *sql.Tx) error {
 	}
 	return nil
 }
+
+// migrateV24 adds the vector epoch: a one-row counter and the triggers that bump
+// it when a write changes what the vector query returns (#1031).
+//
+// The DDL is repeated here rather than shared with initSQL, for the reason
+// migrateV20 and migrateV23 give their own copies: a step is frozen in time.
+// TestMigrateV24MatchesTheFreshDatabaseSchema compares the two spellings.
+//
+// Nothing is backfilled and nothing needs to be: the counter is only ever
+// compared with itself, a missing row reads as 0, and a process that has not seen
+// it yet holds no copy. Every statement is IF NOT EXISTS, so a database that
+// already has the objects is stamped without harm. This step is where an upgraded
+// database gets them, and it is last for a reason: the update trigger's WHEN
+// clause names memories.scope, so creating it before v12 added that column (as
+// initSQL's pass over a lagging database would have) breaks every step that
+// alters memories in between. See vectorEpochSQL.
+func migrateV24(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS vector_epoch (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch INTEGER NOT NULL DEFAULT 0
+)`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ai AFTER INSERT ON memory_embeddings BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_au AFTER UPDATE ON memory_embeddings
+    WHEN old.memory_id IS NOT new.memory_id OR old.embedding IS NOT new.embedding OR old.model IS NOT new.model BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ad AFTER DELETE ON memory_embeddings BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_au AFTER UPDATE OF resolved_at, scope, project_id ON memories
+    WHEN old.resolved_at IS NOT new.resolved_at OR old.scope IS NOT new.scope OR old.project_id IS NOT new.project_id BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ai AFTER INSERT ON memories
+    WHEN EXISTS (SELECT 1 FROM memory_embeddings WHERE memory_id = new.id) BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+	}
+	// A trigger is created only on a table that exists. Every real database has
+	// both (they date from v1), but the steps are also run directly against the
+	// partial fixtures the earlier steps' tests build, and a step that refused a
+	// database over a table it does not need to fire on would be a step that
+	// cannot be run. initSQL creates every table and trigger on the next open.
+	for i, stmt := range stmts {
+		if table := vectorEpochStepTables[i]; table != "" {
+			ok, err := tableExists(tx, table)
+			if err != nil {
+				return fmt.Errorf("v24 vector epoch: %w", err)
+			}
+			if !ok {
+				continue
+			}
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v24 vector epoch: %w", err)
+		}
+	}
+	return nil
+}
+
+// vectorEpochStepTables is the table each statement of migrateV24 depends on,
+// in statement order: "" for the one that creates the counter itself.
+var vectorEpochStepTables = []string{"", "memory_embeddings", "memory_embeddings", "memory_embeddings", "memories", "memories", "memories"}

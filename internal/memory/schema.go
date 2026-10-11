@@ -970,6 +970,77 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
+// vectorEpochSQL is the vector corpus cache's counter and the triggers that bump
+// it (schema v24, #1031). It is NOT part of initSQL, and the reason is ordering:
+// initSQL runs on every open BEFORE a lagging database is migrated, and the
+// update trigger's WHEN clause names memories.scope, which a database from before
+// v12 does not have yet — SQLite re-parses every trigger on a table when a
+// migration step renames or alters it, so a trigger created too early breaks the
+// legacy steps it has no business in. This DDL therefore runs where the schema
+// is already current: for a fresh database right after initSQL, for a migrated
+// one as migrateV24's own frozen copy, and for a current one from
+// ensurePostMigrationIndexes (all IF NOT EXISTS, so a re-run writes nothing).
+//
+// One row holds a counter that moves exactly when a write changes what the
+// vector query returns, so a process can keep a copy of the vector corpus and
+// know, from one point read, whether the copy is still the database's. It lives
+// in the database rather than in the process because several Ghost processes
+// share one file, and SQLite is the only thing they share. The counter is bumped
+// by the triggers below, in the SAME transaction as the write, so a reader that
+// sees epoch E sees exactly the state E describes. The row is created by the
+// first bump (an upsert), so there is no seed write and a reader treats a missing
+// row as 0.
+//
+// The vector query joins memory_embeddings to memories and reads
+// memory_id, embedding, model from the first and scope, project_id, resolved_at
+// from the second, so those are the writes that fire it: any insert, update or
+// delete on memory_embeddings; an UPDATE OF resolved_at, scope or project_id on
+// memories; and a delete of a memory. An update fires only when the value it
+// names actually changed (an edit rewrites resolved_at in the same statement
+// whether or not it changed it, and a vector rewritten to the same bytes is the
+// same corpus). Everything else a memory carries (access_count, last_accessed,
+// tags, importance, content, pinned) is read by other queries and deliberately
+// does NOT fire it: the retrieval write every search makes would otherwise
+// invalidate every other process's copy. TestVectorEpoch* pins both lists.
+//
+// vector_epoch_mem_ai covers the one insert that does change the query: a memory
+// whose id already has an embedding row (an orphan left by a delete made with
+// foreign keys off) joins again. An ordinary create has no embedding yet and
+// does not fire it.
+//
+// A future migration that rebuilds memories or memory_embeddings drops these
+// triggers with the table and must recreate them, and must bump the epoch if it
+// changes any vector-query input: a rebuild's implicit delete fires no trigger.
+// The counter must never decrease, be deleted or be reset, because the cache
+// matches on equality.
+const vectorEpochSQL = `
+CREATE TABLE IF NOT EXISTS vector_epoch (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ai AFTER INSERT ON memory_embeddings BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_au AFTER UPDATE ON memory_embeddings
+    WHEN old.memory_id IS NOT new.memory_id OR old.embedding IS NOT new.embedding OR old.model IS NOT new.model BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ad AFTER DELETE ON memory_embeddings BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_au AFTER UPDATE OF resolved_at, scope, project_id ON memories
+    WHEN old.resolved_at IS NOT new.resolved_at OR old.scope IS NOT new.scope OR old.project_id IS NOT new.project_id BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ai AFTER INSERT ON memories
+    WHEN EXISTS (SELECT 1 FROM memory_embeddings WHERE memory_id = new.id) BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+`
+
 // ensurePostMigrationIndexes creates the indexes whose columns a migration added,
 // which is why they are not in initSQL.
 //
@@ -1004,6 +1075,9 @@ func ensurePostMigrationIndexes(db *sql.DB) error {
 			CREATE INDEX IF NOT EXISTS idx_memories_session_expiry
 			ON memories(expires_at) WHERE retention = 'session'
 		`},
+		// The vector corpus cache's counter and triggers (#1031); see
+		// vectorEpochSQL for why they cannot ride in initSQL.
+		{"vector epoch", vectorEpochSQL},
 	} {
 		if _, err := db.Exec(stmt.ddl); err != nil {
 			return fmt.Errorf("create %s: %w", stmt.name, err)
