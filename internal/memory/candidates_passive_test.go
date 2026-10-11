@@ -1083,6 +1083,10 @@ func TestCandidatesPassiveReadsAStoreBelowTheTierFloor(t *testing.T) {
 	if _, err := st.db.Exec(`DROP INDEX IF EXISTS idx_memories_session_expiry`); err != nil {
 		t.Fatalf("drop the partial index the tier migration created: %v", err)
 	}
+	// The vector epoch triggers (v24) read memories.scope, and SQLite refuses to
+	// drop a column a trigger names. A pre-v12 store has none of them, so the
+	// fixture removes them with the columns they postdate.
+	dropVectorEpoch(t, st.db)
 	for _, col := range []string{"retention", "expires_at", "scope"} {
 		if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN ` + col); err != nil {
 			t.Fatalf("drop %s to build a pre-v12 store: %v", col, err)

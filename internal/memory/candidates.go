@@ -512,6 +512,9 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		// garbage the moment this retrieval returns — a corpus-sized allocation
 		// on every search, which is what the pool exists to avoid.
 		scratch: s.scratch,
+		// And the corpus cache, which Candidates may use only because it reads
+		// the epoch inside this transaction and takes a hit only on a match.
+		vcache: s.vcache,
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}

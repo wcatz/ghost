@@ -510,6 +510,13 @@ func TestConsolidateGlobalApplyTouchesOnlyTheCluster(t *testing.T) {
 	touched := []string{f.newID, f.oldID, f.midID}
 	for _, side := range []map[string][]string{removed, added} {
 		for table, rows := range side {
+			// The vector corpus cache's counter is one row of derived state that
+			// every write to a memory or its embedding moves, the cluster's own
+			// included. It names no memory, so it cannot say which rows the fold
+			// touched; the rows that could are compared above and below.
+			if table == "vector_epoch" {
+				continue
+			}
 			for _, r := range rows {
 				if !rowMentions(r, touched...) {
 					t.Errorf("%s changed a row outside the cluster: %s", table, r)

@@ -228,6 +228,11 @@ type options struct {
 	batch    int
 	after    int
 	writers  string
+	// op and target drive the vecwrite role: one write of the named kind against
+	// the memory id in target, with vec as its embedding for the embed op.
+	op     string
+	target string
+	vec    string
 }
 
 func parseFlags() options {
@@ -245,6 +250,9 @@ func parseFlags() options {
 	flag.IntVar(&o.batch, "batch", 0, "rows in the maint role's reflection batch")
 	flag.IntVar(&o.after, "after", 0, "writes a load role completes before it reports itself in step")
 	flag.StringVar(&o.writers, "writers", "", "comma-separated labels of the load's writers (maint role)")
+	flag.StringVar(&o.op, "op", "", "vecwrite role: embed, resolve, delete, touch or retrieval")
+	flag.StringVar(&o.target, "target", "", "vecwrite role: id of the memory the op writes")
+	flag.StringVar(&o.vec, "vec", "", "vecwrite role: comma-separated embedding for the embed op")
 	flag.Parse()
 	return o
 }
@@ -296,6 +304,8 @@ func main() {
 		err = runSnapshot(ctx, o, rep, b)
 	case "poller":
 		err = runPoller(ctx, o, rep, b)
+	case "vecwrite":
+		err = runVectorWrite(ctx, o, rep)
 	default:
 		err = fmt.Errorf("unknown role %q", o.role)
 	}
@@ -1280,4 +1290,47 @@ func textOf(content []mcp.Content) string {
 		}
 	}
 	return b.String()
+}
+
+// runVectorWrite is the vecwrite role: ONE write, by a real process through
+// memory.OpenDB, of a kind the vector corpus cache has to notice (embed,
+// resolve, delete) or has to ignore (touch, retrieval). The parent holds a warm
+// cache on the same file, runs this, and searches again; nothing here waits on
+// anyone, because the parent's own sequencing is the synchronization.
+func runVectorWrite(ctx context.Context, o options, rep *report) error {
+	db, err := memory.OpenDB(o.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	switch o.op {
+	case "embed":
+		var vec []float32
+		for _, f := range strings.Split(o.vec, ",") {
+			x, err := strconv.ParseFloat(strings.TrimSpace(f), 32)
+			if err != nil {
+				return fmt.Errorf("-vec %q: %w", o.vec, err)
+			}
+			vec = append(vec, float32(x))
+		}
+		err = store.StoreEmbedding(ctx, o.target, vec, o.label)
+	case "resolve":
+		_, err = store.MarkResolved(ctx, o.project, []string{o.target}, memory.Provenance{})
+	case "delete":
+		err = store.Delete(ctx, o.target)
+	case "touch":
+		err = store.Touch(ctx, []string{o.target})
+	case "retrieval":
+		err = store.RecordRetrieval(ctx, memory.RetrievalRecord{
+			ProjectID: o.project, Source: "search", Outcome: "empty", Reason: "no_candidates",
+		})
+	default:
+		err = fmt.Errorf("unknown vecwrite op %q", o.op)
+	}
+	if err == nil {
+		rep.KV["op"] = o.op
+	}
+	return err
 }

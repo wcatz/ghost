@@ -302,6 +302,22 @@ func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec 
 	// blocks that writer's readers — including this one — forever.
 	identity := s.configuredEmbeddingIdentity()
 
+	// A search the cache can serve scores a shared immutable copy of the corpus
+	// and never reads the rows again; see vector_cache.go. nil means the
+	// uncached path below, which is what a corpus above the cache's bound, a
+	// database without the epoch counter and a store without a cache all get.
+	cp, err := s.vectorCorpusFor(ctx, queryVec, identity)
+	if err != nil {
+		return nil, vectorLegFacts{}, err
+	}
+	if cp != nil {
+		scratch := s.borrowVectorRows()
+		defer s.returnVectorRows(scratch)
+		v := s.viewVectorCorpus(cp, scratch, projectID, false, queryVec)
+		defer releaseViewScratch(scratch, v)
+		return v.search(queryVec, limit, scope), v.facts, nil
+	}
+
 	rows := s.borrowVectorRows()
 	defer s.returnVectorRows(rows)
 
@@ -1262,6 +1278,18 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, vectorLegFacts, error) {
 	// Read the identity before taking the lock, as searchVectorLeg does.
 	identity := s.configuredEmbeddingIdentity()
+
+	cp, err := s.vectorCorpusFor(ctx, queryVec, identity)
+	if err != nil {
+		return nil, vectorLegFacts{}, err
+	}
+	if cp != nil {
+		scratch := s.borrowVectorRows()
+		defer s.returnVectorRows(scratch)
+		v := s.viewVectorCorpus(cp, scratch, "", true, queryVec)
+		defer releaseViewScratch(scratch, v)
+		return v.search(queryVec, limit, nil), v.facts, nil
+	}
 
 	rows := s.borrowVectorRows()
 	defer s.returnVectorRows(rows)

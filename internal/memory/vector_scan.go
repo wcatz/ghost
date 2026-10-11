@@ -29,6 +29,15 @@ const vectorScanColumns = `
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
 
+// queryVectorCorpus runs the corpus cache's query: the shared projection with no
+// predicate, so one copy serves every project. It lives beside the constant it
+// runs for the reason the structural write scan reads statements — a name bound
+// to a name in another file cannot be resolved there, and an unresolved
+// statement is reported as a write.
+func queryVectorCorpus(ctx context.Context, q Queryer) (*sql.Rows, error) {
+	return q.QueryContext(ctx, vectorScanColumns)
+}
+
 // duringVectorCopyFn and duringVectorScoreFn are test seams inside a vector
 // search, one in each of its two phases (the scoring seam fires once, after the first
 // row is scored). Production leaves both no-ops. A test
@@ -322,6 +331,15 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	for m := range foreign {
 		v.facts.foreign += foreign[m]
 	}
+	s.reportSkippedVectors(foreign, mismatched, mismatchedModel, len(v.rows), identity, len(queryVec))
+	return nil
+}
+
+// reportSkippedVectors logs what a scan could not use: rows from another vector
+// space (once per retired identity) and rows of the wrong width (every scan).
+// It is shared by the uncached load and the cached corpus's per-search view, so
+// the two cannot drift apart on what an operator is told.
+func (s *Store) reportSkippedVectors(foreign map[string]int, mismatched int, mismatchedModel string, usable int, identity string, queryDims int) {
 	if s.logger != nil && len(foreign) > 0 {
 		// Sorted so a log is deterministic whichever row order the planner
 		// happened to yield.
@@ -333,15 +351,14 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		for _, m := range models {
 			if s.warnForeignOnce(m) {
 				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
-					"skipped", foreign[m], "usable", len(v.rows), "configured_identity", identity, "stored_identity", m)
+					"skipped", foreign[m], "usable", usable, "configured_identity", identity, "stored_identity", m)
 			}
 		}
 	}
 	if s.logger != nil && mismatched > 0 {
 		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-			"skipped", mismatched, "usable", len(v.rows), "query_dims", len(queryVec), "stored_model", mismatchedModel)
+			"skipped", mismatched, "usable", usable, "query_dims", queryDims, "stored_model", mismatchedModel)
 	}
-	return nil
 }
 
 // search scores the snapshot against queryVec and returns at most limit
