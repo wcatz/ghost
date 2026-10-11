@@ -36,6 +36,9 @@ var (
 // comparison, a threshold or a scanner that moves any figure fails here and has to
 // say so in the golden, which is the review surface.
 func TestAuditBaseline(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	got := FormatAudit(auditRun(t))
 	if os.Getenv("GHOST_UPDATE_GOLDEN") != "" {
 		if err := os.WriteFile(auditGoldenPath, []byte(got), 0o644); err != nil {
@@ -55,6 +58,9 @@ func TestAuditBaseline(t *testing.T) {
 // TestAuditReportIsStableAcrossRuns: two runs print the same bytes, which is what
 // makes the golden a property of the code and not of a machine or a second.
 func TestAuditReportIsStableAcrossRuns(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	second, err := RunAuditTemp(context.Background())
 	if err != nil {
 		t.Fatalf("RunAuditTemp: %v", err)
@@ -200,6 +206,9 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 }
 
 func TestAuditBenchIdentifierArmIsExact(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	for _, sc := range auditRun(t).Scenarios {
 		p := sc.Score.Class[ClassUsedIdentifier].Precision
 		if p.Num != p.Den {
@@ -209,6 +218,9 @@ func TestAuditBenchIdentifierArmIsExact(t *testing.T) {
 }
 
 func TestAuditBenchACallAfterTheLastTurnIsNeverUsed(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	found := false
 	for _, sc := range auditRun(t).Scenarios {
 		if sc.Name != "end" {
@@ -234,6 +246,9 @@ func TestAuditBenchACallAfterTheLastTurnIsNeverUsed(t *testing.T) {
 // positive outcome, and handed one that calls everything used it must report a
 // precision below the product's.
 func TestAuditScorerFlagsWhatItIsGiven(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	rep := auditRun(t)
 	var start AuditScenario
 	for _, sc := range rep.Scenarios {
@@ -278,6 +293,9 @@ func TestAuditScorerFlagsWhatItIsGiven(t *testing.T) {
 // figures and neither domain line — a report that printed "0 of 0" for them would
 // be asserting a population it does not have.
 func TestAuditHeadlinesArePrinted(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	out := FormatAudit(auditRun(t))
 	for _, re := range []string{
 		`(?m)^same-domain used at session start: \d+ of 20$`,
@@ -317,6 +335,9 @@ func TestAuditHeadlinesArePrinted(t *testing.T) {
 // in the session-start call, by assertion and not by golden: a golden can be
 // regenerated to accept a regression, and these cannot.
 func TestAuditStartRecallIsPinnedSemantically(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	start := auditRun(t).scenario("start")
 	if len(start.Pairs) == 0 {
 		t.Fatal("no start scenario")
@@ -332,6 +353,9 @@ func TestAuditStartRecallIsPinnedSemantically(t *testing.T) {
 // TestAuditSpreadMemoriesAreLabelledIgnored: the corpus expects the spread memories
 // ignored, and the report counts how many the audit called used.
 func TestAuditSpreadMemoriesAreLabelledIgnored(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	rep := auditRun(t)
 	n := 0
 	for _, p := range rep.scenario("start").Pairs {

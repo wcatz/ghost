@@ -196,6 +196,9 @@ const wideAgeGapDays = 30
 // numbers are comparable and the difference between them is the state, not the
 // corpus.
 func TestRankedStateSuiteIsNotInert(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	ctx := context.Background()
 	queries, ds, store := seedRankedStateFixture(t)
 

@@ -155,6 +155,9 @@ func neverDecayingCount(scenarios []TrapScenario) int {
 // invariance would be a MISS: an old-but-correct memory competing against a
 // fresh distractor in a category decay actually reorders.
 func TestRecencyTrapDecayingCategories(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	scenarios := loadTrapTestdata(t)
 
 	// The five decaying categories the audit named. A fixture that quietly lost
@@ -278,6 +281,9 @@ func TestRecencyTrapDecayingCategories(t *testing.T) {
 // their score moves under decay by design. Reading the frontier off the pooled
 // number would put that movement in the wrong column.
 func TestDecayFrontier(t *testing.T) {
+	// Parallel: opens its own stores and reads no process-global state, so it
+	// overlaps the corpus-wide tests instead of running ahead of them.
+	t.Parallel()
 	stale := loadStalenessTestdata(t)
 	traps := neverDecayScenarios(loadTrapTestdata(t))
 	ctx := context.Background()
