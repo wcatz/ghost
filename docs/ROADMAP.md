@@ -40,7 +40,7 @@ Horizons, roughly:
 - [x] **Wire LongMemEval-S into CI** — shipped PRs #193/#211/#213:
   `.github/workflows/longmemeval.yml` gates PRs on the fts floor
   (R@5 ≥ 0.74, NDCG@10 ≥ 0.72, path-filtered to `internal/memory/**`,
-  `bench/longmemeval/**`); hybrid (R@5 ≥ 0.91) is manual
+  `bench/longmemeval/**`); hybrid (R@5 ≥ 0.94) is manual
   `workflow_dispatch`-only because the cold embedding pass is too slow to
   gate or schedule. See docs/benchmarks.md "Phase 1".
 

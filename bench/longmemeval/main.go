@@ -600,8 +600,12 @@ func exitCode(partial bool, violations []string) int {
 // about it. It deliberately reads as progress, never as a score — no metric
 // names, no table, no floor verdict.
 func partialMessage(got, want int, budget, elapsed time.Duration) string {
-	// The budget is echoed as the user wrote it, unrounded: rounding a 500ms
-	// budget to "1s" would name a deadline this pass was not given.
+	// The budget is echoed as the exact Duration the flag parsed to, at its own
+	// precision: rounding a 500ms budget to "1s" would name a deadline this
+	// pass was not given. A budget is therefore reported in the Duration's own
+	// spelling rather than the flag's — -embed-deadline 300m prints "5h0m0s"
+	// here and "300m" in the workflow's own warning, which are the same
+	// deadline said twice.
 	return fmt.Sprintf("Embedding pass stopped at its %s budget after %s: cache warmed %d/%d vectors. "+
 		"No metrics, no floor check — re-dispatch to continue from this cache.",
 		budget, elapsed.Round(time.Second), got, want)
