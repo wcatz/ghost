@@ -250,9 +250,29 @@ func TestGetByIDsBatchesPastSQLiteVariableLimit(t *testing.T) {
 		// More than the chunk size and more than the old 999 default, so the
 		// rows land in at least three statements.
 		const n = 1200
+		//
+		// The rows are inserted directly, in one transaction: what is under test
+		// is how GetByIDs chunks its IN list, not how a memory gets written, and
+		// twelve hundred committed Create calls cost about a dozen seconds under
+		// the race detector for nothing this subtest asserts. The ids are the
+		// ones the store minted, so they are real rows across the chunk
+		// boundaries, which is what a fix that drops the tail would fail on.
 		ids := make([]string, n)
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin seed: %v", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
 		for i := range ids {
-			ids[i] = createTestMemory(t, store, ctx, fmt.Sprintf("memory number %d", i))
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO memories (project_id, category, content, source, importance, tags)
+				VALUES ('test-proj', 'fact', ?, 'manual', 0.8, '["test"]') RETURNING id`,
+				fmt.Sprintf("memory number %d", i)).Scan(&ids[i]); err != nil {
+				t.Fatalf("seed memory %d: %v", i, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit seed: %v", err)
 		}
 		got, err := store.GetByIDs(ctx, ids)
 		if err != nil {
