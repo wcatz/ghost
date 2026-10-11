@@ -266,6 +266,31 @@ func TestASaveThatNamesAMemoryCitesIt(t *testing.T) {
 	}
 }
 
+// TestASaveSharingAMemorysWordsWithoutAnIDDrawsNoVerdictOnIt: a save's words are never
+// a use and never a denial. Only an id the save names reaches the negation arm, so a
+// save that shares most of a retrieved memory's words, even beside a cue, and cites no
+// id records neither used nor contradicted for that memory.
+func TestASaveSharingAMemorysWordsWithoutAnIDDrawsNoVerdictOnIt(t *testing.T) {
+	saves := map[string]string{
+		"restatement": memContent,
+		"beside a cue": "that is wrong: the opencode plugin materializes its transcript under mkdtemp " +
+			"and rm-rfs the directory on hook close",
+	}
+	for name, text := range saves {
+		t.Run(name, func(t *testing.T) {
+			s := newTestSignals(t)
+			s.AddSaveArgs(text)
+			if len(s.negated) != 0 {
+				t.Fatalf("a save with no id drew %d negation segments", len(s.negated))
+			}
+			v := compareOneAs(t, s, testMemoryID, memContent)
+			if v.Outcome == OutcomeUsed || v.Outcome == OutcomeContradicted {
+				t.Errorf("a save sharing the memory's words and citing no id judged %s/%s", v.Outcome, v.Signal)
+			}
+		})
+	}
+}
+
 // TestAGiantTurnDoesNotMakeWordsCommon: the frequency is over the turns a person
 // wrote. Two outlier turns holding a word would lift it from 2 of 12 to 4 of 14.
 func TestAGiantTurnDoesNotMakeWordsCommon(t *testing.T) {
