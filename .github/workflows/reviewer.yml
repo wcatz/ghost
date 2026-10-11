@@ -155,7 +155,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/opencode.tar.gz
-          key: opencode-tarball-linux-x64-2.0.15-5ba4e87d9ee5dd5c
+          key: opencode-tarball-linux-x64-2.0.18-aa455d073b3a0733
 
       - name: Install opencode
         # Binary from the npm registry with SHA256 verification — no
@@ -168,7 +168,7 @@ jobs:
           # (that is what https://opencode.ai/v2/install downloads), not as
           # a GitHub release asset. OC_SHA256 is the sha256 of that exact
           # registry tarball; its sha512 matches the registry's published
-          # dist.integrity (sha512-PGVHuIb6...), cross-checked 2026-09-25.
+          # dist.integrity (sha512-94dH7lwB...), cross-checked 2026-10-11.
           # V1 (1.18.31) could no longer run the read-only agent on any free
           # model (opaque UnknownError), which is why the pin moved to V2.
           #
@@ -182,8 +182,15 @@ jobs:
           # If a future bump fails fast with that error again, bump
           # OC_VERSION and OC_SHA256 here (and the cache key above) before
           # anything else.
-          OC_VERSION=2.0.15
-          OC_SHA256=5ba4e87d9ee5dd5ce3aa45acdba1c6d37acdd282d450d6b65fb45226d6da44cc
+          #
+          # V2 (2026-10-11, 2.0.15 and 2.0.18): the same error returned for
+          # every free model once the reviewer agent was in use. A bisect of
+          # the agent's tools map on 2.0.18 found the trigger: the free tier
+          # refuses an agent whose shell tool is switched off (bash: false,
+          # permission bash: deny, or a deny-all bash pattern) and accepts
+          # every other tool being switched off. See the agent step below.
+          OC_VERSION=2.0.18
+          OC_SHA256=aa455d073b3a0733a6912f477b370f3d50ca7af44715bb7ccc41faa13b3cc2eb
           OC_URL="https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-${OC_VERSION}.tgz"
           # A restored cache entry is untrusted input: drop it rather
           # than let a bad one wedge the pipeline until the cache expires.
@@ -218,8 +225,9 @@ jobs:
         # payload, post_review.py refused to read tool output (that output
         # echoes the attacker-controlled diff, so the text-part allowlist
         # is deliberate), and the review failed with "no JSON object with
-        # a 'verdict' key". With no write/patch/edit/bash/task/todowrite
-        # tool registered there is no such channel to reach for.
+        # a 'verdict' key". With no write/patch/edit/task/todowrite tool
+        # registered, and the shell refused on every call (below), there
+        # is no such channel to reach for.
         #
         # $HOME, NOT the workspace: "Prepare review context" runs
         # `gh pr checkout`, which replaces the tree, and then sweeps
@@ -233,6 +241,21 @@ jobs:
         # anything the binary gains in a future version, and every tool
         # id the pinned binary knows is then listed explicitly, because
         # the wildcard's semantics are not documented.
+        #
+        # The shell tool is the one exception: it stays registered, with
+        # permission "ask". OpenCode's anonymous free tier refuses any
+        # agent whose shell tool is switched off ("OpenCode's free tier
+        # can only be used from within OpenCode"), whether by the tools
+        # map or by a deny permission (bisected on 2.0.18, 2026-10-11).
+        # "ask" has nobody to answer it in `opencode run`: the call is
+        # auto-rejected, nothing executes, the session ends and the run
+        # exits 1, so the selection and review loops treat it as a failed
+        # model and move on; no answer can leave through it. Verified
+        # locally with a planted "touch pwned.txt" instruction: the model
+        # tried the shell, the call was rejected and no file was created.
+        # A PR cannot turn "ask" into "allow": Prepare review context
+        # deletes opencode.json, opencode.jsonc and .opencode from the
+        # checkout, and no review step passes an auto-approve flag.
         run: |
           # The model is selected at run time by the step after Prepare
           # review context, then supplied explicitly with -m to every
@@ -263,12 +286,14 @@ jobs:
             write: false
             edit: false
             patch: false
-            bash: false
+            bash: true
             task: false
             todowrite: false
             webfetch: false
             question: false
             invalid: false
+          permission:
+            bash: ask
           ---
           You review code and print your answer as plain text. You have no
           tool that can write, edit, patch, run a command, fetch a URL, or
@@ -283,7 +308,7 @@ jobs:
           # starts), so it cannot guard anything. V2 itself is the guard:
           # `run --agent <name>` for an unregistered agent exits 1 with
           # 'Agent not found' instead of falling back to the default,
-          # write-capable agent (verified on 2.0.15), and the selection
+          # write-capable agent (verified on 2.0.15 and 2.0.18), and the selection
           # step treats that error as fatal rather than trying the next model.
           # Verified the same day that this agent refuses a prompt telling
           # it to run a shell command ("I can't run shell commands in this
