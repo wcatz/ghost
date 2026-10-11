@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -470,67 +469,130 @@ func TestBindProjectPathRepairsAnUnmatchableSpelling(t *testing.T) {
 	}
 }
 
-// TestBindProjectPathRefusesUnmatchablePath — the resolver's candidate query
-// skips recorded paths of ten characters or fewer, so binding one records a
-// project that no session directory can ever find. The command exists to make
-// a project resolvable, so a path it would leave unresolvable is a refusal,
-// not a success.
-func TestBindProjectPathRefusesUnmatchablePath(t *testing.T) {
+// shortExistingDir returns an existing directory whose resolved path is ten
+// characters or fewer, or skips: the temp root of a CI host is usually deeper,
+// so a short path has to come from the system directories.
+func shortExistingDir(t *testing.T) string {
+	t.Helper()
+	for _, c := range []string{"/etc", "/usr/bin", "/usr/lib", "/var", "/opt", "/srv", "/dev/shm", "/usr"} {
+		resolved, err := filepath.EvalSymlinks(c)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+			continue
+		}
+		if pathRankLength(resolved) <= 10 {
+			return resolved
+		}
+	}
+	t.Skip("no existing directory with a path of ten characters or fewer on this host")
+	return ""
+}
+
+// TestBindAndLookupTreatAShortPathTheSame — resolution used to ignore recorded
+// paths of ten characters or fewer through a textual length filter while bind
+// refused to record them, and after the resolver moved to resolved form it
+// accepted them, so a row made another way (import, restore) routed callers
+// that bind would never have created. Both now ask storedPathIsUsable and
+// compare in resolved form: a short directory is bindable, and lookup finds
+// what was bound, so neither side disagrees with the other.
+func TestBindAndLookupTreatAShortPathTheSame(t *testing.T) {
 	ctx := context.Background()
+	dir := shortExistingDir(t)
 
-	// Two shapes of the same refusal. The filter is SQLite's LENGTH(path) > 10,
-	// which counts CHARACTERS on TEXT, so a short path made of multi-byte
-	// characters is dropped by the query while its byte length is over the
-	// limit — and an error that counted bytes would then claim the path passed
-	// the very rule it failed.
-	//
-	// Both cases need a path of ten characters or fewer, which means resolving
-	// the temp root first: on a host whose TMPDIR is itself deep (macOS
-	// /var/folders/…, TMPDIR=/var/tmp) no such path exists here, and the honest
-	// outcome is to skip rather than to fail on a host that cannot produce one.
-	root, err := filepath.EvalSymlinks(os.TempDir())
+	// A row written by SQL, as an import would: lookup routes it.
+	imported := bindStore(t)
+	if _, err := imported.db.ExecContext(ctx,
+		`INSERT INTO projects (id, path, name) VALUES ('short', ?, 'short')`, dir); err != nil {
+		t.Fatalf("insert short row: %v", err)
+	}
+	if id, _, err := imported.ResolveProject(ctx, dir); err != nil || id != "short" {
+		t.Fatalf("lookup of an imported short path = (%q, %v), want short", id, err)
+	}
+
+	// The same path through bind: accepted, and lookup finds it.
+	bound := bindStore(t)
+	sentinelProject(t, bound, "short", "short")
+	if _, err := bound.BindProjectPath(ctx, "short", dir, ""); err != nil {
+		t.Fatalf("bind refused a short path the resolver accepts: %v", err)
+	}
+	if id, _, err := bound.ResolveProject(ctx, dir); err != nil || id != "short" {
+		t.Fatalf("lookup of a bound short path = (%q, %v), want short", id, err)
+	}
+}
+
+// TestBindRefusesASecondSpellingAndLookupStaysUnambiguous — a symlinked parent
+// gives one recorded directory a second spelling. Resolution compares in
+// resolved form, so a row recorded under that spelling would tie with the
+// first and every caller beneath it would get the ambiguity error. Bind
+// applies the same comparison and refuses, so lookup never reaches
+// ErrAmbiguousProject through a bind.
+func TestBindRefusesASecondSpellingAndLookupStaysUnambiguous(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "first", "first")
+	sentinelProject(t, s, "second", "second")
+
+	realParent := t.TempDir()
+	real := filepath.Join(realParent, "checkout")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := symlinkTo(t, realParent)
+	second := filepath.Join(linkParent, "checkout")
+
+	if _, err := s.BindProjectPath(ctx, "first", real, ""); err != nil {
+		t.Fatalf("binding the first project: %v", err)
+	}
+	_, err := s.BindProjectPath(ctx, "second", second, "")
+	if !errors.Is(err, ErrBindPathClaimed) {
+		t.Fatalf("err = %v, want ErrBindPathClaimed for a second spelling of a recorded directory", err)
+	}
+	if !strings.Contains(err.Error(), "first") {
+		t.Errorf("the refusal should name the project that records the directory, got %q", err)
+	}
+	if got := projectPath(t, s, "second"); got != "second" {
+		t.Errorf("the refused bind wrote path %q", got)
+	}
+	for _, from := range []string{real, second} {
+		id, _, err := s.ResolveProject(ctx, from)
+		if errors.Is(err, ErrAmbiguousProject) {
+			t.Fatalf("lookup from %q reached the ambiguity error after a refused bind: %v", from, err)
+		}
+		if err != nil || id != "first" {
+			t.Errorf("lookup from %q = (%q, %v), want first", from, id, err)
+		}
+	}
+}
+
+// TestCheckPathResolvableRefusesAResolvedTie — the check bind and
+// BindNewProjectToCheckout run on the written row ranks in resolved form, so
+// two rows that are two spellings of one directory tie even when some other
+// writer put them there, and the project that would lose the tie is refused.
+func TestCheckPathResolvableRefusesAResolvedTie(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	realParent := t.TempDir()
+	real := filepath.Join(realParent, "checkout")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(symlinkTo(t, realParent), "checkout")
+	if err := s.EnsureProject(ctx, "first", real, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureProject(ctx, "second", second, "second"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Skipf("cannot resolve the temp root: %v", err)
+		t.Fatal(err)
 	}
-	cases := []struct{ name, dir string }{
-		{name: "ascii", dir: "gb1"},
-		{name: "multibyte", dir: "日本"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := filepath.Join(root, tc.dir)
-			wantLength := len([]rune(dir))
-			if wantLength > 10 {
-				t.Skipf("no path of ten characters or fewer exists under %s (%d characters)", root, wantLength)
-			}
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Skipf("cannot create %s: %v", dir, err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-			s := bindStore(t)
-			sentinelProject(t, s, "infra", "infrastructure")
-			_, err := s.BindProjectPath(ctx, "infra", dir, "")
-			if !errors.Is(err, ErrBindPathUnmatchable) {
-				t.Fatalf("err = %v, want ErrBindPathUnmatchable for a path the resolver skips", err)
-			}
-			// The number in the message must be the number the filter used,
-			// counted on the resolved path rather than the typed one.
-			if !strings.Contains(err.Error(), fmt.Sprintf("is %d characters", wantLength)) {
-				t.Errorf("error should count the %d characters the filter counted, got %q", wantLength, err)
-			}
-			// And the message must report what was observed rather than assert
-			// the length rule as the cause: a previous version blamed that rule
-			// for a 21-character path it plainly passed, which is how a real
-			// bug (a trailing separator the candidate query cannot match) hid
-			// behind a confident explanation.
-			if !strings.Contains(err.Error(), "candidate query returned no row") {
-				t.Errorf("error should report what the candidate query did, got %q", err)
-			}
-			if got := projectPath(t, s, "infra"); got != "infra" {
-				t.Errorf("the refused bind wrote path %q", got)
-			}
-		})
+	defer tx.Rollback() //nolint:errcheck
+	err = checkPathResolvable(ctx, tx, "second", physical(t, real), "")
+	if !errors.Is(err, ErrBindPathUnmatchable) || !strings.Contains(err.Error(), "ties") {
+		t.Fatalf("err = %v, want a tie refusal for two spellings of one directory", err)
 	}
 }
 
