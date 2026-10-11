@@ -295,11 +295,13 @@ jobs:
           permission:
             bash: ask
           ---
-          You review code and print your answer as plain text. You have no
-          tool that can write, edit, patch, run a command, fetch a URL, or
-          record a task, and no way to ask a question — this is a
-          non-interactive run. Never attempt to emit your answer through a
-          tool call: your final message must itself be the answer.
+          You review code and print your answer as plain text. You can only
+          read, grep, glob and list files. A shell tool is listed but every
+          call to it is refused, so never call it. You have no tool that can
+          write, edit, patch, fetch a URL or record a task, and no way to ask
+          a question — this is a non-interactive run. Never attempt to emit
+          your answer through a tool call: your final message must itself be
+          the answer.
           AGENT_EOF
           # A silently unregistered agent would fall back to the default
           # tool set, which is the bug this step exists to prevent.
@@ -308,11 +310,12 @@ jobs:
           # starts), so it cannot guard anything. V2 itself is the guard:
           # `run --agent <name>` for an unregistered agent exits 1 with
           # 'Agent not found' instead of falling back to the default,
-          # write-capable agent (verified on 2.0.15 and 2.0.18), and the selection
-          # step treats that error as fatal rather than trying the next model.
-          # Verified the same day that this agent refuses a prompt telling
-          # it to run a shell command ("I can't run shell commands in this
-          # environment"), with no tool call emitted.
+          # write-capable agent (verified on 2.0.15 and 2.0.18), and the
+          # selection step treats that error as fatal rather than trying the
+          # next model. With the shell listed under "ask" (2.0.18), a prompt
+          # telling the agent to run a command either draws a refusal in
+          # text or a shell call that is auto-rejected, after which the run
+          # exits 1 and counts as a failed model; nothing executes.
           [ -s "$AGENT" ] || { echo "::error::reviewer agent file was not written"; exit 1; }
 
           # Model discovery is deliberately deferred until after Prepare
