@@ -91,21 +91,20 @@ type vectorRowSpan struct {
 type vecCandidate struct {
 	score float32
 	row   int
+	// id is a view into the snapshot's id buffer (no copy), the tiebreak below.
+	id []byte
 }
 
 // betterThan reports whether a outranks b: the higher cosine wins, and on an
-// exact tie the row the scan yielded first wins.
+// exact tie the lower memory id wins.
 //
 // The tiebreak is what makes the bounded top-k a total order. Without one, two
 // rows with equal float32 cosines have no order between them, and a bounded
-// heap hands back whichever of them happened to reach the cut last, so the
-// answer would depend on the heap's internals rather than on the scan. Ordering
-// by (score, scan position) makes the returned rows a function of the stored
-// data AND the order the scan yielded it in. That is a weaker guarantee than
-// independence from the scan order, and deliberately so: the query has no ORDER
-// BY, so a VACUUM or an index rebuild can reorder a tie. What it does buy is
-// that two searches over the same rows in the same order return the same rows,
-// which the old unstable sort.Slice did not promise either.
+// heap hands back whichever of them happened to reach the cut last. Ordering by
+// (score, memory id) makes the returned rows a function of the stored data
+// alone, whatever order the database yielded them in (the project index, the
+// embeddings scan the corpus cache uses, a VACUUM), so the cached and uncached
+// paths agree on ties too.
 func (c vecCandidate) betterThan(o vecCandidate) bool {
 	return compareCandidates(c, o) < 0
 }
@@ -123,11 +122,17 @@ func compareCandidates(a, b vecCandidate) int {
 		return -1
 	case a.score < b.score:
 		return 1
-	case a.row < b.row:
-		return -1
-	default:
-		return 1
 	}
+	// Exact ties order by memory id, so the answer does not depend on the order
+	// the database yielded the rows in: the project index, the embeddings scan
+	// and a VACUUM all agree. Ids are unique; the row is a last resort.
+	if c := bytes.Compare(a.id, b.id); c != 0 {
+		return c
+	}
+	if a.row < b.row {
+		return -1
+	}
+	return 1
 }
 
 // vectorRows is one vector search's private copy of the rows it may score.
@@ -414,7 +419,7 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {
 			continue
 		}
-		v.offer(limit, vecCandidate{score: sim, row: i})
+		v.offer(limit, vecCandidate{score: sim, row: i, id: v.column(v.ids, sp.id)})
 	}
 	if len(v.cands) == 0 {
 		return nil

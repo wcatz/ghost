@@ -1834,6 +1834,10 @@ END`,
 		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN
     INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
 END`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ai AFTER INSERT ON memories
+    WHEN EXISTS (SELECT 1 FROM memory_embeddings WHERE memory_id = new.id) BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
 	}
 	// A trigger is created only on a table that exists. Every real database has
 	// both (they date from v1), but the steps are also run directly against the
@@ -1859,4 +1863,4 @@ END`,
 
 // vectorEpochStepTables is the table each statement of migrateV24 depends on,
 // in statement order: "" for the one that creates the counter itself.
-var vectorEpochStepTables = []string{"", "memory_embeddings", "memory_embeddings", "memory_embeddings", "memories", "memories"}
+var vectorEpochStepTables = []string{"", "memory_embeddings", "memory_embeddings", "memory_embeddings", "memories", "memories", "memories"}

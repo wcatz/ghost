@@ -1003,8 +1003,16 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 // does NOT fire it: the retrieval write every search makes would otherwise
 // invalidate every other process's copy. TestVectorEpoch* pins both lists.
 //
+// vector_epoch_mem_ai covers the one insert that does change the query: a memory
+// whose id already has an embedding row (an orphan left by a delete made with
+// foreign keys off) joins again. An ordinary create has no embedding yet and
+// does not fire it.
+//
 // A future migration that rebuilds memories or memory_embeddings drops these
-// triggers with the table and must recreate them.
+// triggers with the table and must recreate them, and must bump the epoch if it
+// changes any vector-query input: a rebuild's implicit delete fires no trigger.
+// The counter must never decrease, be deleted or be reset, because the cache
+// matches on equality.
 const vectorEpochSQL = `
 CREATE TABLE IF NOT EXISTS vector_epoch (
     id    INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1025,6 +1033,10 @@ CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_au AFTER UPDATE OF resolved_at, sc
     INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
 END;
 CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ai AFTER INSERT ON memories
+    WHEN EXISTS (SELECT 1 FROM memory_embeddings WHERE memory_id = new.id) BEGIN
     INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
 END;
 `

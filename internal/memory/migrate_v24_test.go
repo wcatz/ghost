@@ -13,7 +13,7 @@ import (
 
 var vectorEpochTriggers = []string{
 	"vector_epoch_emb_ai", "vector_epoch_emb_au", "vector_epoch_emb_ad",
-	"vector_epoch_mem_au", "vector_epoch_mem_ad",
+	"vector_epoch_mem_au", "vector_epoch_mem_ad", "vector_epoch_mem_ai",
 }
 
 // dropVectorEpoch removes the counter and its triggers, leaving the database as

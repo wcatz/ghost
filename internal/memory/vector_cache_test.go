@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1037,14 +1036,11 @@ func TestVectorCacheDoesNotPublishACopyANewerWriteOverlapped(t *testing.T) {
 }
 
 // Tied cosines. Rows with identical embeddings (duplicate content embeds to the
-// same bytes) tie exactly, and a tie is broken by the position the scan yielded
-// the row at — which is the database's choice, not the cache's: the uncached
-// project leg is answered through a project index, and the cache scans the
-// embeddings table once for every project, so the two can yield tied rows in a
-// different order. What is promised, and checked here, is that the SCORES are
-// identical at every rank, and that the SET of rows at each score is identical
-// whenever the limit does not cut through a group of tied rows (the order inside
-// a tied group is the scan's).
+// same bytes) tie exactly, and a tie is broken by memory id, not by the order the
+// database yielded the rows in. The uncached project leg is answered through a
+// project index and the cache scans the embeddings table once, so the two scan in
+// different orders; the answers must still be identical, row for row, at every
+// limit, including limits that cut through a tied group.
 func TestCachedVectorSearchAgreesWithTheUncachedPathOnTies(t *testing.T) {
 	ctx := context.Background()
 	s, _ := cacheStore(t)
@@ -1062,41 +1058,71 @@ func TestCachedVectorSearchAgreesWithTheUncachedPathOnTies(t *testing.T) {
 	}
 	q := cacheVec(1)
 
-	for limit := 1; limit <= 13; limit++ {
+	for limit := 1; limit <= 14; limit++ {
 		withCacheCap(t, 0)
-		want, err := s.SearchVector(ctx, cacheProj, q, limit+1)
+		want, err := s.SearchVector(ctx, cacheProj, q, limit)
 		if err != nil {
 			t.Fatal(err)
 		}
 		withCacheCap(t, maxRetainedVectorBytes)
-		got, err := s.SearchVector(ctx, cacheProj, q, limit+1)
+		got, err := s.SearchVector(ctx, cacheProj, q, limit)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != len(want) {
-			t.Fatalf("limit %d: %d rows cached, %d uncached", limit, len(got), len(want))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("limit %d: cached and uncached differ on ties:\n cached   %v\n uncached %v", limit, idsOf(got), idsOf(want))
 		}
-		for i := range got {
-			if got[i].Score != want[i].Score {
-				t.Errorf("limit %d rank %d: cached score %v, uncached %v", limit, i, got[i].Score, want[i].Score)
+		for i := 1; i < len(got); i++ {
+			if got[i].Score == got[i-1].Score && got[i].MemoryID < got[i-1].MemoryID {
+				t.Errorf("limit %d: tied rows %d and %d are not in memory id order", limit, i-1, i)
 			}
-		}
-		cutsATie := limit < len(want) && want[limit-1].Score == want[limit].Score
-		if !cutsATie && !reflect.DeepEqual(rowsByScore(got[:limit]), rowsByScore(want[:limit])) {
-			t.Errorf("limit %d does not cut a tie, yet the rows differ:\n cached   %v\n uncached %v", limit, idsOf(got[:limit]), idsOf(want[:limit]))
 		}
 	}
 }
 
-// rowsByScore groups a result's ids by score, each group sorted, so two results
-// compare equal when they differ only in the order of tied rows.
-func rowsByScore(res []ScoredMemory) map[float32][]string {
-	out := map[float32][]string{}
-	for _, r := range res {
-		out[r.Score] = append(out[r.Score], r.MemoryID)
+// A memory inserted under an id that already has an embedding row joins the
+// vector query again, and only vector_epoch_mem_ai can tell. The orphan is left
+// by a delete made with foreign keys off (what a migration step does); the
+// cached search must return the row once it is reinserted.
+func TestVectorEpochSeesAnOrphanedEmbeddingReattach(t *testing.T) {
+	ctx := context.Background()
+	s, _ := cacheStore(t)
+	cacheCorpus(t, s)
+	id := cacheMemory(t, s, cacheProj, "target", 3, nil)
+	q := cacheVec(1)
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, ids := range out {
-		sort.Strings(ids)
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
 	}
-	return out
+	if _, err := conn.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	res, err := s.SearchVector(ctx, cacheProj, q, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cacheFind(res, id); ok {
+		t.Fatal("the orphaned embedding was returned without its memory")
+	}
+	if _, ok := s.vcache.held(); !ok {
+		t.Fatal("nothing cached, so the reattach would not be tested against a copy")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES (?, ?, 'fact', 'reattached', 'manual')`,
+		id, cacheProj); err != nil {
+		t.Fatal(err)
+	}
+	res, err = s.SearchVector(ctx, cacheProj, q, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cacheFind(res, id); !ok {
+		t.Error("a memory reinserted over an orphaned embedding is not in the next search: the cache served the old corpus")
+	}
 }

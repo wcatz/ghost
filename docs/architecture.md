@@ -336,6 +336,7 @@ change what the vector query (`vectorScanColumns`) returns:
 | `vector_epoch_emb_ad` | DELETE on `memory_embeddings` |
 | `vector_epoch_mem_au` | UPDATE OF `resolved_at`, `scope`, `project_id` on `memories` that changes one of them |
 | `vector_epoch_mem_ad` | DELETE on `memories` (which covers a delete that did not cascade, e.g. under `foreign_keys=OFF`) |
+| `vector_epoch_mem_ai` | INSERT on `memories` whose id already has an embedding row (an orphan from a delete under `foreign_keys=OFF`) |
 
 Everything else a memory carries (access count, `last_accessed`, tags,
 importance, content, `pinned`), and every other table (retrieval records, links,
@@ -377,17 +378,13 @@ plus the rows of any other identity as (project, model) pairs. The project and
 facts and warnings run per search over the copy (`viewVectorCorpus`), so the
 reported facts and the once-per-identity warning behave as on the uncached path.
 Scores are the same `cosineFromBytes` over the same bytes, so a cached search is
-bit-identical to an uncached one on a corpus without tied cosines
-(`TestCachedVectorSearchMatchesTheUncachedPath`). Exact ties are the one place the
-two can differ, and it is the scan order's doing rather than the cache's: the
-uncached project leg is answered through a project index and the cache scans the
-embeddings table once for every project, so rows with identical embeddings can
-come back in a different order inside their tied group. The scores at every rank
-are identical, and so is the set of rows at each score unless the limit cuts the
-group (`TestCachedVectorSearchAgreesWithTheUncachedPathOnTies`).
+bit-identical to an uncached one, and exact ties are ordered by memory id so the
+rows and their order are identical too, whichever order the database scanned them
+in (`TestCachedVectorSearchMatchesTheUncachedPath`,
+`TestCachedVectorSearchAgreesWithTheUncachedPathOnTies`).
 
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
-scratch pool's own bound) of embeddings, and drops it after ten idle minutes.
+scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
 Above the bound it is never loaded for the cache — on a miss the row count at the
 query's width is checked first; a hit reads only the counter — and the search is the uncached path exactly as before,
 pooled scratch included. A database without the counter (a schema older than v24
