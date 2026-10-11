@@ -112,6 +112,9 @@ func (e *StoreNewerError) Error() string {
 // of it — and the refusal rolls the transaction back, so a refused write
 // contributes no hold time and blocks nothing.
 func (s *Store) beginGuardedWrite(ctx context.Context, op string) (*sql.Tx, writeLock, error) {
+	// The resolved-path memo is cleared here, at the one place every write
+	// starts, before the transaction can change a project (see canonMemo).
+	s.canon.noteWrite(op)
 	start := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err == nil {

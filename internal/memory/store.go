@@ -17,7 +17,6 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -163,6 +162,10 @@ type Store struct {
 	warnOnce sync.Once
 	logger   *slog.Logger
 	onSave   func(projectID string) // optional callback after memory create/upsert
+
+	// canon memoizes each recorded project path's canonical form for
+	// ResolveProject; see canonMemo for when it is cleared and when it expires.
+	canon canonMemo
 
 	// demotionThreshold gates near-duplicate demotion in GetTopMemories (see
 	// DemotionPenalties). Defaults to DefaultDemotionThreshold; callers that
@@ -2286,47 +2289,15 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	}
 
 	if IsPathShaped(input) {
-		pathMatches, qErr := s.pathCandidates(ctx, input, hasRepoRemote)
-		if qErr != nil {
-			return "", "", fmt.Errorf("resolve project by path: %w", qErr)
+		best, tied, found, pErr := s.resolveByPath(ctx, input, hasRepoRemote, remoteOnce)
+		if pErr != nil {
+			return "", "", fmt.Errorf("resolve project by path: %w", pErr)
 		}
-		survivors := make([]basenameCandidate, 0, len(pathMatches))
-		consider := func(candidate basenameCandidate) {
-			// The session's remote is read for one reason only: to reject a
-			// candidate that asserts a different one. A candidate that
-			// asserts none can neither agree nor disagree, so a prefix hit
-			// against unclaimed projects settles without detection.
-			if candidate.remote != "" {
-				remote = remoteOnce()
-			}
-			if candidate.agreesWithSession(input, remote) {
-				survivors = append(survivors, candidate)
-			}
+		if tied {
+			return "", "", ambiguousProject(input, "has tied path-prefix matches")
 		}
-		for _, candidate := range pathMatches {
-			consider(candidate)
-		}
-		if len(survivors) == 0 {
-			seen := make(map[string]bool, len(pathMatches))
-			for _, candidate := range pathMatches {
-				seen[candidate.id] = true
-			}
-			rest, rErr := s.resolvedPathCandidates(ctx, hasRepoRemote, seen)
-			if rErr != nil {
-				return "", "", fmt.Errorf("resolve project by resolved path: %w", rErr)
-			}
-			for _, candidate := range rest {
-				consider(candidate)
-			}
-		}
-		if len(survivors) > 0 {
-			bestLength := pathRankLength(survivors[0].path)
-			for _, candidate := range survivors[1:] {
-				if pathRankLength(candidate.path) == bestLength {
-					return "", "", ambiguousProject(input, "has tied path-prefix matches")
-				}
-			}
-			return survivors[0].id, survivors[0].name, nil
+		if found {
+			return best.id, best.name, nil
 		}
 	}
 	// A name-shaped input spawns no process here, because inputRemote gates
@@ -2524,17 +2495,9 @@ const pathCandidatesQuery = `SELECT id, name, path, %s FROM projects
 
 // pathCandidates returns rows whose recorded path text could contain input.
 // The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
-// this query is only a narrowing step, never proof of a project match.
-//
-// The narrowing is textual, so it is run for the caller's directory in both
-// spellings it has: as reported, and resolved through symlinks (the form
-// pathsAgree compares in). Without the second, a project recorded at the
-// resolved spelling is invisible to a session that reports the same directory
-// through a symlink, or through a Windows 8.3 short name. That is one extra
-// indexed-free query over the projects table, and one EvalSymlinks on the
-// caller's path, per resolve. The recorded side's other spellings are
-// reached by resolvedPathCandidates, which is a fallback and not a part of
-// this step.
+// this query is only a narrowing step, never proof of a project match. It is
+// the textual narrowing the save side mirrors (savingRepository); ResolveProject
+// itself decides in resolved form (resolveByPath).
 func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote bool) ([]basenameCandidate, error) {
 	remoteColumn := "''"
 	if hasRepoRemote {
@@ -2545,70 +2508,113 @@ func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote 
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := scanProjectCandidates(rows)
-	if err != nil {
-		return nil, err
-	}
-	resolved, rErr := canonicalPath(norm)
-	if rErr != nil || resolved == norm {
-		return candidates, nil
-	}
-	rows, err = s.db.QueryContext(ctx, fmt.Sprintf(pathCandidatesQuery, remoteColumn), resolved, resolved, resolved)
-	if err != nil {
-		return nil, err
-	}
-	more, err := scanProjectCandidates(rows)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]bool, len(candidates))
-	for _, c := range candidates {
-		seen[c.id] = true
-	}
-	for _, c := range more {
-		if !seen[c.id] {
-			candidates = append(candidates, c)
-		}
-	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return pathRankLength(candidates[i].path) > pathRankLength(candidates[j].path)
-	})
-	return candidates, nil
+	return scanProjectCandidates(rows)
 }
 
-// resolvedPathCandidates is the fallback for a recorded path whose TEXT shares
-// nothing with either spelling of the caller's directory — the project was
-// recorded through a symlink and the caller reports the resolved directory.
-// No text query can find that row, so it reads every recorded path longer than
-// ten characters, skips the ids already examined, and lets agreesWithSession
-// (which resolves both sides) decide.
+// resolveByPath is the path step of ResolveProject. The caller's directory is
+// resolved ONCE, each recorded path's resolved form comes from the Store's memo
+// (canonMemo), and a project is a survivor when the caller's directory is the
+// recorded one or inside it IN RESOLVED FORM and no remote conflicts. Among
+// survivors the deepest by resolved length wins and equal resolved length is a
+// tie, which the caller reports as ambiguity.
 //
-// Cost: it runs only when the textual narrowing produced no surviving
-// candidate, and is then one pass over the projects table (no joins, three
-// columns) plus two EvalSymlinks per usable row — linear in the number of
-// projects, a handful of lstat calls each. A directory that belongs to no
-// project pays it on every resolve.
-func (s *Store) resolvedPathCandidates(ctx context.Context, hasRepoRemote bool, skip map[string]bool) ([]basenameCandidate, error) {
+// Every usable recorded path is considered on every resolve, not only on a
+// total miss of a textual narrowing. That is what makes the answer independent
+// of the spelling either side was recorded or reported in: a text prefix query
+// cannot see that /link/p/child and /real/p are nested, and ranking by recorded
+// TEXT length cannot tell two spellings of one directory apart from a deeper
+// one. The textual candidates of the old narrowing are a subset of what this
+// examines, since agreement was always decided on resolved forms, so nothing
+// they found is lost. The usable-path predicate is the one the agreement step
+// uses (storedPathIsUsable) rather than a length floor.
+//
+// A caller directory that does not resolve cannot agree with anything and the
+// pass ends before it reads the table. A miss is otherwise one query over the
+// table plus a memo lookup and a string comparison per row; the filesystem is
+// read once per stored path per canonMemoTTL.
+func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote bool, remoteOnce func() string) (best basenameCandidate, tied, found bool, err error) {
+	inputCanon, rErr := canonicalPath(absoluteSessionPath(input))
+	if rErr != nil {
+		return basenameCandidate{}, false, false, nil
+	}
+	// Only id and path are read for the whole table: row transfer is the
+	// dominant cost of a miss, and name and remote are needed only for the few
+	// rows whose directory contains the caller's, which are fetched below.
+	rows, qErr := s.db.QueryContext(ctx, `SELECT id, path FROM projects`)
+	if qErr != nil {
+		return basenameCandidate{}, false, false, qErr
+	}
+	type hit struct {
+		id, path, canon string
+	}
+	var hits []hit
+	for rows.Next() {
+		var h hit
+		if scanErr := rows.Scan(&h.id, &h.path); scanErr != nil {
+			_ = rows.Close()
+			return basenameCandidate{}, false, false, scanErr
+		}
+		if !storedPathIsUsable(h.path) {
+			continue
+		}
+		canon, ok := s.canon.lookup(h.path)
+		if !ok || !samePath(inputCanon, canon) {
+			continue
+		}
+		h.canon = canon
+		hits = append(hits, h)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return basenameCandidate{}, false, false, rowsErr
+	}
+	_ = rows.Close()
+
 	remoteColumn := "''"
 	if hasRepoRemote {
 		remoteColumn = "COALESCE(repo_remote, '')"
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, path, `+remoteColumn+` FROM projects WHERE LENGTH(path) > 10 ORDER BY LENGTH(path) DESC`)
-	if err != nil {
-		return nil, err
-	}
-	all, err := scanProjectCandidates(rows)
-	if err != nil {
-		return nil, err
-	}
-	out := all[:0]
-	for _, c := range all {
-		if !skip[c.id] {
-			out = append(out, c)
+	bestLength := -1
+	for _, h := range hits {
+		// A survivor is confirmed against the filesystem now, so a memoized
+		// resolved form that has since gone stale can refuse a caller (until it
+		// expires) but never route one.
+		fresh, fErr := canonicalPath(h.path)
+		if fErr != nil || !samePath(inputCanon, fresh) {
+			continue
+		}
+		h.canon = fresh
+		c := basenameCandidate{id: h.id, path: h.path}
+		if scanErr := s.db.QueryRowContext(ctx,
+			`SELECT name, `+remoteColumn+` FROM projects WHERE id = ?`, h.id).Scan(&c.name, &c.remote); scanErr != nil {
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				continue // deleted since the first read
+			}
+			return basenameCandidate{}, false, false, scanErr
+		}
+		// The session's remote is read for one reason only: to reject a
+		// candidate that asserts a different one.
+		remote := ""
+		if c.remote != "" {
+			remote = remoteOnce()
+		}
+		if c.remoteConflicts(remote) {
+			continue
+		}
+		switch length := pathRankLength(h.canon); {
+		case length > bestLength:
+			best, bestLength, tied, found = c, length, false, true
+		case length == bestLength:
+			tied = true
 		}
 	}
-	return out, nil
+	return best, tied, found, nil
+}
+
+// remoteConflicts is rule 3: both sides asserted a repository identity and the
+// two differ. A side that asserts none can neither agree nor disagree.
+func (c basenameCandidate) remoteConflicts(remote string) bool {
+	return remote != "" && c.remote != "" && remote != c.remote
 }
 
 // agreesWithSession applies the three rules in ResolveProject to one
@@ -2620,7 +2626,7 @@ func (s *Store) resolvedPathCandidates(ctx context.Context, hasRepoRemote bool, 
 func (c basenameCandidate) agreesWithSession(input, remote string) bool {
 	// Rule 3. remote != c.remote is redundant — an exact repo_remote match
 	// returned earlier — but it states the rule being enforced.
-	if remote != "" && c.remote != "" && remote != c.remote {
+	if c.remoteConflicts(remote) {
 		return false // both asserted an identity, and they disagree
 	}
 	if !IsPathShaped(input) {
