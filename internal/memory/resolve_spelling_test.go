@@ -281,3 +281,77 @@ func TestResolveProjectMemoExpiresAndRetriesUnresolvable(t *testing.T) {
 		t.Fatal("resolved entry outlived canonMemoTTL")
 	}
 }
+
+// Pins the bounded staleness: a child recorded as a symlink that is retargeted
+// into the caller's directory with no ghost write is excluded by the warm memo,
+// so the caller is routed to the shallower parent until the entry expires.
+func TestResolveProjectStaleMemoCanHideADeeperProjectUntilItExpires(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	now := time.Now()
+	s.canon.now = func() time.Time { return now }
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	parent := filepath.Join(root, "parent-workspace")
+	elsewhere := filepath.Join(root, "elsewhere-dir")
+	child := filepath.Join(parent, "child-dir")
+	for _, d := range []string{child, elsewhere} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "parent-id", parent, "parent-name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureProject(ctx, "child-id", link, "child-name"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
+		t.Fatalf("warm-up: %q, want parent-id", id)
+	}
+	_ = os.Remove(link)
+	if err := os.Symlink(child, link); err != nil {
+		t.Fatal(err)
+	}
+	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
+		t.Fatalf("within the TTL the stale entry hides the child: %q, want parent-id", id)
+	}
+	now = now.Add(canonMemoTTL + time.Second)
+	if id, _, _ := s.ResolveProject(ctx, child); id != "child-id" {
+		t.Fatalf("after the TTL: %q, want child-id", id)
+	}
+}
+
+// A memo warm from resolving the parent must not hide a child created
+// afterwards: the memo is keyed by path string, so a new row has no entry.
+func TestResolveProjectNewDeeperProjectIsFoundWithWarmMemo(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	parent := filepath.Join(root, "parent-workspace")
+	child := filepath.Join(parent, "child-dir")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureProject(ctx, "parent-id", parent, "parent-name"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
+		t.Fatalf("warm-up: %q, want parent-id", id)
+	}
+	if err := s.EnsureProject(ctx, "child-id", child, "child-name"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _, _ := s.ResolveProject(ctx, child); id != "child-id" {
+		t.Fatalf("after adding the child: %q, want child-id", id)
+	}
+}

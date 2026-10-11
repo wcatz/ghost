@@ -2576,9 +2576,11 @@ func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote b
 	}
 	bestLength := -1
 	for _, h := range hits {
-		// A survivor is confirmed against the filesystem now, so a memoized
-		// resolved form that has since gone stale can refuse a caller (until it
-		// expires) but never route one.
+		// A survivor is confirmed against the filesystem now, so a stale
+		// memoized form cannot route a caller into a project that no longer
+		// contains it. It does NOT guard the other direction: a stale entry can
+		// exclude a deeper project, and the caller is then routed to a
+		// shallower one until the entry expires (canonMemoTTL).
 		fresh, fErr := canonicalPath(h.path)
 		if fErr != nil || !samePath(inputCanon, fresh) {
 			continue

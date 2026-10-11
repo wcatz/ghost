@@ -14,10 +14,15 @@ import (
 // filesystem side — a symlink retargeted, a directory removed or created, a
 // short name remapped — and a write from another process, neither of which this
 // Store sees. Three things bound that. resolveByPath re-resolves every
-// SURVIVING path fresh before it routes a caller, so a stale entry can never
-// send a caller into a project (a stale refusal is all that is left, and it is
-// bounded by the TTL). Project writes that move, bind, merge, import, restore or
-// delete a project clear the whole memo (noteWrite). And entries expire.
+// SURVIVING path fresh before it routes a caller, which guards only against a
+// FALSE INCLUSION. It does not guard a false exclusion: a stale entry can hide
+// a deeper project (a child recorded as a symlink that is retargeted into the
+// caller's directory with no ghost write), and the caller is then routed to the
+// shallower project until the entry expires — at most canonMemoTTL, or
+// canonMemoRetry for an unresolvable entry. Main resolved fresh every time, so
+// this is a bounded regression traded for the cost. Project writes through this
+// Store clear the whole memo (noteWrite), which shortens the window in the
+// writing process only; and entries expire.
 //
 // An unresolvable entry (the recorded directory does not exist, or cannot be
 // read) is RETRIED after the short canonMemoRetry rather than remembered: a
