@@ -1140,13 +1140,13 @@
         <div class="meta">Session-level, n=470 evidence-labeled questions &middot; deterministic given the embedding cache</div>
         <table>
           <tr><th>Condition</th><th class="num">R@5</th><th class="num">R@10</th><th class="num">NDCG@10</th></tr>
-          <tr class="hero-row"><td>Hybrid</td><td class="num">0.930</td><td class="num">0.973</td><td class="num">0.903</td></tr>
-          <tr><td>Vector only</td><td class="num">0.926</td><td class="num">0.968</td><td class="num">0.909</td></tr>
+          <tr class="hero-row"><td>Hybrid (CI run 38125202586, task-prefixed)</td><td class="num">0.963</td><td class="num">0.982</td><td class="num">0.943</td></tr>
+          <tr><td>Vector only (pre-prefix local measurement)</td><td class="num">0.926</td><td class="num">0.968</td><td class="num">0.909</td></tr>
           <tr><td>FTS only</td><td class="num">0.751</td><td class="num">0.832</td><td class="num">0.738</td></tr>
         </table>
         <p style="color:var(--muted);font-size:13.5px;margin-top:14px;">
           Embeddings fix exactly the classes keyword search fails: assistant-session recall goes
-          0.607&nbsp;&rarr;&nbsp;1.000 with vectors. Pull-request CI enforces the fast FTS floor; the hybrid
+          0.607&nbsp;&rarr;&nbsp;1.000 with vectors (pre-prefix local measurement). Pull-request CI enforces the fast FTS floor; the hybrid
           floor is run locally or manually because its cold embedding pass is much slower.
         </p>
       </div>
