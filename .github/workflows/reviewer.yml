@@ -256,6 +256,15 @@ jobs:
         # A PR cannot turn "ask" into "allow": Prepare review context
         # deletes opencode.json, opencode.jsonc and .opencode from the
         # checkout, and no review step passes an auto-approve flag.
+        # Every opencode run (model check, free review, paid fallback) also
+        # sets OPENCODE_DISABLE_PROJECT_CONFIG=1, so a file name the sweep
+        # misses is not loaded either. Checked 2026-10-11 on opencode
+        # 2.0.18 from a directory holding an opencode.json with bash
+        # "allow" and a project ghost-reviewer agent with bash "allow":
+        # without the variable the project agent applied and the shell
+        # ran `touch pwned.txt`; with it the global agent applied, the
+        # project files were ignored and no file was created.
+        # OPENCODE_CONFIG_PROJECT_DISABLE behaved the same way.
         run: |
           # The model is selected at run time by the step after Prepare
           # review context, then supplied explicitly with -m to every
@@ -732,7 +741,7 @@ jobs:
             : > "$probe_err"
             probe_status=0
             (cd "$probe_dir" && env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
-              timeout --foreground 60s opencode run \
+              OPENCODE_DISABLE_PROJECT_CONFIG=1 timeout --foreground 60s opencode run \
               --standalone --agent ghost-reviewer -m "$model" --format json \
               'Reply with exactly OK.' > "$probe_out" 2> "$probe_err") || probe_status=$?
 
@@ -878,6 +887,7 @@ jobs:
                 free_timeout=300
               fi
               env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
+                OPENCODE_DISABLE_PROJECT_CONFIG=1 \
                 timeout --foreground "${free_timeout}s" opencode run --standalone \
                 --agent ghost-reviewer -m "$model" --format json \
                 "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || free_status=$?
@@ -1012,7 +1022,8 @@ jobs:
           : > model-stderr.txt
           : > model-validation.err
           paid_status=0
-          timeout --foreground 600s opencode run --standalone \
+          OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+            timeout --foreground 600s opencode run --standalone \
             --agent ghost-reviewer -m "$PAID_MODEL" --format json \
             "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
 
