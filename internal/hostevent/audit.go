@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -176,15 +177,25 @@ func walkArgText(v any) string {
 				parts = append(parts, s)
 			}
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(parts, "\n")
 	case map[string]any:
+		// Sorted by key, so the text is a function of the arguments alone and not of
+		// Go's randomized map iteration. Joined with a newline, which the audit reads
+		// as a sentence boundary: a negation cue binds an id only when both stand in the
+		// same argument, never across two (a content ending "is deprecated" beside a
+		// source_ref that names a memory).
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		parts := make([]string, 0, len(t))
-		for _, e := range t {
-			if s := walkArgText(e); s != "" {
+		for _, k := range keys {
+			if s := walkArgText(t[k]); s != "" {
 				parts = append(parts, s)
 			}
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(parts, "\n")
 	}
 	return ""
 }

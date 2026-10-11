@@ -667,7 +667,7 @@ What this does not fix: the bodies of Edit, Write and Bash tool arguments are st
 token set, which clears the token bar (three shared distinctive words and half of the
 memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
 skipped, a word in a quarter of the session's turns does not count toward a match, and the
-id in a save or update's arguments is not a citation. It is measured by `ghost bench --audit`
+id in the arguments of an update that rewrites a memory's text is not a citation (an update with no text, such as tags-only, is one; so is an id in a save's text or source_ref, since #1010, unless a negation cue is bound to it, in which case it is a denial, as in prose). It is measured by `ghost bench --audit`
 ([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
 labelled offline session (forty memories, twenty of them in the session's own domain, a
 long scripted session of narrative and file bodies with hand-written labels) through
@@ -2083,7 +2083,15 @@ What exists now:
   "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
   current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
   `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
-  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+  blaming an embedder outage for a weak keyword hit, in the other direction. Presence is the exact -1
+  mark and never the sign, in both arms and in every reader of the score: a cosine is in [-1, 1], so
+  one at or below zero was MEASURED and is a very weak match. A block whose every cosine is at or
+  below zero is therefore `weak`/`below_floor` — the arm held a value and judged the rows low — and
+  counting it as "no vector value" would report `no_floor_arm` for a verdict the vector leg had
+  already made. That is the SEAM's rule and Ghost's own leg sits outside it: `*memory.Store` discards
+  every candidate whose cosine is not above 0 before fusion, so a shipped query whose rows matched
+  nothing on meaning still reports `no_floor_arm`, and a `Candidate.VectorScore` there is either the
+  sentinel or a positive cosine. The line and the trace both keep "a threshold" and "a
 threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
   vector leg never ran or ran and failed) or the number, and
 `Floors` carries `VectorArmOn` (what the request configured) beside
@@ -2121,7 +2129,16 @@ and whose vector leg then failed.)
   itself cannot fit, `Run` returns `ErrResponseBudgetExceeded` rather than an
   outcome. A trim also suppresses the window caveat, which would otherwise blame
   the window for a shortfall the byte cap caused and advise raising a limit that
-  only makes the response larger. The window note an incomplete-coverage empty
+  only makes the response larger. Whether cutting can help at all is decided
+  ONCE, on the first over-cap iteration, and against the caller's framing as it
+  stands with every row cut — the longest its own count line can make it. A
+  caller's framing grows with its cuts, so a per-iteration reading of it asked a
+  different question each time: a framing just under the ceiling passed, the cut
+  that followed pushed the framing over it, and the pass stopped over the cap
+  with rows recorded as cut for nothing. Measured at its longest, the same
+  framing answers for every number of cuts.
+
+  The window note an incomplete-coverage empty
   result carries names each knob the request actually set and no other: the item
   limit when one was set, the scope filter when one was set, and the category
   filter when one was set. An unfiltered hybrid search is the shipped default,
@@ -2417,6 +2434,8 @@ Three layers, and the third is about the artifact rather than the packages.
 **In-process tests** call into `internal/...` directly. That is where logic is tested, and it is the overwhelming majority of the tree: the store, the assembler, the consolidation tiers, the migration steps, the hook parsers. `go test ./...` runs them, and they run in CI on every leg.
 
 **Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
+
+**A fixture's rows are stamped, never clocked.** A ranking whose tie-break is `created_at` orders tied rows by which side of a wall-clock second each INSERT landed on, so a fixture that leaves the column to `datetime('now')` is a different fixture on every run — and the insert loop is long enough for the boundary to fall inside it. The bench corpus closed that hole with one stamp per seeding pass (#708), and the session-start fixture closed the same one by deriving every stamp from one fixed instant (#1002). The rule is what makes a guard a contract: two runs of the same fixture have to be the same fixture for any assertion about the second one to mean anything. The companion rule is about the assertion rather than the fixture — where a tie is legitimately broken by `id`, which row a cap cuts is a selection and not a ranking, so a test pins the ORDER it claims rather than the identity of the row it expects to lose.
 
 **End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
 

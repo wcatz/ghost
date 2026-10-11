@@ -95,8 +95,8 @@ func TestAuditCorpusLabelsAreConsistent(t *testing.T) {
 		}
 		mem[m.ID] = m
 	}
-	if len(c.Memories) != 44+9 {
-		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures, four spread memories and nine false-positive cases", len(c.Memories))
+	if len(c.Memories) != 44+11 {
+		t.Fatalf("%d memories, want the forty sentences of the audit's own fixtures, four spread memories and eleven false-positive cases", len(c.Memories))
 	}
 	// A spread memory's words are in no single turn at the token bar: the bench's
 	// point is that the union of turns clears it and no one turn does.
@@ -272,6 +272,11 @@ func TestAuditScorerFlagsWhatItIsGiven(t *testing.T) {
 	}
 }
 
+// TestAuditHeadlinesArePrinted holds both report shapes to their headline lines.
+// The synthetic session has a call before its first turn, so it prints the two
+// domain lines; the real-work corpus has none, so it prints the four corpus-wide
+// figures and neither domain line — a report that printed "0 of 0" for them would
+// be asserting a population it does not have.
 func TestAuditHeadlinesArePrinted(t *testing.T) {
 	out := FormatAudit(auditRun(t))
 	for _, re := range []string{
@@ -279,10 +284,32 @@ func TestAuditHeadlinesArePrinted(t *testing.T) {
 		`(?m)^cited ids caught: \d+ of \d+$`,
 		`(?m)^restatements caught: \d+ of \d+$`,
 		`(?m)^spread across turns, judged used: \d+ of \d+$`,
+		`(?m)^false "used" \(labels expect ignored\): \d+ of \d+$`,
+		`(?m)^token-arm precision: (\d\.\d{3} \(\d+/\d+\)|n/a)$`,
 	} {
 		if !regexp.MustCompile(re).MatchString(out) {
 			t.Errorf("report lacks a line matching %s:\n%s", re, out)
 		}
+	}
+
+	real := FormatAudit(realAuditRun(t))
+	for _, re := range []string{
+		`(?m)^cited ids caught: \d+ of \d+$`,
+		`(?m)^restatements caught: \d+ of \d+$`,
+		`(?m)^false "used" \(labels expect ignored\): \d+ of \d+$`,
+		`(?m)^token-arm precision: (\d\.\d{3} \(\d+/\d+\)|n/a)$`,
+	} {
+		if !regexp.MustCompile(re).MatchString(real) {
+			t.Errorf("real-set report lacks a line matching %s:\n%s", re, real)
+		}
+	}
+	for _, re := range []string{`same-domain used`, `spread across turns`, `of which no turn labels them`} {
+		if regexp.MustCompile(re).MatchString(real) {
+			t.Errorf("real-set report prints the synthetic-only line %s over a domain it has none of:\n%s", re, real)
+		}
+	}
+	if !strings.Contains(real, "hand-labelled real sessions") || !strings.Contains(out, "labelled offline session") {
+		t.Errorf("each report has to name the corpus it measured:\n--- synthetic\n%s\n--- real\n%s", out, real)
 	}
 }
 

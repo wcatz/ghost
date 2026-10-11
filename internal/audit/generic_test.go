@@ -244,24 +244,25 @@ func TestGenericWordsDoNotSoftenAContradiction(t *testing.T) {
 	}
 }
 
-// TestASaveOrUpdateDoesNotCiteWhatItNames: the id in a write tool's arguments is the
-// memory being rewritten. Its words are still read as a restatement.
-func TestASaveOrUpdateDoesNotCiteWhatItNames(t *testing.T) {
+// TestASaveThatNamesAMemoryCitesIt: a save's arguments are a new memory's text, so an
+// id in them names another memory and is a citation (#1010); the save's words are still
+// read as a restatement, and a save with no id is still only that.
+func TestASaveThatNamesAMemoryCitesIt(t *testing.T) {
 	s := newTestSignals(t)
-	s.AddSaveArgs(testMemoryID + " " + memContent)
-	if s.HasID(testMemoryID) {
-		t.Error("an id in a save's arguments was recorded as a citation")
+	s.AddSaveArgs("per " + testMemoryID + " add the anchor rule: never mutate by the shared statement alone")
+	if !s.HasID(testMemoryID) {
+		t.Error("an id in a save's arguments was not recorded as a citation")
 	}
-	v := compareOneAs(t, s, testMemoryID, memContent)
-	if v.Outcome != OutcomeSuperseded {
-		t.Errorf("a save restating the memory judged %s, want superseded", v.Outcome)
+	v := compareOneAs(t, s, testMemoryID, "an unrelated memory about something else entirely")
+	if v.Outcome != OutcomeUsed || v.Signal != SignalIdentifier {
+		t.Errorf("a save naming the memory judged %s/%s, want used/identifier", v.Outcome, v.Signal)
 	}
 
-	// The control: the same id in any other tool call, or in prose, is a citation.
+	// The save's words alone, without the id, are still the superseded bucket.
 	s2 := newTestSignals(t)
-	s2.AddToolArgs("ghost_memory_search --note " + testMemoryID)
-	if !s2.HasID(testMemoryID) {
-		t.Error("an id in an ordinary tool call stopped being a citation")
+	s2.AddSaveArgs(memContent)
+	if v := compareOneAs(t, s2, testMemoryID, memContent); v.Outcome != OutcomeSuperseded {
+		t.Errorf("a save restating the memory judged %s, want superseded", v.Outcome)
 	}
 }
 
@@ -341,5 +342,32 @@ func TestGenericWordsDoNotMakeASupersede(t *testing.T) {
 	}
 	if v := compareOne(t, build(true), memContent); v.Outcome != OutcomeIgnored {
 		t.Errorf("generic words in a save judged %s, want ignored", v.Outcome)
+	}
+}
+
+// TestANegatedIDInASaveIsADenialNotACitation: an id a save names beside a cue it is
+// bound to is the agent saying the memory is wrong, exactly as in prose, so it is
+// contradicted and never used by identifier. The save's words alone never draw a
+// negation arm.
+func TestANegatedIDInASaveIsADenialNotACitation(t *testing.T) {
+	s := newTestSignals(t)
+	s.AddSaveArgs("Memory " + testMemoryID + " is wrong, ignore it; the real rule is that convoys queue by draught")
+	v := compareOneAs(t, s, testMemoryID, "an unrelated memory about something else entirely")
+	if v.Outcome != OutcomeContradicted {
+		t.Errorf("a save denying the memory by id judged %s/%s, want contradicted", v.Outcome, v.Signal)
+	}
+
+	// The same id in prose agrees.
+	p := newTestSignals(t)
+	p.AddProse("Memory " + testMemoryID + " is wrong, ignore it; the real rule is that convoys queue by draught")
+	if v := compareOneAs(t, p, testMemoryID, "an unrelated memory about something else entirely"); v.Outcome != OutcomeContradicted {
+		t.Errorf("prose control judged %s, want contradicted", v.Outcome)
+	}
+
+	// A negation cue in a save that is not bound to the id is not a denial.
+	u := newTestSignals(t)
+	u.AddSaveArgs("Per " + testMemoryID + ", I now ignore the formatting rules")
+	if v := compareOneAs(t, u, testMemoryID, "an unrelated memory about something else entirely"); v.Outcome != OutcomeUsed {
+		t.Errorf("a cited id with an unrelated cue judged %s, want used", v.Outcome)
 	}
 }

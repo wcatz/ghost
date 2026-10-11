@@ -160,11 +160,20 @@ type Budget struct {
 	// least once per dropped row and may be called more than once per drop. The
 	// items slice may be EMPTY (nil) — that is how the caller's framing alone is
 	// measured — so Measure must not assume a row.
+	//
+	// It is also called with a trace holding MORE decisions than this run has
+	// made, one `response_fit` drop per row in the answer: that is the framing
+	// measured as it would stand with every row cut, which is how
+	// FramingCeiling is decided against a framing that does not depend on the
+	// cuts. Such a trace is a COPY; the run's own trace is never handed to
+	// Measure with hypothetical cuts in it, and a caller reading it must treat
+	// the extra decisions as "every row was cut for size" and nothing more.
 	Measure func(items []Item, trace *Trace) int
 	// FramingCeiling, with Measure, is the size at which cutting rows cannot help:
-	// when the framing alone (Measure of no rows) is at or over it, the rows are
-	// kept rather than all cut for nothing. Below it, rows are cut down to none if
-	// that is what it takes to reach MaxBytes. 0 means rows are always cut.
+	// when the framing alone — measured with every row cut, so the answer does not
+	// depend on the cuts — is at or over it, the rows are kept rather than all cut
+	// for nothing. Below it, rows are cut down to none if that is what it takes to
+	// reach MaxBytes. 0 means rows are always cut.
 	FramingCeiling int
 	// KeepPinned makes the response-fit post-pass cut the lowest-ranked UNPINNED
 	// row first, and a pinned row only when none other is left. Without it the
