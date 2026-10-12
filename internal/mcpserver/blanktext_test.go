@@ -39,11 +39,12 @@ var badWriteText = map[string]string{
 // where the save succeeded and the blank text became a row.
 func TestSaveToolsRefuseBlankOrMalformedContent(t *testing.T) {
 	for _, tool := range []struct {
-		name string
-		args map[string]any
+		name     string
+		args     map[string]any
+		projects []string
 	}{
-		{"ghost_memory_save", map[string]any{"project_id": "test-project", "category": "fact"}},
-		{"ghost_save_global", map[string]any{}},
+		{"ghost_memory_save", map[string]any{"project_id": "test-project", "category": "fact"}, []string{"test-project"}},
+		{"ghost_save_global", map[string]any{}, nil},
 	} {
 		for shape, bad := range badWriteText {
 			t.Run(tool.name+"/"+shape, func(t *testing.T) {
@@ -56,7 +57,7 @@ func TestSaveToolsRefuseBlankOrMalformedContent(t *testing.T) {
 				if !strings.Contains(got, "content") {
 					t.Errorf("%s: the refusal does not name the content field: %s", tool.name, got)
 				}
-				assertNoMemory(t, srv)
+				assertNoMemory(t, srv, tool.projects...)
 			})
 		}
 	}
@@ -122,7 +123,7 @@ func TestTitleWritersRefuseBlankOrMalformedTitles(t *testing.T) {
 				if !strings.Contains(got, "title") {
 					t.Errorf("%s: the refusal does not name the title field: %s", tool.name, got)
 				}
-				assertNoTaskAndNoDecision(t, srv)
+				assertNoTaskAndNoDecision(t, srv, "test-project")
 			})
 		}
 	}
@@ -149,7 +150,7 @@ func TestDecisionRecordRefusesBlankOrMalformedDecisionAndRationale(t *testing.T)
 				if !strings.Contains(got, field) {
 					t.Errorf("the refusal does not name the %s field: %s", field, got)
 				}
-				assertNoTaskAndNoDecision(t, srv)
+				assertNoTaskAndNoDecision(t, srv, "test-project")
 			})
 		}
 	}
@@ -182,7 +183,7 @@ func TestMemorySaveRefusesBlankOrOversizedProjectID(t *testing.T) {
 			if projectExists(t, srv, bad) {
 				t.Errorf("a save opened a project under the refused id %q", bad)
 			}
-			assertNoMemory(t, srv)
+			assertNoMemory(t, srv, bad)
 		})
 	}
 }
@@ -207,35 +208,42 @@ func TestProjectIDAtTheCapIsStillAccepted(t *testing.T) {
 	}
 }
 
-// assertNoMemory fails when either the ordinary or the global project holds a
-// memory, which is what a refused content or project_id write must leave behind:
-// nothing.
-func assertNoMemory(t *testing.T, srv *Server) {
+// assertNoMemory fails when a memory exists in any of the named projects or in
+// _global, which is what a refused content or project_id write must leave behind:
+// nothing. The projects are the CALLER's because each tool writes to its own
+// project — "test-project", or the refused id in the identifier test — and a
+// helper pinned to a fixed control id would pass without ever inspecting the
+// project the write would have landed in.
+func assertNoMemory(t *testing.T, srv *Server, projectIDs ...string) {
 	t.Helper()
-	for _, projectID := range []string{"abc123", memory.GlobalProjectID} {
+	for _, projectID := range append(projectIDs, memory.GlobalProjectID) {
 		if n := countProjectMemories(t, srv, projectID); n != 0 {
 			t.Errorf("a refused write stored %d memory(ies) in %s", n, projectID)
 		}
 	}
 }
 
-// assertNoTaskAndNoDecision fails when a refused title produced a task or a
-// decision, which is the write the old `title == ""` check let through.
-func assertNoTaskAndNoDecision(t *testing.T, srv *Server) {
+// assertNoTaskAndNoDecision fails when a refused title, decision or rationale
+// produced a task or a decision in any of the named projects, which is the write
+// the old `== ""` checks let through. The projects are the caller's for the same
+// reason assertNoMemory takes them.
+func assertNoTaskAndNoDecision(t *testing.T, srv *Server, projectIDs ...string) {
 	t.Helper()
-	tasks, err := srv.store.ListTasks(context.Background(), "abc123", "", 10)
-	if err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if len(tasks) != 0 {
-		t.Errorf("a refused title created %d task(s)", len(tasks))
-	}
-	decisions, err := srv.store.ListDecisions(context.Background(), "abc123", "", 10)
-	if err != nil {
-		t.Fatalf("ListDecisions: %v", err)
-	}
-	if len(decisions) != 0 {
-		t.Errorf("a refused title created %d decision(s)", len(decisions))
+	for _, projectID := range projectIDs {
+		tasks, err := srv.store.ListTasks(context.Background(), projectID, "", 10)
+		if err != nil {
+			t.Fatalf("ListTasks(%q): %v", projectID, err)
+		}
+		if len(tasks) != 0 {
+			t.Errorf("a refused write created %d task(s) in %s", len(tasks), projectID)
+		}
+		decisions, err := srv.store.ListDecisions(context.Background(), projectID, "", 10)
+		if err != nil {
+			t.Fatalf("ListDecisions(%q): %v", projectID, err)
+		}
+		if len(decisions) != 0 {
+			t.Errorf("a refused write created %d decision(s) in %s", len(decisions), projectID)
+		}
 	}
 }
 
