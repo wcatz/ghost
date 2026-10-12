@@ -2855,10 +2855,14 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 		if p != nil {
-			priority = *p
-			if priority < 0 || priority > 4 {
-				priority = 2
+			// A priority outside 0-4 is refused rather than reset to the
+			// default: silently demoting a P0 task on a typo loses the
+			// caller's intent, and the schema's CHECK would reject it later
+			// with a raw constraint error.
+			if *p < 0 || *p > 4 {
+				return nil, nil, fmt.Errorf("invalid priority %d — must be between 0 and 4", *p)
 			}
+			priority = *p
 		}
 		id, err := s.store.CreateTask(ctx, args.ProjectID, args.Title, args.Description, priority)
 		if err != nil {
@@ -3680,8 +3684,7 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 		if priority != nil && (*priority < 0 || *priority > 4) {
-			normalized := 2
-			priority = &normalized
+			return nil, nil, fmt.Errorf("invalid priority %d — must be between 0 and 4", *priority)
 		}
 		truncated := false
 		if args.Description != nil {
