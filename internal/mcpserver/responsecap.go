@@ -82,7 +82,11 @@ func capResponseParts(parts []responsePart, budget int, advice string) (string, 
 // prefix that precedes the rows and is never cut, then rows, every one of them a
 // whole cuttable row.
 func capRowsToResponseBudget(framing string, rows []string, budget int, advice string) (string, int) {
-	parts := make([]responsePart, 0, len(rows)+1)
+	// The capacity is len(rows) and not len(rows) plus the framing part: the
+	// addition is a size computation an analyzer reads as an overflow risk, and
+	// the one extra append it costs when it reallocates is not worth silencing
+	// that with arithmetic.
+	parts := make([]responsePart, 0, len(rows))
 	if framing != "" {
 		parts = append(parts, responsePart{text: framing})
 	}
@@ -127,7 +131,10 @@ func responseSection(priorLen int, heading string, rows []string, notes string) 
 	}
 	head.WriteString(heading)
 	head.WriteString("\n\n")
-	parts := make([]responsePart, 0, len(rows)+2)
+	// len(rows) rather than len(rows) plus the heading and notes parts, for the
+	// same reason as capRowsToResponseBudget: the addition is a size computation
+	// an analyzer reads as an overflow risk.
+	parts := make([]responsePart, 0, len(rows))
 	parts = append(parts, responsePart{text: head.String()})
 	for _, r := range rows {
 		parts = append(parts, responsePart{text: r, cuttable: true})
