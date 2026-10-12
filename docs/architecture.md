@@ -301,9 +301,12 @@ costs one comparison, and the order is imposed once at the end over at most
 `limit` rows. The order is total — cosine descending, exact ties broken by the
 memory's creation order (its rowid, older first) — so the answer is a function of
 the stored data alone, rather than of the heap's internals or of the order the
-scan yielded the rows in. A rowid does not move under `VACUUM` or an index
-rebuild. The scan position is only the last resort for equal rowids, which a real
-corpus cannot produce. The unstable `sort.Slice` this replaced promised neither.
+scan yielded the rows in. `memories` has a TEXT primary key, so its rowid is
+SQLite's implicit one and an in-place `VACUUM` may renumber it; Ghost never runs
+one on the live database (backups use `VACUUM INTO`, which writes a new file),
+and a renumbering could only reorder rows inside an exact tie, never change
+which rows are returned. The scan position is only the last resort for equal
+rowids, which a real corpus cannot produce. The unstable `sort.Slice` this replaced promised neither.
 
 The scratch is recycled through a `sync.Pool` on the store, so a steady-state
 search refills buffers it grew last time; an oversized embedding buffer is
