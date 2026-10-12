@@ -310,7 +310,15 @@ rowids, which a real corpus cannot produce. The unstable `sort.Slice` this repla
 
 The scratch is recycled through a `sync.Pool` on the store, so a steady-state
 search refills buffers it grew last time; an oversized embedding buffer is
-dropped on return rather than retained for a query that may not return. What a
+dropped on return rather than retained for a query that may not return. A corpus
+above that cap is therefore regrown from an empty buffer on every search, so the
+copy sizes the embedding buffer in one allocation from the corpus row count
+before it starts (`vectorRows.reserve`) instead of growing it by repeated
+append, which reallocated and copied the whole corpus several times over
+([#1036](https://github.com/wcatz/ghost/issues/1036)). The count names only the
+rows the copy can actually use — the leg's own project narrowing plus the
+loader's identity and width filters — so a small project on a large store, or a
+corpus mid-re-embed, does not reserve bytes for rows the copy skips. What a
 query still allocates is the database driver: `modernc.org/sqlite` copies every
 BLOB and every TEXT column into a fresh Go allocation per row, which is the
 floor for any `database/sql` scan and is the reason the next step was a corpus
@@ -388,8 +396,8 @@ in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
 scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
 Above the bound it is never loaded for the cache — on a miss the row count at the
-query's width is checked first; a hit reads only the counter — and the search is the uncached path exactly as before,
-pooled scratch included. A database without the counter (a schema older than v24
+query's width is checked first; a hit reads only the counter — and the search is the uncached path, whose pooled scratch the copy sizes from the row count before it starts ([#1036](#the-vector-scan)).
+A database without the counter (a schema older than v24
 opened read-only) is "do not cache", not an error.
 
 ### Hybrid fusion and window selection
