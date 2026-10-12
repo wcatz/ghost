@@ -446,6 +446,42 @@ import` refuse a file `ghost export` had just written. An id is a primary key, s
 a shortened one would name a *different row* — a memory under a key the artifact
 never chose, colliding with whatever genuinely holds it.
 
+**Free text is refused at WRITE time when it is blank or malformed.** The tools
+that store free text — `ghost_memory_save`, `ghost_save_global` and
+`ghost_memory_update` for `content`, and `ghost_task_create` and
+`ghost_decision_record` for `title` — refuse a value that is empty or
+whitespace-only, that is not valid UTF-8, or that carries a NUL byte. The old
+check at each site was `value == ""`, which accepted `"   "`, `"\n\t"` and
+`"a\x00b"` and stored them verbatim: a blank memory is a row that answers a
+later search with nothing, and a blank title is a task no listing can name. The
+refusal names the field and never the value, because an invalid-UTF-8 or
+NUL-bearing argument is exactly the caller text this codebase keeps out of its
+answers. A `ghost_memory_update` that is refused leaves the stored content
+byte-identical to what it was — a refused edit is not a partial write. The rule
+is a write-boundary rule and lives beside `validateTags`, not in the import
+predicates: `CheckImportedMemory` and `CheckImportedTask` still accept a
+whitespace-only `content` or `title` from an artifact, because an import is
+another way to reach the same table and must not be the way around a store's
+existing rows.
+
+**A `project_id` is capped at WRITE time, and the cap is a write rule alone.**
+`ensureProjectFor` refuses a `project_id` that is whitespace-only, that is not
+valid UTF-8, that carries a NUL byte, or that exceeds 4096 bytes — the largest
+path a POSIX filesystem can address, and a project id is routinely a filesystem
+path. A value wider than that is not a checkout anyone can open or a project
+anyone can name; it is a payload wearing a project's clothes, and
+`ghost_list_projects` renders the name of every project uncapped, so one
+accepted id turns into megabytes of listing. The cap deliberately does NOT live
+in `memory.CheckImportedProjectID`, which has no length bound ON PURPOSE (#844):
+`ghost export` writes a project id into the artifact and `ghost import` refuses
+a project the predicate refuses, and a refusal there CASCADES — a failed project
+step never records its id, so every memory, task and decision naming it is then
+rejected and a whole project is lost on restore. So the bound is a WRITE rule,
+like `validateTags`'s shape rule: it refuses a NEW project, and the importer
+keeps the bound-free predicate it needs to round-trip a legacy or artifact id.
+The gate at the call site is creation too — an existing project addressed by a
+long recorded path resolves before this is asked.
+
 **A tag is refused at WRITE time, and never costs a record.** All four tools that
 take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
 and `ghost_decision_record` — refuse a tag holding a control character, a backtick

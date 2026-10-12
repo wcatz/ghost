@@ -246,6 +246,22 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		}); err != nil {
 			return "", nil, fmt.Errorf("%w — project_id %s", err, assemble.Token(projectID))
 		}
+		// A blank, malformed or oversized `project_id` never names an existing
+		// project — nothing legitimate is one — so it is refused here, on the arm
+		// that would OPEN one, exactly like the shape and credential guards above
+		// (#1038). "  " used to open a project literally named two spaces, and a
+		// 100000-character id was stored and then rendered by ghost_list_projects
+		// into about 300 KB of answer. The value is never echoed: an invalid-UTF-8
+		// or NUL-bearing argument is caller text an error string must not carry,
+		// and the field name is enough to act on.
+		//
+		// It runs AFTER the guards rather than before them, so the ordering their
+		// comment relies on is untouched: a credential-shaped value is not blank,
+		// NUL-bearing or invalid UTF-8, and one that is ALSO over-long is still
+		// refused by the credential guard first.
+		if err := validateProjectIDArgument(projectID); err != nil {
+			return "", nil, err
+		}
 	}
 
 	pathShaped := strings.ContainsAny(projectID, `/\`)
@@ -1206,6 +1222,14 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	if args.Category != "" && !memory.IsValidCategory(args.Category) {
 		return "", fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 	}
+	// A blank or malformed content is not an omitted field: the no-op check above
+	// read it as a value, so it must be refused before it overwrites real text
+	// with whitespace (#1038).
+	if args.Content != "" {
+		if err := validateRequiredText("content", args.Content); err != nil {
+			return "", err
+		}
+	}
 
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 	if err != nil {
@@ -2113,6 +2137,11 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" || args.Content == "" {
 			return nil, nil, fmt.Errorf("project_id and content are required")
 		}
+		// A value that is not empty is not thereby content: "   ", "\n\t" and
+		// "a\x00b" all pass the check above and were stored verbatim (#1038).
+		if err := validateRequiredText("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		if args.Category == "" {
 			args.Category = "fact"
 		}
@@ -2725,6 +2754,11 @@ func (s *Server) registerTools() {
 		if args.Content == "" {
 			return nil, nil, fmt.Errorf("content is required")
 		}
+		// Same rule as ghost_memory_save: a non-empty blank or malformed value is
+		// not content (#1038).
+		if err := validateRequiredText("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		if args.Category == "" {
 			args.Category = "fact"
 		}
@@ -2837,6 +2871,10 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCreateArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" {
 			return nil, nil, fmt.Errorf("project_id and title are required")
+		}
+		// A title of "   " is not empty and was stored verbatim (#1038).
+		if err := validateRequiredText("title", args.Title); err != nil {
+			return nil, nil, err
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var descTruncated bool
@@ -3124,6 +3162,10 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args decisionRecordArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" || args.Decision == "" || args.Rationale == "" {
 			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
+		}
+		// A title of "   " is not empty and was stored verbatim (#1038).
+		if err := validateRequiredText("title", args.Title); err != nil {
+			return nil, nil, err
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
