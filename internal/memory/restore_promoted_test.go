@@ -82,4 +82,33 @@ func TestRestoreSnapshotSkipsPromotedMemory(t *testing.T) {
 	if got := byID[moveID].ProjectID; got != GlobalProjectID {
 		t.Errorf("promoted memory project = %q, want %q", got, GlobalProjectID)
 	}
+
+	// The history append is the half the issue names second, and it is a
+	// separate read: changedIDs decides which rows the restore records. A
+	// project restore that skipped the promoted row in the UPDATE but still
+	// read it in changedIDs would append a restore-phase event to the global
+	// memory — a changelog entry claiming the project reverted a row it never
+	// touched, recording content the global row never held. The sibling proves
+	// the record still happens for a row the project does own.
+	if n := restorePhaseRows(t, s, moveID); n != 0 {
+		t.Errorf("promoted memory has %d restore-phase history rows, want 0 — changedIDs must not claim a row the project no longer owns", n)
+	}
+	if n := restorePhaseRows(t, s, stayID); n != 1 {
+		t.Errorf("stay memory has %d restore-phase history rows, want 1 — a row the project still owns is recorded", n)
+	}
+}
+
+// restorePhaseRows counts the restore-phase history a memory carries, read from
+// the table rather than through MemoryHistory so a retention cap cannot hide a
+// row the assertion is about.
+func restorePhaseRows(t *testing.T, s *Store, memoryID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = ?`,
+		memoryID, phaseRestore,
+	).Scan(&n); err != nil {
+		t.Fatalf("count restore-phase history for %s: %v", memoryID, err)
+	}
+	return n
 }
