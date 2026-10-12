@@ -146,6 +146,14 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 			out := callToolErr(t, session, "ghost_save_global", map[string]any{"content": "a fact worth keeping", "category": v})
 			assertNoRefusalEcho(t, out, v)
 		})
+		t.Run("unknown project/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_pin", map[string]any{"project_id": v, "memory_id": "m", "pinned": true})
+			if !strings.Contains(out, "not found") {
+				t.Fatalf("did not reach the unknown-project refusal: %.200s", out)
+			}
+			assertNoRefusalEcho(t, out, v)
+		})
 		t.Run("list filters/"+label, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
 			callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})

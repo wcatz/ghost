@@ -253,3 +253,19 @@ func TestRefusalArgWithholdsAnOversizedValueAndTheStoreRefusalsInheritIt(t *test
 		}
 	}
 }
+
+// The project refusals are refusals, so they are bounded too: an ambiguous or
+// unknown 200 KB project operand is not repeated by the store.
+func TestProjectRefusalsAreBounded(t *testing.T) {
+	big := strings.Repeat("z", 200*1024)
+	if msg := ambiguousProject(big, "matches multiple projects").Error(); len(msg) > 1024 || strings.Contains(msg, "zzzz") {
+		t.Errorf("ambiguousProject repeated an oversized operand: %.120s (len %d)", msg, len(msg))
+	}
+	_, err := testStore(t).DeleteProject(context.Background(), big, false)
+	if err == nil {
+		t.Fatal("DeleteProject accepted an unknown project")
+	}
+	if len(err.Error()) > 1024 || strings.Contains(err.Error(), "zzzz") {
+		t.Errorf("DeleteProject repeated an oversized operand: %.120s (len %d)", err, len(err.Error()))
+	}
+}

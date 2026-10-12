@@ -922,7 +922,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		// writable. So the same renderer that holds `ResolveProject`'s refusals
 		// holds this one, for the same reason and at the same cost: the sentence
 		// is returned to the saving agent as a tool answer.
-		return "", false, fmt.Errorf("project reference %s matches multiple projects", ProjectArg("project_id", projectRef))
+		return "", false, fmt.Errorf("project reference %s matches multiple projects", RefusalArg("project_id", projectRef))
 	}
 	var existingRemote, matchedPath string
 	norm := strings.ReplaceAll(projectRef, `\`, "/")
@@ -2010,7 +2010,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		// both callers agree on is the value, not the argument. The MCP boundary
 		// wraps this sentence in `ghost_project_delete: `, which is what tells an
 		// agent which tool refused it and therefore which argument to change.
-		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", ProjectArg(ProjectIdentifierLabel, input))
+		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, input))
 	}
 	if id == "_global" {
 		return DeleteProjectSummary{}, fmt.Errorf("refusing to delete the _global project")
@@ -2425,7 +2425,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // a NormalizeRepoRemote'd remote, which has had its userinfo stripped, so there is
 // no credential left in it to withhold.
 func ambiguousProject(input, reason string) error {
-	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, ProjectArg(ProjectIdentifierLabel, input), reason)
+	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, input), reason)
 }
 
 // basenameCandidate is one projects row that answers to a name.
