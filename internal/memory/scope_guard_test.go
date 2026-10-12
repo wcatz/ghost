@@ -64,7 +64,7 @@ func TestAScopeTokenIsRefusedOnEveryWriter(t *testing.T) {
 		t.Run("create/"+name, func(t *testing.T) {
 			s := testStore(t)
 			_, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "deploy notes", Source: "mcp", Scope: scope})
-			wantScopeRefusal(t, err, tok)
+			_ = wantScopeRefusal(t, err, tok)
 			if n := countAllMemories(t, s); n != 0 {
 				t.Errorf("%d row(s) stored after a refused create", n)
 			}
@@ -75,10 +75,10 @@ func TestAScopeTokenIsRefusedOnEveryWriter(t *testing.T) {
 				t.Fatalf("EnsureProject: %v", err)
 			}
 			pm := PortableMemory{ID: "M1", ProjectID: "p1", Category: "fact", Content: "an artifact's claim", Source: "mcp", Scope: scope}
-			wantScopeRefusal(t, CheckImportedMemory(pm), tok)
+			_ = wantScopeRefusal(t, CheckImportedMemory(pm), tok)
 			for _, apply := range []bool{false, true} {
 				_, _, _, err := s.ImportMemory(ctx, pm, ImportOptions{Apply: apply, TrustProvenance: true})
-				wantScopeRefusal(t, err, tok)
+				_ = wantScopeRefusal(t, err, tok)
 			}
 			if n := countAllMemories(t, s); n != 0 {
 				t.Errorf("%d row(s) stored after a refused import", n)
@@ -105,7 +105,7 @@ func TestARefusedScopeLeavesAStoredRowUnchanged(t *testing.T) {
 	}
 	_, _, _, err = s.UpsertWithOptions(ctx, testProject, "fact", "deploy notes for alpha", "mcp", 0.9, nil,
 		UpsertOptions{Scope: map[string]string{"token": scopeToken()}})
-	wantScopeRefusal(t, err, scopeToken())
+	_ = wantScopeRefusal(t, err, scopeToken())
 	after, err := s.GetByIDs(ctx, []string{id})
 	if err != nil || len(after) != 1 {
 		t.Fatalf("GetByIDs: %v rows=%d", err, len(after))
