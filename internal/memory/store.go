@@ -2918,6 +2918,9 @@ func checkMemoryWrite(m Memory) error {
 	if _, err := boundedAgent(m.Agent); err != nil {
 		return err
 	}
+	if err := checkScope(m.Scope); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -3735,6 +3738,12 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, err
 	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
+	// The scope is caller-supplied text printed outside the data delimiters on
+	// every listing, so it passes the same token guard as the content and is
+	// bounded at write time (scope_guard.go).
+	if err := checkScope(opts.Scope); err != nil {
 		return "", "", 0, err
 	}
 	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {

@@ -2118,7 +2118,7 @@ func (s *Server) registerTools() {
 		// values survive schema validation and are normalized in-handler.
 		Importance any  `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
 		Tags       any  `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
-		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
+		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. At most 16 keys, keys up to 64 bytes and values up to 128 bytes; a token-shaped key or value is refused. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
 		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to guarantee it a slot on every passive context surface (session start, ghost_project_context, the project and global resources) ahead of ranking, unless its validity window has closed or its scope contradicts the session (an as_of reading replays the past and reserves nothing). Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 		validityArgs
 		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session (true of this conversation only \u2014 Ghost derives an expiry, and 'ghost prune' is the only thing that removes one, never automatically), project (the default: persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning, and nothing automatic can rewrite it). Use session for an observation that is about now; use persistent for a decision or rule the user would be annoyed to lose. An unknown value is refused. On a near-duplicate save the tier RAISES the existing row and never lowers it."`
@@ -2171,12 +2171,13 @@ func (s *Server) registerTools() {
 		// confidence is a tool error the caller can act on rather than a row
 		// reading as a claim nobody meant.
 		//
-		// Two refusals come later, from the store, because the checks belong to
-		// the column rather than to this tool: an over-long source_ref and a
-		// credential-shaped one. A first save to an unknown project therefore
+		// Three refusals come later, from the store, because the checks belong to
+		// the column rather than to this tool: an over-long source_ref, a
+		// credential-shaped one, and a scope that is over its bounds or holds a
+		// token (memory.checkScope). A first save to an unknown project therefore
 		// registers the project and then fails, leaving an empty project behind —
 		// the same residue the credential guard has always left on this path, and
-		// no more of it than that, since neither has written a memory.
+		// no more of it than that, since none of them has written a memory.
 		fields, err := resolveWriteFields(args.validityArgs)
 		if err != nil {
 			return nil, nil, err
