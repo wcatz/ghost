@@ -14,7 +14,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
 | Memory | `ghost_memory_flag` | Record that this memory is wrong or stale, with a short reason: an append-only objection that changes nothing by itself — resolve and reflect count it as negative evidence, and the reason stays in the store. Its `session_id` is the transport's only (`provenanceFor`), so under Claude Code a flag records no session while the `retrieval_record` beside it carries a session id whenever one can be named — the host's own under Claude Code, the same id the stop hook's payload carries — so the audit can match the call to the scan that judged it (#922) |
 | Memory | `ghost_memory_pin` | Pin or unpin a memory; a pinned memory is guaranteed a slot on every passive surface (session start, `ghost_project_context`, the project and global resources) ahead of ranking, still subject to validity, scope and resolution, and a block says how many pinned rows it cut when they outnumber the cap; an `as_of` reading replays the past and reserves nothing |
-| Memory | `ghost_memory_promote` | Promote a project memory to `_global` |
+| Memory | `ghost_memory_promote` | Promote a project memory to `_global`; the move carries the memory and its history, and a later project restore leaves the promoted row alone because the project no longer owns it |
 | Memory | `ghost_save_global` | Save a memory that applies to all projects; takes the same `retention` argument |
 | Memory | `ghost_resolve` | Mark resolved evidence after source-matched classification |
 | Memory | `ghost_resolve_mark` | Stamp `resolved_at` on memories you name |
