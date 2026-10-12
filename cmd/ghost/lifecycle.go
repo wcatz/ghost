@@ -1619,7 +1619,7 @@ func runReflect() {
 		// all. The round did not happen; it must not be recorded as having.
 		fmt.Fprintln(os.Stderr, "note: nothing was written this round, so no skip fingerprint is recorded — the next run will reconsider this project")
 	} else if len(preserved) > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were saved during consolidation and preserved; not recording the skip fingerprint so the next run merges them\n", len(preserved))
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) changed or were saved while consolidation ran and were preserved; not recording the skip fingerprint so the next run re-merges them\n", len(preserved))
 	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)
 	} else if err := store.SetReflectInputSignature(ctx, projectID, reflection.InputSignature(consolidatable(postMemories))); err != nil {
