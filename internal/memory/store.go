@@ -1980,15 +1980,15 @@ type DeleteProjectSummary struct {
 // DeleteProject permanently removes a project and everything under it.
 // memories (with their FTS index entries, embeddings, links, and link_scans),
 // tasks, decisions, ghost_state, and memory_snapshots all cascade from the
-// projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log and
-// retrieval_record carry a project_id column but no foreign key to projects, so
-// they're deleted explicitly in the same transaction, by that column.
-// retrieval_audit and memory_flags are reached by MEMORY OWNERSHIP instead: the
-// memory is the fact and the row's own project_id is a name a writer has to keep
-// in step, so the delete follows the memory and leaves a row about a memory that
-// has moved elsewhere alone. memory_snapshot_evidence has no key to follow at
-// all, so it is pruned by the same "snapshot no longer exists" statement the
-// snapshot prune uses.
+// projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log,
+// retrieval_record and retrieval_audit carry a project_id column but no foreign
+// key to projects, so they're deleted explicitly in the same transaction, by
+// that column. memory_flags is reached by MEMORY OWNERSHIP instead: the memory is
+// the fact and the flag's own project_id is a name a writer has to keep in step,
+// so the delete follows the memory and leaves a flag about a memory that has
+// moved elsewhere alone. memory_snapshot_evidence has no key to follow at all, so
+// it is pruned by the same "snapshot no longer exists" statement the snapshot
+// prune uses.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
@@ -2079,16 +2079,18 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
 	}
-	// And the verdicts, by MEMORY OWNERSHIP rather than by their own project_id.
-	// A verdict's ONLY payload is a memory id and a bucket, so it belongs with
-	// the memory it judges; its project_id is a name a writer has to keep in
-	// step, and a store written before a promotion reassigned these holds rows
-	// whose column still names a project the memory has left. Reaching by the
-	// memory leaves those alone — and the predicate's second arm still takes a
-	// verdict whose memory was never stored, which memory_id deliberately does
-	// not forbid.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM retrieval_audit WHERE `+deleteProjectAuditRowsSQL, id, id); err != nil {
+	// And the verdicts, by the CALL they were filed against — which is their own
+	// project_id, because a verdict's project is the project whose retrieval it
+	// judged (`audit.Run` stamps the call's project, and the schema's column
+	// comment says the project is the report's denominator). This is the same
+	// predicate the record delete above uses, and it is deliberately NOT memory
+	// ownership: a verdict is a claim about a call, not about the memory the call
+	// happened to admit, so it belongs with the call. That is also why a
+	// promotion does NOT reassign this column (only memory_flags and
+	// supersede_checked move with the memory): moving it would detach the verdict
+	// from the call its record_rowid still names, and the next audit pass would
+	// re-file it under the call's project anyway.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
 	}
 	// And the flags, by the same ownership rule and for the same reason. Their
@@ -2155,16 +2157,6 @@ type queryRower interface {
 // gone-memory arm to add here.
 const deleteProjectFlagRowsSQL = `memory_id IN (SELECT id FROM memories WHERE project_id = ?)`
 
-// deleteProjectAuditRowsSQL is the same ownership rule for retrieval_audit, with
-// one arm a flag cannot need: an audit's memory_id carries NO foreign key and its
-// writer records a verdict's subject as a bare id, so a row may name a memory
-// that was never stored — or one since purged. Ownership cannot see such a row
-// and it is still this project's to remove, matched by its own project_id, but
-// ONLY while its memory is gone: an audit about a live memory elsewhere is left
-// alone. Two binds of the project id, in the order the two arms read them.
-const deleteProjectAuditRowsSQL = `memory_id IN (SELECT id FROM memories WHERE project_id = ?)` +
-	` OR (project_id = ? AND memory_id NOT IN (SELECT id FROM memories))`
-
 // countProjectRows computes the per-table counts for DeleteProjectSummary.
 // It does not set ProjectID/ProjectName — the caller already has both from
 // ResolveProject and assigns them itself.
@@ -2198,7 +2190,7 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_record: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
-		`SELECT count(*) FROM retrieval_audit WHERE `+deleteProjectAuditRowsSQL, id, id,
+		`SELECT count(*) FROM retrieval_audit WHERE project_id = ?`, id,
 	).Scan(&summary.RetrievalAudits); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_audit: %w", err)
 	}
@@ -5614,6 +5606,15 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	// behind, so that a later DeleteProject of the old project took them from a
 	// memory that had already left it.
 	//
+	// retrieval_audit is deliberately NOT among them. Its project_id is the
+	// project of the retrieval CALL a verdict was filed against — `audit.Run`
+	// stamps the call's project, and the report groups by it — so the verdict
+	// belongs with the call, not with the memory the call admitted. Moving it
+	// would detach the verdict from the call its record_rowid still names and the
+	// next audit pass would re-file it under the call's project anyway, so a
+	// promotion leaves it alone and a project delete takes it with the calls
+	// whose project it records.
+	//
 	//   - memory_flags.project_id carries no foreign key, so nothing cascades it
 	//     and a flag left naming the old project is one the per-project evidence
 	//     read no longer reaches. Keyed by memory_id, the column that names the
@@ -5622,15 +5623,6 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 		`UPDATE memory_flags SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
 	); err != nil {
 		return fmt.Errorf("promote memory flags: %w", err)
-	}
-	//   - retrieval_audit is the same shape and one step sharper: a verdict's
-	//     project is the denominator its report groups by, so a row left behind is
-	//     both misattributed in that report and removed by a delete of the
-	//     project the memory is no longer in.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE retrieval_audit SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
-	); err != nil {
-		return fmt.Errorf("promote retrieval audits: %w", err)
 	}
 	//   - supersede_checked names the memory as one of TWO endpoints and its
 	//     project_id cascades from projects, so a row left naming the old project

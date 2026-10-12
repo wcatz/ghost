@@ -669,10 +669,10 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(projec
 -- flag is a claim somebody made at a time, and overwriting it would destroy the
 -- very disagreement the count is meant to report.
 CREATE TABLE IF NOT EXISTS memory_flags (
-    -- No FK, matching retrieval_audit: DeleteProject does not follow this
-    -- column to find a project's flags — it follows the MEMORY each flag names,
-    -- so it cannot take the flag of a memory that has moved elsewhere — and the
-    -- writer that moves a memory between projects (a merge, or PromoteToGlobal)
+    -- No FK, like retrieval_audit: DeleteProject does not follow this column to
+    -- find a project's flags — it follows the MEMORY each flag names, so it
+    -- cannot take the flag of a memory that has moved elsewhere — and the writer
+    -- that moves a memory between projects (a merge, or PromoteToGlobal)
     -- reassigns this column.
     project_id   TEXT NOT NULL,
     -- On delete CASCADE, so a memory that goes takes its flags with it in the
