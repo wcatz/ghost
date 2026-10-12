@@ -1814,6 +1814,69 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 			return fmt.Errorf("merge reassign: %w", err)
 		}
 	}
+
+	// Merge ghost_state: survivor keeps larger interaction count, newer reflection
+	// timestamp with its matching summary/signature, and fills empty fields from
+	// outgoing when appropriate.
+	type gs struct {
+		interactionCount  int
+		learnedContext    string
+		lastReflectionAt  sql.NullString
+		reflectionSummary string
+		reflectInputSig   string
+		updatedAt         sql.NullString
+	}
+	var surv gs
+	var oldg gs
+	err := tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,''), updated_at FROM ghost_state WHERE project_id = ?`, newID).Scan(&surv.interactionCount, &surv.learnedContext, &surv.lastReflectionAt, &surv.reflectionSummary, &surv.reflectInputSig, &surv.updatedAt)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("merge read survivor ghost_state: %w", err)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,''), updated_at FROM ghost_state WHERE project_id = ?`, oldID).Scan(&oldg.interactionCount, &oldg.learnedContext, &oldg.lastReflectionAt, &oldg.reflectionSummary, &oldg.reflectInputSig, &oldg.updatedAt)
+	if err == nil {
+		// Merge: keep larger interaction count.
+		if oldg.interactionCount > surv.interactionCount {
+			surv.interactionCount = oldg.interactionCount
+		}
+		// Fill empty learned context from outgoing if survivor is empty.
+		if surv.learnedContext == "" && oldg.learnedContext != "" {
+			surv.learnedContext = oldg.learnedContext
+		}
+		// Reflection timestamp: keep newer; if old is newer, take its summary/sig.
+		if oldg.lastReflectionAt.Valid && !surv.lastReflectionAt.Valid {
+			surv.lastReflectionAt = oldg.lastReflectionAt
+			surv.reflectionSummary = oldg.reflectionSummary
+			surv.reflectInputSig = oldg.reflectInputSig
+		} else if oldg.lastReflectionAt.Valid && surv.lastReflectionAt.Valid {
+			if oldg.lastReflectionAt.String > surv.lastReflectionAt.String {
+				surv.lastReflectionAt = oldg.lastReflectionAt
+				surv.reflectionSummary = oldg.reflectionSummary
+				surv.reflectInputSig = oldg.reflectInputSig
+			}
+		}
+		// If no timestamps set, don't override summary/sig from old unless survivor empty.
+		if !surv.lastReflectionAt.Valid && !oldg.lastReflectionAt.Valid {
+			if surv.reflectionSummary == "" && oldg.reflectionSummary != "" {
+				surv.reflectionSummary = oldg.reflectionSummary
+			}
+			if surv.reflectInputSig == "" && oldg.reflectInputSig != "" {
+				surv.reflectInputSig = oldg.reflectInputSig
+			}
+		}
+		// If old has no reflection timestamp but has summary/sig and survivor also has none,
+		// only fill empties as above - but keep them consistent only if we took old's timestamp.
+		// Also handle case where old has newer reflection data? The spec says "keep the newer
+		// reflection timestamp with its matching summary and input signature" - so timestamp is the key.
+		if _, err := tx.ExecContext(ctx, `UPDATE ghost_state SET interaction_count=?, learned_context=?, last_reflection_at=?, reflection_summary=?, reflect_input_sig=?, updated_at=datetime('now') WHERE project_id=?`,
+			surv.interactionCount, surv.learnedContext, surv.lastReflectionAt, surv.reflectionSummary, surv.reflectInputSig, newID); err != nil {
+			return fmt.Errorf("merge update survivor ghost_state: %w", err)
+		}
+	} else if err == sql.ErrNoRows {
+		// Old has no ghost_state; nothing to merge.
+	} else {
+		return fmt.Errorf("merge read old ghost_state: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
@@ -1938,7 +2001,56 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		}
 	}
 
-	// Delete old project's ghost_state (newID already has its own).
+	// Merge ghost_state before deleting old row (same logic as free function).
+	type gs struct {
+		interactionCount  int
+		learnedContext    string
+		lastReflectionAt  sql.NullString
+		reflectionSummary string
+		reflectInputSig   string
+		updatedAt         sql.NullString
+	}
+	var surv gs
+	var oldg gs
+	err := tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,''), updated_at FROM ghost_state WHERE project_id = ?`, newID).Scan(&surv.interactionCount, &surv.learnedContext, &surv.lastReflectionAt, &surv.reflectionSummary, &surv.reflectInputSig, &surv.updatedAt)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("merge read survivor ghost_state: %w", err)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,''), updated_at FROM ghost_state WHERE project_id = ?`, oldID).Scan(&oldg.interactionCount, &oldg.learnedContext, &oldg.lastReflectionAt, &oldg.reflectionSummary, &oldg.reflectInputSig, &oldg.updatedAt)
+	if err == nil {
+		if oldg.interactionCount > surv.interactionCount {
+			surv.interactionCount = oldg.interactionCount
+		}
+		if surv.learnedContext == "" && oldg.learnedContext != "" {
+			surv.learnedContext = oldg.learnedContext
+		}
+		if oldg.lastReflectionAt.Valid && !surv.lastReflectionAt.Valid {
+			surv.lastReflectionAt = oldg.lastReflectionAt
+			surv.reflectionSummary = oldg.reflectionSummary
+			surv.reflectInputSig = oldg.reflectInputSig
+		} else if oldg.lastReflectionAt.Valid && surv.lastReflectionAt.Valid {
+			if oldg.lastReflectionAt.String > surv.lastReflectionAt.String {
+				surv.lastReflectionAt = oldg.lastReflectionAt
+				surv.reflectionSummary = oldg.reflectionSummary
+				surv.reflectInputSig = oldg.reflectInputSig
+			}
+		}
+		if !surv.lastReflectionAt.Valid && !oldg.lastReflectionAt.Valid {
+			if surv.reflectionSummary == "" && oldg.reflectionSummary != "" {
+				surv.reflectionSummary = oldg.reflectionSummary
+			}
+			if surv.reflectInputSig == "" && oldg.reflectInputSig != "" {
+				surv.reflectInputSig = oldg.reflectInputSig
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ghost_state SET interaction_count=?, learned_context=?, last_reflection_at=?, reflection_summary=?, reflect_input_sig=?, updated_at=datetime('now') WHERE project_id=?`,
+			surv.interactionCount, surv.learnedContext, surv.lastReflectionAt, surv.reflectionSummary, surv.reflectInputSig, newID); err != nil {
+			return fmt.Errorf("merge update survivor ghost_state: %w", err)
+		}
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("merge read old ghost_state: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
