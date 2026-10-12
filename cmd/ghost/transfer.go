@@ -800,7 +800,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			// A scope over its bound is not fixed by a different id either. No tool
 			// edits a stored scope, so the repair is the delete-and-save the sentence
 			// already names, with the scope kept inside the bounds this time.
-			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes; the id is not the problem)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
+			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		}
 		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
 			return err
