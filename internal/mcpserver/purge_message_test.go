@@ -25,6 +25,9 @@ func TestPurgeErasedTextReportsWhatTheCheckpointReached(t *testing.T) {
 		if strings.Contains(got, "could not be truncated") {
 			t.Errorf("a complete checkpoint is reported as incomplete:\n%s", got)
 		}
+		if strings.Index(got, lead) > strings.Index(got, "write-ahead log has been truncated") {
+			t.Errorf("the complete qualifier does not follow the lead:\n%s", got)
+		}
 		assertPurgeCaveat(t, got)
 	})
 
@@ -38,6 +41,11 @@ func TestPurgeErasedTextReportsWhatTheCheckpointReached(t *testing.T) {
 		}
 		if strings.Contains(got, "has been truncated") {
 			t.Errorf("an incomplete checkpoint is reported as truncated:\n%s", got)
+		}
+		// The limited claim comes FIRST, so the lead's account of what was
+		// removed is not read as unconditional.
+		if strings.Index(got, "could not be truncated") > strings.Index(got, lead) {
+			t.Errorf("the incomplete qualifier does not precede the lead:\n%s", got)
 		}
 		assertPurgeCaveat(t, got)
 	})

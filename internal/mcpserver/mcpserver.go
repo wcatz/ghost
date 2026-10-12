@@ -1840,28 +1840,29 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
-			fmt.Sprintf("Memory %s was already deleted; purged the %d recorded version(s) of its text, "+
-				"the reflection snapshot holding it, and the pages this purge freed. "+
-				"The memory itself is not restored.",
+			fmt.Sprintf("Memory %s was already deleted; its %d recorded version(s) of text and the "+
+				"reflection snapshot holding it were removed. The memory itself is not restored.",
 				memoryID, outcome.Rows), outcome)}},
 	}, nil, nil
 }
 
 // purgeErasedText is the sentence a purge reports after the lead the caller
 // already wrote. It says what the store confirmed about the file and what it
-// could not reach, and it never claims more than the outcome shows: an
-// incomplete checkpoint is reported as the text still sitting in the
-// write-ahead log, and the older-build free-space copy is named as out of reach
-// with `ghost backup` as the way to a clean copy.
+// could not reach, and it never claims more than the outcome shows: when the
+// checkpoint could not truncate the log the qualifier comes FIRST, before the
+// lead's account of what was removed, so the limited claim is not read as an
+// unconditional one; and the older-build free-space copy is named as out of
+// reach with `ghost backup` as the way to a clean copy.
 func purgeErasedText(lead string, outcome memory.PurgeOutcome) string {
 	var b strings.Builder
+	if !outcome.CheckpointComplete {
+		b.WriteString("Other Ghost readers held the store, so the write-ahead log could not be truncated: " +
+			"this memory's text stays in it until they close and a later purge or checkpoint completes. ")
+	}
 	b.WriteString(lead)
 	b.WriteString(" ")
 	if outcome.CheckpointComplete {
 		b.WriteString("The write-ahead log has been truncated, so no copy this purge's writes left remains in it. ")
-	} else {
-		b.WriteString("Other Ghost readers held the store, so the write-ahead log could not be truncated: " +
-			"this memory's text stays in it until they close and a later purge or checkpoint completes. ")
 	}
 	b.WriteString("Text an older Ghost version, one running without secure delete, already freed into the " +
 		"file's free space, a copy in a backup taken before this, or another machine's store, is out of " +
@@ -2626,9 +2627,8 @@ func (s *Server) registerTools() {
 				s.notifyProjectResource(ctx, resolvedProjectID, "context")
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
-						fmt.Sprintf("Memory %s was deleted, and every version of its text this database "+
-							"recorded is gone: its recorded history, the reflection snapshot that could "+
-							"have restored the row, and the pages this purge freed.", args.MemoryID), outcome)}},
+						fmt.Sprintf("Memory %s was deleted, and its recorded history and any reflection "+
+							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
 				}, nil, nil
 			}
 			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
@@ -2637,12 +2637,11 @@ func (s *Server) registerTools() {
 			s.notifyProjectResource(ctx, resolvedProjectID, "context")
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-					"Memory %s was deleted, and every version of its text this database recorded is gone: "+
-						"its recorded history, the reflection snapshot that could have restored the row, and "+
-						"the pages this purge freed. This store does not report whether the write-ahead log "+
-						"was truncated, so treat the text as possibly still in it until a later checkpoint; "+
-						"text an older Ghost version already freed into the file's free space, a copy in a "+
-						"backup taken before this, or another machine's store, is out of reach.",
+					"This store does not report whether the write-ahead log was truncated, so treat the "+
+						"text as possibly still in it until a later checkpoint. Memory %s was deleted, and its "+
+						"recorded history and any reflection snapshot that could have restored the row were "+
+						"removed. Text an older Ghost version already freed into the file's free space, a copy "+
+						"in a backup taken before this, or another machine's store, is out of reach.",
 					args.MemoryID)}},
 			}, nil, nil
 		}

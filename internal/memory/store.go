@@ -5240,11 +5240,10 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 		return out, err
 	}
 	if opts.PurgeHistory {
-		complete, err := s.checkpointAfterPurge(ctx)
-		out.CheckpointComplete = complete
-		if err != nil {
-			return out, err
-		}
+		// The delete has committed, so the checkpoint can only add a warning
+		// about the file: an incomplete one is reported through the outcome, and
+		// it is never returned as an error for a row that is already gone.
+		out.CheckpointComplete = s.checkpointAfterPurgeUncancelled(ctx)
 	}
 	return out, nil
 }

@@ -800,6 +800,29 @@ func (s *Store) checkpointAfterPurge(ctx context.Context) (bool, error) {
 	return busy == 0 && walFrames == folded, nil
 }
 
+// checkpointAfterPurgeUncancelled runs the post-commit checkpoint and reports
+// whether it finished, and it never returns an error.
+//
+// The purge has already committed by the time this runs, so a checkpoint that
+// cannot finish is a warning about the file, not a failure of the delete: the
+// caller must not tell the operator "delete failed" about a row that is gone.
+// A real SQL error is logged and folded into the outcome as CheckpointComplete
+// false, the same report a held reader produces.
+//
+// The context is stripped of cancellation because the busy wait is not
+// interruptible: SQLite's busy handler runs to its timeout whatever the context
+// says, so an expiring deadline would only make the driver surface an error
+// after the wait has already happened — turning a slow truncation into a
+// reported failure of a delete that already occurred.
+func (s *Store) checkpointAfterPurgeUncancelled(ctx context.Context) bool {
+	complete, err := s.checkpointAfterPurge(context.WithoutCancel(ctx))
+	if err != nil {
+		s.logger.Warn("checkpoint after a purge did not run; the delete has committed", "error", err)
+		return false
+	}
+	return complete
+}
+
 // purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
 // rather than an empty string so a reader can tell "this fold discarded text that
 // has since been purged" from "this fold discarded nothing", which an empty
@@ -849,11 +872,9 @@ func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeO
 	if err := tx.Commit(); err != nil {
 		return PurgeOutcome{}, fmt.Errorf("commit purge history: %w", err)
 	}
-	complete, err := s.checkpointAfterPurge(ctx)
-	if err != nil {
-		return PurgeOutcome{Rows: n}, err
-	}
-	return PurgeOutcome{Rows: n, CheckpointComplete: complete}, nil
+	// From here the purge has committed: the checkpoint can only add a warning
+	// about the file, never a failure of a delete that already happened.
+	return PurgeOutcome{Rows: n, CheckpointComplete: s.checkpointAfterPurgeUncancelled(ctx)}, nil
 }
 
 // linkSuccessorTx records, on the delete row of a memory a consolidation
