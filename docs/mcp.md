@@ -459,7 +459,10 @@ export paths carry a tag byte for byte, a store's existing tags round-trip
 unchanged, and the renderer above is what makes an old one safe to read. An
 over-long tag is trimmed on a rune boundary rather than refused, and a tag over 64
 bytes is stored as the first 64 — a shortened *label* is a different label, not a
-different row, which is the whole difference from an id.
+different row, which is the whole difference from an id. A list longer than ten
+tags is refused rather than cut, because a silent cut leaves a label unaccounted
+for behind a success answer and the count is a number the caller can act on
+(#1041).
 
 **A decision's tags are the same rule, and the same reason.** `ghost_decision_record`
 is the only tool that writes a decision's tag list, so a decision's tags are

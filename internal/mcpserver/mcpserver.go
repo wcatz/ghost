@@ -627,18 +627,25 @@ func shortID(id string) string {
 // description that tells an agent the limit, and the test that pins the cut.
 const tagMaxLen = 64
 
-// tagMaxCount is how many tags one row may carry. The excess is DROPPED rather
-// than refused, and that is the shipped behaviour this keeps: a caller passing
-// twelve labels has made a mistake about how many it needs, not a mistake about
-// what a label may be, and the eleventh is a worse answer than the first ten.
+// tagMaxCount is how many tags one row may carry. A list longer than this is
+// REFUSED rather than cut, and that is the behaviour #1041 asks for: a caller
+// passing twelve labels has asked for more slots than the row has, and silently
+// keeping ten answers a question the caller did not ask — the eleventh label
+// vanishes and the answer still reads as a success. The count is a number the
+// caller can act on, so it is named with the number to drop. The LENGTH is the
+// other half and stays a trim: a shortened label is a different spelling of the
+// label the caller meant, not a request that cannot be met.
 const tagMaxCount = 10
 
 // validateTags bounds a tag list and refuses the characters that could end the
 // line it is printed on.
 //
-// It returns an error because the two halves are different in kind and only one of
-// them is a number: a count and a length are trimmed, silently and harmlessly,
-// while a control character, a backtick or a `«»` is a refusal. A tag list is
+// It returns an error for two different refusals and trims exactly one thing. A
+// list longer than tagMaxCount is refused, because the count is a number the
+// caller can act on and a silent cut leaves a label unaccounted for behind a
+// success sentence; a tag longer than tagMaxLen is TRIMMED, silently and
+// harmlessly, because a shortened label is still the label the caller meant; and
+// a control character, a backtick or a `«»` is a refusal. A tag list is
 // printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
 // the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
 // pairs into a markdown code span that swallows the rest of the row, and a «
@@ -667,7 +674,14 @@ const tagMaxCount = 10
 // because it is a character this error string must never contain.
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
-		tags = tags[:tagMaxCount]
+		// Refused, not cut (#1041). The excess used to be sliced away and the
+		// caller told nothing, so a twelve-tag save answered as a success with
+		// two labels silently missing. The count is reported with the number to
+		// drop, because it is a request the caller can fix; the LIST is not
+		// returned, so a caller cannot mistake a partial result for a validated
+		// one.
+		return nil, fmt.Errorf("tag list has %d entries — at most %d tags are allowed; drop %d and call again",
+			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
 		if len(t) > tagMaxLen {
@@ -721,6 +735,39 @@ func unsafeTagRune(t string) string {
 		}
 	}
 	return ""
+}
+
+// invalidCategory is the refusal every tool that accepts a category returns for a
+// value outside memory's eight canonical categories. It exists so the four tools
+// name one list in one order rather than each holding a copy: the order is the
+// store's schema order, which `memory.categoryList` writes out for the same
+// reason. Three writers (save, save_global, update) already refused a category;
+// `ghost_memories_list` did not, so a misspelt category there was either handed
+// to the store as a raw `list failed:` or — on a project Ghost has never heard
+// of — never reached the store at all and was answered as "not registered",
+// naming the project rather than the argument that was wrong (#1041).
+func invalidCategory(category string) error {
+	return fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", category)
+}
+
+// taskStatusValues is the one list of task statuses, in the order the refusal
+// names them: pending, active, blocked, done. The order is pinned by
+// TestGhostTaskUpdate_RejectsInvalidStatus. Both the update tool and the list tool
+// validate against it, so a status is refused with the allowed list in one place;
+// `ghost_task_list` used to pass the raw value to the store, whose `WHERE status
+// = ?` simply matched nothing and answered "No tasks found." for a misspelt
+// status (#1041).
+var taskStatusValues = []string{"pending", "active", "blocked", "done"}
+
+// taskStatusError returns the refusal for a status outside taskStatusValues, and
+// nil for one inside it.
+func taskStatusError(status string) error {
+	for _, v := range taskStatusValues {
+		if status == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid status %q — must be one of: %s", status, strings.Join(taskStatusValues, ", "))
 }
 
 // defaultImportance returns the importance value, defaulting to fallback when nil.
@@ -1204,7 +1251,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("nothing to update — pass at least one of content, category, importance, tags, valid_from, valid_until, verified_at, verified, confidence, source_ref")
 	}
 	if args.Category != "" && !memory.IsValidCategory(args.Category) {
-		return "", fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		return "", invalidCategory(args.Category)
 	}
 
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
@@ -2117,7 +2164,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+			return nil, nil, invalidCategory(args.Category)
 		}
 		// The vocabulary, the default and the refusal are the store's, so the tool
 		// and the writer it calls cannot spell the three tiers differently.
@@ -2464,6 +2511,15 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
+		// The category is judged before the project is resolved, so a misspelt
+		// category is refused as the argument it is. Asked after the resolve, an
+		// unresolved project short-circuits to the not-registered sentence and the
+		// category is never examined — and a resolved one was handed to the store,
+		// whose own refusal reaches the caller wrapped in `list failed:`. Either
+		// way the caller was told about the project rather than the typo (#1041).
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
 		// The RAW name is kept, because `ResolveProject` answers an unknown name
 		// with `("", "", nil)` and the message below formats what it is given:
 		// assigning the resolved id over `args.ProjectID` and then formatting that
@@ -2729,7 +2785,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+			return nil, nil, invalidCategory(args.Category)
 		}
 		retention, err := memory.NormalizeRetention(args.Retention)
 		if err != nil {
@@ -3035,6 +3091,15 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
 		}
+		// The status is judged before the project is resolved, so a misspelt one is
+		// refused as the argument it is rather than passed to `ListTasks`, whose
+		// `WHERE status = ?` matches nothing and answers "No tasks found." — the
+		// same sentence a genuinely empty project gets (#1041).
+		if args.Status != "" {
+			if err := taskStatusError(args.Status); err != nil {
+				return nil, nil, err
+			}
+		}
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -3191,12 +3256,26 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
+		supersedeFailed := false
 		if args.Supersedes != "" {
 			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
 			if err != nil {
-				// The new decision is already committed; report the
-				// supersession failure without losing that ID.
-				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
+				// The new decision is committed and the old one is NOT marked.
+				// That is a partial failure — the caller asked for one write and
+				// got another — so it is reported as an ERROR result rather than
+				// a warning on a success, which is what it used to be: a caller
+				// checking only `isError` read "Decision recorded" and believed
+				// the reversal had landed (#1041).
+				//
+				// A plain Go error is the other wrong answer: it would drop the
+				// content, and the content is the one place the committed
+				// decision_id and memory_id live. Returning the result with
+				// IsError set keeps both ids, tells the caller the new decision
+				// stands, and names the old id through `assemble.Token` so a
+				// hostile id cannot forge a line in this sentence.
+				supersedeFailed = true
+				supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
+					assemble.Token(args.Supersedes), err)
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {
@@ -3241,6 +3320,7 @@ func (s *Server) registerTools() {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+			IsError: supersedeFailed,
 		}, nil, nil
 	})
 
@@ -3666,11 +3746,8 @@ func (s *Server) registerTools() {
 
 		var status *string
 		if args.Status != "" {
-			validStatuses := map[string]bool{
-				"pending": true, "active": true, "blocked": true, "done": true,
-			}
-			if !validStatuses[args.Status] {
-				return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
+			if err := taskStatusError(args.Status); err != nil {
+				return nil, nil, err
 			}
 			status = &args.Status
 		}
