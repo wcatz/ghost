@@ -551,6 +551,8 @@ func TestTheCredentialAdviceCoversEveryGuardedField(t *testing.T) {
 		"memory/agent":          withCred(okMem, func(m *memory.PortableMemory) { m.Agent = "ops-" + cred }),
 		"memory/session_id":     withCred(okMem, func(m *memory.PortableMemory) { m.SessionID = "ses-" + cred }),
 		"memory/tags":           withCred(okMem, func(m *memory.PortableMemory) { m.Tags = []string{cred} }),
+		"memory/scope_value":    withCred(okMem, func(m *memory.PortableMemory) { m.Scope = map[string]string{"token": cred} }),
+		"memory/scope_key":      withCred(okMem, func(m *memory.PortableMemory) { m.Scope = map[string]string{cred: "production"} }),
 		"task/title":            withCredTask(okTask, func(tk *memory.Task) { tk.Title = "t " + cred }),
 		"task/description":      withCredTask(okTask, func(tk *memory.Task) { tk.Description = "d " + cred }),
 		"task/notes":            withCredTask(okTask, func(tk *memory.Task) { tk.Notes = "n " + cred }),

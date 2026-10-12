@@ -881,6 +881,10 @@ var secretUnfixableRoutes = []string{
 	// edit of a field, so it is named as what it is.
 	"a memory's evidence agent, session_id and source_ref — no tool writes an evidence row; they are appended by a save, an import and a reflect, and the only surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field",
 
+	// A memory's scope keys and values (reported as scope_key and scope). Written
+	// at save and by no update: ghost_memory_update takes no scope.
+	"a memory's scope keys and values (scope_key and scope) — written when the memory is saved; `ghost_memory_update` takes no scope, so the only routes are to delete the memory with ghost_memory_delete and save it again with a clean scope, or to edit the row's scope in the database directly",
+
 	// A task's title. Written at insert and by no update.
 	"a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly",
 
