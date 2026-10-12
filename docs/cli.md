@@ -197,7 +197,7 @@ ghost reflect myproject --apply
 |---|---|
 | `--tier auto\|cli\|opencode\|sqlite` | Select the consolidation backend. `auto` is the default and routes to the calling harness when available. |
 | `--apply` | Save the consolidated result. |
-| `--restore` | Restore the most recent consolidation snapshot. |
+| `--restore` | Restore the most recent consolidation snapshot. Only the rows the project still holds are reverted: a memory promoted to `_global` after the snapshot is left alone, because the project no longer owns it. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
 | `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag an input memory no surviving memory explains is re-added verbatim instead of deleted. **Nothing is exempt**: an explicit `obsolete` drop, a rewrite, and a `superseded by <id>` drop are all audited the same way, and a row the model disposed of comes back unless a single output memory carries at least 45% of its tokens. A merge source is audited against the text of its OWN merge, not the whole result. A memory the harness simply never named is carried through unchanged, so a rewrite is not a free change of wording — its replacement has to carry the memory's substance, or the old row survives beside it until a later `ghost resolve` or `ghost supersede` demotes it. The cost of that is a possible duplicate; the alternative is a silent deletion with nobody watching. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
