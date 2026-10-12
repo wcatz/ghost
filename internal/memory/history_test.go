@@ -1523,8 +1523,8 @@ func TestImportRefusesAnIDThatStillHasHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PurgeMemoryHistory: %v", err)
 	}
-	if purged != int64(len(entries)) {
-		t.Errorf("purged %d rows, want the %d it had", purged, len(entries))
+	if purged.Rows != int64(len(entries)) {
+		t.Errorf("purged %d rows, want the %d it had", purged.Rows, len(entries))
 	}
 	after, err := s.MemoryHistory(ctx, id, 0)
 	if err != nil {

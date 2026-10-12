@@ -501,7 +501,8 @@ type markCapableStore interface {
 // erases the text without inventing a row to erase.
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
-	PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error)
+	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // asOfCapableStore narrows provider.MemoryStore to the historical read
@@ -1832,19 +1833,40 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	if entries[0].ProjectID != resolvedProjectID {
 		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.ProjectArg("project_id", requestedProjectID))
 	}
-	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
+	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("purge failed: %w", err)
 	}
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-			"Memory %s was already deleted; purged the %d recorded version(s) of its text, the "+
-				"reflection snapshot holding it, and the text's own bytes in the database file. "+
-				"The memory itself is not restored, and a copy in a backup taken before this is "+
-				"not something this can reach.",
-			memoryID, purged)}},
+		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
+			fmt.Sprintf("Memory %s was already deleted; purged the %d recorded version(s) of its text, "+
+				"the reflection snapshot holding it, and the pages this purge freed. "+
+				"The memory itself is not restored.",
+				memoryID, outcome.Rows), outcome)}},
 	}, nil, nil
+}
+
+// purgeErasedText is the sentence a purge reports after the lead the caller
+// already wrote. It says what the store confirmed about the file and what it
+// could not reach, and it never claims more than the outcome shows: an
+// incomplete checkpoint is reported as the text still sitting in the
+// write-ahead log, and the older-build free-space copy is named as out of reach
+// with `ghost backup` as the way to a clean copy.
+func purgeErasedText(lead string, outcome memory.PurgeOutcome) string {
+	var b strings.Builder
+	b.WriteString(lead)
+	b.WriteString(" ")
+	if outcome.CheckpointComplete {
+		b.WriteString("The write-ahead log has been truncated, so no copy this purge's writes left remains in it. ")
+	} else {
+		b.WriteString("Other Ghost readers held the store, so the write-ahead log could not be truncated: " +
+			"this memory's text stays in it until they close and a later purge or checkpoint completes. ")
+	}
+	b.WriteString("Text an older Ghost version, one running without secure delete, already freed into the " +
+		"file's free space, a copy in a backup taken before this, or another machine's store, is out of " +
+		"reach; `ghost backup` writes a clean copy without it.")
+	return b.String()
 }
 
 // maxHealthPinnedContradictions bounds how many pinned-contradiction entries
@@ -2590,22 +2612,45 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
 		}
 
-		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
-			PurgeHistory: args.PurgeHistory,
-		}); err != nil {
+		if args.PurgeHistory {
+			// The purge's report is about the file, not only the rows, so a store
+			// that can return how far it got is asked for that; one that cannot
+			// still purges and simply says less, rather than failing a redaction
+			// that would have worked.
+			if hs, ok := s.store.(historyCapableStore); ok {
+				outcome, err := hs.DeletePurge(ctx, args.MemoryID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("delete failed: %w", err)
+				}
+				s.notifyProjectResource(ctx, resolvedProjectID, "context")
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
+						fmt.Sprintf("Memory %s was deleted, and every version of its text this database "+
+							"recorded is gone: its recorded history, the reflection snapshot that could "+
+							"have restored the row, and the pages this purge freed.", args.MemoryID), outcome)}},
+				}, nil, nil
+			}
+			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+				return nil, nil, fmt.Errorf("delete failed: %w", err)
+			}
+			s.notifyProjectResource(ctx, resolvedProjectID, "context")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+					"Memory %s was deleted, and every version of its text this database recorded is gone: "+
+						"its recorded history, the reflection snapshot that could have restored the row, and "+
+						"the pages this purge freed. This store does not report whether the write-ahead log "+
+						"was truncated, so treat the text as possibly still in it until a later checkpoint; "+
+						"text an older Ghost version already freed into the file's free space, a copy in a "+
+						"backup taken before this, or another machine's store, is out of reach.",
+					args.MemoryID)}},
+			}, nil, nil
+		}
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
-
-		text := "Memory deleted."
-		if args.PurgeHistory {
-			text = "Memory deleted, and every version of its text this database recorded is gone: " +
-				"its recorded history, the reflection snapshot that could have restored the row, and " +
-				"the text's own bytes in the database file. A copy in a backup taken before this, or " +
-				"in another machine's store, is not something this can reach."
-		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: text}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
 		}, nil, nil
 	})
 

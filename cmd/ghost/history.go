@@ -643,23 +643,36 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 	switch {
 	case len(live) > 0:
 		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", assemble.Token(memoryID), len(entries))
-		if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+		outcome, err := s.DeletePurge(ctx, memoryID)
+		if err != nil {
 			return err
 		}
+		printPurgeReport(os.Stdout, outcome)
 	default:
 		// Already deleted. The row is not coming back and nothing asked for it to.
 		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
-		if _, err := s.PurgeMemoryHistory(ctx, memoryID); err != nil {
+		outcome, err := s.PurgeMemoryHistory(ctx, memoryID)
+		if err != nil {
 			return err
 		}
+		printPurgeReport(os.Stdout, outcome)
 	}
-	// Accurate about what the transaction covers: the row, its history, the
-	// snapshots that could restore it, and the text's own bytes in this file all
-	// go. What no purge can reach is a copy outside this database — an earlier
-	// backup, another machine's store — or a text quoted into something that was
-	// never Ghost's memory.
-	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone, and the text has been erased from the database file.")
 	return nil
+}
+
+// printPurgeReport states what the purge reached and what it could not. It never
+// claims the text is gone from the file unconditionally: an incomplete
+// checkpoint is reported as the text still sitting in the write-ahead log, and
+// bytes an older build freed before secure delete was on — which no purge
+// reaches — are named with `ghost backup` as the way to a copy without them.
+func printPurgeReport(w io.Writer, outcome memory.PurgeOutcome) {
+	fmt.Fprintln(w, "Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.")
+	if outcome.CheckpointComplete {
+		fmt.Fprintln(w, "The pages this purge freed were zeroed and the write-ahead log truncated, so the copy this memory held is gone from the database file and its -wal.")
+	} else {
+		fmt.Fprintln(w, "Other Ghost readers held the store, so the write-ahead log could not be truncated: this memory's text stays in it until they close and a later purge or checkpoint completes.")
+	}
+	fmt.Fprintln(w, "Text an older Ghost version, one running without secure delete, already freed into the file's free space, a copy in a backup taken before this, or another machine's store, is out of reach; `ghost backup` writes a clean copy without it.")
 }
 
 // wholeMemoryID reports the id in ids that ref names WHOLE, and whether it names

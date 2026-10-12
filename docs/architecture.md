@@ -1176,12 +1176,16 @@ prints it. Three things follow:
   `secure_delete` on, the purge rebuilds the full-text index from the surviving
   content table (a delete's tombstone marks a row dead but leaves its tokens in
   segment blobs no merge has to rewrite), and the purge then checkpoints the WAL
-  with `TRUNCATE` — so a byte scan of the database file and its `-wal` finds no
-  copy of the purged text
+  with `TRUNCATE`. The checkpoint's result row is read rather than discarded —
+  `wal_checkpoint` reports contention as `busy` instead of an error — and the
+  purge returns a `PurgeOutcome` carrying whether the log was truncated, so an
+  incomplete one is reported as the text still in `-wal` rather than as done
   ([#1043](https://github.com/wcatz/ghost/issues/1043)). What a purge still cannot
-  reach is a backup taken before it, or another machine's copy of the store, so the
-  command reports what its transaction covered rather than that the text has ceased
-  to exist.
+  reach is text an older build freed before `secure_delete` was on (it stays in
+  the file's free space until a compaction rewrites it, which Ghost never does in
+  place), a backup taken before it, or another machine's copy of the store — so the
+  command reports what its transaction covered and which of those remain, rather
+  than that the text has ceased to exist.
 - **A redaction seam on the way in.** `ghost_history_content` is a SQLite
   function called by the append statement itself, so content is rewritten inside
   the one statement that copies the state out of `memories` rather than in a

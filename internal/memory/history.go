@@ -746,19 +746,58 @@ func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// PurgeOutcome reports what a purge reached.
+//
+// Rows is the number of history versions the purge removed. CheckpointComplete
+// is whether the write-ahead log was truncated once the purge committed: when it
+// is false another connection held a read snapshot for the whole busy_timeout, so
+// the frames the purge's own writes produced — the DELETE and the index rebuild —
+// are still in the -wal, and a caller must say the text stays there rather than
+// that it is gone from the file. It says nothing about bytes an OLDER build freed
+// before this connection ran secure_delete, or about a copy outside this
+// database: the store cannot measure either, so a caller must not report the
+// purge as reaching them.
+type PurgeOutcome struct {
+	Rows               int64
+	CheckpointComplete bool
+}
+
 // checkpointAfterPurge folds the WAL back into the main database file so the
-// pages the purge just zeroed are the pages on disk.
+// pages the purge just zeroed are the pages on disk, and reports whether it got
+// all the way.
 //
 // It runs after the purge's transaction commits — a WAL checkpoint cannot run
 // inside a transaction — and it is TRUNCATE rather than PASSIVE so the -wal file
 // is emptied rather than merely bounded: the purged text was written to WAL when
 // the memory was saved, and those older frames are dropped only when the log is
 // truncated. A no-op on an in-memory database, which is not in WAL mode.
-func (s *Store) checkpointAfterPurge(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("checkpoint after a purge: %w", err)
+//
+// The result row is READ, not discarded: wal_checkpoint does not raise an error
+// when it cannot finish — it returns (busy, log, checkpointed), and busy != 0 or
+// a log the run did not fold means another connection held a read snapshot for
+// the whole busy_timeout, so the purge's frames are still in the log. Returning
+// that up rather than an error is what lets the caller report the erase as
+// incomplete instead of either claiming it is done or rolling back a delete that
+// has already committed.
+//
+// It stays inside the caller's s.mu rather than being moved out. The busy wait
+// occupies the store's one pinned connection (SetMaxOpenConns(1)), and every
+// other write and read on this Store queues for that same connection, so
+// releasing the mutex would move the queue from the mutex to the pool without
+// letting any of them through; holding it also keeps the checkpoint from
+// interleaving with a second transaction on the one connection.
+func (s *Store) checkpointAfterPurge(ctx context.Context) (bool, error) {
+	var busy, walFrames, folded int
+	err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &walFrames, &folded)
+	if errors.Is(err, sql.ErrNoRows) {
+		// journal_mode is not WAL (an in-memory store): there is no log to
+		// truncate, so nothing is left unerased by this step.
+		return true, nil
 	}
-	return nil
+	if err != nil {
+		return false, fmt.Errorf("checkpoint after a purge: %w", err)
+	}
+	return busy == 0 && walFrames == folded, nil
 }
 
 // purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
@@ -768,7 +807,8 @@ func (s *Store) checkpointAfterPurge(ctx context.Context) error {
 const purgedTextMarker = "[purged]"
 
 // PurgeMemoryHistory erases a memory's recorded history without touching the
-// memory row, and reports how many rows it removed.
+// memory row, and reports what the purge reached in a PurgeOutcome: the rows it
+// removed and whether the checkpoint truncated the write-ahead log.
 //
 // It is the second stage of the redaction path, and it exists because a purge
 // asked for at DELETE time cannot cover a memory that is already gone. The
@@ -785,18 +825,18 @@ const purgedTextMarker = "[purged]"
 // different requests and conflating them would destroy knowledge nobody asked to
 // lose. What it does reach is every copy of the text the database kept, so
 // nothing is left that a restore or a reader can bring back; see purgeHistoryTx.
-func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error) {
+func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, _, err := s.beginWrite(ctx, "purge-history")
 	if err != nil {
-		return 0, fmt.Errorf("begin purge history: %w", err)
+		return PurgeOutcome{}, fmt.Errorf("begin purge history: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	n, err := purgeHistoryTx(ctx, tx, memoryID)
 	if err != nil {
-		return 0, err
+		return PurgeOutcome{}, err
 	}
 	// The history table is not FTS-indexed, but the memory's own row may have
 	// been deleted by an earlier plain delete — whose trigger left the token in
@@ -804,15 +844,16 @@ func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64,
 	// content table removes any such token, and is a no-op index-wise for a row
 	// that is still live. See rebuildFTSAfterPurgeTx and #1043.
 	if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
-		return 0, err
+		return PurgeOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit purge history: %w", err)
+		return PurgeOutcome{}, fmt.Errorf("commit purge history: %w", err)
 	}
-	if err := s.checkpointAfterPurge(ctx); err != nil {
-		return 0, err
+	complete, err := s.checkpointAfterPurge(ctx)
+	if err != nil {
+		return PurgeOutcome{Rows: n}, err
 	}
-	return n, nil
+	return PurgeOutcome{Rows: n, CheckpointComplete: complete}, nil
 }
 
 // linkSuccessorTx records, on the delete row of a memory a consolidation

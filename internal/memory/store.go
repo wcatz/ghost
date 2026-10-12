@@ -5137,7 +5137,10 @@ type DeleteOptions struct {
 	// deleted bytes themselves: the write connection runs secure_delete, the
 	// purge rebuilds the full-text index from the surviving rows, and a
 	// checkpoint folds the zeroed pages out of the WAL (rebuildFTSAfterPurgeTx
-	// and checkpointAfterPurge). It cannot reach a backup taken earlier. See the
+	// and checkpointAfterPurge). It cannot reach a backup taken earlier, nor
+	// bytes an older build freed before secure_delete was on — those stay in
+	// the file's free space until a compaction rewrites it, and only a fresh
+	// `ghost backup` (VACUUM INTO) is a copy without them. See the
 	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
 }
@@ -5157,12 +5160,25 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // tombstone) or purged (nothing). Both happen inside the one transaction that
 // removes the row, so a memory and its history can never come apart.
 func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
+	_, err := s.deleteWithOptionsLocked(ctx, id, opts)
+	return err
+}
+
+// DeletePurge deletes a memory and erases every recorded copy of its text,
+// reporting what the purge reached. It is DeleteWithOptions(PurgeHistory: true)
+// with the checkpoint's result; that call delegates here and drops the detail.
+func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error) {
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
+}
+
+func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var out PurgeOutcome
 	tx, _, err := s.beginWrite(ctx, "delete")
 	if err != nil {
-		return fmt.Errorf("begin delete: %w", err)
+		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -5172,7 +5188,7 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 		// "memory not found" in its own words, and a bad id must produce that.
 		if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
 			!errors.Is(err, errHistoryNoMemory) {
-			return err
+			return out, err
 		}
 	}
 
@@ -5186,18 +5202,20 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	// And it writes no tombstone of its own, which is the point: a purge must
 	// leave nothing behind that could carry the text being redacted.
 	if opts.PurgeHistory {
-		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
-			return err
+		n, err := purgeHistoryTx(ctx, tx, id)
+		if err != nil {
+			return out, err
 		}
+		out.Rows = n
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("delete memory: %w", err)
+		return out, fmt.Errorf("delete memory: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", id)
 	}
 	// After the DELETE, so the row is gone from the content table the rebuild
 	// reads: the index still carries the deleted row's tokens in segments the
@@ -5206,16 +5224,20 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	// of it move together; see rebuildFTSAfterPurgeTx.
 	if opts.PurgeHistory {
 		if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
-			return err
+			return out, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return out, err
 	}
 	if opts.PurgeHistory {
-		return s.checkpointAfterPurge(ctx)
+		complete, err := s.checkpointAfterPurge(ctx)
+		out.CheckpointComplete = complete
+		if err != nil {
+			return out, err
+		}
 	}
-	return nil
+	return out, nil
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is
