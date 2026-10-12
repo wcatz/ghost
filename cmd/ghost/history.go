@@ -653,11 +653,12 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 			return err
 		}
 	}
-	// Accurate about what the transaction covers: the row, its history, and the
-	// snapshots that could restore it all go. What no purge can reach is a copy
-	// outside this database — an earlier backup, another machine's store — or a
-	// text quoted into something that was never Ghost's memory.
-	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.")
+	// Accurate about what the transaction covers: the row, its history, the
+	// snapshots that could restore it, and the text's own bytes in this file all
+	// go. What no purge can reach is a copy outside this database — an earlier
+	// backup, another machine's store — or a text quoted into something that was
+	// never Ghost's memory.
+	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone, and the text has been erased from the database file.")
 	return nil
 }
 

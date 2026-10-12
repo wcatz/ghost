@@ -1839,9 +1839,10 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-			"Memory %s was already deleted; purged the %d recorded version(s) of its text. "+
-				"reflection snapshot holding it. The memory itself is not restored, and a copy in a "+
-				"backup taken before this is not something this can reach.",
+			"Memory %s was already deleted; purged the %d recorded version(s) of its text, the "+
+				"reflection snapshot holding it, and the text's own bytes in the database file. "+
+				"The memory itself is not restored, and a copy in a backup taken before this is "+
+				"not something this can reach.",
 			memoryID, purged)}},
 	}, nil, nil
 }
@@ -2598,9 +2599,10 @@ func (s *Server) registerTools() {
 
 		text := "Memory deleted."
 		if args.PurgeHistory {
-			text = "Memory deleted, and the versions of its text this database recorded are gone. " +
-				"its recorded history, and the reflection snapshot that could have restored the row. " +
-				"A copy in a backup taken before this, or in another machine's store, is not something this can reach."
+			text = "Memory deleted, and every version of its text this database recorded is gone: " +
+				"its recorded history, the reflection snapshot that could have restored the row, and " +
+				"the text's own bytes in the database file. A copy in a backup taken before this, or " +
+				"in another machine's store, is not something this can reach."
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},

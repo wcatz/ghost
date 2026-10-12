@@ -722,6 +722,45 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 // column by substring, and an empty id is a substring of everything.
 var errPurgeNoMemoryID = errors.New("purge history: a memory id is required")
 
+// rebuildFTSAfterPurgeTx replaces the whole full-text index from the surviving
+// content table, inside the purge's own transaction.
+//
+// A DELETE on memories fires memories_ad, which writes FTS5 a 'delete'
+// tombstone — but a tombstone only marks the row deleted; the token stays in
+// the segment blobs the index already holds until a merge rewrites them, and
+// no merge is guaranteed to run. So a purge that stopped at the DELETE left the
+// purged wording readable in memories_fts's shadow tables, which is what the
+// byte scan in the redaction test found (#1043). 'rebuild' wipes the index and
+// re-derives it from the content table, which no longer holds the row, and the
+// connection's secure_delete zeroes the freed segment blobs as they go.
+//
+// For an external-content table this is the index's own command, not a schema
+// change: memories_fts is content=memories, so the rebuild reads memories and
+// needs no argument. It runs in the purge transaction so the row and the index
+// can never come apart.
+func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`); err != nil {
+		return fmt.Errorf("rebuild the full-text index after a purge: %w", err)
+	}
+	return nil
+}
+
+// checkpointAfterPurge folds the WAL back into the main database file so the
+// pages the purge just zeroed are the pages on disk.
+//
+// It runs after the purge's transaction commits — a WAL checkpoint cannot run
+// inside a transaction — and it is TRUNCATE rather than PASSIVE so the -wal file
+// is emptied rather than merely bounded: the purged text was written to WAL when
+// the memory was saved, and those older frames are dropped only when the log is
+// truncated. A no-op on an in-memory database, which is not in WAL mode.
+func (s *Store) checkpointAfterPurge(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("checkpoint after a purge: %w", err)
+	}
+	return nil
+}
+
 // purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
 // rather than an empty string so a reader can tell "this fold discarded text that
 // has since been purged" from "this fold discarded nothing", which an empty
@@ -759,8 +798,19 @@ func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64,
 	if err != nil {
 		return 0, err
 	}
+	// The history table is not FTS-indexed, but the memory's own row may have
+	// been deleted by an earlier plain delete — whose trigger left the token in
+	// a segment the tombstone does not rewrite. Rebuilding from the surviving
+	// content table removes any such token, and is a no-op index-wise for a row
+	// that is still live. See rebuildFTSAfterPurgeTx and #1043.
+	if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit purge history: %w", err)
+	}
+	if err := s.checkpointAfterPurge(ctx); err != nil {
+		return 0, err
 	}
 	return n, nil
 }

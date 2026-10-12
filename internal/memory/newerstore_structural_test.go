@@ -207,6 +207,16 @@ var writeSeamExemptions = map[string]string{
 	// needs answered before it is replaced.
 	"history_growth.go:(*Store).historyWindowCounts":    "a read: the window aggregate SELECT built by historyWindowGrowthStmt and run through the pool, so the scan resolves no leading keyword and counts an unresolvable statement as a write — and a report that refused to run against a newer store would be useless for diagnosing one",
 	"history_growth.go:(*Store).historyPerMemoryCounts": "a read: the per-memory aggregate SELECT built by historyPerMemoryGrowthStmt, reached the same way and for the same reason",
+
+	// The other side of the purge, a WAL checkpoint rather than a store write:
+	// it moves the purge's already-committed frames out of the WAL into the main
+	// database file and truncates the log, writing no row (#1043). It cannot run
+	// inside the transaction the purge used — SQLite makes wal_checkpoint a no-op
+	// inside a transaction — and that transaction was opened by the guarded
+	// beginWrite, so a store a newer Ghost owns is refused before this line is
+	// reachable. There is nothing for a seam to guard here beyond the transaction
+	// that already ran, and a checkpoint is the same maintenance a close performs.
+	"history.go:(*Store).checkpointAfterPurge": "a WAL checkpoint, not a row write: it folds the purge's already-committed frames from the WAL into the main file and truncates the log, cannot run inside a transaction (wal_checkpoint is a no-op there), and the guarded beginWrite that committed the purge already refused a newer store",
 }
 
 // TestEveryWriteRefusesANewerStore is the check that the safety property cannot

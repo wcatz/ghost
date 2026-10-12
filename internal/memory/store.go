@@ -5133,9 +5133,12 @@ type DeleteOptions struct {
 	// credential "removed" by deleting its memory survives in a table with a
 	// longer life than the row. A delete meant to ERASE rather than to retire has
 	// to say so here. It erases every copy of the text this database holds,
-	// including the reflection snapshot that could restore the row; it cannot
-	// reach a backup taken earlier. See the ghost_memory_delete purge_history
-	// argument and `ghost history purge`.
+	// including the reflection snapshot that could restore the row and the
+	// deleted bytes themselves: the write connection runs secure_delete, the
+	// purge rebuilds the full-text index from the surviving rows, and a
+	// checkpoint folds the zeroed pages out of the WAL (rebuildFTSAfterPurgeTx
+	// and checkpointAfterPurge). It cannot reach a backup taken earlier. See the
+	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
 }
 
@@ -5196,7 +5199,23 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
 	}
-	return tx.Commit()
+	// After the DELETE, so the row is gone from the content table the rebuild
+	// reads: the index still carries the deleted row's tokens in segments the
+	// trigger's 'delete' tombstone does not rewrite, and rebuilding is what
+	// removes them. It belongs in this transaction so the row and every index
+	// of it move together; see rebuildFTSAfterPurgeTx.
+	if opts.PurgeHistory {
+		if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if opts.PurgeHistory {
+		return s.checkpointAfterPurge(ctx)
+	}
+	return nil
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is
