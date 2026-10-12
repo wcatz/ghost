@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -184,11 +185,19 @@ func optScope(v any, name string) (map[string]string, error) {
 		if len(t) == 0 {
 			return nil, nil
 		}
+		// Keys are walked in sorted order so a refusal is deterministic, and a
+		// refusal names the offending entry by its position, never by its key:
+		// a key is caller text and may be token-shaped or arbitrarily long.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		out := make(map[string]string, len(t))
-		for k, raw := range t {
-			s, ok := raw.(string)
+		for i, k := range keys {
+			s, ok := t[k].(string)
 			if !ok {
-				return nil, fmt.Errorf("%s[%q] must be a string value, got %T", name, k, raw)
+				return nil, fmt.Errorf("%s entry %d (in key order) must be a string value, got %T", name, i+1, t[k])
 			}
 			out[k] = s
 		}
