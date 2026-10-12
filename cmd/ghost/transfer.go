@@ -704,7 +704,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -729,6 +729,9 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		}
 		if sk.Secret {
 			hasSecret = true
+		}
+		if sk.Scope {
+			hasScope = true
 		}
 	}
 	// The credential advice is printed FIRST and separately, because it is not an
@@ -793,7 +796,18 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		if hasSecret {
 			phrase = "delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above)"
 		}
+		if hasScope && !hasSecret {
+			// A scope over its bound is not fixed by a different id either. No tool
+			// edits a stored scope, so the repair is the delete-and-save the sentence
+			// already names, with the scope kept inside the bounds this time.
+			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
+		}
 		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
+			return err
+		}
+	}
+	if hasScope && hasSecret {
+		if _, err := fmt.Fprintf(out, "  A scope over its bound is a separate fix: delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes).\n", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen); err != nil {
 			return err
 		}
 	}
@@ -880,6 +894,10 @@ var secretUnfixableRoutes = []string{
 	// them, and that is a redaction of the whole memory's history rather than an
 	// edit of a field, so it is named as what it is.
 	"a memory's evidence agent, session_id and source_ref — no tool writes an evidence row; they are appended by a save, an import and a reflect, and the only surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field",
+
+	// A memory's scope keys and values (reported as scope_key and scope). Written
+	// at save and by no update: ghost_memory_update takes no scope.
+	"a memory's scope keys and values (scope_key and scope) — written when the memory is saved; `ghost_memory_update` takes no scope, so the only routes are to delete the memory with ghost_memory_delete and save it again with a clean scope, or to edit the row's scope in the database directly",
 
 	// A task's title. Written at insert and by no update.
 	"a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly",

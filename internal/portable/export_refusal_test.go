@@ -206,6 +206,32 @@ func storeReachableGrounds(cred string) []ground {
 			},
 		},
 		{
+			// #1042: a scope key or value is printed on every listing, so a token in
+			// one is refused like content, and named by field.
+			kind: TypeMemory, id: "m-secret-scope-value", wantField: "scope[", credential: true,
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-secret-scope-value", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-secret-scope-value", `{"token":"`+cred+`"}`)
+			},
+		},
+		{
+			kind: TypeMemory, id: "m-secret-scope-key", wantField: "scope_key[", credential: true,
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-secret-scope-key", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-secret-scope-key", `{"`+cred+`":"production"}`)
+			},
+		},
+		{
+			// A scope stored before the bound existed: named and left out, as an
+			// over-long source_ref is, rather than exported into an artifact the
+			// importer would refuse.
+			kind: TypeMemory, id: "m-huge-scope", wantReason: "a scope value must be at most",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-huge-scope", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-huge-scope", `{"environment":"`+strings.Repeat("v", 200)+`"}`)
+			},
+		},
+		{
 			kind: TypeMemory, id: "m-no-content", wantField: "content",
 			plant: func(t *testing.T, db *sql.DB) {
 				plantMemory(t, db, "m-no-content", "p1", "", `[]`, "mcp")
@@ -545,6 +571,29 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 			importRefuses: func() error {
 				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.Tags = []string{"ops-" + cred} }))
 			}},
+		{name: "memory/scope value credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.Scope = map[string]string{"token": cred} }))
+			}},
+		{name: "memory/scope key credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.Scope = map[string]string{cred: "production"} }))
+			}},
+		{name: "memory/scope too many keys", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
+					m.Scope = map[string]string{}
+					for i := 0; i <= memory.MaxScopeKeys; i++ {
+						m.Scope[strings.Repeat("k", i+1)] = "v"
+					}
+				}))
+			}},
+		{name: "memory/scope value too long", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
+					m.Scope = map[string]string{"environment": strings.Repeat("v", memory.MaxScopeValueLen+1)}
+				}))
+			}},
 		{name: "memory/evidence kind", counterpart: "predicate",
 			importRefuses: func() error {
 				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
@@ -712,17 +761,17 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 	// is counted from the predicates rather than transcribed, so it cannot drift
 	// from them by being wrong.
 	//
-	// 18 = a project's name and path (2) + a memory's content, source_ref, agent,
-	// session_id and tags (5) + an evidence record's agent, session_id and
+	// 20 = a project's name and path (2) + a memory's content, source_ref, agent,
+	// session_id, tags, scope keys and scope values (7) + an evidence record's agent, session_id and
 	// source_ref (3) + a task's title, description and notes (3) + a decision's
 	// title, decision, rationale, alternatives and tags (5).
-	if got, want := credentialFields(), 18; got != want {
+	if got, want := credentialFields(), 20; got != want {
 		t.Errorf("the table covers %d credential-guarded field(s), want %d — a field was added to a predicate's guard, so it needs a row here", got, want)
 	}
 }
 
 // credentialFields counts the credential-guarded fields across the four
-// predicates: a project has 2, a memory has 5 at the row level plus 3 per evidence
+// predicates: a project has 2, a memory has 7 at the row level plus 3 per evidence
 // record, a task has 3, a decision has 5 (4 fields plus alternatives and tags). It is
 // computed by driving each predicate and reading which field the refusal names, so
 // it cannot drift from the predicates by construction.
@@ -746,6 +795,8 @@ func credentialFields() int {
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Agent: "ops-" + cred}))
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", SessionID: "ses-" + cred}))
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Tags: []string{cred}}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Scope: map[string]string{cred: "production"}}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Scope: map[string]string{"token": cred}}))
 	for _, e := range []memory.PortableEvidence{
 		{Kind: "observed", Agent: "ops-" + cred},
 		{Kind: "observed", SessionID: "ses-" + cred},
@@ -1015,6 +1066,13 @@ func plantMemory(t *testing.T, db *sql.DB, id, projectID, content, tagsJSON, sou
 		(id, project_id, category, content, source, tags, created_at, updated_at)
 		VALUES (?, ?, 'gotcha', ?, ?, ?, datetime('now'), datetime('now'))`,
 		id, projectID, content, source, tagsJSON)
+}
+
+// plantScope sets a planted memory's raw scope column, as a store written before
+// the scope bound would hold it.
+func plantScope(t *testing.T, db *sql.DB, id, scopeJSON string) {
+	t.Helper()
+	plantRaw(t, db, `UPDATE memories SET scope = ? WHERE id = ?`, scopeJSON, id)
 }
 
 // plantTask inserts a task with the given id, project, title, status and priority.
