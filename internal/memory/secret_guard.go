@@ -193,7 +193,9 @@ func rejectSecretList(field string, values []string) error {
 // UpsertWithProvenance, the MCP save tools, the Claude first-contact import,
 // and reflection's candidate writes), Create, UpdateMemory, RecordDecision, the
 // three task writers, UpdateLearnedContext, and the three portable importers
-// ImportMemory/ImportTask/ImportDecision. The importers matter more than their
+// ImportMemory/ImportTask/ImportDecision. A memory's scope keys and values are
+// guarded by checkScope (scope_guard.go) on Create, UpsertWithOptions and
+// CheckImportedMemory, with the bounds that function states. The importers matter more than their
 // position in this list suggests: they write with raw INSERTs rather than
 // through Upsert, and their input is a JSONL artifact that arrived from
 // somewhere.

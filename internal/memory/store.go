@@ -2918,6 +2918,9 @@ func checkMemoryWrite(m Memory) error {
 	if _, err := boundedAgent(m.Agent); err != nil {
 		return err
 	}
+	if err := checkScope(m.Scope); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -3735,6 +3738,12 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, err
 	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
+	// The scope is caller-supplied text printed outside the data delimiters on
+	// every listing, so it passes the same token guard as the content and is
+	// bounded at write time (scope_guard.go).
+	if err := checkScope(opts.Scope); err != nil {
 		return "", "", 0, err
 	}
 	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
@@ -6757,10 +6766,20 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// A restore that revives nothing but a row's tags, age or provenance changes
 	// no state the history holds, so it records nothing — the rule every other
 	// writer follows.
+	//
+	// The project predicate is what keeps a restore inside the project that took
+	// the snapshot. A memory promoted to `_global` keeps its id AND its snapshot
+	// rows — PromoteToGlobal moves the memory and its history, not its snapshot —
+	// so matching by id alone rewrote the shared row back to its pre-promotion
+	// text: a project-scoped command mutating the one scope every session reads.
+	// Requiring memories.project_id = s.project_id leaves the promoted row to the
+	// scope that now owns it; the UPDATE below carries the same predicate, or the
+	// two would disagree about which rows this restore changed.
 	changedIDs, err := selectIDs(ctx, tx, `
 		SELECT s.memory_id FROM memory_snapshots s
 		JOIN memories m ON m.id = s.memory_id
 		WHERE s.snapshot_id = ? AND s.memory_id = m.id
+		  AND m.project_id = s.project_id
 		  AND m.pinned = 0 AND m.resolved_at IS NULL
 		  AND m.`+retentionExemptSQL+`
 		  AND (s.content != m.content OR s.category != m.category
@@ -6789,6 +6808,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		    scope = CASE WHEN s.scope_captured = 1 THEN s.scope ELSE memories.scope END
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
+		  AND memories.project_id = s.project_id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
 		  AND memories.`+retentionExemptSQL+`
 	`, snapshotID)

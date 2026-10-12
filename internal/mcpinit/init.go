@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -718,11 +719,25 @@ type projectInfo struct {
 
 // importMemories opens the Ghost DB and imports Claude Code memory files
 // for all known projects.
+//
+// A dry run resolves the directory WITHOUT creating it (config.DataDirPath) and
+// opens the store READ-ONLY (memory.OpenReadDB), because a preview must not be
+// the write it previews (#1049): OpenDB runs migrations and writes a
+// pre-migration copy, so the run that ends "No changes made (dry run)" would
+// have made an irreversible one, and an older store it migrated would then
+// refuse a live server's writes. The ordinary run keeps the read-write open,
+// because importing memories is a real write.
 func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
-	// A GHOST_DEV_FORBID_DATA_DIR refusal arrives from here, before the read-WRITE
-	// open below can migrate anything (#721). `ghost mcp init` is a command, not
+	// A GHOST_DEV_FORBID_DATA_DIR refusal arrives from DataDirPath, before
+	// anything is opened or created (#721). `ghost mcp init` is a command, not
 	// a hook, so the refusal is an error it reports rather than an empty session.
-	dataDir, err := config.DataDir()
+	var dataDir string
+	var err error
+	if dryRun {
+		dataDir, err = config.DataDirPath()
+	} else {
+		dataDir, err = config.DataDir()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("data dir: %w", err)
 	}
@@ -733,11 +748,37 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		return nil, nil
 	}
 
-	db, err := memory.OpenDB(dbPath)
+	var db *sql.DB
+	if dryRun {
+		db, err = memory.OpenReadDB(dbPath)
+	} else {
+		db, err = memory.OpenDB(dbPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close() //nolint:errcheck
+
+	// A read-only preview cannot run the migrations a store behind this build
+	// needs, and selecting from it would fail on a column it does not have, so
+	// the preview is skipped rather than attempted. The message names the one
+	// write that makes the preview possible.
+	if dryRun {
+		version, verr := memory.DBUserVersion(db)
+		if verr != nil {
+			return nil, fmt.Errorf("read schema version: %w", verr)
+		}
+		if version != memory.SchemaVersion() {
+			if version > memory.SchemaVersion() {
+				_, _ = fmt.Fprintf(w, "  - database is at schema v%d, newer than this Ghost (v%d) — upgrade ghost before previewing an import\n",
+					version, memory.SchemaVersion())
+			} else {
+				_, _ = fmt.Fprintf(w, "  - database is at schema v%d (this Ghost reads v%d) — a dry run does not migrate it; start a session or run `ghost mcp init`, then preview again\n",
+					version, memory.SchemaVersion())
+			}
+			return nil, nil
+		}
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := memory.NewStore(db, logger)

@@ -24,6 +24,7 @@ import (
 	"io"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // SchemaVersion is the version of the artifact format this build writes and
@@ -175,15 +176,18 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
-		reason, secret := "", false
+		reason, secret, scope := "", false, false
 		switch {
 		case orphaned(m.ProjectID):
 			reason = orphanReason
 		default:
-			reason, secret = exportRefusal(memory.CheckImportedMemory(m))
+			err := memory.CheckImportedMemory(m)
+			reason, secret = exportRefusal(err)
+			var bound *memory.ScopeBoundError
+			scope = errors.As(err, &bound)
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret})
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope})
 			continue
 		}
 		keptMemories = append(keptMemories, m)
@@ -317,6 +321,9 @@ type SkippedRecord struct {
 	// nothing else, and there is no second copy of the value anywhere in this
 	// struct: a report built from a SkippedRecord must not be able to print one.
 	Secret bool
+	// Scope marks a record refused for a scope that breaks a bound. The id is not
+	// the problem, so the report points at the scope instead of at re-keying.
+	Scope bool
 }
 
 // Stats is what an export wrote, and what it deliberately left out.
@@ -358,12 +365,36 @@ func exportRefusal(err error) (reason string, secret bool) {
 	if err == nil {
 		return "", false
 	}
+	var bound *memory.ScopeBoundError
+	if errors.As(err, &bound) {
+		return scopeBoundReason(bound), false
+	}
 	var refused *memory.SecretContentError
 	if errors.As(err, &refused) {
 		return fmt.Sprintf("its %s is credential-shaped, and ghost import refuses to store one by design — Ghost never stores a credential value",
 			refused.Field), true
 	}
 	return "ghost import refuses it: " + err.Error(), false
+}
+
+// scopeBoundReason is the importer's own sentence for a scope bound, plus the key
+// a value sits under when the bound is a value's: the sentence says how long, not
+// where. The key is rendered through memory.SafeToken and is already within its
+// bound; an over-long KEY is never quoted, so the line stays as short as the
+// others however large the stored scope is.
+func scopeBoundReason(e *memory.ScopeBoundError) string {
+	reason := "ghost import refuses it: " + e.Error()
+	if e.Kind == memory.ScopeValueTooLong {
+		// The bounds run before the token guard, so this key has not been checked
+		// for a credential shape. SafeToken only quotes characters; it would print a
+		// token-shaped key bare. Such a key is not named at all.
+		if _, shaped := secret.Detect(e.Key); shaped {
+			reason += " (one scope value; its key is not shown)"
+		} else {
+			reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(e.Key))
+		}
+	}
+	return reason
 }
 
 // selectProjects filters an already-read project list by id or exact name.
