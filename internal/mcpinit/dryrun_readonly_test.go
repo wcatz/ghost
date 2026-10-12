@@ -126,3 +126,33 @@ func TestStatusCreatesNoDataDirWithoutAStore(t *testing.T) {
 		t.Errorf("status did not report the absent database; it printed:\n%s", out.String())
 	}
 }
+
+// TestStatusCreatesNoDataDirOnTheOllamaDownPath pins the one branch that
+// resolved the data directory through config.DataDir: the Ollama-down
+// duration report. DataDir runs os.MkdirAll, so on a machine with no store,
+// embedding enabled and Ollama unreachable, a status run still created the
+// directory it was reporting on. reportOllamaDownDuration only reads the
+// marker file, so the directory does not have to exist.
+func TestStatusCreatesNoDataDirOnTheOllamaDownPath(t *testing.T) {
+	statusEnv(t)
+	// Embedding enabled and Ollama pointed at a port nothing listens on, so
+	// checkOllama's live probe is a conclusive refusal rather than a round trip
+	// that could reach a real Ollama on the host.
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", "http://127.0.0.1:1")
+
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	dataDir := filepath.Join(dataHome, "ghost")
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status = %v, want a report rather than an error", err)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Errorf("a status run created the data directory on the Ollama-down path (stat error: %v)", err)
+	}
+	if !strings.Contains(out.String(), "Ollama unreachable") {
+		t.Errorf("status did not report the unreachable Ollama; it printed:\n%s", out.String())
+	}
+}

@@ -494,8 +494,12 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
 		// A refused data dir must not have had a marker written into it before
 		// the report says so (#721), so this resolves the directory the same way
-		// the store open below does — and its `== nil` branch is the same skip.
-		if dataDir, ddErr := config.DataDir(); ddErr == nil {
+		// the store open below does. DataDirPath, not DataDir: a status run
+		// must not create the directory it is reporting on, and DataDir would
+		// — DataDirPath applies the same guard without the mkdir, and
+		// reportOllamaDownDuration only reads the marker, so it has no need
+		// for the directory to exist. The `== nil` branch is the same skip.
+		if dataDir, ddErr := config.DataDirPath(); ddErr == nil {
 			reportOllamaDownDuration(w, dataDir)
 		}
 	}
