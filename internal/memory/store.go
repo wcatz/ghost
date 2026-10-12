@@ -4449,42 +4449,69 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	return results, nil
 }
 
-// SearchFTS searches memories using full-text search.
+// SearchFTS searches memories using full-text search. It returns every match in
+// the window, an expired row included: the browse surfaces show a row outside
+// its window MARKED, not withheld, so this reader must not filter. The query
+// path calls searchFTSValidating directly, which applies the window predicate
+// before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT `+memoryColumnsPrefixed+`
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE (m.project_id = ? OR m.project_id = '_global')
-		  AND memories_fts MATCH ?
-		ORDER BY rank, m.importance DESC
-		LIMIT ?
-	`, projectID, sanitizeFTS(query), limit)
-	if err != nil {
-		return nil, fmt.Errorf("search memories: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanMemories(rows)
+	return s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
 }
 
 // SearchFTSAll searches memories across ALL projects using full-text search.
 func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Memory, error) {
+	return s.searchFTSValidating(ctx, "", query, limit, time.Time{}, true)
+}
+
+// searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
+// the query path's keyword leg run. A non-zero now applies the validity window
+// predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
+// unfiltered statement, byte for byte what SearchFTS always ran.
+//
+// Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
+// the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
+// the predicate applied after the cut, expired rows fill the leg's depth and a
+// valid match ranked below it is never fetched, so a small window reports nothing
+// while a match exists. docs/architecture.md states the rule: filters precede
+// window closure.
+//
+// The predicate is a SUPERSET of Go's ValidityState (see validityMatchesSQLFor):
+// it may admit a row stage 2 then drops — that costs one slot, never a valid row.
+// The columns are already named by memoryColumnsPrefixed, so a store that can run
+// SearchFTS at all has them; there is nothing to gate on.
+func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string, limit int, now time.Time, allProjects bool) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	where := "memories_fts MATCH ?"
+	args := []any{}
+	if !allProjects {
+		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
+		args = append(args, projectID)
+	}
+	args = append(args, sanitizeFTS(query))
+	if !now.IsZero() {
+		where += " AND " + validityMatchesSQLFor("m.")
+		// The predicate's placeholders are bound in its own text order: until,
+		// then from, both to the same whole-second-truncated instant.
+		stamp := now.UTC().Format(stampLayoutForSQL)
+		args = append(args, stamp, stamp)
+	}
+	args = append(args, limit)
 
 	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT `+memoryColumnsPrefixed+`
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE memories_fts MATCH ?
+		WHERE `+where+`
 		ORDER BY rank, m.importance DESC
 		LIMIT ?
-	`, sanitizeFTS(query), limit)
+	`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("search all memories: %w", err)
+		if allProjects {
+			return nil, fmt.Errorf("search all memories: %w", err)
+		}
+		return nil, fmt.Errorf("search memories: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)

@@ -11,14 +11,21 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // vectorScanColumns is the projection both vector searches read: a candidate's
-// id, its embedding, the vector space that embedding was written in, and the
-// three status fields fusion applies to the returned row, plus the memory's
-// rowid (an 8-byte integer, not a copied column) that breaks exact ties. Nothing else — a
-// search that read a column it does not return would be paying the single
-// connection for bytes it throws away.
+// id, its embedding, the vector space that embedding was written in, the three
+// status fields fusion applies to the returned row, the memory's validity
+// window, plus the memory's rowid (an 8-byte integer, not a copied column) that
+// breaks exact ties. Nothing else — a search that read a column it does not
+// return would be paying the single connection for bytes it throws away.
+//
+// valid_from/valid_until are read so the vector leg can withhold a row outside
+// its window BEFORE the top-k cut, the mirror of the keyword leg's predicate
+// (#1053): a query whose limit is small must not spend its vector depth on rows
+// stage 2 will drop. They decide membership during the scan and are not copied
+// into the result.
 //
 // m.scope is coalesced to an empty string so the column is never NULL.
 // database/sql assigns nil to a []byte destination it is handed for a NULL
@@ -26,7 +33,7 @@ import (
 // on every unscoped memory; an empty string means no scope exactly as NULL does,
 // so the coalesce changes no answer — see parseScopeJSON.
 const vectorScanColumns = `
-	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at, m.rowid
+	SELECT e.memory_id, e.embedding, e.model, COALESCE(m.scope, ''), m.project_id, m.resolved_at, m.rowid, m.valid_from, m.valid_until
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
 
@@ -80,6 +87,11 @@ type vecSpan struct{ off, n int }
 // vectorRowSpan is one usable row of a vector search's snapshot.
 type vectorRowSpan struct {
 	id, scope, project, embed vecSpan
+	// validFrom and validUntil locate the row's stored validity bounds, when it
+	// states them. They are read so the scan can withhold an out-of-window row
+	// before the cut (#1053); a span of length 0 is a NULL or empty bound, which
+	// is no claim, exactly as ValidityState reads it.
+	validFrom, validUntil vecSpan
 	// resolved is the row's own resolved_at, read here so fusion can demote it
 	// without a second lookup per candidate.
 	resolved bool
@@ -168,14 +180,23 @@ func compareCandidates(a, b vecCandidate) int {
 // maxRetainedVectorBytes.
 type vectorRows struct {
 	// Column buffers, each holding one column of every usable row concatenated
-	// in scan order. Only the embedding column is large; ids, scopes and
-	// projects are tens of bytes per row.
+	// in scan order. Only the embedding column is large; ids, scopes, projects
+	// and validity bounds are tens of bytes per row.
 	ids, scopes, projects, embeds []byte
+	// validFroms and validUntils hold the validity bounds, in the same order, so
+	// the scoring pass can withhold an out-of-window row before the cut. They are
+	// kept as stored text rather than parsed: the common row states no window, so
+	// parsing every row would be pure waste for a decision only a dated row makes.
+	validFroms, validUntils []byte
 	// rows locates each row's bytes inside those buffers.
 	rows []vectorRowSpan
 	// cands is the bounded top-k, reused so a search does not allocate a heap
 	// per query.
 	cands []vecCandidate
+	// now is the clock the validity window is judged against. The zero time is
+	// "do not filter", which is every read that does not ask for it (the exported
+	// vector wrappers); the query path sets it to its request's Now.
+	now time.Time
 	// dest is the scan destination, reused for every row. It lives here rather
 	// than in the read loop because database/sql takes each destination as an
 	// any, which moves a loop-local to the heap — six allocations for every row
@@ -196,6 +217,7 @@ type vectorRows struct {
 // the column buffers before it moves on.
 type vectorScanDest struct {
 	id, embed, model, scope, project, resolvedAt sql.RawBytes
+	validFrom, validUntil                        sql.RawBytes
 	seq                                          int64
 }
 
@@ -204,8 +226,14 @@ func (v *vectorRows) reset() {
 	v.scopes = v.scopes[:0]
 	v.projects = v.projects[:0]
 	v.embeds = v.embeds[:0]
+	v.validFroms = v.validFroms[:0]
+	v.validUntils = v.validUntils[:0]
 	v.rows = v.rows[:0]
 	v.cands = v.cands[:0]
+	// The clock belongs to the search that set it, and the snapshot is pooled
+	// across queries, so a stale one would filter this query against another's
+	// Now — or, worse, keep filtering a browse read that asked for no filter.
+	v.now = time.Time{}
 	// The counts belong to the scan that set them, and the snapshot is pooled
 	// across queries, so a stale one would be read as this query's.
 	v.facts = vectorLegFacts{}
@@ -286,7 +314,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		// is coalesced: a NULL column assigns nil to the destination, and this
 		// is the one place the scan would otherwise have to notice.)
 		d := &v.dest
-		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq); err != nil {
+		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq, &d.validFrom, &d.validUntil); err != nil {
 			return err
 		}
 		if identity != "" && !bytes.Equal(d.model, identityBytes) {
@@ -311,17 +339,21 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		// of the corpus is foreign or the wrong width — does not grow a
 		// snapshot for vectors it will not score.
 		row := vectorRowSpan{
-			id:       vecSpan{len(v.ids), len(d.id)},
-			scope:    vecSpan{len(v.scopes), len(d.scope)},
-			project:  vecSpan{len(v.projects), len(d.project)},
-			embed:    vecSpan{len(v.embeds), len(d.embed)},
-			resolved: len(d.resolvedAt) > 0,
-			seq:      d.seq,
+			id:         vecSpan{len(v.ids), len(d.id)},
+			scope:      vecSpan{len(v.scopes), len(d.scope)},
+			project:    vecSpan{len(v.projects), len(d.project)},
+			embed:      vecSpan{len(v.embeds), len(d.embed)},
+			validFrom:  vecSpan{len(v.validFroms), len(d.validFrom)},
+			validUntil: vecSpan{len(v.validUntils), len(d.validUntil)},
+			resolved:   len(d.resolvedAt) > 0,
+			seq:        d.seq,
 		}
 		v.ids = append(v.ids, d.id...)
 		v.scopes = append(v.scopes, d.scope...)
 		v.projects = append(v.projects, d.project...)
 		v.embeds = append(v.embeds, d.embed...)
+		v.validFroms = append(v.validFroms, d.validFrom...)
+		v.validUntils = append(v.validUntils, d.validUntil...)
 		v.rows = append(v.rows, row)
 
 		// Once per scan, after the first row is in the snapshot, so the seam is
@@ -390,6 +422,11 @@ func (s *Store) reportSkippedVectors(foreign map[string]int, mismatched int, mis
 // caller may actually use. That is why the scope filter runs per row here
 // rather than on the k survivors: a compatible row ranked below the cut is
 // exactly the one a post-filter would never see.
+//
+// The validity window, when v.now names one, narrows before the cut for the same
+// reason and is the mirror of the keyword leg's SQL predicate (#1053): a row
+// stage 2 will withhold must not spend a slot of the depth, or a small window
+// fills with expired rows and hides a valid match ranked below them.
 func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]string) []ScoredMemory {
 	// A non-positive limit cannot be satisfied by any window. (The cut it
 	// replaces sliced to `limit` without checking, which panicked on a negative
@@ -425,6 +462,9 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		if !(sim > minVectorSimilarity) {
 			continue
 		}
+		if v.validityWithheld(sp) {
+			continue
+		}
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {
 			continue
 		}
@@ -447,6 +487,33 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		}
 	}
 	return out
+}
+
+// validityWithheld reports whether a row's stored validity window excludes it at
+// v.now: expired when a readable valid_until is before it, future when a
+// readable valid_from is after it. This is ValidityWithheld over the same rule
+// (see ValidityState), evaluated on the raw stored span so the common row — the
+// one that states no window — allocates nothing and pays one length check.
+//
+// A zero v.now means no filter was asked for (every exported vector search), so
+// nothing is withheld: those callers return expired rows marked, not withheld,
+// exactly as SearchFTS does. An absent or unreadable bound is no claim, so a row
+// that names only one end of a window is judged on that end alone.
+func (v *vectorRows) validityWithheld(sp *vectorRowSpan) bool {
+	if v.now.IsZero() {
+		return false
+	}
+	if sp.validUntil.n > 0 {
+		if t, ok := ParseStamp(string(v.validUntils[sp.validUntil.off : sp.validUntil.off+sp.validUntil.n])); ok && t.Before(v.now) {
+			return true
+		}
+	}
+	if sp.validFrom.n > 0 {
+		if t, ok := ParseStamp(string(v.validFroms[sp.validFrom.off : sp.validFrom.off+sp.validFrom.n])); ok && t.After(v.now) {
+			return true
+		}
+	}
+	return false
 }
 
 // offer puts c in the top-k if it belongs there. Once the window is full a

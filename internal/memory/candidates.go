@@ -223,8 +223,9 @@ type CandidateSet struct {
 	// removed in SQL, before the LIMIT, so a bucket that came back empty can say
 	// whether it was empty of valid rows or EMPTY of rows. It is only set by the
 	// passive path, and only for a bucket whose fetch returned nothing; a fusion
-	// read leaves it zero because its validity filtering happens in the assembler,
-	// where the removed rows are counted per stage as usual.
+	// read leaves it zero because its legs apply the same predicate silently
+	// before their own LIMIT and report no count — the rows simply never became
+	// candidates (#1053).
 	ValidityExcluded int
 	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
 	// entered the window: the window is a LIMIT, and a bucket holding more pinned
@@ -869,9 +870,9 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 		var rows []Memory
 		var err error
 		if req.Mode == AllProjects {
-			rows, err = s.SearchFTSAll(ctx, req.Query, ftsTopK)
+			rows, err = s.searchFTSValidating(ctx, "", req.Query, ftsTopK, req.Now, true)
 		} else {
-			rows, err = s.SearchFTS(ctx, project, req.Query, ftsTopK)
+			rows, err = s.searchFTSValidating(ctx, project, req.Query, ftsTopK, req.Now, false)
 		}
 		ftsStatus.Attempted = true
 		ftsStatus.Available = err == nil
@@ -904,9 +905,9 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 		var raw []ScoredMemory
 		var err error
 		if req.Mode == AllProjects {
-			raw, facts, err = s.searchVectorAllLeg(ctx, req.QueryVec, vecTopK)
+			raw, facts, err = s.searchVectorAllLegAt(ctx, req.QueryVec, vecTopK, req.Now)
 		} else {
-			raw, facts, err = s.searchVectorLeg(ctx, project, req.QueryVec, vecTopK, nil)
+			raw, facts, err = s.searchVectorLegAt(ctx, project, req.QueryVec, vecTopK, nil, req.Now)
 		}
 		vecStatus.Available = err == nil
 		if err != nil {
