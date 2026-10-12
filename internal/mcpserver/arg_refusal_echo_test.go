@@ -154,6 +154,14 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 			}
 			assertNoRefusalEcho(t, out, v)
 		})
+		t.Run("unknown project as_of/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": v, "as_of": "2026-01-01T00:00:00Z"}))
+			if !strings.Contains(out, "not registered") {
+				t.Fatalf("did not reach the as_of not-registered answer: %.200s", out)
+			}
+			assertNoRefusalEcho(t, out, v)
+		})
 		t.Run("list filters/"+label, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
 			callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
