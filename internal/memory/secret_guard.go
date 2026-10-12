@@ -96,6 +96,9 @@ func RejectSecret(field, text string) error {
 // name, and this is what a store sentence uses when it is the one refusing.
 const ProjectIdentifierLabel = "project identifier"
 
+// ArgEchoMaxBytes is the longest argument a refusal repeats back; see RefusalArg.
+const ArgEchoMaxBytes = 256
+
 // ProjectArg renders a caller's project argument — the value a `project_id` or
 // `project` tool parameter carries, or a CLI's project operand — for a sentence
 // that REFUSES it.
@@ -154,6 +157,27 @@ func ProjectArg(field, value string) string {
 	// this whole comment exists to prevent: a guard that grew a second error type
 	// must still refuse to quote, not fall through to naming the value.
 	return fmt.Sprintf("%q", "<"+field+" withheld: it holds a credential>")
+}
+
+// RefusalArg is ProjectArg for a sentence that REFUSES an argument, and it adds
+// one thing: a value longer than ArgEchoMaxBytes is withheld with its length, so
+// a refusal never hands the caller back a 200 KB argument. The token guard runs
+// on the whole value first, so a token inside an oversized one is still named by
+// its format.
+//
+// It is a separate function because ProjectArg is also used where the value must
+// come back whole: the prompts that tell an agent to call a tool with this very
+// project id, and the not-registered answers. Bounding those would hand the agent
+// a placeholder to pass as an id.
+func RefusalArg(field, value string) string {
+	if len(value) > ArgEchoMaxBytes {
+		if refusal := rejectSecret(field, value); refusal != nil {
+			return ProjectArg(field, value)
+		}
+		return fmt.Sprintf("%q", fmt.Sprintf("<%s withheld: it is %d bytes, longer than the %d a refusal repeats>",
+			field, len(value), ArgEchoMaxBytes))
+	}
+	return ProjectArg(field, value)
 }
 
 // secretField is one caller-supplied text to check, named the way the caller
