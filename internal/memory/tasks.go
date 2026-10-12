@@ -196,9 +196,10 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 // where a separate get-then-update could clobber a concurrent update made
 // between the read and the write (see UpdateMemory for the same pattern).
 // status, priority, and description are nil to preserve the current value.
-// Accepts a full task ID or a unique prefix. Returns the task as it stood
-// after the merge, so callers don't need a separate read to get ProjectID
-// or the resolved field values.
+// completed_at follows the status like CompleteTask sets it: stamped when the
+// status moves INTO done and cleared when it moves out. Accepts a full task ID
+// or a unique prefix. Returns the task as it stood after the merge, so callers
+// don't need a separate read to get ProjectID or the resolved field values.
 func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (Task, error) {
 	// The incoming description only, for the reason UpdateMemory gives: a row
 	// that already holds a credential must stay editable field by field.
@@ -230,6 +231,11 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, fmt.Errorf("get task: %w", err)
 	}
 
+	// completed_at tracks the status exactly as CompleteTask writes it (#1040):
+	// stamped on the transition INTO done and cleared on any transition out.
+	// The transition is what matters, so an already-done task edited again
+	// keeps the stamp it got when it became done rather than being re-stamped.
+	previousStatus := t.Status
 	if status != nil {
 		t.Status = *status
 	}
@@ -239,11 +245,25 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 	if description != nil {
 		t.Description = *description
 	}
+	switch {
+	case t.Status != "done":
+		t.CompletedAt = ""
+	case previousStatus != "done":
+		t.CompletedAt = time.Now().UTC().Format(StoredStampLayout)
+	}
+
+	// Bind NULL rather than "" when clearing, so a cleared stamp is the
+	// column's own "no completion" rather than an empty value a reader has to
+	// interpret.
+	var completedAt any
+	if t.CompletedAt != "" {
+		completedAt = t.CompletedAt
+	}
 
 	if _, err := s.execGuardedWrite(ctx, "update-task", `
-		UPDATE tasks SET status = ?, priority = ?, description = ?, updated_at = datetime('now')
+		UPDATE tasks SET status = ?, priority = ?, description = ?, completed_at = ?, updated_at = datetime('now')
 		WHERE id = ?
-	`, t.Status, t.Priority, t.Description, id); err != nil {
+	`, t.Status, t.Priority, t.Description, completedAt, id); err != nil {
 		return Task{}, fmt.Errorf("update task: %w", err)
 	}
 	return t, nil
