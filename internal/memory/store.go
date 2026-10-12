@@ -6991,6 +6991,14 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 // (cmd/ghost/lifecycle.go), so a hallucinated credential costs one unrecorded
 // summary rather than the whole consolidation — the memories it summarised have
 // already been applied by this point.
+//
+// A project with no ghost_state row is a failure too, and it is the reason this
+// is not a fire-and-forget UPDATE. The row is written by every project creation
+// route, so a missing one means a store this build did not create that row for —
+// notably a project imported before ImportProject wrote it — and an UPDATE that
+// matched nothing returns nil just as an UPDATE that wrote does. Reporting the
+// empty result instead turns that silent loss into the warning the caller
+// already knows how to print.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
 	if err := rejectSecret("learned_context", learnedContext); err != nil {
 		return err
@@ -7001,13 +7009,23 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.execGuardedWrite(ctx, "update-learned-context", `
+	res, err := s.execGuardedWrite(ctx, "update-learned-context", `
 		UPDATE ghost_state
 		SET learned_context = ?, reflection_summary = ?,
 		    last_reflection_at = datetime('now'), updated_at = datetime('now')
 		WHERE project_id = ?
 	`, learnedContext, summary, projectID)
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("update learned context: no ghost_state row for %s", ProjectArg(ProjectIdentifierLabel, projectID))
+	}
+	return nil
 }
 
 // GetReflectInputSignature returns the fingerprint of the memory set that

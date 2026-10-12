@@ -2373,6 +2373,34 @@ func TestStoreLearnedContext(t *testing.T) {
 	}
 }
 
+// TestUpdateLearnedContextReportsAMissingStateRow: a project that has no
+// ghost_state row — a store written before the state table, or one a project
+// was planted into without it — must not read a successful write from an UPDATE
+// that affected 0 rows. The caller is `ghost reflect`, which carries on after a
+// warning, so reporting turns a silent loss into a visible one instead of
+// dropping the learned context with no trace.
+func TestUpdateLearnedContextReportsAMissingStateRow(t *testing.T) {
+	s := portableTestStore(t)
+	ctx := context.Background()
+	// plantRawProject writes a projects row and deliberately no state row, the
+	// shape the import defect left behind.
+	plantRawProject(t, s, "p1", "/src/p1", "p1")
+
+	err := s.UpdateLearnedContext(ctx, "p1", "learned", "summary")
+	if err == nil {
+		t.Fatal("UpdateLearnedContext succeeded for a project with no ghost_state row")
+	}
+	if !strings.Contains(err.Error(), "no ghost_state row") {
+		t.Errorf("refusal does not say the state row is missing: %v", err)
+	}
+	// And nothing was stored, which is what the caller is now told.
+	if got, err := s.GetLearnedContext(ctx, "p1"); err != nil {
+		t.Fatalf("GetLearnedContext: %v", err)
+	} else if got != "" {
+		t.Errorf("GetLearnedContext = %q, want empty", got)
+	}
+}
+
 func TestReflectInputSignatureRoundTrip(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
