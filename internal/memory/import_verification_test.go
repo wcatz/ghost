@@ -217,7 +217,7 @@ func TestReplaceNonManualNeverComposesAWindowThatEndsBeforeItStarts(t *testing.T
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: merged, Importance: 0.7,
 		ReplacesIDs: []string{a, b},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -255,7 +255,7 @@ func TestReplaceNonManualDoesNotInheritAnOutOfOrderWindow(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{a},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -284,7 +284,7 @@ func TestReplaceNonManualStillInheritsAConsistentWindow(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{a},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	row := successorRow(t, s, rewritten)
@@ -361,7 +361,7 @@ func TestReplaceNonManualPrefersACompleteWindowWhicheverSourceIsNamedFirst(t *te
 			content := "the support window is open through next year and the rollback is bounded"
 			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
-			}}, ""); err != nil {
+			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
 			}
 
@@ -403,7 +403,7 @@ func TestReplaceNonManualNeverComposesHalvesWhenNoSourceHasBoth(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6,
 		ReplacesIDs: []string{from, until},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -478,7 +478,7 @@ func TestReplaceNonManualAnUnreadableWindowNeverOutranksARealOne(t *testing.T) {
 			content := "the support window runs to the end of next year, and the prose note is retired"
 			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
-			}}, ""); err != nil {
+			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
 			}
 
@@ -514,7 +514,7 @@ func TestReplaceNonManualDoesNotWriteAnUnreadableStampOntoTheSuccessor(t *testin
 	const content = "the rollback is scheduled, in a form the reader can use"
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -551,9 +551,9 @@ func TestReplaceNonManualRecordsTheEmptyMomentAsNoClaim(t *testing.T) {
 	empty := ""
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6,
-		ValidFrom:   &empty, // the empty moment, which is not a claim
+		ValidFrom:   &empty,
 		ReplacesIDs: []string{a},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -595,7 +595,7 @@ func TestReplaceNonManualDoesNotWriteAnUnreadableVerifiedAtOntoTheSuccessor(t *t
 	const content = "the check is recorded in a form the reader can use"
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -656,7 +656,7 @@ func TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow(t *testing.T)
 	const content = "the support window is open through next year, and the zero-instant note is retired"
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{zero, real},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -711,12 +711,11 @@ func TestReplaceNonManualTheEmissionsClaimBeatsTheSources(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "architecture", Content: rewritten, Importance: 0.7,
 		ReplacesIDs: []string{id},
-		// The emission restates the window and speaks for itself where the
-		// source row did not.
+
 		ValidFrom:  &restated,
 		VerifiedAt: stampPtr("2026-11-11 00:00:00"),
 		SourceRef:  "docs/new.md",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -823,7 +822,7 @@ func TestReplaceNonManualFreshRowKeepsTheColumnsItsCarriedEvidenceClaims(t *test
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "architecture", Content: rewritten, Importance: 0.8,
 		ReplacesIDs: []string{id},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -896,7 +895,7 @@ func TestReplaceNonManualFreshRowInventsNoClaim(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{id},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -937,7 +936,7 @@ func TestReplaceNonManualFreshRowKeepsTheSourcesTrustNotTheEmissions(t *testing.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "gotcha", Content: rewritten, Importance: 0.5,
 		ReplacesIDs: []string{id},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

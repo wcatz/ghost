@@ -515,7 +515,7 @@ func TestMemoriesAsOfFindsAMemoryTheStoreHasSinceDeleted(t *testing.T) {
 	// old row (recording the tombstone and the successor) and inserts a new id.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "gotcha", Content: replacement, Source: "mcp", Importance: 0.5,
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	newID := theOnlyMemoryID(t, s, testProject)
@@ -619,7 +619,7 @@ func TestMemoriesAsOfReportsAMemoryWhoseFirstVersionIsAfterT(t *testing.T) {
 		{name: "reflect rewrite", first: func(t *testing.T, s *Store, id string) {
 			if _, err := s.ReplaceNonManual(context.Background(), testProject, []Memory{{
 				Category: "fact", Content: content + ", restated", Source: "mcp", Importance: 0.5,
-			}}, ""); err != nil {
+			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
 			}
 		}},

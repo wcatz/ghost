@@ -550,7 +550,7 @@ func TestPurgeReachesTheEvidenceASnapshotCarries(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "convention", Content: redacted, Importance: 0.6},
 		{Category: "fact", Content: bystander, Importance: 0.5},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	var carried int
@@ -688,7 +688,7 @@ func TestCarryIsVerbatimAndNamesItsSource(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "gotcha", Content: carried, Importance: 0.6,
 		ReplacesIDs: []string{source},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

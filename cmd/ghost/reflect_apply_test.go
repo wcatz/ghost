@@ -24,7 +24,7 @@ type fakeReflectionApplier struct {
 	err             error
 }
 
-func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
+func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool, _ []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	f.calls++
 	f.projectMems = append([]memory.Memory(nil), projectMems...)
 	f.globalMems = append([]memory.Memory(nil), globalMems...)
@@ -56,8 +56,8 @@ func globals(contents ...string) []reflection.ReflectMemory {
 func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.T) {
 	f := &fakeReflectionApplier{resultPromoted: 1}
 	_, _, preserved, promoted, kept, _, err := applyReflection(
-		context.Background(), f, "p1", nil, globals("global"), "since", true, nil,
-	)
+		context.Background(), f, "p1", nil, globals("global"), "since", true, nil, nil)
+
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -88,8 +88,8 @@ func TestApplyReflectionFoldsGlobalsIntoProjectUnlessAsked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeReflectionApplier{}
 			_, _, _, _, _, _, err := applyReflection(
-				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote, nil,
-			)
+				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote, nil, nil)
+
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}
@@ -103,7 +103,7 @@ func TestApplyReflectionFoldsGlobalsIntoProjectUnlessAsked(t *testing.T) {
 func TestApplyReflectionPropagatesStoreFailure(t *testing.T) {
 	want := errors.New("transaction failed")
 	f := &fakeReflectionApplier{err: want}
-	_, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil)
+	_, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil, nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
@@ -123,7 +123,7 @@ func TestApplyReflectionCoversPromotionMatrix(t *testing.T) {
 					if fail {
 						f.err = errors.New("injected apply failure")
 					}
-					_, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil)
+					_, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil, nil)
 					if (err != nil) != fail {
 						t.Fatalf("error = %v, want error=%t", err, fail)
 					}
@@ -213,10 +213,8 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, _, _, promoted, kept, _, err := applyReflection(ctx, store, "proj",
-		projectMemories("a consolidated project fact"),
-		globals("prefer running the linter before pushing"),
-		"", false, nil)
+	_, _, _, promoted, kept, _, err := applyReflection(ctx, store, "proj", projectMemories("a consolidated project fact"), globals("prefer running the linter before pushing"), "", false, nil, nil)
+
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}

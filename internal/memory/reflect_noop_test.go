@@ -159,7 +159,7 @@ func TestReplaceNonManualVerbatimReemissionWritesNothing(t *testing.T) {
 	for _, id := range ids {
 		emitted = append(emitted, keptReemit(t, s, id))
 	}
-	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestReplaceNonManualAStrengthenedRowKeptVerbatimIsStillANoOp(t *testing.T) 
 	}
 	updatedAtBefore := memoryUpdatedAt(t, s, id)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{keptReemit(t, s, id)}, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{keptReemit(t, s, id)}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestReplaceNonManualAStrengthenedRowReweightedIsStillAChange(t *testing.T) 
 	const reweight float32 = 0.6600001
 	emitted := keptReemit(t, s, id)
 	emitted.Importance = reweight
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{emitted}, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{emitted}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -402,7 +402,7 @@ func TestReplaceNonManualRepeatedAllKeepApplyIsStable(t *testing.T) {
 		for _, id := range ids {
 			emitted = append(emitted, keptReemit(t, s, id))
 		}
-		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, ""); err != nil {
+		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual round %d: %v", round, err)
 		}
 	}
@@ -435,7 +435,7 @@ func TestReplaceNonManualGenuineRewriteStillAppendsOneRow(t *testing.T) {
 
 	emitted := keptReemit(t, s, id)
 	emitted.Content = rewritten
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{emitted}, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{emitted}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -487,7 +487,7 @@ func TestReplaceNonManualImportanceOnlyChangeAppendsOneRow(t *testing.T) {
 		emitted = append(emitted, keptReemit(t, s, id))
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -605,7 +605,7 @@ func TestReplaceNonManualEveryRecordedFieldBreaksTheNoOp(t *testing.T) {
 				}
 				emitted = append(emitted, keptReemit(t, s, id))
 			}
-			if _, err := s.ReplaceNonManual(ctx, testProject, emitted, ""); err != nil {
+			if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
 			}
 
@@ -662,7 +662,7 @@ func TestReplaceNonManualAnUnreadableStoredValueIsTreatedAsChanged(t *testing.T)
 
 	emitted := []Memory{keptReemit(t, s, id)}
 	emitted[0].Tags = []string{"a"}
-	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if n := historyRowCount(t, s, id); n != beforeRows+1 {

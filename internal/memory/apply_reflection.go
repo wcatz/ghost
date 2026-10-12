@@ -17,7 +17,7 @@ import (
 // them, not just a count: a summary that reports how many rows the project now
 // holds cannot be built from an integer when it also has to say which rows those
 // are.
-func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []Memory, err error) {
+func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool, fed []CorpusRow) (preserved []string, promoted int, keptMems []Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]Memory(nil), projectMems...), globalMems...)
 		globalMems = nil
@@ -37,7 +37,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 
 	txCtx := withStoreTx(ctx, tx)
 	if len(projectMems) > 0 {
-		preserved, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince)
+		preserved, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("replace project memories: %w", err)
 		}

@@ -90,7 +90,7 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "convention", Content: rewritten, Importance: 0.6,
 			ReplacesIDs: []string{source},
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -133,7 +133,7 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: merged, Importance: 0.5,
 			ReplacesIDs: []string{first, second},
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -187,7 +187,7 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 		// carry: the row never changed identity, so its evidence never left it.
 		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "convention", Content: kept, Importance: 0.6,
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -207,7 +207,7 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 		const fresh = "a consolidation surfaced this with no predecessor at all"
 		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: fresh, Importance: 0.5,
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 		id := onlyMemoryWithContent(t, s, fresh)
@@ -256,7 +256,7 @@ func TestRestoreBringsTheEvidenceBackWithTheMemory(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "convention", Content: rewritten, Importance: 0.7,
 		ReplacesIDs: []string{id},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if ev, err := s.MemoryProvenance(ctx, id); err != nil || len(ev) != 0 {
@@ -323,7 +323,7 @@ func TestRestoreDoesNotTouchTheEvidenceOfARowItUpdatesInPlace(t *testing.T) {
 	// kept, and the snapshot now holds exactly the evidence the row has.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: original, Importance: 0.5,
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual (the snapshot): %v", err)
 	}
 

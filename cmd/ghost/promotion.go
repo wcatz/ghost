@@ -18,7 +18,7 @@ import (
 // recovery behind one call makes their ordering testable and lets the store
 // commit them atomically.
 type reflectionApplier interface {
-	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []memory.Memory, err error)
+	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, err error)
 }
 
 // applyReflection converts reflection proposals to store rows and always
@@ -51,7 +51,7 @@ type reflectionApplier interface {
 // caller's "Applied: N memories consolidated" line counts them. Returning only a
 // count left it counting the pre-drop lists, so a partial drop — one good
 // proposal and one credential — reported 2 written when 1 was.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
 	// Filter FIRST, on the caller's two sets, and fold afterwards.
 	//
 	// The order is load-bearing and it was the other way round here first.
@@ -85,7 +85,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// operator's head while the value sits in the database.
 		return keptProject, keptGlobal, nil, 0, nil, false, nil
 	}
-	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
+	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals, fed)
 	if err != nil {
 		return keptProject, keptGlobal, nil, 0, nil, false, err
 	}

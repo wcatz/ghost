@@ -30,7 +30,7 @@ func TestRestoreKeepsSavesMadeAfterSnapshot(t *testing.T) {
 	// Takes a snapshot of the project, then replaces it.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 	// reused in place — that is the path that lost identity.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "gotcha", Content: "entirely different consolidated content", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
@@ -159,7 +159,7 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	}
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestSnapshotRetentionIsWidened(t *testing.T) {
 		}
 		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 			{Category: "fact", Content: "consolidated content", Importance: 0.6},
-		}, ""); err != nil {
+		}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual %d: %v", i, err)
 		}
 	}

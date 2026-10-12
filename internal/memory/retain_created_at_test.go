@@ -44,7 +44,7 @@ func TestReplaceNonManualRetainedRowKeepsCreatedAtAndSource(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		retainedMemory("architecture", content, 0.6, []string{"worker"}),
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestReplaceNonManualRetainedRowStillDecays(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		retainedMemory("architecture", staleContent, 0.6, []string{}),
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestReplaceNonManualRewrittenRowStillRefreshesCreatedAt(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "convention", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestReplaceNonManualUnchangedReuseStillAppliesRewriteFields(t *testing.T) {
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "convention", Content: content, Importance: 0.9, Tags: []string{"deploy", "ci"},
 		Scope: map[string]string{"environment": "production"},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestReplaceNonManualReusePickPrefersMatchingCategory(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestReplaceNonManualReusePickIsDeterministic(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

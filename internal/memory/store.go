@@ -5658,6 +5658,27 @@ type replaceCandidate struct {
 	importance float64
 	tags       string
 	scope      sql.NullString
+	// updatedAt is the row's write clock as the pass will compare it: the fed
+	// corpus carries the value read before the harness answered, and a row whose
+	// column has moved since is not the row the pass is about (#1051).
+	updatedAt string
+}
+
+// CorpusRow is one row as a reflection pass READ it: the identity and the two
+// facts ReplaceNonManual re-checks inside the write transaction. A row is only
+// replaceable while the store still holds that content at that updated_at;
+// anything else is a concurrent edit, is kept as it is, and any emission that
+// claims it is dropped rather than written beside it.
+//
+// updated_at is a write clock, not a content clock (#879): a metadata-only edit
+// — a retag, a reweight, a scope narrowing — moves it while the text stays put.
+// That is the safe direction here. Treating such a row as concurrent keeps the
+// edit and drops the emission, where reading updated_at as "content unchanged"
+// would let the re-emission overwrite a change it never saw.
+type CorpusRow struct {
+	ID        string
+	Content   string
+	UpdatedAt string
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -6243,7 +6264,7 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) (preserved []string, err error) {
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, err error) {
 	if len(memories) == 0 {
 		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
@@ -6294,7 +6315,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// irrelevant, because every reused row was re-stamped created_at = now
 	// anyway; now it decides the age that survives.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, content, category, importance, tags, scope FROM memories
+		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 		  AND `+retentionExemptSQL+`
 		ORDER BY created_at, id
@@ -6305,7 +6326,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var candidates []replaceCandidate
 	for rows.Next() {
 		var c replaceCandidate
-		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope); err != nil {
+		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope, &c.updatedAt); err != nil {
 			rows.Close() //nolint:errcheck
 			return nil, fmt.Errorf("scan replaceable memory: %w", err)
 		}
@@ -6347,6 +6368,75 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
+	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
+	// content or updated_at has moved since it was read, is not the row the pass
+	// was given: an edit or a delete landed while the harness was answering.
+	// Such a row is kept as it is, and any emission claiming it is dropped
+	// rather than written beside it. This is the same guard FoldRows applies
+	// with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
+	// behaviour above exactly.
+	candidateByID := make(map[string]replaceCandidate, len(candidates))
+	for _, c := range candidates {
+		candidateByID[c.id] = c
+	}
+	dropEmission := make([]bool, len(memories))
+	if len(fed) > 0 {
+		fedByID := make(map[string]CorpusRow, len(fed))
+		fedIDsByContent := make(map[string][]string, len(fed))
+		for _, f := range fed {
+			fedByID[f.ID] = f
+			fedIDsByContent[f.Content] = append(fedIDsByContent[f.Content], f.ID)
+		}
+		for _, c := range candidates {
+			if concurrent[c.id] {
+				continue
+			}
+			f, read := fedByID[c.id]
+			if !read || f.Content != c.content || f.UpdatedAt != c.updatedAt {
+				concurrent[c.id] = true
+			}
+		}
+
+		for i, m := range memories {
+			// A keep restates its source byte-for-byte, so the emitted text IS
+			// the claim on the fed row with that text. A merge or a rewrite
+			// claims the ids it names. Either claim is void once the row it
+			// points at changed or is gone.
+			drop := false
+			for _, fid := range fedIDsByContent[m.Content] {
+				if _, stored := candidateByID[fid]; !stored || concurrent[fid] {
+					drop = true
+					break
+				}
+			}
+			if !drop {
+				for _, replaced := range m.ReplacesIDs {
+					if _, stored := candidateByID[replaced]; !stored || concurrent[replaced] {
+						drop = true
+						break
+					}
+				}
+			}
+			if !drop {
+				continue
+			}
+			dropEmission[i] = true
+			// Keep every row this emission would otherwise have deleted: the
+			// sources it names, and any stored row carrying the text it emits.
+			// Nothing may be lost to a claim the pass is not allowed to make.
+			for _, replaced := range m.ReplacesIDs {
+				if _, stored := candidateByID[replaced]; stored {
+					concurrent[replaced] = true
+				}
+			}
+			for _, c := range candidates {
+				if c.content == m.Content {
+					concurrent[c.id] = true
+				}
+			}
+		}
+	}
+
 	// Report the survivors so the caller can avoid recording a skip
 	// fingerprint that would absorb them into the next no-op gate.
 	preserved = make([]string, 0, len(concurrent))
@@ -6369,6 +6459,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	reuseFor := make(map[int]replaceCandidate, len(memories))
 	for i, m := range memories {
+		if dropEmission[i] {
+			continue
+		}
 		// Matching is exact, not trimmed: reuse preserves the existing
 		// embedding, so it is only valid when the stored text is byte-identical
 		// to what the consolidator emitted. A whitespace-only difference takes
@@ -6414,6 +6507,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// and must not be given one.
 	successorOf := map[string]string{}
 	for i, m := range memories {
+		if dropEmission[i] {
+			continue
+		}
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
 			id := stored.id

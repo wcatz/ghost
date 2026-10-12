@@ -1476,8 +1476,17 @@ func runReflect() {
 	// The POST-drop sets, not the caller's pre-drop ones: the summary below counts
 	// them, and a partial drop — one good proposal and one credential — has to
 	// report only what was written.
+	//
+	// The corpus this pass READ, carried into the write so a row edited or
+	// deleted while the harness was answering is kept as it is and the emission
+	// claiming it is dropped rather than overwriting the edit or resurrecting
+	// the delete (#1051).
+	fed := make([]memory.CorpusRow, 0, len(live))
+	for _, m := range live {
+		fed = append(fed, memory.CorpusRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt})
+	}
 	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, applied, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result))
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)

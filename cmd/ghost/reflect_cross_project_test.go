@@ -31,8 +31,8 @@ func TestCrossProjectCandidatesSurviveTheDropAndStayDiscoverable(t *testing.T) {
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222"),
 		globals("tabs, not spaces, in every repository we touch"),
-		"since", false, nil,
-	)
+		"since", false, nil, nil)
+
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -70,8 +70,8 @@ func TestCredentialAmongCrossProjectCandidatesIsNotPromoted(t *testing.T) {
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222"),
 		globals("the deploy token is "+credential),
-		"since", true, nil,
-	)
+		"since", true, nil, nil)
+
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}

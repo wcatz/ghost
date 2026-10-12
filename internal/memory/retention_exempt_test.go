@@ -39,7 +39,7 @@ func TestConsolidationLeavesAPersistentRowAlone(t *testing.T) {
 
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "the corpus after consolidation", Importance: 0.6, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestRestoreCannotRewriteARowThatBecamePersistentAfterTheSnapshot(t *testing
 	}
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha beta gamma", Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if got := getOne(t, s, id); got.Content != "alpha beta gamma" {

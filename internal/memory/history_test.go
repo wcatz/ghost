@@ -255,7 +255,7 @@ func TestMemoryHistoryRecordsReflectRewriteAndDelete(t *testing.T) {
 		Content:    "search falls back to FTS5 when Ollama is unreachable",
 		Importance: 0.6,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -652,7 +652,7 @@ func TestMemoryHistoryRecordsRestore(t *testing.T) {
 		Content:    "ollama being unreachable degrades retrieval to lexical only",
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
@@ -1208,7 +1208,7 @@ func TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow(t *testing.T) {
 		Importance:  0.5,
 		Source:      "reflection",
 		ReplacesIDs: []string{old},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -1262,7 +1262,7 @@ func TestReplaceNonManualLeavesAnUnrelatedDeleteWithoutASuccessor(t *testing.T) 
 		Content:    "an entirely different consolidated fact about the pipeline",
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	entries, err := s.MemoryHistory(ctx, kept, 0)
@@ -1573,7 +1573,7 @@ func TestPurgeReachesTheSnapshotThatCouldRestoreTheRow(t *testing.T) {
 		Content:    secret,
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	var snapshots int
@@ -1762,7 +1762,7 @@ func TestRestoreAppendsOnlyForRowsItChanged(t *testing.T) {
 	// The reflection that snapshots and replaces it.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "the consolidated wording", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
