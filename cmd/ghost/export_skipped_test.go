@@ -937,3 +937,29 @@ func TestAnExportThatLeftAnOverBoundScopeOutNamesTheKeyAndTheScopeFix(t *testing
 		t.Errorf("the report printed the over-long value:\n%s", report)
 	}
 }
+
+// TestAnOverBoundScopeValueUnderATokenShapedKeyDoesNotPrintTheKey: the bounds are
+// checked before the token guard, so the key the report names has not been
+// screened. A key shaped like a credential must not reach the output.
+func TestAnOverBoundScopeValueUnderATokenShapedKeyDoesNotPrintTheKey(t *testing.T) {
+	key := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3)
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-tokkey", `{"`+key+`":"`+strings.Repeat("v", memory.MaxScopeValueLen+72)+`"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+
+	if err == nil {
+		t.Error("an export that left the row out exited 0")
+	}
+	if !strings.Contains(report, assemble.Token("m-tokkey")) {
+		t.Errorf("the report does not name the record:\n%s", report)
+	}
+	if strings.Contains(report, key) || strings.Contains(report, "ghp_") {
+		t.Errorf("the report printed the token-shaped scope key:\n%s", report)
+	}
+}

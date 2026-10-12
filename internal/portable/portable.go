@@ -24,6 +24,7 @@ import (
 	"io"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // SchemaVersion is the version of the artifact format this build writes and
@@ -384,7 +385,14 @@ func exportRefusal(err error) (reason string, secret bool) {
 func scopeBoundReason(e *memory.ScopeBoundError) string {
 	reason := "ghost import refuses it: " + e.Error()
 	if e.Kind == memory.ScopeValueTooLong {
-		reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(e.Key))
+		// The bounds run before the token guard, so this key has not been checked
+		// for a credential shape. SafeToken only quotes characters; it would print a
+		// token-shaped key bare. Such a key is not named at all.
+		if _, shaped := secret.Detect(e.Key); shaped {
+			reason += " (one scope value; its key is not shown)"
+		} else {
+			reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(e.Key))
+		}
 	}
 	return reason
 }
