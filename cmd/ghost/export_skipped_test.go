@@ -901,3 +901,39 @@ func TestTheUnrepairableSentenceNamesTheRepairThatDoesWork(t *testing.T) {
 		t.Errorf("the report does not name the repair that does work:\n%s", report)
 	}
 }
+
+// TestAnExportThatLeftAnOverBoundScopeOutNamesTheKeyAndTheScopeFix covers a stored
+// row whose scope predates the write-time bound. The id is not what is wrong with
+// it, so the report must not tell the operator to re-save it under a different id:
+// it names the scope key that is over its limit and says a shorter scope fixes it.
+func TestAnExportThatLeftAnOverBoundScopeOutNamesTheKeyAndTheScopeFix(t *testing.T) {
+	long := strings.Repeat("v", memory.MaxScopeValueLen+1)
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-scope", `{"environment":"`+long+`"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+
+	if err == nil {
+		t.Error("an export that left an over-bound scope row out exited 0")
+	}
+	if !strings.Contains(report, assemble.Token("m-scope")) {
+		t.Errorf("the report does not name the record it left out:\n%s", report)
+	}
+	if !strings.Contains(report, "the scope key is environment") {
+		t.Errorf("the report does not name the offending scope key:\n%s", report)
+	}
+	if !strings.Contains(report, "re-save it with a shorter scope") {
+		t.Errorf("the report does not give the scope advice:\n%s", report)
+	}
+	if strings.Contains(report, "under an id this build accepts") {
+		t.Errorf("the report blames the id for a scope problem:\n%s", report)
+	}
+	if strings.Contains(report, long) {
+		t.Errorf("the report printed the over-long value:\n%s", report)
+	}
+}

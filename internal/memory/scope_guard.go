@@ -26,6 +26,39 @@ const (
 	MaxScopeValueLen = 128
 )
 
+// ScopeBoundError is a scope that breaks one of the bounds above. It carries what
+// a report needs to say which bound without re-parsing the message: the Kind, the
+// limit and the measured size, and — for a value — the KEY it was stored under,
+// which the bounds check has already held to MaxScopeKeyLen. A key that is itself
+// over its bound is never carried, so no field here can be as long as the scope
+// it describes. Error keeps the sentence the write paths have always returned.
+type ScopeBoundError struct {
+	// Kind is ScopeTooManyKeys, ScopeKeyTooLong or ScopeValueTooLong.
+	Kind string
+	// Key is the key whose value is over its bound, and empty for the other kinds.
+	Key string
+	// Limit is the bound that was broken and Got the size that broke it.
+	Limit, Got int
+}
+
+// The Kinds of ScopeBoundError.
+const (
+	ScopeTooManyKeys  = "keys"
+	ScopeKeyTooLong   = "key"
+	ScopeValueTooLong = "value"
+)
+
+func (e *ScopeBoundError) Error() string {
+	switch e.Kind {
+	case ScopeTooManyKeys:
+		return fmt.Sprintf("scope must have at most %d keys, got %d — it is a few short labels such as environment and component, not a document", e.Limit, e.Got)
+	case ScopeKeyTooLong:
+		return fmt.Sprintf("a scope key must be at most %d bytes, got %d — it names a dimension such as environment, not a document", e.Limit, e.Got)
+	default:
+		return fmt.Sprintf("a scope value must be at most %d bytes, got %d — it is a short label such as production, not a document", e.Limit, e.Got)
+	}
+}
+
 // checkScope is the whole of what a scope is checked for before it reaches SQL:
 // the bounds, then the token guard over every key and every key=value pair. It is one
 // function because the writers that store a scope are several — Create and
@@ -45,7 +78,7 @@ func checkScope(scope map[string]string) error {
 		return nil
 	}
 	if len(scope) > MaxScopeKeys {
-		return fmt.Errorf("scope must have at most %d keys, got %d — it is a few short labels such as environment and component, not a document", MaxScopeKeys, len(scope))
+		return &ScopeBoundError{Kind: ScopeTooManyKeys, Limit: MaxScopeKeys, Got: len(scope)}
 	}
 	keys := make([]string, 0, len(scope))
 	for k := range scope {
@@ -57,10 +90,10 @@ func checkScope(scope map[string]string) error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		if len(k) > MaxScopeKeyLen {
-			return fmt.Errorf("a scope key must be at most %d bytes, got %d — it names a dimension such as environment, not a document", MaxScopeKeyLen, len(k))
+			return &ScopeBoundError{Kind: ScopeKeyTooLong, Limit: MaxScopeKeyLen, Got: len(k)}
 		}
 		if v := scope[k]; len(v) > MaxScopeValueLen {
-			return fmt.Errorf("a scope value must be at most %d bytes, got %d — it is a short label such as production, not a document", MaxScopeValueLen, len(v))
+			return &ScopeBoundError{Kind: ScopeValueTooLong, Key: k, Limit: MaxScopeValueLen, Got: len(v)}
 		}
 	}
 	for i, k := range keys {
