@@ -516,7 +516,11 @@ before its own INSERT.
 
 A project a save OPENS from a name-shaped id is bound to the checkout the server
 is actually in — the git top level of its own working directory, plus that
-checkout's origin remote — so a session in the same checkout resolves it. Both
+checkout's origin remote — so a session in the same checkout resolves it. The
+recorded checkout must be a directory: `EvalSymlinks` resolves a regular file
+exactly as it resolves a directory, so the resolved path is statted and a
+non-directory is declined, opening the project unbound rather than bound to a
+location no session can stand in. Both
 answers come from `repo.GitCommand`, the one helper every git child in Ghost is
 built by, which drops from the child every inherited git variable that can
 relocate the repository or replace the file its configuration is read from. The
