@@ -253,6 +253,15 @@ func CheckImportedMemory(m PortableMemory) error {
 	if err := rejectSecretList("tags", m.Tags); err != nil {
 		return err
 	}
+	// The scope, on the terms of the save: an artifact's scope column is the
+	// FILE's content, printed outside the data delimiters on every listing, so a
+	// token in a key or value is refused and the count and lengths are bounded.
+	// Export asks this predicate too, so a stored row that predates the bound is
+	// named in the export report rather than carried into an artifact the importer
+	// would refuse.
+	if err := checkScope(m.Scope); err != nil {
+		return err
+	}
 	// The evidence records' own text, for the same reason. An artifact's evidence
 	// rows are the FILE's content, exactly as `source_ref` above is, and this is
 	// the one route where that is true: a harness's own identity is not a secret,
