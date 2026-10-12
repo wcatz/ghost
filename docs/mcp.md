@@ -450,21 +450,24 @@ never chose, colliding with whatever genuinely holds it.
 
 **Free text is refused at WRITE time when it is blank or malformed.** The tools
 that store free text — `ghost_memory_save`, `ghost_save_global` and
-`ghost_memory_update` for `content`, and `ghost_task_create` and
-`ghost_decision_record` for `title` — refuse a value that is empty or
-whitespace-only, that is not valid UTF-8, or that carries a NUL byte. The old
-check at each site was `value == ""`, which accepted `"   "`, `"\n\t"` and
-`"a\x00b"` and stored them verbatim: a blank memory is a row that answers a
-later search with nothing, and a blank title is a task no listing can name. The
-refusal names the field and never the value, because an invalid-UTF-8 or
-NUL-bearing argument is exactly the caller text this codebase keeps out of its
-answers. A `ghost_memory_update` that is refused leaves the stored content
-byte-identical to what it was — a refused edit is not a partial write. The rule
-is a write-boundary rule and lives beside `validateTags`, not in the import
-predicates: `CheckImportedMemory` and `CheckImportedTask` still accept a
-whitespace-only `content` or `title` from an artifact, because an import is
-another way to reach the same table and must not be the way around a store's
-existing rows.
+`ghost_memory_update` for `content`; `ghost_task_create` for `title`; and
+`ghost_decision_record` for `title`, `decision` and `rationale` — refuse a value
+that is blank, that is not valid UTF-8, or that carries a NUL byte. Blank means
+empty, whitespace-only, or holding nothing but invisible FORMAT characters
+(`U+200B` ZERO WIDTH SPACE, `U+2060` WORD JOINER, `U+FEFF` ZERO WIDTH NO-BREAK
+SPACE), which render as nothing but are not Unicode spaces, so a `TrimSpace`
+check misses them. The old check at each site was `value == ""`, which accepted
+`"   "`, `"\n\t"` and `"a\x00b"` and stored them verbatim: a blank memory is a
+row that answers a later search with nothing, and a blank title is a task no
+listing can name. The refusal names the field and never the value, because an
+invalid-UTF-8 or NUL-bearing argument is exactly the caller text this codebase
+keeps out of its answers. A `ghost_memory_update` that is refused leaves the
+stored content byte-identical to what it was — a refused edit is not a partial
+write. The rule is a write-boundary rule and lives beside `validateTags`, not in
+the import predicates: `CheckImportedMemory`, `CheckImportedTask` and
+`CheckImportedDecision` still accept a blank `content`, `title`, `decision` or
+`rationale` from an artifact, because an import is another way to reach the same
+table and must not be the way around a store's existing rows.
 
 **A `project_id` is capped at WRITE time, and the cap is a write rule alone.**
 `ensureProjectFor` refuses a `project_id` that is whitespace-only, that is not

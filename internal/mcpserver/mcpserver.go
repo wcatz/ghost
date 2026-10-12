@@ -3164,8 +3164,15 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" || args.Title == "" || args.Decision == "" || args.Rationale == "" {
 			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
 		}
-		// A title of "   " is not empty and was stored verbatim (#1038).
+		// A title, decision or rationale of "   " is not empty and was stored
+		// verbatim (#1038).
 		if err := validateRequiredText("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := validateRequiredText("decision", args.Decision); err != nil {
+			return nil, nil, err
+		}
+		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)

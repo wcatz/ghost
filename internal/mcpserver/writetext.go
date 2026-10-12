@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -28,16 +29,35 @@ import (
 // before this is asked.
 const maxProjectIDLen = 4096
 
+// blankWriteText reports whether value holds nothing a reader would see: only
+// Unicode space characters and Unicode FORMAT characters (category Cf).
+//
+// TrimSpace alone is not enough. It covers every Unicode space — a value of one
+// ideographic space is blank too, not only an ASCII one — but not the invisible
+// FORMAT characters, so a value of one U+200B ZERO WIDTH SPACE, U+2060 WORD
+// JOINER or U+FEFF ZERO WIDTH NO-BREAK SPACE passed both a `== ""` check and a
+// TrimSpace one and was stored as a row that renders as nothing. A value that is
+// ONLY those is blank by the same argument a whitespace-only one is; this strips
+// them and asks whether anything is left, so a zero-width character beside real
+// text (where it is legitimate, as in a word joiner or an emoji sequence) is
+// untouched.
+func blankWriteText(value string) bool {
+	return strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+	}) == ""
+}
+
 // validateRequiredText refuses a required free-text argument a write tool must
-// not store: a value that is empty or whitespace-only, one that is not valid
-// UTF-8, or one carrying a NUL byte (#1038).
+// not store: a value that is blank — empty, or holding only whitespace or
+// invisible FORMAT characters — one that is not valid UTF-8, or one carrying a
+// NUL byte (#1038).
 //
 // It is the one rule behind every free-text argument the write tools require —
-// memory content on the two save tools and the update, and a task's or a
-// decision's title — because the old check at each site was `value == ""`, which
-// accepts "   ", "\n\t" and "a\x00b" and stores them. A blank memory is a row
-// that answers a later search with nothing, and a blank title is a task no
-// listing can name.
+// memory content on the two save tools and the update, a task's or a decision's
+// title, and a decision's decision and rationale — because the old check at each
+// site was `value == ""`, which accepts "   ", "\n\t" and "a\x00b" and stores
+// them. A blank memory is a row that answers a later search with nothing, and a
+// blank title is a task no listing can name.
 //
 // The sentence names the FIELD and never the value. That is not decoration: an
 // invalid-UTF-8 or NUL-bearing argument is exactly the caller text this codebase
@@ -45,10 +65,8 @@ const maxProjectIDLen = 4096
 // string is not rendered), so the refusal must be about the class, not the bytes.
 // The field name is enough for a caller to act on: it is the one it passed.
 func validateRequiredText(field, value string) error {
-	// TrimSpace covers every Unicode space, so a value of one ideographic space
-	// is blank too, not only an ASCII one.
-	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("%s is required and must not be empty or whitespace-only", field)
+	if blankWriteText(value) {
+		return fmt.Errorf("%s is required and must not be empty or blank", field)
 	}
 	if !utf8.ValidString(value) {
 		return fmt.Errorf("%s must be valid UTF-8", field)

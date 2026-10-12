@@ -9,19 +9,24 @@ import (
 )
 
 // badWriteText is the free-text a write tool must refuse, one row per class:
-// whitespace that reads as blank and a NUL byte.
+// whitespace that reads as blank, invisible FORMAT characters that render as
+// nothing, and a NUL byte.
 //
 // A value that is blank is not merely empty: "   " and "\n\t" are both arguments
 // an agent produces when it means to pass something and passes nothing, and the
-// old `== ""` checks accepted every one of them. The NUL case is the one that
-// survives JSON: a client can send it as `\u0000` inside a string, so it arrives
-// at the handler as a real NUL and must be refused there. Invalid UTF-8 is
-// deliberately absent here — the JSON transport coerces an invalid byte to
-// U+FFFD before the handler sees it — and is covered against the helper itself in
+// old `== ""` checks accepted every one of them. The zero-width row is the class
+// TrimSpace alone misses — U+200B ZERO WIDTH SPACE, U+2060 WORD JOINER and U+FEFF
+// ZERO WIDTH NO-BREAK SPACE are category Cf, not spaces — so a value made only of
+// them also rendered as nothing. The NUL case is the one that survives JSON: a
+// client can send it as `\u0000` inside a string, so it arrives at the handler as
+// a real NUL and must be refused there. Invalid UTF-8 is deliberately absent here
+// — the JSON transport coerces an invalid byte to U+FFFD before the handler sees
+// it — and is covered against the helper itself in
 // TestValidateRequiredTextRefusesInvalidUTF8.
 var badWriteText = map[string]string{
 	"spaces":          "   ",
 	"tab and newline": "\n\t",
+	"zero-width only": "\u200b\u2060\ufeff",
 	"a NUL byte":      "a\x00b",
 }
 
@@ -123,6 +128,33 @@ func TestTitleWritersRefuseBlankOrMalformedTitles(t *testing.T) {
 	}
 }
 
+// TestDecisionRecordRefusesBlankOrMalformedDecisionAndRationale is the rest of
+// #1038 on ghost_decision_record: a blank `decision` or `rationale` is the same
+// class as a blank `title`, and the old `== ""` check on each stored "   "
+// verbatim. `title` is a real value here, so the refusal is about the field under
+// test and not about a blank title firing first.
+func TestDecisionRecordRefusesBlankOrMalformedDecisionAndRationale(t *testing.T) {
+	for _, field := range []string{"decision", "rationale"} {
+		for shape, bad := range badWriteText {
+			t.Run(field+"/"+shape, func(t *testing.T) {
+				srv, session := newCapSession(t)
+				args := map[string]any{
+					"project_id": "test-project",
+					"title":      "we chose it",
+					"decision":   "we chose it",
+					"rationale":  "because",
+				}
+				args[field] = bad
+				got := callToolErr(t, session, "ghost_decision_record", args)
+				if !strings.Contains(got, field) {
+					t.Errorf("the refusal does not name the %s field: %s", field, got)
+				}
+				assertNoTaskAndNoDecision(t, srv)
+			})
+		}
+	}
+}
+
 // TestMemorySaveRefusesBlankOrOversizedProjectID is the identifier half of #1038.
 //
 // Two classes, one assertion: nothing is opened. A blank id is the "  " case the
@@ -135,6 +167,7 @@ func TestMemorySaveRefusesBlankOrOversizedProjectID(t *testing.T) {
 		"spaces":      "   ",
 		"tab":         "\t",
 		"newline":     "\n",
+		"zero-width":  "\u200b\u2060\ufeff",
 		"oversized":   strings.Repeat("a", maxProjectIDLen+1),
 		"way too big": strings.Repeat("a", 100000),
 	} {
@@ -231,6 +264,31 @@ func TestValidateRequiredTextRefusesInvalidUTF8(t *testing.T) {
 	}
 }
 
+// TestValidateRequiredTextRefusesZeroWidthOnly pins the class TrimSpace misses:
+// the invisible FORMAT characters U+200B, U+2060 and U+FEFF — and U+00AD SOFT
+// HYPHEN, the same category — are not spaces, so a value made only of one of them
+// is blank to a reader but was not blank to a `== ""` or a TrimSpace check. Each
+// is refused on its own; the tool-level rows in badWriteText cover the three
+// together.
+func TestValidateRequiredTextRefusesZeroWidthOnly(t *testing.T) {
+	for name, value := range map[string]string{
+		"a zero width space":    "\u200b",
+		"a word joiner":         "\u2060",
+		"a zero width no-break": "\ufeff",
+		"a soft hyphen":         "\u00ad",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateRequiredText("content", value)
+			if err == nil {
+				t.Fatalf("validateRequiredText accepted the invisible value %q", value)
+			}
+			if !strings.Contains(err.Error(), "content") {
+				t.Errorf("the refusal must name the field: %v", err)
+			}
+		})
+	}
+}
+
 // TestValidateRequiredTextAcceptsOrdinaryText is the false-positive half: the
 // rule refuses blank and malformed values and nothing else. Leading and trailing
 // whitespace around real text, an internal newline, and non-ASCII characters are
@@ -241,6 +299,7 @@ func TestValidateRequiredTextAcceptsOrdinaryText(t *testing.T) {
 		"  padded claim  ",
 		"line one\nline two",
 		"日本語のメモ",
+		"a\u200bzero-width\u2060 beside real text",
 	} {
 		if err := validateRequiredText("content", value); err != nil {
 			t.Errorf("validateRequiredText refused ordinary text %q: %v", value, err)
@@ -266,7 +325,7 @@ func TestValidateProjectIDArgumentBoundaryAndShape(t *testing.T) {
 			t.Errorf("a project_id with a space inside was refused: %q: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "   ", "\t", "a\x00b"} {
+	for _, bad := range []string{"", "   ", "\t", "\u200b\u2060\ufeff", "a\x00b"} {
 		if err := validateProjectIDArgument(bad); err == nil {
 			t.Errorf("a blank or malformed project_id was accepted: %q", bad)
 		}
