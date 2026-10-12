@@ -54,7 +54,7 @@ func optInt(v any, name string) (*int, error) {
 		return nil, err
 	}
 	if *f != float64(int64(*f)) {
-		return nil, fmt.Errorf("%s must be an integer, got %v", name, v)
+		return nil, fmt.Errorf("%s must be an integer, got a fractional number", name)
 	}
 	n := int(int64(*f))
 	return &n, nil
@@ -95,7 +95,7 @@ func optStringSlice(v any, name string) ([]string, error) {
 		}
 		// A bare []any that failed the element check above would have
 		// errored already; here only a malformed or non-array string lands.
-		return nil, fmt.Errorf("%s must be an array of strings, got %s", name, memory.ProjectArg(name, t))
+		return nil, fmt.Errorf("%s must be an array of strings, got %s", name, memory.RefusalArg(name, t))
 	default:
 		return nil, fmt.Errorf("%s must be an array of strings, got %T", name, v)
 	}
@@ -120,14 +120,14 @@ func toFloat64(v any, name string) (*float64, error) {
 	case json.Number:
 		f, err := t.Float64()
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.ProjectArg(name, t.String()))
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.RefusalArg(name, t.String()))
 		}
 		return finiteFloat64(f, name, t.String())
 	case string:
 		trimmed := strings.TrimSpace(t)
 		f, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.ProjectArg(name, t))
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.RefusalArg(name, t))
 		}
 		return finiteFloat64(f, name, trimmed)
 	case *float32:

@@ -212,22 +212,26 @@ func plantTiedPathPair(t *testing.T, s *Store, dir string) {
 	}
 }
 
-// A value past ArgEchoMaxBytes is withheld with its length, and the renderers
-// built on ProjectArg inherit that: a 200 KB category or retention tier is not
+// A value past ArgEchoMaxBytes is withheld with its length by RefusalArg, and the store refusals
+// built on it inherit that: a 200 KB category or retention tier is not
 // repeated by the store's own refusals.
-func TestProjectArgWithholdsAnOversizedValueAndTheStoreRefusalsInheritIt(t *testing.T) {
+func TestRefusalArgWithholdsAnOversizedValueAndTheStoreRefusalsInheritIt(t *testing.T) {
 	big := strings.Repeat("z", 200*1024)
 
-	if got := ProjectArg("project_id", strings.Repeat("a", ArgEchoMaxBytes)); strings.Contains(got, "withheld") {
+	if got := RefusalArg("project_id", strings.Repeat("a", ArgEchoMaxBytes)); strings.Contains(got, "withheld") {
 		t.Errorf("a value exactly at the bound was withheld: %.80s", got)
 	}
-	got := ProjectArg("project_id", big)
+	// ProjectArg itself stays unbounded: prompts name a project id with it.
+	if got := ProjectArg("project_id", big); !strings.Contains(got, "zzzz") {
+		t.Errorf("ProjectArg bounded a value it renders on a success path: %.80s", got)
+	}
+	got := RefusalArg("project_id", big)
 	if len(got) > 256 || strings.Contains(got, "zzzz") || !strings.Contains(got, "project_id withheld") {
 		t.Errorf("ProjectArg of an oversized value = %.120s (len %d)", got, len(got))
 	}
 	// The guard runs on the whole value, so a token inside an oversized one is
 	// still named by its format.
-	if got := ProjectArg("project_id", big+" "+credentialToken); !strings.Contains(got, "GitHub personal access token") {
+	if got := RefusalArg("project_id", big+" "+credentialToken); !strings.Contains(got, "GitHub personal access token") {
 		t.Errorf("an oversized value holding a token lost the guard's finding: %.120s", got)
 	}
 

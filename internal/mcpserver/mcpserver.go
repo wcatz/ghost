@@ -81,7 +81,7 @@ func parseAsOf(raw string) (*time.Time, error) {
 	}
 	parsed, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return nil, fmt.Errorf("as_of %s is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z)", memory.ProjectArg("as_of", raw))
+		return nil, fmt.Errorf("as_of %s is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z)", memory.RefusalArg("as_of", raw))
 	}
 	utc := parsed.UTC()
 	return &utc, nil
@@ -249,7 +249,7 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 			// ProjectArg instead, so a 200 KB id is not repeated whole.
 			shown := assemble.Token(projectID)
 			if len(projectID) > memory.ArgEchoMaxBytes {
-				shown = memory.ProjectArg("project_id", projectID)
+				shown = memory.RefusalArg("project_id", projectID)
 			}
 			return "", nil, fmt.Errorf("%w — project_id %s", err, shown)
 		}
@@ -1041,7 +1041,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 // resource or resource-template URI before the SDK starts tracking it.
 func (s *Server) handleSubscribe(ctx context.Context, req *mcp.SubscribeRequest) error {
 	if !strings.HasPrefix(req.Params.URI, "ghost://") {
-		return fmt.Errorf("unknown resource URI: %s", memory.ProjectArg("resource URI", req.Params.URI))
+		return fmt.Errorf("unknown resource URI: %s", memory.RefusalArg("resource URI", req.Params.URI))
 	}
 	return nil
 }
@@ -1211,7 +1211,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("nothing to update — pass at least one of content, category, importance, tags, valid_from, valid_until, verified_at, verified, confidence, source_ref")
 	}
 	if args.Category != "" && !memory.IsValidCategory(args.Category) {
-		return "", fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.ProjectArg("category", args.Category))
+		return "", fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
 	}
 
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
@@ -1219,17 +1219,17 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 	}
 	mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 	if err != nil {
 		return "", fmt.Errorf("lookup failed: %w", err)
 	}
 	if len(mems) == 0 {
-		return "", fmt.Errorf("memory %s not found", memory.ProjectArg("memory_id", args.MemoryID))
+		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
 	}
 
 	importance, err := optFloat32(args.Importance, "importance")
@@ -1374,7 +1374,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
+		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
 	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
@@ -1382,13 +1382,13 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("lookup failed: %w", err)
 	}
 	if len(mems) == 0 {
-		return "", fmt.Errorf("memory %s not found", memory.ProjectArg("memory_id", memoryID))
+		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID == "_global" {
 		return "", fmt.Errorf("memory %s is already global", memoryID)
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.ProjectArg("project_id", projectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", projectID))
 	}
 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
@@ -1430,7 +1430,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// withdrawn.
 	if relation != "" {
 		if relation != string(supersede.RelationSupersedes) && relation != string(supersede.RelationCauses) {
-			return "", fmt.Errorf("ghost_link_withdraw: relation takes supersedes or causes, not %s", memory.ProjectArg("relation", relation))
+			return "", fmt.Errorf("ghost_link_withdraw: relation takes supersedes or causes, not %s", memory.RefusalArg("relation", relation))
 		}
 	}
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
@@ -1438,7 +1438,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
+		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
 	}
 	ws, ok := s.store.(linkCapableStore)
 	if !ok {
@@ -1627,7 +1627,7 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
+		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
 	}
 	ms, ok := s.store.(markCapableStore)
 	if !ok {
@@ -1821,23 +1821,23 @@ func markedMemoryIDs(rows []resolve.MarkedMemory) []string {
 // nothing to retire and the caller may simply have the wrong id.
 func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, requestedProjectID, resolvedProjectID string, purge bool) (*mcp.CallToolResult, any, error) {
 	if !purge {
-		return nil, nil, fmt.Errorf("memory %s not found", memory.ProjectArg("memory_id", memoryID))
+		return nil, nil, fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
 	}
 	hist, ok := s.store.(historyCapableStore)
 	if !ok {
-		return nil, nil, fmt.Errorf("this store cannot reach a deleted memory's history; run 'ghost history purge %s' instead", memory.ProjectArg("memory_id", memoryID))
+		return nil, nil, fmt.Errorf("this store cannot reach a deleted memory's history; run 'ghost history purge %s' instead", memory.RefusalArg("memory_id", memoryID))
 	}
 	entries, err := hist.MemoryHistory(ctx, memoryID, 1)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read history: %w", err)
 	}
 	if len(entries) == 0 {
-		return nil, nil, fmt.Errorf("memory %s not found, and no recorded history to purge", memory.ProjectArg("memory_id", memoryID))
+		return nil, nil, fmt.Errorf("memory %s not found, and no recorded history to purge", memory.RefusalArg("memory_id", memoryID))
 	}
 	// The same ownership check a live row gets, against the project the
 	// tombstone was filed under. One entry is enough to name it.
 	if entries[0].ProjectID != resolvedProjectID {
-		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.ProjectArg("project_id", requestedProjectID))
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", requestedProjectID))
 	}
 	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
@@ -2124,7 +2124,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.ProjectArg("category", args.Category))
+			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
 		}
 		// The vocabulary, the default and the refusal are the store's, so the tool
 		// and the writer it calls cannot spell the three tiers differently.
@@ -2575,7 +2575,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolvedProjectID == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		// Verify the memory exists and belongs to the specified project.
@@ -2594,7 +2594,7 @@ func (s *Server) registerTools() {
 			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
@@ -2737,7 +2737,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.ProjectArg("category", args.Category))
+			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
 		}
 		retention, err := memory.NormalizeRetention(args.Retention)
 		if err != nil {
@@ -2854,7 +2854,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolved == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 		priority := 2 // default: normal
@@ -2906,7 +2906,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if projectID == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project", args.Project))
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project", args.Project))
 		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
@@ -2935,7 +2935,7 @@ func (s *Server) registerTools() {
 			source = detectCallingSource()
 		}
 		if source == "" {
-			return nil, nil, fmt.Errorf("ghost_resolve (client %s): %w", memory.ProjectArg("client name", clientName), ai.ErrUndetectableHarness)
+			return nil, nil, fmt.Errorf("ghost_resolve (client %s): %w", memory.RefusalArg("client name", clientName), ai.ErrUndetectableHarness)
 		}
 		cli := ai.NewSourceProviderForSourceWithModel(source, s.resolveCLI.ModelResolve,
 			s.resolveCLI.ClaudeBinary, s.resolveCLI.OpenCodeBinary, s.resolveCLI.CodexBinary, s.resolveCLI.GooseBinary)
@@ -3547,7 +3547,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolvedProjectID == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		// FlagMemory and the evidence read are not on provider.MemoryStore: the
 		// capability surface is what the tools expose, and this is a storage
@@ -3626,7 +3626,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolvedProjectID == "" {
-			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		// Verify the memory exists and belongs to the specified project.
@@ -3635,10 +3635,10 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
 		}
 		if len(mems) == 0 {
-			return nil, nil, fmt.Errorf("memory %s not found", memory.ProjectArg("memory_id", args.MemoryID))
+			return nil, nil, fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
@@ -3678,7 +3678,7 @@ func (s *Server) registerTools() {
 				"pending": true, "active": true, "blocked": true, "done": true,
 			}
 			if !validStatuses[args.Status] {
-				return nil, nil, fmt.Errorf("invalid status %s — must be one of: pending, active, blocked, done", memory.ProjectArg("status", args.Status))
+				return nil, nil, fmt.Errorf("invalid status %s — must be one of: pending, active, blocked, done", memory.RefusalArg("status", args.Status))
 			}
 			status = &args.Status
 		}
@@ -3824,7 +3824,7 @@ func (s *Server) registerResources() {
 		// projectNotRegistered and buildProjectContext.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("reading project context %s: %w", memory.ProjectArg("project_id", rawID), err)
+			return nil, fmt.Errorf("reading project context %s: %w", memory.RefusalArg("project_id", rawID), err)
 		}
 		if projectID == "" {
 			text = projectContextWithNotRegistered(text, rawID)
@@ -4051,7 +4051,7 @@ func (s *Server) registerPrompts() {
 		// project. See projectNotRegistered.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("recall project context for %s: %w", memory.ProjectArg("project_id", rawID), err)
+			return nil, fmt.Errorf("recall project context for %s: %w", memory.RefusalArg("project_id", rawID), err)
 		}
 		if projectID == "" {
 			text = projectContextWithNotRegistered(text, rawID)
@@ -4373,15 +4373,15 @@ func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble
 func parseProjectIDFromURI(rawURI string) (string, error) {
 	u, err := url.Parse(rawURI)
 	if err != nil {
-		return "", fmt.Errorf("invalid resource URI %s: %w", memory.ProjectArg("resource URI", rawURI), err)
+		return "", fmt.Errorf("invalid resource URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
 	}
 	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
-		return "", fmt.Errorf("resource URI missing project_id: %s", memory.ProjectArg("resource URI", rawURI))
+		return "", fmt.Errorf("resource URI missing project_id: %s", memory.RefusalArg("resource URI", rawURI))
 	}
 	projectID, err := url.PathUnescape(parts[0])
 	if err != nil {
-		return "", fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.ProjectArg("resource URI", rawURI), err)
+		return "", fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
 	}
 	return projectID, nil
 }

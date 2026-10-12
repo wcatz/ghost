@@ -4562,7 +4562,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 // become unreachable.
 func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
 	if category != "" && !IsValidCategory(category) {
-		return nil, fmt.Errorf("invalid category %s — must be one of %s", ProjectArg("category", category), categoryList())
+		return nil, fmt.Errorf("invalid category %s — must be one of %s", RefusalArg("category", category), categoryList())
 	}
 	if retention != "" && !IsValidRetention(retention) {
 		return nil, InvalidRetentionError(retention)

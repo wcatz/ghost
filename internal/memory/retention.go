@@ -105,7 +105,7 @@ var ErrInvalidRetention = errors.New("invalid retention tier")
 // rendered through ProjectArg, so a token-shaped or oversized one is withheld.
 func InvalidRetentionError(got string) error {
 	return fmt.Errorf("%w %s: must be one of %s — %s (useful for this conversation only), %s (the default: persists until resolved), %s (keep-forever, exempt from consolidation, supersede, resolve and pruning)",
-		ErrInvalidRetention, ProjectArg("retention", got), strings.Join(retentionTiers, ", "),
+		ErrInvalidRetention, RefusalArg("retention", got), strings.Join(retentionTiers, ", "),
 		RetentionSession, RetentionProject, RetentionPersistent)
 }
 

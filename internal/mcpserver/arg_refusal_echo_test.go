@@ -246,3 +246,51 @@ func TestArgumentRefusalsStillNameTheArgumentAndTheShape(t *testing.T) {
 		})
 	}
 }
+
+// ProjectArg is also how the prompts and the not-registered answers name a
+// project, and there the value has to come back whole: record_decision tells the
+// agent to call a tool with that id. Only a refusal is bounded.
+func TestPromptsRenderALongProjectPathWholeAndRefusalsDoNot(t *testing.T) {
+	long := "/srv/" + strings.Repeat("d", 300) + "/ghost"
+	if len(long) <= memory.ArgEchoMaxBytes {
+		t.Fatalf("fixture is %d bytes, want over the refusal bound", len(long))
+	}
+	_, session, _ := echoLogSession(t)
+	for _, name := range []string{"recall_project", "record_decision"} {
+		args := map[string]string{"project_id": long}
+		if name == "record_decision" {
+			args["topic"] = "caching"
+		}
+		res, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("GetPrompt %s: %v", name, err)
+		}
+		var text string
+		for _, msg := range res.Messages {
+			if c, ok := msg.Content.(*mcp.TextContent); ok {
+				text += c.Text
+			}
+		}
+		if !strings.Contains(text, long) || strings.Contains(text, "withheld") {
+			t.Errorf("%s did not render the %d-byte project id whole: %.300s", name, len(long), text)
+		}
+	}
+}
+
+func TestAFractionalPriorityRefusalDoesNotRepeatTheNumber(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
+	digits := "2." + strings.Repeat("5", refusalBigValue)
+	for tool, args := range map[string]map[string]any{
+		"ghost_task_create": {"project_id": "p", "title": "t", "priority": digits},
+		"ghost_task_update": {"task_id": "t", "priority": digits},
+	} {
+		out := callToolErr(t, session, tool, args)
+		if !strings.Contains(out, "must be an integer") {
+			t.Fatalf("%s did not reach the integer refusal: %.200s", tool, out)
+		}
+		if len(out) > 2048 {
+			t.Errorf("%s repeated the number: %d bytes", tool, len(out))
+		}
+	}
+}
