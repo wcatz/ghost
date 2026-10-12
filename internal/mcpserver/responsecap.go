@@ -18,6 +18,11 @@ import (
 // the same number search ships (searchResponseMaxBytes, one memory at the
 // store's own content cap), read through the same accessor, so a caller has one
 // budget to reason about across all six tools rather than six.
+//
+// An answer that HAS rows in it always keeps at least one: the first row is
+// never cut, so a single row larger than the budget (a decision whose 8000-byte
+// decision and rationale are each clamped separately is about 16 KB) is shown
+// whole with a notice rather than dropped for a notice over nothing.
 
 // responsePart is one segment of a tool response, in the order it is rendered.
 // A cuttable part is a WHOLE row: the budget may drop it to make the answer fit,
@@ -36,46 +41,77 @@ type responsePart struct {
 //
 // The answer is BYTE-IDENTICAL to the uncut render when it already fits, and
 // when the budget is not positive (an unbounded budget, the assembler's own
-// reading of a zero cap). A budget too small for even the all-cut framing plus
-// its notice keeps every row instead of answering with nothing: cutting cannot
-// reach the cap, and an empty answer is worse than a large one — the same rule
-// the assembler's fit pass states as its framing ceiling.
+// reading of a zero cap).
+//
+// TWO ROWS THE PASS REFUSES TO LOSE, and both are about an answer that can still
+// be read rather than one that merely fits:
+//
+//   - A FRAMING that is already at or over the budget keeps every row. Cutting
+//     rows then reaches no cap and would only empty the answer, the same rule
+//     the assembler's fit pass states as its framing ceiling.
+//   - The FIRST ROW is never cut, whatever the budget. A single row larger than
+//     the budget — a decision whose two 8000-byte fields are clamped separately
+//     is one — would otherwise be dropped and the answer would be framing and a
+//     notice with nothing to read. The row is shown WHOLE and the notice says
+//     the budget could not be met, because there is no smaller form of it a
+//     listing argument can reach.
 func capResponseParts(parts []responsePart, budget int, advice string) (string, int) {
 	total := 0
+	framing := 0
 	var cutIndex []int
 	for i, p := range parts {
 		total += len(p.text)
 		if p.cuttable {
 			cutIndex = append(cutIndex, i)
+		} else {
+			framing += len(p.text)
 		}
 	}
 	if budget <= 0 || total <= budget {
 		return joinResponseParts(parts), 0
 	}
+	if framing >= budget {
+		return joinResponseParts(parts), 0
+	}
+	// The first cuttable row is never removed, so the most that can go is every
+	// row after it.
+	maxCut := len(cutIndex) - 1
 	removed := 0
-	for cut := 1; cut <= len(cutIndex); cut++ {
+	for cut := 1; cut <= maxCut; cut++ {
 		removed += len(parts[cutIndex[len(cutIndex)-cut]].text)
 		notice := responseCapNotice(cut, budget, advice)
 		if total-removed+len(notice) <= budget {
-			var b strings.Builder
-			b.Grow(total - removed + len(notice))
-			skip := len(cutIndex) - cut
-			next := 0
-			for i, p := range parts {
-				if next < len(cutIndex) && cutIndex[next] == i {
-					cutThis := next >= skip
-					next++
-					if cutThis {
-						continue
-					}
-				}
-				b.WriteString(p.text)
-			}
-			b.WriteString(notice)
-			return b.String(), cut
+			return renderTrimmedResponse(parts, cutIndex, cut, notice), cut
 		}
 	}
+	if len(cutIndex) > 0 {
+		// Even framing, the first row and its notice do not fit. Keep the first
+		// row whole, cut the rows after it, and say why the budget was missed.
+		cut := len(cutIndex) - 1
+		return renderTrimmedResponse(parts, cutIndex, cut, responseCapNoticeFirstKept(cut, budget)), cut
+	}
 	return joinResponseParts(parts), 0
+}
+
+// renderTrimmedResponse renders parts with the LAST cut cuttable rows removed,
+// then the notice. cutIndex is the cuttable positions in order, so the rows
+// removed are cutIndex[len-cut:] and everything before them survives.
+func renderTrimmedResponse(parts []responsePart, cutIndex []int, cut int, notice string) string {
+	skip := len(cutIndex) - cut
+	var b strings.Builder
+	next := 0
+	for i, p := range parts {
+		if next < len(cutIndex) && cutIndex[next] == i {
+			cutThis := next >= skip
+			next++
+			if cutThis {
+				continue
+			}
+		}
+		b.WriteString(p.text)
+	}
+	b.WriteString(notice)
+	return b.String()
 }
 
 // capRowsToResponseBudget is capResponseParts for the common shape: a framing
@@ -109,6 +145,25 @@ func responseCapNotice(cut, budget int, advice string) string {
 	}
 	return fmt.Sprintf("\n(%d %s cut from the end of this answer to stay within the %d-byte response "+
 		"budget, which bounds the answer and not what is stored. %s)\n", cut, verb, budget, advice)
+}
+
+// responseCapNoticeFirstKept is the notice for the one over-budget answer the
+// pass still returns: the first row alone is larger than the budget and is kept
+// whole rather than dropped, so the caller has something to read. It names no
+// advice, because the usual lever — a lower `limit` — cannot shrink a single row
+// and naming it would send the caller to a call that fails identically.
+func responseCapNoticeFirstKept(cut, budget int) string {
+	if cut > 0 {
+		verb := "rows were"
+		if cut == 1 {
+			verb = "row was"
+		}
+		return fmt.Sprintf("\n(%d %s cut from the end of this answer, and the first row alone is larger than the "+
+			"%d-byte response budget, so it is shown in full rather than dropped; no listing argument makes one "+
+			"row smaller.)\n", cut, verb, budget)
+	}
+	return fmt.Sprintf("\n(The first row alone is larger than the %d-byte response budget, so it is shown in full "+
+		"rather than dropped; no listing argument makes one row smaller.)\n", budget)
 }
 
 // responseSection builds one `## `-headed section as response parts: the heading

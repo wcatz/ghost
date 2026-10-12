@@ -100,6 +100,74 @@ func TestCapRowsToResponseBudgetKeepsRowsWhenTheFramingIsTheExcess(t *testing.T)
 	}
 }
 
+// TestCapResponsePartsNeverDropsEveryRow is the regression for the one oversized
+// row: a decision whose 8000-byte decision and rationale are clamped separately
+// is about 16 KB, larger than the budget. Cutting it would leave framing and a
+// notice with nothing to read, so the first row is kept whole and the notice
+// says the budget could not be met.
+func TestCapResponsePartsNeverDropsEveryRow(t *testing.T) {
+	framing := "## Decisions\n\n"
+	row := "### big\n" + strings.Repeat("D", 16000) + "\n\n"
+	parts := []responsePart{
+		{text: framing},
+		{text: row, cuttable: true},
+	}
+	got, cut := capResponseParts(parts, 500, "Advise.")
+	if !strings.Contains(got, row) {
+		t.Fatalf("the only row was dropped, so the answer is unreadable: got cut=%d bytes=%d:\n%s",
+			cut, len(got), got)
+	}
+	if !strings.HasPrefix(got, framing) {
+		t.Errorf("the framing must lead the answer: %q", tail(got, 200))
+	}
+	if !strings.Contains(got, "shown in full") {
+		t.Errorf("the notice does not say the oversized row was kept whole: %q", tail(got, 300))
+	}
+	if strings.Contains(got, "Ask for fewer results") {
+		t.Errorf("the notice gives advice that cannot shrink one row: %q", tail(got, 300))
+	}
+}
+
+// TestCapResponsePartsCountsTheNoticeAgainstTheBudget closes a mutation gap: a
+// pass that tested `total-removed <= budget` without the notice would return an
+// answer whose rows fit but whose notice pushes it back over. The fixture makes
+// the notice the difference — cutting one row leaves the rows exactly at the
+// budget, so only counting the notice moves the pass to cut two.
+func TestCapResponsePartsCountsTheNoticeAgainstTheBudget(t *testing.T) {
+	advice := "Advise."
+	r0 := strings.Repeat("A", 200)
+	r1 := strings.Repeat("B", 300)
+	r2 := strings.Repeat("C", 300)
+	budget := len(r0) + len(r1) // exactly the first two rows, no room for a notice
+
+	n1 := len(responseCapNotice(1, budget, advice))
+	if len(r0)+len(r1)+n1 <= budget {
+		t.Fatalf("precondition: one cut plus its notice must not fit (rows=%d notice=%d budget=%d)",
+			len(r0)+len(r1), n1, budget)
+	}
+	n2 := len(responseCapNotice(2, budget, advice))
+	if len(r0)+n2 > budget {
+		t.Fatalf("precondition: two cuts plus their notice must fit (row=%d notice=%d budget=%d)",
+			len(r0), n2, budget)
+	}
+	parts := []responsePart{
+		{text: r0, cuttable: true},
+		{text: r1, cuttable: true},
+		{text: r2, cuttable: true},
+	}
+	got, cut := capResponseParts(parts, budget, advice)
+	if cut != 2 {
+		t.Fatalf("cut = %d, want 2: the notice pushed the first cut over the budget, so a second row must go", cut)
+	}
+	if len(got) > budget {
+		t.Errorf("the answer is %d bytes against a %d-byte budget: the notice was not counted against it",
+			len(got), budget)
+	}
+	if !strings.Contains(got, r0) || strings.Contains(got, r1) || strings.Contains(got, r2) {
+		t.Errorf("the kept prefix is not exactly the first row: %q", tail(got, 300))
+	}
+}
+
 // TestMemoriesListStaysInsideTheResponseBudget: a browse is bounded by `limit`
 // alone, so 30 memories at the store's content cap are hundreds of KB. The tool
 // must fit them to the search response cap, keep whole rows, and say how many it
@@ -353,6 +421,37 @@ func TestReadToolsKeepSmallAnswersByteIdentical(t *testing.T) {
 	}
 	if cutCount(t, out) != -1 {
 		t.Errorf("a small listing must carry no cut notice: %s", out)
+	}
+}
+
+// TestDecisionsListKeepsADecisionLargerThanTheBudget is the tool-level regression
+// for the one oversized row: each field is clamped to 8000 separately, so one
+// decision record is about 16 KB — larger than the whole response budget — and
+// the listing must still return it rather than a notice over nothing.
+func TestDecisionsListKeepsADecisionLargerThanTheBudget(t *testing.T) {
+	_, session := newCapSession(t)
+	decision := strings.Repeat("d", 7900)
+	rationale := strings.Repeat("r", 7900)
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "test-project",
+		"title":      "huge decision",
+		"decision":   decision,
+		"rationale":  rationale,
+	})
+	if res.IsError {
+		t.Fatalf("decision_record: %s", resultText(res))
+	}
+
+	out := resultText(callTool(t, session, "ghost_decisions_list", map[string]any{
+		"project_id": "test-project",
+		"limit":      1,
+	}))
+	if !strings.Contains(out, "huge decision") || !strings.Contains(out, decision) {
+		t.Fatalf("the oversized decision was dropped, so the listing cannot read it back: bytes=%d:\n%s",
+			len(out), tail(out, 400))
+	}
+	if !strings.Contains(out, "shown in full") {
+		t.Errorf("the notice does not say the oversized decision was kept whole: %q", tail(out, 400))
 	}
 }
 
