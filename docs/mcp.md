@@ -23,9 +23,9 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
 | Context | `ghost_list_projects` | List known projects and their IDs |
 | Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
-| Tasks | `ghost_task_create` | Create a durable task |
+| Tasks | `ghost_task_create` | Create a durable task; `priority` is 0-4 (default 2), and a value outside that range is refused by name rather than reset to the default |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
-| Tasks | `ghost_task_update` | Change task status, priority, or description; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done` |
+| Tasks | `ghost_task_update` | Change task status, priority, or description; a `priority` outside 0-4 is refused and the stored priority is left unchanged; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done` |
 | Tasks | `ghost_task_complete` | Mark a task done with optional notes |
 | Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
