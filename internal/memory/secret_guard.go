@@ -96,6 +96,9 @@ func RejectSecret(field, text string) error {
 // name, and this is what a store sentence uses when it is the one refusing.
 const ProjectIdentifierLabel = "project identifier"
 
+// ArgEchoMaxBytes is the longest argument a refusal repeats back; see ProjectArg.
+const ArgEchoMaxBytes = 256
+
 // ProjectArg renders a caller's project argument — the value a `project_id` or
 // `project` tool parameter carries, or a CLI's project operand — for a sentence
 // that REFUSES it.
@@ -140,9 +143,18 @@ const ProjectIdentifierLabel = "project identifier"
 // refusals are returned to the caller by every read and update handler as
 // `resolve project: %w`, so a second rendering at each of them is nineteen
 // chances to get one wrong.
+//
+// The value is also BOUNDED: one longer than ArgEchoMaxBytes is withheld with its
+// length instead, because a refusal that repeats a 200 KB argument hands the
+// caller back what it sent. The guard runs on the whole value first, so a token
+// inside an oversized one is still reported by its format.
 func ProjectArg(field, value string) string {
 	refusal := rejectSecret(field, value)
 	if refusal == nil {
+		if len(value) > ArgEchoMaxBytes {
+			return fmt.Sprintf("%q", fmt.Sprintf("<%s withheld: it is %d bytes, longer than the %d a refusal repeats>",
+				field, len(value), ArgEchoMaxBytes))
+		}
 		return fmt.Sprintf("%q", value)
 	}
 	var detected *SecretContentError

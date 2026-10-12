@@ -86,7 +86,7 @@ func parseStampArg(field string, raw any, endOfDay bool) (*string, error) {
 	}
 	s, ok := raw.(string)
 	if !ok {
-		return nil, fmt.Errorf("%s must be a string timestamp, got %v (%T)", field, raw, raw)
+		return nil, fmt.Errorf("%s must be a string timestamp, got %T", field, raw)
 	}
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
@@ -101,7 +101,7 @@ func parseStampArg(field string, raw any, endOfDay bool) (*string, error) {
 			return &out, nil
 		}
 	}
-	return nil, fmt.Errorf("%s must be RFC 3339 (2026-10-01T09:00:00Z) or a date (2026-10-01), got %q", field, s)
+	return nil, fmt.Errorf("%s must be RFC 3339 (2026-10-01T09:00:00Z) or a date (2026-10-01), got %s", field, memory.ProjectArg(field, s))
 }
 
 // parseStampFields normalizes the validity triple from one writer's arguments.

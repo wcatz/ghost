@@ -211,3 +211,41 @@ func plantTiedPathPair(t *testing.T, s *Store, dir string) {
 		t.Fatalf("plant tied path projects: %v", err)
 	}
 }
+
+// A value past ArgEchoMaxBytes is withheld with its length, and the renderers
+// built on ProjectArg inherit that: a 200 KB category or retention tier is not
+// repeated by the store's own refusals.
+func TestProjectArgWithholdsAnOversizedValueAndTheStoreRefusalsInheritIt(t *testing.T) {
+	big := strings.Repeat("z", 200*1024)
+
+	if got := ProjectArg("project_id", strings.Repeat("a", ArgEchoMaxBytes)); strings.Contains(got, "withheld") {
+		t.Errorf("a value exactly at the bound was withheld: %.80s", got)
+	}
+	got := ProjectArg("project_id", big)
+	if len(got) > 256 || strings.Contains(got, "zzzz") || !strings.Contains(got, "project_id withheld") {
+		t.Errorf("ProjectArg of an oversized value = %.120s (len %d)", got, len(got))
+	}
+	// The guard runs on the whole value, so a token inside an oversized one is
+	// still named by its format.
+	if got := ProjectArg("project_id", big+" "+credentialToken); !strings.Contains(got, "GitHub personal access token") {
+		t.Errorf("an oversized value holding a token lost the guard's finding: %.120s", got)
+	}
+
+	if msg := InvalidRetentionError(big).Error(); len(msg) > 1024 || strings.Contains(msg, "zzzz") {
+		t.Errorf("InvalidRetentionError repeated an oversized tier: %.120s (len %d)", msg, len(msg))
+	}
+	if msg := InvalidRetentionError(credentialToken).Error(); strings.Contains(msg, credentialToken) {
+		t.Errorf("InvalidRetentionError repeated a token: %s", msg)
+	}
+
+	store := testStore(t)
+	for _, v := range []string{big, credentialToken} {
+		_, err := store.ListMemories(context.Background(), "p", v, "", 5)
+		if err == nil {
+			t.Fatal("ListMemories accepted an invalid category")
+		}
+		if len(err.Error()) > 1024 || strings.Contains(err.Error(), "zzzz") || strings.Contains(err.Error(), credentialToken) {
+			t.Errorf("ListMemories repeated its category argument: %.160s", err)
+		}
+	}
+}

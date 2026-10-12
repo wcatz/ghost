@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // Some MCP clients serialize numeric and array tool arguments as JSON strings
@@ -72,10 +74,12 @@ func optStringSlice(v any, name string) ([]string, error) {
 		return t, nil
 	case []any:
 		out := make([]string, 0, len(t))
-		for _, e := range t {
+		for i, e := range t {
 			s, ok := e.(string)
 			if !ok {
-				return nil, fmt.Errorf("%s must be an array of strings, got element %v (%T)", name, e, e)
+				// By position and type: an element is caller text, and a map or a
+				// nested array prints its contents.
+				return nil, fmt.Errorf("%s must be an array of strings, got element %d of type %T", name, i+1, e)
 			}
 			out = append(out, s)
 		}
@@ -91,9 +95,9 @@ func optStringSlice(v any, name string) ([]string, error) {
 		}
 		// A bare []any that failed the element check above would have
 		// errored already; here only a malformed or non-array string lands.
-		return nil, fmt.Errorf("%s must be an array of strings, got %q", name, t)
+		return nil, fmt.Errorf("%s must be an array of strings, got %s", name, memory.ProjectArg(name, t))
 	default:
-		return nil, fmt.Errorf("%s must be an array of strings, got %v (%T)", name, v, v)
+		return nil, fmt.Errorf("%s must be an array of strings, got %T", name, v)
 	}
 }
 
@@ -116,14 +120,14 @@ func toFloat64(v any, name string) (*float64, error) {
 	case json.Number:
 		f, err := t.Float64()
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %q", name, t.String())
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.ProjectArg(name, t.String()))
 		}
 		return finiteFloat64(f, name, t.String())
 	case string:
 		trimmed := strings.TrimSpace(t)
 		f, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %q", name, t)
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.ProjectArg(name, t))
 		}
 		return finiteFloat64(f, name, trimmed)
 	case *float32:
@@ -144,7 +148,7 @@ func toFloat64(v any, name string) (*float64, error) {
 		f := float64(*t)
 		return &f, nil
 	default:
-		return nil, fmt.Errorf("%s must be a number, got %v (%T)", name, v, v)
+		return nil, fmt.Errorf("%s must be a number, got %T", name, v)
 	}
 }
 
