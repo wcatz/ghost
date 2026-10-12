@@ -48,16 +48,21 @@ func checkScope(scope map[string]string) error {
 		return fmt.Errorf("scope must have at most %d keys, got %d — it is a few short labels such as environment and component, not a document", MaxScopeKeys, len(scope))
 	}
 	keys := make([]string, 0, len(scope))
-	for k, v := range scope {
+	for k := range scope {
+		keys = append(keys, k)
+	}
+	// Sorted before ANY check, the length bounds included: map iteration order is
+	// random, so a scope that breaches two bounds would otherwise name a different
+	// one on each call.
+	sort.Strings(keys)
+	for _, k := range keys {
 		if len(k) > MaxScopeKeyLen {
 			return fmt.Errorf("a scope key must be at most %d bytes, got %d — it names a dimension such as environment, not a document", MaxScopeKeyLen, len(k))
 		}
-		if len(v) > MaxScopeValueLen {
+		if v := scope[k]; len(v) > MaxScopeValueLen {
 			return fmt.Errorf("a scope value must be at most %d bytes, got %d — it is a short label such as production, not a document", MaxScopeValueLen, len(v))
 		}
-		keys = append(keys, k)
 	}
-	sort.Strings(keys)
 	for i, k := range keys {
 		if err := rejectSecret(fmt.Sprintf("scope_key[%d]", i), k); err != nil {
 			return err

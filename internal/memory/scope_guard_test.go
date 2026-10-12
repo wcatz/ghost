@@ -165,3 +165,23 @@ func TestAnOverLimitScopeIsRefusedAndTheLimitsAreAccepted(t *testing.T) {
 		})
 	}
 }
+
+// TestTheBoundReportedDoesNotVaryBetweenIdenticalCalls: a scope that breaches two
+// bounds at once must name the same one every time, whatever the map's iteration
+// order, so an operator is not sent to fix a different half on each retry.
+func TestTheBoundReportedDoesNotVaryBetweenIdenticalCalls(t *testing.T) {
+	scope := map[string]string{
+		strings.Repeat("a", MaxScopeKeyLen+1): "v",
+		"environment":                         strings.Repeat("v", MaxScopeValueLen+1),
+		"component":                           strings.Repeat("v", MaxScopeValueLen+1),
+	}
+	first := checkScope(scope)
+	if first == nil {
+		t.Fatal("an over-limit scope was accepted")
+	}
+	for i := 0; i < 200; i++ {
+		if got := checkScope(scope); got == nil || got.Error() != first.Error() {
+			t.Fatalf("call %d reported %v, the first reported %v", i, got, first)
+		}
+	}
+}

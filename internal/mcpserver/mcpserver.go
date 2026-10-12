@@ -2154,7 +2154,7 @@ func (s *Server) registerTools() {
 		// token (memory.checkScope). A first save to an unknown project therefore
 		// registers the project and then fails, leaving an empty project behind —
 		// the same residue the credential guard has always left on this path, and
-		// no more of it than that, since neither has written a memory.
+		// no more of it than that, since none of them has written a memory.
 		fields, err := resolveWriteFields(args.validityArgs)
 		if err != nil {
 			return nil, nil, err
