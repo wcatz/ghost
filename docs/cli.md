@@ -570,7 +570,7 @@ The second form requires the project name to be retyped at the prompt. It is irr
 
 ### `ghost project merge <old> <new>`
 
-Moves all records from the old project into the surviving project while preserving memory IDs, links, and pin state:
+Moves all records from the old project into the surviving project while preserving memory IDs, links, and pin state. The source project's learned context and reflection metadata do not go with its deleted row: the survivor keeps the newer reflection whole (learned context, summary, input signature and timestamp travel together), or takes the source's when it has none of its own, and keeps the larger interaction count. A source that recorded a different repository is refused rather than merged.
 
 ```bash
 ghost project merge old-name new-name
