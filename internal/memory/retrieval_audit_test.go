@@ -2055,3 +2055,146 @@ func TestEveryRendererOfTheDeleteSummaryNamesTheAudits(t *testing.T) {
 		}
 	}
 }
+
+// seedAuditOnMemory files one "used" verdict in projectID about a memory that
+// really exists there, so a later move can be followed through the audit's own
+// project_id. The write names the memory in its call's verdicts, which is what
+// the writer requires of a verdict about a memory it kept.
+func seedAuditOnMemory(t *testing.T, s *Store, projectID, memoryID, session string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: projectID,
+		Source:    "search",
+		Outcome:   "answerable",
+		Verdicts:  []RowVerdict{{ID: memoryID, Kept: true, Stage: "fit", Reason: "fit_response"}},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval: %v", err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID:   projectID,
+		RecordRowID: recs[0].RowID,
+		SessionID:   session,
+		Source:      "search",
+		MemoryID:    memoryID,
+		Outcome:     VerdictOutcomeUsed,
+		Signal:      "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+}
+
+// TestPromoteToGlobalReassignsTheAudits: a promotion moves a memory BETWEEN
+// projects, and retrieval_audit.project_id is the denominator the report groups
+// by. A verdict left naming the project the memory just left is misattributed,
+// and — because DeleteProject reaches the table by memory ownership — it would
+// also be dropped with a project the memory is no longer in.
+func TestPromoteToGlobalReassignsTheAudits(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const source = "audit-promote-source"
+	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, source, Memory{
+		Category: "fact", Content: "the audit rides with the memory", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	seedAuditOnMemory(t, s, source, id, "s-promote")
+
+	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	rows := readAuditRows(t, s)
+	if len(rows) != 1 {
+		t.Fatalf("retrieval_audit holds %d row(s) after the promotion, want 1 — the verdict did not move with its memory",
+			len(rows))
+	}
+	if rows[0].ProjectID != GlobalProjectID {
+		t.Errorf("audit's project_id = %q, want the memory's new project %q", rows[0].ProjectID, GlobalProjectID)
+	}
+}
+
+// TestDeleteProjectAfterPromoteKeepsThePromotedAudits is the issue's sequence
+// for the verdicts: audit M, promote M, delete the source project. M survives in
+// `_global`, so the verdict about it has to survive too.
+func TestDeleteProjectAfterPromoteKeepsThePromotedAudits(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const source = "audit-promote-delete"
+	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, source, Memory{
+		Category: "fact", Content: "the verdict outlives the source project", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	seedAuditOnMemory(t, s, source, id, "s-delete")
+
+	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	if _, err := s.DeleteProject(ctx, source, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	rows := readAuditRows(t, s)
+	if len(rows) != 1 {
+		t.Fatalf("retrieval_audit holds %d row(s) after deleting the source project, want 1 — the promoted memory's "+
+			"verdict went with a project it is no longer in", len(rows))
+	}
+	if rows[0].ProjectID != GlobalProjectID || rows[0].MemoryID != id {
+		t.Errorf("the surviving verdict is %+v, want memory %s under %q", rows[0], id, GlobalProjectID)
+	}
+}
+
+// TestDeleteProjectSparesAnAuditWhoseMemoryHasLeft pins the audit half of the
+// predicate to MEMORY OWNERSHIP. An audit's project_id is a name a writer has to
+// keep in step; the delete follows the memory instead, so a project that no
+// longer holds the memory does not take the verdict about it. The gone-memory arm
+// does not accidentally reach this row: the memory is live, just elsewhere.
+func TestDeleteProjectSparesAnAuditWhoseMemoryHasLeft(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const doomed = "audit-project-left"
+	if err := s.EnsureProject(ctx, doomed, "/tmp/"+doomed, doomed); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the verdict outlives the project column", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The call and the verdict both name `doomed`, but the memory is in
+	// testProject — the divergence a pre-reassignment promotion produced.
+	seedAuditOnMemory(t, s, doomed, id, "s-left")
+
+	summary, err := s.DeleteProject(ctx, doomed, false)
+	if err != nil {
+		t.Fatalf("DeleteProject (dry run): %v", err)
+	}
+	if summary.RetrievalAudits != 0 {
+		t.Errorf("the dry run counts %d audit(s) for a project holding none of their memories", summary.RetrievalAudits)
+	}
+
+	if _, err := s.DeleteProject(ctx, doomed, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	rows := readAuditRows(t, s)
+	if len(rows) != 1 || rows[0].MemoryID != id {
+		t.Errorf("retrieval_audit after the delete = %+v, want the verdict whose memory is elsewhere", rows)
+	}
+}
