@@ -470,6 +470,11 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale
 // can run additional store-dependent checks; the caller must Close a non-nil
 // store.
 //
+// The store is opened READ-ONLY and the directory is resolved without creating
+// it, because a diagnostic must neither create nor migrate the store it is
+// reporting on (#1049): it reports a missing database rather than making one,
+// and a schema mismatch rather than upgrading past it.
+//
 // The config is read once, through LoadForHook, and a file that does not parse
 // must not cost the user these checks. reportConfigFile has already reported
 // the parse error, and gating on config.Load here would drop the Ollama,
@@ -496,11 +501,14 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	}
 
 	// A GHOST_DEV_FORBID_DATA_DIR refusal arrives from here, before the
-	// read-write open below can migrate anything (#721). A status run that must
-	// not open the store has something to report — that, and why — so this is a
-	// failed check and not a silent nil: a run that exited non-zero having
+	// read-only open below can read anything (#721). A status run that must
+	// not open the store has something to report — that, and why — so this is
+	// a failed check and not a silent nil: a run that exited non-zero having
 	// printed nothing would be a run that diagnosed nothing.
-	dataDir, err := config.DataDir()
+	//
+	// DataDirPath, not DataDir: a status run must not create the store it is
+	// reporting on, and DataDir would.
+	dataDir, err := config.DataDirPath()
 	if err != nil {
 		check(false, "", fmt.Sprintf("database: %v", err))
 		return nil
@@ -516,9 +524,30 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 		check(false, "", fmt.Sprintf("database: %v", err))
 		return nil
 	}
-	db, err := memory.OpenDB(dbPath)
+	// OpenReadDB, not OpenDB: a diagnostic reports on the store and must never
+	// migrate it, or the run that says "All checks passed" would have upgraded
+	// the schema out from under a live server (#1049).
+	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		check(false, "", fmt.Sprintf("database: %v", err))
+		return nil
+	}
+	// OpenReadDB runs no migration, so a store whose schema is not exactly the
+	// one this build reads cannot be queried here: report the mismatch instead
+	// of selecting columns it does not have. A newer store is a failed check
+	// (OpenDB refuses it too); an older one is informational, like the absent
+	// database above, because the next ordinary open migrates it.
+	if version, verr := memory.DBUserVersion(db); verr != nil {
+		_ = db.Close()
+		check(false, "", fmt.Sprintf("database: %v", verr))
+		return nil
+	} else if version != memory.SchemaVersion() {
+		_ = db.Close()
+		if version > memory.SchemaVersion() {
+			check(false, "", fmt.Sprintf("database: schema v%d is newer than this ghost build (v%d) — upgrade ghost", version, memory.SchemaVersion()))
+		} else {
+			_, _ = fmt.Fprintf(w, "  - database: schema v%d, this Ghost reads v%d — start a session or run `ghost mcp init` to migrate it\n", version, memory.SchemaVersion())
+		}
 		return nil
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
