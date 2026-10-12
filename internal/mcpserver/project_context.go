@@ -230,12 +230,19 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 // add is the only behavioural difference between the two renderers, and it is the
 // point: a row this one reached is a row stage 2 judged current.
 func projectContextItems(items []assemble.Item) string {
-	var sb strings.Builder
+	return strings.Join(itemLines(items), "")
+}
+
+// itemLines is projectContextItems as one string per row, so a caller fitting the
+// surface to a response byte budget (#1039) can drop whole rows rather than
+// re-render the section with a shorter slice. The join of these is byte-identical
+// to the render projectContextItems has always produced.
+func itemLines(items []assemble.Item) []string {
+	lines := make([]string, 0, len(items))
 	for _, it := range items {
-		sb.WriteString(it.Line())
-		sb.WriteString("\n")
+		lines = append(lines, it.Line()+"\n")
 	}
-	return sb.String()
+	return lines
 }
 
 // projectContextPinnedLine is the parenthetical a section ends with when pinned
@@ -478,8 +485,19 @@ func projectContextWithNotRegistered(text, asked string) string {
 // `limit` is the cap the CALLER asked for, and the two call sites pass different
 // ones on purpose — see projectContextGlobalBudget.
 func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Builder, limit int, alreadyShown, carried []assemble.Item, foldedOwn, carriedLine string) {
-	rows := carried
-	line := carriedLine
+	rows, line := s.projectContextGlobalRows(ctx, limit, alreadyShown, carried, carriedLine)
+	projectContextSection(sb, globalSectionHeading, projectContextItems(rows)+foldedOwn+line)
+}
+
+// projectContextGlobalRows is the selection half of projectContextGlobalSection:
+// the rows the `## Global` section will show and its trailing pinned-cut line,
+// without rendering either. It is split out for the TOOL's unresolved-name path,
+// which must fit those rows to a response byte budget (#1039) before the section
+// is rendered — and the shared renderer above keeps the resource and the tool's
+// section byte-identical.
+func (s *Server) projectContextGlobalRows(ctx context.Context, limit int, alreadyShown, carried []assemble.Item, carriedLine string) (rows []assemble.Item, line string) {
+	rows = carried
+	line = carriedLine
 	if globals, err := s.projectContextGlobals(ctx, limit); err == nil {
 		seen := make(map[string]bool, len(alreadyShown))
 		for _, it := range alreadyShown {
@@ -512,7 +530,7 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Bu
 		// its count replaces the union window's rather than adding to it.
 		line = projectContextPinnedLine(cut, "global ")
 	}
-	projectContextSection(sb, globalSectionHeading, projectContextItems(rows)+foldedOwn+line)
+	return rows, line
 }
 
 // projectContextEmptyNote is what the surface says about a project whose memory
@@ -829,7 +847,12 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 // unregistered name before it gets here; `asked` is the name as the caller wrote
 // it, which the not-registered sentence has to quote.
 func (s *Server) projectContextBlock(ctx context.Context, projectID, asked string, limit int) (string, error) {
-	var sb strings.Builder
+	// The block is built as RESPONSE PARTS, not straight into a builder (#1039):
+	// the memory rows are cuttable, every heading, count line and learned summary
+	// is framing, so fitting the answer to the response byte budget drops whole
+	// rows from the end without touching what the block means. Byte-for-byte this
+	// is the builder the function has always used when the answer fits.
+	var parts []responsePart
 	var err error
 	// The unresolved-name case was answered ABOVE, before the as_of return,
 	// because both branches of this handler were handed the empty id and both
@@ -866,13 +889,13 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 				memories.Trace.PinnedCut[memory.GlobalProjectID])
 			globalLine = ""
 		}
-		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+ownLine)
+		parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, itemLines(own), ownLine)...)
 		// The tool's Global section is the `_global` half of its own window and
 		// NO second read: `limit` already capped the whole block, and a second
 		// read at the Global section's own cap would return more rows than the
 		// caller asked for. The resource, whose caps are per-section, does run
 		// one — see buildProjectContext.
-		projectContextSection(&sb, globalSectionHeading, projectContextItems(globals)+foldedOwn+globalLine)
+		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(globals), foldedOwn+globalLine)...)
 	}
 
 	learned, err := s.store.GetLearnedContext(ctx, projectID)
@@ -884,12 +907,11 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// its own Summary line: the summary is written by a reflection pass
 		// reading this project's memories, and a memory can have arrived
 		// from a repository this agent has never checked.
-		sb.WriteString("\n\n## Learned Context\n\n")
-		sb.WriteString(dataDelimiterNote + "\n\n")
-		sb.WriteString(quoteData(learned))
+		parts = append(parts, responsePart{text: "\n\n## Learned Context\n\n" +
+			dataDelimiterNote + "\n\n" + quoteData(learned)})
 	}
 
-	text := sb.String()
+	text := joinResponseParts(parts)
 	if text == "" {
 		// A block the stages EMPTIED is not an empty project, and the census
 		// below would say it is. So the two are separated by the verdict, and
@@ -933,7 +955,11 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		default:
 			text = projectNotRegistered(asked)
 		}
-	} else if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+		// A sentence about the store is not a large answer and has no rows to cut,
+		// so it is not fitted to the budget.
+		return text, nil
+	}
+	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 		// A block made entirely of cross-project rows is not this project's
 		// context, and it is only visible from OUTSIDE the empty gate: with
 		// `IncludeGlobal` the section is populated by `_global` whenever the
@@ -948,9 +974,13 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// rows were withheld (#788). The function picks the sentence by the
 		// verdict, so this call site does not ask what kind of non-empty block
 		// it is holding.
-		text += "\n\n" + note
+		parts = append(parts, responsePart{text: "\n\n" + note})
 	}
 
+	// The response byte budget (#1039): fit the whole block by cutting whole
+	// memory rows from the end, framing (headings, the learned summary, the
+	// cross-project note) counted but never cut.
+	text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
 	return text, nil
 }
 
