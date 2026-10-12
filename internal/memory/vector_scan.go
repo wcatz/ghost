@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -30,27 +31,52 @@ const vectorScanColumns = `
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
 
-// vectorProjectScanQuery is the project leg's corpus query: the shared
-// projection narrowed to the project and the global project (a project's own
-// search always includes _global). It is a constant rather than an expression at
-// the call site so the row count below can be stated beside it: the count and
-// the scan have to name the same rows, and a change to one predicate has to be a
-// change to the other.
-const vectorProjectScanQuery = vectorScanColumns + `
-	WHERE m.project_id = ? OR m.project_id = '_global'`
+// vectorProjectPredicate is the project leg's narrowing: the project and the
+// global project (a project's own search always includes _global). It is one
+// constant because the scan below and the uncached path's row-count hint (see
+// vectorCountQuery) have to name the same rows — a change to one has to be a
+// change to the other. It is parenthesized because vectorCountQuery ANDs the
+// loader's filters onto it: without the parentheses `a = ? OR b = ? AND c` binds
+// as `a = ? OR (b = ? AND c)`, and the filter would apply only to the second
+// branch of the OR.
+const vectorProjectPredicate = `(m.project_id = ? OR m.project_id = '_global')`
 
-// vectorProjectRowCountQuery is the project leg's corpus size, read on the
-// uncached path to size the snapshot's embedding buffer before the copy (see
-// vectorRows.reserve). It is the PROJECT's count and not the whole table's: a
-// small project on a store whose whole corpus is above the cache bound must not
-// reserve the store's embedding bytes for a handful of rows, which would be the
-// over-allocation the cache's own bound exists to avoid. The predicate mirrors
-// vectorProjectScanQuery's.
-const vectorProjectRowCountQuery = `
+// vectorProjectScanQuery is the project leg's corpus query: the shared
+// projection narrowed by vectorProjectPredicate.
+const vectorProjectScanQuery = vectorScanColumns + `
+	WHERE ` + vectorProjectPredicate
+
+// vectorCountFrom is the row set the uncached path's count sizes the snapshot
+// buffer from (see vectorCountQuery): the same join vectorScanColumns reads.
+const vectorCountFrom = `
 	SELECT COUNT(*)
 	FROM memory_embeddings e
-	JOIN memories m ON m.id = e.memory_id
-	WHERE m.project_id = ? OR m.project_id = '_global'`
+	JOIN memories m ON m.id = e.memory_id`
+
+// vectorCountQuery builds the count that sizes an uncached snapshot's embedding
+// buffer. It names the rows loadVectorRows can actually copy: the join the scan
+// reads, the leg's own narrowing (projectWhere/projectArgs — empty for the
+// cross-project leg), and the loader's two filters, the configured identity when
+// there is one and the query's width. Without the last two the count is every
+// row of the leg, so a corpus mid-re-embed — most rows foreign or of another
+// width — would reserve a corpus-sized buffer for rows the copy skips, which is
+// the allocation the identity filter exists to avoid. The hint is then an upper
+// bound on the appended bytes rather than a guess at them; reserve is correct
+// either way, only tighter with the filters.
+func vectorCountQuery(projectWhere string, projectArgs []any, identity string, dims int) (string, []any) {
+	where := make([]string, 0, 3)
+	args := append([]any(nil), projectArgs...)
+	if projectWhere != "" {
+		where = append(where, projectWhere)
+	}
+	if identity != "" {
+		where = append(where, "e.model = ?")
+		args = append(args, identity)
+	}
+	where = append(where, "length(e.embedding)/4 = ?")
+	args = append(args, dims)
+	return vectorCountFrom + " WHERE " + strings.Join(where, " AND "), args
+}
 
 // queryVectorCorpus runs the corpus cache's query: the shared projection with no
 // predicate, so one copy serves every project. It lives beside the constant it
@@ -277,21 +303,24 @@ func (v *vectorRows) reserve(rows int64, dims int) {
 // clause) and is run against queryDB, so the snapshot store Candidates builds still
 // reads its transaction.
 //
-// countQuery, when non-empty, is the corpus row count at the query's width. It
-// is run first, under the same lock and on the same handle as the copy, and sizes
-// the embedding buffer before the copy (vectorRows.reserve), so a corpus above
-// the pool's retention cap — which is dropped on return and so regrown from zero
-// every search — is built in one allocation instead of by append growth. A
-// failed count is not an error: it only means the copy falls back to that growth.
-func (s *Store) snapshotVectors(ctx context.Context, query string, args []any, countQuery string, countArgs []any, queryVec []float32, identity string, v *vectorRows) error {
+// countWhere and countArgs, when non-empty, are the leg's own narrowing of the
+// corpus (the project predicate, or nothing for the cross-project leg). The
+// count that sizes the embedding buffer is built from them plus the loader's own
+// filters — the configured identity and the query's width — so it names exactly
+// the rows the copy below can append (vectorCountQuery). It is run first, under
+// the same lock and on the same handle as the copy, so it describes the rows
+// about to be read, and sizes the buffer before the copy (vectorRows.reserve):
+// a corpus above the pool's retention cap is dropped on return and would
+// otherwise be regrown from zero by append growth every search. A failed count
+// is not an error: it only means the copy falls back to that growth.
+func (s *Store) snapshotVectors(ctx context.Context, query string, args []any, countWhere string, countArgs []any, queryVec []float32, identity string, v *vectorRows) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if countQuery != "" {
-		var n int64
-		if err := s.queryDB().QueryRowContext(ctx, countQuery, countArgs...).Scan(&n); err == nil {
-			v.reserve(n, len(queryVec))
-		}
+	countQuery, countArgs := vectorCountQuery(countWhere, countArgs, identity, len(queryVec))
+	var n int64
+	if err := s.queryDB().QueryRowContext(ctx, countQuery, countArgs...).Scan(&n); err == nil {
+		v.reserve(n, len(queryVec))
 	}
 
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)

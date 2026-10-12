@@ -315,9 +315,10 @@ above that cap is therefore regrown from an empty buffer on every search, so the
 copy sizes the embedding buffer in one allocation from the corpus row count
 before it starts (`vectorRows.reserve`) instead of growing it by repeated
 append, which reallocated and copied the whole corpus several times over
-([#1036](https://github.com/wcatz/ghost/issues/1036)). The count is the
-project's own rows on the project leg, so a small project on a large store does
-not reserve the whole store's embedding bytes. What a
+([#1036](https://github.com/wcatz/ghost/issues/1036)). The count names only the
+rows the copy can actually use — the leg's own project narrowing plus the
+loader's identity and width filters — so a small project on a large store, or a
+corpus mid-re-embed, does not reserve bytes for rows the copy skips. What a
 query still allocates is the database driver: `modernc.org/sqlite` copies every
 BLOB and every TEXT column into a fresh Go allocation per row, which is the
 floor for any `database/sql` scan and is the reason the next step was a corpus

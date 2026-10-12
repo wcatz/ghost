@@ -496,7 +496,7 @@ func TestSnapshotVectorsSizesTheEmbeddingBufferFromTheRowCount(t *testing.T) {
 		queryVec[d] = 1 + float32(d)/3
 	}
 	err := store.snapshotVectors(ctx, vectorProjectScanQuery, []any{"test-proj"},
-		vectorProjectRowCountQuery, []any{"test-proj"}, queryVec, identityCurrent, v)
+		vectorProjectPredicate, []any{"test-proj"}, queryVec, identityCurrent, v)
 	if err != nil {
 		t.Fatalf("snapshotVectors: %v", err)
 	}
@@ -509,6 +509,56 @@ func TestSnapshotVectorsSizesTheEmbeddingBufferFromTheRowCount(t *testing.T) {
 	}
 	if len(v.embeds) != want {
 		t.Errorf("the embedding buffer holds %d bytes, want %d (one row per appended vector)", len(v.embeds), want)
+	}
+}
+
+// TestSnapshotVectorsDoesNotReserveForRowsItWillSkip is the other half of the
+// sizing: the count that sizes the buffer has to name only the rows the loader
+// can copy. A corpus mid-re-embed — its rows carrying a retired identity, or a
+// width the query does not match — would otherwise reserve a corpus-sized buffer
+// for rows the copy skips, which is the allocation the identity and width
+// filters exist to avoid (a search that appends nothing must allocate nothing).
+// The corpus below has no row the loader will copy, half of them foreign and
+// half of the configured identity at the wrong width, so dropping either filter
+// from the count makes it reserve for rows that never reach the buffer.
+func TestSnapshotVectorsDoesNotReserveForRowsItWillSkip(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	const dims = 8
+	for i := range 40 {
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact", Content: fmt.Sprintf("row %d", i), Source: "manual",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		vec := make([]float32, dims)
+		if i%2 == 0 {
+			// A retired vector space: the identity filter skips it.
+			if err := store.StoreEmbedding(ctx, id, vec, identityStale); err != nil {
+				t.Fatalf("StoreEmbedding: %v", err)
+			}
+			continue
+		}
+		// The configured identity at a width the query does not match: the
+		// width filter skips it.
+		if err := store.StoreEmbedding(ctx, id, make([]float32, dims+1), identityCurrent); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+	}
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	v := &vectorRows{}
+	queryVec := make([]float32, dims)
+	err := store.snapshotVectors(ctx, vectorProjectScanQuery, []any{"test-proj"},
+		vectorProjectPredicate, []any{"test-proj"}, queryVec, identityCurrent, v)
+	if err != nil {
+		t.Fatalf("snapshotVectors: %v", err)
+	}
+	if len(v.rows) != 0 {
+		t.Fatalf("the snapshot loaded %d rows, want none: the fixture must hold only rows the copy skips", len(v.rows))
+	}
+	if cap(v.embeds) != 0 {
+		t.Errorf("reserved %d bytes for a corpus of rows the copy skips, want none", cap(v.embeds))
 	}
 }
 
