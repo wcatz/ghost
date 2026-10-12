@@ -293,3 +293,52 @@ func TestGhostDecisionRecord_AcceptsStringifiedArrays(t *testing.T) {
 		t.Errorf("alternatives = %v", decisions[0].Alternatives)
 	}
 }
+
+// A scope value that is not a string is refused by the coercion before the
+// scope guard runs. The refusal must never carry the offending key: a key is
+// caller text, so quoting it would echo a token-shaped or arbitrarily long
+// string back in the answer.
+func TestOptScope_NonStringValueRefusalOmitsKey(t *testing.T) {
+	keys := map[string]string{
+		"token":    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"oversize": strings.Repeat("k", 200*1024),
+	}
+	for name, key := range keys {
+		t.Run(name, func(t *testing.T) {
+			_, err := optScope(map[string]any{key: 5}, "scope")
+			if err == nil {
+				t.Fatal("expected a refusal for a non-string scope value")
+			}
+			if strings.Contains(err.Error(), key[:16]) {
+				t.Errorf("refusal echoes the key: %.120s", err.Error())
+			}
+			if len(err.Error()) > 200 {
+				t.Errorf("refusal is unbounded: %d bytes", len(err.Error()))
+			}
+			if !strings.Contains(err.Error(), "string") {
+				t.Errorf("refusal must say a string is required: %v", err)
+			}
+		})
+	}
+}
+
+func TestGhostMemorySave_NonStringScopeValueRefusalOmitsKey(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	for _, key := range []string{"ghp_abcdefghijklmnopqrstuvwxyz0123456789", strings.Repeat("k", 200*1024)} {
+		result := callTool(t, session, "ghost_memory_save", map[string]any{
+			"project_id": "abc123",
+			"content":    "scope with a non-string value",
+			"scope":      map[string]any{key: 5},
+		})
+		if !result.IsError {
+			t.Fatalf("expected a refusal, got: %.200s", resultText(result))
+		}
+		if txt := resultText(result); strings.Contains(txt, key[:16]) || len(txt) > 1024 {
+			t.Errorf("refusal carries the key or is unbounded (%d bytes): %.200s", len(txt), txt)
+		}
+	}
+}
