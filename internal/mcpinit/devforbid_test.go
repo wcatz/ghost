@@ -191,9 +191,10 @@ func TestImportMemoriesRefusesAForbiddenDataDirAndLeavesTheStoreUntouched(t *tes
 
 // TestImportMemoriesOpensAForbiddenDataDirOnAReleaseBuild is the reason the
 // variable can be exported into a developer's shell at all. The same refused
-// store, on the artifact a release published, is opened and MIGRATED — because
-// that is what a release is for, and a guard that stopped it would break the
-// install the developer also uses.
+// store, on the artifact a release published, is opened and MIGRATED by the
+// ordinary (non-dry-run) import — because that is what a release is for, and a
+// guard that stopped it would break the install the developer also uses. The
+// open is the read-write one: a dry run is read-only on every build (#1049).
 func TestImportMemoriesOpensAForbiddenDataDirOnAReleaseBuild(t *testing.T) {
 	withBuildVersion(t, releaseBuild)
 	root := t.TempDir()
@@ -206,7 +207,7 @@ func TestImportMemoriesOpensAForbiddenDataDirOnAReleaseBuild(t *testing.T) {
 	t.Setenv(config.DevForbidDataDirEnv, dataDir)
 
 	var out bytes.Buffer
-	if _, err := importMemories(&out, true); err != nil {
+	if _, err := importMemories(&out, false); err != nil {
 		t.Fatalf("importMemories on a release build = %v, want the store opened; it printed:\n%s", err, out.String())
 	}
 	// And it really was opened: the stamp moved, which is the migration this

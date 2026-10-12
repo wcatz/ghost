@@ -2,6 +2,7 @@ package assemble
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -349,18 +350,50 @@ func ScopeLabel(scope map[string]string) string {
 	}
 	sort.Strings(keys)
 
+	// The display bound, for the reason AgentLabel and TagsLabel carry one: the
+	// writers refuse a scope past memory.MaxScopeKeys / MaxScopeKeyLen /
+	// MaxScopeValueLen, but a row written before that bound, an imported
+	// snapshot, and the writers that deliberately skip it (RestoreSnapshot,
+	// CreateFromCorpus, ReplaceNonManual) can hold any size, and this label is
+	// printed on every listing. The bounds are the writer's own constants rather
+	// than copies, so the renderer can never be tighter than what a writer
+	// accepted whole — a display bound quietly becoming a data change.
+	extra := 0
+	if len(keys) > memory.MaxScopeKeys {
+		extra = len(keys) - memory.MaxScopeKeys
+		keys = keys[:memory.MaxScopeKeys]
+	}
+
 	var b strings.Builder
 	b.WriteString(" scope{")
 	for i, k := range keys {
 		if i > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(Token(k))
+		b.WriteString(boundedScopePart(k, memory.MaxScopeKeyLen))
 		b.WriteString("=")
-		b.WriteString(Token(scope[k]))
+		b.WriteString(boundedScopePart(scope[k], memory.MaxScopeValueLen))
+	}
+	if extra > 0 {
+		fmt.Fprintf(&b, " …[%d more scope keys]", extra)
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// scopeTruncationMarker is what an over-long scope key or value prints as its last
+// characters, the same shape as the agent, source_ref and tag markers.
+const scopeTruncationMarker = "…[scope truncated]"
+
+// boundedScopePart renders one scope key or value through Token after cutting it
+// to max bytes on a rune boundary. The cut comes BEFORE Token so the rendered size
+// is bounded by the constant rather than by how much a quoted escape expands, and
+// the marker is appended outside the token so it is never itself quoted.
+func boundedScopePart(s string, max int) string {
+	if len(s) <= max {
+		return Token(s)
+	}
+	return Token(clampBytes(s, max)) + scopeTruncationMarker
 }
 
 // Token renders one stored value that a line prints OUTSIDE the «...» data
