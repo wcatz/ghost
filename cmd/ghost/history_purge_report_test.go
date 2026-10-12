@@ -15,7 +15,9 @@ import (
 func TestPrintPurgeReportMatchesTheCheckpointOutcome(t *testing.T) {
 	t.Run("checkpoint complete", func(t *testing.T) {
 		var out strings.Builder
-		printPurgeReport(&out, memory.PurgeOutcome{Rows: 3, CheckpointComplete: true})
+		if err := printPurgeReport(&out, memory.PurgeOutcome{Rows: 3, CheckpointComplete: true}); err != nil {
+			t.Fatalf("printPurgeReport: %v", err)
+		}
 		got := out.String()
 		if !strings.Contains(got, "write-ahead log truncated") {
 			t.Errorf("a complete checkpoint is not reported as one:\n%s", got)
@@ -28,7 +30,9 @@ func TestPrintPurgeReportMatchesTheCheckpointOutcome(t *testing.T) {
 
 	t.Run("checkpoint incomplete", func(t *testing.T) {
 		var out strings.Builder
-		printPurgeReport(&out, memory.PurgeOutcome{Rows: 3, CheckpointComplete: false})
+		if err := printPurgeReport(&out, memory.PurgeOutcome{Rows: 3, CheckpointComplete: false}); err != nil {
+			t.Fatalf("printPurgeReport: %v", err)
+		}
 		got := out.String()
 		if !strings.Contains(got, "could not be truncated") || !strings.Contains(got, "stays in it until they close") {
 			t.Errorf("an incomplete checkpoint is not reported as one:\n%s", got)
@@ -37,6 +41,12 @@ func TestPrintPurgeReportMatchesTheCheckpointOutcome(t *testing.T) {
 			t.Errorf("an incomplete checkpoint is reported as truncated:\n%s", got)
 		}
 		assertPurgeReportCaveat(t, got)
+	})
+
+	t.Run("failed write is returned", func(t *testing.T) {
+		if err := printPurgeReport(&failingWriter{failOn: 1}, memory.PurgeOutcome{Rows: 3, CheckpointComplete: true}); err == nil {
+			t.Fatal("a failed write was reported as a printed purge")
+		}
 	})
 }
 
