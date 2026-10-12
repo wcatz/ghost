@@ -442,7 +442,7 @@ type flagCapableStore interface {
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
-// the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
+// the methods ghost_resolve needs (ResolveCandidates, SetResolvedJudged, the
 // supersedes-link read for deterministic demotion with GetByIDs for the link
 // endpoints' scopes, and the KEEP-verdict cache). These aren't part of
 // provider.MemoryStore, so s.store is type-asserted to this interface at call
@@ -450,7 +450,7 @@ type flagCapableStore interface {
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
-	SetResolved(ctx context.Context, ids []string) (int, error)
+	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
@@ -2950,10 +2950,16 @@ func (s *Server) registerTools() {
 		var sb strings.Builder
 		// The veto count is reported so a caller can tell a pass that asked
 		// about nothing (every candidate settled by a rule) from a pass that
-		// decided everything was KEEP.
-		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		// decided everything was KEEP. A confirmed row a concurrent writer
+		// rewrote while it was being classified is not stamped (#1052), so it is
+		// named rather than silently absent from the resolved count.
+		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))",
 			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
 			res.Vetoed, res.Skipped, res.Unknown, verb, count, cls.Calls())
+		if res.Stale > 0 {
+			fmt.Fprintf(&sb, ", %d skipped as stale", res.Stale)
+		}
+		sb.WriteString("\n")
 		if res.Superseded > 0 || res.Corrected > 0 {
 			fmt.Fprintf(&sb, "  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 				res.Superseded, res.Corrected, res.Confirmed)

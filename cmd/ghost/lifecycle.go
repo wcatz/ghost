@@ -4134,7 +4134,8 @@ func markStampedIDs(rows []resolve.MarkedMemory) []string {
 
 // resolveSummaryLine renders the one-line resolve result, including the
 // deterministic KEEP vetoes and the UNKNOWN verdicts that remain eligible for a
-// later pass.
+// later pass. The stale count is appended only when it is non-zero, so a pass
+// that stamped everything it confirmed reads exactly as it did before #1052.
 func resolveSummaryLine(projectName string, res resolve.Result, apply bool, confirmed int, calls int) string {
 	verb := "would resolve"
 	count := confirmed
@@ -4142,9 +4143,17 @@ func resolveSummaryLine(projectName string, res resolve.Result, apply bool, conf
 		verb = "resolved"
 		count = res.Resolved
 	}
-	return fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
+	line := fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))",
 		assemble.Label(projectName), res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
 		res.Vetoed, res.Skipped, res.Unknown, verb, count, calls)
+	// A confirmed row another writer rewrote while it was being classified is not
+	// stamped (#1052). It is named here rather than silently missing from the
+	// resolved count, because "resolved 0" with no reason reads as a pass that
+	// found nothing rather than one that found something whose text had moved.
+	if res.Stale > 0 {
+		line += fmt.Sprintf(", %d skipped as stale", res.Stale)
+	}
+	return line + "\n"
 }
 
 // reassessSummaryLine renders the one-line --reassess result. The counts are

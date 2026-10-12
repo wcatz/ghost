@@ -67,14 +67,18 @@ type fakeStore struct {
 	candidates        []memory.Memory
 	links             []memory.Link
 	resolved          []string
-	err               error // when set, returned by SetResolved instead of writing
+	err               error // when set, returned by SetResolvedJudged instead of writing
 	setResolvedCalled bool
-	kept              map[string]string   // pre-seeded resolve KEEP cache
-	markedKept        []map[string]string // hashes passed to MarkResolveKept, one per call
-	markErr           error               // when set, returned by MarkResolveKept
-	alreadyResolved   []memory.Memory     // ResolvedCandidates pool (reassess)
-	cleared           []string            // ids passed to ClearResolved
-	clearErr          error               // when set, returned by ClearResolved
+	// moved is the content the store holds for an id when it differs from the
+	// candidate's — a rewrite landing between the read and the classify, which is
+	// exactly what SetResolvedJudged refuses to stamp (#1052).
+	moved           map[string]string
+	kept            map[string]string   // pre-seeded resolve KEEP cache
+	markedKept      []map[string]string // hashes passed to MarkResolveKept, one per call
+	markErr         error               // when set, returned by MarkResolveKept
+	alreadyResolved []memory.Memory     // ResolvedCandidates pool (reassess)
+	cleared         []string            // ids passed to ClearResolved
+	clearErr        error               // when set, returned by ClearResolved
 	// known holds every row GetByIDs can serve. It defaults to the union of
 	// both candidate pools so a test that does not care about endpoint scopes
 	// does not have to restate its rows; scopeCompatibleSupersedes needs the
@@ -117,13 +121,21 @@ func (s *fakeStore) GetByIDs(_ context.Context, ids []string) ([]memory.Memory, 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
 	return s.candidates, nil
 }
-func (s *fakeStore) SetResolved(_ context.Context, ids []string) (int, error) {
+func (s *fakeStore) SetResolvedJudged(_ context.Context, judged []memory.Memory) ([]string, []string, error) {
 	s.setResolvedCalled = true
 	if s.err != nil {
-		return 0, s.err
+		return nil, nil, s.err
 	}
-	s.resolved = append(s.resolved, ids...)
-	return len(ids), nil
+	var stamped, stale []string
+	for _, m := range judged {
+		if current, ok := s.moved[m.ID]; ok && current != m.Content {
+			stale = append(stale, m.ID)
+			continue
+		}
+		stamped = append(stamped, m.ID)
+	}
+	s.resolved = append(s.resolved, stamped...)
+	return stamped, stale, nil
 }
 func (s *fakeStore) LinksByRelationSource(_ context.Context, _, _, _ string) ([]memory.Link, error) {
 	return s.links, nil
