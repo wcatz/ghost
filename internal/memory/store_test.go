@@ -2877,6 +2877,97 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskTracksCompletedAt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.CreateTask(ctx, testProject, "Track completion", "", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// completedAt reads the stored column verbatim, NULL included, so a cleared
+	// stamp is distinguishable from one that was never written.
+	completedAt := func() sql.NullString {
+		t.Helper()
+		var v sql.NullString
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT completed_at FROM tasks WHERE id = ?`, id).Scan(&v); err != nil {
+			t.Fatalf("read completed_at: %v", err)
+		}
+		return v
+	}
+
+	// A pending task has no completion stamp.
+	if v := completedAt(); v.Valid {
+		t.Fatalf("a new task should have a NULL completed_at, got %q", v.String)
+	}
+
+	// pending -> done stamps it, on the stored row and on the returned value.
+	done := "done"
+	updated, err := s.UpdateTask(ctx, id, &done, nil, nil)
+	if err != nil {
+		t.Fatalf("UpdateTask pending->done: %v", err)
+	}
+	if updated.CompletedAt == "" {
+		t.Error("UpdateTask pending->done returned an empty CompletedAt")
+	}
+	if v := completedAt(); !v.Valid || v.String == "" {
+		t.Errorf("UpdateTask pending->done should store a completion stamp, got %+v", v)
+	}
+	got, err := s.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask after done: %v", err)
+	}
+	if got.CompletedAt != updated.CompletedAt {
+		t.Errorf("returned CompletedAt %q disagrees with the stored %q", updated.CompletedAt, got.CompletedAt)
+	}
+
+	// done -> active clears it, on the stored row and on the returned value.
+	active := "active"
+	updated, err = s.UpdateTask(ctx, id, &active, nil, nil)
+	if err != nil {
+		t.Fatalf("UpdateTask done->active: %v", err)
+	}
+	if updated.CompletedAt != "" {
+		t.Errorf("UpdateTask done->active returned CompletedAt %q, want empty", updated.CompletedAt)
+	}
+	if v := completedAt(); v.Valid {
+		t.Errorf("UpdateTask done->active should NULL completed_at, got %q", v.String)
+	}
+
+	// A non-status edit leaves a pending task's stamp empty.
+	priority := 1
+	updated, err = s.UpdateTask(ctx, id, nil, &priority, nil)
+	if err != nil {
+		t.Fatalf("UpdateTask priority only: %v", err)
+	}
+	if updated.CompletedAt != "" {
+		t.Errorf("a non-status edit returned CompletedAt %q, want empty", updated.CompletedAt)
+	}
+
+	// done -> done, and a status-nil edit while done, must PRESERVE an existing
+	// stamp rather than re-stamp it: the stamp records when the task BECAME
+	// done, not when it was last written.
+	seed := "2000-01-01 00:00:00"
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?`, seed, id); err != nil {
+		t.Fatalf("seed completed_at: %v", err)
+	}
+	for _, status := range []*string{&done, nil} {
+		updated, err = s.UpdateTask(ctx, id, status, nil, nil)
+		if err != nil {
+			t.Fatalf("UpdateTask preserving done: %v", err)
+		}
+		if updated.CompletedAt != seed {
+			t.Errorf("UpdateTask re-stamped an already-done task: got %q, want preserved %q", updated.CompletedAt, seed)
+		}
+		if v := completedAt(); !v.Valid || v.String != seed {
+			t.Errorf("stored completed_at moved on an already-done task: got %+v, want %q", v, seed)
+		}
+	}
+}
+
 func TestMergeProject(t *testing.T) {
 	s := testStore(t) // creates testProject ("test-project") at "/tmp/test"
 	ctx := context.Background()
