@@ -330,14 +330,17 @@ func TestMigrateFreshDBHasSnapshotColumns(t *testing.T) {
 // and UnembeddedMemoryIDs never re-queued it, because it still had a vector
 // under the configured identity: the row stayed wrong until the embedding
 // model changed. The restore now deletes both rows in the same transaction
-// it writes content in, the rule UpdateMemoryWithOptions applies to an edit,
-// and a row whose content the restore leaves alone keeps its vector.
+// it writes content in, the rule UpdateMemoryWithOptions applies to an edit.
+// A row whose content the restore leaves alone keeps both, and so does a row
+// whose METADATA the restore reverts — the delete is scoped to the content
+// difference alone, never the UPDATE's four-column difference.
 func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// Two reflection rows the replace below re-emits verbatim, so both keep
-	// their ids, both keep their embeddings, and both land in the snapshot.
+	// Three reflection rows the replace below re-emits verbatim, so all of
+	// them keep their ids, their embeddings and their link scans, and all
+	// three land in the snapshot.
 	alpha, err := s.Create(ctx, testProject, Memory{
 		Category: "fact", Content: "alpha content", Source: "reflection", Importance: 0.5,
 	})
@@ -350,17 +353,24 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create psi: %v", err)
 	}
-	for _, id := range []string{alpha, psi} {
+	chi, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "chi content", Source: "reflection", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create chi: %v", err)
+	}
+	for _, id := range []string{alpha, psi, chi} {
 		if err := s.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "test"); err != nil {
 			t.Fatalf("embed %s: %v", id, err)
 		}
 	}
 
-	// A verbatim replace takes the snapshot. Nothing about the two rows
+	// A verbatim replace takes the snapshot. Nothing about the three rows
 	// changes, so restoration comes back to exactly this state.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha content", Importance: 0.5},
 		{Category: "fact", Content: "psi content", Importance: 0.5},
+		{Category: "fact", Content: "chi content", Importance: 0.5},
 	}, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
@@ -375,17 +385,46 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	if err := s.StoreEmbedding(ctx, alpha, []float32{0, 1, 0}, "test"); err != nil {
 		t.Fatalf("re-embed alpha: %v", err)
 	}
+	// Chi is edited in METADATA ONLY — its category diverges from the
+	// snapshot while its content stays the same, so the restore rewrites chi
+	// without reverting any text.
+	if err := s.UpdateMemoryWithOptions(ctx, testProject, chi, UpdateOptions{
+		Category: strPtr("pattern"),
+	}); err != nil {
+		t.Fatalf("update chi: %v", err)
+	}
+
+	// Every row holds a link-scan slot describing the vectors above. The
+	// restore must clear alpha's — its slot described the reverted text —
+	// and leave psi's and chi's exactly where they were.
+	for _, id := range []string{alpha, psi, chi} {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO link_scans (memory_id) VALUES (?)`, id); err != nil {
+			t.Fatalf("seed link scan %s: %v", id, err)
+		}
+	}
 
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
 		t.Fatalf("RestoreSnapshot: %v", err)
 	}
 
-	got, err := s.GetByIDs(ctx, []string{alpha})
-	if err != nil || len(got) != 1 {
+	got, err := s.GetByIDs(ctx, []string{alpha, chi})
+	if err != nil || len(got) != 2 {
 		t.Fatalf("GetByIDs after restore: err=%v n=%d", err, len(got))
 	}
-	if got[0].Content != "alpha content" {
-		t.Fatalf("restored content = %q, want %q", got[0].Content, "alpha content")
+	var alphaGot, chiGot Memory
+	for _, m := range got {
+		if m.ID == alpha {
+			alphaGot = m
+		}
+		if m.ID == chi {
+			chiGot = m
+		}
+	}
+	if alphaGot.Content != "alpha content" {
+		t.Fatalf("restored content = %q, want %q", alphaGot.Content, "alpha content")
+	}
+	if chiGot.Category != "fact" {
+		t.Fatalf("restored category = %q, want %q (the metadata revert did land)", chiGot.Category, "fact")
 	}
 
 	// The vector of the reverted-away text must be gone, not stale: the row
@@ -411,18 +450,43 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	for _, r := range results {
 		if r.MemoryID == alpha {
 			t.Errorf("SearchVector(beta) returned the restored row %s at score %f (content %q)",
-				r.MemoryID, r.Score, got[0].Content)
+				r.MemoryID, r.Score, alphaGot.Content)
 		}
 	}
 
 	// Its own content never changed, so psi keeps its vector across the
 	// restore — only reverted text re-queues a re-embed.
-	psiVec, err := s.GetEmbedding(ctx, psi)
-	if err != nil {
-		t.Fatalf("GetEmbedding(psi): %v", err)
+	for _, id := range []string{psi, chi} {
+		vec, err := s.GetEmbedding(ctx, id)
+		if err != nil {
+			t.Fatalf("GetEmbedding(%s): %v", id, err)
+		}
+		if vec == nil {
+			t.Errorf("row %s whose content the restore left alone lost its embedding", id)
+		}
 	}
-	if psiVec == nil {
-		t.Errorf("row whose content the restore left alone lost its embedding")
+
+	// The link-scan slots follow the same rule as the embeddings: alpha's
+	// is dropped with the text it described, psi's and chi's survive — psi
+	// because nothing about it changed, chi because a metadata-only revert
+	// restores no text and must not re-queue a re-link it does not need.
+	linkScanCount := func(id string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM link_scans WHERE memory_id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("count link_scans for %s: %v", id, err)
+		}
+		return n
+	}
+	if n := linkScanCount(alpha); n != 0 {
+		t.Errorf("reverted row %s kept its link scan (1 row, want 0)", alpha)
+	}
+	if n := linkScanCount(psi); n != 1 {
+		t.Errorf("unchanged row %s lost its link scan (%d rows, want 1)", psi, n)
+	}
+	if n := linkScanCount(chi); n != 1 {
+		t.Errorf("metadata-only-reverted row %s lost its link scan (%d rows, want 1)", chi, n)
 	}
 }
 
