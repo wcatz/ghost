@@ -650,10 +650,32 @@ func runExport() {
 	}
 }
 
+// exportPublish moves the finished temporary artifact to its final name and
+// removes the temporary name. It is a variable so a test can make the last step
+// fail, which is the one a killed process cannot be made to do on demand.
+//
+// os.Link, not os.Rename, because a rename silently replaces whatever appeared
+// at dest since the check in runExportCore, and the contract is that an existing
+// file is never overwritten. A filesystem without hard links falls back to the
+// rename, which is the same atomic publish with the check's window as the only
+// difference.
+var exportPublish = func(tmp, dest string) error {
+	if err := os.Link(tmp, dest); err == nil {
+		_ = os.Remove(tmp)
+		return nil
+	} else if os.IsExist(err) {
+		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	return nil
+}
+
 // runExportCore writes the artifact and reports what it wrote. On a file
-// destination the file is created with the same 0600 width the database has,
-// before any record is written, so a failure part-way leaves a file only the
-// user can read.
+// destination the artifact is written to a 0600 temporary file beside it and
+// published under its name only once complete and synced, so a failure part-way
+// leaves nothing at the destination name.
 //
 // summary is where the run states what it did, and warn is where it names the
 // records it could not write. They are separate writers because the artifact may
@@ -670,29 +692,44 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 		}
 		return reportSkippedRecords(warn, stats.Skipped)
 	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	// An existing destination is refused for the same reason a backup refuses
+	// one: overwriting it would destroy the copy someone may be holding. The
+	// message says so, because "file exists" on its own reads as an obstacle
+	// rather than as the decision this is. Lstat, so a dangling symlink counts.
+	if _, err := os.Lstat(dest); err == nil {
+		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check %s: %w", dest, err)
+	}
+	// The artifact is written under a temporary name in the destination
+	// directory and only published under the requested name once it is complete
+	// and synced. A kill or a failure part-way therefore leaves nothing at the
+	// name the user asked for: an artifact carries no trailer, so a file cut on a
+	// record boundary would import cleanly and look whole. os.CreateTemp creates
+	// the file 0600, the width the database has, before any record is written.
+	f, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
 	if err != nil {
-		// O_EXCL refuses an existing artifact for the same reason a backup
-		// does: overwriting one would destroy the copy someone may be holding.
-		// The message says so, because "file exists" on its own reads as an
-		// obstacle rather than as the decision this is.
-		if os.IsExist(err) {
-			return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
-		}
 		return fmt.Errorf("create %s: %w", dest, err)
 	}
+	tmp := f.Name()
 	stats, exportErr := portable.Export(ctx, store, f, projectFilter)
-	// Close before reporting, so a write error the close surfaces is not lost
-	// and the file is flushed either way.
+	if exportErr == nil {
+		if err := f.Sync(); err != nil {
+			exportErr = fmt.Errorf("sync %s: %w", dest, err)
+		}
+	}
+	// Close before publishing, so a write error the close surfaces is not lost.
 	if err := f.Close(); err != nil && exportErr == nil {
 		exportErr = fmt.Errorf("close %s: %w", dest, err)
 	}
+	if exportErr == nil {
+		exportErr = exportPublish(tmp, dest)
+	}
 	if exportErr != nil {
-		// A partial artifact is worse than none: it is a file the user can see,
-		// and importing it half-succeeds. Removing it leaves the failure as the
-		// only record of the run.
-		if rmErr := os.Remove(dest); rmErr != nil && !os.IsNotExist(rmErr) {
-			return fmt.Errorf("%w (and the partial file %s could not be removed: %v)", exportErr, dest, rmErr)
+		// A partial artifact is worse than none, and so is a stray temp file.
+		// Removing it leaves the failure as the only record of the run.
+		if rmErr := os.Remove(tmp); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("%w (and the temporary file %s could not be removed: %v)", exportErr, tmp, rmErr)
 		}
 		return exportErr
 	}
