@@ -14,19 +14,33 @@ import (
 type pointerRun struct {
 	actions map[string]Action
 	dropped map[string]string
+	reasons map[string]DropReason
 	report  ImportReport
 	store   *memory.Store
 }
 
 func runPointerImport(t *testing.T, artifact string, apply bool) pointerRun {
 	t.Helper()
+	return runPointerImportOnto(t, "", artifact, apply)
+}
+
+// runPointerImportOnto is runPointerImport onto a store that already holds what
+// seed, an artifact applied first, puts there.
+func runPointerImportOnto(t *testing.T, seed, artifact string, apply bool) pointerRun {
+	t.Helper()
 	s := newTestStore(t)
-	run := pointerRun{actions: map[string]Action{}, dropped: map[string]string{}, store: s}
+	if seed != "" {
+		if _, err := Import(context.Background(), s, strings.NewReader(seed), ImportOptions{Apply: true}, nil); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	run := pointerRun{actions: map[string]Action{}, dropped: map[string]string{}, reasons: map[string]DropReason{}, store: s}
 	report, err := Import(context.Background(), s, strings.NewReader(artifact), ImportOptions{Apply: apply}, func(r RecordResult) {
 		key := fmt.Sprintf("%s/%s", r.Type, r.ID)
 		run.actions[key] = r.Action
 		if r.DroppedRef != "" {
 			run.dropped[key] = r.DroppedRef
+			run.reasons[key] = r.DropReason
 		}
 	})
 	if err != nil {
@@ -45,6 +59,9 @@ func assertSameOutcome(t *testing.T, dry, applied pointerRun) {
 	}
 	if fmt.Sprint(dry.dropped) != fmt.Sprint(applied.dropped) {
 		t.Errorf("dropped pointers differ:\n dry run %v\n apply   %v", dry.dropped, applied.dropped)
+	}
+	if fmt.Sprint(dry.reasons) != fmt.Sprint(applied.reasons) {
+		t.Errorf("drop reasons differ:\n dry run %v\n apply   %v", dry.reasons, applied.reasons)
 	}
 	if fmt.Sprint(dry.report.Created) != fmt.Sprint(applied.report.Created) ||
 		fmt.Sprint(dry.report.Skipped) != fmt.Sprint(applied.report.Skipped) ||
@@ -264,5 +281,243 @@ func TestAPointerToARecordAlreadyInTheStoreIsKept(t *testing.T) {
 				t.Errorf("decision dt2 is not in the store after the apply")
 			}
 		})
+	}
+}
+
+// pointersAfter reads back, from the store an apply ran against, the blocked_by
+// of every task and the superseded_by of every decision in project pb.
+func pointersAfter(t *testing.T, s *memory.Store) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	tasks, err := selectTasks(context.Background(), s, []string{"pb"})
+	if err != nil {
+		t.Fatalf("selectTasks: %v", err)
+	}
+	for _, task := range tasks {
+		out["task/"+task.ID] = task.BlockedBy
+	}
+	decisions, err := selectDecisions(context.Background(), s, []string{"pb"})
+	if err != nil {
+		t.Fatalf("selectDecisions: %v", err)
+	}
+	for _, d := range decisions {
+		out["decision/"+d.ID] = d.SupersededBy
+	}
+	return out
+}
+
+// assertPointerOutcome checks, in both modes, every record's action and the
+// drop each one reports (a record absent from wantDrops must report none), and
+// then the pointers the apply left in the store.
+func assertPointerOutcome(t *testing.T, dry, applied pointerRun, wantActions map[string]Action,
+	wantDrops map[string]string, wantReasons map[string]DropReason, wantStored map[string]string) {
+	t.Helper()
+	assertSameOutcome(t, dry, applied)
+	for mode, run := range map[string]pointerRun{"dry run": dry, "apply": applied} {
+		for key, want := range wantActions {
+			if got := run.actions[key]; got != want {
+				t.Errorf("%s: %s was %q, want %q", mode, key, got, want)
+			}
+			if got, want := run.dropped[key], wantDrops[key]; got != want {
+				t.Errorf("%s: %s reported dropped pointer %q, want %q", mode, key, got, want)
+			}
+			if want, ok := wantReasons[key]; ok {
+				if got := run.reasons[key]; got != want {
+					t.Errorf("%s: %s drop reason = %d, want %d", mode, key, got, want)
+				}
+			}
+		}
+	}
+	stored := pointersAfter(t, applied.store)
+	for key, want := range wantStored {
+		got, ok := stored[key]
+		if !ok {
+			t.Errorf("%s is not in the store after the apply", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s pointer = %q in the store, want %q", key, got, want)
+		}
+	}
+}
+
+// TestAPointerToARecordNowhereIsReported: a blocked_by or superseded_by naming
+// a record that is neither in the artifact nor in the destination store is
+// dropped — it can never resolve — and the dependent record's report line names
+// the drop and says why, in the dry run and the apply alike (#1153). Before, the
+// pointer was cleared while ordering and nothing in the report said a link from
+// the source machine was lost.
+func TestAPointerToARecordNowhereIsReported(t *testing.T) {
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pb","title":"blocked by nothing here","status":"pending","priority":2,"blocked_by":"tx9"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pb","title":"superseded by nothing here","decision":"d","rationale":"r","status":"superseded","superseded_by":"dx9"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImport(t, artifact, false), runPointerImport(t, artifact, true),
+		map[string]Action{"task/ta1": ActionCreate, "decision/da1": ActionCreate},
+		map[string]string{"task/ta1": "tx9", "decision/da1": "dx9"},
+		map[string]DropReason{"task/ta1": DropAbsent, "decision/da1": DropAbsent},
+		map[string]string{"task/ta1": "", "decision/da1": ""})
+}
+
+// TestAPointerInACycleIsReported: pointers that form a cycle have no order of
+// writes that satisfies them, so each is dropped and its record's report line
+// says so (#1153). A record that only points INTO a cycle is not part of it: its
+// target is written, so its pointer is kept and nothing is reported for it.
+func TestAPointerInACycleIsReported(t *testing.T) {
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"tc3","project_id":"pb","title":"points into the cycle","status":"pending","priority":2,"blocked_by":"tc1"}}` + "\n" +
+		`{"type":"task","task":{"id":"tc1","project_id":"pb","title":"cycle one","status":"pending","priority":2,"blocked_by":"tc2"}}` + "\n" +
+		`{"type":"task","task":{"id":"tc2","project_id":"pb","title":"cycle two","status":"pending","priority":2,"blocked_by":"tc1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dc1","project_id":"pb","title":"cycle one","decision":"d","rationale":"r","status":"superseded","superseded_by":"dc2"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dc2","project_id":"pb","title":"cycle two","decision":"d","rationale":"r","status":"superseded","superseded_by":"dc1"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImport(t, artifact, false), runPointerImport(t, artifact, true),
+		map[string]Action{
+			"task/tc1": ActionCreate, "task/tc2": ActionCreate, "task/tc3": ActionCreate,
+			"decision/dc1": ActionCreate, "decision/dc2": ActionCreate,
+		},
+		map[string]string{"task/tc1": "tc2", "task/tc2": "tc1", "decision/dc1": "dc2", "decision/dc2": "dc1"},
+		map[string]DropReason{"task/tc1": DropCycle, "task/tc2": DropCycle, "decision/dc1": DropCycle, "decision/dc2": DropCycle},
+		map[string]string{"task/tc1": "", "task/tc2": "", "task/tc3": "tc1", "decision/dc1": "", "decision/dc2": ""})
+}
+
+// TestAPointerToARecordOnlyInTheStoreIsKept: a pointer naming a record the
+// artifact does not carry but the destination store already holds resolves, so
+// it is kept and nothing is reported — in a dry run as in the apply (#1153). It
+// is the case that separates "not in this artifact" from "can never resolve".
+//
+// The same holds inside a cycle whose other member the store already has: that
+// member is skipped, the store's row is there to point at, and the new record
+// keeps its pointer.
+func TestAPointerToARecordOnlyInTheStoreIsKept(t *testing.T) {
+	const project = `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n"
+	seed := project +
+		`{"type":"task","task":{"id":"ts1","project_id":"pb","title":"target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"ds1","project_id":"pb","title":"superseder","decision":"d","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"task","task":{"id":"tk1","project_id":"pb","title":"cycle member already here","status":"pending","priority":2}}` + "\n"
+	artifact := project +
+		`{"type":"task","task":{"id":"tk1","project_id":"pb","title":"cycle member already here","status":"pending","priority":2,"blocked_by":"tk2"}}` + "\n" +
+		`{"type":"task","task":{"id":"tk2","project_id":"pb","title":"new cycle member","status":"pending","priority":2,"blocked_by":"tk1"}}` + "\n" +
+		`{"type":"task","task":{"id":"ts2","project_id":"pb","title":"dependent","status":"pending","priority":2,"blocked_by":"ts1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"ds2","project_id":"pb","title":"superseded","decision":"d","rationale":"r","status":"superseded","superseded_by":"ds1"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), runPointerImportOnto(t, seed, artifact, true),
+		map[string]Action{"task/ts2": ActionCreate, "decision/ds2": ActionCreate, "task/tk1": ActionSkip, "task/tk2": ActionCreate},
+		map[string]string{},
+		nil,
+		map[string]string{"task/ts2": "ts1", "decision/ds2": "ds1", "task/tk1": "", "task/tk2": "tk1"})
+}
+
+// chainIntoCycle is n task records, task i blocked by task i+1, the last two
+// blocking each other: one long chain that ends in a 2-cycle.
+func chainIntoCycle(n int) []struct{ id, blockedBy string } {
+	rows := make([]struct{ id, blockedBy string }, n)
+	for i := range rows {
+		next := i + 1
+		if i == n-1 {
+			next = n - 2
+		}
+		rows[i].id, rows[i].blockedBy = fmt.Sprintf("c%d", i), fmt.Sprintf("c%d", next)
+	}
+	return rows
+}
+
+// TestCycleMembersIsLinear: finding a cycle's members walks each record once.
+// It counts the calls made to the id and pointer accessors rather than timing
+// anything, so it fails on a quadratic or cubic walk however fast the machine.
+// The walk that preceded it re-walked every record's whole path with a linear
+// scan per step and made a dry run of 4000 such tasks take minutes; at this
+// size it fails in seconds rather than minutes.
+func TestCycleMembersIsLinear(t *testing.T) {
+	const n = 1000
+	recs := taskRecords(chainIntoCycle(n))
+	calls := 0
+	idOf := func(r parsedRecord) string { calls++; return r.rec.Task.ID }
+	refOf := func(r parsedRecord) string { calls++; return r.rec.Task.BlockedBy }
+
+	members := cycleMembers(recs, idOf, refOf)
+	for i, on := range members {
+		if want := i >= n-2; on != want {
+			t.Errorf("record c%d on a cycle = %v, want %v", i, on, want)
+		}
+	}
+	if calls > 4*n {
+		t.Errorf("cycleMembers made %d accessor calls for %d records, want at most %d — the walk is no longer linear", calls, n, 4*n)
+	}
+}
+
+// TestTopoOrderOfAChainIntoACycleIsBounded: the whole ordering of that chain —
+// the stall, the cycle broken, and one pass per link after it — stays within a
+// quadratic number of accessor calls. A membership test that scanned the
+// pending slice made each pass quadratic and the whole ordering cubic. Every
+// link keeps its pointer and follows its target; only the two cycle members
+// lose theirs.
+func TestTopoOrderOfAChainIntoACycleIsBounded(t *testing.T) {
+	const n = 1000
+	calls := 0
+	idOf := func(r parsedRecord) string { calls++; return r.rec.Task.ID }
+	refOf := func(r parsedRecord) string { calls++; return r.rec.Task.BlockedBy }
+	clearRef := func(r parsedRecord) parsedRecord {
+		task := *r.rec.Task
+		task.BlockedBy = ""
+		r.rec.Task = &task
+		return r
+	}
+
+	got := topoOrder(taskRecords(chainIntoCycle(n)), idOf, refOf, clearRef)
+	if len(got) != n {
+		t.Fatalf("ordered %d records, want %d", len(got), n)
+	}
+	pos := map[string]int{}
+	for i, r := range got {
+		pos[r.rec.Task.ID] = i
+	}
+	for i, r := range got {
+		task := r.rec.Task
+		cycle := task.ID == fmt.Sprintf("c%d", n-1) || task.ID == fmt.Sprintf("c%d", n-2)
+		if cycle != (task.BlockedBy == "") {
+			t.Errorf("record %s blocked_by = %q after ordering", task.ID, task.BlockedBy)
+		}
+		if task.BlockedBy != "" && pos[task.BlockedBy] > i {
+			t.Errorf("record %s is ordered before its blocker %s", task.ID, task.BlockedBy)
+		}
+	}
+	if limit := 4 * n * n; calls > limit {
+		t.Errorf("topoOrder made %d accessor calls for %d records, want at most %d — the ordering is worse than quadratic", calls, n, limit)
+	}
+}
+
+// TestCycleMembersMarksOnlyCycles: membership is exact whatever the order the
+// records are walked in — a tail listed after its cycle, a second tail joining
+// the first one partway, a record pointing at itself, a pointer to an id
+// outside the set, and two separate cycles. A walk that reaches a record an
+// earlier walk finished must not mark its own path as a cycle.
+func TestCycleMembersMarksOnlyCycles(t *testing.T) {
+	rows := []struct{ id, blockedBy string }{
+		{id: "a", blockedBy: "b"}, // cycle a <-> b
+		{id: "b", blockedBy: "a"},
+		{id: "c", blockedBy: "a"},       // tail into the cycle, listed after it
+		{id: "d", blockedBy: "c"},       // tail of the tail
+		{id: "e", blockedBy: "d"},       // joins the finished path at d
+		{id: "s", blockedBy: "s"},       // points at itself
+		{id: "x", blockedBy: "outside"}, // names an id outside the set
+		{id: "p", blockedBy: "q"},       // a second cycle p -> q -> r -> p
+		{id: "q", blockedBy: "r"},
+		{id: "r", blockedBy: "p"},
+		{id: "f", blockedBy: "q"}, // tail into the second cycle
+		{id: "g", blockedBy: ""},
+	}
+	want := map[string]bool{"a": true, "b": true, "s": true, "p": true, "q": true, "r": true}
+	recs := taskRecords(rows)
+	members := cycleMembers(recs,
+		func(r parsedRecord) string { return r.rec.Task.ID },
+		func(r parsedRecord) string { return r.rec.Task.BlockedBy })
+	for i, r := range rows {
+		if members[i] != want[r.id] {
+			t.Errorf("record %s on a cycle = %v, want %v", r.id, members[i], want[r.id])
+		}
 	}
 }

@@ -702,7 +702,9 @@ const tagMaxCount = 10
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
 // the ASCII-only quoted string. Interpolating it raw would be a second injection
 // on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain.
+// because it is a character this error string must never contain. A tag that is
+// token-shaped, or that the caller sent longer than the bound a refusal repeats,
+// is withheld instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -715,6 +717,7 @@ func validateTags(tags []string) ([]string, error) {
 			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
+		orig := t
 		if len(t) > tagMaxLen {
 			// Cut on a RUNE boundary. This was `t[:64]`, which on a CJK tag
 			// returned half a rune — and the invalid bytes were STORED, not merely
@@ -738,10 +741,27 @@ func validateTags(tags []string) ([]string, error) {
 			return nil, fmt.Errorf("tag %d (%s) must hold no %s — a tag is printed in the metadata of a memory row, "+
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
-				"any length are fine. Change the tag and call again", i, assemble.Token(t), reason)
+				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
 		}
 	}
 	return tags, nil
+}
+
+// refusedTag renders a tag the shape check refused. A tag the token guard
+// recognises, or one the caller sent longer than memory.ArgEchoMaxBytes, is
+// withheld through memory.RefusalArg like every other argument refusal: the
+// shape check runs before the guard, so naming the tag here would hand a
+// credential back that the guard would have refused to store. Both are decided
+// on the tag as the caller sent it, before the cut, so a value cut to the tag
+// bound is not repeated and the length reported is the caller's own. Every
+// other tag is named through assemble.Token, in the form the row would print.
+// RefusalArg alone would not do for those: it quotes with %q, which keeps the
+// data delimiters this sentence must not carry.
+func refusedTag(orig, cut string) string {
+	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
+		return memory.RefusalArg("tag", orig)
+	}
+	return assemble.Token(cut)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
@@ -1788,13 +1808,15 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 			marker = "pinned (kept visible on purpose)"
 		case m.ExemptCategory:
 			marker = "standing category (never marked)"
+		case m.PersistentTier:
+			marker = "persistent tier (exempt from resolve)"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 	}
-	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
-		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.PersistentTier > 0 || res.Declined > 0 {
+		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, in a standing category or in the persistent tier is left as it is, and a\n"+
 			"report saying otherwise would be claiming a change that did not happen.\n")
 	}
 	stamped := markedMemoryIDs(res.Memories)
@@ -2054,6 +2076,17 @@ func (s *Server) registerTools() {
 				return nil, nil, err
 			}
 		}
+		// Refused with the allowed list, as every other tool that takes a category
+		// refuses it (#1041/#1079), and before the project is resolved so the
+		// caller is told about the argument that was wrong. Handed on, a plural or
+		// capitalised category reached the assembler's category predicate, which
+		// dropped every candidate and answered "nothing found passed the category
+		// filter" with advice to raise the limit — a confident false negative no
+		// limit could fix. Checked here, above the explain and as_of branches, so
+		// all three paths refuse it alike.
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
@@ -2063,6 +2096,23 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as ghost_task_list and
+		// ghost_decisions_list refuse it (#1179). `ResolveProject` answers an
+		// unknown name with `""`, which the assembler reads as a `_global`-only
+		// search, so a misspelt project came back as "no match — widen the
+		// limit", or as a `_global` row presented as an answerable hit for the
+		// misspelt name, with nothing saying the named project was never searched.
+		//
+		// A refusal rather than the not-registered sentence ghost_project_context
+		// appends, because this answer is rendered and measured by the assembler:
+		// a sentence added here would ship bytes the response cap never saw, the
+		// assembler's own verdict text (widen the limit, the query was not wrong)
+		// would still be in the body, and explain's JSON payload has no place for
+		// it. A refusal says the one true thing on the plain, explain and as_of
+		// paths alike. `_global` itself is a registered project and still resolves.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 

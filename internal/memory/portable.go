@@ -1031,9 +1031,10 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 //
 // blocked_by is inserted as given: the caller is responsible for having ordered
 // the records so a blocker exists before the task that points at it (see the
-// portable package's ordering), and a pointer to a task that is not in the
-// artifact at all, or that the same run rejected, is dropped there rather than
-// written as a foreign key that can never resolve.
+// portable package's ordering), and a pointer to a task that is in neither the
+// artifact nor this store, that the same run rejected, or that is part of a
+// cycle, is dropped there and reported rather than written as a foreign key
+// that can never resolve. A pointer to a task this store already holds is kept.
 //
 // The project and the blocker are checked immediately before the write, for the
 // reason ImportMemory gives. Both checks come after the dry-run return because a
@@ -1126,6 +1127,34 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	return true, nil
 }
 
+// HasTask reports whether a task with exactly this id is in the store. The
+// portable import asks it before dropping a blocked_by pointer whose target the
+// artifact does not supply: a target the store already holds resolves, so the
+// pointer is kept. It is a plain read, so a dry run's read-only store answers it
+// exactly as the apply's does.
+func (s *Store) HasTask(ctx context.Context, id string) (bool, error) {
+	return s.hasRow(ctx, `SELECT 1 FROM tasks WHERE id = ?`, id)
+}
+
+// HasDecision is HasTask for a decision's superseded_by.
+func (s *Store) HasDecision(ctx context.Context, id string) (bool, error) {
+	return s.hasRow(ctx, `SELECT 1 FROM decisions WHERE id = ?`, id)
+}
+
+func (s *Store) hasRow(ctx context.Context, query, id string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var present int
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&present)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ImportDecision inserts a decision under the artifact's id, reporting
 // created=false when the id is present. It never updates an existing row.
 //
@@ -1140,8 +1169,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 // four plus alternatives and tags.
 //
 // superseded_by is inserted as given: the caller orders the records so a
-// superseding decision exists first, and drops a pointer to a decision that is
-// not in the artifact or that the same run rejected. As with a task, the project
+// superseding decision exists first, and drops (and reports) a pointer to a
+// decision that is in neither the artifact nor this store, that the same run
+// rejected, or that is part of a cycle. As with a task, the project
 // and the reference are checked immediately before the write, after the dry-run
 // return, and the portable plan makes the dry run's equivalent check.
 func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (created bool, err error) {
