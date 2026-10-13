@@ -114,7 +114,7 @@ type FlagMemoryRequest struct {
 // second source of the same figure, free to disagree with it.
 func (s *Store) FlagMemory(ctx context.Context, req FlagMemoryRequest) error {
 	if req.Kind != FlagKindWrong && req.Kind != FlagKindStale {
-		return fmt.Errorf("%w: got %q", ErrFlagKind, req.Kind)
+		return fmt.Errorf("%w: got %s", ErrFlagKind, RefusalArg("kind", req.Kind))
 	}
 	if strings.TrimSpace(req.Reason) == "" {
 		return fmt.Errorf("%w: a flag with no reason is an unexplained objection, and the reason is what an "+
