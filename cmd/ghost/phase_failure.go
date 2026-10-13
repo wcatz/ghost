@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 const (
@@ -103,12 +105,25 @@ func phaseFailureCause(argv []string, runErr error, output string) string {
 // sanitizeArgv renders argv for the marker, replacing any argument large
 // enough to be prompt content. Flags and paths survive intact so the record
 // still says which phase ran and with what options.
+//
+// The value after `--project` is rendered through `memory.ProjectArg` (#1087):
+// the marker is a durable data-directory file that persists for up to 30 days
+// and is printed at every later session start, and the project operand is a
+// value a session routinely supplies from the clone URL it is standing in, so a
+// credential-shaped one has to be withheld rather than recorded. The renderer
+// leaves the ordinary case as the quoted name the neighbouring refusal sentences
+// use, so the marker still names the phase's scope. It is applied BEFORE the
+// length test, so a credential-shaped value only a little past the bound is
+// withheld by the guard rather than dropped as an anonymous omission.
 func sanitizeArgv(argv []string) string {
 	if len(argv) == 0 {
 		return "(none)"
 	}
 	kept := make([]string, 0, len(argv))
-	for _, a := range argv {
+	for i, a := range argv {
+		if i > 0 && argv[i-1] == "--project" {
+			a = memory.ProjectArg("project", a)
+		}
 		if len(a) > promptArgMaxBytes {
 			kept = append(kept, promptOmittedMarker)
 			continue
