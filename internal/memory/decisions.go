@@ -193,8 +193,12 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // repointed. History is append-only and ghost_link_withdraw repairs a wrong edge.
 //
 // Both IDs must belong to projectID and must differ; a decision cannot
-// supersede itself. Superseding an already-superseded decision just repoints
-// it, so re-running is safe.
+// supersede itself. Re-running the same pair is a clean no-op, so re-running is
+// safe. A decision already superseded by a DIFFERENT decision that is still
+// live (active or revisit) is refused (#1144): the repoint would overwrite the
+// only record that the live successor replaced it, leaving two live decisions
+// and no link between them. A decision whose successor was itself superseded,
+// or no longer exists, has no live successor to lose and is repointed.
 func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
 	if oldID == newID {
@@ -225,6 +229,16 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", RefusalArg("decision_id", newID), RefusalArg("project_id", projectID))
 	}
 
+	// Inside the transaction, so a second writer cannot slip a repoint past a
+	// read-only check the caller made before it wrote anything (#1144).
+	successor, err := liveDecisionSuccessor(ctx, tx, projectID, oldID)
+	if err != nil {
+		return out, fmt.Errorf("supersede decision: lookup successor of %s: %w", RefusalArg("decision_id", oldID), err)
+	}
+	if successor != "" && successor != newID {
+		return out, &DecisionSuccessorError{Successor: successor}
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE decisions
 		SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
@@ -251,6 +265,46 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 	}
 	lock.reportHold("supersede-decision", time.Now())
 	return out, nil
+}
+
+// DecisionSuccessorError is the refusal SupersedeDecisionReport returns when
+// the old decision is already superseded by a different decision that is still
+// live. Successor is that decision's id, a stored value; Error renders it through
+// SafeToken.
+type DecisionSuccessorError struct {
+	Successor string
+}
+
+func (e *DecisionSuccessorError) Error() string {
+	return fmt.Sprintf("decision is already superseded by %s, which is still live; supersede that one instead (supersedes=%s)",
+		SafeToken(e.Successor), SafeToken(e.Successor))
+}
+
+// LiveDecisionSuccessor returns the id of the decision that superseded
+// decisionID when that decision is still live (active or revisit, the same
+// "live" FindLiveDecisionByTitle uses), or "" when decisionID is not
+// superseded, its successor was itself superseded, or its successor no longer
+// exists. It is the read-only form of the check SupersedeDecisionReport makes in
+// its transaction, so a caller can refuse before it writes anything.
+func (s *Store) LiveDecisionSuccessor(ctx context.Context, projectID, decisionID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return liveDecisionSuccessor(ctx, s.db, projectID, decisionID)
+}
+
+// liveDecisionSuccessor takes a queryRower so it runs on the store's handle and
+// inside SupersedeDecisionReport's write transaction alike.
+func liveDecisionSuccessor(ctx context.Context, q queryRower, projectID, decisionID string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT s.id FROM decisions d
+		JOIN decisions s ON s.id = d.superseded_by AND s.project_id = d.project_id
+		WHERE d.id = ? AND d.project_id = ? AND d.status = 'superseded' AND s.status != 'superseded'
+	`, decisionID, projectID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // decisionCompanionRef is the stable link from a companion memory back to the

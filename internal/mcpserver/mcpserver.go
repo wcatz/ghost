@@ -3431,6 +3431,25 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 		args.ProjectID = canonical
+		// A target already superseded by a DIFFERENT decision that is still live
+		// is refused BEFORE RecordDecision commits anything (#1144). Repointing
+		// it overwrote the only record that the live successor replaced it, and
+		// left both live with the same-title advice skipped. The refusal names
+		// the successor, the decision that is current, so the caller can
+		// supersede that one instead. The same check runs again inside
+		// SupersedeDecisionReport's transaction; a writer racing past this one
+		// lands in the partial-failure branch below rather than in a silent
+		// repoint.
+		if args.Supersedes != "" {
+			successor, err := s.store.LiveDecisionSuccessor(ctx, args.ProjectID, args.Supersedes)
+			if err != nil {
+				return nil, nil, fmt.Errorf("check %s: %w", memory.RefusalArg("supersedes", args.Supersedes), err)
+			}
+			if successor != "" {
+				return nil, nil, fmt.Errorf("decision not recorded, nothing was written: %s is already superseded by decision %s, which is still live. If this decision replaces that one, record it with supersedes=%s",
+					memory.RefusalArg("supersedes", args.Supersedes), assemble.Token(successor), assemble.Token(successor))
+			}
+		}
 		// Looked up BEFORE the write, so the row this call is about to create
 		// cannot match itself.
 		sameTitleAdvice := ""
