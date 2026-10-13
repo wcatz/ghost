@@ -153,6 +153,37 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 			}
 			assertNoRefusalEcho(t, out, v)
 		})
+		// A link or mark ref that matches no memory: the refusal fires before the
+		// ref is known to name anything, so it is caller text like any argument.
+		for _, tc := range []struct {
+			name string
+			tool string
+			args func(seed string) map[string]any
+		}{
+			{"target_id", "ghost_link_withdraw", func(seed string) map[string]any {
+				return map[string]any{"project_id": "p", "source_id": seed, "target_id": v}
+			}},
+			{"source_id", "ghost_link_withdraw", func(seed string) map[string]any {
+				return map[string]any{"project_id": "p", "source_id": v, "target_id": seed}
+			}},
+			{"memory_ids", "ghost_resolve_mark", func(string) map[string]any {
+				return map[string]any{"project_id": "p", "memory_ids": []any{v}}
+			}},
+		} {
+			t.Run(tc.name+"/"+label, func(t *testing.T) {
+				db, session, _ := echoLogSession(t)
+				callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
+				var seed string
+				if err := db.QueryRow(`SELECT id FROM memories WHERE project_id = 'p' LIMIT 1`).Scan(&seed); err != nil {
+					t.Fatal(err)
+				}
+				out := callToolErr(t, session, tc.tool, tc.args(seed))
+				if !strings.Contains(out, "has an id starting with") {
+					t.Fatalf("%s did not reach its no-match refusal: %.200s", tc.tool, out)
+				}
+				assertNoRefusalEcho(t, out, v)
+			})
+		}
 		t.Run("category save_global/"+label, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
 			out := callToolErr(t, session, "ghost_save_global", map[string]any{"content": "a fact worth keeping", "category": v})
