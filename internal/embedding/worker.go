@@ -285,8 +285,11 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 // A "pacified" endpoint — one that answers GET / but stalls /api/embed — costs
 // one stalled embed request per sweep, not one per project: EmbedPending stops
 // its batch at the first timed-out embed and reports Inconclusive, as it does
-// for a batch that spent embedPendingBudget, and the check below ends the sweep
-// on that. The remaining projects wait for the next tick.
+// for a batch that spent embedPendingBudget without embedding anything, and the
+// check below ends the sweep on that. The remaining projects wait for the next
+// tick. A batch that spent its budget while still embedding reports Reachable,
+// so a slow but working endpoint costs at most one budget per project and the
+// sweep reaches every project.
 //
 // The streak is still counted, so a hung endpoint still accrues the outage clock
 // noteSweep maintains: the strictness changes what the sweep DOES, not what it
@@ -394,8 +397,9 @@ var embedPendingBudget = time.Minute
 // The batch is bounded in time as well as rows (embedPendingBudget, in the
 // spirit of supersedeEmbedBudget). The budget is the deadline of every embed
 // request in the batch, so a batch never runs past it by more than the store
-// calls around one embed; when it is spent the batch stops, logs "embed budget
-// spent", and reports Inconclusive. The loop also stops at the first embed that
+// calls around one embed; when it is spent the batch stops and logs "embed
+// budget spent", reporting Inconclusive if it embedded nothing and Reachable if
+// it made progress (see budgetSpent). The loop also stops at the first embed that
 // fails with a timeout while the liveness re-check is still Reachable — the
 // "pacified endpoint" shape where the server answers GET / but hangs
 // /api/embed — and reports Inconclusive for that too. Ordinary per-row errors (a
@@ -411,10 +415,11 @@ var embedPendingBudget = time.Minute
 // "the endpoint's last answer", because a probe with nothing behind it is not
 // evidence. The in-batch re-probe's verdict is reported as itself: a batch
 // actually attempted an embed, so an endpoint that then stopped answering HAS said
-// something. A batch stopped by a stalled embed or a spent budget reports
-// Inconclusive although the re-probe answered: the endpoint did not do the work
-// in time, and a Reachable there would send the sweep's next project into the
-// same wait. On the two no-work paths — the unembedded list failed, or there was
+// something. A batch stopped by a stalled embed, or by a budget spent without
+// embedding anything, reports Inconclusive although the re-probe answered: the
+// endpoint did not do the work in time, and a Reachable there would send the
+// sweep's next project into the same wait. A budget spent while embedding
+// reports Reachable, so the sweep moves on. On the two no-work paths — the unembedded list failed, or there was
 // nothing to embed — a CONCLUSIVE verdict is still reported (a refusal stops a
 // sweep whatever the work behind it) and an INCONCLUSIVE one collapses to
 // Reachable, because `client.go` says a busy machine reaches that deadline
@@ -541,14 +546,24 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 }
 
 // budgetSpent logs a batch that ran out of embedPendingBudget and returns the
-// verdict it reports. The endpoint did not finish the batch in time, which is
-// not an outage, so the line says what happened rather than reusing the
-// "ollama unavailable" one; Inconclusive ends SweepOnce's sweep, because the
-// next project's batch would be waiting on the same endpoint.
+// verdict it reports. Running out is not an outage, so the line says what
+// happened rather than reusing the "ollama unavailable" one.
+//
+// The verdict depends on whether the batch made progress. A batch that
+// embedded nothing in its whole budget reports Inconclusive, which ends
+// SweepOnce's sweep: the next project would be waiting on the same endpoint. A
+// batch that embedded rows reports Reachable: the endpoint is slow but working,
+// the budget has already bounded this project, and ending the sweep there would
+// hold every later project behind the first one's backlog for as many ticks as
+// that backlog takes to drain.
 func (w *Worker) budgetSpent(embedded int) Reachability {
+	verdict := Reachable
+	if embedded == 0 {
+		verdict = Inconclusive
+	}
 	w.logger.Info("embed budget spent, pausing batch",
-		"embedded", embedded, "budget", embedPendingBudget.String(), "reachability", Inconclusive.String())
-	return Inconclusive
+		"embedded", embedded, "budget", embedPendingBudget.String(), "reachability", verdict.String())
+	return verdict
 }
 
 // processProject is the sweep's per-project body, and it passes the endpoint's

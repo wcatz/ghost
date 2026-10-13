@@ -1345,6 +1345,73 @@ func TestEmbedPending_StopsAtItsBudget(t *testing.T) {
 	}
 }
 
+// TestSweepOnce_MovesOnAfterABudgetThatMadeProgress is the other half of the
+// budget's verdict: a slow but healthy endpoint spends one project's budget
+// while still embedding, and that must not end the sweep, or the first project
+// by name holds every other one back until its whole backlog is drained.
+func TestSweepOnce_MovesOnAfterABudgetThatMadeProgress(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+	t.Cleanup(setEmbedPendingBudget(t, 250*time.Millisecond))
+
+	var mu sync.Mutex
+	requested := map[string]int{} // project -> embed requests
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			body, _ := io.ReadAll(r.Body)
+			for _, p := range []string{"proj-a", "proj-b"} {
+				if strings.Contains(string(body), p) {
+					mu.Lock()
+					requested[p]++
+					mu.Unlock()
+				}
+			}
+			select {
+			case <-time.After(60 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newMockStore()
+	store.projects = []string{"proj-a", "proj-b"}
+	store.projectsOf = map[string]string{}
+	// proj-a holds far more rows than one budget can embed.
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("proj-a-mem-%02d", i)
+		store.memories[id] = "content " + id
+		store.projectsOf[id] = "proj-a"
+	}
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("proj-b-mem-%02d", i)
+		store.memories[id] = "content " + id
+		store.projectsOf[id] = "proj-b"
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requested["proj-a"] < 2 || requested["proj-a"] >= 40 {
+		t.Fatalf("proj-a got %d embed request(s), want its budget to end the batch after some progress", requested["proj-a"])
+	}
+	if requested["proj-b"] < 1 {
+		t.Errorf("proj-b got no embed request: a budget spent while embedding ended the sweep")
+	}
+}
+
 // setEmbedPendingBudget lowers embedPendingBudget for one test, as
 // setProbeDeadline does for the probe.
 func setEmbedPendingBudget(t *testing.T, d time.Duration) (restore func()) {
