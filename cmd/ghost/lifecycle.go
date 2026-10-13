@@ -478,10 +478,10 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			i++
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				return "", "", "", fmt.Errorf("unknown flag %q", args[i])
+				return "", "", "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 			}
 			if projectSet {
-				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+				return "", "", "", fmt.Errorf("unexpected extra argument %s", memory.RefusalArg("project", args[i]))
 			}
 			project, projectSet = args[i], true
 		}
@@ -1915,7 +1915,7 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = args[i]
 			projectSeen = true
 		default:
-			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	if len(withdraw) > 0 && reassess {
@@ -3830,7 +3830,7 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			out.project = args[i]
 			projectSeen = true
 		default:
-			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
+			return resolveArgs{}, fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	// An empty POSITIONAL is the same missing operand in the third spelling, and
