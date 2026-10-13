@@ -3452,16 +3452,17 @@ func (s *Server) registerTools() {
 	})
 
 	// ghost_project_delete — permanently delete a project and everything
-	// under it. Dry-run by default; apply:true actually deletes. _global is
-	// always refused, in both modes.
+	// under it. Dry-run by default; apply:true actually deletes, and only by
+	// the exact project id the dry run printed. _global is always refused,
+	// in both modes.
 	type projectDeleteArgs struct {
-		Project string `json:"project" jsonschema:"the project to delete (id, name, or path)"`
+		Project string `json:"project" jsonschema:"the project to delete (id, name, or path for the dry run; apply:true requires the exact id it printed)"`
 		Apply   bool   `json:"apply,omitempty" jsonschema:"actually delete (default false: dry-run preview only)"`
 	}
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_delete",
 		Title:       "Delete Project",
-		Description: "Permanently deletes a project: memories, tags, embeddings, links, tasks, decisions, learned context, reflection snapshots, and cost/audit history. Irreversible — there is no undo. Dry-run by default (returns counts of what would be removed); pass apply:true to actually delete. Always refuses to delete the _global project. Only use when the user has explicitly and unambiguously asked to delete an entire project, never as a side effect of another request.",
+		Description: "Permanently deletes a project: memories, tags, embeddings, links, tasks, decisions, learned context, reflection snapshots, and cost/audit history. Irreversible — there is no undo. Dry-run by default (returns counts of what would be removed); pass apply:true with the exact project id the dry run printed to actually delete — a name, path or basename is refused, because those only resolve to a project and an apply must not delete whichever one they happened to resolve to. Always refuses to delete the _global project. Only use when the user has explicitly and unambiguously asked to delete an entire project, never as a side effect of another request.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -3469,6 +3470,21 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args projectDeleteArgs) (*mcp.CallToolResult, any, error) {
 		if args.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
+		}
+		// apply:true must name the project by the exact id its own dry run
+		// printed. DeleteProject resolves through ResolveProject, which also
+		// accepts a name, a canonical path prefix, a repository remote and a
+		// basename — the right shapes for a dry run, which only previews, but
+		// not for an irreversible delete: handing an apply the same fuzzy
+		// identifier would delete whichever project those words resolved to at
+		// delete time. The id is the only identifier a caller can supply
+		// without evidence, so only it may cross into apply.
+		if args.Apply {
+			if _, ok, err := s.store.ResolveExactProjectID(ctx, args.Project); err != nil {
+				return nil, nil, fmt.Errorf("ghost_project_delete: %w", err)
+			} else if !ok {
+				return nil, nil, fmt.Errorf("ghost_project_delete: apply:true requires the exact project id shown by the dry run, not a name, path or basename: %s", memory.RefusalArg("project", args.Project))
+			}
 		}
 		summary, err := s.store.DeleteProject(ctx, args.Project, args.Apply)
 		if err != nil {
