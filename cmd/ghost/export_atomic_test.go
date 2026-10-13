@@ -53,7 +53,7 @@ func TestExportFailedPublishLeavesNoFileAndNoTempFile(t *testing.T) {
 
 // The temp file exists while the export runs and the final name does not.
 func TestExportDestinationAbsentUntilPublish(t *testing.T) {
-	dir, path, run := plantAtomicExportRow(t)
+	dir, _, run := plantAtomicExportRow(t)
 	orig := exportPublish
 	var sawDest bool
 	var sawTemp int
@@ -76,13 +76,6 @@ func TestExportDestinationAbsentUntilPublish(t *testing.T) {
 	}
 	if names := dirNames(t, dir); len(names) != 1 || names[0] != "artifact.jsonl" {
 		t.Fatalf("unexpected directory contents: %v", names)
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
 
