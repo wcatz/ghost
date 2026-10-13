@@ -2375,6 +2375,34 @@ func TestStoreLearnedContext(t *testing.T) {
 	}
 }
 
+// TestUpdateLearnedContextReportsAMissingStateRow: a project that has no
+// ghost_state row — a store written before the state table, or one a project
+// was planted into without it — must not read a successful write from an UPDATE
+// that affected 0 rows. The caller is `ghost reflect`, which carries on after a
+// warning, so reporting turns a silent loss into a visible one instead of
+// dropping the learned context with no trace.
+func TestUpdateLearnedContextReportsAMissingStateRow(t *testing.T) {
+	s := portableTestStore(t)
+	ctx := context.Background()
+	// plantRawProject writes a projects row and deliberately no state row, the
+	// shape the import defect left behind.
+	plantRawProject(t, s, "p1", "/src/p1", "p1")
+
+	err := s.UpdateLearnedContext(ctx, "p1", "learned", "summary")
+	if err == nil {
+		t.Fatal("UpdateLearnedContext succeeded for a project with no ghost_state row")
+	}
+	if !strings.Contains(err.Error(), "no ghost_state row") {
+		t.Errorf("refusal does not say the state row is missing: %v", err)
+	}
+	// And nothing was stored, which is what the caller is now told.
+	if got, err := s.GetLearnedContext(ctx, "p1"); err != nil {
+		t.Fatalf("GetLearnedContext: %v", err)
+	} else if got != "" {
+		t.Errorf("GetLearnedContext = %q, want empty", got)
+	}
+}
+
 func TestReflectInputSignatureRoundTrip(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -3322,6 +3350,70 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	}
 }
 
+// TestDeleteProjectRemovesOrphanedSnapshotEvidence: memory_snapshot_evidence has
+// no foreign key — evidence is addressed by (snapshot_id, memory_id), which is
+// not a key a cascade can follow — so deleting a project takes its snapshots
+// (through the projects cascade) and leaves their evidence behind. The rows would
+// accumulate until some later reflect prunes the snapshot again, which is a run
+// that may never come. The delete has to reach them itself, the same statement
+// shape pruneSnapshotsTx uses, and it must leave another project's evidence
+// alone.
+func TestDeleteProjectRemovesOrphanedSnapshotEvidence(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const other = "snapshot-evidence-other"
+	if err := s.EnsureProject(ctx, other, "/tmp/"+other, other); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	seedSnapshotWithEvidence := func(project, snapshotID string) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			snapshotID, project, "fact", "snapshot body", 0.5, "manual",
+		); err != nil {
+			t.Fatalf("seed memory_snapshots %s: %v", snapshotID, err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO memory_snapshot_evidence (snapshot_id, memory_id, kind, agent, session_id, source_ref)
+			 VALUES (?, ?, 'observed', 'codex', 'sess', 'ref')`,
+			snapshotID, "mem-"+snapshotID,
+		); err != nil {
+			t.Fatalf("seed memory_snapshot_evidence %s: %v", snapshotID, err)
+		}
+	}
+	seedSnapshotWithEvidence(testProject, "snap-doomed")
+	seedSnapshotWithEvidence(other, "snap-kept")
+
+	if _, err := s.DeleteProject(ctx, testProject, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	var snapshots int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_snapshots`).Scan(&snapshots); err != nil {
+		t.Fatalf("count memory_snapshots: %v", err)
+	}
+	if snapshots != 1 {
+		t.Fatalf("memory_snapshots holds %d row(s) after the delete, want 1 (the other project's)", snapshots)
+	}
+	var evidence int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_snapshot_evidence`).Scan(&evidence); err != nil {
+		t.Fatalf("count memory_snapshot_evidence: %v", err)
+	}
+	if evidence != 1 {
+		t.Fatalf("memory_snapshot_evidence holds %d row(s) after the delete, want 1 — the deleted project's "+
+			"snapshots are gone and their evidence must go with them", evidence)
+	}
+	var survivor string
+	if err := s.db.QueryRow(`SELECT snapshot_id FROM memory_snapshot_evidence`).Scan(&survivor); err != nil {
+		t.Fatalf("read the surviving evidence: %v", err)
+	}
+	if survivor != "snap-kept" {
+		t.Errorf("the surviving evidence belongs to snapshot %q, want %q", survivor, "snap-kept")
+	}
+}
+
 func TestDeleteProject_IsolatesOtherProjects(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -3906,6 +3998,48 @@ func TestStorePromoteToGlobal(t *testing.T) {
 			t.Errorf("memory moved to %q, must stay in %q", mems[0].ProjectID, testProject)
 		}
 	})
+}
+
+// TestPromoteToGlobalReassignsSupersedeChecked: supersede_checked.project_id
+// cascades from projects, so a check left naming the project a promoted endpoint
+// just left is destroyed when that project is deleted — discarding a NEITHER
+// verdict the pass already paid for, and re-asking a pair the cache had settled.
+// The row names its memory as one of TWO endpoints, so the reassignment has to
+// match either column.
+func TestPromoteToGlobalReassignsSupersedeChecked(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newer, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the newer claim", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create newer: %v", err)
+	}
+	older, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the older claim", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create older: %v", err)
+	}
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{
+		{newer, older}: {NewerHash: "newer-hash", OlderHash: "older-hash"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither: %v", err)
+	}
+
+	if err := s.PromoteToGlobal(ctx, testProject, newer); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	var projectID string
+	if err := s.db.QueryRow(
+		`SELECT project_id FROM supersede_checked WHERE newer_id = ? AND older_id = ?`, newer, older,
+	).Scan(&projectID); err != nil {
+		t.Fatalf("read supersede_checked: %v", err)
+	}
+	if projectID != GlobalProjectID {
+		t.Errorf("supersede_checked.project_id = %q, want %q", projectID, GlobalProjectID)
+	}
 }
 
 func TestEnsureProject_AutoMerge(t *testing.T) {
