@@ -84,6 +84,7 @@ func TestContextArgumentRefusalsGuardEchoedValue(t *testing.T) {
 	}{
 		{"since", func(v string) []string { return []string{"context", "--audit", "--since", v} }},
 		{"since equals form", func(v string) []string { return []string{"context", "--audit", "--since=" + v} }},
+		{"duplicate since", func(v string) []string { return []string{"context", "--audit", "--since", "24h", "--since", v} }},
 		{"unknown flag", func(v string) []string { return []string{"context", "--audit", "--" + v} }},
 		{"stray positional", func(v string) []string { return []string{"context", "--audit", v} }},
 		{"as-of", func(v string) []string { return []string{"context", "--as-of", v} }},

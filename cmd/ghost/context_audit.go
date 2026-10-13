@@ -177,7 +177,7 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// is about the value rather than about a scope silently becoming the whole
 			// store.
 			if seenSince {
-				return opts, fmt.Errorf("--since was given twice (%s and %s)", opts.Since, value)
+				return opts, fmt.Errorf("--since was given twice (%s and %s)", opts.Since, memory.RefusalArg("since", value))
 			}
 			seenSince = true
 			// The value is the next token whatever it looks like, and time.Parse is
