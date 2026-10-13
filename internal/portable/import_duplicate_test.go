@@ -78,10 +78,11 @@ func TestADryRunAndItsApplyAgreeWhenAnArtifactRepeatsAnID(t *testing.T) {
 	for i := range drySeen {
 		d, a := drySeen[i], applySeen[i]
 		if d.Type != a.Type || d.ID != a.ID || d.Line != a.Line || d.Action != a.Action ||
-			d.Clamped != a.Clamped || d.Downgraded != a.Downgraded || d.DroppedRef != a.DroppedRef {
-			t.Errorf("record %d disagrees: dry %s %s line %d = %s (clamped %v, downgraded %v, dropped %q), apply %s %s line %d = %s (clamped %v, downgraded %v, dropped %q)",
-				i, d.Type, d.ID, d.Line, d.Action, d.Clamped, d.Downgraded, d.DroppedRef,
-				a.Type, a.ID, a.Line, a.Action, a.Clamped, a.Downgraded, a.DroppedRef)
+			d.Clamped != a.Clamped || d.Downgraded != a.Downgraded || d.DroppedRef != a.DroppedRef ||
+			d.DropReason != a.DropReason {
+			t.Errorf("record %d disagrees: dry %s %s line %d = %s (clamped %v, downgraded %v, dropped %q, reason %d), apply %s %s line %d = %s (clamped %v, downgraded %v, dropped %q, reason %d)",
+				i, d.Type, d.ID, d.Line, d.Action, d.Clamped, d.Downgraded, d.DroppedRef, d.DropReason,
+				a.Type, a.ID, a.Line, a.Action, a.Clamped, a.Downgraded, a.DroppedRef, a.DropReason)
 		}
 	}
 

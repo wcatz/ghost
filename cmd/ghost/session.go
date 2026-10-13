@@ -19,7 +19,17 @@ const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>]
 
 Prints the passive session-start context block for a directory. This is what
 the opencode adapter injects as instructions, because opencode does not
-consume a stdout hook response.
+consume a stdout hook response. It is a session start: it counts a session
+for the project and starts the Obsidian mirror when that is configured.
+
+  --cwd <dir>             The directory to resolve (default: your own; an
+                          empty value means your own too)
+  --as-of <RFC3339>       Print the block as the store stood at an instant
+
+This mode takes those two flags and nothing else. Anything else is refused
+with exit 1 before the block is rendered, so a refusal counts no session:
+--project and --since (they belong to --audit), an unknown flag, a stray
+argument, --cwd with no value after it, and --cwd or --as-of given twice.
 
 --as-of <RFC3339> prints the block as the store stood at that instant instead
 (issue #647): the wording each memory held then, including memories deleted
@@ -113,6 +123,83 @@ func contextAsOf(args []string) (*time.Time, error) {
 	return &utc, nil
 }
 
+// parseContextBlockArgs reads the arguments of `ghost context` WITHOUT --audit:
+// the session-start block. It takes --cwd and --as-of and nothing else.
+//
+// A strict parser, like parseContextAuditArgs, and for a sharper reason than
+// that one's: this mode is a session start, so a render counts a session for
+// the directory's project and starts the Obsidian mirror. The parser used to
+// read --cwd and --as-of and drop every other token, so `ghost context
+// --project other` printed the block for the directory's project, counted a
+// session there and exited 0 — a different question answered, with side
+// effects, and no word that the argument was ignored (#1195). Everything here
+// is decided before runContext renders anything.
+//
+// --project and --since are refused with a pointer to --audit rather than as
+// unknown flags: they are real flags of this command, of its other mode, and
+// the reader who typed one most likely wanted the report.
+//
+// An EMPTY --cwd value is accepted and means the process's own directory, which
+// is what it has always meant. The opencode adapter spawns `ghost context
+// --cwd <dir>` with whatever directory it was handed and ignores stderr, so
+// refusing an empty one would turn a session start into a session with no
+// context and no visible error. A --cwd with no token after it at all is
+// refused: that is a truncated command line, not a directory.
+//
+// The --as-of instant itself is parsed by contextAsOf, which this calls once the
+// shape of the command line is known to be good.
+func parseContextBlockArgs(args []string) (string, *time.Time, error) {
+	cwd := ""
+	var seenCwd, seenAsOf bool
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--cwd" || strings.HasPrefix(arg, "--cwd="):
+			value := ""
+			if arg == "--cwd" {
+				if i+1 >= len(args) {
+					return "", nil, errors.New("flag --cwd needs a value (a directory)")
+				}
+				i++
+				value = args[i]
+			} else {
+				value = strings.TrimPrefix(arg, "--cwd=")
+			}
+			if seenCwd {
+				return "", nil, fmt.Errorf("--cwd was given twice (%s and %s)",
+					memory.RefusalArg("cwd", cwd), memory.RefusalArg("cwd", value))
+			}
+			seenCwd = true
+			cwd = value
+		case arg == "--as-of" || strings.HasPrefix(arg, "--as-of="):
+			// The value is contextAsOf's to judge, including a missing one; this
+			// clause only skips over it so the scan does not read the instant as
+			// a stray positional, and refuses a second occurrence, which
+			// contextAsOf would otherwise resolve silently to the last one.
+			if seenAsOf {
+				return "", nil, errors.New("--as-of was given twice: a block is read at one instant")
+			}
+			seenAsOf = true
+			if arg == "--as-of" && i+1 < len(args) {
+				i++
+			}
+		case arg == "--project" || strings.HasPrefix(arg, "--project="),
+			arg == "--since" || strings.HasPrefix(arg, "--since="):
+			name, _, _ := strings.Cut(arg, "=")
+			return "", nil, fmt.Errorf("%s is a flag of `ghost context --audit`, the retrieval report; the session-start block takes only --cwd and --as-of", name)
+		case strings.HasPrefix(arg, "-"):
+			return "", nil, fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
+		default:
+			return "", nil, fmt.Errorf("the session-start block takes flags only, got %s", memory.RefusalArg("argument", arg))
+		}
+	}
+	asOf, err := contextAsOf(args)
+	if err != nil {
+		return "", nil, err
+	}
+	return cwd, asOf, nil
+}
+
 // runContext prints the passive session-start context block for a directory,
 // backing opencode's plugin-injected instructions. It mirrors the SessionStart
 // hook's startup side effects (Obsidian sync when configured, session-count
@@ -144,17 +231,7 @@ func runContext() int {
 	if contextAuditRequested(args) {
 		return runContextAudit(args)
 	}
-	cwd := ""
-	for i := 2; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--cwd" && i+1 < len(os.Args):
-			cwd = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--cwd="):
-			cwd = strings.TrimPrefix(os.Args[i], "--cwd=")
-		}
-	}
-	asOf, err := contextAsOf(os.Args[2:])
+	cwd, asOf, err := parseContextBlockArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)
 		return 1

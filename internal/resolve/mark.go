@@ -144,6 +144,13 @@ type MarkedMemory struct {
 	// the resolved_at the request did not set.
 	Pinned         bool
 	ExemptCategory bool
+	// PersistentTier marks a row whose retention is `persistent`, the tier every
+	// lifecycle pass leaves alone (memory.RetentionExempt). The store's guard
+	// declines it like the three above, and like them it is a property of the
+	// row rather than of the moment: named from the read, it is never mistaken
+	// for a Declined row, which would tell the caller a concurrent pin, move or
+	// recategorisation happened when none did.
+	PersistentTier bool
 	// Declined marks a row that was ELIGIBLE when this call read it and was not
 	// stamped anyway: the store re-checks its guard at write time, and a pin, a
 	// recategorisation or a move to another project that lands between the two
@@ -184,6 +191,7 @@ type MarkResult struct {
 	AlreadyResolved int
 	Pinned          int
 	ExemptCategory  int
+	PersistentTier  int
 	// Declined counts rows the store's write-time guard refused, which is only
 	// ever non-zero under --apply. It is counted and not left to the difference
 	// between Resolved and the other four, because that difference is also
@@ -258,6 +266,7 @@ func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Lo
 	res.AlreadyResolved = countMarked(rows, func(m *MarkedMemory) bool { return m.AlreadyResolved })
 	res.Pinned = countMarked(rows, func(m *MarkedMemory) bool { return m.Pinned })
 	res.ExemptCategory = countMarked(rows, func(m *MarkedMemory) bool { return m.ExemptCategory })
+	res.PersistentTier = countMarked(rows, func(m *MarkedMemory) bool { return m.PersistentTier })
 
 	// The rows and their counts are what a dry run reports, so they are
 	// attached before the write rather than only on the success path: a preview
@@ -298,7 +307,7 @@ func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Lo
 		switch {
 		case written[rows[i].ID]:
 			rows[i].Marked = true
-		case rows[i].AlreadyResolved || rows[i].Pinned || rows[i].ExemptCategory:
+		case rows[i].AlreadyResolved || rows[i].Pinned || rows[i].ExemptCategory || rows[i].PersistentTier:
 			// Already named from the read, with the reason it applies.
 		default:
 			// Eligible on the read, absent from the write: the store's write-time
@@ -313,6 +322,7 @@ func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Lo
 		logger.Info("resolve marked named memories",
 			"project", req.ProjectID, "resolved", res.Resolved, "marked", res.Marked,
 			"already_resolved", res.AlreadyResolved, "pinned", res.Pinned, "exempt", res.ExemptCategory,
+			"persistent", res.PersistentTier,
 			"declined", res.Declined)
 	}
 	return res, nil
@@ -387,6 +397,7 @@ func attachMarkState(ctx context.Context, store MarkStore, projectID string, row
 		rows[i].AlreadyResolved = m.ResolvedAt != nil && *m.ResolvedAt != ""
 		rows[i].Pinned = m.Pinned
 		rows[i].ExemptCategory = m.Category == "convention" || m.Category == "preference"
+		rows[i].PersistentTier = memory.RetentionExempt(m)
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("nothing marked: %s", strings.Join(problems, "; "))

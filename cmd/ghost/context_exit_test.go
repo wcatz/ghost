@@ -34,6 +34,19 @@ func TestContextArgumentRefusalsExitOne(t *testing.T) {
 		{"audit non-duration since", []string{"context", "--audit", "--since", "7d"}},
 		{"audit combined with as-of", []string{"context", "--audit", "--as-of", "2026-01-01T00:00:00Z"}},
 		{"as-of not an RFC 3339 instant", []string{"context", "--as-of", "bogus"}},
+		// Plain mode (no --audit) used to drop every one of these and render a
+		// live block with exit 0 (#1195).
+		{"plain unknown flag", []string{"context", "--bogus"}},
+		{"plain unknown flag equals form", []string{"context", "--json=true"}},
+		{"plain stray positional", []string{"context", "somewhere"}},
+		{"plain project", []string{"context", "--project", "ghost"}},
+		{"plain project equals form", []string{"context", "--project=ghost"}},
+		{"plain since", []string{"context", "--since", "1h"}},
+		{"plain since equals form", []string{"context", "--since=1h"}},
+		{"plain cwd with no value", []string{"context", "--cwd"}},
+		{"plain cwd twice", []string{"context", "--cwd", "/a", "--cwd=/b"}},
+		{"plain as-of twice", []string{"context", "--as-of", "2026-01-01T00:00:00Z", "--as-of=2026-02-01T00:00:00Z"}},
+		{"plain as-of with no value", []string{"context", "--as-of"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			roots := isolatedHelpFS(t)
@@ -88,6 +101,10 @@ func TestContextArgumentRefusalsGuardEchoedValue(t *testing.T) {
 		{"unknown flag", func(v string) []string { return []string{"context", "--audit", "--" + v} }},
 		{"stray positional", func(v string) []string { return []string{"context", "--audit", v} }},
 		{"as-of", func(v string) []string { return []string{"context", "--as-of", v} }},
+		{"plain unknown flag", func(v string) []string { return []string{"context", "--" + v} }},
+		{"plain stray positional", func(v string) []string { return []string{"context", v} }},
+		{"plain project", func(v string) []string { return []string{"context", "--project", v} }},
+		{"plain duplicate cwd", func(v string) []string { return []string{"context", "--cwd", "/a", "--cwd", v} }},
 	} {
 		for _, val := range []struct{ name, v, needle string }{
 			{"token", key, "sk-ant-api03"},

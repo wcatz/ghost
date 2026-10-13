@@ -347,18 +347,24 @@ func checkReservedSourceRef(ref string) error {
 // project's promoted memory. A companion written before that link existed
 // carries none, so for a decision with no linked companion at all the lookup
 // falls back to the composed text — but only when it is unambiguous: one live
-// unlinked decision_log memory with that text AND exactly one decisions row in
-// the project composing to it. Two decisions with identical text, or an edited
-// memory, match nothing rather than the wrong row: a stale decision left live is
-// recoverable, a wrong memory retired is not.
+// unlinked decision_log memory with that text, whatever its category now, AND
+// exactly one decisions row in the project composing to it. Two decisions with
+// identical text, or an edited memory, match nothing rather than the wrong row:
+// a stale decision left live is recoverable, a wrong memory retired is not.
 func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
-	// memory. When more than one claims it, the one RecordDecision wrote is the
-	// one with source 'decision_log' — an import downgrades the source — and it
-	// is the companion only if it is the sole such row. Otherwise nothing is
-	// chosen and the live claimants are returned as ambiguous, so the caller can
-	// say the decision's memory was left standing.
+	// memory OR one with source 'decision_log'. The second arm is the companion
+	// a caller recategorised with ghost_memory_update (which decision_record
+	// itself points them at): it keeps the link and its source, and no writer
+	// tool can set that source while a default import downgrades it, so the
+	// category it has now is no reason to stop recognising it. The resolve guard
+	// then decides — a convention/preference companion is Declined, not skipped.
+	// When more than one claims it, the one RecordDecision wrote is the one with
+	// source 'decision_log' — an import downgrades the source — and it is the
+	// companion only if it is the sole such row. Otherwise nothing is chosen and
+	// the live claimants are returned as ambiguous, so the caller can say the
+	// decision's memory was left standing.
 	type linkRow struct {
 		id     string
 		source string
@@ -366,7 +372,8 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	rows0, err := tx.QueryContext(ctx, `
 		SELECT id, source, resolved_at IS NULL FROM memories
-		WHERE project_id IN (?, ?) AND category = 'decision' AND source_ref = ?
+		WHERE project_id IN (?, ?) AND source_ref = ?
+		  AND (category = 'decision' OR source = 'decision_log')
 		ORDER BY rowid
 	`, projectID, GlobalProjectID, decisionCompanionRef(decisionID))
 	if err != nil {
@@ -448,7 +455,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 
 	unlinked, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
-		WHERE project_id = ? AND source = 'decision_log' AND category = 'decision'
+		WHERE project_id = ? AND source = 'decision_log'
 		  AND content = ? AND (source_ref IS NULL OR source_ref = '')
 		  AND resolved_at IS NULL
 	`, projectID, content)

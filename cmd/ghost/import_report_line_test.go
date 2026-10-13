@@ -99,9 +99,10 @@ func TestTheImportRecordLineNeverForgesALine(t *testing.T) {
 }
 
 // TestTheImportRecordLineNamesADroppedPointer: a task or decision imported with
-// its blocked_by or superseded_by dropped, because the record that pointer named
-// was rejected, says so on its own line — in a dry run and an apply alike — so
-// the operator learns what the record lost. The dropped id goes through
+// its blocked_by or superseded_by dropped says so on its own line, with the
+// reason — the record that pointer named was rejected, is in neither the
+// artifact nor the store, or the pointer is part of a cycle — in a dry run and
+// an apply alike, so the operator learns what the record lost. The dropped id goes through
 // assemble.Token like every other id this line prints.
 func TestTheImportRecordLineNamesADroppedPointer(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -118,6 +119,26 @@ func TestTheImportRecordLineNamesADroppedPointer(t *testing.T) {
 				Detail: "kept", DroppedRef: "dc2"},
 			want: "  create  decision: line 3  \"kept\" (dc1) (superseded_by dc2 dropped: that decision was rejected)\n",
 		},
+		"task whose blocker is nowhere": {
+			r: portable.RecordResult{Type: portable.TypeTask, ID: "ta1", Line: 3, Action: portable.ActionCreate,
+				Detail: "blocked", DroppedRef: "tx9", DropReason: portable.DropAbsent},
+			want: "  create  task:     line 3  \"blocked\" (ta1) (blocked_by tx9 dropped: not in this artifact or this store)\n",
+		},
+		"decision whose superseder is nowhere": {
+			r: portable.RecordResult{Type: portable.TypeDecision, ID: "da1", Line: 3, Action: portable.ActionCreate,
+				Detail: "kept", DroppedRef: "dx9", DropReason: portable.DropAbsent},
+			want: "  create  decision: line 3  \"kept\" (da1) (superseded_by dx9 dropped: not in this artifact or this store)\n",
+		},
+		"task in a cycle": {
+			r: portable.RecordResult{Type: portable.TypeTask, ID: "tc1", Line: 3, Action: portable.ActionCreate,
+				Detail: "blocked", DroppedRef: "tc2", DropReason: portable.DropCycle},
+			want: "  create  task:     line 3  \"blocked\" (tc1) (blocked_by tc2 dropped: part of a cycle)\n",
+		},
+		"decision in a cycle": {
+			r: portable.RecordResult{Type: portable.TypeDecision, ID: "dc1", Line: 3, Action: portable.ActionCreate,
+				Detail: "kept", DroppedRef: "dc2", DropReason: portable.DropCycle},
+			want: "  create  decision: line 3  \"kept\" (dc1) (superseded_by dc2 dropped: part of a cycle)\n",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var buf bytes.Buffer
@@ -130,12 +151,14 @@ func TestTheImportRecordLineNamesADroppedPointer(t *testing.T) {
 		})
 	}
 
-	var buf bytes.Buffer
-	if err := printRecordLine(&buf, portable.RecordResult{Type: portable.TypeTask, ID: "tb2", Line: 4,
-		Action: portable.ActionCreate, Detail: "blocked", DroppedRef: "AAAA\n- forged"}); err != nil {
-		t.Fatalf("printRecordLine: %v", err)
-	}
-	if out := buf.String(); strings.Count(out, "\n") != 1 {
-		t.Errorf("a hostile dropped id broke the record line:\n%q", out)
+	for _, reason := range []portable.DropReason{portable.DropRejected, portable.DropAbsent, portable.DropCycle} {
+		var buf bytes.Buffer
+		if err := printRecordLine(&buf, portable.RecordResult{Type: portable.TypeTask, ID: "tb2", Line: 4,
+			Action: portable.ActionCreate, Detail: "blocked", DroppedRef: "AAAA\n- forged", DropReason: reason}); err != nil {
+			t.Fatalf("printRecordLine: %v", err)
+		}
+		if out := buf.String(); strings.Count(out, "\n") != 1 {
+			t.Errorf("reason %d: a hostile dropped id broke the record line:\n%q", reason, out)
+		}
 	}
 }
