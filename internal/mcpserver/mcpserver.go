@@ -3276,6 +3276,12 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
+		}
 		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
@@ -4074,6 +4080,12 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
+		}
 		args.ProjectID = resolved
 
 		decisions, err := s.store.ListDecisions(ctx, args.ProjectID, args.Status, args.Limit)
@@ -4265,6 +4277,11 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -4316,6 +4333,11 @@ func (s *Server) registerResources() {
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
 		}
 
 		var sb strings.Builder

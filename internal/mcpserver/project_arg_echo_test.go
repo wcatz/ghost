@@ -148,10 +148,10 @@ var projectResolvingSurfaces = []struct {
 	neverResolves bool
 	// silentWhenUnknown marks a surface whose answer for a project Ghost has never
 	// heard of is an ordinary empty result rather than a sentence about the project.
-	// `ghost_memory_search` and the three listing surfaces report "nothing found" and
-	// never mention the argument, so there is nothing there to withhold and nothing
-	// to name: the unknown-project shape asserts only that nothing is echoed on
-	// them, which is the whole of what is true.
+	// `ghost_memory_search` reports "nothing found" and never mentions the
+	// argument, so there is nothing there to withhold and nothing to name: the
+	// unknown-project shape asserts only that nothing is echoed on it, which is
+	// the whole of what is true.
 	silentWhenUnknown bool
 	// storeRefusal marks a surface whose unknown-project sentence is built by the
 	// STORE rather than by the handler, so the field name the handler knows is not
@@ -196,8 +196,7 @@ var projectResolvingSurfaces = []struct {
 	},
 	{
 		name: "ghost_decisions_list", argKey: "project_id", argName: "project_id",
-		read:              toolReader("ghost_decisions_list", "project_id", nil),
-		silentWhenUnknown: true,
+		read: toolReader("ghost_decisions_list", "project_id", nil),
 	},
 	{
 		name: "ghost_task_create", argKey: "project_id", argName: "project_id",
@@ -205,8 +204,7 @@ var projectResolvingSurfaces = []struct {
 	},
 	{
 		name: "ghost_task_list", argKey: "project_id", argName: "project_id",
-		read:              toolReader("ghost_task_list", "project_id", nil),
-		silentWhenUnknown: true,
+		read: toolReader("ghost_task_list", "project_id", nil),
 	},
 	{
 		name: "ghost_resolve_mark", argKey: "project_id", argName: "project_id",
@@ -239,8 +237,8 @@ var projectResolvingSurfaces = []struct {
 		storeRefusal: true,
 	},
 	{name: "ghost://project/{id}/context", argKey: "project_id", argName: "project_id", read: resourceReader("context")},
-	{name: "ghost://project/{id}/tasks", argKey: "project_id", argName: "project_id", read: resourceReader("tasks"), silentWhenUnknown: true},
-	{name: "ghost://project/{id}/decisions", argKey: "project_id", argName: "project_id", read: resourceReader("decisions"), silentWhenUnknown: true},
+	{name: "ghost://project/{id}/tasks", argKey: "project_id", argName: "project_id", read: resourceReader("tasks")},
+	{name: "ghost://project/{id}/decisions", argKey: "project_id", argName: "project_id", read: resourceReader("decisions")},
 	{name: "recall_project", argKey: "project_id", argName: "project_id", read: promptReader("recall_project", nil)},
 	{
 		// The one surface with no resolver above it at all, and the reason the
@@ -382,7 +380,7 @@ func TestACredentialShapedProjectIDIsNeverEchoedBackByAResolvingSurface(t *testi
 	}{
 		{name: "ambiguous by name", argument: ambiguousByName, label: storeAmbiguityLabel, uriAddressable: true, needsPlanting: true},
 		{name: "ambiguous by tied path prefix", argument: ambiguousByPathPrefix, label: storeAmbiguityLabel, needsPlanting: true},
-		{name: "unknown project", argument: unknownProject, needsPlanting: false},
+		{name: "unknown project", argument: unknownProject, uriAddressable: true, needsPlanting: false},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			for _, surface := range projectResolvingSurfaces {
