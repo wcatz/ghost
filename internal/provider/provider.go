@@ -112,6 +112,9 @@ type MemoryStore interface {
 	// the project with the same title (trimmed, case-insensitive), or "".
 	FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
+	// LiveDecisionSuccessor returns the id of the still-live decision that
+	// superseded decisionID, or "" when it has none.
+	LiveDecisionSuccessor(ctx context.Context, projectID, decisionID string) (string, error)
 	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
 	// decision's companion memory (retired, or left live because it is pinned).
 	SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (memory.DecisionRetirement, error)
