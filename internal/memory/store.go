@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"slices"
@@ -577,6 +578,14 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	// path too, and a directory that cannot be resolved is not a checkout.
 	physical, err := canonicalPath(dir)
 	if err != nil || physical == id || !storedPathIsUsable(physical) {
+		return false, nil
+	}
+	// EvalSymlinks resolves a regular file exactly as it resolves a directory, so
+	// the resolved string alone does not make a checkout: a session stands in a
+	// directory, and a file recorded here would claim a location no session can
+	// be. Declined before the transaction, like every other unusable path, so the
+	// save opens its project unbound rather than bound to something it is not.
+	if info, statErr := os.Stat(physical); statErr != nil || !info.IsDir() {
 		return false, nil
 	}
 	dir = physical
