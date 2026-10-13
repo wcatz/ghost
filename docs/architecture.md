@@ -1457,7 +1457,7 @@ are four, deliberately separate by caller:
 | may this stored vector enter a search? | `loadVectorRows` | both vector scans (`SearchVector`, `SearchVectorAll`), which share one snapshot and one scoring pass |
 | may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
 | may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
-| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite |
+| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite; an embedding row whose memory is gone is not counted |
 
 Rewriting a row under a new identity also clears the `link_scans` slot the
 memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
