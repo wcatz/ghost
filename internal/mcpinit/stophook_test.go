@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -515,7 +516,7 @@ func raceClaimPidFile(t *testing.T, pidPath string, n int) int {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i] = claimPidFile(pidPath)
+			results[i], _ = claimPidFile(pidPath)
 		}(i)
 	}
 	wg.Wait()
@@ -539,8 +540,8 @@ func TestClaimPidFile_PlaceholderCarriesToken(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "resolve-test.pid")
 
-	if !claimPidFile(pidPath) {
-		t.Fatal("claimPidFile on an empty slot = false, want true")
+	if ok, err := claimPidFile(pidPath); !ok || err != nil {
+		t.Fatalf("claimPidFile on an empty slot = %v, %v; want true, nil", ok, err)
 	}
 
 	data, err := os.ReadFile(pidPath)
@@ -589,6 +590,11 @@ func TestSafeProjectIDComponent(t *testing.T) {
 		"nul\x00byte",
 		"tab\ttab", // control characters are unusable in filenames on Windows
 		"bell\x07", // any control rune, not just NUL
+		// A name the filesystem cannot hold: the store accepts ids far past
+		// NAME_MAX, and lifecycle-<id>.pid.lock built from one fails to open.
+		strings.Repeat("p", 300),
+		strings.Repeat("p", maxProjectIDComponentBytes+1),
+		strings.Repeat("é", maxProjectIDComponentBytes/2+1), // bytes, not runes
 	}
 	for _, id := range invalid {
 		if safeProjectIDComponent(id) {
@@ -638,5 +644,63 @@ func TestRunStop_OpencodeV2Transcript(t *testing.T) {
 				t.Errorf("transient V2 transcript dir was not swept: %v", err)
 			}
 		})
+	}
+}
+
+// TestTheLongestAcceptedProjectIDStillNamesEveryFile pins the length bound from
+// the other side: an id at the limit must still produce every file the lifecycle
+// derives from it, the longest being the start stamp's temp file
+// (lifecycle-<id>.last.tmp<random>). A bound computed from a shorter name would
+// pass the id here and fail the write there.
+func TestTheLongestAcceptedProjectIDStillNamesEveryFile(t *testing.T) {
+	id := strings.Repeat("p", maxProjectIDComponentBytes)
+	if !safeProjectIDComponent(id) {
+		t.Fatalf("an id of exactly %d bytes must be accepted", maxProjectIDComponentBytes)
+	}
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "lifecycle-"+id+".pid")
+	ok, err := claimPidFile(pidPath)
+	if !ok || err != nil {
+		t.Fatalf("claim at the length limit: ok=%v err=%v", ok, err)
+	}
+	for i := 0; i < 20; i++ {
+		f, err := os.CreateTemp(dir, lifecycleLastStartFile(id)+".tmp*")
+		if err != nil {
+			t.Fatalf("start stamp temp file at the length limit: %v", err)
+		}
+		_ = f.Close()
+	}
+	// A temp name with the widest random suffix CreateTemp can produce.
+	widest := filepath.Join(dir, lifecycleLastStartFile(id)+".tmp4294967295")
+	if err := os.WriteFile(widest, nil, 0o600); err != nil {
+		t.Fatalf("widest start stamp temp name at the length limit: %v", err)
+	}
+}
+
+// TestClaimPidFileTellsAnEvaluationFailureFromALiveHolder pins the distinction
+// the lifecycle lock depends on: a claim that cannot be evaluated returns an
+// error, never the plain "held" answer a live process earns.
+func TestClaimPidFileTellsAnEvaluationFailureFromALiveHolder(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "resolve-test.pid")
+	if err := os.Mkdir(pidPath+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := claimPidFile(pidPath)
+	if ok || err == nil {
+		t.Fatalf("an unopenable claim lock: ok=%v err=%v, want false and an error", ok, err)
+	}
+
+	holder := exec.Command("sleep", "60")
+	if err := holder.Start(); err != nil {
+		t.Skipf("cannot start a holder process: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill(); _, _ = holder.Process.Wait() })
+	livePath := filepath.Join(dir, "live.pid")
+	if err := os.WriteFile(livePath, []byte(strconv.Itoa(holder.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := claimPidFile(livePath); ok || err != nil {
+		t.Fatalf("a slot held by a live process: ok=%v err=%v, want false and no error", ok, err)
 	}
 }

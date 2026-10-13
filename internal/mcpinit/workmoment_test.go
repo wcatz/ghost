@@ -616,6 +616,34 @@ func TestARepeatedSessionStartStillChargesItsBytes(t *testing.T) {
 	}
 }
 
+// A start block is printed whether or not it fits: a second one that crosses
+// the budget is still charged, and the ledger then authorizes nothing more.
+func TestARepeatedSessionStartPastTheBudgetIsStillCharged(t *testing.T) {
+	f := newMomentFixture(t)
+	path := filepath.Join(f.dataDir, "working-moment-clear-over.log")
+	for _, e := range []momentEntry{
+		{token: startToken, bytes: 6000, ids: []string{"a"}},
+		{token: startToken, bytes: 6000, ids: []string{"a"}},
+	} {
+		if err := appendMomentEntry(path, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _ := readMomentState(path)
+	if st.spent != 12000 {
+		t.Errorf("spent=%d, want both start blocks charged (12000)", st.spent)
+	}
+	if remaining := workMomentBudget - st.spent; remaining > 0 {
+		t.Errorf("remaining=%d, want no further delivery authorized", remaining)
+	}
+	if err := appendMomentEntry(path, momentEntry{token: "t1", bytes: 1500, ids: []string{"x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ = readMomentState(path); st.valid["t1"] {
+		t.Error("a delivery after an over-budget start pair must lose")
+	}
+}
+
 func TestATruncatedPreviewEndsInOneEllipsis(t *testing.T) {
 	got := momentPreview(strings.Repeat("word ", 100))
 	if strings.Count(got, "…") != 1 || !strings.HasSuffix(got, "…") {
