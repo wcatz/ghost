@@ -281,13 +281,20 @@ func checkReservedSourceRef(ref string) error {
 
 // findDecisionCompanionsTx returns the LIVE companion memory ids of decisionID.
 //
-// The link is memories.source_ref. A companion written before that link
-// existed carries none, so for a decision with no linked companion at all the
-// lookup falls back to the composed text — but only when it is unambiguous: one
-// live unlinked decision_log memory with that text AND exactly one decisions row
-// in the project composing to it. Two decisions with identical text, or an
-// edited memory, match nothing rather than the wrong row: a stale decision left
-// live is recoverable, a wrong memory retired is not.
+// The link is memories.source_ref. Promotion moves a memory to `_global` and
+// leaves that link alone, so the link is read across the decision's project AND
+// `_global` — the same widening LinksInto gives a promoted endpoint — and a
+// companion promoted before the supersede is still found where it now lives.
+// The widening is safe for THIS arm because the link names a decision id, which
+// is unique; it is not given to the composed-text fallback below, whose match
+// carries no such identity and would otherwise be free to cross into another
+// project's promoted memory. A companion written before that link existed
+// carries none, so for a decision with no linked companion at all the lookup
+// falls back to the composed text — but only when it is unambiguous: one live
+// unlinked decision_log memory with that text AND exactly one decisions row in
+// the project composing to it. Two decisions with identical text, or an edited
+// memory, match nothing rather than the wrong row: a stale decision left live is
+// recoverable, a wrong memory retired is not.
 func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
@@ -303,9 +310,9 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	rows0, err := tx.QueryContext(ctx, `
 		SELECT id, source, resolved_at IS NULL FROM memories
-		WHERE project_id = ? AND category = 'decision' AND source_ref = ?
+		WHERE project_id IN (?, ?) AND category = 'decision' AND source_ref = ?
 		ORDER BY rowid
-	`, projectID, decisionCompanionRef(decisionID))
+	`, projectID, GlobalProjectID, decisionCompanionRef(decisionID))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
@@ -460,7 +467,13 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	for _, id := range retire {
 		args = append(args, id)
 	}
-	args = append(args, projectID, projectID)
+	// No project is bound, exactly as SetResolved passes none: the candidates
+	// were already scoped by the selection, which names them by the decision
+	// link, and that link reaches a promoted companion in `_global`. Binding the
+	// decision's project here is the bug this closes — a promoted companion
+	// carries `_global` as its own project_id and would be filtered straight back
+	// out.
+	args = append(args, "", "")
 
 	// The same SELECT/UPDATE pair the two resolve writers issue, so the
 	// companion is withheld under exactly the guard a resolve stamp is.
