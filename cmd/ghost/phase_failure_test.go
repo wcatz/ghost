@@ -125,11 +125,13 @@ func TestPhaseFailureCauseCarriesRealExitCode(t *testing.T) {
 
 // TestPhaseTailKeepsOnlyTheBoundedTail: a phase that prints for minutes must
 // not grow the marker without limit, and the LAST output is what matters —
-// that is where the failure shows up.
+// that is where the failure shows up. The output is line-structured, as a
+// phase's is: a kept tail that is one partial line is replaced by a marker
+// (TestPhaseTailOfOnePartialLineIsAMarker).
 func TestPhaseTailKeepsOnlyTheBoundedTail(t *testing.T) {
 	tail := newPhaseTail(64)
 	for i := 0; i < 100; i++ {
-		if _, err := tail.Write([]byte(strings.Repeat("x", 10))); err != nil {
+		if _, err := tail.Write([]byte(strings.Repeat("x", 9) + "\n")); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}
@@ -159,7 +161,67 @@ func TestPhaseTailPassesEverythingThrough(t *testing.T) {
 	if n != len(payload) {
 		t.Errorf("Write returned %d, want %d — a short count would make the child retry or abort", n, len(payload))
 	}
-	if len(tail.String()) > 8 {
-		t.Errorf("tail exceeded its cap: %d bytes", len(tail.String()))
+	// One partial line is all that is kept, so the fixed marker stands in for
+	// it; anything else must stay within the cap.
+	if got := tail.String(); len(got) > 8 && got != phaseTailTrimmedMarker {
+		t.Errorf("tail exceeded its cap: %d bytes", len(got))
+	}
+}
+
+// splitTailToken is obviously fake, shaped by the detector's GitHub personal
+// access token rule.
+const splitTailToken = "ghp_" + "dddddddddddddddddddddddddddddddddddd"
+
+// TestPhaseTailDropsAPartialFirstLine: the tail is cut from the head, so the
+// cut can land inside a token. The fragment that survives has lost its ghp_
+// prefix, so the token guard downstream cannot recognise it, and as the first
+// line it is exactly what the session-start alert shows. A kept tail that
+// starts mid-line must drop that partial line.
+func TestPhaseTailDropsAPartialFirstLine(t *testing.T) {
+	line := "harness: request rejected for " + splitTailToken + "\n"
+	last := "error: consolidation failed\n"
+	// Cap the tail so the cut lands 10 bytes into the token.
+	cut := strings.Index(line, splitTailToken) + 10
+	tail := newPhaseTail(len(line) - cut + len(last))
+	for _, s := range []string{line, last} {
+		if _, err := tail.Write([]byte(s)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	got := tail.String()
+	if fragment := splitTailToken[10:]; strings.Contains(got, fragment) {
+		t.Errorf("the tail keeps the split token's fragment %q:\n%q", fragment, got)
+	}
+	if got != last {
+		t.Errorf("tail = %q, want only the whole line after the cut %q", got, last)
+	}
+}
+
+// TestPhaseTailOfOnePartialLineIsAMarker: when the whole kept tail is one
+// partial line there is no whole line to keep, so a fixed marker stands in
+// rather than the fragment.
+func TestPhaseTailOfOnePartialLineIsAMarker(t *testing.T) {
+	tail := newPhaseTail(30)
+	if _, err := tail.Write([]byte("harness: request rejected for " + splitTailToken)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := tail.String(); got != phaseTailTrimmedMarker {
+		t.Errorf("tail = %q, want %q", got, phaseTailTrimmedMarker)
+	}
+}
+
+// TestPhaseTailKeepsAWholeFirstLine: a cut that lands exactly after a newline
+// leaves a whole first line, which must be kept.
+func TestPhaseTailKeepsAWholeFirstLine(t *testing.T) {
+	first, second := "dropped line\n", "kept line\nlast line\n"
+	tail := newPhaseTail(len(second))
+	for _, s := range []string{first, second} {
+		if _, err := tail.Write([]byte(s)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if got := tail.String(); got != second {
+		t.Errorf("tail = %q, want %q", got, second)
 	}
 }
