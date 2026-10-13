@@ -1786,13 +1786,15 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 			marker = "pinned (kept visible on purpose)"
 		case m.ExemptCategory:
 			marker = "standing category (never marked)"
+		case m.PersistentTier:
+			marker = "persistent tier (exempt from resolve)"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 	}
-	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
-		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.PersistentTier > 0 || res.Declined > 0 {
+		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, in a standing category or in the persistent tier is left as it is, and a\n"+
 			"report saying otherwise would be claiming a change that did not happen.\n")
 	}
 	stamped := markedMemoryIDs(res.Memories)
