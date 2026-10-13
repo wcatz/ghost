@@ -667,7 +667,7 @@ ghost backup --out ~/backups/ghost.db.snapshot
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. |
+| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. An EMPTY value is refused rather than read as the default — `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
 
 The snapshot is taken with SQLite's `VACUUM INTO`, which reads one consistent snapshot of a live WAL database. Copying the file by hand cannot: copying `ghost.db` without its `-wal` loses whatever the write-ahead log held, and copying both while a write lands can capture a torn state. The write lock is held for the length of the vacuum and no longer.
 
@@ -798,7 +798,7 @@ ghost export --out - | head -3
 | Flag | Meaning |
 |---|---|
 | `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. Default: every project. An EMPTY value is refused rather than read as the default — `--project=` is an unset variable, and the way to export everything is to leave the flag off. |
-| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. |
+| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. An EMPTY value is refused rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
 
 The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
 
