@@ -1823,6 +1823,12 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 			return fmt.Errorf("merge reassign: %w", err)
 		}
 	}
+
+	// Carry the outgoing project's learned context over to the survivor before
+	// its row is deleted. See mergeGhostStateTx for the rule.
+	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
@@ -1830,6 +1836,104 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 		return fmt.Errorf("merge delete project: %w", err)
 	}
 	return nil
+}
+
+// ghostStateRow is the mergeable slice of a ghost_state row. updated_at is not
+// read: the merged row's is written as now.
+type ghostStateRow struct {
+	interactionCount  int
+	learnedContext    string
+	lastReflectionAt  sql.NullString
+	reflectionSummary string
+	reflectInputSig   string
+}
+
+// mergeGhostStateTx folds the outgoing project's ghost_state into the survivor's.
+//
+// learned_context, reflection_summary, reflect_input_sig and last_reflection_at
+// are ONE unit, because UpdateLearnedContext writes all four in a single
+// reflection pass: a merged row that took the survivor's learned context but the
+// outgoing project's summary, signature and timestamp would describe a
+// reflection that never happened. The unit is taken whole from one project, with
+// two deliberate choices at the edges:
+//
+//   - A survivor that holds learned_context but no last_reflection_at is treated
+//     as HAVING a reflection and keeps its own unit. It is the project the merge
+//     is into, its context is the one already injected into sessions, and a
+//     missing timestamp is not evidence that the outgoing project's reflection is
+//     newer; overwriting would discard content for no gain.
+//   - A survivor with neither learned_context nor a timestamp has no reflection,
+//     so it takes the outgoing unit wholesale (or keeps its own empty one when
+//     the outgoing has nothing either).
+//
+// When both projects have a timestamped reflection the newer one wins whole.
+//
+// interaction_count is not part of the unit: it is a monotonic counter, so the
+// larger of the two is kept.
+//
+// The survivor's row is created with INSERT OR IGNORE when it is missing, so a
+// merge into a project that has never reflected still receives the outgoing
+// context rather than matching no UPDATE row and losing it.
+func mergeGhostStateTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	var surv ghostStateRow
+	err := tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, newID).
+		Scan(&surv.interactionCount, &surv.learnedContext, &surv.lastReflectionAt, &surv.reflectionSummary, &surv.reflectInputSig)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("merge read survivor ghost_state: %w", err)
+	}
+	var oldg ghostStateRow
+	err = tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, oldID).
+		Scan(&oldg.interactionCount, &oldg.learnedContext, &oldg.lastReflectionAt, &oldg.reflectionSummary, &oldg.reflectInputSig)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The outgoing project never reflected or interacted; there is nothing to
+		// carry over and no reason to create a survivor row.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("merge read outgoing ghost_state: %w", err)
+	}
+
+	merged := mergeGhostStateRows(surv, oldg)
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, newID); err != nil {
+		return fmt.Errorf("merge ensure survivor ghost_state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ghost_state SET interaction_count = ?, learned_context = ?, last_reflection_at = ?, reflection_summary = ?, reflect_input_sig = ?, updated_at = datetime('now') WHERE project_id = ?`,
+		merged.interactionCount, merged.learnedContext, merged.lastReflectionAt, merged.reflectionSummary, merged.reflectInputSig, newID); err != nil {
+		return fmt.Errorf("merge update survivor ghost_state: %w", err)
+	}
+	return nil
+}
+
+// mergeGhostStateRows applies the rule documented on mergeGhostStateTx. It is a
+// pure function so the rule can be exercised directly, but the merge paths are
+// what call it.
+func mergeGhostStateRows(surv, oldg ghostStateRow) ghostStateRow {
+	merged := surv
+	if oldg.interactionCount > merged.interactionCount {
+		merged.interactionCount = oldg.interactionCount
+	}
+
+	survivorHasReflection := surv.lastReflectionAt.Valid || surv.learnedContext != ""
+	outgoingHasReflection := oldg.lastReflectionAt.Valid || oldg.learnedContext != ""
+
+	takeOutgoing := false
+	if !survivorHasReflection && outgoingHasReflection {
+		// The survivor has no reflection to keep, so the outgoing unit is the only
+		// content — including when the survivor row is absent entirely.
+		takeOutgoing = true
+	} else if surv.lastReflectionAt.Valid && oldg.lastReflectionAt.Valid &&
+		oldg.lastReflectionAt.String > surv.lastReflectionAt.String {
+		// Both projects have a timestamped reflection; the newer one wins whole.
+		takeOutgoing = true
+	}
+
+	if takeOutgoing {
+		merged.learnedContext = oldg.learnedContext
+		merged.reflectionSummary = oldg.reflectionSummary
+		merged.reflectInputSig = oldg.reflectInputSig
+		merged.lastReflectionAt = oldg.lastReflectionAt
+	}
+	return merged
 }
 
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
@@ -1947,7 +2051,12 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		}
 	}
 
-	// Delete old project's ghost_state (newID already has its own).
+	// Carry the outgoing project's learned context over to the survivor before
+	// its row is deleted, through the same helper the free function uses so the
+	// two copies cannot drift.
+	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
