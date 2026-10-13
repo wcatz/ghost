@@ -177,3 +177,68 @@ func TestImportReportStillLabelsOrdinaryRecords(t *testing.T) {
 		t.Errorf("an ordinary rejection lost its content prefix: %+v", results)
 	}
 }
+
+// TestImportReportNeverEchoesARefusedCategoryOrSource: the invalid category and
+// invalid source refusals run before the token guard, and the report prints each
+// rejected record's error. A token-shaped or oversized value in either column
+// must come back as the field name and a withheld marker, never as the value.
+func TestImportReportNeverEchoesARefusedCategoryOrSource(t *testing.T) {
+	credential := credentialInArtifact()
+	needle := credential[strings.Index(credential, "ghp_"):]
+	oversized := strings.Repeat("z", 200*1024)
+
+	for _, tc := range []struct {
+		name, field, value string
+		token              bool
+	}{
+		{"category token", "category", credential, true},
+		{"category oversized", "category", oversized, false},
+		{"source token", "source", credential, true},
+		{"source oversized", "source", oversized, false},
+	} {
+		for _, apply := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s apply=%v", tc.name, apply), func(t *testing.T) {
+				category, source := "fact", "mcp"
+				if tc.field == "category" {
+					category = tc.value
+				} else {
+					source = tc.value
+				}
+				body := `{"type":"header","schema_version":1}` + "\n" +
+					`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
+					`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"` + category +
+					`","content":"hello","source":"` + source + `","tags":[]}}` + "\n"
+
+				store := newTestStore(t)
+				var results []RecordResult
+				report, _ := Import(context.Background(), store, strings.NewReader(body),
+					ImportOptions{Apply: apply}, func(r RecordResult) { results = append(results, r) })
+
+				if report.Rejected != 1 {
+					t.Fatalf("Rejected = %d, want 1: %v", report.Rejected, report.Errors)
+				}
+				var printed []string
+				for _, e := range report.Errors {
+					printed = append(printed, e.Error())
+				}
+				for _, r := range results {
+					errText := ""
+					if r.Error != nil {
+						errText = r.Error.Error()
+					}
+					printed = append(printed, r.Detail, errText)
+				}
+				joined := strings.Join(printed, "\n")
+				if strings.Contains(joined, needle) || strings.Contains(joined, oversized[:64]) {
+					t.Errorf("the report echoed the refused %s value", tc.field)
+				}
+				if len(joined) > 4096 {
+					t.Errorf("the report is %d bytes: an oversized value came back through it", len(joined))
+				}
+				if !strings.Contains(joined, "invalid "+tc.field) {
+					t.Errorf("the report no longer names the field %q:\n%s", tc.field, joined)
+				}
+			})
+		}
+	}
+}
