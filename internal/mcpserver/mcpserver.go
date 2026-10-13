@@ -525,7 +525,7 @@ type markCapableStore interface {
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
 	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
-	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	DeletePurgeInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // asOfCapableStore narrows provider.MemoryStore to the historical read
@@ -2750,7 +2750,11 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		// Verify the memory exists and belongs to the specified project.
+		// Verify the memory exists and belongs to the specified project. This
+		// read answers the caller's errors and finds the tombstone; it does not
+		// decide the write — every delete below carries resolvedProjectID, which
+		// the store checks inside its own transaction, so a row that moves to
+		// _global after this read is refused there rather than deleted (#1154).
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 		if err != nil {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
@@ -2775,7 +2779,7 @@ func (s *Server) registerTools() {
 			// still purges and simply says less, rather than failing a redaction
 			// that would have worked.
 			if hs, ok := s.store.(historyCapableStore); ok {
-				outcome, err := hs.DeletePurge(ctx, args.MemoryID)
+				outcome, err := hs.DeletePurgeInProject(ctx, resolvedProjectID, args.MemoryID)
 				if err != nil {
 					return nil, nil, fmt.Errorf("delete failed: %w", err)
 				}
@@ -2786,7 +2790,7 @@ func (s *Server) registerTools() {
 							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
 				}, nil, nil
 			}
-			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
 				return nil, nil, fmt.Errorf("delete failed: %w", err)
 			}
 			s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -2800,7 +2804,7 @@ func (s *Server) registerTools() {
 					args.MemoryID)}},
 			}, nil, nil
 		}
-		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{}); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -3960,7 +3964,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
+		if err := s.store.TogglePinInProject(ctx, resolvedProjectID, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
