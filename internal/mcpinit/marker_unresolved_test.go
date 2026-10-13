@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -126,5 +127,47 @@ func TestAnExpiredMarkerKeyedOnTheUnresolvedNameSelfCleans(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the self-clean left the expired name-keyed marker on disk: %v", err)
+	}
+}
+
+// TestAnExpiredIDMarkerDoesNotTakeAFreshNameMarkerWithIt: the self-clean removes
+// what has expired and nothing else. The project's id-keyed marker is past the
+// self-clean horizon while a failure keyed on its name is current; the alert
+// reads the id file first, and clearing the whole project from there would
+// delete the current failure along with the stale one. Only a clean run clears
+// every key. The stale file goes, the current one survives and is shown.
+func TestAnExpiredIDMarkerDoesNotTakeAFreshNameMarkerWithIt(t *testing.T) {
+	dataHome := isolatedHome(t)
+	namePath := writeUnresolvedMarker(t, dataHome, "Proj A")
+	seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")
+	if err := WriteLifecycleFailure("p1", []string{"resolve"}, "the stale id failure"); err != nil {
+		t.Fatalf("record the id failure: %v", err)
+	}
+	idPath := filepath.Join(dataHome, "ghost", projectMarkerFile("p1"))
+	b, err := os.ReadFile(idPath)
+	if err != nil {
+		t.Fatalf("read id marker: %v", err)
+	}
+	var m testMarker
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parse id marker: %v", err)
+	}
+	m.At = time.Now().UTC().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	if b, err = json.Marshal(m); err != nil {
+		t.Fatalf("marshal id marker: %v", err)
+	}
+	if err := os.WriteFile(idPath, b, 0o600); err != nil {
+		t.Fatalf("backdate id marker: %v", err)
+	}
+
+	got := lifecycleFailureAlert("p1", "Proj A")
+	if !strings.Contains(got, "reflect failed before the import") {
+		t.Errorf("the current name-keyed failure is not shown once the stale one expires: %q", got)
+	}
+	if _, err := os.Stat(namePath); err != nil {
+		t.Errorf("the self-clean deleted a current name-keyed marker: %v", err)
+	}
+	if _, err := os.Stat(idPath); !os.IsNotExist(err) {
+		t.Errorf("the self-clean left the expired id-keyed marker on disk: %v", err)
 	}
 }

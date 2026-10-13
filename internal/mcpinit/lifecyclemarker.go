@@ -52,6 +52,11 @@ const (
 	// marker (its project deleted, its config changed by hand) can never
 	// nag — or linger on disk — forever.
 	lifecycleMarkerMaxAge = 30 * 24 * time.Hour
+	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
+	// session-start removes before giving up on finding a current one: more
+	// than a project's candidate files (markerCandidates), so it never cuts a
+	// real read short.
+	lifecycleSelfCleanMaxPasses = 8
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
 	lifecycleMarkerErrorMaxBytes = 300
@@ -581,8 +586,9 @@ func markerCandidates(ids ...string) []markerCandidate {
 // Print rules (each pinned by a test):
 //   - no marker, or a marker that cannot be parsed/aged: no output;
 //   - marker older than lifecycleAlertMaxAge (14d): no output, file kept;
-//   - marker older than lifecycleMarkerMaxAge (30d): no output, file DELETED
-//     (self-clean);
+//   - marker older than lifecycleMarkerMaxAge (30d): that file DELETED
+//     (self-clean), and only that file — the next candidate is then read and
+//     judged by these same rules, so a current marker behind it still alerts;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -599,25 +605,41 @@ func markerCandidates(ids ...string) []markerCandidate {
 // of the recorded error, withheld by the token guard or framed as data — see
 // renderMarkerError.
 func lifecycleFailureAlert(projectID, projectName string) string {
-	m := readLifecycleFailure(projectID, projectName)
-	if m == nil {
-		return ""
-	}
-	at, err := time.Parse(time.RFC3339, m.At)
-	if err != nil {
-		return ""
-	}
-	age := time.Since(at)
-	if age > lifecycleMarkerMaxAge {
-		// Clear the marker that was actually read, keyed by its own recorded
-		// project — never a blanket removal that could touch another's.
-		_ = ClearLifecycleFailure(m.Project)
-		// A withheld project names no file, so the clear above cannot find
-		// the marker it records; remove the file that was read. Its path came
-		// from config.DataDirPath through readLifecycleFailure.
-		if m.path != "" {
-			_ = os.Remove(m.path)
+	var (
+		m   *lifecycleFailureMarker
+		at  time.Time
+		age time.Duration
+	)
+	// Each pass either returns or removes the expired file it read, so the
+	// loop ends when the candidates run out; the bound is only a backstop.
+	for range lifecycleSelfCleanMaxPasses {
+		m = readLifecycleFailure(projectID, projectName)
+		if m == nil {
+			return ""
 		}
+		var err error
+		at, err = time.Parse(time.RFC3339, m.At)
+		if err != nil {
+			return ""
+		}
+		age = time.Since(at)
+		if age <= lifecycleMarkerMaxAge {
+			break
+		}
+		// Remove the expired file that was read, and only that file. Not
+		// ClearLifecycleFailure: that is a clean run's clear, which removes
+		// every marker recording the project, and from here it would delete a
+		// CURRENT failure keyed on the project's name along with a stale one
+		// keyed on its id. A withheld project names no file either, which is
+		// the other reason the path is used. It came from config.DataDirPath
+		// through readLifecycleFailure. The next pass reads what is left, so a
+		// current marker behind the expired one is still shown.
+		if m.path == "" || os.Remove(m.path) != nil {
+			return ""
+		}
+		m = nil
+	}
+	if m == nil {
 		return ""
 	}
 	if age > lifecycleAlertMaxAge {
