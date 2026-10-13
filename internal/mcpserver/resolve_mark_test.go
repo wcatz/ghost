@@ -231,6 +231,43 @@ func TestResolveMarkReportsAnAlreadyResolvedMemoryAsANoOp(t *testing.T) {
 	}
 }
 
+// TestResolveMarkNamesAPersistentTierRowAsExempt: a persistent-tier memory is
+// exempt from resolve, and the answer has to say that. It used to fall through
+// to the write-time decline and read "no longer eligible: pinned, recategorized,
+// or moved since this call read it", telling the agent a race happened that did
+// not and never stating the real, permanent reason.
+func TestResolveMarkNamesAPersistentTierRowAsExempt(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	session := connectedClient(t, srv)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "juliet keeps the release key offline in the vault",
+		Source: "mcp", Importance: 0.7, Retention: memory.RetentionPersistent,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	out := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{id},
+	}))
+	if !strings.Contains(out, "persistent tier (exempt from resolve)") {
+		t.Errorf("the result does not name the persistent tier as the reason:\n%s", out)
+	}
+	if strings.Contains(out, "no longer eligible") {
+		t.Errorf("the result reports a persistent-tier row as a concurrent change:\n%s", out)
+	}
+	if !strings.Contains(out, "Marked 0 of 1") {
+		t.Errorf("the result does not report that nothing was marked:\n%s", out)
+	}
+	if isMarkedResolved(t, store, id) {
+		t.Error("the tool stamped a persistent-tier memory")
+	}
+}
+
 // TestResolveMarkRefusesARefItCannotResolve: an ambiguous prefix is a question
 // with two answers and the memory it would bury is not something to guess at, so
 // the refusal lists the matches. A ref naming nothing says so, and a request

@@ -61,13 +61,36 @@ type RecordResult struct {
 	// to read the preview for.
 	Downgraded bool
 	// DroppedRef is the id a task's blocked_by or a decision's superseded_by
-	// named when the pointer was dropped because the record it names is in the
-	// artifact but was rejected. The record itself is still imported, without
-	// the pointer; this is how the report says what it lost. Set for a create,
-	// a dry run's included, so the preview shows the drop the apply will make.
+	// named when the pointer was dropped: its target was rejected by this run,
+	// is in neither the artifact nor the store, or the pointer is part of a
+	// cycle (DropReason says which). A target the store already holds is never
+	// a drop. The record itself is still imported, without the pointer; this is
+	// how the report says what it lost. Set for a create, a dry run's included,
+	// so the preview shows the drop the apply will make.
 	DroppedRef string
+	// DropReason says why DroppedRef was dropped. Its zero value is
+	// DropRejected, the reason the field was first added for.
+	DropReason DropReason
 	Error      error
 }
+
+// DropReason is why an import dropped a task's blocked_by or a decision's
+// superseded_by. Each is a pointer that could not be honoured without refusing
+// the record holding it, so the record lands without the pointer and the report
+// says which of these it was.
+type DropReason int
+
+const (
+	// DropRejected: the record the pointer names is in the artifact, but this
+	// run rejected it.
+	DropRejected DropReason = iota
+	// DropAbsent: the record the pointer names is neither in the artifact nor
+	// already in the store.
+	DropAbsent
+	// DropCycle: the pointer is part of a cycle of pointers, which no order of
+	// writes can satisfy.
+	DropCycle
+)
 
 // ImportReport summarises one import run, counted per record type.
 type ImportReport struct {
@@ -333,6 +356,12 @@ func checkSchemaVersion(version int) error {
 type parsedRecord struct {
 	rec  record
 	line int
+	// droppedRef and dropReason are set by orderTasks / orderDecisions when
+	// ordering cleared the record's pointer, so the step that writes it can
+	// report the drop — or restore the pointer if the store already holds its
+	// target.
+	droppedRef string
+	dropReason DropReason
 }
 
 // id returns the record's id, for the per-record report. A record with no
@@ -374,6 +403,7 @@ type outcome struct {
 	clamped    bool
 	downgraded bool
 	droppedRef string
+	dropReason DropReason
 	err        error
 }
 
@@ -393,8 +423,10 @@ type outcome struct {
 // artifact does not contain, or a cycle, has its pointer dropped rather than
 // failing the import — an artifact that cannot be read in full is still worth
 // importing as far as it goes. A reference to a record the artifact contains but
-// this run rejects is dropped the same way, as the steps run, and that drop is
-// named on the dependent record's report line (RecordResult.DroppedRef).
+// this run rejects is dropped the same way, as the steps run. Every such drop is
+// named on the dependent record's report line (RecordResult.DroppedRef, with
+// DropReason saying why), and a pointer whose target the store already held
+// before the run is kept rather than dropped, because it resolves.
 //
 // Each child step is given the set of project ids its project will exist under
 // by the time it runs: what the store already holds plus what this artifact's
@@ -519,25 +551,43 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	// the preview and the apply agreeing about the dependent record (#1147).
 	landedTasks := map[string]bool{}
 	landedDecisions := map[string]bool{}
+	// Which of them this run created. A dropped pointer is restored when the
+	// store already holds its target (#1153) — but only a target the store held
+	// BEFORE the run: one this run wrote is there in an apply and not in the dry
+	// run that previews it, so counting it would make the two disagree about a
+	// cycle's pointers.
+	createdTasks := map[string]bool{}
+	createdDecisions := map[string]bool{}
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
 		t.ProjectID = under(t.ProjectID)
 		steps = append(steps, step{rec: p, kind: TypeTask, detail: safeDetail(t.Title, t.Title, t.ID), check: checkFor(t.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				task := *t
-				dropped := ""
+				dropped, reason := p.droppedRef, p.dropReason
 				if task.BlockedBy != "" && !landedTasks[task.BlockedBy] {
-					dropped, task.BlockedBy = task.BlockedBy, ""
+					dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
+				}
+				if dropped != "" {
+					held, err := s.HasTask(ctx, dropped)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the task blocked_by names, %s: %w", memory.RefusalArg("blocked_by", dropped), err)}
+					}
+					if held && !createdTasks[dropped] {
+						task.BlockedBy, dropped = dropped, ""
+					}
 				}
 				created, err := s.ImportTask(ctx, task, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
 				landedTasks[task.ID] = true
-				if !created {
+				if created {
+					createdTasks[task.ID] = true
+				} else {
 					dropped = ""
 				}
-				return outcome{action: actionFor(created), droppedRef: dropped}
+				return outcome{action: actionFor(created), droppedRef: dropped, dropReason: reason}
 			}})
 	}
 	for _, p := range orderDecisions(decisions) {
@@ -546,19 +596,30 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 		steps = append(steps, step{rec: p, kind: TypeDecision, detail: safeDetail(d.Title, d.Title, d.ID), check: checkFor(d.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				decision := *d
-				dropped := ""
+				dropped, reason := p.droppedRef, p.dropReason
 				if decision.SupersededBy != "" && !landedDecisions[decision.SupersededBy] {
-					dropped, decision.SupersededBy = decision.SupersededBy, ""
+					dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
+				}
+				if dropped != "" {
+					held, err := s.HasDecision(ctx, dropped)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the decision superseded_by names, %s: %w", memory.RefusalArg("superseded_by", dropped), err)}
+					}
+					if held && !createdDecisions[dropped] {
+						decision.SupersededBy, dropped = dropped, ""
+					}
 				}
 				created, err := s.ImportDecision(ctx, decision, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
 				landedDecisions[decision.ID] = true
-				if !created {
+				if created {
+					createdDecisions[decision.ID] = true
+				} else {
 					dropped = ""
 				}
-				return outcome{action: actionFor(created), droppedRef: dropped}
+				return outcome{action: actionFor(created), droppedRef: dropped, dropReason: reason}
 			}})
 	}
 	return steps, nil
@@ -752,6 +813,7 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		Clamped:    got.clamped,
 		Downgraded: got.downgraded,
 		DroppedRef: got.droppedRef,
+		DropReason: got.dropReason,
 		Error:      got.err,
 	}
 	action, err := got.action, got.err
@@ -853,11 +915,12 @@ const contentPreviewMax = 60
 //
 // A pointer to a task the artifact does not contain, and a cycle, have their
 // pointer dropped: both are references that can never resolve, and dropping one
-// field is a better outcome than refusing records over it. The store reports a
-// dropped reference as a skip-free create, so what was lost shows up as a task
-// that is simply not blocked — the honest state, since the blocker does not
-// exist to be blocked by. A blocker the artifact contains but the run rejects is
-// the same case discovered later, when the steps run, and planRecords drops that
+// field is a better outcome than refusing records over it. The record carries
+// what was cleared and why (droppedRef, dropReason), so its report line names
+// the drop; and planRecords puts a cleared pointer back when the store already
+// holds its target, since a target outside the artifact may still be one the
+// destination has. A blocker the artifact contains but the run rejects is the
+// same case discovered later, when the steps run, and planRecords drops that
 // pointer too.
 func orderTasks(recs []parsedRecord) []parsedRecord {
 	present := make(map[string]bool, len(recs))
@@ -867,10 +930,11 @@ func orderTasks(recs []parsedRecord) []parsedRecord {
 	cleaned := make([]parsedRecord, 0, len(recs))
 	for _, r := range recs {
 		t := *r.rec.Task
+		cp := r
 		if t.BlockedBy != "" && !present[t.BlockedBy] {
+			cp.droppedRef, cp.dropReason = t.BlockedBy, DropAbsent
 			t.BlockedBy = ""
 		}
-		cp := r
 		cp.rec.Task = &t
 		cleaned = append(cleaned, cp)
 	}
@@ -879,6 +943,7 @@ func orderTasks(recs []parsedRecord) []parsedRecord {
 		func(r parsedRecord) string { return r.rec.Task.BlockedBy },
 		func(r parsedRecord) parsedRecord {
 			t := *r.rec.Task
+			r.droppedRef, r.dropReason = t.BlockedBy, DropCycle
 			t.BlockedBy = ""
 			r.rec.Task = &t
 			return r
@@ -894,10 +959,11 @@ func orderDecisions(recs []parsedRecord) []parsedRecord {
 	cleaned := make([]parsedRecord, 0, len(recs))
 	for _, r := range recs {
 		d := *r.rec.Decision
+		cp := r
 		if d.SupersededBy != "" && !present[d.SupersededBy] {
+			cp.droppedRef, cp.dropReason = d.SupersededBy, DropAbsent
 			d.SupersededBy = ""
 		}
-		cp := r
 		cp.rec.Decision = &d
 		cleaned = append(cleaned, cp)
 	}
@@ -906,6 +972,7 @@ func orderDecisions(recs []parsedRecord) []parsedRecord {
 		func(r parsedRecord) string { return r.rec.Decision.SupersededBy },
 		func(r parsedRecord) parsedRecord {
 			d := *r.rec.Decision
+			r.droppedRef, r.dropReason = d.SupersededBy, DropCycle
 			d.SupersededBy = ""
 			r.rec.Decision = &d
 			return r
@@ -916,54 +983,166 @@ func orderDecisions(recs []parsedRecord) []parsedRecord {
 // the input order among records that do not constrain each other.
 //
 // A cycle — two tasks each blocked by the other, which a hand-edited file can
-// easily contain — has no valid order, so the references inside it are dropped
-// and the records appended in input order. Losing a pointer is the better
+// easily contain — has no valid order, so the references of the cycle's members
+// are dropped and ordering continues; a record that only points into the cycle
+// keeps its pointer and follows its target. Losing a pointer is the better
 // outcome: the rows themselves are good, and a pointer within a cycle describes
 // no ordering anyone could have intended.
 func topoOrder(recs []parsedRecord, idOf, refOf func(parsedRecord) string, clearRef func(parsedRecord) parsedRecord) []parsedRecord {
-	pending := make([]parsedRecord, len(recs))
-	copy(pending, recs)
-	out := make([]parsedRecord, 0, len(recs))
-	emitted := make(map[string]bool, len(recs))
+	// The passes work on indices into a private copy, with each record's id and
+	// pointer read once. A chain hanging off a cycle takes one pass per link
+	// once the cycle is broken, so a pass has to cost no more than a walk over
+	// the indices still pending: copying the records themselves, or asking the
+	// pending slice whether it holds an id, made the whole ordering cubic.
+	//
+	// Ids are numbered once, so a pass compares integers rather than hashing
+	// strings. Every record is either emitted or pending, so "the pointer names
+	// a pending record" is "it names an id of recs that has not been emitted";
+	// a pointer to an id outside recs (ref -1) constrains nothing.
+	work := make([]parsedRecord, len(recs))
+	copy(work, recs)
+	number := make(map[string]int, len(work))
+	idNum := make([]int, len(work))
+	for i, r := range work {
+		id := idOf(r)
+		n, ok := number[id]
+		if !ok {
+			n = len(number)
+			number[id] = n
+		}
+		idNum[i] = n
+	}
+	refNum := make([]int, len(work))
+	for i, r := range work {
+		refNum[i] = -1
+		if ref := refOf(r); ref != "" {
+			if n, ok := number[ref]; ok {
+				refNum[i] = n
+			}
+		}
+	}
+	emitted := make([]bool, len(number))
+	pending := make([]int, len(work))
+	for i := range pending {
+		pending[i] = i
+	}
+	out := make([]parsedRecord, 0, len(work))
 	for len(pending) > 0 {
-		var deferred []parsedRecord
+		deferred := pending[:0:0]
 		progressed := false
-		for _, r := range pending {
-			ref := refOf(r)
-			if ref != "" && !emitted[ref] && containsID(pending, ref, idOf) {
-				deferred = append(deferred, r)
+		for _, i := range pending {
+			if ref := refNum[i]; ref != -1 && !emitted[ref] {
+				deferred = append(deferred, i)
 				continue
 			}
-			out = append(out, r)
-			emitted[idOf(r)] = true
+			out = append(out, work[i])
+			emitted[idNum[i]] = true
 			progressed = true
 		}
 		if !progressed {
 			// A cycle: nothing in the remainder can be emitted this pass, and no
-			// order will ever satisfy it. Drop the references among the
-			// remaining records and append them in input order. Dropping is the
-			// better outcome than refusing: the rows themselves are good, and a
-			// blocked_by pointer inside a cycle describes no ordering anyone
-			// could have intended. Reporting the first record as rejected would
-			// lose a task over a pointer that carries no information.
-			for _, r := range deferred {
-				r = clearRef(r)
-				out = append(out, r)
+			// order will ever satisfy it. Drop the references of the records ON
+			// a cycle and go round again. Dropping is the better outcome than
+			// refusing: the rows themselves are good, and a blocked_by pointer
+			// inside a cycle describes no ordering anyone could have intended.
+			// Reporting the first record as rejected would lose a task over a
+			// pointer that carries no information.
+			//
+			// Only the cycle's own members lose their pointer. A record that
+			// merely points INTO a cycle is not part of it: once the cycle's
+			// members are written, its target exists, so the next pass emits it
+			// after them with its pointer intact — and the report's "part of a
+			// cycle" is true of every record it is said of (#1153).
+			//
+			// Membership is decided for every record before any pointer is
+			// cleared: clearing as the scan goes would break the cycle at its
+			// first member and leave the rest of it looking acyclic.
+			stalled := make([]parsedRecord, len(deferred))
+			for k, i := range deferred {
+				stalled[k] = work[i]
 			}
-			break
+			members := cycleMembers(stalled, idOf, refOf)
+			cleared := false
+			for k, i := range deferred {
+				if members[k] {
+					work[i] = clearRef(work[i])
+					refNum[i] = -1
+					cleared = true
+				}
+			}
+			if !cleared {
+				// Unreachable with one pointer per record — a remainder that
+				// cannot progress always holds a cycle — but the loop must end
+				// whatever the input, so the old rule stands behind it.
+				for _, i := range deferred {
+					out = append(out, clearRef(work[i]))
+				}
+				break
+			}
 		}
 		pending = deferred
 	}
 	return out
 }
 
-func containsID(recs []parsedRecord, id string, idOf func(parsedRecord) string) bool {
-	for _, r := range recs {
-		if idOf(r) == id {
-			return true
+// cycleMembers reports, for each record, whether it lies on a cycle of
+// pointers through recs. Each record has at most one pointer, so the records
+// form a graph in which every node has at most one successor (the first record
+// carrying the id its pointer names), and every walk is a single path.
+//
+// It runs in time linear in len(recs): each record is walked once. A walk
+// stops at a record with no successor or one an earlier walk has finished
+// (neither can lead back into this walk), or at one this walk has already
+// visited — and then exactly the records from that one to the end of the path
+// are the cycle. Walking every record's path afresh, as this once did, made an
+// import of a long chain ending in a cycle cubic in the chain's length.
+func cycleMembers(recs []parsedRecord, idOf, refOf func(parsedRecord) string) []bool {
+	index := make(map[string]int, len(recs))
+	for i, r := range recs {
+		if _, seen := index[idOf(r)]; !seen {
+			index[idOf(r)] = i
 		}
 	}
-	return false
+	next := make([]int, len(recs))
+	for i, r := range recs {
+		next[i] = -1
+		if ref := refOf(r); ref != "" {
+			if j, ok := index[ref]; ok {
+				next[i] = j
+			}
+		}
+	}
+	const (
+		unvisited = iota
+		onPath
+		done
+	)
+	state := make([]int, len(recs))
+	members := make([]bool, len(recs))
+	pos := make([]int, len(recs)) // a record's position in the current path
+	var path []int
+	for start := range recs {
+		if state[start] != unvisited {
+			continue
+		}
+		path = path[:0]
+		cur := start
+		for cur != -1 && state[cur] == unvisited {
+			state[cur] = onPath
+			pos[cur] = len(path)
+			path = append(path, cur)
+			cur = next[cur]
+		}
+		if cur != -1 && state[cur] == onPath {
+			for _, i := range path[pos[cur]:] {
+				members[i] = true
+			}
+		}
+		for _, i := range path {
+			state[i] = done
+		}
+	}
+	return members
 }
 
 // sortTasksByID puts tasks in id order, for the deterministic export.
