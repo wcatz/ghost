@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/secret"
@@ -102,7 +103,11 @@ func headerLine() []byte {
 // id or name exactly, and a filter that matches nothing is an error. Silently
 // exporting zero records would produce a file that reads like a store with
 // nothing in it, and the user who asked for one project would not learn that the
-// name was wrong until they tried to import it elsewhere.
+// name was wrong until they tried to import it elsewhere. A filter that matches
+// MORE than one project is an error too, naming the ids it matched: a name is not
+// unique, and exporting every project that answers to it would capture a project
+// the caller never named. An exact id wins before any name is considered, since
+// an id is unique and ids and names share the filter's one namespace.
 //
 // Records are written projects first, then memories, then tasks, then decisions.
 // Projects come first because a memory names a project, and an artifact a user
@@ -410,18 +415,55 @@ func scopeBoundReason(e *memory.ScopeBoundError) string {
 // basename fallback — because an export filter is a choice about what to copy,
 // and a filter that resolved like project resolution would select a different
 // project on another machine than the one named here.
+//
+// A filter that matches more than one NAME is REFUSED, not widened. A project's
+// NAME is not unique — `projects.path` and `projects.repo_remote` carry the only
+// unique indexes — so matching by name alone can select two rows, and exporting
+// both would violate the one thing `--project` promises: that the artifact holds
+// one project and nothing else. A backup script that named a duplicate name would
+// silently capture another project's memories into a file it hands to someone
+// else, and a restore elsewhere would create the extra project.
+//
+// An exact ID wins outright, before any name is considered: an id is a primary
+// key and matches at most one project, and ids and names share this one filter
+// namespace, so a store can hold a project whose id is literally another
+// project's name (an imported artifact carries ids verbatim, and a project id is
+// routinely a path). Refusing that filter would tell the operator to do what they
+// already did, so the id selects its project and the multi-match refusal stays
+// what it is for — duplicate NAMES. It is also the precedence the store's own
+// resolution gives an id (`ResolveProject` queries `WHERE id = ?` first).
+//
+// The filter and the ids are rendered through `memory.RefusalArg`, the renderer
+// every store-level project refusal uses: it quotes the value (so a control
+// character cannot forge a line of the report) and withholds one shaped like a
+// credential rather than relocating it into a log.
 func selectProjects(projects []memory.PortableProject, filter string) ([]memory.PortableProject, error) {
 	if filter == "" {
 		return projects, nil
 	}
+	// The id pass runs alone and returns on the hit, so a name that equals the
+	// filter is never even collected when the filter names a project by id.
+	for _, p := range projects {
+		if p.ID == filter {
+			return []memory.PortableProject{p}, nil
+		}
+	}
 	var out []memory.PortableProject
 	for _, p := range projects {
-		if p.ID == filter || p.Name == filter {
+		if p.Name == filter {
 			out = append(out, p)
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no project matches %q", filter)
+		return nil, fmt.Errorf("no project matches %s", memory.RefusalArg("project", filter))
+	}
+	if len(out) > 1 {
+		ids := make([]string, 0, len(out))
+		for _, p := range out {
+			ids = append(ids, memory.RefusalArg("project_id", p.ID))
+		}
+		return nil, fmt.Errorf("project filter %s matches multiple projects by name: %s — name a project by its unique id",
+			memory.RefusalArg("project", filter), strings.Join(ids, ", "))
 	}
 	return out, nil
 }

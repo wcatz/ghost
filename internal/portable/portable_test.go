@@ -473,6 +473,77 @@ func TestExportProjectFilterIsExact(t *testing.T) {
 	}
 }
 
+// TestExportRefusesAFilterThatMatchesMoreThanOneProject: `--project` is a SCOPE,
+// and a project's NAME is not unique — only `path` and `repo_remote` carry unique
+// indexes — so a name that two projects answer to used to export BOTH, exit 0, and
+// hand the caller an artifact holding a project they never named. The refusal must
+// name the ambiguity and every id it matched, so the operator can switch to an id,
+// which is unique; and it must write nothing, because a partially-scoped artifact
+// reads as a complete one.
+func TestExportRefusesAFilterThatMatchesMoreThanOneProject(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "pa", "/src/pa", "samename"); err != nil {
+		t.Fatalf("EnsureProject pa: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "pb", "/src/pb", "samename"); err != nil {
+		t.Fatalf("EnsureProject pb: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := Export(ctx, store, &buf, "samename"); err == nil {
+		t.Fatal("an export whose filter matched two projects exited 0, so the artifact silently captured a project the caller did not name")
+	} else {
+		if !strings.Contains(err.Error(), "multiple projects") {
+			t.Errorf("error = %v, want it to say the name is ambiguous", err)
+		}
+		for _, id := range []string{"pa", "pb"} {
+			if !strings.Contains(err.Error(), id) {
+				t.Errorf("error = %v, want it to name %s so the operator can pick one", err, id)
+			}
+		}
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a refused export wrote %d byte(s); an ambiguous scope must not produce a partial artifact", buf.Len())
+	}
+
+	// An id is unique, so exporting by one still selects exactly that project.
+	artifact := exportBytes(t, store, "pa")
+	if !strings.Contains(string(artifact), `"id":"pa"`) {
+		t.Errorf("an export by id did not carry the project it named:\n%s", artifact)
+	}
+	if strings.Contains(string(artifact), `"id":"pb"`) {
+		t.Errorf("an export by id also carried the other project:\n%s", artifact)
+	}
+}
+
+// TestExportPrefersAnExactIDOverANameCollision: ids and names share the filter's
+// one namespace, and a real store can hold a project whose id is literally another
+// project's name — `ghost import` writes artifact ids verbatim and an MCP-created
+// project's id can be path-shaped. The refusal above is for an ambiguous NAME, not
+// for a filter that names a project by its unique id, so an exact id wins before
+// any name is considered (the same precedence `ResolveProject` gives an id).
+// Without that precedence this filter would be refused and tell the operator to do
+// exactly what they already did.
+func TestExportPrefersAnExactIDOverANameCollision(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "samename", "/src/byid", "the by-id project"); err != nil {
+		t.Fatalf("EnsureProject id: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "other", "/src/byname", "samename"); err != nil {
+		t.Fatalf("EnsureProject name: %v", err)
+	}
+
+	artifact := exportBytes(t, store, "samename")
+	if !strings.Contains(string(artifact), `"id":"samename"`) {
+		t.Errorf("filtering by an exact id did not select that project:\n%s", artifact)
+	}
+	if strings.Contains(string(artifact), `"id":"other"`) {
+		t.Errorf("filtering by an exact id also selected the project named the same:\n%s", artifact)
+	}
+}
+
 // TestImportSkipsExistingIDs: importing the same artifact twice must leave the
 // second run a no-op. An import that duplicated on a second run would make the
 // command unsafe to retry after an interrupted first one.

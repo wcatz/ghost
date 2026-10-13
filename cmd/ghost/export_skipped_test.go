@@ -106,6 +106,35 @@ func TestAnExportThatLeftRecordsOutKeepsTheFileAndExitsNonZero(t *testing.T) {
 	}
 }
 
+// TestAnExportOfAnAmbiguousProjectNameIsRefusedAndLeavesNoFile is the command's
+// half of #1093: `--project` names a scope, so a name two projects answer to must
+// fail the run rather than export both. The partial-file removal is asserted here
+// as well, because the file is created before the store is read and a refusal that
+// left an empty artifact behind would look like a successful export of nothing.
+func TestAnExportOfAnAmbiguousProjectNameIsRefusedAndLeavesNoFile(t *testing.T) {
+	store, db := exportTestStore(t)
+	// A second project with the SAME name as p1, which is what a name collision is.
+	plantExportRow(t, db, `INSERT INTO projects (id, path, name) VALUES (?, '/src/another', 'one')`, "p-two")
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "one")
+	if err == nil {
+		t.Fatal("an export of a name that two projects answer to exited 0")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("a refused export left a file behind: %v", statErr)
+	}
+	if !strings.Contains(err.Error(), "multiple projects") {
+		t.Errorf("error = %v, want it to say the name is ambiguous", err)
+	}
+	for _, id := range []string{"p1", "p-two"} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error = %v, want it to name %s so the operator can pick one", err, id)
+		}
+	}
+}
+
 // TestAnOrdinaryExportReportsNothingAndExitsZero is the invisible half, and it is
 // the one a whole-file replacement of the export path would break: for an ordinary
 // store the report is exactly the line it always was, and the run exits 0.
