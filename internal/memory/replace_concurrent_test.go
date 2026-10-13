@@ -378,6 +378,82 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		}
 	})
 
+	t.Run("a refused cross-project merge keeps its unchanged sources from the project replace", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the relay host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is beta", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+		thirdID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "unrelated stable fact", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		setAgesDaysAgo(t, s, thirdID, 2)
+
+		fed := corpusRows(t, s, aID, bID, thirdID)
+
+		edited := "the relay host is bravo"
+		if err := s.UpdateMemory(ctx, testProject, aID, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory A: %v", err)
+		}
+
+		// The project half is non-empty (a verbatim keep of the unrelated row),
+		// so the whole-set project replace runs. The only claim on A or B is the
+		// cross-project merge, which the guard refuses because A moved mid-round;
+		// the refused merge must keep ALL of its sources, so the replace must not
+		// delete the unchanged B as unaccounted. That is the project replace doing
+		// exactly what the guard exists to prevent — the merge was not allowed to
+		// consume A or B, so neither may be taken.
+		_, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+			[]Memory{{Category: "fact", Content: "unrelated stable fact", Importance: 0.6, Tags: []string{}}},
+			[]Memory{{
+				Category: "fact", Content: "alpha and beta, one fact across projects", Importance: 0.7,
+				Tags: []string{}, ReplacesIDs: []string{aID, bID},
+			}},
+			"", false, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if globalDropped != 1 {
+			t.Errorf("globalDropped = %d, want 1: the merge claiming the edited A was not refused", globalDropped)
+		}
+		if projectDropped != 0 {
+			t.Errorf("projectDropped = %d, want 0: the refusal belongs to the global half", projectDropped)
+		}
+		if promoted != 0 || len(kept) != 0 {
+			t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(kept))
+		}
+		project, err := s.GetAll(ctx, testProject, -1)
+		if err != nil {
+			t.Fatalf("GetAll project: %v", err)
+		}
+		byID := map[string]Memory{}
+		for _, m := range project {
+			byID[m.ID] = m
+		}
+		if _, ok := byID[bID]; !ok {
+			t.Errorf("B (%s) is gone from the project after the refused merge: an unchanged source of a dropped cross-project emission must survive the project replace, got %v", bID, contents(project))
+		}
+		if got := byID[aID]; got.Content != edited {
+			t.Errorf("A = %q, want the concurrent edit %q kept", got.Content, edited)
+		}
+		if _, ok := byID[thirdID]; !ok {
+			t.Errorf("the unrelated row C was lost: %v", contents(project))
+		}
+	})
+
 	t.Run("a promotion with nothing concurrent still reaches _global", func(t *testing.T) {
 		s := testStore(t)
 		aID, err := s.Create(ctx, testProject, Memory{

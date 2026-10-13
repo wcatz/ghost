@@ -3764,6 +3764,25 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 	return tx, ok && tx != nil
 }
 
+// concurrentViewContextKey carries the ONE concurrent map both halves of an
+// ApplyReflection share: the rows saved or edited since consolidation, plus
+// every source of an emission the corpus guard refused. ReplaceNonManual seeds
+// its own map from it, so a refused cross-project merge keeps ALL of its
+// sources from the project replace's delete set — not just the ones that moved,
+// which the guard's own sameAs check marks. Without the seed, the unchanged
+// source of a refused global emission matches no surviving emission and the
+// whole-set replace deletes it as unaccounted.
+type concurrentViewContextKey struct{}
+
+func withConcurrentView(ctx context.Context, concurrent map[string]bool) context.Context {
+	return context.WithValue(ctx, concurrentViewContextKey{}, concurrent)
+}
+
+func concurrentViewFromContext(ctx context.Context) (map[string]bool, bool) {
+	concurrent, ok := ctx.Value(concurrentViewContextKey{}).(map[string]bool)
+	return concurrent, ok && concurrent != nil
+}
+
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
 	// Before the lock, the transaction, and the FTS probe: a refused value
@@ -6542,13 +6561,19 @@ func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, co
 // apply must not reach _global through the promotion loop. It runs inside the
 // caller's transaction, which already holds the write lock, so the read is the
 // same one the replace makes — it is not a second race window.
-func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, fed []CorpusRow) (*fedGuard, error) {
+//
+// The caller supplies `concurrent` rather than fedGuardFor minting one, because
+// that map must be the same one the replace consumes: drop() marks every source
+// of an emission it refuses into the guard's map, and a refused cross-project
+// merge keeps all of its sources only if that marking reaches the replace's
+// delete set. ReplaceNonManual picks the shared map up from the context and
+// seeds its own from it.
+func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, fed []CorpusRow, concurrent map[string]bool) (*fedGuard, error) {
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	concurrent, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, make(map[string]bool))
-	if err != nil {
+	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
 		return nil, err
 	}
 	return newFedGuard(candidates, fed, concurrent), nil
@@ -6617,7 +6642,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if err != nil {
 		return nil, 0, err
 	}
+	// Seed the concurrent window from the shared view when this replace is one
+	// half of an ApplyReflection: the global half's guard has already marked
+	// every source of an emission it refused into that map, and those sources
+	// must survive this replace's delete set whether they moved or not (#1051).
 	concurrent := make(map[string]bool)
+	if shared, ok := concurrentViewFromContext(ctx); ok {
+		for id := range shared {
+			concurrent[id] = true
+		}
+	}
 	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
 		return nil, 0, err
 	}

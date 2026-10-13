@@ -49,10 +49,20 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// row was written beside the edit. The guard is read BEFORE the project
 	// replace so that half and this one answer from a single view of the project,
 	// and it is the same fed corpus the CLI handed to the replace.
-	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed)
+	//
+	// The view is the map itself, shared with the replace: fedGuardFor fills it
+	// with the rows saved or edited since consolidation, and dropConcurrentClaims
+	// below additionally marks every source of an emission it refuses there. That
+	// second marking must reach the project replace, or the unchanged source of a
+	// refused cross-project merge matches no surviving emission and the replace
+	// deletes it as unaccounted — the merge was refused, so NONE of its sources
+	// may be taken. ReplaceNonManual seeds its own concurrent map from this one.
+	sharedConcurrent := make(map[string]bool)
+	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, sharedConcurrent)
 	if guardErr != nil {
 		return nil, 0, nil, 0, 0, guardErr
 	}
+	txCtx = withConcurrentView(txCtx, sharedConcurrent)
 
 	// A candidate the guard drops is dropped entirely: it is neither promoted
 	// nor recovered into the project, and with promotion off it is not folded
