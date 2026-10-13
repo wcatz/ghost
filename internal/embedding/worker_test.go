@@ -1,6 +1,7 @@
 package embedding
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -640,6 +642,8 @@ func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, projectID string, ide
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Sorted, so a test that places one row first by its id gets it first on
+	// every run rather than in map order.
 	var ids []string
 	for id := range m.memories {
 		if m.projectsOf != nil && m.projectsOf[id] != projectID {
@@ -647,10 +651,11 @@ func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, projectID string, ide
 		}
 		if model, hasEmb := m.embModel[id]; !hasEmb || (identity != "" && model != identity) {
 			ids = append(ids, id)
-			if len(ids) >= limit {
-				break
-			}
 		}
+	}
+	sort.Strings(ids)
+	if len(ids) > limit {
+		ids = ids[:limit]
 	}
 	return ids, nil
 }
@@ -1200,25 +1205,9 @@ func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
 // failure whose liveness re-check is still Reachable.
 func TestEmbedPending_StopsAfterTheFirstStalledEmbed(t *testing.T) {
 	// The probe deadline is lowered so the liveness re-check is cheap.
-	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
 
-	release := make(chan struct{})
-	var embeds atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/":
-			w.WriteHeader(http.StatusOK)
-		case "/api/embed":
-			embeds.Add(1)
-			<-release // hang until the test ends
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(func() {
-		close(release)
-		srv.Close()
-	})
+	srv, embeds := stalledEmbedEndpoint(t)
 
 	store := newMockStore()
 	store.projects = []string{"proj-a"}
@@ -1231,9 +1220,7 @@ func TestEmbedPending_StopsAfterTheFirstStalledEmbed(t *testing.T) {
 	client.httpClient.Timeout = 120 * time.Millisecond
 	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
 
-	started := time.Now()
 	n, verdict := worker.EmbedPending(context.Background(), "proj-a", 0)
-	elapsed := time.Since(started)
 
 	if n != 0 {
 		t.Errorf("embedded %d against a stalled endpoint, want 0", n)
@@ -1241,11 +1228,149 @@ func TestEmbedPending_StopsAfterTheFirstStalledEmbed(t *testing.T) {
 	if got := embeds.Load(); got != 1 {
 		t.Errorf("made %d embed attempt(s) against a stalled endpoint, want 1 (stop after first stall)", got)
 	}
-	// One client timeout (120ms) plus probe overhead, not 8 timeouts.
-	if elapsed > 5*time.Second {
-		t.Errorf("batch took %v against a stalled endpoint, want roughly one client timeout", elapsed)
+	// Reachable would mean "nothing to act on" to SweepOnce, which would then
+	// start the next project against the same stalled endpoint.
+	if verdict != Inconclusive {
+		t.Errorf("verdict after a stalled embed = %v, want %v", verdict, Inconclusive)
 	}
-	_ = verdict
+}
+
+// stalledEmbedEndpoint answers the liveness probe at once and hangs every
+// /api/embed until the test ends: the "pacified" endpoint. It returns the count
+// of embed requests it received.
+func stalledEmbedEndpoint(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	release := make(chan struct{})
+	embeds := new(atomic.Int64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			embeds.Add(1)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv, embeds
+}
+
+// TestSweepOnce_EndsOnAStalledEmbed is the sweep-level half of the stall stop:
+// the batch's verdict is what SweepOnce acts on, so a stalled project must end
+// the sweep rather than send the next project into the same stall. Three
+// projects with pending rows cost one stalled request in total.
+func TestSweepOnce_EndsOnAStalledEmbed(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	srv, embeds := stalledEmbedEndpoint(t)
+
+	store := newMockStore()
+	store.projects = []string{"proj-a", "proj-b", "proj-c"}
+	store.projectsOf = map[string]string{}
+	for _, p := range store.projects {
+		for i := 0; i < 3; i++ {
+			id := fmt.Sprintf("%s-mem-%d", p, i)
+			store.memories[id] = "content " + id
+			store.projectsOf[id] = p
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+
+	if got := embeds.Load(); got != 1 {
+		t.Errorf("sweep made %d embed request(s) against a stalled endpoint, want 1 (end the sweep after the first stall)", got)
+	}
+}
+
+// TestEmbedPending_StopsAtItsBudget pins the time bound: the batch's budget
+// reaches the embed in flight, so a stalled endpoint costs the budget and not
+// a full client timeout, and the line it logs says the budget was spent rather
+// than that the endpoint is unavailable or stalled.
+func TestEmbedPending_StopsAtItsBudget(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+	t.Cleanup(setEmbedPendingBudget(t, 150*time.Millisecond))
+
+	srv, embeds := stalledEmbedEndpoint(t)
+
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	for i := 0; i < 4; i++ {
+		store.memories[fmt.Sprintf("mem-%d", i)] = fmt.Sprintf("content %d", i)
+	}
+
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	client := NewClient(srv.URL, "test-model", 3)
+	// Far longer than the budget, so only the budget can end the request soon.
+	client.httpClient.Timeout = 20 * time.Second
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	started := time.Now()
+	n, verdict := worker.EmbedPending(context.Background(), "proj-a", 0)
+	elapsed := time.Since(started)
+
+	if n != 0 {
+		t.Errorf("embedded %d against a stalled endpoint, want 0", n)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("batch took %v with a 150ms budget, want it bounded by the budget, not the 20s client timeout", elapsed)
+	}
+	if got := embeds.Load(); got != 1 {
+		t.Errorf("made %d embed attempt(s), want 1", got)
+	}
+	if verdict != Inconclusive {
+		t.Errorf("verdict after a spent budget = %v, want %v", verdict, Inconclusive)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "embed budget spent") {
+		t.Errorf("no budget line logged:\n%s", out)
+	}
+	for _, wrong := range []string{"ollama unavailable", "embed stalled"} {
+		if strings.Contains(out, wrong) {
+			t.Errorf("a spent budget logged %q:\n%s", wrong, out)
+		}
+	}
+}
+
+// setEmbedPendingBudget lowers embedPendingBudget for one test, as
+// setProbeDeadline does for the probe.
+func setEmbedPendingBudget(t *testing.T, d time.Duration) (restore func()) {
+	t.Helper()
+	prev := embedPendingBudget
+	embedPendingBudget = d
+	return func() { embedPendingBudget = prev }
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a reader on different
+// goroutines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestEmbedPending_ContinuesPastOrdinaryPerRowErrors verifies that a

@@ -135,7 +135,9 @@ const (
 	// Inconclusive: the probe's OWN deadline expired. Something may be listening
 	// and simply too slow to answer this time: a machine under load, a proxy, a
 	// disk stall. It is evidence of nothing, and the difference from Unreachable
-	// is the whole point of this type.
+	// is the whole point of this type. EmbedPending also returns it for a batch
+	// it stopped on a stalled embed or a spent budget: the endpoint answered its
+	// liveness probe and still did not do the work in time.
 	Inconclusive
 )
 
