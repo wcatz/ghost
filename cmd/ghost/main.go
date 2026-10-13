@@ -244,8 +244,10 @@ func dispatchCommand(argv []string) int {
 			runBench()
 			return 0
 		case "context":
-			runContext()
-			return 0
+			// runContext returns its exit code rather than exiting: an
+			// argument its own parser rejects is a run that started and failed
+			// (1), not a command line the dispatch cannot route (2) (#1090).
+			return runContext()
 		case "maintenance":
 			sub, given := subArg(argv, 1)
 			switch sub {
