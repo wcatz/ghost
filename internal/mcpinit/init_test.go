@@ -20,11 +20,23 @@ func absProjectPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "git", "myproject")
 }
 
-// projectSlug folds a project path to Claude's directory name the way
-// claudeimport.EncodeProjectPath does (`\`, `:`, and `/` all become `-`),
-// spelled out here so the expectation stays independent of production code.
+// projectSlug folds a project path to the directory name Claude Code stores it
+// under: every character outside [a-zA-Z0-9] becomes "-" — not just the three
+// path separators — matching claudeimport.EncodeProjectPath. Spelled out here
+// so the expectation stays independent of production code. Claude Code also
+// truncates names over 200 units and appends a hash; these fixtures are short
+// enough that branch never runs, so it is not repeated.
 func projectSlug(projectPath string) string {
-	return strings.NewReplacer(`\`, "-", ":", "-", "/", "-").Replace(projectPath)
+	var b strings.Builder
+	b.Grow(len(projectPath))
+	for _, r := range projectPath {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 func TestHandleSessionStartHook(t *testing.T) {

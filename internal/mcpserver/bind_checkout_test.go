@@ -266,8 +266,18 @@ func TestWorkingDirNeverTheHomeDirectoryOrRoot(t *testing.T) {
 func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
-	dir := filepath.Join(physTemp(t), "checkout")
+	root := physTemp(t)
+	dir := filepath.Join(root, "checkout")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file is not a checkout, and the path is owned by the test so the
+	// case cannot depend on what a host happens to have at a fixed location: the
+	// test used to spell this as "/tmp/x", which passes only while nothing is
+	// there. EvalSymlinks resolves a file exactly as it resolves a directory, so
+	// the bind has to ask the filesystem rather than the resolved string.
+	file := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(file, []byte("file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,12 +292,12 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	if _, ok := projectPath(t, store, "billing"); ok {
 		t.Fatal("a declined bind wrote a project row")
 	}
-	for _, bad := range []string{"", "relative/dir", string(filepath.Separator), "/app", "/tmp/x"} {
+	for _, bad := range []string{"", "relative/dir", string(filepath.Separator), filepath.Join(root, "absent"), file} {
 		if ok, err := store.BindNewProjectToCheckout(ctx, "other", bad, "other", ""); err != nil || ok {
 			t.Fatalf("bind at unusable path %q = %v, %v; want false", bad, ok, err)
 		}
 	}
-	again, err := store.BindNewProjectToCheckout(ctx, "notifier", filepath.Join(physTemp(t), "elsewhere"), "notifier", "")
+	again, err := store.BindNewProjectToCheckout(ctx, "notifier", filepath.Join(root, "elsewhere"), "notifier", "")
 	if err != nil || again {
 		t.Fatalf("rebind of an existing project = %v, %v; want false", again, err)
 	}
