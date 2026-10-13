@@ -138,6 +138,11 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 }
 
 // CompleteTask marks a task as done. Accepts a full task ID or a unique prefix.
+//
+// The RowsAffected of the UPDATE is read and a 0-row update is an error rather
+// than a success (#1083): the row is resolved above and a task deleted in
+// between leaves nothing for the write to land on, which is a completion the
+// caller believes happened.
 func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 	// Checked before resolveTaskID so the refusal is the same error whether or
 	// not the id resolves — and a completion note is the one task field with no
@@ -154,12 +159,19 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 		return err
 	}
 
-	_, err = s.execGuardedWrite(ctx, "complete-task", `
+	res, err := s.execGuardedWrite(ctx, "complete-task", `
 		UPDATE tasks SET status = 'done', notes = ?, completed_at = datetime('now'), updated_at = datetime('now')
 		WHERE id = ?
 	`, notes, id)
 	if err != nil {
 		return fmt.Errorf("complete task: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete task: rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("complete task: task %s was deleted before the write landed", id)
 	}
 	return nil
 }
@@ -192,13 +204,20 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 }
 
 // UpdateTask merges the caller's optional fields onto the current row and
-// writes the result under a single lock, closing the check-then-write race
-// where a separate get-then-update could clobber a concurrent update made
-// between the read and the write (see UpdateMemory for the same pattern).
-// status, priority, and description are nil to preserve the current value.
-// Accepts a full task ID or a unique prefix. Returns the task as it stood
-// after the merge, so callers don't need a separate read to get ProjectID
-// or the resolved field values.
+// writes the result. The row is read INSIDE the write transaction that then
+// writes it (#1083): read on the pool outside it, as this did, two handles
+// editing different fields of one task each merged onto a copy taken before the
+// other's edit landed, so one of the two was lost and both calls reported
+// success. s.mu is per Store and closes nothing across processes, and two MCP
+// servers on one database is a supported mode. The transaction is opened before
+// the read and _txlock=immediate holds the write lock across it, which is the
+// arrangement the Boundaries note in docs/architecture.md requires and the one
+// UpdateMemoryWithOptions already followed. status, priority, and description
+// are nil to preserve the current value.
+// completed_at follows the status like CompleteTask sets it: stamped when the
+// status moves INTO done and cleared when it moves out. Accepts a full task ID
+// or a unique prefix. Returns the task as it stood after the merge, so callers
+// don't need a separate read to get ProjectID or the resolved field values.
 func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (Task, error) {
 	// The incoming description only, for the reason UpdateMemory gives: a row
 	// that already holds a credential must stay editable field by field.
@@ -215,8 +234,18 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, err
 	}
 
+	// The read that decides this write, in the transaction that makes it. The
+	// prefix is resolved above on the pool because it names a row and decides no
+	// value; a task that disappears between there and here is caught below, by
+	// the read returning no row or by the UPDATE matching nothing.
+	tx, lock, err := s.beginWrite(ctx, "update-task")
+	if err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var t Task
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT id, project_id, title, description, status, priority,
 		       COALESCE(blocked_by, ''), COALESCE(branch, ''), COALESCE(pr_number, 0),
 		       COALESCE(notes, ''), created_at, updated_at, COALESCE(completed_at, '')
@@ -230,6 +259,11 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, fmt.Errorf("get task: %w", err)
 	}
 
+	// completed_at tracks the status exactly as CompleteTask writes it (#1040):
+	// stamped on the transition INTO done and cleared on any transition out.
+	// The transition is what matters, so an already-done task edited again
+	// keeps the stamp it got when it became done rather than being re-stamped.
+	previousStatus := t.Status
 	if status != nil {
 		t.Status = *status
 	}
@@ -239,12 +273,41 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 	if description != nil {
 		t.Description = *description
 	}
+	switch {
+	case t.Status != "done":
+		t.CompletedAt = ""
+	case previousStatus != "done":
+		t.CompletedAt = time.Now().UTC().Format(StoredStampLayout)
+	}
 
-	if _, err := s.execGuardedWrite(ctx, "update-task", `
-		UPDATE tasks SET status = ?, priority = ?, description = ?, updated_at = datetime('now')
+	// Bind NULL rather than "" when clearing, so a cleared stamp is the
+	// column's own "no completion" rather than an empty value a reader has to
+	// interpret.
+	var completedAt any
+	if t.CompletedAt != "" {
+		completedAt = t.CompletedAt
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE tasks SET status = ?, priority = ?, description = ?, completed_at = ?, updated_at = datetime('now')
 		WHERE id = ?
-	`, t.Status, t.Priority, t.Description, id); err != nil {
+	`, t.Status, t.Priority, t.Description, completedAt, id)
+	if err != nil {
 		return Task{}, fmt.Errorf("update task: %w", err)
 	}
+	// A 0-row update is an error, never a success nobody can detect (#1083).
+	// The read above is inside this transaction, so the row could only have
+	// gone away under it; the count is what says so rather than assuming.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return Task{}, fmt.Errorf("update task: rows affected: %w", err)
+	}
+	if n == 0 {
+		return Task{}, fmt.Errorf("update task: task %s was deleted before the write landed", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
+	}
+	lock.reportHold("update-task", time.Now())
 	return t, nil
 }

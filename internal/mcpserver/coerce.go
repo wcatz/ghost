@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // Some MCP clients serialize numeric and array tool arguments as JSON strings
@@ -51,7 +54,7 @@ func optInt(v any, name string) (*int, error) {
 		return nil, err
 	}
 	if *f != float64(int64(*f)) {
-		return nil, fmt.Errorf("%s must be an integer, got %v", name, v)
+		return nil, fmt.Errorf("%s must be an integer, got a fractional number", name)
 	}
 	n := int(int64(*f))
 	return &n, nil
@@ -71,10 +74,12 @@ func optStringSlice(v any, name string) ([]string, error) {
 		return t, nil
 	case []any:
 		out := make([]string, 0, len(t))
-		for _, e := range t {
+		for i, e := range t {
 			s, ok := e.(string)
 			if !ok {
-				return nil, fmt.Errorf("%s must be an array of strings, got element %v (%T)", name, e, e)
+				// By position and type: an element is caller text, and a map or a
+				// nested array prints its contents.
+				return nil, fmt.Errorf("%s must be an array of strings, got element %d of type %T", name, i+1, e)
 			}
 			out = append(out, s)
 		}
@@ -90,9 +95,9 @@ func optStringSlice(v any, name string) ([]string, error) {
 		}
 		// A bare []any that failed the element check above would have
 		// errored already; here only a malformed or non-array string lands.
-		return nil, fmt.Errorf("%s must be an array of strings, got %q", name, t)
+		return nil, fmt.Errorf("%s must be an array of strings, got %s", name, memory.RefusalArg(name, t))
 	default:
-		return nil, fmt.Errorf("%s must be an array of strings, got %v (%T)", name, v, v)
+		return nil, fmt.Errorf("%s must be an array of strings, got %T", name, v)
 	}
 }
 
@@ -115,14 +120,14 @@ func toFloat64(v any, name string) (*float64, error) {
 	case json.Number:
 		f, err := t.Float64()
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %q", name, t.String())
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.RefusalArg(name, t.String()))
 		}
 		return finiteFloat64(f, name, t.String())
 	case string:
 		trimmed := strings.TrimSpace(t)
 		f, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
-			return nil, fmt.Errorf("%s must be a number, got %q", name, t)
+			return nil, fmt.Errorf("%s must be a number, got %s", name, memory.RefusalArg(name, t))
 		}
 		return finiteFloat64(f, name, trimmed)
 	case *float32:
@@ -143,7 +148,7 @@ func toFloat64(v any, name string) (*float64, error) {
 		f := float64(*t)
 		return &f, nil
 	default:
-		return nil, fmt.Errorf("%s must be a number, got %v (%T)", name, v, v)
+		return nil, fmt.Errorf("%s must be a number, got %T", name, v)
 	}
 }
 
@@ -184,11 +189,19 @@ func optScope(v any, name string) (map[string]string, error) {
 		if len(t) == 0 {
 			return nil, nil
 		}
+		// Keys are walked in sorted order so a refusal is deterministic, and a
+		// refusal names the offending entry by its position, never by its key:
+		// a key is caller text and may be token-shaped or arbitrarily long.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		out := make(map[string]string, len(t))
-		for k, raw := range t {
-			s, ok := raw.(string)
+		for i, k := range keys {
+			s, ok := t[k].(string)
 			if !ok {
-				return nil, fmt.Errorf("%s[%q] must be a string value, got %T", name, k, raw)
+				return nil, fmt.Errorf("%s entry %d (in key order) must be a string value, got %T", name, i+1, t[k])
 			}
 			out[k] = s
 		}
