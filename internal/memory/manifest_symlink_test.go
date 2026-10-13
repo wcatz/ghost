@@ -149,6 +149,43 @@ func TestVerifyBackupNamesADamagedManifestAsPresentNotAbsent(t *testing.T) {
 	}
 }
 
+// TestVerifyBackupRefusesADanglingManifestSymlink: a symlink at the manifest
+// path whose target is gone is the one sidecar Lstat finds and ReadFile cannot
+// read — the read fails with ENOENT, which is the same error a genuinely absent
+// manifest returns. Reading that error as absence leaves ManifestErr nil, so the
+// footer prints "present but could not be read: <nil>", the verdict is "checked"
+// and the exit is 0: the report says damage while the code says nothing failed,
+// and a backup script branching on it restores the copy it should not. The
+// Lstat's verdict decides absence, never the read's error.
+func TestVerifyBackupRefusesADanglingManifestSymlink(t *testing.T) {
+	dest := backedUpFixture(t)
+	link := ManifestPath(dest)
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("remove the manifest: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rep, err := VerifyBackup(context.Background(), dest)
+	if err == nil {
+		t.Fatalf("verify accepted a dangling manifest symlink: %+v", rep)
+	}
+	if !rep.ManifestPresent {
+		t.Error("ManifestPresent is false for a sidecar Lstat found on disk")
+	}
+	if rep.HasManifest {
+		t.Error("HasManifest is true for a sidecar that could not be read")
+	}
+	if rep.ManifestErr == nil {
+		t.Error("ManifestErr is nil, so the report would print the nil error it names")
+	}
+	if rep.BytesRead || rep.CountsRead {
+		t.Errorf("a run that stopped at the manifest reports BytesRead=%v CountsRead=%v, want both false",
+			rep.BytesRead, rep.CountsRead)
+	}
+}
+
 // TestVerifyBackupMarksTheSizeReadOnceItHasStatEd: BytesRead is what stops a
 // report claiming a 0-byte file it never measured, and it is only trustworthy if
 // a successful run sets it.

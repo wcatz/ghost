@@ -51,6 +51,52 @@ func TestRunBackupVerifyCoreDistinguishesADamagedManifestFromAMissingOne(t *test
 	}
 }
 
+// TestRunBackupVerifyCoreRefusesADanglingManifestSymlink: the same case one
+// level up — the report a user reads and the exit code a script branches on. A
+// sidecar the filesystem lists but whose link target is gone used to print
+// "present but could not be read: <nil>" and exit 0 under a "checked" verdict:
+// the footer said damage, the verdict said absence, and the nil error is the
+// tell. It must be a refusal naming the real error.
+func TestRunBackupVerifyCoreRefusesADanglingManifestSymlink(t *testing.T) {
+	ctx := context.Background()
+	store := transferTestStore(t)
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "snap.db")
+	if err := runBackupCore(ctx, store, os.Stderr, dest); err != nil {
+		t.Fatalf("runBackupCore: %v", err)
+	}
+	manifest := memory.ManifestPath(dest)
+	if err := os.Remove(manifest); err != nil {
+		t.Fatalf("remove the manifest: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), manifest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	var out strings.Builder
+	if err := runBackupVerifyCore(ctx, &out, dest); err == nil {
+		t.Fatalf("verify accepted a dangling manifest symlink:\n%s", out.String())
+	}
+	text := out.String()
+	if !strings.Contains(text, "refusing ") {
+		t.Errorf("the verdict is not a refusal:\n%s", text)
+	}
+	if !strings.Contains(text, "present but could not be read") {
+		t.Errorf("the report does not say the sidecar is present and damaged:\n%s", text)
+	}
+	if strings.Contains(text, "<nil>") {
+		t.Errorf("the report names a nil error:\n%s", text)
+	}
+	if strings.Contains(text, "no manifest at") {
+		t.Errorf("the report calls a present sidecar absent:\n%s", text)
+	}
+	if !strings.Contains(text, manifest) {
+		t.Errorf("the report does not name the sidecar:\n%s", text)
+	}
+}
+
 // TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat: a run that fails
 // before the stat has measured nothing, and "0 bytes" is a claim about a file —
 // the same reason CountsRead exists for row counts. A damaged sidecar is the
