@@ -77,6 +77,43 @@ func TestParseObsidianFlags(t *testing.T) {
 	})
 }
 
+// TestParseObsidianFlagsRefusesAnEmptyOut: an explicit empty --out is the
+// unset-variable spelling and is a refusal, never "no flag given". The parser
+// returned "" for it, and runObsidian reads "" as "use the default vault", so
+// `ghost obsidian export --out "$VAULT"` with VAULT unset wrote into the
+// default vault and exited 0. The default is the flag left off.
+func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"attached empty", []string{"--out="}},
+		{"separate empty", []string{"--out", ""}},
+		{"attached empty after a valid flag", []string{"--project=ghost", "--out="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, _, err := parseObsidianFlags(tc.args)
+			if err == nil {
+				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --out must be refused, not read as the default vault", tc.args, out)
+			}
+			if err.Error() != "--out requires a value" {
+				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--out requires a value")
+			}
+		})
+	}
+
+	// Positive controls: a value still parses in both spellings, and an absent
+	// --out is not an error and leaves out empty for the default to fill.
+	for _, args := range [][]string{{"--out", "/v"}, {"--out=/v"}} {
+		if out, _, _, err := parseObsidianFlags(args); err != nil || out != "/v" {
+			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want /v", args, out, err)
+		}
+	}
+	if out, _, _, err := parseObsidianFlags([]string{"--project=ghost"}); err != nil || out != "" {
+		t.Errorf("absent --out = %q (err %v), want empty and no error", out, err)
+	}
+}
+
 // TestParseMCPClient verifies --client parsing rejects a missing or empty
 // value (which previously silently fell back to Claude) and accepts both
 // "--client NAME" and "--client=NAME" forms.
@@ -1669,6 +1706,19 @@ func TestResolveSummaryLineReportsUnknown(t *testing.T) {
 func TestResolveSummaryLineReportsVetoes(t *testing.T) {
 	got := resolveSummaryLine("proj", resolve.Result{Loaded: 4, Candidates: 4, Confirmed: 1, Resolved: 1, Vetoed: 3}, true, 1, 1)
 	want := "proj: 4 loaded, 4 after prefilter, 1 confirmed evidence, 3 KEEP vetoed, 0 KEEP cached, 0 UNKNOWN, resolved 1 (1 classify call(s))\n"
+	if got != want {
+		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveSummaryLineReportsStale: a confirmed note a concurrent writer
+// rewrote while it was classified is not stamped, and the count is named so
+// "resolved 0" is not read as a pass that found nothing (#1052). The suffix is
+// absent when the count is zero, which is what keeps every other report line
+// here stable.
+func TestResolveSummaryLineReportsStale(t *testing.T) {
+	got := resolveSummaryLine("proj", resolve.Result{Loaded: 1, Candidates: 1, Confirmed: 1, Stale: 1}, true, 1, 1)
+	want := "proj: 1 loaded, 1 after prefilter, 1 confirmed evidence, 0 KEEP vetoed, 0 KEEP cached, 0 UNKNOWN, resolved 0 (1 classify call(s)), 1 skipped as stale\n"
 	if got != want {
 		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
 	}

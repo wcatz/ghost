@@ -411,8 +411,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			// know is a file from a newer build or a different format, and
 			// dropping it would import a store that is missing data the file
 			// plainly contains.
-			return nil, fmt.Errorf("line %d: unknown record type %q — this ghost build reads %q, %q, %q and %q records",
-				p.line, p.rec.Type, TypeProject, TypeMemory, TypeTask, TypeDecision)
+			return nil, fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q and %q records",
+				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision)
 		}
 		if err := requirePayload(p); err != nil {
 			return nil, err
@@ -623,7 +623,7 @@ func requirePayload(p parsedRecord) error {
 		}
 	}
 	if missing != "" {
-		return fmt.Errorf("line %d: %q record carries no %q payload", p.line, p.rec.Type, missing)
+		return fmt.Errorf("line %d: %s record carries no %q payload", p.line, memory.RefusalArg("type", p.rec.Type), missing)
 	}
 	return nil
 }
@@ -648,8 +648,8 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		// reaches the same verdict an apply run would. The reason alone: the
 		// report line names the record and the line number around it.
 		got = outcome{action: ActionReject, err: fmt.Errorf(
-			"project %q not found — the artifact carries no record for it and this store does not have it",
-			st.check.projectID)}
+			"project %s not found — the artifact carries no record for it and this store does not have it",
+			memory.RefusalArg("project_id", st.check.projectID))}
 	} else {
 		got = st.runFunc(ctx, s, st.opts)
 	}

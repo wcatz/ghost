@@ -27,11 +27,11 @@ func TestCredentialRemovalIsReportedOnlyAfterAReplace(t *testing.T) {
 	t.Run("a surviving project proposal means the replace ran, so the note fires", func(t *testing.T) {
 		f := &fakeReflectionApplier{}
 		stderr := captureStderr(t, func() {
-			_, _, _, _, _, applied, err := applyReflection(
+			_, _, _, _, _, _, _, _, _, applied, err := applyReflection(
 				context.Background(), f, "p1",
 				projectMemories("the relay listens on 2222", "the deploy token is "+credential),
-				nil, "since", false, nil,
-			)
+				nil, "since", false, nil, nil)
+
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}
@@ -57,11 +57,11 @@ func TestCredentialRemovalIsReportedOnlyAfterAReplace(t *testing.T) {
 	t.Run("the drop emptying the set means no replace, so no removal is claimed", func(t *testing.T) {
 		f := &fakeReflectionApplier{}
 		stderr := captureStderr(t, func() {
-			_, _, _, _, _, applied, err := applyReflection(
+			_, _, _, _, _, _, _, _, _, applied, err := applyReflection(
 				context.Background(), f, "p1",
 				projectMemories("the deploy token is "+credential),
-				nil, "since", false, nil,
-			)
+				nil, "since", false, nil, nil)
+
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}
@@ -89,12 +89,12 @@ func TestCredentialRemovalIsReportedOnlyAfterAReplace(t *testing.T) {
 		// a global candidate is still promoted and written to _global.
 		f := &fakeReflectionApplier{resultPromoted: 1}
 		stderr := captureStderr(t, func() {
-			_, _, _, _, _, _, err := applyReflection(
+			_, _, _, _, _, _, _, _, _, _, err := applyReflection(
 				context.Background(), f, "p1",
 				projectMemories("the deploy token is "+credential),
 				globals("tabs, not spaces, in every repository we touch"),
-				"since", true, nil,
-			)
+				"since", true, nil, nil)
+
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}
@@ -107,11 +107,11 @@ func TestCredentialRemovalIsReportedOnlyAfterAReplace(t *testing.T) {
 	t.Run("a failed apply claims no removal", func(t *testing.T) {
 		f := &fakeReflectionApplier{err: context.DeadlineExceeded}
 		stderr := captureStderr(t, func() {
-			_, _, _, _, _, applied, err := applyReflection(
+			_, _, _, _, _, _, _, _, _, applied, err := applyReflection(
 				context.Background(), f, "p1",
 				projectMemories("the relay listens on 2222", "the deploy token is "+credential),
-				nil, "since", false, nil,
-			)
+				nil, "since", false, nil, nil)
+
 			if err == nil {
 				t.Fatal("applyReflection: want the store's error")
 			}

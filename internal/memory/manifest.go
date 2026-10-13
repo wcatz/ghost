@@ -225,8 +225,21 @@ func manifestOpenError(path string, err error) error {
 // file is reported as fs.ErrNotExist so a caller can tell "there is no manifest"
 // from "the manifest is unreadable" — the first is an expected state a pre-
 // migration copy is always in, and the second is damage.
+//
+// A symlink is followed, and its target must be a regular file. The target is
+// stat'ed BEFORE it is opened and anything else — a FIFO, a device, a socket, a
+// directory — is refused unopened: opening a FIFO for reading blocks until a
+// writer appears, so a read-first check would hang `ghost backup verify` on a
+// sidecar that is sitting right there.
 func ReadBackupManifest(path string) (BackupManifest, error) {
 	var m BackupManifest
+	info, err := os.Stat(path)
+	if err != nil {
+		return BackupManifest{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return BackupManifest{}, fmt.Errorf("the manifest at %s is not a regular file (%s)", path, info.Mode().Type())
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return BackupManifest{}, err
@@ -408,8 +421,16 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	case err == nil:
 		rep.HasManifest = true
 		manifest = m
-	case os.IsNotExist(err):
+	case os.IsNotExist(err) && !rep.ManifestPresent:
 		// Expected for a pre-migration copy. Recorded as the absence it is.
+		//
+		// Gated on the Lstat, not on the error alone: a dangling symlink at
+		// this path makes the read report ENOENT exactly as a genuinely absent
+		// manifest does, and the Lstat above is the only thing that tells the
+		// two apart. Reading a sidecar Lstat found as absent here is the bug
+		// this gate exists to prevent — it leaves ManifestErr nil, so the
+		// report prints "present but could not be read: <nil>" and returns a
+		// zero exit that a backup script reads as nothing failed.
 	default:
 		rep.ManifestErr = err
 		return rep, err

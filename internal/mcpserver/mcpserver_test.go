@@ -2883,3 +2883,38 @@ func TestProjectContextAsOfSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
 		t.Errorf("a project with no rows at T gained a validity note:\n%s", empty)
 	}
 }
+
+// TestGhostTaskComplete_RepeatKeepsNotesAndStamp pins #1143 through the tool:
+// a second ghost_task_complete with no notes leaves the stored notes and the
+// completed_at stamp alone.
+func TestGhostTaskComplete_RepeatKeepsNotesAndStamp(t *testing.T) {
+	db, store, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	ctx := context.Background()
+
+	id, err := store.CreateTask(ctx, "abc123", "fix the flake", "", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	const notes = "root cause: the retry loop reused a closed conn"
+	if res := callTool(t, session, "ghost_task_complete", map[string]any{"task_id": id, "notes": notes}); res.IsError {
+		t.Fatalf("first complete: %s", resultText(res))
+	}
+	const backdated = "2026-01-01 00:00:00"
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET completed_at = ? WHERE id = ?`, backdated, id); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if res := callTool(t, session, "ghost_task_complete", map[string]any{"task_id": id}); res.IsError {
+		t.Fatalf("second complete: %s", resultText(res))
+	}
+	got, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.Notes != notes {
+		t.Errorf("notes = %q, want %q kept", got.Notes, notes)
+	}
+	if got.CompletedAt != backdated {
+		t.Errorf("completed_at = %q, want %q kept", got.CompletedAt, backdated)
+	}
+}

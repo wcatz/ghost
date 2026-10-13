@@ -87,10 +87,10 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 
 		// A rewrite: new wording, so no reuse, and the source named as replaced.
 		const rewritten = "the release tag is cut from the release branch, never from main"
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "convention", Content: rewritten, Importance: 0.6,
 			ReplacesIDs: []string{source},
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -130,10 +130,10 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 		}
 
 		const merged = "the staging cluster answers health checks on port 8443"
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: merged, Importance: 0.5,
 			ReplacesIDs: []string{first, second},
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -185,9 +185,9 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 
 		// A byte-identical re-emission reuses the row in place. There is nothing to
 		// carry: the row never changed identity, so its evidence never left it.
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "convention", Content: kept, Importance: 0.6,
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -205,9 +205,9 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 
 	t.Run("a genuinely new memory gets no evidence", func(t *testing.T) {
 		const fresh = "a consolidation surfaced this with no predecessor at all"
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: fresh, Importance: 0.5,
-		}}, ""); err != nil {
+		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 		id := onlyMemoryWithContent(t, s, fresh)
@@ -253,10 +253,10 @@ func TestRestoreBringsTheEvidenceBackWithTheMemory(t *testing.T) {
 	// A consolidation rewrites it, which deletes the row the restore has to bring
 	// back — and with it, its evidence.
 	const rewritten = "the bastion accepts ssh on port 2222 and nothing else"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "convention", Content: rewritten, Importance: 0.7,
 		ReplacesIDs: []string{id},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if ev, err := s.MemoryProvenance(ctx, id); err != nil || len(ev) != 0 {
@@ -321,9 +321,9 @@ func TestRestoreDoesNotTouchTheEvidenceOfARowItUpdatesInPlace(t *testing.T) {
 	}
 	// A reflect that reuses the row verbatim: the snapshot is taken, the row is
 	// kept, and the snapshot now holds exactly the evidence the row has.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: original, Importance: 0.5,
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual (the snapshot): %v", err)
 	}
 
