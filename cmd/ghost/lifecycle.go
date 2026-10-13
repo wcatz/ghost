@@ -1483,7 +1483,14 @@ func runReflect() {
 	// the delete (#1051).
 	fed := make([]memory.CorpusRow, 0, len(live))
 	for _, m := range live {
-		fed = append(fed, memory.CorpusRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt})
+		fed = append(fed, memory.CorpusRow{
+			ID:         m.ID,
+			Content:    m.Content,
+			UpdatedAt:  m.UpdatedAt,
+			Category:   m.Category,
+			Importance: m.Importance,
+			Tags:       m.Tags,
+		})
 	}
 	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)

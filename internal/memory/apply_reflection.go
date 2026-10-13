@@ -36,6 +36,19 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	defer tx.Rollback() //nolint:errcheck
 
 	txCtx := withStoreTx(ctx, tx)
+	// The corpus guard has to cover the global half too (#1051). A cross-project
+	// candidate is a claim on the project row it was consolidated from — by the
+	// text it restates, or by the ids it names in ReplacesIDs — and the promotion
+	// loop below writes it into _global, where the project's reuse map is never
+	// consulted: without this check a concurrently deleted project row came back
+	// in _global, and a global emission merging a concurrently edited project
+	// row was written beside the edit. The guard is read BEFORE the project
+	// replace so that half and this one answer from a single view of the project,
+	// and it is the same fed corpus the CLI handed to the replace.
+	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed)
+	if guardErr != nil {
+		return nil, 0, nil, guardErr
+	}
 	if len(projectMems) > 0 {
 		preserved, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
 		if err != nil {
@@ -44,6 +57,21 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	}
 
 	if len(globalMems) > 0 {
+		// A candidate the guard drops is dropped entirely: it is neither
+		// promoted nor recovered into the project. Writing it back into the
+		// project would resurrect the row a concurrent writer deleted, which is
+		// the loss the guard exists to prevent, and it is not reported as kept
+		// either — it is a claim the pass is not allowed to make, not a
+		// cross-project fact that failed to promote.
+		live := make([]Memory, 0, len(globalMems))
+		for _, m := range globalMems {
+			if globalGuard.drop(m) {
+				continue
+			}
+			live = append(live, m)
+		}
+		globalMems = live
+
 		if ensureErr := ensureGlobalProjectTx(ctx, tx); ensureErr != nil {
 			// The global bucket is unavailable, but the project-side write may
 			// still be healthy. Keep each candidate project-scoped instead of

@@ -5673,21 +5673,139 @@ type replaceCandidate struct {
 	updatedAt string
 }
 
-// CorpusRow is one row as a reflection pass READ it: the identity and the two
-// facts ReplaceNonManual re-checks inside the write transaction. A row is only
-// replaceable while the store still holds that content at that updated_at;
-// anything else is a concurrent edit, is kept as it is, and any emission that
-// claims it is dropped rather than written beside it.
+// CorpusRow is one row as a reflection pass READ it: the identity and the state
+// the write transaction re-checks before a claim on it is honoured. A row is
+// only replaceable while the store still holds that content, at that write
+// clock, carrying the same metadata the harness was shown; anything else is a
+// concurrent edit, the row is kept as it is, and any emission claiming it is
+// dropped rather than written beside it.
 //
-// updated_at is a write clock, not a content clock (#879): a metadata-only edit
-// — a retag, a reweight, a scope narrowing — moves it while the text stays put.
-// That is the safe direction here. Treating such a row as concurrent keeps the
-// edit and drops the emission, where reading updated_at as "content unchanged"
-// would let the re-emission overwrite a change it never saw.
+// The metadata columns are here because updated_at is not the whole signal. A
+// save that only folds a duplicate — UpsertWithOptions' strengthen-memory update
+// — raises importance WITHOUT moving updated_at, so a row the pass answered
+// about can sit at the write clock it read with its importance already drifted,
+// and the reuse branch would then write the stale value back over the edit.
+// Comparing the columns that branch writes closes that gap. Scope is
+// deliberately absent: the reuse branch reaches a scope only through COALESCE,
+// so an emission that states none can never erase a concurrent one.
+//
+// updated_at is a write clock, not a content clock (#879), and that is the safe
+// direction here: UpdateMemory moves it on a retag, a reweight or a scope
+// narrowing alone, and treating such a row as concurrent keeps the edit and
+// drops the emission where reading it as "content unchanged" would let the
+// re-emission overwrite a change it never saw.
 type CorpusRow struct {
-	ID        string
-	Content   string
-	UpdatedAt string
+	ID         string
+	Content    string
+	UpdatedAt  string
+	Category   string
+	Importance float32
+	Tags       []string
+}
+
+// sameAs reports whether the stored candidate is still the row this corpus
+// entry read. It compares exactly what the reuse branch writes into a row it
+// re-emits — content, category, importance, tags — plus the write clock, which
+// stands for every other column an edit moves.
+func (f CorpusRow) sameAs(c replaceCandidate) bool {
+	return f.Content == c.content &&
+		f.UpdatedAt == c.updatedAt &&
+		f.Category == c.category &&
+		float32(c.importance) == f.Importance &&
+		sameTags(c.tags, f.Tags)
+}
+
+// fedGuard is the #1051 concurrency guard over ONE replaceable candidate set.
+// It is built before the write that consumes the emissions so that every half of
+// an apply reads the same view of the project: ReplaceNonManual uses it for the
+// project replace, and ApplyReflection uses it for the cross-project promotions
+// that name those rows but are written into _global, where the project's reuse
+// map is not consulted.
+type fedGuard struct {
+	// inactive is a caller that carried no corpus: the pre-#1051 behaviour
+	// exactly, with no row kept and no emission dropped on this guard's account.
+	inactive        bool
+	candidates      []replaceCandidate
+	candidateByID   map[string]replaceCandidate
+	fedIDsByContent map[string][]string
+	// concurrent is the caller's map, already holding the rows a concurrent
+	// writer saved during the round trip, so the two guards keep one definition
+	// of "concurrent" and one preserved list.
+	concurrent map[string]bool
+}
+
+// newFedGuard marks every candidate the pass did not read, or read differently,
+// as concurrent: an edit or a delete landed while the harness was answering.
+func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[string]bool) *fedGuard {
+	g := &fedGuard{
+		candidates:      candidates,
+		candidateByID:   make(map[string]replaceCandidate, len(candidates)),
+		fedIDsByContent: make(map[string][]string, len(fed)),
+		concurrent:      concurrent,
+	}
+	if len(fed) == 0 {
+		g.inactive = true
+		return g
+	}
+	fedByID := make(map[string]CorpusRow, len(fed))
+	for _, f := range fed {
+		fedByID[f.ID] = f
+		g.fedIDsByContent[f.Content] = append(g.fedIDsByContent[f.Content], f.ID)
+	}
+	for _, c := range candidates {
+		g.candidateByID[c.id] = c
+	}
+	for _, c := range candidates {
+		f, read := fedByID[c.id]
+		if !read || !f.sameAs(c) {
+			concurrent[c.id] = true
+		}
+	}
+	return g
+}
+
+// drop reports whether the emission must not be written at all, and keeps every
+// row it would otherwise have taken. A keep restates its source byte-for-byte,
+// so the emitted text IS the claim on the fed row carrying that text; a merge or
+// a rewrite claims the ids it names in ReplacesIDs. Either claim is void the
+// moment the row it points at changed or is gone, and the caller that honours a
+// void claim writes a duplicate beside a live edit or resurrects a delete.
+func (g *fedGuard) drop(m Memory) bool {
+	if g.inactive {
+		return false
+	}
+	drop := false
+	for _, fid := range g.fedIDsByContent[m.Content] {
+		if _, stored := g.candidateByID[fid]; !stored || g.concurrent[fid] {
+			drop = true
+			break
+		}
+	}
+	if !drop {
+		for _, replaced := range m.ReplacesIDs {
+			if _, stored := g.candidateByID[replaced]; !stored || g.concurrent[replaced] {
+				drop = true
+				break
+			}
+		}
+	}
+	if !drop {
+		return false
+	}
+	// Keep every row this emission would otherwise have deleted: the sources it
+	// names, and any stored row carrying the text it emits. Nothing may be lost
+	// to a claim the pass is not allowed to make.
+	for _, replaced := range m.ReplacesIDs {
+		if _, stored := g.candidateByID[replaced]; stored {
+			g.concurrent[replaced] = true
+		}
+	}
+	for _, c := range g.candidates {
+		if c.content == m.Content {
+			g.concurrent[c.id] = true
+		}
+	}
+	return true
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -6265,6 +6383,99 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // beside it, those rows are merged into this one and the merged knowledge takes
 // the longest life any of them had (raiseReusedRetentionTx, #773).
 //
+// replaceableCandidatesTx is the set of rows a reflection apply may delete,
+// reuse, or have to leave alone: every row that is not a manual/builtin
+// preservation class, not pinned, not resolved, and not retention-exempt.
+//
+// ORDER BY pins the order takeReusableRow consumes, so which same-content row a
+// reuse claims is a decision and not whatever order the planner happens to
+// return (this predicate is served by idx_memories_project_cat or
+// idx_memories_project_source). created_at ascending means a duplicate keeps the
+// age of the oldest copy — the one the age belongs to — and id breaks
+// same-second ties deterministically. Before #623 the order was irrelevant,
+// because every reused row was re-stamped created_at = now anyway; now it
+// decides the age that survives.
+func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]replaceCandidate, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
+		ORDER BY created_at, id
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list replaceable memories: %w", err)
+	}
+	var candidates []replaceCandidate
+	for rows.Next() {
+		var c replaceCandidate
+		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope, &c.updatedAt); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("scan replaceable memory: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	rowsErr := rows.Err()
+	rows.Close() //nolint:errcheck
+	if rowsErr != nil {
+		return nil, fmt.Errorf("iterate replaceable memories: %w", rowsErr)
+	}
+	return candidates, nil
+}
+
+// concurrentSinceTx adds to concurrent the ids of memories saved during the
+// consolidation round trip: they never reached the consolidator, so they must
+// survive untouched — the same predicate as ReplaceNonManual's, matched by ID so
+// the row itself is never deleted. >= (not >) errs toward a rare same-second
+// duplicate, which the next reflection merges, rather than toward silent loss.
+// An empty consolidatedSince writes nothing.
+func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, concurrent map[string]bool) (map[string]bool, error) {
+	if consolidatedSince == "" {
+		return concurrent, nil
+	}
+	crows, err := tx.QueryContext(ctx, `
+		SELECT id FROM memories
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+		  AND `+retentionExemptSQL+`
+	`, projectID, consolidatedSince)
+	if err != nil {
+		return nil, fmt.Errorf("find concurrent memories: %w", err)
+	}
+	for crows.Next() {
+		var id string
+		if err := crows.Scan(&id); err != nil {
+			crows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("scan concurrent memory: %w", err)
+		}
+		concurrent[id] = true
+	}
+	crowsErr := crows.Err()
+	crows.Close() //nolint:errcheck
+	if crowsErr != nil {
+		return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
+	}
+	return concurrent, nil
+}
+
+// fedGuardFor builds the #1051 guard over projectID's replaceable set, reading
+// the same candidates and the same concurrent window ReplaceNonManual reads.
+// ApplyReflection calls it before that replace, because a cross-project
+// candidate names rows the project replace is also deciding the fate of, and
+// both halves have to answer from one view: an emission the project half may not
+// apply must not reach _global through the promotion loop. It runs inside the
+// caller's transaction, which already holds the write lock, so the read is the
+// same one the replace makes — it is not a second race window.
+func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, fed []CorpusRow) (*fedGuard, error) {
+	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	concurrent, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, make(map[string]bool))
+	if err != nil {
+		return nil, err
+	}
+	return newFedGuard(candidates, fed, concurrent), nil
+}
+
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
 // before the caller fetched the memories it fed to the consolidator. ghost
 // reflect runs as a separate process from the long-lived MCP server, so a
@@ -6315,135 +6526,26 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// DELETE CASCADE), so identical content used to mean a re-embedded memory
 	// and a lost link graph on every reflection. Rows saved concurrently with
 	// the consolidation round trip are kept in place for the same reason.
-	// ORDER BY pins the order takeReusableRow consumes, so which same-content
-	// row a reuse claims is a decision and not whatever order the planner
-	// happens to return (this predicate is served by idx_memories_project_cat
-	// or idx_memories_project_source). created_at ascending means a duplicate
-	// keeps the age of the oldest copy — the one the age belongs to — and id
-	// breaks same-second ties deterministically. Before #623 the order was
-	// irrelevant, because every reused row was re-stamped created_at = now
-	// anyway; now it decides the age that survives.
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
-		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		  AND `+retentionExemptSQL+`
-		ORDER BY created_at, id
-	`, projectID)
+	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list replaceable memories: %w", err)
+		return nil, err
 	}
-	var candidates []replaceCandidate
-	for rows.Next() {
-		var c replaceCandidate
-		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope, &c.updatedAt); err != nil {
-			rows.Close() //nolint:errcheck
-			return nil, fmt.Errorf("scan replaceable memory: %w", err)
-		}
-		candidates = append(candidates, c)
-	}
-	rowsErr := rows.Err()
-	rows.Close() //nolint:errcheck
-	if rowsErr != nil {
-		return nil, fmt.Errorf("iterate replaceable memories: %w", rowsErr)
-	}
-
-	// Memories saved during the round trip never reached the consolidator, so
-	// they must survive untouched — same predicate as before, but matched by
-	// ID so the row itself is never deleted. >= (not >) errs toward a rare
-	// same-second duplicate, which the next reflection merges, rather than
-	// toward silent loss.
 	concurrent := make(map[string]bool)
-	if consolidatedSince != "" {
-		crows, err := tx.QueryContext(ctx, `
-			SELECT id FROM memories
-			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
-			  AND `+retentionExemptSQL+`
-		`, projectID, consolidatedSince)
-		if err != nil {
-			return nil, fmt.Errorf("find concurrent memories: %w", err)
-		}
-		for crows.Next() {
-			var id string
-			if err := crows.Scan(&id); err != nil {
-				crows.Close() //nolint:errcheck
-				return nil, fmt.Errorf("scan concurrent memory: %w", err)
-			}
-			concurrent[id] = true
-		}
-		crowsErr := crows.Err()
-		crows.Close() //nolint:errcheck
-		if crowsErr != nil {
-			return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
-		}
+	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
+		return nil, err
 	}
 
 	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
-	// content or updated_at has moved since it was read, is not the row the pass
-	// was given: an edit or a delete landed while the harness was answering.
-	// Such a row is kept as it is, and any emission claiming it is dropped
-	// rather than written beside it. This is the same guard FoldRows applies
-	// with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
+	// content, write clock or metadata has moved since it was read, is not the
+	// row the pass was given: an edit or a delete landed while the harness was
+	// answering. Such a row is kept as it is, and any emission claiming it is
+	// dropped rather than written beside it. This is the same guard FoldRows
+	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
 	// behaviour above exactly.
-	candidateByID := make(map[string]replaceCandidate, len(candidates))
-	for _, c := range candidates {
-		candidateByID[c.id] = c
-	}
+	guard := newFedGuard(candidates, fed, concurrent)
 	dropEmission := make([]bool, len(memories))
-	if len(fed) > 0 {
-		fedByID := make(map[string]CorpusRow, len(fed))
-		fedIDsByContent := make(map[string][]string, len(fed))
-		for _, f := range fed {
-			fedByID[f.ID] = f
-			fedIDsByContent[f.Content] = append(fedIDsByContent[f.Content], f.ID)
-		}
-		for _, c := range candidates {
-			if concurrent[c.id] {
-				continue
-			}
-			f, read := fedByID[c.id]
-			if !read || f.Content != c.content || f.UpdatedAt != c.updatedAt {
-				concurrent[c.id] = true
-			}
-		}
-
-		for i, m := range memories {
-			// A keep restates its source byte-for-byte, so the emitted text IS
-			// the claim on the fed row with that text. A merge or a rewrite
-			// claims the ids it names. Either claim is void once the row it
-			// points at changed or is gone.
-			drop := false
-			for _, fid := range fedIDsByContent[m.Content] {
-				if _, stored := candidateByID[fid]; !stored || concurrent[fid] {
-					drop = true
-					break
-				}
-			}
-			if !drop {
-				for _, replaced := range m.ReplacesIDs {
-					if _, stored := candidateByID[replaced]; !stored || concurrent[replaced] {
-						drop = true
-						break
-					}
-				}
-			}
-			if !drop {
-				continue
-			}
-			dropEmission[i] = true
-			// Keep every row this emission would otherwise have deleted: the
-			// sources it names, and any stored row carrying the text it emits.
-			// Nothing may be lost to a claim the pass is not allowed to make.
-			for _, replaced := range m.ReplacesIDs {
-				if _, stored := candidateByID[replaced]; stored {
-					concurrent[replaced] = true
-				}
-			}
-			for _, c := range candidates {
-				if c.content == m.Content {
-					concurrent[c.id] = true
-				}
-			}
-		}
+	for i, m := range memories {
+		dropEmission[i] = guard.drop(m)
 	}
 
 	// Report the survivors so the caller can avoid recording a skip

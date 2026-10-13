@@ -172,8 +172,9 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 	})
 }
 
-// corpusRows reads the id, content and updated_at of each row the way
-// ghost reflect does before handing the corpus to a harness.
+// corpusRows reads the id, content, updated_at and the metadata the reuse
+// branch writes — category, importance, tags — of each row the way ghost
+// reflect does before handing the corpus to a harness.
 func corpusRows(t *testing.T, s *Store, ids ...string) []CorpusRow {
 	t.Helper()
 	rows, err := s.GetByIDs(context.Background(), ids)
@@ -182,7 +183,268 @@ func corpusRows(t *testing.T, s *Store, ids ...string) []CorpusRow {
 	}
 	out := make([]CorpusRow, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, CorpusRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt})
+		out = append(out, CorpusRow{
+			ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt,
+			Category: m.Category, Importance: m.Importance, Tags: m.Tags,
+		})
 	}
 	return out
+}
+
+// The global half of the apply writes into _global through the promotion loop,
+// which never consults the project's reuse map, so #1051's guard has to be
+// applied to the cross-project candidates as well. Without it a concurrently
+// deleted project row came back in _global, and a global emission merging a
+// concurrently edited project row was written beside the edit.
+func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a promoted candidate claiming a concurrently deleted row is dropped", func(t *testing.T) {
+		s := testStore(t)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "unrelated note beta", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, bID)
+		// The delete lands while the harness is answering, and the candidate
+		// the harness returned still claims B's text.
+		if err := s.Delete(ctx, bID); err != nil {
+			t.Fatalf("Delete B: %v", err)
+		}
+
+		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+			nil, []Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
+			"", true, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if promoted != 0 {
+			t.Errorf("promoted = %d, want 0: the deleted row was resurrected in _global", promoted)
+		}
+		globals, err := s.GetAll(ctx, "_global", -1)
+		if err != nil {
+			t.Fatalf("GetAll _global: %v", err)
+		}
+		if len(globals) != 0 {
+			t.Errorf("_global holds %d rows: %v — the deleted project row was resurrected there",
+				len(globals), contents(globals))
+		}
+		project, err := s.GetAll(ctx, testProject, -1)
+		if err != nil {
+			t.Fatalf("GetAll project: %v", err)
+		}
+		if len(project) != 0 {
+			t.Errorf("project holds %d rows: %v — the dropped candidate was recovered into the project",
+				len(project), contents(project))
+		}
+	})
+
+	t.Run("a global emission merging a concurrently edited row is dropped", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the relay host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+
+		fed := corpusRows(t, s, aID)
+
+		edited := "the relay host is bravo"
+		if err := s.UpdateMemory(ctx, testProject, aID, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory A: %v", err)
+		}
+
+		// A cross-project merge naming the row that was just edited.
+		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+			nil, []Memory{{
+				Category: "fact", Content: "the relay host, one fact across projects", Importance: 0.7,
+				Tags: []string{}, ReplacesIDs: []string{aID},
+			}},
+			"", true, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if promoted != 0 {
+			t.Errorf("promoted = %d, want 0: the merge was written beside the concurrent edit", promoted)
+		}
+		globals, err := s.GetAll(ctx, "_global", -1)
+		if err != nil {
+			t.Fatalf("GetAll _global: %v", err)
+		}
+		for _, m := range globals {
+			if m.Content == "the relay host, one fact across projects" {
+				t.Errorf("_global holds the merge row written beside the concurrent edit")
+			}
+		}
+		got := getOne(t, s, aID)
+		if got.Content != edited {
+			t.Errorf("A = %q, want the concurrent edit %q kept", got.Content, edited)
+		}
+	})
+
+	t.Run("a promotion with nothing concurrent still reaches _global", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the relay host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+
+		fed := corpusRows(t, s, aID)
+
+		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+			[]Memory{{Category: "fact", Content: "the relay host is alpha", Importance: 0.6, Tags: []string{}}},
+			[]Memory{{Category: "fact", Content: "always run the linter before pushing", Importance: 0.6, Tags: []string{}}},
+			"", true, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if promoted != 1 {
+			t.Errorf("promoted = %d, want 1", promoted)
+		}
+		globals, err := s.GetAll(ctx, "_global", -1)
+		if err != nil {
+			t.Fatalf("GetAll _global: %v", err)
+		}
+		if len(globals) != 1 || globals[0].Content != "always run the linter before pushing" {
+			t.Errorf("_global = %v, want the cross-project candidate", contents(globals))
+		}
+	})
+}
+
+// The save-path fold raises importance WITHOUT moving updated_at, so a guard
+// that reads only the write clock lets a re-emission overwrite the folded value
+// (#1051, review finding 2). The corpus carries the metadata the reuse branch
+// writes, which is what makes the fold visible.
+func TestReplaceNonManualKeepsAConcurrentImportanceFold(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	aID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a stable deployment fact", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create A: %v", err)
+	}
+	setAgesDaysAgo(t, s, aID, 2)
+
+	fed := corpusRows(t, s, aID)
+
+	// A duplicate save of the same text folds into the row: importance rises,
+	// updated_at does not move, and the content is unchanged.
+	if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "a stable deployment fact", "mcp", 0.5, []string{}, UpsertOptions{}); err != nil {
+		t.Fatalf("UpsertWithOptions: %v", err)
+	}
+	folded := getOne(t, s, aID)
+	if folded.Importance <= 0.5 {
+		t.Fatalf("fold did not raise importance: %v", folded.Importance)
+	}
+	if folded.UpdatedAt != fed[0].UpdatedAt {
+		t.Fatalf("fold moved updated_at from %q to %q — the test needs the write clock unchanged",
+			fed[0].UpdatedAt, folded.UpdatedAt)
+	}
+
+	// The harness re-emits the row with the importance it READ, and the reuse
+	// branch would write it back over the fold.
+	emitted := []Memory{{Category: "fact", Content: "a stable deployment fact", Importance: 0.5, Tags: []string{}}}
+	preserved, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	got := getOne(t, s, aID)
+	if got.Importance != folded.Importance {
+		t.Errorf("importance = %v, want the concurrently folded %v kept: the re-emission overwrote it",
+			got.Importance, folded.Importance)
+	}
+	if len(preserved) == 0 {
+		t.Errorf("preserved is empty, want the folded row reported so the next run re-merges it")
+	}
+}
+
+// A populated fed with no concurrent writes must behave exactly like the
+// pre-#1051 path: the guard is invisible unless something moved. A guard that
+// silently blocked all reflection would otherwise pass every negative test.
+func TestReplaceNonManualWithACompleteCorpusReflectsNormally(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	aID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create A: %v", err)
+	}
+	bID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "unrelated note beta", Source: "mcp", Importance: 0.6, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create B: %v", err)
+	}
+	cID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "third note gamma", Source: "mcp", Importance: 0.6, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create C: %v", err)
+	}
+	for _, id := range []string{aID, bID, cID} {
+		setAgesDaysAgo(t, s, id, 2)
+	}
+
+	fed := corpusRows(t, s, aID, bID, cID)
+
+	emitted := []Memory{
+		// A verbatim keep: reuses A's row.
+		{Category: "fact", Content: "the deploy host is alpha", Importance: 0.6, Tags: []string{}},
+		// A merge replacing B and C.
+		{
+			Category: "fact", Content: "beta and gamma, one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{bID, cID},
+		},
+	}
+
+	preserved, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if len(preserved) != 0 {
+		t.Errorf("preserved = %v, want none: nothing was concurrent", preserved)
+	}
+
+	all, err := s.GetAll(ctx, testProject, -1)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("corpus holds %d rows, want A and the merge: %v", len(all), contents(all))
+	}
+	byID := map[string]Memory{}
+	for _, m := range all {
+		byID[m.ID] = m
+	}
+	kept, ok := byID[aID]
+	if !ok {
+		t.Fatalf("A's row %s is gone — the verbatim keep did not reuse it: %v", aID, contents(all))
+	}
+	if kept.Content != "the deploy host is alpha" {
+		t.Errorf("A = %q, want its own text kept", kept.Content)
+	}
+	if _, gone := byID[bID]; gone {
+		t.Errorf("B survived the merge that replaced it")
+	}
+	if _, gone := byID[cID]; gone {
+		t.Errorf("C survived the merge that replaced it")
+	}
+	for _, m := range all {
+		if m.Content != "the deploy host is alpha" && m.Content != "beta and gamma, one fact" {
+			t.Errorf("unexpected row %q in %v", m.Content, contents(all))
+		}
+	}
 }
