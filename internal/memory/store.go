@@ -7456,13 +7456,26 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
 	// Find the latest snapshot. Order by snapshot_id (embeds UnixNano), not
 	// created_at (second-precision, so same-second snapshots order
 	// arbitrarily). Older Unix()-suffixed IDs sort before newer
 	// UnixNano()-suffixed ones because the shorter numeric suffix is a prefix
 	// of the longer, so mixed-vintage databases still order correctly.
+	//
+	// The read runs inside the write transaction, after BEGIN IMMEDIATE took
+	// the lock (#1190). Read on the pool first, a reflection another process
+	// committed while this restore waited for the lock was serialised before
+	// the restore and still skipped by it: the restore applied the older
+	// snapshot, and a memory the newer reflection consumed — not in the older
+	// snapshot — stayed deleted while the command reported success.
 	var snapshotID string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT snapshot_id FROM memory_snapshots
 		WHERE project_id = ?
 		ORDER BY snapshot_id DESC
@@ -7474,12 +7487,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("find snapshot: %w", err)
 	}
-
-	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
 
 	// Remove what the replace created — and only that.
 	//
