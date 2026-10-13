@@ -984,7 +984,7 @@ func runMaintenance(ctx context.Context, o options, rep *report, b barriers) err
 	if err != nil {
 		return fmt.Errorf("current timestamp: %w", err)
 	}
-	if _, _, _, err := store.ApplyReflection(ctx, o.project, batch, nil, consolidated, false); err != nil {
+	if _, _, _, _, _, _, _, err := store.ApplyReflection(ctx, o.project, batch, nil, consolidated, false, nil); err != nil {
 		return fmt.Errorf("ApplyReflection: %w", err)
 	}
 	rep.put("batch_rows", fmt.Sprint(len(batch)))

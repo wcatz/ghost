@@ -17,30 +17,106 @@ import (
 // them, not just a count: a summary that reports how many rows the project now
 // holds cannot be built from an integer when it also has to say which rows those
 // are.
-func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []Memory, err error) {
-	if !promoteGlobals && len(globalMems) > 0 {
-		projectMems = append(append([]Memory(nil), projectMems...), globalMems...)
-		globalMems = nil
-	}
+//
+// projectDropped and globalDropped count the emissions the #1051 corpus guard
+// refused in each half — the ones whose claimed row changed or was deleted
+// while the harness was answering. Keep them attributable: once the two lists
+// are folded nobody can say which input a dropped emission came from, so the
+// global half is guarded before the fold below. The caller needs the split to
+// report only what was written (a project summary and a cross-project component
+// subtract different halves) and to recognise a round that wrote nothing.
+//
+// deleted is the number of rows the project replace removed, and
+// appliedByCategory is what it landed per category (including the kept-back
+// candidates written into the project when promotion fails or _global is
+// unavailable). Together with the two drop counts they let the caller tell a
+// round that changed the corpus from one that did not: an all-dropped round
+// that still deleted unclaimed candidates is not "nothing written", and must
+// report the replace and offer its snapshot for restore.
+func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool, fed []CorpusRow) (preserved []string, promoted int, keptMems []Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error) {
 	if len(projectMems) == 0 && len(globalMems) == 0 {
-		return nil, 0, nil, nil
+		return nil, 0, nil, 0, 0, 0, nil, nil
 	}
+
+	// The category map is a caller-visible return, so it must never come back
+	// nil even when no project replace ran: a global-only apply that lands a
+	// kept-back candidate records it here, and that write happens on a map the
+	// replace did not build. ReplaceNonManual overwrites it with its own counts
+	// when the project half runs.
+	appliedByCategory = make(map[string]int)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, lock, err := s.beginWrite(ctx, "reflect-apply")
 	if err != nil {
-		return nil, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
+		return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
 	txCtx := withStoreTx(ctx, tx)
+	// The corpus guard has to cover the global half too (#1051). A cross-project
+	// candidate is a claim on the project row it was consolidated from — by the
+	// text it restates, or by the ids it names in ReplacesIDs — and the promotion
+	// loop below writes it into _global, where the project's reuse map is never
+	// consulted: without this check a concurrently deleted project row came back
+	// in _global, and a global emission merging a concurrently edited project
+	// row was written beside the edit. The guard is read BEFORE the project
+	// replace so that half and this one answer from a single view of the project,
+	// and it is the same fed corpus the CLI handed to the replace.
+	//
+	// The view is the shared state itself: fedGuardFor fills its concurrent map
+	// with the rows saved or edited since consolidation, and dropConcurrentClaims
+	// below additionally marks every source of an emission it refuses there. That
+	// second marking must reach the project replace, or the unchanged source of a
+	// refused cross-project merge matches no surviving emission and the replace
+	// deletes it as unaccounted — the merge was refused, so NONE of its sources
+	// may be taken. ReplaceNonManual seeds its own concurrent map from this one,
+	// and counts back the refusals it makes about folded candidates.
+	view := &applyView{concurrent: make(map[string]bool), crossProjectFrom: -1}
+	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, view.concurrent)
+	if guardErr != nil {
+		return nil, 0, nil, 0, 0, 0, nil, guardErr
+	}
+	txCtx = withApplyView(txCtx, view)
+
+	// A candidate the guard drops is dropped entirely: it is neither promoted
+	// nor recovered into the project, and with promotion off it is not folded
+	// back for the project replace either. Writing it back into the project
+	// would resurrect the row a concurrent writer deleted, which is the loss
+	// the guard exists to prevent, and it is not reported as kept either — it
+	// is a claim the pass is not allowed to make, not a cross-project fact that
+	// failed to promote. Guarding BEFORE the fold is what keeps the two halves'
+	// drop counts attributable: once the lists are merged nobody can say which
+	// input a dropped emission came from, and the caller's summary subtracts
+	// different halves in different flag modes.
+	globalMems, globalDropped = dropConcurrentClaims(globalGuard, globalMems)
+
+	if !promoteGlobals && len(globalMems) > 0 {
+		// From here on the replace's input ENDS with the folded candidates, so a
+		// refusal at or after this index is a refusal of a cross-project
+		// candidate even though the replace is what made it.
+		view.crossProjectFrom = len(projectMems)
+		projectMems = append(append([]Memory(nil), projectMems...), globalMems...)
+		globalMems = nil
+	}
+
 	if len(projectMems) > 0 {
-		preserved, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince)
+		var projectDrop int
+		preserved, projectDrop, deleted, appliedByCategory, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
 		if err != nil {
-			return nil, 0, nil, fmt.Errorf("replace project memories: %w", err)
+			return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("replace project memories: %w", err)
 		}
+		projectDropped = projectDrop
+		// Move the replace's refusals of folded candidates onto the half that
+		// produced them. The caller's summary subtracts each half's drops from
+		// a different component — the cross-project count only knows the global
+		// half's — so a folded refusal left in projectDropped makes the Applied
+		// line claim a cross-project candidate was kept project-scoped beside a
+		// total that never counted it. The sum the caller adds back is
+		// unchanged: this is attribution, not a second drop.
+		projectDropped -= view.crossProjectDropped
+		globalDropped += view.crossProjectDropped
 	}
 
 	if len(globalMems) > 0 {
@@ -51,25 +127,34 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			var recoveryErr error
 			keptMems, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
 			if recoveryErr != nil {
-				return nil, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
+				return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
+			}
+			// The recovered rows landed in the project, so they belong in the
+			// applied summary and its category breakdown exactly like the
+			// replace's own writes.
+			for _, m := range keptMems {
+				appliedByCategory[m.Category]++
 			}
 		} else {
 			for _, m := range globalMems {
 				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m)
 				if candidateErr != nil {
-					return nil, 0, nil, candidateErr
+					return nil, 0, nil, 0, 0, 0, nil, candidateErr
 				}
 				if promotedOK {
 					promoted++
 				} else if kept {
 					keptMems = append(keptMems, m)
+					// Written back into the project (the one place a failed
+					// promotion leaves the row), so it counts as applied there.
+					appliedByCategory[m.Category]++
 				}
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
+		return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
 	}
 	lock.reportHold("reflect-apply", time.Now())
 	if s.onSave != nil {
@@ -80,7 +165,26 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			s.onSave("_global")
 		}
 	}
-	return preserved, promoted, keptMems, nil
+	return preserved, promoted, keptMems, projectDropped, globalDropped, deleted, appliedByCategory, nil
+}
+
+// dropConcurrentClaims removes the emissions the corpus guard refuses — their
+// claimed row changed or was deleted while the harness was answering — and
+// returns how many were refused, so the caller can report only what was written
+// and can tell a round that wrote nothing from one that did.
+func dropConcurrentClaims(g *fedGuard, memories []Memory) (live []Memory, dropped int) {
+	if len(memories) == 0 {
+		return memories, 0
+	}
+	live = make([]Memory, 0, len(memories))
+	for _, m := range memories {
+		if g.drop(m) {
+			dropped++
+			continue
+		}
+		live = append(live, m)
+	}
+	return live, dropped
 }
 
 // ensureGlobalProjectTx creates the bucket without taking Store.mu or opening

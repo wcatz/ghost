@@ -509,7 +509,7 @@ func storeRound(t *testing.T, project string, seeded []seedRow, reply func(ids [
 
 	out.section = accountingSection(t, input, result, guarded, false, false)
 	projectMems, globalMems := splitByScope(result.Memories)
-	if _, _, _, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, nil, nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 	after, err := store.GetAll(ctx, project, -1)
