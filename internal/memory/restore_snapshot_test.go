@@ -367,11 +367,11 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 
 	// A verbatim replace takes the snapshot. Nothing about the three rows
 	// changes, so restoration comes back to exactly this state.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha content", Importance: 0.5},
 		{Category: "fact", Content: "psi content", Importance: 0.5},
 		{Category: "fact", Content: "chi content", Importance: 0.5},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
