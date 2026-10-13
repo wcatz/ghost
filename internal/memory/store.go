@@ -6938,6 +6938,66 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 	return nil
 }
 
+// fillReusedClaimsTx gives a REUSED row the claims of the OTHER sources an
+// emission merged into it, filling only what the row left unset.
+//
+// It is the reuse-branch half of inheritedClaims, for the reason
+// raiseReusedRetentionTx is the reuse-branch half of inheritedRetention: when
+// ReplacesIDs names a source beside the reused row, that source is deleted into
+// this row, and its window, verification, confidence and provenance strings went
+// with it — a decision companion's `decision:<id>` link among them — while the
+// fresh INSERT path keeps every one. The reused row is the FIRST source: its own
+// value wins, and an absorbed source supplies a value only where the row has none,
+// in ReplacesIDs order, by inheritedClaims' own rules.
+//
+// The window is still a unit. It is filled only when the reused row states
+// neither boundary; a row holding one boundary keeps exactly that half, because
+// completing it from another row composes a pair no row asserted. The emission's
+// own columns play no part, as on the reuse UPDATEs above, which never wrote them.
+//
+// No updated_at and no history row: memory_history records none of these
+// columns, and the evidence that backs them is carried by the caller in the same
+// transaction (carryEvidenceTx), so a filled verified_at stands beside the record
+// that claims it, as on the fresh INSERT.
+func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory) error {
+	others := make([]string, 0, len(m.ReplacesIDs))
+	for _, replaced := range m.ReplacesIDs {
+		if replaced != "" && replaced != id {
+			others = append(others, replaced)
+		}
+	}
+	if len(others) == 0 {
+		return nil
+	}
+	claims, err := inheritedClaims(ctx, tx, projectID, Memory{ReplacesIDs: others})
+	if err != nil {
+		return err
+	}
+	if claims == (rowClaims{}) {
+		return nil
+	}
+	// SQLite evaluates every SET expression against the row as it was, so the
+	// valid_until CASE reads the ORIGINAL valid_from and the window moves together.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories SET
+			valid_from  = CASE WHEN NULLIF(valid_from, '') IS NULL AND NULLIF(valid_until, '') IS NULL
+			                   THEN COALESCE(?, valid_from) ELSE valid_from END,
+			valid_until = CASE WHEN NULLIF(valid_from, '') IS NULL AND NULLIF(valid_until, '') IS NULL
+			                   THEN COALESCE(?, valid_until) ELSE valid_until END,
+			verified_at = COALESCE(NULLIF(verified_at, ''), ?, verified_at),
+			confidence  = COALESCE(confidence, ?),
+			agent       = COALESCE(NULLIF(agent, ''), ?, agent),
+			session_id  = COALESCE(NULLIF(session_id, ''), ?, session_id),
+			source_ref  = COALESCE(NULLIF(source_ref, ''), ?, source_ref)
+		WHERE id = ?`,
+		nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
+		claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
+		nullIfEmpty(claims.sourceRef), id); err != nil {
+		return fmt.Errorf("fill the reused memory's claims: %w", err)
+	}
+	return nil
+}
+
 // The fresh INSERT below is the one writer in the package that mints a row a save
 // did not ask for, so it is the one that has to decide a tier nobody stated: the
 // successor of rows that are being replaced. It inherits (inheritedRetention)
@@ -7315,6 +7375,18 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
 				return nil, 0, 0, nil, err
 			}
+			// The other sources' support and claims, for the same reason and in the
+			// same place: a merge that kept one source's row deletes the rest into it,
+			// and the cascade takes their evidence the moment the delete below runs.
+			// The fresh INSERT carries both and FoldRows carries the evidence; a
+			// reuse that names no other source carries nothing, because the row's
+			// own evidence never left it. See fillReusedClaimsTx.
+			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
+				return nil, 0, 0, nil, err
+			}
+			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m); err != nil {
+				return nil, 0, 0, nil, err
+			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
 				successorOf[replaced] = id
@@ -7378,10 +7450,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// unattended over the whole corpus, silently forgetting the whole corpus's
 		// support.
 		//
-		// The reuse branch above needs none of this: it updates a row in place, so
-		// that row's evidence never left it. And an emission with no ReplacesIDs
-		// carries nothing, because a brand-new memory has no inherited support and
-		// "none" is the answer.
+		// The reuse branch above carries only for the OTHER sources it names: the
+		// reused row is updated in place, so its own evidence never left it, but the
+		// rows merged into it are deleted like any other source. And an emission
+		// with no ReplacesIDs carries nothing, because a brand-new memory has no
+		// inherited support and "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
 			return nil, 0, 0, nil, err
 		}

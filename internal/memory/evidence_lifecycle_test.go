@@ -221,6 +221,167 @@ func TestConsolidationCarriesEvidenceToTheRowThatSurvives(t *testing.T) {
 	})
 }
 
+// TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims: a merge whose text is
+// byte-identical to one of its sources takes ReplaceNonManual's REUSE branch. That
+// row is updated in place and the other sources are deleted into it, so their
+// evidence goes with the cascade and their claims with the row — unless the reuse
+// branch carries them, as the fresh INSERT and FoldRows do. The reused row's own
+// columns win; the absorbed sources only fill what it left unset, and the window
+// is still inherited as a unit, never completed half from another row.
+func TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims(t *testing.T) {
+	ctx := context.Background()
+	confidence := 0.7
+
+	// absorbed writes a source row stating every claim, and returns its id.
+	absorbed := func(t *testing.T, s *Store, content string) string {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: content, Source: "mcp", Importance: 0.5,
+			Agent: "codex", SessionID: "ses_b", SourceRef: "docs/queue.md", Confidence: &confidence,
+			ValidFrom:  stampPtr("2026-01-15 00:00:00"),
+			ValidUntil: stampPtr("2027-12-31 23:59:59"),
+			VerifiedAt: stampPtr("2026-09-20 00:00:00"),
+		})
+		if err != nil {
+			t.Fatalf("Create absorbed source: %v", err)
+		}
+		return id
+	}
+	reuseMerge := func(t *testing.T, s *Store, kept string, ids ...string) {
+		t.Helper()
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: kept, Importance: 0.5, ReplacesIDs: ids,
+		}}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+	}
+	readRow := func(t *testing.T, s *Store, id string) Memory {
+		t.Helper()
+		got, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(got) != 1 {
+			t.Fatalf("GetByIDs(%s): %v (n=%d) — the reused row must survive the merge", id, err, len(got))
+		}
+		return got[0]
+	}
+
+	t.Run("an unclaimed reused row takes the absorbed source's evidence and claims", func(t *testing.T) {
+		s := testStore(t)
+		const kept = "the job queue backend is Redis lists"
+		keptID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: kept, Source: "mcp", Importance: 0.5, Agent: "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("Create kept: %v", err)
+		}
+		other := absorbed(t, s, "the queue worker reads Redis lists with BLPOP")
+
+		reuseMerge(t, s, kept, keptID, other)
+
+		if got := onlyMemoryWithContent(t, s, kept); got != keptID {
+			t.Fatalf("the merge minted %s; this test needs the reuse branch to keep %s", got, keptID)
+		}
+		ev, err := s.MemoryProvenance(ctx, keptID)
+		if err != nil {
+			t.Fatalf("MemoryProvenance: %v", err)
+		}
+		// The absorbed source stated a verification, so it holds a verified record
+		// beside its observation, and both are carried.
+		want := []string{"observed:claude-code:", "observed:codex:" + other, "verified:codex:" + other}
+		if got := evidenceRowsOf(t, ev); !sameSet(got, want) {
+			t.Errorf("the reused row's evidence = %v, want its own record plus the absorbed source's carried ones %v", got, want)
+		}
+
+		row := readRow(t, s, keptID)
+		if row.Agent != "claude-code" {
+			t.Errorf("agent = %q, want the reused row's own claude-code", row.Agent)
+		}
+		if row.SourceRef != "docs/queue.md" {
+			t.Errorf("source_ref = %q, want the absorbed source's docs/queue.md", row.SourceRef)
+		}
+		if row.SessionID != "ses_b" {
+			t.Errorf("session_id = %q, want the absorbed source's ses_b", row.SessionID)
+		}
+		if row.Confidence == nil || *row.Confidence != confidence {
+			t.Errorf("confidence = %v, want %v", row.Confidence, confidence)
+		}
+		for _, tc := range []struct {
+			name string
+			got  *string
+			want string
+		}{
+			{"valid_from", row.ValidFrom, "2026-01-15 00:00:00"},
+			{"valid_until", row.ValidUntil, "2027-12-31 23:59:59"},
+			{"verified_at", row.VerifiedAt, "2026-09-20 00:00:00"},
+		} {
+			if tc.got == nil || *tc.got != tc.want {
+				t.Errorf("%s = %v, want the absorbed source's %q", tc.name, tc.got, tc.want)
+			}
+		}
+	})
+
+	t.Run("the reused row's own claims win and a half window is not completed", func(t *testing.T) {
+		s := testStore(t)
+		const kept = "the queue retries a job at most five times"
+		keptID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: kept, Source: "mcp", Importance: 0.5,
+			Agent: "claude-code", SourceRef: "docs/retries.md",
+			ValidFrom: stampPtr("2026-03-01 00:00:00"),
+		})
+		if err != nil {
+			t.Fatalf("Create kept: %v", err)
+		}
+		other := absorbed(t, s, "retries back off exponentially from one second")
+
+		reuseMerge(t, s, kept, keptID, other)
+
+		row := readRow(t, s, keptID)
+		if row.Agent != "claude-code" || row.SourceRef != "docs/retries.md" {
+			t.Errorf("agent/source_ref = %q/%q, want the reused row's own claude-code/docs/retries.md", row.Agent, row.SourceRef)
+		}
+		if row.ValidFrom == nil || *row.ValidFrom != "2026-03-01 00:00:00" {
+			t.Errorf("valid_from = %v, want the reused row's own 2026-03-01", row.ValidFrom)
+		}
+		if row.ValidUntil != nil {
+			t.Errorf("valid_until = %q, want NULL — completing the reused row's half window from another row composes a pair no row asserted", *row.ValidUntil)
+		}
+		if row.VerifiedAt == nil || *row.VerifiedAt != "2026-09-20 00:00:00" {
+			t.Errorf("verified_at = %v, want the absorbed source's, since the reused row stated none", row.VerifiedAt)
+		}
+	})
+
+	t.Run("a decision companion merged into a reused fact keeps its link and evidence", func(t *testing.T) {
+		s := testStore(t)
+		_, companion, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "Redis lists", "already deployed for caching", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision: %v", err)
+		}
+		var link string
+		if err := s.db.QueryRow(`SELECT COALESCE(source_ref, '') FROM memories WHERE id = ?`, companion).Scan(&link); err != nil || link == "" {
+			t.Fatalf("the companion's link = %q (%v); the fixture needs one", link, err)
+		}
+		const kept = "the job queue backend is Redis lists, chosen because it was already deployed"
+		keptID, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact", kept, "mcp", 0.5, nil,
+			Provenance{Agent: "claude-code", SessionID: "ses_a"})
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+
+		reuseMerge(t, s, kept, keptID, companion)
+
+		ev, err := s.MemoryProvenance(ctx, keptID)
+		if err != nil {
+			t.Fatalf("MemoryProvenance: %v", err)
+		}
+		want := []string{"observed:claude-code:", "observed::" + companion}
+		if got := evidenceRowsOf(t, ev); !sameSet(got, want) {
+			t.Errorf("the reused row's evidence = %v, want %v", got, want)
+		}
+		if row := readRow(t, s, keptID); row.SourceRef != link {
+			t.Errorf("source_ref = %q, want the absorbed companion's decision link %q", row.SourceRef, link)
+		}
+	})
+}
+
 // TestRestoreBringsTheEvidenceBackWithTheMemory: a restore that reinstates a
 // deleted row under its ORIGINAL id has to bring that row's evidence with it. The
 // cascade took the evidence when the consolidation deleted the row, and a restore
