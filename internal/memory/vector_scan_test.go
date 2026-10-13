@@ -418,6 +418,150 @@ func TestVectorSearchReadsIdentityBeforeTakingTheLock(t *testing.T) {
 	}
 }
 
+// --- the uncached copy is sized for the corpus ---
+
+// TestVectorRowsReserveSizesTheEmbeddingBufferOnce pins what grow-in-place is
+// buying: a hint has to produce a buffer of exactly the hinted size in one
+// allocation (so appending the hinted bytes never grows it), and it may only
+// ever grow a recycled buffer, never shrink it. A shrink would defeat the pool:
+// a snapshot that came back with room to spare gets smaller with every search
+// that needs less than it has.
+func TestVectorRowsReserveSizesTheEmbeddingBufferOnce(t *testing.T) {
+	v := &vectorRows{}
+	v.reserve(10, 4)
+	if cap(v.embeds) != 10*4*4 {
+		t.Fatalf("reserve(10, 4) made a buffer of capacity %d, want exactly %d", cap(v.embeds), 10*4*4)
+	}
+	if len(v.embeds) != 0 {
+		t.Fatalf("reserve left %d bytes in the buffer, want an empty buffer to append into", len(v.embeds))
+	}
+	// Appending exactly the hinted bytes must not grow the buffer: that is the
+	// whole point — one allocation instead of append growth.
+	v.embeds = append(v.embeds, make([]byte, 10*4*4)...)
+	if cap(v.embeds) != 10*4*4 {
+		t.Errorf("appending the hinted bytes grew the buffer to capacity %d; reserve did not size it exactly", cap(v.embeds))
+	}
+
+	// A smaller hint leaves a buffer that already has room alone.
+	v.embeds = v.embeds[:0]
+	v.reserve(5, 4)
+	if cap(v.embeds) != 10*4*4 {
+		t.Errorf("reserve(5, 4) changed the capacity to %d, want the existing %d kept", cap(v.embeds), 10*4*4)
+	}
+	// A larger hint replaces it, growing to the new hint in one allocation.
+	v.reserve(100, 4)
+	if cap(v.embeds) != 100*4*4 {
+		t.Errorf("reserve(100, 4) made a buffer of capacity %d, want %d", cap(v.embeds), 100*4*4)
+	}
+	// A non-positive hint is a no-op rather than a panic or an empty allocation.
+	for _, rows := range []int64{0, -1} {
+		v.reserve(rows, 4)
+	}
+	v.reserve(10, 0)
+	v.reserve(10, -1)
+	if cap(v.embeds) != 100*4*4 {
+		t.Errorf("a non-positive hint changed the capacity to %d, want the existing %d kept", cap(v.embeds), 100*4*4)
+	}
+}
+
+// TestSnapshotVectorsSizesTheEmbeddingBufferFromTheRowCount is the wiring half
+// of reserve: the count query a caller passes has to reach the buffer before the
+// copy, so the buffer the copy fills is exactly count×dims×4 bytes with no
+// append growth. Without the wiring the loader still returns the same rows —
+// which is why only a capacity assertion can tell the two apart.
+func TestSnapshotVectorsSizesTheEmbeddingBufferFromTheRowCount(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	const dims = 8
+	const rows = 40
+	for i := range rows {
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact", Content: fmt.Sprintf("row %d", i), Source: "manual",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		vec := make([]float32, dims)
+		for d := range vec {
+			vec[d] = float32(i+1) + float32(d)/7
+		}
+		if err := store.StoreEmbedding(ctx, id, vec, identityCurrent); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+	}
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	v := &vectorRows{}
+	queryVec := make([]float32, dims)
+	for d := range queryVec {
+		queryVec[d] = 1 + float32(d)/3
+	}
+	err := store.snapshotVectors(ctx, vectorProjectScanQuery, []any{"test-proj"},
+		vectorProjectPredicate, []any{"test-proj"}, queryVec, identityCurrent, v)
+	if err != nil {
+		t.Fatalf("snapshotVectors: %v", err)
+	}
+	if len(v.rows) != rows {
+		t.Fatalf("the snapshot loaded %d rows, want %d", len(v.rows), rows)
+	}
+	want := rows * dims * 4
+	if cap(v.embeds) != want {
+		t.Fatalf("the embedding buffer has capacity %d, want exactly %d: the copy was not sized from the row count", cap(v.embeds), want)
+	}
+	if len(v.embeds) != want {
+		t.Errorf("the embedding buffer holds %d bytes, want %d (one row per appended vector)", len(v.embeds), want)
+	}
+}
+
+// TestSnapshotVectorsDoesNotReserveForRowsItWillSkip is the other half of the
+// sizing: the count that sizes the buffer has to name only the rows the loader
+// can copy. A corpus mid-re-embed — its rows carrying a retired identity, or a
+// width the query does not match — would otherwise reserve a corpus-sized buffer
+// for rows the copy skips, which is the allocation the identity and width
+// filters exist to avoid (a search that appends nothing must allocate nothing).
+// The corpus below has no row the loader will copy, half of them foreign and
+// half of the configured identity at the wrong width, so dropping either filter
+// from the count makes it reserve for rows that never reach the buffer.
+func TestSnapshotVectorsDoesNotReserveForRowsItWillSkip(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	const dims = 8
+	for i := range 40 {
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact", Content: fmt.Sprintf("row %d", i), Source: "manual",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		vec := make([]float32, dims)
+		if i%2 == 0 {
+			// A retired vector space: the identity filter skips it.
+			if err := store.StoreEmbedding(ctx, id, vec, identityStale); err != nil {
+				t.Fatalf("StoreEmbedding: %v", err)
+			}
+			continue
+		}
+		// The configured identity at a width the query does not match: the
+		// width filter skips it.
+		if err := store.StoreEmbedding(ctx, id, make([]float32, dims+1), identityCurrent); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+	}
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	v := &vectorRows{}
+	queryVec := make([]float32, dims)
+	err := store.snapshotVectors(ctx, vectorProjectScanQuery, []any{"test-proj"},
+		vectorProjectPredicate, []any{"test-proj"}, queryVec, identityCurrent, v)
+	if err != nil {
+		t.Fatalf("snapshotVectors: %v", err)
+	}
+	if len(v.rows) != 0 {
+		t.Fatalf("the snapshot loaded %d rows, want none: the fixture must hold only rows the copy skips", len(v.rows))
+	}
+	if cap(v.embeds) != 0 {
+		t.Errorf("reserved %d bytes for a corpus of rows the copy skips, want none", cap(v.embeds))
+	}
+}
+
 // --- the scoring pass ---
 
 // snapshotFixture builds a vectorRows holding n usable rows of dims dimensions,

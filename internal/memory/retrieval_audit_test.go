@@ -2055,3 +2055,160 @@ func TestEveryRendererOfTheDeleteSummaryNamesTheAudits(t *testing.T) {
 		}
 	}
 }
+
+// seedAuditOnMemory files one "used" verdict in projectID about a memory that
+// really exists there, so a later move can be followed through the audit's own
+// project_id. The write names the memory in its call's verdicts, which is what
+// the writer requires of a verdict about a memory it kept.
+func seedAuditOnMemory(t *testing.T, s *Store, projectID, memoryID, session string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: projectID,
+		Source:    "search",
+		Outcome:   "answerable",
+		Verdicts:  []RowVerdict{{ID: memoryID, Kept: true, Stage: "fit", Reason: "fit_response"}},
+	}); err != nil {
+		t.Fatalf("RecordRetrieval: %v", err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID:   projectID,
+		RecordRowID: recs[0].RowID,
+		SessionID:   session,
+		Source:      "search",
+		MemoryID:    memoryID,
+		Outcome:     VerdictOutcomeUsed,
+		Signal:      "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+}
+
+// TestPromoteToGlobalLeavesTheAuditWithItsCall pins that a promotion does NOT
+// move a verdict. retrieval_audit.project_id is the project of the retrieval
+// CALL a verdict was filed against — `audit.Run` stamps the call's project, and
+// the report groups by it — so the verdict belongs with the call, not with the
+// memory the call admitted. Moving the column would detach the verdict from the
+// call its record_rowid still names, and the next audit pass would re-file it
+// under the call's project anyway. memory_flags is the row that DOES move; this
+// is the row that must not.
+func TestPromoteToGlobalLeavesTheAuditWithItsCall(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const source = "audit-promote-source"
+	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, source, Memory{
+		Category: "fact", Content: "the audit stays with the call that filed it", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	seedAuditOnMemory(t, s, source, id, "s-promote")
+
+	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	rows := readAuditRows(t, s)
+	if len(rows) != 1 {
+		t.Fatalf("retrieval_audit holds %d row(s) after the promotion, want 1", len(rows))
+	}
+	if rows[0].ProjectID != source {
+		t.Errorf("audit's project_id = %q, want the CALL's project %q — a promotion must not re-file a verdict "+
+			"against a project the call was not made in", rows[0].ProjectID, source)
+	}
+	if rows[0].MemoryID != id {
+		t.Errorf("audit's memory_id = %q, want %q", rows[0].MemoryID, id)
+	}
+}
+
+// TestDeleteProjectTakesTheAuditsWithTheCallsItRemoves is the regression the
+// memory-ownership predicate introduced: it deleted a verdict only when its
+// memory was in the project, so a verdict whose memory had left survived even
+// though the call it was filed against was deleted with the project. What was
+// left named a project that no longer existed and a record_rowid pointing at a
+// call that no longer existed, which every report can only classify as Detached.
+// The memory is deliberately OUTSIDE the deleted project, which is the shape the
+// ownership predicate spared.
+func TestDeleteProjectTakesTheAuditsWithTheCallsItRemoves(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const doomed = "audit-call-doomed"
+	if err := s.EnsureProject(ctx, doomed, "/tmp/"+doomed, doomed); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the verdict belongs to the call", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The call and its verdict name `doomed`; the memory the verdict names is in
+	// testProject. The verdict is the call's, so it goes when the call does.
+	seedAuditOnMemory(t, s, doomed, id, "s-call-doomed")
+
+	summary, err := s.DeleteProject(ctx, doomed, false)
+	if err != nil {
+		t.Fatalf("DeleteProject (dry run): %v", err)
+	}
+	if summary.RetrievalAudits != 1 {
+		t.Errorf("the dry run counts %d audit(s), want 1 — the verdict the project's call filed", summary.RetrievalAudits)
+	}
+
+	if _, err := s.DeleteProject(ctx, doomed, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	rows := readAuditRows(t, s)
+	if len(rows) != 0 {
+		t.Errorf("retrieval_audit after the delete = %+v, want none — a verdict must not outlive the call it judged",
+			rows)
+	}
+}
+
+// TestDeleteProjectLeavesAVerdictFiledByAnotherProject pins the delete to the
+// CALL's project rather than to the memory's. A verdict filed by another
+// project's call is that project's evidence, so deleting a project that happens
+// to hold the memory it names must not take it. This is the half the
+// memory-ownership predicate got wrong in the other direction.
+func TestDeleteProjectLeavesAVerdictFiledByAnotherProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const doomed = "audit-memory-doomed"
+	if err := s.EnsureProject(ctx, doomed, "/tmp/"+doomed, doomed); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, doomed, Memory{
+		Category: "fact", Content: "another project's call filed this verdict", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The call and the verdict name testProject; the memory is in `doomed`.
+	seedAuditOnMemory(t, s, testProject, id, "s-memory-doomed")
+
+	summary, err := s.DeleteProject(ctx, doomed, false)
+	if err != nil {
+		t.Fatalf("DeleteProject (dry run): %v", err)
+	}
+	if summary.RetrievalAudits != 0 {
+		t.Errorf("the dry run counts %d audit(s) for a project that filed none of them", summary.RetrievalAudits)
+	}
+
+	if _, err := s.DeleteProject(ctx, doomed, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	rows := readAuditRows(t, s)
+	if len(rows) != 1 || rows[0].ProjectID != testProject || rows[0].MemoryID != id {
+		t.Errorf("retrieval_audit after the delete = %+v, want the verdict %s's call filed about %s",
+			rows, testProject, id)
+	}
+}
