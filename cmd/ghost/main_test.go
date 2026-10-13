@@ -77,6 +77,43 @@ func TestParseObsidianFlags(t *testing.T) {
 	})
 }
 
+// TestParseObsidianFlagsRefusesAnEmptyOut: an explicit empty --out is the
+// unset-variable spelling and is a refusal, never "no flag given". The parser
+// returned "" for it, and runObsidian reads "" as "use the default vault", so
+// `ghost obsidian export --out "$VAULT"` with VAULT unset wrote into the
+// default vault and exited 0. The default is the flag left off.
+func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"attached empty", []string{"--out="}},
+		{"separate empty", []string{"--out", ""}},
+		{"attached empty after a valid flag", []string{"--project=ghost", "--out="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, _, err := parseObsidianFlags(tc.args)
+			if err == nil {
+				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --out must be refused, not read as the default vault", tc.args, out)
+			}
+			if err.Error() != "--out requires a value" {
+				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--out requires a value")
+			}
+		})
+	}
+
+	// Positive controls: a value still parses in both spellings, and an absent
+	// --out is not an error and leaves out empty for the default to fill.
+	for _, args := range [][]string{{"--out", "/v"}, {"--out=/v"}} {
+		if out, _, _, err := parseObsidianFlags(args); err != nil || out != "/v" {
+			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want /v", args, out, err)
+		}
+	}
+	if out, _, _, err := parseObsidianFlags([]string{"--project=ghost"}); err != nil || out != "" {
+		t.Errorf("absent --out = %q (err %v), want empty and no error", out, err)
+	}
+}
+
 // TestParseMCPClient verifies --client parsing rejects a missing or empty
 // value (which previously silently fell back to Claude) and accepts both
 // "--client NAME" and "--client=NAME" forms.

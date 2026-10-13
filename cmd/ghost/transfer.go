@@ -211,7 +211,7 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 			}
 			opts.Out = v
 		default:
-			return opts, fmt.Errorf("unknown argument %q", arg)
+			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
 	}
 	return opts, nil
@@ -225,7 +225,7 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 	var positional []string
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
-			return "", fmt.Errorf("unknown flag %q", arg)
+			return "", fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		}
 		positional = append(positional, arg)
 	}
@@ -304,7 +304,7 @@ func parseExportArgs(args []string) (exportOptions, error) {
 			opts.Project = v
 			projectSeen = true
 		default:
-			return opts, fmt.Errorf("unknown argument %q", arg)
+			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
 	}
 	return opts, nil
@@ -324,7 +324,7 @@ func parseImportArgs(args []string) (importOptions, error) {
 		case arg == "--trust-provenance":
 			opts.TrustProvenance = true
 		case strings.HasPrefix(arg, "-"):
-			return opts, fmt.Errorf("unknown flag %q", arg)
+			return opts, fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		default:
 			positional = append(positional, arg)
 		}
