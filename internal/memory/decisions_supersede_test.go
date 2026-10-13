@@ -474,6 +474,58 @@ func TestSupersedeDecisionLegacyCompanionMatchIsUnambiguousOnly(t *testing.T) {
 	})
 }
 
+// A companion recategorised by ghost_memory_update keeps its decision_log
+// source, which no writer tool can set and a default import downgrades, so it is
+// found whatever its category is now — by the link, and by the composed text when
+// it predates the link — and the resolve guard then decides: an architecture
+// companion is retired, a convention companion is left live and reported in
+// Declined.
+func TestSupersedeDecisionFindsARecategorisedCompanion(t *testing.T) {
+	ctx := context.Background()
+	for _, legacy := range []bool{false, true} {
+		for _, tc := range []struct {
+			category string
+			retired  bool
+		}{
+			{category: "architecture", retired: true},
+			{category: "convention", retired: false},
+		} {
+			name := tc.category
+			if legacy {
+				name = "legacy " + name
+			}
+			t.Run(name, func(t *testing.T) {
+				s := testStore(t)
+				oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+				if legacy {
+					if _, err := s.db.Exec(`UPDATE memories SET source_ref = NULL WHERE id IN (?, ?)`, oldMem, newMem); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := s.db.Exec(`UPDATE memories SET category = ? WHERE id = ?`, tc.category, oldMem); err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.retired {
+					if !decisionMemoryResolved(t, s, oldMem) || len(got.Retired) != 1 || got.Retired[0] != oldMem {
+						t.Errorf("a recategorised %s companion was not retired: %+v", tc.category, got)
+					}
+					return
+				}
+				if decisionMemoryResolved(t, s, oldMem) {
+					t.Errorf("the resolve guard was bypassed for a %s companion", tc.category)
+				}
+				if len(got.Declined) != 1 || got.Declined[0] != oldMem {
+					t.Errorf("a %s companion left live is not reported in Declined: %+v", tc.category, got)
+				}
+			})
+		}
+	}
+}
+
 // Old and new compose to the same text and the old companion is gone: the
 // replacement's own companion must not be retired or linked to itself.
 func TestSupersedeDecisionNeverRetiresTheReplacementsOwnCompanion(t *testing.T) {
