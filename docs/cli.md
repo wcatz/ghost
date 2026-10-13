@@ -229,6 +229,8 @@ Kept verbatim: 1    Passed through (not named): 1
 
 Every input id appears in exactly one line or one count, and every count is a count of ids — a merge may name any number of sources, so `Merges (3)` above is three ids folded into one row, and the numbers add up to the input total. Every id is quoted in the spelling the database holds: the parser accepts any case (`memIDKey` compares case-insensitively) and normalises only a drop's successor target, so a response that spelled an id differently would otherwise put a key on the page that looks up nothing. That quoted-id discipline is what makes the count arithmetic checkable, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Deleted` is the set of rows an apply removes, one line each with the reason, and it is counted by the replace's own reuse pass rather than by asking whether the row's text is still in the result: reuse is content-keyed and claims **one** row per emission, so two inputs holding the same bytes both have their text in the result and only one of them is still there afterwards. A row nothing carries is a loss; a row whose identical twin was reused is a deduplication, and the knowledge is still in the project either way. That is the whole of the offline SQLite tier's absorptions, which name no ids and so appeared in no bucket of any report. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen. A `superseded by` reason names the successor it replaces, so that id is quoted on the drop line and accounted for by its own count — the accounting is per input id, not per mention.
 
+The `Applied:` line states how many rows the replace removed (`Applied: 0 memories consolidated, 2 removed`) whenever that count is non-zero, and says nothing about removal otherwise. A round whose every emission the concurrent-edit guard refused can still delete the rows nothing claimed, and the count is what tells the operator so; the restore hint follows on the next line.
+
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 
 
@@ -633,7 +635,7 @@ ghost obsidian export --project myproject --out ~/Documents/GhostVault
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. |
+| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. An EMPTY value is refused (`--out requires a value`, exit 1) rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
 | `--project <name>` | Mirror one project plus global records. |
 
 ### `ghost obsidian sync`
@@ -646,7 +648,7 @@ ghost obsidian sync --interval 30s
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. |
+| `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`. |
 | `--project <name>` | Mirror one project plus global records. |
 | `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. |
 
@@ -780,7 +782,7 @@ Both outputs above show the format and the column widths the command prints; the
 
 Note the `schema version` line: a pre-migration copy is **always** at a lower version than the build that wrote it, because that is what "before the migration" means. So this case is not an accident of the example, and it is why an older file passes. `OpenDB` refuses a file from a newer Ghost outright, so that direction is a real failure and the message says to upgrade; an older file is what every restore of a pre-migration copy produces, and the next ordinary open migrates it.
 
-A manifest that is *present but unreadable* **is** a refusal, and the report says so in those words rather than calling it absent — that is damage, not a missing optional file, and treating it as absent would send the reader looking for a file that is sitting right there. A symlink whose target is gone is the case that makes the two look alike: `Lstat` finds the sidecar while the read reports the same `ENOENT` a genuinely absent manifest does, so absence is decided by the `Lstat` and never by the read's error. The report also never states a size or a row count it did not measure: a run that stopped early says `not checked` rather than `0 bytes` or `no rows`, because the zero value of a size is a 0-byte file and the zero value of a row count is an empty database.
+A manifest that is *present but unreadable* **is** a refusal, and the report says so in those words rather than calling it absent — that is damage, not a missing optional file, and treating it as absent would send the reader looking for a file that is sitting right there. A symlink whose target is gone is the case that makes the two look alike: `Lstat` finds the sidecar while the read reports the same `ENOENT` a genuinely absent manifest does, so absence is decided by the `Lstat` and never by the read's error. A manifest symlink is **followed**, and its target must be a regular file: the resolved target is `stat`ed before it is opened, and a FIFO, device, socket or directory (reached directly or through a link) is refused with the same present-but-unreadable report without being opened, because opening a FIFO blocks until a writer appears and would hang `ghost backup verify`. The report also never states a size or a row count it did not measure: a run that stopped early says `not checked` rather than `0 bytes` or `no rows`, because the zero value of a size is a 0-byte file and the zero value of a row count is an empty database.
 
 Verify **before** restoring, not after: it is the difference between restoring a copy and finding out afterwards that it was never the copy you thought. The restore procedure itself is above, under [`ghost backup`](#ghost-backup).
 
@@ -1630,7 +1632,9 @@ This is an internal integration command rather than the normal way to start main
 
 When the Stop hook spawns it for a turn, it also passes `--signals <path>`, the audit sidecar holding the memory ids and token fingerprints of what the agent wrote this session. The command compares those against what retrieval admitted, records a verdict per kept memory, prints the figures to the log and deletes the file. The flag is never typed by hand: a run without it judges nothing, and a sidecar that cannot be read costs the audit and nothing else.
 
-A run reports its own preconditions and outcomes on stderr — a reflect skip, the scratch reap, the supersede-consensus clamp notice, a phase that failed — and records the outcome durably in the `lifecycle-last-failure` marker the next session start surfaces. The project operand in the runner's own lines is rendered through `memory.RefusalArg`, and the marker's recorded argv renders the value after `--project` through `memory.ProjectArg` — the bounded and the unbounded spellings of the same guard, per `docs/invariants.md`. An ordinary name appears as usual (quoted), and a token-shaped `--project` value is withheld behind a placeholder naming the argument and its format, so the runner's own output and the argv it records do not relocate one. (The marker's own project field and file name are written by `internal/mcpinit`, outside this command.)
+A run reports its own preconditions and outcomes on stderr — a reflect skip, the scratch reap, the supersede-consensus clamp notice, a phase that failed — and records the outcome durably in the `lifecycle-last-failure` marker the next session start surfaces. The project operand in the runner's own lines is rendered through `memory.RefusalArg`, and the marker's recorded argv renders the value after `--project` through `memory.ProjectArg` — the bounded and the unbounded spellings of the same guard, per `docs/invariants.md`. An ordinary name appears as usual (quoted), and a token-shaped `--project` value is withheld behind a placeholder naming the argument and its format, so the runner's own output and the argv it records do not relocate one. The argument parser's own refusals — a second positional argument and an unknown flag, which is where `--project=<value>` lands — render the argument the same way, so a token-shaped or oversized value is withheld there too. (The marker's own project field and file name are written by `internal/mcpinit`, outside this command.)
+
+A run first claims the project's lifecycle lock. Another live run holding it is the only lock outcome that stops the run ("another lifecycle is already running"). A lock that cannot be evaluated — its files cannot be created or written, or the project id is not usable as a file name (for example, longer than the file names built from it allow) — is a warning on stderr, and the phases run unlocked.
 
 ## Development builds: refusing a real store
 
