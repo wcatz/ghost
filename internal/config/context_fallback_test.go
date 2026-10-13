@@ -115,3 +115,29 @@ func TestFallbackConfigKeepsInRangeContextValues(t *testing.T) {
 		t.Errorf("no_answer_cosine = %v, want 0.3 from the environment", cfg.Context.NoAnswerCosine)
 	}
 }
+
+// Every key decodeFallback checks has a reset, and the reset writes a value the
+// same check accepts. A key added to contextChecks without one fails here rather
+// than leaving the fallback to carry the bad value.
+func TestContextChecksEachResetToAValueTheirCheckAccepts(t *testing.T) {
+	for _, c := range contextChecks {
+		if c.reset == nil {
+			t.Errorf("%s has no reset: the fallback would detect a bad value and keep it", c.key)
+			continue
+		}
+		cfg := defaultConfig()
+		cfg.Context = ContextConfig{
+			AbstainCosine:   float32(math.NaN()),
+			RelevanceCutoff: math.NaN(),
+			NoAnswerCosine:  math.NaN(),
+		}
+		if err := c.check(cfg); err == nil {
+			t.Errorf("%s: the check accepted NaN, so this test cannot see its reset", c.key)
+			continue
+		}
+		c.reset(cfg)
+		if err := c.check(cfg); err != nil {
+			t.Errorf("%s: after its reset the check still refuses: %v", c.key, err)
+		}
+	}
+}

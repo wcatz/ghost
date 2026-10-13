@@ -553,15 +553,23 @@ func checkContextValues(cfg *Config) error {
 // contextChecks is checkContextValues one key at a time, in the order Load
 // reports them. decodeFallback walks it too, so a bad value in the environment
 // is replaced key by key rather than only the first one the check reaches.
+// Each entry carries the reset that writes its key's compiled default back and
+// returns the value it wrote, so a key added here cannot be checked by the
+// fallback without also being reset by it
+// (TestContextChecksEachResetToAValueTheirCheckAccepts).
 var contextChecks = []struct {
 	key   string
 	check func(*Config) error
+	reset func(*Config) any
 }{
 	{"context.abstain_cosine", func(cfg *Config) error {
 		if v := float64(cfg.Context.AbstainCosine); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("context.abstain_cosine: a cosine is between 0 and 1, got %v", cfg.Context.AbstainCosine)
 		}
 		return nil
+	}, func(cfg *Config) any {
+		cfg.Context.AbstainCosine = defaultConfig().Context.AbstainCosine
+		return cfg.Context.AbstainCosine
 	}},
 	// The cutoff is a share of the top row's fused Base, so it is the same
 	// (0,1] range a fraction can be in: 0 leaves it off, and a value above 1
@@ -574,6 +582,9 @@ var contextChecks = []struct {
 			return fmt.Errorf("context.relevance_cutoff: a cutoff is a fraction in [0,1] where 0 is off, got %v", cfg.Context.RelevanceCutoff)
 		}
 		return nil
+	}, func(cfg *Config) any {
+		cfg.Context.RelevanceCutoff = defaultConfig().Context.RelevanceCutoff
+		return cfg.Context.RelevanceCutoff
 	}},
 	// The no-answer bar is a cosine in [0,1] where 0 is off. NaN compares false
 	// against both bounds and would read as off, telling a user who set a bar
@@ -583,6 +594,11 @@ var contextChecks = []struct {
 			return fmt.Errorf("context.no_answer_cosine: a cosine is in [0,1] where 0 is off, got %v", cfg.Context.NoAnswerCosine)
 		}
 		return nil
+	}, func(cfg *Config) any {
+		// The default for the default model; decodeFallback then treats the
+		// bar as unset, so the model tie can still turn it off.
+		cfg.Context.NoAnswerCosine = defaultConfig().Context.NoAnswerCosine
+		return cfg.Context.NoAnswerCosine
 	}},
 }
 
@@ -816,22 +832,14 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 	// bad value is replaced with its compiled default. A rejected bar counts
 	// as unset, so the model tie below decides its default as it does for a
 	// bar nobody set.
-	compiled := defaultConfig().Context
 	for _, c := range contextChecks {
 		err := c.check(cfg)
 		if err == nil {
 			continue
 		}
-		switch c.key {
-		case "context.abstain_cosine":
-			cfg.Context.AbstainCosine = compiled.AbstainCosine
-			warnf("%v — using the built-in default %v", err, compiled.AbstainCosine)
-		case "context.relevance_cutoff":
-			cfg.Context.RelevanceCutoff = compiled.RelevanceCutoff
-			warnf("%v — using the built-in default %v", err, compiled.RelevanceCutoff)
-		case noAnswerKey:
+		warnf("%v — using the built-in default %v", err, c.reset(cfg))
+		if c.key == noAnswerKey {
 			explicitBar = false
-			warnf("%v — using the built-in default", err)
 		}
 	}
 	if !explicitBar {
