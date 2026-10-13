@@ -3,9 +3,12 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRestoreKeepsSavesMadeAfterSnapshot is the data-loss defect.
@@ -533,5 +536,110 @@ func TestRestoreLegacySnapshotMatchesByContent(t *testing.T) {
 	}
 	if n := count(); n != 1 {
 		t.Errorf("after a second restore the legacy row appears %d times, want 1 — content match is not idempotent", n)
+	}
+}
+
+// TestRestorePicksTheSnapshotInsideItsWriteTransaction is the cross-process
+// race: RestoreSnapshot read the latest snapshot id on the pool and only then
+// waited for the write lock, so a reflection another handle committed while the
+// restore waited in BEGIN IMMEDIATE was serialised BEFORE the restore and still
+// skipped by it. The restore applied the older snapshot, and a memory saved
+// between the two reflections and consumed by the second was in neither the
+// live corpus nor the snapshot it used — gone, with the restore reporting
+// success.
+//
+// Handle b holds the write lock with the second reflection written but not
+// committed; handle a's restore is started and observed holding its one
+// connection (waiting for the lock, after the old code's pool read); then b
+// commits. A restore that picks its snapshot inside its own transaction sees
+// b's snapshot, so the consumed memory comes back and b's output goes.
+func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ghost.db")
+	open := func() *Store {
+		db, err := OpenDB(path)
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+	a, b := open(), open()
+	live := func(content string) bool {
+		t.Helper()
+		var n int
+		if err := a.db.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE project_id = ? AND content = ?`, testProject, content).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n > 0
+	}
+
+	if err := a.EnsureProject(ctx, testProject, "/src/"+testProject, testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, _, _, err := a.Upsert(ctx, testProject, "fact", "alpha deploys run on tuesdays only", "mcp", 0.6, nil); err != nil {
+		t.Fatalf("save X: %v", err)
+	}
+	if _, _, _, _, err := a.ReplaceNonManual(ctx, testProject, []Memory{{Category: "fact", Content: "reflect one output about deploy cadence", Importance: 0.6}}, "", nil); err != nil {
+		t.Fatalf("reflect1: %v", err)
+	}
+	const mContent = "bravo the staging cluster needs a manual cert rotation"
+	if _, _, _, err := a.Upsert(ctx, testProject, "gotcha", mContent, "mcp", 0.7, nil); err != nil {
+		t.Fatalf("save M: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond) // a distinct UnixNano snapshot id
+	const reflect2Out = "reflect two output merging everything"
+
+	// b takes the write lock (BEGIN IMMEDIATE) and writes reflection 2 in it.
+	txB, err := b.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin b: %v", err)
+	}
+	defer txB.Rollback() //nolint:errcheck
+	if _, _, _, _, err := b.ReplaceNonManual(withStoreTx(ctx, txB), testProject, []Memory{{Category: "fact", Content: reflect2Out, Importance: 0.6}}, "", nil); err != nil {
+		t.Fatalf("reflect2 in tx: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { _, err := a.RestoreSnapshot(ctx, testProject); done <- err }()
+
+	// a is one connection: once the restore holds it continuously, the
+	// restore is in BEGIN waiting for b's lock (the old code's snapshot read
+	// on the pool is a single fast query that releases it before that).
+	deadline := time.Now().Add(5 * time.Second)
+	held := time.Time{}
+	for {
+		if a.db.Stats().InUse == 1 {
+			if held.IsZero() {
+				held = time.Now()
+			} else if time.Since(held) > 100*time.Millisecond {
+				break
+			}
+		} else {
+			held = time.Time{}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("restore finished while b held the write lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restore never started waiting for the write lock")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := txB.Commit(); err != nil {
+		t.Fatalf("commit b: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	if !live(mContent) {
+		t.Errorf("memory saved between the two reflections is gone after the restore: the restore applied the snapshot taken before reflection 1, not the one reflection 2 committed while it waited")
+	}
+	if live(reflect2Out) {
+		t.Errorf("reflection 2's output survived the restore: it was serialised before the restore and should have been undone")
 	}
 }
