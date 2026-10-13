@@ -18,7 +18,7 @@ import (
 // recovery behind one call makes their ordering testable and lets the store
 // commit them atomically.
 type reflectionApplier interface {
-	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []memory.Memory, err error)
+	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error)
 }
 
 // applyReflection converts reflection proposals to store rows and always
@@ -41,18 +41,31 @@ type reflectionApplier interface {
 // longer does, so the replace DELETES any stored memory it was carrying forward.
 // Both halves are consequences of the same position, and neither is a surprise:
 // the row is the value.
-// `applied` is false when there was nothing to write, which is not the same as
-// a successful write of nothing. The caller needs the difference: an
-// unattendented round that writes nothing must not print "Applied", must not
-// offer a restore hint, and above all must not record the skip fingerprint over
-// an unchanged corpus — because then --skip-unchanged skips the project
-// forever, and a stored row holding a credential is never revisited.
+// `applied` is false when the round changed nothing, which is not the same as
+// a round that wrote no new rows. applied is keyed on what the store actually
+// WROTE or DELETED, never on its drop count: an all-dropped round — every
+// emission refused because its claimed row changed or was deleted while the
+// harness was answering (#1051) — can still remove the unclaimed candidates
+// beside those refused claims, and a replace that changed the corpus, snapshot
+// included, has to print "Applied", offer its restore hint, and record the
+// learned context like any other. The caller needs the difference: a round
+// that changes nothing must not print "Applied", must not offer a restore
+// hint, and above all must not record the skip fingerprint over an unchanged
+// corpus — because then --skip-unchanged skips the project forever, and a
+// stored row holding a credential is never revisited. Two paths reach
+// applied=false: nothing survived the credential filter, so the store is not
+// even called, and the store refused every emission it was handed with no row
+// deleted either.
 // `keptProject` and `keptGlobal` are the POST-drop proposal sets, because the
 // caller's "Applied: N memories consolidated" line counts them. Returning only a
 // count left it counting the pre-drop lists, so a partial drop — one good
-// proposal and one credential — reported 2 written when 1 was.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
-	// Filter FIRST, on the caller's two sets, and fold afterwards.
+// proposal and one credential — reported 2 written when 1 was. `projectDropped`
+// and `globalDropped` come back from the store and close the same gap on the
+// OTHER drop path (the corpus guard): they are the emissions the store refused,
+// per half, so the summary can subtract only what each of its components counts
+// and can tell a round that wrote nothing from one that did.
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, applied bool, err error) {
+	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
 	//
 	// The order is load-bearing and it was the other way round here first.
 	// Folding the cross-project candidates into projectMems and nilling
@@ -63,31 +76,37 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	// ", N cross-project candidates kept project-scoped" component disappears
 	// from the Applied line. Filtering first also drops a credential among the
 	// cross-project candidates before they can be promoted, which is the point.
-	keptProject, keptCrossProject, dropped := dropCredentialProposals(projectMems, globalMems)
+	//
+	// The fold itself is the store's job now, not this wrapper's: ApplyReflection
+	// folds the cross-project rows into the project replace when promotion is
+	// off, and it does so AFTER its own corpus guard has filtered them. A fold
+	// here would put those rows into the one list the store sees, so its two
+	// drop counts could no longer be attributed to the half that produced them,
+	// and the summary's project count and cross-project component subtract
+	// different halves. The store already folded the same way on every path that
+	// reached it, so this only changes who owns the slice juggling, not what is
+	// written.
+	keptProject, keptCrossProject, credDropped := dropCredentialProposals(projectMems, globalMems)
 	projectMems = keptProject
 	// Two different sets from here on, and conflating them is the failure the
-	// ordering above is guarding: the fold is what the STORE gets, and
-	// keptCrossProject is what the caller REPORTS. Nilling the returned set to
-	// fold it would make the --promote-globals hint and the cross-project count
-	// unreachable, and a flag nobody is told about is a flag nobody uses.
-	writeGlobals := keptCrossProject
-	if !promoteGlobals && len(keptCrossProject) > 0 {
-		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), keptCrossProject...)
-		writeGlobals = nil
-	}
+	// ordering above is guarding: what the STORE gets (both lists, folded inside
+	// ApplyReflection when promotion is off) and keptCrossProject, which is what
+	// the caller REPORTS. Nilling the returned set to fold it here would make the
+	// --promote-globals hint and the cross-project count unreachable, and a flag
+	// nobody is told about is a flag nobody uses.
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
-	globalRows := reflectMemoriesToMemory("_global", writeGlobals, replaced)
+	globalRows := reflectMemoriesToMemory("_global", keptCrossProject, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
 		// Nothing to write, so nothing is replaced: no deleteIds are computed and
 		// no stored row is touched. The dropped proposals are still reported
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return keptProject, keptGlobal, nil, 0, nil, false, nil
+		return keptProject, keptGlobal, nil, 0, nil, 0, 0, 0, nil, false, nil
 	}
-	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
+	preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals, fed)
 	if err != nil {
-		return keptProject, keptGlobal, nil, 0, nil, false, err
+		return keptProject, keptGlobal, nil, 0, nil, 0, 0, 0, nil, false, err
 	}
 	// Two things have to be true for a carried-forward row to be gone, and this
 	// note says only what holds. A proposal dropped for holding a credential is
@@ -103,11 +122,25 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	// --allow-drops does not gate the removal: that flag is the operator
 	// authorising what the MODEL chose to drop, and this is Ghost removing a row
 	// that is itself the value.
-	if dropped > 0 && len(projectRows) > 0 {
+	if credDropped > 0 && len(projectRows) > 0 {
 		fmt.Fprintln(os.Stderr,
 			"note: the project replace has just removed any stored memory the dropped proposal(s) were carrying forward, because it held a credential value. A manual, builtin, pinned or resolved row is not replaceable and would still be there: check the project")
 	}
-	return keptProject, keptCrossProject, preserved, promoted, kept, true, nil
+	// A successful transaction is not a successful round. When the store refused
+	// every emission it was handed AND removed no stored row — their claimed rows
+	// changed or were deleted while the harness was answering, and no unclaimed
+	// candidate sat beside them — nothing changed, so the round is reported and
+	// recorded exactly as if nothing had reached the store at all: no "Applied",
+	// no restore hint, and above all no skip fingerprint over a corpus the
+	// consolidator's answer never landed in. The store's own delete count, not
+	// the drop count, is what separates that from an all-dropped round that
+	// still changed the corpus: the latter took a snapshot the operator can
+	// restore, so it is a replace and must be reported as one.
+	applied = true
+	if projectDropped+globalDropped == len(projectRows)+len(globalRows) && deleted == 0 {
+		applied = false
+	}
+	return keptProject, keptCrossProject, preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, applied, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own
@@ -327,10 +360,9 @@ func replacedIDsByText(result *reflection.ReflectionResult) map[string][]string 
 	return out
 }
 
-func reflectCategoryParts(mems []reflection.ReflectMemory) string {
-	counts := make(map[string]int)
-	for _, m := range mems {
-		counts[m.Category]++
+func reflectCategoryParts(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
 	}
 	categories := make([]string, 0, len(counts))
 	for category := range counts {
@@ -353,7 +385,11 @@ func reflectCategoryParts(mems []reflection.ReflectMemory) string {
 // and a test that re-spelled the format string would pass with the command
 // changed — the same seam reasoning as gatedLLMTier.
 func reflectResultLine(result reflection.ReflectionResult) string {
-	return fmt.Sprintf("Result:       %d memories (%s)%s\n", len(result.Memories), reflectCategoryParts(result.Memories), reflectRepairNote(result.RepairTurns))
+	counts := make(map[string]int, len(result.Memories))
+	for _, m := range result.Memories {
+		counts[m.Category]++
+	}
+	return fmt.Sprintf("Result:       %d memories (%s)%s\n", len(result.Memories), reflectCategoryParts(counts), reflectRepairNote(result.RepairTurns))
 }
 
 // reflectRepairNote reports the run's repair turn on the `Result:` line: a run
@@ -385,12 +421,37 @@ func reflectRepairNote(turns int) string {
 	return fmt.Sprintf("  repair: %d (a rejected response was re-read)", turns)
 }
 
-// appliedSummary describes the rows actually written to the project. The
-// caller passes the post-fold project slice, so a global candidate kept
-// project-scoped is counted in both the total and category breakdown.
-func appliedSummary(projectMems, globalMems []reflection.ReflectMemory, promoted int, promoteGlobals bool) string {
-	summary := fmt.Sprintf("%d memories consolidated", len(projectMems))
-	if parts := reflectCategoryParts(projectMems); parts != "" {
+// crossProjectKept is the number of cross-project candidates the round actually
+// left in the project: every candidate the caller handed over, minus the ones
+// the store refused. With promotion off a candidate can be refused by EITHER
+// guard pass — the global half's own pass, or the replace's second pass over the
+// folded list — and the store attributes both to the same drop count precisely
+// so this one subtraction covers them. Callers that print per-candidate
+// follow-ups must count with this too: a round that refused every candidate has
+// nothing to promote, and saying otherwise contradicts the applied total
+// printed next to it.
+func crossProjectKept(globalMems []reflection.ReflectMemory, globalDropped int) int {
+	if kept := len(globalMems) - globalDropped; kept > 0 {
+		return kept
+	}
+	return 0
+}
+
+// appliedSummary describes the rows that actually landed in the project. The
+// caller passes the store's per-category applied counts — what the replace
+// wrote, plus any kept-back global candidate written into the project — so the
+// total and the category breakdown come from the SAME map: an emission the
+// corpus guard refused is counted in neither, and the parts always sum to the
+// total. Counting the caller's emitted slices instead was the bug here: they
+// still hold the dropped emissions, so a partial-refusal round printed "(1
+// fact)" beside "0 memories consolidated".
+func appliedSummary(appliedByCategory map[string]int, globalMems []reflection.ReflectMemory, promoted, globalDropped int, promoteGlobals bool) string {
+	total := 0
+	for _, n := range appliedByCategory {
+		total += n
+	}
+	summary := fmt.Sprintf("%d memories consolidated", total)
+	if parts := reflectCategoryParts(appliedByCategory); parts != "" {
 		summary += " (" + parts + ")"
 	}
 	if len(globalMems) == 0 {
@@ -399,7 +460,7 @@ func appliedSummary(projectMems, globalMems []reflection.ReflectMemory, promoted
 	if promoteGlobals {
 		return summary + fmt.Sprintf(", %d promoted to global", promoted)
 	}
-	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems))
+	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", crossProjectKept(globalMems, globalDropped))
 }
 
 func restoreHint(promoted int) string {

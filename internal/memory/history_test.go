@@ -250,12 +250,12 @@ func TestMemoryHistoryRecordsReflectRewriteAndDelete(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category:   "fact",
 		Content:    "search falls back to FTS5 when Ollama is unreachable",
 		Importance: 0.6,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -647,12 +647,12 @@ func TestMemoryHistoryRecordsRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category:   "fact",
 		Content:    "ollama being unreachable degrades retrieval to lexical only",
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
@@ -1202,13 +1202,13 @@ func TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow(t *testing.T) {
 	// The consolidation rewrites it, declaring which input row it stands for —
 	// the field the reflection operations (#659) fill in from their merge and
 	// rewrite output.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category:    "fact",
 		Content:     "an unreachable Ollama degrades retrieval to lexical search only",
 		Importance:  0.5,
 		Source:      "reflection",
 		ReplacesIDs: []string{old},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -1257,12 +1257,12 @@ func TestReplaceNonManualLeavesAnUnrelatedDeleteWithoutASuccessor(t *testing.T) 
 	}
 	// A verbatim keep survives, so something else has to be dropped: the emitted
 	// memory is a different fact entirely.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category:   "fact",
 		Content:    "an entirely different consolidated fact about the pipeline",
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	entries, err := s.MemoryHistory(ctx, kept, 0)
@@ -1568,12 +1568,12 @@ func TestPurgeReachesTheSnapshotThatCouldRestoreTheRow(t *testing.T) {
 	// replacement here is a no-op shape: the emitted text is the same memory, so
 	// the row is reused and the snapshot of the pre-replace text is what stands
 	// between the purge and a restore.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category:   "gotcha",
 		Content:    secret,
 		Importance: 0.5,
 		Source:     "reflection",
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	var snapshots int
@@ -1760,9 +1760,9 @@ func TestRestoreAppendsOnlyForRowsItChanged(t *testing.T) {
 		t.Fatalf("create the pre-snapshot row: %v", err)
 	}
 	// The reflection that snapshots and replaces it.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "the consolidated wording", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

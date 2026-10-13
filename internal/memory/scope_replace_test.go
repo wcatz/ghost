@@ -28,9 +28,9 @@ func TestReplaceNonManualCarriesScope(t *testing.T) {
 		t.Fatalf("create old: %v", err)
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "a consolidated fact scoped to production", Importance: 0.6, Scope: scope},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -63,10 +63,10 @@ func TestReplaceNonManualRewritesScopeOnReusedRow(t *testing.T) {
 		t.Fatalf("create old: %v", err)
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "a fact that reflection will rewrite in place", Importance: 0.6,
 			Scope: map[string]string{"environment": "production"}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -106,9 +106,9 @@ func TestReplaceNonManualKeepsScopeWhenReflectionOmitsIt(t *testing.T) {
 
 	// No Scope: exactly what cmd/ghost/lifecycle.go builds from a
 	// reflection.ReflectMemory, which has no scope field.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "a scoped fact the consolidator re-emits verbatim", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -144,9 +144,9 @@ func TestRestoreSnapshotSkipsUnverifiedScopeOnInsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "an unrelated consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	all, err := s.GetAll(ctx, testProject, 100)
@@ -284,9 +284,9 @@ func TestRestoreSnapshotBringsScopeBack(t *testing.T) {
 	}
 
 	// ReplaceNonManual snapshots first, then destroys the row.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "an unrelated consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -338,10 +338,10 @@ func TestRestoreSnapshotRewritesScopeOnExistingRow(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "a fact whose scope will be edited after the snapshot", Importance: 0.6,
 			Scope: map[string]string{"environment": "staging"}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

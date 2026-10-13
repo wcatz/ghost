@@ -547,10 +547,10 @@ func TestPurgeReachesTheEvidenceASnapshotCarries(t *testing.T) {
 
 	// A reflect takes the snapshot a restore reads. Both rows are re-emitted
 	// verbatim, so both are reused in place and only the snapshot grows.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "convention", Content: redacted, Importance: 0.6},
 		{Category: "fact", Content: bystander, Importance: 0.5},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	var carried int
@@ -685,10 +685,10 @@ func TestCarryIsVerbatimAndNamesItsSource(t *testing.T) {
 	}
 
 	const carried = "the vault seal is read-only once written, and cannot be rewritten"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "gotcha", Content: carried, Importance: 0.6,
 		ReplacesIDs: []string{source},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
