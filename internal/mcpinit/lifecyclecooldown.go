@@ -102,7 +102,7 @@ func TouchLifecycleStart(project string) error {
 		return fmt.Errorf("cannot record a lifecycle start for %s: no project resolves to it", memory.RefusalArg("project", project))
 	}
 	if !safeProjectIDComponent(id) {
-		return fmt.Errorf("project id %q is not a safe filename component", id)
+		return fmt.Errorf("project id %s is not a safe filename component", memory.RefusalArg("project id", id))
 	}
 	path := filepath.Join(dataDir, lifecycleLastStartFile(id))
 	// Write-temp-then-rename, like the failure marker: the only mutation of the
