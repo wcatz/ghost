@@ -285,12 +285,24 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 // treating those rows as absent is how a changed-model setup looks like an empty
 // store.
 //
-// It carries the two counts and nothing else. The stored identities behind the
-// foreign count stay local to the scan, where the warning log names them one per
-// identity; a model name cannot reach a caller anyway, because LegStatus has no
-// field to carry it, and a field no consumer can read is a claim nothing checks.
+// It carries the three counts and nothing else. The stored identities behind
+// the foreign count stay local to the scan, where the warning log names them one
+// per identity; a model name cannot reach a caller anyway, because LegStatus has
+// no field to carry it, and a field no consumer can read is a claim nothing
+// checks.
+//
+// validityExcluded counts the rows the scan scored above the similarity floor
+// and then withheld because they lie outside their validity window (#1053). It
+// is the vector leg's counterpart to the keyword leg's own count, and it is free
+// and exact because the scoring loop already holds the similarity it is
+// counting past — no second pass and no extra statement. It is what keeps a
+// semantic-only (or hybrid) query whose every match retired from reading as
+// absence: the query path sums it into CandidateSet.ValidityExcluded when the
+// leg came back empty, and the empty reason stays `all_invalid` rather than
+// `no_candidates`. Zero on a browse read, which asks for no window and so
+// withholds nothing.
 type vectorLegFacts struct {
-	mismatched, foreign int
+	mismatched, foreign, validityExcluded int
 }
 
 // searchVectorLeg is the project's vector leg, with its facts. Every exported

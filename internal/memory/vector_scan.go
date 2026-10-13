@@ -517,7 +517,10 @@ func (s *Store) reportSkippedVectors(foreign map[string]int, mismatched int, mis
 // The validity window, when v.now names one, narrows before the cut for the same
 // reason and is the mirror of the keyword leg's SQL predicate (#1053): a row
 // stage 2 will withhold must not spend a slot of the depth, or a small window
-// fills with expired rows and hides a valid match ranked below them.
+// fills with expired rows and hides a valid match ranked below them. The rows it
+// withholds are counted into v.facts.validityExcluded as they are scored, so an
+// empty leg can still report that it found matches and withheld them rather than
+// that it found none (see vectorLegFacts).
 func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]string) []ScoredMemory {
 	// A non-positive limit cannot be satisfied by any window. (The cut it
 	// replaces sliced to `limit` without checking, which panicked on a negative
@@ -554,6 +557,13 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 			continue
 		}
 		if v.validityWithheld(sp) {
+			// Count what the window withheld so an empty leg can say why it is
+			// empty (#1053). The row matched above the floor — the check above
+			// passed — so it is a match the leg is reporting as withheld rather
+			// than missed; the query path reads the count when the leg returns
+			// nothing and keeps the empty reason `all_invalid`. Free: the
+			// similarity is already in hand and no second pass is run.
+			v.facts.validityExcluded++
 			continue
 		}
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {

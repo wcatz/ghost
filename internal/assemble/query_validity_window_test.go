@@ -244,3 +244,96 @@ func TestAQueryWithNoMatchAtAllStaysNoCandidates(t *testing.T) {
 		t.Errorf("reason = %q, want no_candidates: nothing matched, so nothing was withheld", res.Reason)
 	}
 }
+
+// expiredSemanticOnlyStore builds a store holding one expired row whose stored
+// embedding IS the query vector but whose text shares no term with the query — a
+// match only the vector leg can see. It is the fixture for the two reason tests
+// below: the keyword leg has nothing to withhold, so the empty reason has to come
+// from the vector leg's own count. The window is closed (2020) and Now is 2026.
+func expiredSemanticOnlyStore(t *testing.T, queryVec []float32) *memory.Store {
+	t.Helper()
+	ctx := context.Background()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "proj", "/src/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	expired := "2020-01-01 00:00:00"
+	id, err := s.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "the quarterly banana harvest is in the ledger",
+		Source: "manual", Importance: 0.7, ValidUntil: &expired,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, id, queryVec, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	return s
+}
+
+// assertRetiredMatchWithheld is the shared assertion for a query whose only
+// match is out of its window: the result is empty, and its reason says rows were
+// found and withheld as out of date rather than that nothing matched.
+func assertRetiredMatchWithheld(t *testing.T, res Result, path string) {
+	t.Helper()
+	if len(res.Items) != 0 {
+		t.Fatalf("%s: items = %v, want none: the only match is out of its window", path, itemIDs(res.Items))
+	}
+	if res.Outcome != OutcomeEmpty {
+		t.Errorf("%s: outcome = %q, want %q", path, res.Outcome, OutcomeEmpty)
+	}
+	if res.Reason != "all_invalid" {
+		t.Errorf("%s: reason = %q, want all_invalid: the query's only match was withdrawn as out of "+
+			"date, which is not the same fact as nothing matching", path, res.Reason)
+	}
+	if !strings.Contains(res.Abstention, "withheld as out of date") {
+		t.Errorf("%s: abstention = %q, want it to say the candidates were withheld as out of date", path, res.Abstention)
+	}
+}
+
+// TestAVectorOnlyQueryWhoseOnlyMatchRetiredStaysAllInvalid is the semantic-only
+// half of the reason #1053 has to preserve. The vector scan now withholds an
+// out-of-window row before its cut, so a query whose only (cosine) match retired
+// comes back empty — and the count of what the scan withheld is what keeps the
+// empty reason `all_invalid`. Without it the reason reads `no_candidates`, whose
+// sentence the tool reserves for "no such memory", which is a different and false
+// claim about a corpus whose match merely aged out.
+func TestAVectorOnlyQueryWhoseOnlyMatchRetiredStaysAllInvalid(t *testing.T) {
+	qvec := []float32{1, 0, 0, 0}
+	s := expiredSemanticOnlyStore(t, qvec)
+	res := run(t, s, Request{
+		ProjectID: "proj",
+		Query:     "kubernetes upgrade runbook",
+		QueryVec:  qvec,
+		Source:    SourceSearch,
+		Budget:    Budget{MaxItems: 3},
+		Condition: CondVectorOnly,
+		Now:       time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC),
+	})
+	assertRetiredMatchWithheld(t, res, "vector-only")
+}
+
+// TestAHybridQueryWhoseOnlySemanticMatchRetiredStaysAllInvalid is the hybrid
+// case, which is the normal Ollama mode. The keyword leg finds nothing (the text
+// shares no term with the query), so only the vector leg's count can carry the
+// reason; if it does not, an agent whose semantic match retired is told
+// `no_candidates` and reads it as "no such memory".
+func TestAHybridQueryWhoseOnlySemanticMatchRetiredStaysAllInvalid(t *testing.T) {
+	qvec := []float32{0, 1, 0, 0}
+	s := expiredSemanticOnlyStore(t, qvec)
+	res := run(t, s, Request{
+		ProjectID: "proj",
+		Query:     "kubernetes upgrade runbook",
+		QueryVec:  qvec,
+		Source:    SourceSearch,
+		Budget:    Budget{MaxItems: 3},
+		Condition: CondHybrid,
+		Now:       time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC),
+	})
+	assertRetiredMatchWithheld(t, res, "hybrid")
+}

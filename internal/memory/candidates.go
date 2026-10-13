@@ -219,13 +219,15 @@ type CandidateSet struct {
 	// they are counted here because a shorter set that says nothing about the gap
 	// reads as the whole truth. Zero on every current read.
 	Unrecorded int
-	// ValidityExcluded counts the rows a validity predicate removed in SQL,
-	// before the window closed, so a set that came back empty can say whether it
-	// was empty of valid rows or EMPTY of rows. The passive path sets it for a
-	// bucket whose fetch returned nothing; the query path's keyword leg sets it
-	// when the query's every match lay outside its window (#1053). Both are zero
-	// on a read whose predicate admitted everything, and zero on the vector leg,
-	// which has no lexical match to count.
+	// ValidityExcluded counts the rows a validity predicate removed before the
+	// window closed, so a set that came back empty can say whether it was empty
+	// of valid rows or EMPTY of rows. The passive path sets it for a bucket whose
+	// fetch returned nothing. The query path sets it from the leg that withheld
+	// the rows: the keyword leg counts what its SQL predicate removed when it
+	// returns nothing (#1053), and the vector scan counts the above-floor matches
+	// it withheld before the cut, so a semantic-only or hybrid empty whose every
+	// match retired reads `all_invalid` too rather than as absence. All are zero
+	// on a read whose predicate admitted everything.
 	ValidityExcluded int
 	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
 	// entered the window: the window is a LIMIT, and a bucket holding more pinned
@@ -946,6 +948,20 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 			// yet.
 			vecStatus.DimMismatch = facts.mismatched + facts.foreign
 			vecStatus.Eligible = len(kept)
+			// #1053 moved the window predicate into the vector scan too, so a
+			// semantic-only (or hybrid) query whose every match above the
+			// similarity floor is out of its window comes back with no candidate
+			// and no stage having run. The scan counted those rows as it scored
+			// them, so the count is free and exact; it is added to the set only
+			// when the leg itself came back empty, mirroring the keyword leg's
+			// probe, so it cannot describe a non-empty leg as withheld. A vector
+			// match is a cosine rather than a term, so there is no separate
+			// statement that could count what the leg would have retrieved — the
+			// count lives in the scan because that is the only place the
+			// similarity is known.
+			if len(raw) == 0 {
+				set.ValidityExcluded += facts.validityExcluded
+			}
 			// CoverageComplete stays false on purpose, and the reason is a cost
 			// decision rather than an oversight. Reconciling it needs the rows
 			// the leg could have seen against the rows that carry a vector —
@@ -1009,12 +1025,14 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 // are different facts a caller acts on differently — the tool's reason vocabulary
 // allows only no_candidates to claim the store holds nothing matching.
 //
-// ONLY the keyword leg can answer it. A vector match is a cosine rather than a
-// term, so there is no cheap statement that counts the rows a vector leg WOULD
-// have retrieved; counting the project's out-of-window rows instead would report
-// rows that never matched as withheld, which is exactly the false claim
-// no_candidates exists to avoid. A vector-only empty therefore stays
-// no_candidates, and that is honest rather than a gap.
+// This counts the KEYWORD leg's population. The vector leg answers the same
+// question from its own scan — a vector match is a cosine rather than a term, so
+// there is no cheap statement that counts the rows it would have retrieved, and
+// the only place the similarity is known is the scoring loop, which counts the
+// above-floor matches it withheld (vectorLegFacts.validityExcluded). The two
+// counts are summed by the query path when their legs come back empty, so a
+// semantic-only or hybrid query whose every match retired is `all_invalid` too,
+// not an absence.
 //
 // The population is the leg's own — the same predicate, the same bindings, the
 // same project clause, and no resolved_at or scope filter, both of which the

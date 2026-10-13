@@ -122,7 +122,8 @@ axes that decide eligibility:
   set and was dropped there. A row the legs withheld before the window is not a
   candidate at all, so the payload has no row for it — but a query whose matches
   all retired is still answered `empty reason=all_invalid` ("withheld as out of
-  date"), not `no_candidates`, because the leg reports how many it withheld.
+  date"), not `no_candidates`, because each leg reports how many it withheld
+  (keyword, semantic-only and hybrid alike).
   `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.

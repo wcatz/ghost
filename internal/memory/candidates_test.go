@@ -1263,3 +1263,77 @@ func TestCandidatesCountsTheRowsTheKeywordLegWithheld(t *testing.T) {
 			"would report rows that never matched", none.ValidityExcluded)
 	}
 }
+
+// TestCandidatesCountsTheRowsTheVectorLegWithheld is the semantic counterpart of
+// the keyword count above, and the half of #1053 the semantic-only and hybrid
+// paths depend on: the vector scan withholds an out-of-window row before its
+// top-k cut, so a query whose every above-floor match retired comes back empty
+// and needs the count to keep `all_invalid` rather than read as absence.
+//
+// The count is the scan's own: the number of rows the cosine pass scored above
+// the similarity floor and then withheld, which no separate statement could
+// reconstruct (a vector match is a cosine, not a term). It joins the set only
+// when the leg came back empty, exactly as the keyword probe does, so a leg that
+// found a valid match reports zero even when it also withheld rows.
+func TestCandidatesCountsTheRowsTheVectorLegWithheld(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	expired := "2020-01-01 00:00:00"
+
+	add := func(content string, validUntil *string, vec []float32) {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: content, Source: "manual",
+			Importance: 0.7, ValidUntil: validUntil,
+		})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", content, err)
+		}
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(%q): %v", content, err)
+		}
+	}
+	// Two expired rows whose embeddings ARE the query vector: the cosine pass
+	// scores both above the floor and withholds both.
+	add("the quarterly banana harvest is in the ledger", &expired, []float32{1, 0, 0})
+	add("the annual banana harvest is in the ledger", &expired, []float32{1, 0, 0})
+
+	req := CandidateRequest{
+		ProjectID: testProject,
+		Mode:      ProjectScoped,
+		Query:     "kubernetes upgrade runbook",
+		QueryVec:  []float32{1, 0, 0},
+		Condition: CondVectorOnly,
+		Params:    DefaultSearchParams(),
+		Now:       now,
+		Fetch:     Fetch{FTSTopK: 10, VectorTopK: 10, Limit: 5},
+	}
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) != 0 {
+		t.Fatalf("rows = %v, want none: every vector match is out of its window", candidateIDs(t, set))
+	}
+	if set.ValidityExcluded != 2 {
+		t.Errorf("ValidityExcluded = %d, want 2: both above-floor matches were withheld, so the empty "+
+			"reason must not read as `no_candidates`", set.ValidityExcluded)
+	}
+
+	// A live row on the same vector makes the leg non-empty, so the count must
+	// stay zero: the emptiness rule is what stops it claiming a leg that found a
+	// match withheld rows.
+	add("the monthly banana harvest is in the ledger", nil, []float32{1, 0, 0})
+	set, err = s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) == 0 {
+		t.Fatal("rows empty after a valid match was added; the fixture is wrong")
+	}
+	if set.ValidityExcluded != 0 {
+		t.Errorf("ValidityExcluded = %d on a non-empty leg, want 0: the count is taken only when the "+
+			"leg comes back empty", set.ValidityExcluded)
+	}
+}
