@@ -1049,7 +1049,7 @@ Also do NOT save credential values — an API key, access token, password, priva
 A memory holds durable knowledge: what survives the conversation and is expensive or inconvenient to rediscover. Save the rule and its reason, not what the repository already states. Good: 'Production schema changes require explicit approval.' and 'Deployment keeps database migrations separate from application rollout, on purpose.' Bad: 'foo.go contains HandleFoo()' — the repository is authoritative for that, so the note goes stale silently and is cheap to re-read from the code. This rule guides and never refuses: a save that reads as a repository fact is still stored, with a note saying so.
 
 ## Changed Decisions
-When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision.
+When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision. If that decision already has a live successor the record is refused and names it; pass the successor instead.
 
 ## Reading Search Results
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
@@ -3350,7 +3350,7 @@ func (s *Server) registerTools() {
 		// arrays survive schema validation and are normalized in-handler.
 		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
-		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). Refused, with nothing written, if that decision already has a live successor; pass the successor instead. That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -3486,8 +3486,19 @@ func (s *Server) registerTools() {
 				// the same renderer, so the whole sentence is bounded and nothing
 				// raw comes back through it.
 				supersedeFailed = true
-				supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
-					memory.RefusalArg("supersedes", args.Supersedes), err)
+				var successorErr *memory.DecisionSuccessorError
+				if errors.As(err, &successorErr) {
+					// The check before the write saw no live successor and the
+					// supersede's transaction did: another writer got there in
+					// between (#1144). The new decision is committed, so the
+					// refusal's advice — record with supersedes=<successor> — would
+					// write a second copy of it. Say it stands unlinked instead.
+					supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: it is already superseded by decision %s, which is still live. This decision stands and is NOT linked to either; do not record it again. If it replaces %s, the two live decisions need reconciling by the operator.",
+						memory.RefusalArg("supersedes", args.Supersedes), assemble.Token(successorErr.Successor), assemble.Token(successorErr.Successor))
+				} else {
+					supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
+						memory.RefusalArg("supersedes", args.Supersedes), err)
+				}
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {

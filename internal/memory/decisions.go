@@ -276,8 +276,10 @@ type DecisionSuccessorError struct {
 }
 
 func (e *DecisionSuccessorError) Error() string {
-	return fmt.Sprintf("decision is already superseded by %s, which is still live; supersede that one instead (supersedes=%s)",
-		SafeToken(e.Successor), SafeToken(e.Successor))
+	// No advice here: the store cannot know whether its caller already wrote the
+	// replacement, and "pass supersedes=<successor>" is wrong advice to a caller
+	// that did (ghost_decision_record words its own answer for that case).
+	return fmt.Sprintf("decision is already superseded by %s, which is still live", SafeToken(e.Successor))
 }
 
 // LiveDecisionSuccessor returns the id of the decision that superseded

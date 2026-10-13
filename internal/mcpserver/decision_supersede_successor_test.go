@@ -1,11 +1,16 @@
 package mcpserver
 
 import (
+	"context"
 	"database/sql"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // recordDecisionID records one decision through the tool and returns its
@@ -120,5 +125,65 @@ func TestDecisionSupersedeRepointsWhenTheSuccessorWasItselfReplaced(t *testing.T
 	c := labeledID(t, out, "decision_id: ")
 	if status, by := decisionPointer(t, db, a); status != "superseded" || by != c {
 		t.Errorf("A is %s superseded_by %q, want superseded by %s", status, by, c)
+	}
+}
+
+// staleSuccessorStore answers the handler's read-only successor check with
+// "none", as a store would when a second writer superseded the target between
+// that read and the supersede itself. Everything else is the real store, so the
+// supersede's own in-transaction guard is what has to catch it.
+type staleSuccessorStore struct{ provider.MemoryStore }
+
+func (staleSuccessorStore) LiveDecisionSuccessor(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+// TestDecisionSupersedeRaceKeepsTheNewDecisionAndDoesNotSendItRoundAgain is the
+// backstop behind the #1144 refusal: when the read before the write saw no live
+// successor but the supersede's transaction does, the new decision is already
+// committed. The answer is the #1041 partial failure, and it must not tell the
+// caller to record again with supersedes=<successor> — that would write a
+// second copy of the decision that just landed.
+func TestDecisionSupersedeRaceKeepsTheNewDecisionAndDoesNotSendItRoundAgain(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	session := connectedClient(t, New(staleSuccessorStore{memory.NewStore(db, logger)}, logger, "test"))
+
+	a := recordDecisionID(t, session, map[string]any{
+		"project_id": "p", "title": "queue backend", "decision": "use Redis", "rationale": "deployed",
+	})
+	b := recordDecisionID(t, session, map[string]any{
+		"project_id": "p", "title": "queue backend", "decision": "use Postgres", "rationale": "Redis lost jobs",
+		"supersedes": a,
+	})
+
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "p", "title": "queue backend", "decision": "use SQS", "rationale": "managed",
+		"supersedes": a,
+	})
+	out := resultText(res)
+	if !res.IsError {
+		t.Fatalf("a supersede the transaction refused was reported as a success:\n%s", out)
+	}
+	c := labeledID(t, out, "decision_id: ")
+	labeledID(t, out, "memory_id: ")
+	if !strings.Contains(out, a) || !strings.Contains(out, b) {
+		t.Errorf("the answer does not name both the target %s and its live successor %s:\n%s", a, b, out)
+	}
+	if !strings.Contains(out, "NOT linked") {
+		t.Errorf("the answer does not say the new decision was left unlinked:\n%s", out)
+	}
+	if strings.Contains(out, "supersedes="+b) || strings.Contains(out, "supersede that one instead") {
+		t.Errorf("the answer tells the caller to record the committed decision again:\n%s", out)
+	}
+	if status, by := decisionPointer(t, db, a); status != "superseded" || by != b {
+		t.Errorf("A is %s superseded_by %q, want superseded by %s", status, by, b)
+	}
+	if status, _ := decisionPointer(t, db, c); status != "active" {
+		t.Errorf("the committed decision %s is %s, want active", c, status)
 	}
 }
