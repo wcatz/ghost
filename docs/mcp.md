@@ -623,7 +623,9 @@ all. The refusal never echoes the value, so the `ghost import` report cannot be
 forged by the record it is refusing. The rejection is per-record and named by
 artifact line number, so one damaged line does not abandon a file that may hold ten
 thousand good ones, and a dry run classifies the file exactly as the apply run it
-previews.
+previews. The same parity holds for an id the artifact repeats: the plan tracks the
+ids the run has created, so the second record is a skip in the preview exactly as it
+is once the first has committed.
 
 `ghost export` applies **these same checks** rather than a second spelling of them,
 so it never writes a record its own importer would reject. A record it leaves out is
