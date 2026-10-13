@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/secret"
@@ -102,7 +103,10 @@ func headerLine() []byte {
 // id or name exactly, and a filter that matches nothing is an error. Silently
 // exporting zero records would produce a file that reads like a store with
 // nothing in it, and the user who asked for one project would not learn that the
-// name was wrong until they tried to import it elsewhere.
+// name was wrong until they tried to import it elsewhere. A filter that matches
+// MORE than one project is an error too, naming the ids it matched: a name is not
+// unique, and exporting every project that answers to it would capture a project
+// the caller never named.
 //
 // Records are written projects first, then memories, then tasks, then decisions.
 // Projects come first because a memory names a project, and an artifact a user
@@ -402,6 +406,21 @@ func scopeBoundReason(e *memory.ScopeBoundError) string {
 // basename fallback — because an export filter is a choice about what to copy,
 // and a filter that resolved like project resolution would select a different
 // project on another machine than the one named here.
+//
+// A filter that matches more than one project is REFUSED, not widened. A project's
+// NAME is not unique — `projects.path` and `projects.repo_remote` carry the only
+// unique indexes — so `ID == filter || Name == filter` can match two rows, and
+// exporting both would violate the one thing `--project` promises: that the
+// artifact holds one project and nothing else. A backup script that named a
+// duplicate name would silently capture another project's memories into a file it
+// hands to someone else, and a restore elsewhere would create the extra project.
+// An id is a primary key and matches at most one row, so the refusal names every
+// matched id and the operator can switch to one.
+//
+// The filter and the ids are rendered through `memory.RefusalArg`, the renderer
+// every store-level project refusal uses: it quotes the value (so a control
+// character cannot forge a line of the report) and withholds one shaped like a
+// credential rather than relocating it into a log.
 func selectProjects(projects []memory.PortableProject, filter string) ([]memory.PortableProject, error) {
 	if filter == "" {
 		return projects, nil
@@ -413,7 +432,15 @@ func selectProjects(projects []memory.PortableProject, filter string) ([]memory.
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no project matches %q", filter)
+		return nil, fmt.Errorf("no project matches %s", memory.RefusalArg("project", filter))
+	}
+	if len(out) > 1 {
+		ids := make([]string, 0, len(out))
+		for _, p := range out {
+			ids = append(ids, memory.RefusalArg("project_id", p.ID))
+		}
+		return nil, fmt.Errorf("project filter %s matches multiple projects: %s — name a project by its unique id",
+			memory.RefusalArg("project", filter), strings.Join(ids, ", "))
 	}
 	return out, nil
 }

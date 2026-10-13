@@ -96,12 +96,14 @@ sidecar into an unverified backup that still looked fine.
 Writes memories, tasks, decisions and projects as JSON Lines — one JSON object
 per line, readable, diffable and editable.
 
-  --project <name>   Export one project, matched by name or id exactly.
-                     Default: every project. An EMPTY value is refused rather
-                     than read as the default — --project= is a script with an
-                     unset variable, and the way to export everything is to leave
-                     the flag off. Naming the flag twice is refused too, whatever
-                     the values are.
+  --project <name>   Export one project, matched by name or id exactly. A name
+                     that matches nothing is an error, and so is a name that
+                     matches MORE than one project (the ids are named); an id
+                     selects exactly one. Default: every project. An EMPTY value
+                     is refused rather than read as the default — --project= is a
+                     script with an unset variable, and the way to export
+                     everything is to leave the flag off. Naming the flag twice is
+                     refused too, whatever the values are.
   --out <path>       Where to write it. Default: a timestamped .jsonl beside
                      the database. Use "-" for standard output.
 
