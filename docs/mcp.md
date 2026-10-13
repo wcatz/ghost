@@ -448,6 +448,19 @@ import` refuse a file `ghost export` had just written. An id is a primary key, s
 a shortened one would name a *different row* — a memory under a key the artifact
 never chose, colliding with whatever genuinely holds it.
 
+A memory's **retention tier** is the same class of check over a value set rather
+than over characters: the three tiers the column's CHECK accepts are checked
+against the same refusal the save tool uses, so a hand-edited `retention: forever`
+is refused by name rather than failing the INSERT with SQLite's own wording, and a
+record that states no tier — every artifact written before the field existed — is
+not a refusal at all but the column's own default. On the way IN the tier is
+**downgraded** to `project` unless `--trust-provenance` is given, exactly as
+`source` and `pinned` are: the tier is the one field a file could cheat with,
+because `persistent` is the one tier no lifecycle pass may take back and `session`
+schedules a row for deletion on a clock the file chose. A restored `session` row
+gets a fresh derived expiry, because the artifact carries no `expires_at` and a
+session row with none would be one no `ghost prune` could ever reach.
+
 **A tag is refused at WRITE time, and never costs a record.** All four tools that
 take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
 and `ghost_decision_record` — refuse a tag holding a control character, a backtick

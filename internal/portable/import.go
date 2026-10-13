@@ -53,11 +53,11 @@ type RecordResult struct {
 	// is set for a create, including a dry run's, because the cut is what the
 	// user needs to know about before applying.
 	Clamped bool
-	// Downgraded reports that the memory's own source and pin state were
-	// replaced, because the run was not told to trust the artifact's provenance
-	// (see memory.ImportOptions.TrustProvenance). It is set for a dry run's
-	// create too, for the same reason Clamped is: the rewrite is the thing to
-	// read the preview for.
+	// Downgraded reports that the memory's own source, pin state and retention
+	// tier were replaced, because the run was not told to trust the artifact's
+	// provenance (see memory.ImportOptions.TrustProvenance). It is set for a dry
+	// run's create too, for the same reason Clamped is: the rewrite is the thing
+	// to read the preview for.
 	Downgraded bool
 	Error      error
 }

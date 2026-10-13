@@ -386,6 +386,18 @@ func TestImportMemoryRejectsInvalidRecords(t *testing.T) {
 			want: "must be one of",
 		},
 		{
+			// The tier is the third value-set check in the predicate, and the
+			// column's CHECK would refuse a fourth one with SQLite's own
+			// wording — a message that quotes the CHECK expression and so holds
+			// the accepted values in a different shape from Ghost's own.
+			name: "unknown retention",
+			rec: PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
+				Retention: "forever",
+			},
+			want: "must be one of",
+		},
+		{
 			name: "unknown project",
 			rec: PortableMemory{
 				ID: "m1", ProjectID: "nope", Category: "fact", Content: "x", Source: "mcp",

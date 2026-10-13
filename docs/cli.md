@@ -808,7 +808,9 @@ The file is JSON Lines: one self-describing object per line, opened by a header 
 {"type":"decision","decision":{"id":"…","project_id":"p1","title":"…","decision":"…","rationale":"…","status":"active"}}
 ```
 
-A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. Since artifact schema v2 it also carries `evidence`, the list of `memory_provenance` records backing that memory — every agent that reported it and what each said. A restore that kept the row and dropped the evidence would report "supported by 0 observations" about a fact two agents had already reported, which is the one thing that table exists to prevent. A project record carries its id, path, name, repository remote and timestamps.
+A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, the retention tier, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. Since artifact schema v2 it also carries `evidence`, the list of `memory_provenance` records backing that memory — every agent that reported it and what each said. A restore that kept the row and dropped the evidence would report "supported by 0 observations" about a fact two agents had already reported, which is the one thing that table exists to prevent. A project record carries its id, path, name, repository remote and timestamps.
+
+`retention` is the one of those that a file could otherwise use to cheat with: `persistent` is the one tier no lifecycle pass may take back, and `session` schedules the row for deletion. So an import **downgrades** it to `project` by default, exactly as it downgrades `source` and `pinned`, and restores it as stated only under `--trust-provenance`. A record that states no tier at all — every artifact written before the field existed — imports as `project`, which is the column's own default and the direction that changes nothing.
 
 The header's `schema_version` is the *artifact* format version, not the database schema version: an artifact is a file that outlives the Ghost that wrote it, and its meaning is the shape of its records. A build reads a range rather than one version, and refuses a file outside it — a newer one is records whose fields it cannot interpret, and an older one would be a file written under rules that no longer hold.
 
@@ -911,7 +913,7 @@ ghost import ~/backups/one.jsonl --apply --trust-provenance
 | Flag | Meaning |
 |---|---|
 | `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
-| `--trust-provenance` | Keep each memory's own source and pin state instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
+| `--trust-provenance` | Keep each memory's own source, pin state and retention tier instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
 
 A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". Two consequences worth knowing:
 
@@ -930,12 +932,12 @@ A dry run is not a separate code path: every record goes through the same valida
 
 ### Imported provenance
 
-By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says:
+By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says, and its retention tier is set to `project`:
 
 ```text
-  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned)
+  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned, retention project)
 imported 1 memory from ~/backups/one.jsonl
-  provenance downgraded to onboarding and unpinned — pass --trust-provenance to keep the artifact's own
+  provenance and retention downgraded to onboarding, unpinned and project — pass --trust-provenance to keep the artifact's own
 ```
 
 The reason is that an artifact is a file that arrived from somewhere, and on its own authority it would otherwise be able to plant rows that read as yours or as Ghost's:
@@ -945,10 +947,12 @@ The reason is that an artifact is a file that arrived from somewhere, and on its
 | `source: "manual"` | the user's own words — excluded from consolidation by name |
 | `source: "builtin"` | a rule Ghost ships — excluded from consolidation by name, and presented as Ghost's own |
 | `pinned: 1` | exempt from consolidation whatever its source |
+| `retention: "persistent"` | keep-forever — exempt from consolidation, supersede, resolve and pruning, and from the ranking demotions those passes cause |
+| `retention: "session"` | scheduled for deletion, on a clock the file chose rather than the store |
 
-`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, and honest about where it came from.
+`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, prunable only as the durable tier is (never), and honest about where it came from.
 
-**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source and pin, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once.
+**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source, pin and tier, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once. A `session` row restored that way is given a fresh derived expiry (24 hours from the import), because the artifact carries no `expires_at` and a session row with none would be a row no `ghost prune` could ever reach.
 
 ```text
   skip    project:  line 2  "one" (p1)
@@ -962,7 +966,7 @@ Rules the import follows:
 
 - **A record whose id already exists is skipped, never overwritten.** The artifact is the older of the two copies by construction, so overwriting would restore stale data over live data. This also makes re-running an import always safe, which is how you repair a run that rejected a record.
 - **A file whose schema version this build does not read is refused outright**, in either direction. Reading a newer one would insert records whose fields this build interprets by guesswork.
-- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source and importance are checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
+- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source, the retention tier and importance are all checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
 - **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is only honoured when the record it names is in the same artifact and is applied first; a pointer to a record the artifact does not contain, or one inside a cycle, is dropped.
 - **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
 - **A line that will not parse is rejected on its own.** A truncated, badly merged or hand-edited artifact still imports every record around the damage, and the bad line is reported with its line number. This is what the line-per-record shape buys: a file-level refusal is reserved for the problems that are not one line's — a missing or unreadable schema version, a second header, an unknown record type — where applying part of the file would mean importing data whose meaning is a guess.

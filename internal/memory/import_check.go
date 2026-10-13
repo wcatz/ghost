@@ -161,7 +161,11 @@ func CheckImportedProject(p PortableProject) error {
 //     reported cut into a lost row.
 //
 //   - The provenance downgrade. It depends on `ImportOptions.TrustProvenance`, and
-//     it is a rewrite the report states, not a refusal.
+//     it is a rewrite the report states, not a refusal. The retention downgrade
+//     rides the same flag, for the same reason, and is also a rewrite: what IS
+//     checked here is the tier's VALUE SET, exactly as category's and source's
+//     are — a fourth tier is a bad value in a column, and an absent one is a
+//     record that states nothing rather than a bad value.
 //
 //   - The recorded-history check. See ImportMemory for why it must run against the
 //     DESTINATION and after the presence check; screening on it here would be
@@ -215,6 +219,16 @@ func CheckImportedMemory(m PortableMemory) error {
 	// guard: an invalid source is a bad value in a column.
 	if !IsValidSource(m.Source) {
 		return fmt.Errorf("invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.Source)
+	}
+	// And the tier, on the same terms and with the same single refusal the MCP
+	// save tool, the CLI and UpsertWithOptions use — so a caller who typed a
+	// fourth tier into the file learns which three words the column accepts
+	// instead of failing the INSERT with SQLite's CHECK wording. The empty
+	// string is NOT a tier but is not a refusal either: it is a record that
+	// states nothing, which is what every v1 artifact does, and NormalizeRetention
+	// resolves it to the column's own default.
+	if m.Retention != "" && !IsValidRetention(m.Retention) {
+		return InvalidRetentionError(m.Retention)
 	}
 	// The secret guard, and the window it runs in is the importer's: after the
 	// presence check, so a record already in the store stays a skip, and before the
