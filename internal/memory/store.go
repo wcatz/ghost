@@ -7014,6 +7014,41 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("find rows this restore changes: %w", err)
 	}
+
+	// A row whose CONTENT this restore reverts loses its embedding and its
+	// link scan in this same transaction, exactly as UpdateMemoryWithOptions
+	// invalidates both on a content edit. The store's rule is that an
+	// embedding — and the scan slot that records which neighbours were
+	// compared in its space — is valid only while the text is byte-identical
+	// to what it was computed from. The restore just put the old text back
+	// over that vector: the row then scores for bytes it no longer holds,
+	// and UnembeddedMemoryIDs cannot repair it, because a row with a vector
+	// under the configured identity is not unembedded. Deleting both rows
+	// re-queues the re-embed and the re-link for the reverted text.
+	//
+	// The delete has to be decided from the pre-UPDATE state, which is why
+	// it runs here rather than after the UPDATE: its predicate is the
+	// difference between the live row and the snapshot, and once the UPDATE
+	// writes the snapshot's content there is nothing left to match. It is
+	// scoped to the CONTENT difference alone, not the UPDATE's four-column
+	// difference — a metadata-only revert (category, importance, source)
+	// restores no text, and a row whose content the restore leaves alone
+	// keeps its vector and its scan slot, the way a tags-only edit does.
+	revertTextIDsSQL := `
+		SELECT m.id FROM memories m
+		JOIN memory_snapshots s ON s.memory_id = m.id
+		WHERE s.snapshot_id = ? AND m.project_id = s.project_id
+		  AND m.pinned = 0 AND m.resolved_at IS NULL
+		  AND m.` + retentionExemptSQL + `
+		  AND s.content != m.content`
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_embeddings WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
+		return 0, fmt.Errorf("invalidate reverted embedding: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM link_scans WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
+		return 0, fmt.Errorf("invalidate reverted link scan: %w", err)
+	}
 	updated, err := tx.ExecContext(ctx, `
 		UPDATE memories SET
 		    category = s.category, content = s.content, importance = s.importance,

@@ -321,6 +321,111 @@ func TestMigrateFreshDBHasSnapshotColumns(t *testing.T) {
 	}
 }
 
+// TestRestoreInvalidatesTheEmbeddingOfRevertedContent is #1085.
+//
+// RestoreSnapshot rewrote a reverted row's CONTENT in place but left the
+// embedding and link-scan rows of the text it had just reverted away. The
+// row then scored for bytes it no longer held — semantic search returned the
+// restored row at cosine 1.000 for a query built from the superseded text —
+// and UnembeddedMemoryIDs never re-queued it, because it still had a vector
+// under the configured identity: the row stayed wrong until the embedding
+// model changed. The restore now deletes both rows in the same transaction
+// it writes content in, the rule UpdateMemoryWithOptions applies to an edit,
+// and a row whose content the restore leaves alone keeps its vector.
+func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two reflection rows the replace below re-emits verbatim, so both keep
+	// their ids, both keep their embeddings, and both land in the snapshot.
+	alpha, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "alpha content", Source: "reflection", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	psi, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "psi content", Source: "reflection", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create psi: %v", err)
+	}
+	for _, id := range []string{alpha, psi} {
+		if err := s.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "test"); err != nil {
+			t.Fatalf("embed %s: %v", id, err)
+		}
+	}
+
+	// A verbatim replace takes the snapshot. Nothing about the two rows
+	// changes, so restoration comes back to exactly this state.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "alpha content", Importance: 0.5},
+		{Category: "fact", Content: "psi content", Importance: 0.5},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// Alpha is edited to the text the restore will revert, and re-embedded
+	// under that text — the stale-vector state the bug leaves behind.
+	if err := s.UpdateMemoryWithOptions(ctx, testProject, alpha, UpdateOptions{
+		Content: strPtr("beta content"),
+	}); err != nil {
+		t.Fatalf("update alpha: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, alpha, []float32{0, 1, 0}, "test"); err != nil {
+		t.Fatalf("re-embed alpha: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	got, err := s.GetByIDs(ctx, []string{alpha})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("GetByIDs after restore: err=%v n=%d", err, len(got))
+	}
+	if got[0].Content != "alpha content" {
+		t.Fatalf("restored content = %q, want %q", got[0].Content, "alpha content")
+	}
+
+	// The vector of the reverted-away text must be gone, not stale: the row
+	// is queued for a re-embed, and a semantic query for the beta text no
+	// longer scores the restored row at 1.000.
+	unembedded, err := s.UnembeddedMemoryIDs(ctx, testProject, "test", 10)
+	if err != nil {
+		t.Fatalf("UnembeddedMemoryIDs: %v", err)
+	}
+	found := false
+	for _, id := range unembedded {
+		if id == alpha {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("restored row %s is not queued for a re-embed: UnembeddedMemoryIDs=%v", alpha, unembedded)
+	}
+	results, err := s.SearchVector(ctx, testProject, []float32{0, 1, 0}, 10)
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	for _, r := range results {
+		if r.MemoryID == alpha {
+			t.Errorf("SearchVector(beta) returned the restored row %s at score %f (content %q)",
+				r.MemoryID, r.Score, got[0].Content)
+		}
+	}
+
+	// Its own content never changed, so psi keeps its vector across the
+	// restore — only reverted text re-queues a re-embed.
+	psiVec, err := s.GetEmbedding(ctx, psi)
+	if err != nil {
+		t.Fatalf("GetEmbedding(psi): %v", err)
+	}
+	if psiVec == nil {
+		t.Errorf("row whose content the restore left alone lost its embedding")
+	}
+}
+
 // TestRestoreLegacySnapshotMatchesByContent covers snapshots written before
 // schema v13, whose memory_id is NULL and cannot be recovered.
 //
