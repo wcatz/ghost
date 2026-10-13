@@ -1108,6 +1108,21 @@ row back, with its text and no history:
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
 
+The erasure reaches the database file, not only the rows: every writer opens the
+store with `secure_delete` on, a purge rebuilds the full-text index from the rows
+that survive (a delete's FTS5 tombstone marks a row dead but leaves its tokens in
+the segment blobs, which a merge is under no obligation to rewrite), and the purge
+then checkpoints the WAL with `TRUNCATE`. If another Ghost reader held the store
+for the whole timeout, the checkpoint could not truncate the log and the command
+says so — the text stays in `-wal` until that reader closes and a later purge or
+checkpoint completes — rather than reporting the erase as done
+([#1043](https://github.com/wcatz/ghost/issues/1043)). Two copies this still does
+not reach: text an older Ghost version, one running before `secure_delete` was on,
+already freed into the file's free space and left there until a compaction
+rewrites it; and a copy outside this file — a backup taken before the purge, or
+another machine's store. `ghost backup` writes a clean copy without the freed
+bytes.
+
 `purge` takes the **whole id** and refuses a prefix, which is the one difference
 from the read above. It erases recorded text for good, so a mistyped argument is
 not a message but an unprintable memory, and echoing the resolved id would not make
@@ -1121,10 +1136,11 @@ that already succeeded looks like.
 The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
 directions — including for a memory that is already deleted, where it purges the
 recorded text without restoring the row; use it whenever the intent is to erase
-something rather than to retire a memory. Neither can reach a backup taken before
-the purge, or another machine's copy of the store. The MCP equivalent is
-`ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
-erase something rather than to retire a memory.
+something rather than to retire a memory. Its answer carries the same two
+limits: text an older Ghost version freed before `secure_delete` was on stays in
+the file's free space, and neither a backup taken before the purge nor another
+machine's copy of the store is reachable. `ghost backup` writes a clean copy
+without the freed bytes.
 
 Reading a history (`ghost history <ref>`, and `as_of`) writes no memory, history or
 project row, and neither does `ghost history compact` **without** `--apply` — a dry

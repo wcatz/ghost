@@ -812,7 +812,16 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	//
 	// Every other BeginTx here is write-first, so immediate changes nothing
 	// for them — they acquire the same lock on their first statement anyway.
-	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	//
+	// secure_delete(ON) is what makes a DELETE actually remove the text rather
+	// than only unlink it: without it a freed b-tree cell keeps its bytes for
+	// the next reader of the file, which is the difference a redaction turns on
+	// (#1043). It is per-connection and must precede the delete, so it belongs
+	// on the DSN rather than beside one caller. FAST is not enough here — it
+	// overwrites the deleted cell but not the free space on the page, which is
+	// where a spilled content value lives, and not the FTS5 segment blobs a
+	// rebuild has to be free to reclaim.
+	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

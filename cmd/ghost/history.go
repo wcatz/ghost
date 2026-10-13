@@ -643,21 +643,44 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 	switch {
 	case len(live) > 0:
 		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", assemble.Token(memoryID), len(entries))
-		if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+		outcome, err := s.DeletePurge(ctx, memoryID)
+		if err != nil {
 			return err
 		}
+		return printPurgeReport(os.Stdout, outcome)
 	default:
 		// Already deleted. The row is not coming back and nothing asked for it to.
 		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
-		if _, err := s.PurgeMemoryHistory(ctx, memoryID); err != nil {
+		outcome, err := s.PurgeMemoryHistory(ctx, memoryID)
+		if err != nil {
+			return err
+		}
+		return printPurgeReport(os.Stdout, outcome)
+	}
+}
+
+// printPurgeReport states what the purge reached and what it could not. It never
+// claims the text is gone from the file unconditionally: an incomplete
+// checkpoint is reported as the text still sitting in the write-ahead log, and
+// bytes an older build freed before secure delete was on — which no purge
+// reaches — are named with `ghost backup` as the way to a copy without them. A
+// failed write is returned rather than dropped, the way reportHistoryRefusal
+// returns one, because a purge that printed nothing would look like a clean run.
+func printPurgeReport(w io.Writer, outcome memory.PurgeOutcome) error {
+	lines := []string{
+		"Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.",
+	}
+	if outcome.CheckpointComplete {
+		lines = append(lines, "The pages this purge freed were zeroed and the write-ahead log truncated, so the copy this memory held is gone from the database file and its -wal.")
+	} else {
+		lines = append(lines, "Other Ghost readers held the store, so the write-ahead log could not be truncated: this memory's text stays in it until they close and a later purge or checkpoint completes.")
+	}
+	lines = append(lines, "Text an older Ghost version, one running without secure delete, already freed into the file's free space, a copy in a backup taken before this, or another machine's store, is out of reach; `ghost backup` writes a clean copy without it.")
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
 			return err
 		}
 	}
-	// Accurate about what the transaction covers: the row, its history, and the
-	// snapshots that could restore it all go. What no purge can reach is a copy
-	// outside this database — an earlier backup, another machine's store — or a
-	// text quoted into something that was never Ghost's memory.
-	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.")
 	return nil
 }
 
