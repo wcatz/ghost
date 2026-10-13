@@ -114,10 +114,17 @@ axes that decide eligibility:
 - `superseded_by` and `near_duplicate_of` — the id of the specific memory behind
   each window-scoped demotion. The penalty counts beside them say how many, these
   say which.
-- `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. The
-  assembler drops an expired or not-yet-valid row rather than ranking it lower, so
-  such a row is reported excluded, with that reason, and `validity_penalty` stays
-  `0`.
+- `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. An
+  expired or not-yet-valid row is withheld rather than ranked lower: the retrieval
+  legs apply the window in SQL before their own depth (so such a row cannot spend a
+  slot a valid match needed), and the assembler's stage 2 withholds any that reach
+  it, so a row reported with `expired`/`future` is one that reached the candidate
+  set and was dropped there. A row the legs withheld before the window is not a
+  candidate at all, so the payload has no row for it — but a query whose matches
+  all retired is still answered `empty reason=all_invalid` ("withheld as out of
+  date"), not `no_candidates`, because each leg reports how many it withheld
+  (keyword, semantic-only and hybrid alike).
+  `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
 

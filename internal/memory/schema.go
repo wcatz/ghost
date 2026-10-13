@@ -997,8 +997,10 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 //
 // The vector query joins memory_embeddings to memories and reads
 // memory_id, embedding, model from the first and scope, project_id, resolved_at
-// from the second, so those are the writes that fire it: any insert, update or
-// delete on memory_embeddings; an UPDATE OF resolved_at, scope or project_id on
+// and (since the query path filters a row's window before the cut, #1053)
+// valid_from, valid_until from the second, so those are the writes that fire it:
+// any insert, update or delete on memory_embeddings; an UPDATE OF resolved_at,
+// scope or project_id on memories; an UPDATE OF valid_from or valid_until on
 // memories; and a delete of a memory. An update fires only when the value it
 // names actually changed (an edit rewrites resolved_at in the same statement
 // whether or not it changed it, and a vector rewritten to the same bytes is the
@@ -1006,6 +1008,12 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 // tags, importance, content, pinned) is read by other queries and deliberately
 // does NOT fire it: the retrieval write every search makes would otherwise
 // invalidate every other process's copy. TestVectorEpoch* pins both lists.
+//
+// The validity arm is a SEPARATE trigger (vector_epoch_mem_validity_au) rather
+// than a fourth column on vector_epoch_mem_au, because that trigger is frozen in
+// migrateV24 and a fresh database's spelling of it must stay byte-identical to
+// the migration's (TestMigrateV24MatchesTheFreshDatabaseSchema). It is delivered
+// to existing databases by migrateV25.
 //
 // vector_epoch_mem_ai covers the one insert that does change the query: a memory
 // whose id already has an embedding row (an orphan left by a delete made with
@@ -1034,6 +1042,10 @@ CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ad AFTER DELETE ON memory_embeddin
 END;
 CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_au AFTER UPDATE OF resolved_at, scope, project_id ON memories
     WHEN old.resolved_at IS NOT new.resolved_at OR old.scope IS NOT new.scope OR old.project_id IS NOT new.project_id BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_validity_au AFTER UPDATE OF valid_from, valid_until ON memories
+    WHEN old.valid_from IS NOT new.valid_from OR old.valid_until IS NOT new.valid_until BEGIN
     INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
 END;
 CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN

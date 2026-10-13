@@ -91,10 +91,19 @@ func stampComparableSQL(col string) string {
 // bound is compared directly, so `valid_until` exactly equal to now is KEPT (the
 // rule is a closed window, not an open one), matching ValidityState's
 // `until.Before(now)`.
-func validityMatchesSQL() string {
-	until, from := readableStampSQL("valid_until"), readableStampSQL("valid_from")
-	return "(valid_until IS NULL OR NOT " + until + " OR " + stampComparableSQL("valid_until") + " >= ?)" +
-		" AND (valid_from IS NULL OR NOT " + from + " OR " + stampComparableSQL("valid_from") + " <= ?)"
+func validityMatchesSQL() string { return validityMatchesSQLFor("") }
+
+// validityMatchesSQLFor is validityMatchesSQL with every column qualified by
+// prefix, for a statement that cannot name them unqualified: the query path's
+// keyword leg aliases memories as m and joins memories_fts as f, so an
+// unqualified `valid_until` is at best a name resolved by convention and at
+// worst ambiguous. The passive path, a single `FROM memories`, passes "" and
+// gets the bare form. It is the same fragment either way, so the two paths
+// cannot disagree about what the window test is.
+func validityMatchesSQLFor(prefix string) string {
+	until, from := readableStampSQL(prefix+"valid_until"), readableStampSQL(prefix+"valid_from")
+	return "(" + prefix + "valid_until IS NULL OR NOT " + until + " OR " + stampComparableSQL(prefix+"valid_until") + " >= ?)" +
+		" AND (" + prefix + "valid_from IS NULL OR NOT " + from + " OR " + stampComparableSQL(prefix+"valid_from") + " <= ?)"
 }
 
 // maxPassiveOverFetch is the ceiling on one bucket's passive window.
