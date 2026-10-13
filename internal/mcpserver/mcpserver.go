@@ -520,11 +520,13 @@ type markCapableStore interface {
 // already gone: a credential removed by deleting its memory is still in the
 // history, and a delete that requires a live row cannot reach it. MemoryHistory
 // supplies the project the tombstone belonged to — which is how ownership is
-// still verified for a row that is no longer there — and PurgeMemoryHistory
-// erases the text without inventing a row to erase.
+// still verified for a row that is no longer there — and
+// PurgeDeletedMemoryHistoryInProject erases the text without inventing a row to
+// erase, re-deciding inside its own transaction that the row is still gone and
+// still the project's.
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
-	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	PurgeDeletedMemoryHistoryInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 	DeletePurgeInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 }
 
@@ -1943,11 +1945,16 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 		return nil, nil, fmt.Errorf("memory %s not found, and no recorded history to purge", memory.RefusalArg("memory_id", memoryID))
 	}
 	// The same ownership check a live row gets, against the project the
-	// tombstone was filed under. One entry is enough to name it.
+	// tombstone was filed under. One entry is enough to name it. Like the
+	// GetByIDs read before it, this answers the caller's errors and does not
+	// decide the write: a deleted row can come back (`ghost reflect --restore`
+	// reinstates it under its own id, and a promote can then move it to
+	// _global), so the purge re-reads both "still deleted" and "still this
+	// project's" inside its own transaction and refuses otherwise (#1191).
 	if entries[0].ProjectID != resolvedProjectID {
 		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", requestedProjectID))
 	}
-	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
+	outcome, err := hist.PurgeDeletedMemoryHistoryInProject(ctx, resolvedProjectID, memoryID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("purge failed: %w", err)
 	}
