@@ -11,16 +11,27 @@ import (
 	"testing"
 )
 
+// vectorEpochTriggers are the six triggers of the v24 step, in the order
+// migrateV24 creates them. The fresh-vs-v24 comparison iterates exactly these,
+// so migrateV25's validity trigger — which a fresh database also has — does not
+// enter a comparison it was never part of.
 var vectorEpochTriggers = []string{
 	"vector_epoch_emb_ai", "vector_epoch_emb_au", "vector_epoch_emb_ad",
 	"vector_epoch_mem_au", "vector_epoch_mem_ad", "vector_epoch_mem_ai",
 }
 
+// allVectorEpochTriggers is every trigger of the current schema, v24's six plus
+// migrateV25's validity arm. dropVectorEpoch iterates this, so shaping a
+// database back to a pre-vector-epoch build removes the validity trigger too —
+// otherwise a "v23" fixture would still bump its epoch on a validity edit and
+// the upgrade test would pass for the wrong reason.
+var allVectorEpochTriggers = append(append([]string{}, vectorEpochTriggers...), "vector_epoch_mem_validity_au")
+
 // dropVectorEpoch removes the counter and its triggers, leaving the database as
 // a v23 build would have.
 func dropVectorEpoch(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, trg := range vectorEpochTriggers {
+	for _, trg := range allVectorEpochTriggers {
 		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + trg); err != nil {
 			t.Fatalf("drop %s: %v", trg, err)
 		}
@@ -195,6 +206,9 @@ func TestOpenDBUpgradesAV23DatabaseToTheVectorEpoch(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM memory_embeddings WHERE memory_id = 'M1'`).Scan(&n); err != nil || n != 1 {
 		t.Errorf("the embedding the old database held is gone (%d, %v)", n, err)
 	}
+	// The v25 arm before assertEpochTriggersFire, which deletes M1 as its last
+	// step: a validity update afterwards would touch no row and prove nothing.
+	assertValidityEpochTriggerFires(t, db)
 	assertEpochTriggersFire(t, db)
 
 	// Reopening is idempotent and does not reset the counter.

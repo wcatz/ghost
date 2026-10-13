@@ -1176,3 +1176,164 @@ func TestTheSnapshotStoreRunsItsVectorLegThroughTheStoresScratch(t *testing.T) {
 			"allocation per query that nothing recycles", before, after)
 	}
 }
+
+// TestCandidatesCountsTheRowsTheKeywordLegWithheld is the query path's own
+// counterpart to passiveValidityExcluded, and the half of #1053 that keeps an
+// empty answer honest.
+//
+// The legs now apply the window predicate in SQL, BEFORE their LIMIT, so a query
+// whose every match lies outside its window comes back with no candidate and no
+// stage having run — and the store is the only component that can still say how
+// many rows the predicate removed. Without the count the empty reason reads
+// `no_candidates`, which is the one reason a caller may read as the store holding
+// nothing matching; the truth is that rows matched and were withheld as out of
+// date, which is `all_invalid`.
+//
+// A resolved row is counted too, and a row of another project is not: the probe
+// asks the leg's own population, so it cannot describe rows the leg never
+// considered. An empty set whose query matched nothing is left at zero, which is
+// what keeps the two empty cases distinguishable.
+func TestCandidatesCountsTheRowsTheKeywordLegWithheld(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+
+	expired := "2020-01-01 00:00:00"
+	future := "2099-01-01 00:00:00"
+	for _, m := range []struct {
+		content    string
+		validUntil *string
+		validFrom  *string
+	}{
+		{"the kubernetes upgrade runbook is retired", &expired, nil},
+		{"the kubernetes upgrade rehearsal is not yet in force", nil, &future},
+		{"the kubernetes upgrade lunch menu", nil, nil},
+	} {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: m.content, Source: "manual",
+			Importance: 0.7, ValidUntil: m.validUntil, ValidFrom: m.validFrom,
+		})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", m.content, err)
+		}
+		// The third row is resolved, so it stays in the keyword leg's population
+		// (which filters resolved rows later, not in its own statement) and must
+		// still be counted when it is out of its window.
+		if m.content == "the kubernetes upgrade lunch menu" {
+			if _, err := s.db.Exec(`UPDATE memories SET valid_until = '2019-01-01 00:00:00', resolved_at = datetime('now') WHERE id = ?`, id); err != nil {
+				t.Fatalf("retire and resolve the third row: %v", err)
+			}
+		}
+	}
+	// A row of another project that matches: the project clause is the leg's own,
+	// so this one is not the leg's to withhold.
+	other := "other-project"
+	if err := s.EnsureProject(ctx, other, "/src/other", other); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := s.Create(ctx, other, Memory{
+		Category: "fact", Content: "the kubernetes upgrade runbook is retired", Source: "manual",
+		Importance: 0.7, ValidUntil: &expired,
+	}); err != nil {
+		t.Fatalf("Create in another project: %v", err)
+	}
+
+	// Every match in this project is out of its window, so the leg returns
+	// nothing and the count is the three of them.
+	set, err := s.Candidates(ctx, candidateRequest("kubernetes upgrade runbook", 5, now))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) != 0 {
+		t.Fatalf("rows = %v, want none: every match is out of its window", candidateIDs(t, set))
+	}
+	if set.ValidityExcluded != 3 {
+		t.Errorf("ValidityExcluded = %d, want 3: two rows whose window closed (one of them resolved), one whose "+
+			"window has not opened — all three over this project's own rows", set.ValidityExcluded)
+	}
+
+	// A query that matches nothing at all is left at zero: nothing was withheld,
+	// which is what keeps `no_candidates` and `all_invalid` distinguishable.
+	none, err := s.Candidates(ctx, candidateRequest("postgres connection pooling", 5, now))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if none.ValidityExcluded != 0 {
+		t.Errorf("ValidityExcluded = %d for a query that matched nothing, want 0: a count of withheld rows "+
+			"would report rows that never matched", none.ValidityExcluded)
+	}
+}
+
+// TestCandidatesCountsTheRowsTheVectorLegWithheld is the semantic counterpart of
+// the keyword count above, and the half of #1053 the semantic-only and hybrid
+// paths depend on: the vector scan withholds an out-of-window row before its
+// top-k cut, so a query whose every above-floor match retired comes back empty
+// and needs the count to keep `all_invalid` rather than read as absence.
+//
+// The count is the scan's own: the number of rows the cosine pass scored above
+// the similarity floor and then withheld, which no separate statement could
+// reconstruct (a vector match is a cosine, not a term). It joins the set only
+// when the leg came back empty, exactly as the keyword probe does, so a leg that
+// found a valid match reports zero even when it also withheld rows.
+func TestCandidatesCountsTheRowsTheVectorLegWithheld(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	expired := "2020-01-01 00:00:00"
+
+	add := func(content string, validUntil *string, vec []float32) {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: content, Source: "manual",
+			Importance: 0.7, ValidUntil: validUntil,
+		})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", content, err)
+		}
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(%q): %v", content, err)
+		}
+	}
+	// Two expired rows whose embeddings ARE the query vector: the cosine pass
+	// scores both above the floor and withholds both.
+	add("the quarterly banana harvest is in the ledger", &expired, []float32{1, 0, 0})
+	add("the annual banana harvest is in the ledger", &expired, []float32{1, 0, 0})
+
+	req := CandidateRequest{
+		ProjectID: testProject,
+		Mode:      ProjectScoped,
+		Query:     "kubernetes upgrade runbook",
+		QueryVec:  []float32{1, 0, 0},
+		Condition: CondVectorOnly,
+		Params:    DefaultSearchParams(),
+		Now:       now,
+		Fetch:     Fetch{FTSTopK: 10, VectorTopK: 10, Limit: 5},
+	}
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) != 0 {
+		t.Fatalf("rows = %v, want none: every vector match is out of its window", candidateIDs(t, set))
+	}
+	if set.ValidityExcluded != 2 {
+		t.Errorf("ValidityExcluded = %d, want 2: both above-floor matches were withheld, so the empty "+
+			"reason must not read as `no_candidates`", set.ValidityExcluded)
+	}
+
+	// A live row on the same vector makes the leg non-empty, so the count must
+	// stay zero: the emptiness rule is what stops it claiming a leg that found a
+	// match withheld rows.
+	add("the monthly banana harvest is in the ledger", nil, []float32{1, 0, 0})
+	set, err = s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) == 0 {
+		t.Fatal("rows empty after a valid match was added; the fixture is wrong")
+	}
+	if set.ValidityExcluded != 0 {
+		t.Errorf("ValidityExcluded = %d on a non-empty leg, want 0: the count is taken only when the "+
+			"leg comes back empty", set.ValidityExcluded)
+	}
+}

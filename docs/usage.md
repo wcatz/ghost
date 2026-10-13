@@ -114,10 +114,17 @@ axes that decide eligibility:
 - `superseded_by` and `near_duplicate_of` — the id of the specific memory behind
   each window-scoped demotion. The penalty counts beside them say how many, these
   say which.
-- `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. The
-  assembler drops an expired or not-yet-valid row rather than ranking it lower, so
-  such a row is reported excluded, with that reason, and `validity_penalty` stays
-  `0`.
+- `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. An
+  expired or not-yet-valid row is withheld rather than ranked lower: the retrieval
+  legs apply the window in SQL before their own depth (so such a row cannot spend a
+  slot a valid match needed), and the assembler's stage 2 withholds any that reach
+  it, so a row reported with `expired`/`future` is one that reached the candidate
+  set and was dropped there. A row the legs withheld before the window is not a
+  candidate at all, so the payload has no row for it — but a query whose matches
+  all retired is still answered `empty reason=all_invalid` ("withheld as out of
+  date"), not `no_candidates`, because each leg reports how many it withheld
+  (keyword, semantic-only and hybrid alike).
+  `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
 
@@ -202,7 +209,7 @@ ghost history <memory-id> --limit 5
 ghost history <memory-id> --json
 ```
 
-Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. To erase something rather than retire it, use `ghost history purge <memory-id>`: it deletes the row, every recorded version of it and any reflection snapshot that could restore the row, in one transaction — or, if the memory was already deleted, erases the recorded versions on their own. A credential that was "removed" by deleting its memory is not printable here — `ghost history` withholds a credential-shaped value in both forms — but it is still in the database file, and purging is what takes it out; a backup taken before the purge, or another machine's copy of the store, is not something either command can reach. Otherwise the command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
+Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. To erase something rather than retire it, use `ghost history purge <memory-id>`: it deletes the row, every recorded version of it and any reflection snapshot that could restore the row, in one transaction — or, if the memory was already deleted, erases the recorded versions on their own. A credential that was "removed" by deleting its memory is not printable here — `ghost history` withholds a credential-shaped value in both forms — but it is still in the database file, and purging is what takes it out; text an older Ghost version already freed before secure delete was on can remain in the file's free space until a compaction rewrites it, and only a fresh `ghost backup` (VACUUM INTO) is a copy without it; a backup taken before the purge, or another machine's copy of the store, is not something either command can reach. Otherwise the command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
 
 ## Automatic lifecycle work
 
@@ -267,7 +274,7 @@ ghost import ghost-export.jsonl --apply --trust-provenance
                                       # restoring your own export
 ```
 
-The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"` and unpinned whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules — pass the flag when the artifact is your own export.
+The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"`, unpinned and set to the durable `project` tier whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules, and cannot plant a keep-forever tier no lifecycle pass may take back — pass the flag when the artifact is your own export.
 
 Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 
