@@ -54,6 +54,9 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			i++
 			switch arg {
 			case "--out":
+				if args[i] == "" {
+					return "", "", "", errors.New("--out requires a value")
+				}
 				out = args[i]
 			case "--project":
 				if projectSeen {
@@ -69,6 +72,9 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			}
 		case strings.HasPrefix(arg, "--out="):
 			out = strings.TrimPrefix(arg, "--out=")
+			if out == "" {
+				return "", "", "", errors.New("--out requires a value")
+			}
 		case strings.HasPrefix(arg, "--project="):
 			if projectSeen {
 				return "", "", "", errors.New("expected exactly one project")
