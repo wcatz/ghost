@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -391,8 +392,10 @@ func markerCandidates(ids ...string) []string {
 //
 // The marker's own project is used in the text; an unattributed marker falls
 // back to the session's project so the retry command is still copyable. The
-// alert never includes paths — only the project identifier and the first
-// (≤300-byte) line of the recorded error.
+// project is a raw `--project` operand the store could not resolve, so it is
+// RENDERED rather than interpolated — see renderMarkerProject. The alert never
+// includes paths — only the project identifier and the first (≤300-byte) line
+// of the recorded error.
 func lifecycleFailureAlert(projectID, projectName string) string {
 	m := readLifecycleFailure(projectID, projectName)
 	if m == nil {
@@ -424,9 +427,38 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// command to give. Degenerate — stay silent.
 		return ""
 	}
+	p = renderMarkerProject(p)
 	errLine := strings.SplitN(m.Error, "\n", 2)[0]
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
 		truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes), p)
+}
+
+// renderMarkerProject renders the marker's project for the alert, and it is two
+// renderers rather than one because the value needs both properties and neither
+// renderer has both.
+//
+// The value is a raw `--project` operand: WriteLifecycleFailure falls back to it
+// when the store cannot resolve it, so `ghost lifecycle --project $'evil\n## x'`
+// stores the newline. assemble.Label folds it to one line — a newline would
+// otherwise start a forged heading above the block's own «...» explainer, the
+// same reason the block renders its project NAME through Label (#791) — and it
+// returns an ordinary project byte-identically, quotes and all absent.
+//
+// Label is not enough on its own, and this is the half that is easy to miss:
+// Label neutralises characters for a line, it does not keep a secret out of one
+// (the bind refusal draws the same line). A clone URL with inline credentials is
+// what an operator or an agent pastes into `--project` about as often as a name,
+// and ProjectArg is the renderer that withholds it behind a placeholder naming
+// the field and the credential's format — so a token is not replayed into every
+// session's context until the marker ages out. The guard is asked FIRST, because
+// the credential verdict has to win over the line verdict: a value that is both
+// hostile and credential-shaped must come back as the placeholder, not as an
+// escaped rendering of the token.
+func renderMarkerProject(p string) string {
+	if memory.RejectSecret("project", p) != nil {
+		return memory.ProjectArg("project", p)
+	}
+	return assemble.Label(p)
 }

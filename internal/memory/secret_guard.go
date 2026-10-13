@@ -50,9 +50,14 @@ func rejectSecret(field, text string) error {
 	return &SecretContentError{Field: field, Format: finding.Label}
 }
 
-// RejectSecret is `rejectSecret` under the name a boundary can call, and it is
-// exported for exactly one caller: `mcpserver.ensureProjectFor`, which NAMES the
-// `project_id` it refused so an agent can fix it.
+// RejectSecret is `rejectSecret` under the name a boundary can call: the
+// boundaries that would NAME a caller-supplied value ask it first, so a refused
+// `project_id` names the argument while the credential behind it is never
+// repeated (mcpserver's `ensureProjectFor` and `checkoutToBind` hand the
+// refusal straight back), and a renderer that has to print such a value asks it
+// to choose between naming it and withholding it (mcpinit's
+// `renderMarkerProject`, which names an ordinary project and withholds a
+// credential-shaped one).
 //
 // Naming is a promise the value has to be able to keep, and a credential cannot.
 // A *SecretContentError quotes nothing precisely because the sentence it produces
