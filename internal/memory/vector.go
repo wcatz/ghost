@@ -285,18 +285,40 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 // treating those rows as absent is how a changed-model setup looks like an empty
 // store.
 //
-// It carries the two counts and nothing else. The stored identities behind the
-// foreign count stay local to the scan, where the warning log names them one per
-// identity; a model name cannot reach a caller anyway, because LegStatus has no
-// field to carry it, and a field no consumer can read is a claim nothing checks.
+// It carries the three counts and nothing else. The stored identities behind
+// the foreign count stay local to the scan, where the warning log names them one
+// per identity; a model name cannot reach a caller anyway, because LegStatus has
+// no field to carry it, and a field no consumer can read is a claim nothing
+// checks.
+//
+// validityExcluded counts the rows the scan scored above the similarity floor
+// and then withheld because they lie outside their validity window (#1053). It
+// is the vector leg's counterpart to the keyword leg's own count, and it is free
+// and exact because the scoring loop already holds the similarity it is
+// counting past — no second pass and no extra statement. It is what keeps a
+// semantic-only (or hybrid) query whose every match retired from reading as
+// absence: the query path sums it into CandidateSet.ValidityExcluded when the
+// leg came back empty, and the empty reason stays `all_invalid` rather than
+// `no_candidates`. Zero on a browse read, which asks for no window and so
+// withholds nothing.
 type vectorLegFacts struct {
-	mismatched, foreign int
+	mismatched, foreign, validityExcluded int
 }
 
 // searchVectorLeg is the project's vector leg, with its facts. Every exported
 // wrapper delegates here, so the facts are computed once on the one scan rather
-// than re-derived by a second pass over the embeddings.
+// than re-derived by a second pass over the embeddings. It asks for no validity
+// filter, which is the browse behaviour; the query path calls searchVectorLegAt
+// with its request's clock.
 func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, vectorLegFacts, error) {
+	return s.searchVectorLegAt(ctx, projectID, queryVec, limit, scope, time.Time{})
+}
+
+// searchVectorLegAt is searchVectorLeg with the validity clock named. A non-zero
+// now withholds a row outside its window before the top-k cut (#1053), the
+// mirror of the keyword leg's SQL predicate; a zero now returns every row in the
+// window, marked rather than withheld, which is what the exported wrappers get.
+func (s *Store) searchVectorLegAt(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string, now time.Time) ([]ScoredMemory, vectorLegFacts, error) {
 	// Read the identity before taking the lock: the helper below runs with the
 	// read lock held, and a second RLock on a RWMutex that has a writer waiting
 	// blocks that writer's readers — including this one — forever.
@@ -315,6 +337,7 @@ func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec 
 		defer s.returnVectorRows(scratch)
 		v := s.viewVectorCorpus(cp, scratch, projectID, false, queryVec)
 		defer releaseViewScratch(scratch, v)
+		v.now = now
 		return v.search(queryVec, limit, scope), v.facts, nil
 	}
 
@@ -337,6 +360,7 @@ func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec 
 	// rows.facts is what the copy pass could not use; the scoring pass below is
 	// the same bounded window as every other vector search, so the facts and the
 	// results come off one scan.
+	rows.now = now
 	return rows.search(queryVec, limit, scope), rows.facts, nil
 }
 
@@ -1272,8 +1296,15 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 }
 
 // searchVectorAllLeg is the cross-project vector leg, with its facts, mirroring
-// searchVectorLeg without the project predicate.
+// searchVectorLeg without the project predicate. It asks for no validity filter;
+// the query path calls searchVectorAllLegAt with its request's clock.
 func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, vectorLegFacts, error) {
+	return s.searchVectorAllLegAt(ctx, queryVec, limit, time.Time{})
+}
+
+// searchVectorAllLegAt is searchVectorAllLeg with the validity clock named, for
+// the reason searchVectorLegAt gives.
+func (s *Store) searchVectorAllLegAt(ctx context.Context, queryVec []float32, limit int, now time.Time) ([]ScoredMemory, vectorLegFacts, error) {
 	// Read the identity before taking the lock, as searchVectorLeg does.
 	identity := s.configuredEmbeddingIdentity()
 
@@ -1286,6 +1317,7 @@ func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limi
 		defer s.returnVectorRows(scratch)
 		v := s.viewVectorCorpus(cp, scratch, "", true, queryVec)
 		defer releaseViewScratch(scratch, v)
+		v.now = now
 		return v.search(queryVec, limit, nil), v.facts, nil
 	}
 
@@ -1298,6 +1330,7 @@ func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limi
 	if err := s.snapshotVectors(ctx, vectorScanColumns, nil, "", nil, queryVec, identity, rows); err != nil {
 		return nil, vectorLegFacts{}, err
 	}
+	rows.now = now
 	return rows.search(queryVec, limit, nil), rows.facts, nil
 }
 

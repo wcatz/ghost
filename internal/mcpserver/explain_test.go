@@ -277,9 +277,12 @@ func explainRows(t *testing.T, session *mcp.ClientSession, query string, extra m
 // assertMembershipMatchesListing states the contract bidirectionally: a
 // row the formatted answer renders must appear in the payload marked included,
 // and every payload row must agree with whether the answer rendered it. A row
-// the answer omits — expired, not yet valid, filtered by category or tier, out
-// of scope, or cut by the result window — is not silence; it is an excluded
-// payload row carrying the fields that say which withholding happened.
+// the answer omits is not silence: when the row reached the candidate set at all
+// (filtered by category or tier, out of scope, or cut by the result window) it is
+// an excluded payload row carrying the fields that say which withholding
+// happened. A row the LEGS withhold — out of its validity window — never reaches
+// the candidate set, so the payload has no row for it, which the validity
+// sub-case asserts directly (#1053).
 func assertMembershipMatchesListing(t *testing.T, session *mcp.ClientSession, query string, extra map[string]any) {
 	t.Helper()
 	listed := listingIDs(t, session, query, extra)
@@ -388,11 +391,17 @@ func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 		if row := rows[resolved]; !row.Included || row.StatusFactor >= 1 {
 			t.Errorf("resolved row = included=%v status_factor=%v, want the demoted row in the answer with its factor", row.Included, row.StatusFactor)
 		}
-		if row := rows[expired]; row.ValidityState != memory.ValidityExpired || row.Included {
-			t.Errorf("expired row = included=%v validity_state=%q, want excluded with %q", row.Included, row.ValidityState, memory.ValidityExpired)
-		}
-		if row := rows[future]; row.ValidityState != memory.ValidityFuture || row.Included {
-			t.Errorf("future row = included=%v validity_state=%q, want excluded with %q", row.Included, row.ValidityState, memory.ValidityFuture)
+		// #1053: an out-of-window row is withheld in the LEG SQL, before the
+		// window closes, so it is never a candidate — and the explain payload is a
+		// projection of the ranking, so it has no row for it. It is not reported
+		// as `included=false validity_state=expired` any more: it never entered
+		// the ranking to be judged. The browse surfaces still render such a row
+		// marked (`memory.ValidityStateOf`); the query path simply does not offer
+		// it.
+		for _, id := range []string{expired, future} {
+			if _, present := rows[id]; present {
+				t.Errorf("out-of-window row %s appears in the explain payload: the legs must withhold it before the window, so it is not a candidate", id)
+			}
 		}
 	})
 

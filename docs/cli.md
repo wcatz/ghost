@@ -574,7 +574,7 @@ The second form requires the project name to be retyped at the prompt. It is irr
 
 ### `ghost project merge <old> <new>`
 
-Moves all records from the old project into the surviving project while preserving memory IDs, links, and pin state:
+Moves all records from the old project into the surviving project while preserving memory IDs, links, and pin state. The source project's learned context and reflection metadata do not go with its deleted row: the survivor keeps the newer reflection whole (learned context, summary, input signature and timestamp travel together), or takes the source's when it has none of its own, and keeps the larger interaction count. 
 
 ```bash
 ghost project merge old-name new-name
@@ -810,7 +810,9 @@ The file is JSON Lines: one self-describing object per line, opened by a header 
 {"type":"decision","decision":{"id":"…","project_id":"p1","title":"…","decision":"…","rationale":"…","status":"active"}}
 ```
 
-A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. Since artifact schema v2 it also carries `evidence`, the list of `memory_provenance` records backing that memory — every agent that reported it and what each said. A restore that kept the row and dropped the evidence would report "supported by 0 observations" about a fact two agents had already reported, which is the one thing that table exists to prevent. A project record carries its id, path, name, repository remote and timestamps.
+A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, the retention tier, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. Since artifact schema v2 it also carries `evidence`, the list of `memory_provenance` records backing that memory — every agent that reported it and what each said. A restore that kept the row and dropped the evidence would report "supported by 0 observations" about a fact two agents had already reported, which is the one thing that table exists to prevent. A project record carries its id, path, name, repository remote and timestamps.
+
+`retention` is the one of those that a file could otherwise use to cheat with: `persistent` is the one tier no lifecycle pass may take back, and `session` schedules the row for deletion. So an import **downgrades** it to `project` by default, exactly as it downgrades `source` and `pinned`, and restores it as stated only under `--trust-provenance`. A record that states no tier at all — every artifact written before the field existed — imports as `project`, which is the column's own default and the direction that changes nothing.
 
 The header's `schema_version` is the *artifact* format version, not the database schema version: an artifact is a file that outlives the Ghost that wrote it, and its meaning is the shape of its records. A build reads a range rather than one version, and refuses a file outside it — a newer one is records whose fields it cannot interpret, and an older one would be a file written under rules that no longer hold.
 
@@ -852,7 +854,7 @@ What is refused is everything the importer refuses, which is the whole of it:
 | Any record whose **project** is left out of the artifact | The importer resolves each record's project against the artifact, so a memory under an absent project would be rejected as project-not-found. **A project's records go with it.** |
 | A memory's or a decision's **`tags`** carrying a control character, a backtick or a `«»` | **Never.** A tag is a LABEL on an otherwise exportable row, so refusing one costs you the memory — or the decision, along with the companion memory `RecordDecision` wrote beside it — and nothing on the write path refused such a tag for the whole life of the feature, so any store written through it can hold one. A tag is carried byte for byte in both directions and printed neutralised and bounded. The characters are refused where a new tag can arrive: the four MCP write tools. |
 
-A tag's characters are the one place this table says **never**, and the row above says why. The class is refused where a NEW tag can arrive instead — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update` and `ghost_decision_record` each refuse a tag holding a control character, a backtick or a `«»`, naming the position and the tag and writing nothing. `ghost_decision_record` is the only writer of a decision's tag list, so a decision's tags follow the same rule and the same round trip: a decision carrying `["«urgent»"]` exports whole and imports whole. A tag over 64 bytes is trimmed on a rune boundary rather than refused, because a shortened LABEL is a different label and not a different row. A CREDENTIAL-shaped tag is the one thing that class does not cover, on a memory **and** on a decision: `CheckImportedMemory` and `CheckImportedDecision` each ask `rejectSecretList("tags", …)`, and since `ghost export` runs the importer's own predicates, a token in either tags column is refused on import AND named and left out of the artifact (#835). That is the one tag refusal which does cost you the row — a decision, along with the companion memory `RecordDecision` wrote beside it — and it is accepted for the reason the credential guard accepts the same cost on `content`, `source_ref`, `agent`, `session_id` and evidence: the VALUE is the leak and the label is not, so a `!` line naming the field is a repair rather than a silent loss. The SHAPE rule above is untouched by it: neither predicate judges a tag's characters, so `["«urgent»"]` still round-trips whole.
+A tag's characters are the one place this table says **never**, and the row above says why. The class is refused where a NEW tag can arrive instead — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update` and `ghost_decision_record` each refuse a tag holding a control character, a backtick or a `«»`, naming the position and the tag and writing nothing. `ghost_decision_record` is the only writer of a decision's tag list, so a decision's tags follow the same rule and the same round trip: a decision carrying `["«urgent»"]` exports whole and imports whole. A tag over 64 bytes is trimmed on a rune boundary rather than refused, because a shortened LABEL is a different label and not a different row. A list longer than ten tags is refused rather than cut, because a silent cut leaves a label unaccounted for behind a success answer and the count is a number the caller can act on (#1041). A CREDENTIAL-shaped tag is the one thing that class does not cover, on a memory **and** on a decision: `CheckImportedMemory` and `CheckImportedDecision` each ask `rejectSecretList("tags", …)`, and since `ghost export` runs the importer's own predicates, a token in either tags column is refused on import AND named and left out of the artifact (#835). That is the one tag refusal which does cost you the row — a decision, along with the companion memory `RecordDecision` wrote beside it — and it is accepted for the reason the credential guard accepts the same cost on `content`, `source_ref`, `agent`, `session_id` and evidence: the VALUE is the leak and the label is not, so a `!` line naming the field is a repair rather than a silent loss. The SHAPE rule above is untouched by it: neither predicate judges a tag's characters, so `["«urgent»"]` still round-trips whole.
 
 The same predicates run on the way **in**, at the three places a project row can be created. `Store.EnsureProject`/`EnsureProjectWithRepo`, `Store.ResolveOrCreateRepoProject` and `Store.BindNewProjectToCheckout` each ask `memory.CheckImportedProject` — the exporter's and importer's own function, not a copy — so a project the table above would leave out cannot be opened by an ordinary `ghost_memory_save`, by a bench seeder, or by anything else that goes through the store. No CLI command creates a project row outside `ghost import`, which applies the same predicate ahead of its own INSERT. The check is on **creation**, and at each store route that means it is asked on the arm about to `INSERT`, in the same transaction as the `INSERT` and after the lookups that decide whether a project exists at all. So a store that already holds a project of this shape — a pre-guard save, a restored snapshot, a hand edit — keeps working, including when the save names it by its **recorded path** rather than its id, which is the ordinary case: the reference resolves to the hostile id and the write still lands in the project you already have. The MCP boundary asks the same predicate, and gates it on the same question answered the same way, so an agent naming that project by its session directory is not refused either. `Store.BindProjectPath` (behind `ghost project bind`) and the INSERT in `Store.BindNewProjectToCheckout` (a save that creates a project from a name, recorded at the top level of the git checkout the server was started in) are the writes of a checkout path to `projects.path`, and both ask the predicate too; `BindProjectPath` asks it on the **new** path only: that closes the route by which a checkout whose **directory name** carries a refused character used to reach this state, while leaving a project that already records one repairable — binding it to a directory that passes is the way out, and the bind refuses nothing about the path it already holds.
 
@@ -915,7 +917,7 @@ ghost import ~/backups/one.jsonl --apply --trust-provenance
 | Flag | Meaning |
 |---|---|
 | `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
-| `--trust-provenance` | Keep each memory's own source and pin state instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
+| `--trust-provenance` | Keep each memory's own source, pin state and retention tier instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
 
 A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". Two consequences worth knowing:
 
@@ -934,12 +936,12 @@ A dry run is not a separate code path: every record goes through the same valida
 
 ### Imported provenance
 
-By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says:
+By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says, and its retention tier is set to `project`:
 
 ```text
-  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned)
+  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned, retention project)
 imported 1 memory from ~/backups/one.jsonl
-  provenance downgraded to onboarding and unpinned — pass --trust-provenance to keep the artifact's own
+  provenance and retention downgraded to onboarding, unpinned and project — pass --trust-provenance to keep the artifact's own
 ```
 
 The reason is that an artifact is a file that arrived from somewhere, and on its own authority it would otherwise be able to plant rows that read as yours or as Ghost's:
@@ -949,10 +951,12 @@ The reason is that an artifact is a file that arrived from somewhere, and on its
 | `source: "manual"` | the user's own words — excluded from consolidation by name |
 | `source: "builtin"` | a rule Ghost ships — excluded from consolidation by name, and presented as Ghost's own |
 | `pinned: 1` | exempt from consolidation whatever its source |
+| `retention: "persistent"` | keep-forever — exempt from consolidation, supersede, resolve and pruning, and from the ranking demotions those passes cause |
+| `retention: "session"` | scheduled for deletion, on a clock the file chose rather than the store |
 
-`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, and honest about where it came from.
+`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, prunable only as the durable tier is (never), and honest about where it came from.
 
-**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source and pin, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once.
+**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source, pin and tier, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once. A `session` row restored that way is given a fresh derived expiry (24 hours from the import), because the artifact carries no `expires_at` and a session row with none would be a row no `ghost prune` could ever reach.
 
 ```text
   skip    project:  line 2  "one" (p1)
@@ -966,7 +970,7 @@ Rules the import follows:
 
 - **A record whose id already exists is skipped, never overwritten.** The artifact is the older of the two copies by construction, so overwriting would restore stale data over live data. This also makes re-running an import always safe, which is how you repair a run that rejected a record.
 - **A file whose schema version this build does not read is refused outright**, in either direction. Reading a newer one would insert records whose fields this build interprets by guesswork.
-- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source and importance are checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
+- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source, the retention tier and importance are all checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
 - **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is only honoured when the record it names is in the same artifact and is applied first; a pointer to a record the artifact does not contain, or one inside a cycle, is dropped.
 - **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
 - **A line that will not parse is rejected on its own.** A truncated, badly merged or hand-edited artifact still imports every record around the damage, and the bad line is reported with its line number. This is what the line-per-record shape buys: a file-level refusal is reserved for the problems that are not one line's — a missing or unreadable schema version, a second header, an unknown record type — where applying part of the file would mean importing data whose meaning is a guess.
@@ -1110,6 +1114,21 @@ row back, with its text and no history:
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
 
+The erasure reaches the database file, not only the rows: every writer opens the
+store with `secure_delete` on, a purge rebuilds the full-text index from the rows
+that survive (a delete's FTS5 tombstone marks a row dead but leaves its tokens in
+the segment blobs, which a merge is under no obligation to rewrite), and the purge
+then checkpoints the WAL with `TRUNCATE`. If another Ghost reader held the store
+for the whole timeout, the checkpoint could not truncate the log and the command
+says so — the text stays in `-wal` until that reader closes and a later purge or
+checkpoint completes — rather than reporting the erase as done
+([#1043](https://github.com/wcatz/ghost/issues/1043)). Two copies this still does
+not reach: text an older Ghost version, one running before `secure_delete` was on,
+already freed into the file's free space and left there until a compaction
+rewrites it; and a copy outside this file — a backup taken before the purge, or
+another machine's store. `ghost backup` writes a clean copy without the freed
+bytes.
+
 `purge` takes the **whole id** and refuses a prefix, which is the one difference
 from the read above. It erases recorded text for good, so a mistyped argument is
 not a message but an unprintable memory, and echoing the resolved id would not make
@@ -1123,10 +1142,11 @@ that already succeeded looks like.
 The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
 directions — including for a memory that is already deleted, where it purges the
 recorded text without restoring the row; use it whenever the intent is to erase
-something rather than to retire a memory. Neither can reach a backup taken before
-the purge, or another machine's copy of the store. The MCP equivalent is
-`ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
-erase something rather than to retire a memory.
+something rather than to retire a memory. Its answer carries the same two
+limits: text an older Ghost version freed before `secure_delete` was on stays in
+the file's free space, and neither a backup taken before the purge nor another
+machine's copy of the store is reachable. `ghost backup` writes a clean copy
+without the freed bytes.
 
 Reading a history (`ghost history <ref>`, and `as_of`) writes no memory, history or
 project row, and neither does `ghost history compact` **without** `--apply` — a dry

@@ -1216,7 +1216,10 @@ func TestValidateTags(t *testing.T) {
 		{"empty", []string{}, 0, "", false, ""},
 		{"under limit", []string{"a", "b", "c"}, 3, "c", false, ""},
 		{"at limit", make([]string, 10), 10, "", false, ""},
-		{"over limit", make([]string, 15), 10, "", false, ""},
+		// Over the bound is refused rather than cut: the caller asked for more
+		// slots than the row has, and a silent cut leaves a label unaccounted
+		// for behind a success sentence.
+		{"over limit", make([]string, 15), 0, "", true, "at most"},
 		{"long tag", []string{strings.Repeat("x", 100)}, 1, strings.Repeat("x", 64), false, ""},
 		// A SPACE and any length are accepted, and that is the decision the
 		// character class is drawn around: a tag is a keyword a reader scans

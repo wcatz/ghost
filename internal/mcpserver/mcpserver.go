@@ -508,7 +508,8 @@ type markCapableStore interface {
 // erases the text without inventing a row to erase.
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
-	PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error)
+	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // asOfCapableStore narrows provider.MemoryStore to the historical read
@@ -634,18 +635,30 @@ func shortID(id string) string {
 // description that tells an agent the limit, and the test that pins the cut.
 const tagMaxLen = 64
 
-// tagMaxCount is how many tags one row may carry. The excess is DROPPED rather
-// than refused, and that is the shipped behaviour this keeps: a caller passing
-// twelve labels has made a mistake about how many it needs, not a mistake about
-// what a label may be, and the eleventh is a worse answer than the first ten.
+// tagMaxCount is how many tags the four MCP writers accept. It is a
+// WRITE-BOUNDARY rule, not a property of the store: a fold or a portable import
+// can leave a row carrying more tags (Store.FoldRows unions a cluster's tags
+// with no bound, and CheckImportedMemory keeps an artifact's tag list as
+// written), and a row that crossed the boundary that way cannot be re-submitted
+// as-is through ghost_memory_update. A list longer than this is
+// REFUSED rather than cut, and that is the behaviour #1041 asks for: a caller
+// passing twelve labels has asked for more slots than the row has, and silently
+// keeping ten answers a question the caller did not ask — the eleventh label
+// vanishes and the answer still reads as a success. The count is a number the
+// caller can act on, so it is named with the number to drop. The LENGTH is the
+// other half and stays a trim: a shortened label is a different spelling of the
+// label the caller meant, not a request that cannot be met.
 const tagMaxCount = 10
 
 // validateTags bounds a tag list and refuses the characters that could end the
 // line it is printed on.
 //
-// It returns an error because the two halves are different in kind and only one of
-// them is a number: a count and a length are trimmed, silently and harmlessly,
-// while a control character, a backtick or a `«»` is a refusal. A tag list is
+// It returns an error for two different refusals and trims exactly one thing. A
+// list longer than tagMaxCount is refused, because the count is a number the
+// caller can act on and a silent cut leaves a label unaccounted for behind a
+// success sentence; a tag longer than tagMaxLen is TRIMMED, silently and
+// harmlessly, because a shortened label is still the label the caller meant; and
+// a control character, a backtick or a `«»` is a refusal. A tag list is
 // printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
 // the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
 // pairs into a markdown code span that swallows the rest of the row, and a «
@@ -674,7 +687,14 @@ const tagMaxCount = 10
 // because it is a character this error string must never contain.
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
-		tags = tags[:tagMaxCount]
+		// Refused, not cut (#1041). The excess used to be sliced away and the
+		// caller told nothing, so a twelve-tag save answered as a success with
+		// two labels silently missing. The count is reported with the number to
+		// drop, because it is a request the caller can fix; the LIST is not
+		// returned, so a caller cannot mistake a partial result for a validated
+		// one.
+		return nil, fmt.Errorf("tag list has %d entries — at most %d tags are allowed; drop %d and call again",
+			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
 		if len(t) > tagMaxLen {
@@ -730,6 +750,65 @@ func unsafeTagRune(t string) string {
 	return ""
 }
 
+// invalidCategory is the refusal every tool that accepts a category returns for a
+// value outside memory's eight canonical categories. It exists so the four tools
+// name one list in one order rather than each holding a copy: the order is the
+// store's schema order, which `memory.categoryList` writes out for the same
+// reason. Three writers (save, save_global, update) already refused a category;
+// `ghost_memories_list` did not, so a misspelt category there was either handed
+// to the store as a raw `list failed:` or — on a project Ghost has never heard
+// of — never reached the store at all and was answered as "not registered",
+// naming the project rather than the argument that was wrong (#1041).
+//
+// The value is rendered through `memory.RefusalArg`, never `%q`, so the refusal
+// carries a bounded, token-guarded form of it: a category carrying a newline or a
+// credential shape is quoted or withheld rather than printed raw, and a 200 KB one
+// is withheld with its length (#1072).
+func invalidCategory(category string) error {
+	return fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", category))
+}
+
+// taskStatusValues is the one list of task statuses, in the order the refusal
+// names them: pending, active, blocked, done. The order is pinned by
+// TestGhostTaskUpdate_RejectsInvalidStatus. Both the update tool and the list tool
+// validate against it, so a status is refused with the allowed list in one place;
+// `ghost_task_list` used to pass the raw value to the store, whose `WHERE status
+// = ?` simply matched nothing and answered "No tasks found." for a misspelt
+// status (#1041).
+var taskStatusValues = []string{"pending", "active", "blocked", "done"}
+
+// taskStatusError returns the refusal for a status outside taskStatusValues, and
+// nil for one inside it. Like invalidCategory it renders the value through
+// memory.RefusalArg, so the refusal is bounded and token-guarded (#1072).
+func taskStatusError(status string) error {
+	for _, v := range taskStatusValues {
+		if status == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(taskStatusValues, ", "))
+}
+
+// decisionStatusValues is the one list of decision statuses, in the order the
+// refusal names them: active, superseded, revisit — the three `decisions.status`
+// is CHECKed to, and the three `ghost_decisions_list`'s own jsonschema
+// advertises. That tool used to hand the raw value to `Store.ListDecisions`, whose
+// `AND status = ?` matched nothing and answered "No decisions found." for a
+// misspelt status on a project that has decisions (#1041).
+var decisionStatusValues = []string{"active", "superseded", "revisit"}
+
+// decisionStatusError returns the refusal for a status outside
+// decisionStatusValues, and nil for one inside it. It is the decisions counterpart
+// of taskStatusError, and renders the value the same way (#1072).
+func decisionStatusError(status string) error {
+	for _, v := range decisionStatusValues {
+		if status == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(decisionStatusValues, ", "))
+}
+
 // defaultImportance returns the importance value, defaulting to fallback when nil.
 func defaultImportance(p *float32, fallback float32) float32 {
 	if p == nil {
@@ -764,14 +843,16 @@ type Server struct {
 	// the shipped default — vector arm B off — so a test that skips the setter
 	// exercises the state every machine without a configured floor is in.
 	contextCfg config.ContextConfig
-	// searchMaxBytes bounds one formatted ghost_memory_search response. It is a
-	// field rather than a constant read inline because a test needs a cap below
-	// the empty envelope to reach the error path, and adding a tool flag to get
-	// there would put a budget knob in front of every caller. Its zero value is
-	// the shipped default, as the two fields above it are: `assemble.Budget.MaxBytes`
-	// reads 0 as UNBOUNDED, so a Server built without New (the tree has one, and a
-	// future constructor would too) would otherwise lose the cap silently and
-	// answer with whatever the corpus holds.
+	// searchMaxBytes bounds one formatted READ response: the search answer and,
+	// since #1039, every other tool that renders its own rows (the list, task,
+	// decision, cross-project and project-context tools — see capResponseParts).
+	// It is a field rather than a constant read inline because a test needs a cap
+	// below the empty envelope to reach the error path, and adding a tool flag to
+	// get there would put a budget knob in front of every caller. Its zero value
+	// is the shipped default, as the two fields above it are:
+	// `assemble.Budget.MaxBytes` reads 0 as UNBOUNDED, so a Server built without
+	// New (the tree has one, and a future constructor would too) would otherwise
+	// lose the cap silently and answer with whatever the corpus holds.
 	searchMaxBytes int
 	// clock is the instant a passive project-context read is made at. nil is the
 	// wall clock, which is every Server New builds; ProjectContextAt sets it so a
@@ -865,8 +946,10 @@ var hostSessionResolver = func() string {
 	return resolveHostSessionID(runtime.GOOS, "/proc", os.Getpid())
 }
 
-// searchResponseCap is one formatted search response's byte cap: the field's
-// value where it was set, and the shipped default where it was not.
+// searchResponseCap is one formatted read response's byte cap: the field's value
+// where it was set, and the shipped default where it was not. ghost_memory_search
+// and the render-level pass the listing tools run (capResponseParts) both read
+// it, so a caller has one budget to reason about across every read tool.
 func (s *Server) searchResponseCap() int {
 	if s.searchMaxBytes > 0 {
 		return s.searchMaxBytes
@@ -874,11 +957,12 @@ func (s *Server) searchResponseCap() int {
 	return searchResponseMaxBytes
 }
 
-// searchResponseMaxBytes is the default response cap for the formatted search
-// answer. It is the same order as the session-start injector's block — 15
+// searchResponseMaxBytes is the default response cap for every formatted read
+// answer: the search tool and, since #1039, the listing tools that render their
+// own rows. It is the same order as the session-start injector's block — 15
 // project memories at 200 bytes plus 8 globals at 300 is about 5.4 KB of content,
-// so a search answer that can fill a harness's context window is larger than
-// anything Ghost is willing to inject (#580).
+// so an answer that can fill a harness's context window is larger than anything
+// Ghost is willing to inject (#580).
 //
 // It must also clear the largest single thing a caller can ask for, and that is
 // the binding constraint: memory.MaxContentLen is 8000, so a memory at the
@@ -1211,7 +1295,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("nothing to update — pass at least one of content, category, importance, tags, valid_from, valid_until, verified_at, verified, confidence, source_ref")
 	}
 	if args.Category != "" && !memory.IsValidCategory(args.Category) {
-		return "", fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
+		return "", invalidCategory(args.Category)
 	}
 
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
@@ -1839,18 +1923,41 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	if entries[0].ProjectID != resolvedProjectID {
 		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", requestedProjectID))
 	}
-	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
+	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("purge failed: %w", err)
 	}
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-			"Memory %s was already deleted; purged the %d recorded version(s) of its text. "+
-				"reflection snapshot holding it. The memory itself is not restored, and a copy in a "+
-				"backup taken before this is not something this can reach.",
-			memoryID, purged)}},
+		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
+			fmt.Sprintf("Memory %s was already deleted; its %d recorded version(s) of text and the "+
+				"reflection snapshot holding it were removed. The memory itself is not restored.",
+				memoryID, outcome.Rows), outcome)}},
 	}, nil, nil
+}
+
+// purgeErasedText is the sentence a purge reports after the lead the caller
+// already wrote. It says what the store confirmed about the file and what it
+// could not reach, and it never claims more than the outcome shows: when the
+// checkpoint could not truncate the log the qualifier comes FIRST, before the
+// lead's account of what was removed, so the limited claim is not read as an
+// unconditional one; and the older-build free-space copy is named as out of
+// reach with `ghost backup` as the way to a clean copy.
+func purgeErasedText(lead string, outcome memory.PurgeOutcome) string {
+	var b strings.Builder
+	if !outcome.CheckpointComplete {
+		b.WriteString("Other Ghost readers held the store, so the write-ahead log could not be truncated: " +
+			"this memory's text stays in it until they close and a later purge or checkpoint completes. ")
+	}
+	b.WriteString(lead)
+	b.WriteString(" ")
+	if outcome.CheckpointComplete {
+		b.WriteString("The write-ahead log has been truncated, so no copy this purge's writes left remains in it. ")
+	}
+	b.WriteString("Text an older Ghost version, one running without secure delete, already freed into the " +
+		"file's free space, a copy in a backup taken before this, or another machine's store, is out of " +
+		"reach; `ghost backup` writes a clean copy without it.")
+	return b.String()
 }
 
 // maxHealthPinnedContradictions bounds how many pinned-contradiction entries
@@ -2124,7 +2231,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
+			return nil, nil, invalidCategory(args.Category)
 		}
 		// The vocabulary, the default and the refusal are the store's, so the tool
 		// and the writer it calls cannot spell the three tiers differently.
@@ -2362,26 +2469,34 @@ func (s *Server) registerTools() {
 					Content: []mcp.Content{&mcp.TextContent{Text: projectNotRegisteredAsOf(asked, *asOf)}},
 				}, nil, nil
 			}
-			// The Global section and nothing else, built in its own builder because
-			// the not-registered sentence is APPENDED to it and a block with the
-			// sentence above the rows would read as though the rows were the
-			// sentence's continuation.
-			var gsb strings.Builder
-			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil, "", "")
+			// The Global section and nothing else, built from response parts so
+			// the response byte budget (#1039) can cut whole rows from it. The
+			// not-registered sentence is APPENDED — a block with the sentence
+			// above the rows would read as though the rows were the sentence's
+			// continuation — and it is counted as framing, so the fitted answer
+			// carries the sentence as well as the rows it kept.
+			//
+			// `args.Limit` and NOT a fixed cap: origin/main's
+			// `GetTopMemories(ctx, "", limit)` honoured the tool's own argument
+			// for a name that resolves to nothing, so hard-coding the Global
+			// section's 15 here would have overridden `limit` — which the tool
+			// publishes as "Max memories to return" — and returned 15 rows for a
+			// `limit: 3` request.
+			rows, globalLine := s.projectContextGlobalRows(ctx, args.Limit, nil, nil, "")
+			var text string
+			if parts := responseSection(0, globalSectionHeading, itemLines(rows), globalLine); len(parts) > 0 {
+				// The section body ends in a newline, so replacing that final
+				// newline with the blank line before the sentence reproduces
+				// projectContextWithNotRegistered byte for byte.
+				parts = append(parts, responsePart{text: "\n" + projectNotRegistered(asked)})
+				text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
+			} else {
+				text = projectNotRegistered(asked)
+			}
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{
-					// `args.Limit` and NOT a fixed cap: origin/main's
-					// `GetTopMemories(ctx, "", limit)` honoured the tool's own
-					// argument for a name that resolves to nothing, so hard-coding
-					// the Global section's 15 here would have overridden
-					// `limit` — which the tool publishes as "Max memories to
-					// return" — and returned 15 rows for a `limit: 3` request.
-					Text: projectContextWithNotRegistered(gsb.String(), asked),
-				}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
-
-		var sb strings.Builder
 
 		if asOf != nil {
 			// The historical set, the same one a search at that instant reads.
@@ -2404,7 +2519,12 @@ func (s *Server) registerTools() {
 			if len(live) > args.Limit {
 				live = live[:args.Limit]
 			}
-			sb.WriteString(memory.AsOfSourceNote(*asOf))
+			// The block is built as response parts so the response byte budget
+			// (#1039) can cut whole historical rows from the end; every note and
+			// heading is framing, counted but never cut. The join of these is
+			// byte-identical to the builder this branch used when the answer fits.
+			var parts []responsePart
+			parts = append(parts, responsePart{text: memory.AsOfSourceNote(*asOf)})
 			if len(live) > 0 {
 				// Split the same way the present-tense branch does, and for the same
 				// reason (#809): `MemoriesAsOf` reads `ProjectScoped`, which is
@@ -2417,23 +2537,24 @@ func (s *Server) registerTools() {
 				// `## Learned Context` and the learned/learned sections stay omitted
 				// for the reason above, and the Global section is the ONLY thing this
 				// adds: it reads the same rows, renders the same fields through the
-				// same `formatMemoriesAt`, and says which instant it read.
+				// same `memoryLines`, and says which instant it read.
 				own, globals := splitMemoriesByProject(live)
-				projectContextSection(&sb, memorySectionHeading, formatMemoriesAt(own, *asOf))
-				projectContextSection(&sb, globalSectionHeading, formatMemoriesAt(globals, *asOf))
+				parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, memoryLines(own, asOf), "")...)
+				parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, memoryLines(globals, asOf), "")...)
 			}
 			if note := set.UnknownNote(); note != "" {
-				sb.WriteString("\n" + note + "\n")
+				parts = append(parts, responsePart{text: "\n" + note + "\n"})
 			}
 			// Said once, at block level, and counted rather than inferred: a block
 			// whose every row was out of window at T must not read as a project
 			// that held nothing then. A set with no rows at all says nothing.
 			if len(inScope) > 0 {
-				sb.WriteString("\n(" + memory.AsOfValidityNote(*asOf, withheldAtT) + ")\n")
+				parts = append(parts, responsePart{text: "\n(" + memory.AsOfValidityNote(*asOf, withheldAtT) + ")\n"})
 			}
-			sb.WriteString("\n(" + memory.AsOfUnversionedNote() + ")\n")
+			parts = append(parts, responsePart{text: "\n(" + memory.AsOfUnversionedNote() + ")\n"})
+			text, _ := capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
 
@@ -2471,6 +2592,24 @@ func (s *Server) registerTools() {
 		}
 		if args.Limit > 100 {
 			args.Limit = 100
+		}
+		// The category is judged before the project is resolved, so a misspelt
+		// category is refused as the argument it is. Asked after the resolve, an
+		// unresolved project short-circuits to the not-registered sentence and the
+		// category is never examined — and a resolved one was handed to the store,
+		// whose own refusal reaches the caller wrapped in `list failed:`. Either
+		// way the caller was told about the project rather than the typo (#1041).
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
+		// Retention is judged before the resolve too, for the same reason the
+		// category is: asked after it, an unresolved project short-circuits to the
+		// not-registered sentence and the retention is never examined, and a
+		// resolved one hands it to the store whose refusal arrives wrapped in
+		// `list failed:`. Either way the caller is told about the project rather
+		// than the argument that was wrong (#1041).
+		if _, err := memory.NormalizeRetention(args.Retention); err != nil {
+			return nil, nil, err
 		}
 		// The RAW name is kept, because `ResolveProject` answers an unknown name
 		// with `("", "", nil)` and the message below formats what it is given:
@@ -2546,8 +2685,12 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
+		// The response byte budget (#1039): a browse is bounded by the caller's
+		// `limit` alone, so 60 memories at the store's 8 KB content cap is a
+		// 485 KB answer. Cut whole rows from the end and say how many went.
+		text, _ := capRowsToResponseBudget("", memoryLines(memories, nil), s.searchResponseCap(), memoriesListCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: formatMemories(memories)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -2597,21 +2740,43 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
-			PurgeHistory: args.PurgeHistory,
-		}); err != nil {
+		if args.PurgeHistory {
+			// The purge's report is about the file, not only the rows, so a store
+			// that can return how far it got is asked for that; one that cannot
+			// still purges and simply says less, rather than failing a redaction
+			// that would have worked.
+			if hs, ok := s.store.(historyCapableStore); ok {
+				outcome, err := hs.DeletePurge(ctx, args.MemoryID)
+				if err != nil {
+					return nil, nil, fmt.Errorf("delete failed: %w", err)
+				}
+				s.notifyProjectResource(ctx, resolvedProjectID, "context")
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
+						fmt.Sprintf("Memory %s was deleted, and its recorded history and any reflection "+
+							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
+				}, nil, nil
+			}
+			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+				return nil, nil, fmt.Errorf("delete failed: %w", err)
+			}
+			s.notifyProjectResource(ctx, resolvedProjectID, "context")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+					"This store does not report whether the write-ahead log was truncated, so treat the "+
+						"text as possibly still in it until a later checkpoint. Memory %s was deleted, and its "+
+						"recorded history and any reflection snapshot that could have restored the row were "+
+						"removed. Text an older Ghost version already freed into the file's free space, a copy "+
+						"in a backup taken before this, or another machine's store, is out of reach.",
+					args.MemoryID)}},
+			}, nil, nil
+		}
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
-
-		text := "Memory deleted."
-		if args.PurgeHistory {
-			text = "Memory deleted, and the versions of its text this database recorded are gone. " +
-				"its recorded history, and the reflection snapshot that could have restored the row. " +
-				"A copy in a backup taken before this, or in another machine's store, is not something this can reach."
-		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: text}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
 		}, nil, nil
 	})
 
@@ -2699,8 +2864,11 @@ func (s *Server) registerTools() {
 				Content: []mcp.Content{&mcp.TextContent{Text: "No matching memories found."}},
 			}, nil, nil
 		}
+		// The response byte budget (#1039), the same one ghost_memories_list
+		// applies: a cross-project search is bounded by `limit` alone.
+		text, _ := capRowsToResponseBudget("", memoryLines(memories, nil), s.searchResponseCap(), searchAllCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: formatMemories(memories)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -2737,7 +2905,7 @@ func (s *Server) registerTools() {
 			args.Category = "fact"
 		}
 		if !memory.IsValidCategory(args.Category) {
-			return nil, nil, fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", args.Category))
+			return nil, nil, invalidCategory(args.Category)
 		}
 		retention, err := memory.NormalizeRetention(args.Retention)
 		if err != nil {
@@ -3053,6 +3221,15 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
 		}
+		// The status is judged before the project is resolved, so a misspelt one is
+		// refused as the argument it is rather than passed to `ListTasks`, whose
+		// `WHERE status = ?` matches nothing and answers "No tasks found." — the
+		// same sentence a genuinely empty project gets (#1041).
+		if args.Status != "" {
+			if err := taskStatusError(args.Status); err != nil {
+				return nil, nil, err
+			}
+		}
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -3073,19 +3250,26 @@ func (s *Server) registerTools() {
 				Content: []mcp.Content{&mcp.TextContent{Text: "No tasks found."}},
 			}, nil, nil
 		}
-		var sb strings.Builder
+		// The id through assemble.Token, for the reason Item.Line's does (#791),
+		// and the title and description through quoteData for the reason the
+		// decisions listing's do: a task's text is written by the same callers,
+		// through the same tools, as a memory's. Each task is one row — the header
+		// line and the description line it owns — so the response budget can drop
+		// whole tasks rather than half a task.
+		rows := make([]string, 0, len(tasks))
 		for _, t := range tasks {
-			// The id through assemble.Token, for the reason Item.Line's does
-			// (#791), and the title and description through quoteData for the
-			// reason the decisions listing's do: a task's text is written by the
-			// same callers, through the same tools, as a memory's.
+			var sb strings.Builder
 			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), quoteData(t.Title))
 			if t.Description != "" {
 				fmt.Fprintf(&sb, "  %s\n", quoteData(t.Description))
 			}
+			rows = append(rows, sb.String())
 		}
+		// The response byte budget (#1039): 60 tasks with 8 KB descriptions is a
+		// 482 KB answer bounded by `limit` alone.
+		text, _ := capRowsToResponseBudget("", rows, s.searchResponseCap(), taskListCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -3209,21 +3393,50 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
+		supersedeFailed := false
 		if args.Supersedes != "" {
 			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
 			if err != nil {
-				// The new decision is already committed; report the
-				// supersession failure without losing that ID.
-				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
+				// The new decision is committed and the old one is NOT marked.
+				// That is a partial failure — the caller asked for one write and
+				// got another — so it is reported as an ERROR result rather than
+				// a warning on a success, which is what it used to be: a caller
+				// checking only `isError` read "Decision recorded" and believed
+				// the reversal had landed (#1041).
+				//
+				// A plain Go error is the other wrong answer: it would drop the
+				// content, and the content is the one place the committed
+				// decision_id and memory_id live. Returning the result with
+				// IsError set keeps both ids, tells the caller the new decision
+				// stands, and names the old id through `memory.RefusalArg` — the
+				// bounded, token-guarded renderer — so a hostile or oversized id
+				// cannot forge a line here or bloat the answer (#1041, #1072).
+				//
+				// The store error is appended rather than dropped because it says
+				// WHICH write failed, and it is safe to append: the id-carrying
+				// sentences in `SupersedeDecisionReport` render their ids through
+				// the same renderer, so the whole sentence is bounded and nothing
+				// raw comes back through it.
+				supersedeFailed = true
+				supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
+					memory.RefusalArg("supersedes", args.Supersedes), err)
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {
 					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
+				// Ambiguous and Declined are the same partial failure the error
+				// branch reports: the decisions row is marked, but the companion
+				// memory keeps answering search and session start, so the caller
+				// did not get the write it asked for. They were WARNING text on an
+				// ordinary success while a failed supersede was an error; now one
+				// check of `isError` reads both (#1041).
 				if len(retirement.Ambiguous) > 0 {
+					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
 				}
 				if len(retirement.Declined) > 0 {
+					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
 				}
 			}
@@ -3259,6 +3472,7 @@ func (s *Server) registerTools() {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+			IsError: supersedeFailed,
 		}, nil, nil
 	})
 
@@ -3700,11 +3914,8 @@ func (s *Server) registerTools() {
 
 		var status *string
 		if args.Status != "" {
-			validStatuses := map[string]bool{
-				"pending": true, "active": true, "blocked": true, "done": true,
-			}
-			if !validStatuses[args.Status] {
-				return nil, nil, fmt.Errorf("invalid status %s — must be one of: pending, active, blocked, done", memory.RefusalArg("status", args.Status))
+			if err := taskStatusError(args.Status); err != nil {
+				return nil, nil, err
 			}
 			status = &args.Status
 		}
@@ -3767,6 +3978,15 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
+		// The status is judged before the project is resolved, so a misspelt one
+		// is refused as the argument it is rather than handed to `ListDecisions`,
+		// whose `AND status = ?` matches nothing and answers "No decisions
+		// found." — the same sentence a project with no decisions gets (#1041).
+		if args.Status != "" {
+			if err := decisionStatusError(args.Status); err != nil {
+				return nil, nil, err
+			}
+		}
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -3799,9 +4019,14 @@ func (s *Server) registerTools() {
 		// The explainer is printed once, at the head, because this is a BLOCK — a
 		// whole decision record — rather than a row listing like
 		// `ghost_memories_list`, which delimits each line and does not.
-		var sb strings.Builder
-		sb.WriteString(dataDelimiterNote + "\n\n")
+		//
+		// Each decision is one row — the whole `### …` record — and the explainer
+		// is framing, so the response byte budget (#1039) drops whole decisions
+		// from the end without ever splitting one in half or cutting its
+		// explainer.
+		rows := make([]string, 0, len(decisions))
 		for _, d := range decisions {
+			var sb strings.Builder
 			fmt.Fprintf(&sb, "### %s\n", quoteData(d.Title))
 			fmt.Fprintf(&sb, "**Decision:** %s\n", quoteData(d.Decision))
 			fmt.Fprintf(&sb, "**Rationale:** %s\n", quoteData(d.Rationale))
@@ -3809,9 +4034,11 @@ func (s *Server) registerTools() {
 				fmt.Fprintf(&sb, "**Alternatives rejected:** %s\n", quoteData(strings.Join(d.Alternatives, ", ")))
 			}
 			fmt.Fprintf(&sb, "**Status:** %s | **ID:** `%s`\n\n", d.Status, assemble.Token(d.ID))
+			rows = append(rows, sb.String())
 		}
+		text, _ := capRowsToResponseBudget(dataDelimiterNote+"\n\n", rows, s.searchResponseCap(), decisionsListCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 }
@@ -4431,7 +4658,15 @@ func truncateUTF8(s string, maxBytes int) string {
 // all, so a note inside a section body would print a heading over nothing. The
 // caller states it once at block level, with the count of rows withheld.
 func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
-	var sb strings.Builder
+	return strings.Join(memoryLines(memories, asOf), "")
+}
+
+// memoryLines renders each memory as its own line, the same line
+// formatMemoriesInternal emitted for every row it printed. The lines are returned
+// separately so a caller that has to cut whole rows to fit a response budget can
+// drop them one at a time rather than re-render the block with a shorter slice.
+func memoryLines(memories []memory.Memory, asOf *time.Time) []string {
+	lines := make([]string, 0, len(memories))
 	now := time.Now().UTC()
 	for _, m := range memories {
 		pin := ""
@@ -4454,13 +4689,13 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 			verdict = state
 		}
 		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
+		lines = append(lines, fmt.Sprintf("- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
 			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
-			sourceLabelForMemory(m), assemble.Data(m.Content))
+			sourceLabelForMemory(m), assemble.Data(m.Content)))
 	}
-	return sb.String()
+	return lines
 }
 
 // withholdInvalidAt drops the rows whose validity window had closed or had not

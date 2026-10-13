@@ -62,8 +62,9 @@ func TestDecisionRecordAnswerWarnsWhenTheOldMemoryIsAmbiguous(t *testing.T) {
 	res := callTool(t, session, "ghost_decision_record", map[string]any{
 		"project_id": "abc123", "title": "n", "decision": "new", "rationale": "new", "supersedes": oldID,
 	})
-	if res.IsError {
-		t.Fatal(resultText(res))
+	if !res.IsError {
+		t.Errorf("an ambiguous retirement was reported as a plain success; a caller checking only isError "+
+			"reads the reversal as fully done:\n%s", resultText(res))
 	}
 	if out := resultText(res); !strings.Contains(out, "more than one memory claims it") {
 		t.Errorf("no ambiguity warning in the answer:\n%s", out)
