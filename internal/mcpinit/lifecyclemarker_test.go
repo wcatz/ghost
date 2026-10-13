@@ -299,7 +299,7 @@ func TestSessionStart_EmitsFreshLifecycleFailureAlert(t *testing.T) {
 	firstLine, out := alertFirstLine(t, projDir)
 
 	want := "**Ghost maintenance alert:** last automatic consolidation failed for project p1 at " + at +
-		" (phase(s): reflect; no CLI LLM backend available; reflect skipped)." +
+		" (phase(s): reflect; «no CLI LLM backend available; reflect skipped»)." +
 		" Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project p1` to retry," +
 		" and check config cli.*_binary if no LLM CLI was found."
 	if firstLine != want {

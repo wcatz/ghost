@@ -97,3 +97,45 @@ func TestTheImportRecordLineNeverForgesALine(t *testing.T) {
 		})
 	}
 }
+
+// TestTheImportRecordLineNamesADroppedPointer: a task or decision imported with
+// its blocked_by or superseded_by dropped, because the record that pointer named
+// was rejected, says so on its own line — in a dry run and an apply alike — so
+// the operator learns what the record lost. The dropped id goes through
+// assemble.Token like every other id this line prints.
+func TestTheImportRecordLineNamesADroppedPointer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		r    portable.RecordResult
+		want string
+	}{
+		"task": {
+			r: portable.RecordResult{Type: portable.TypeTask, ID: "tb2", Line: 4, Action: portable.ActionCreate,
+				Detail: "blocked", DroppedRef: "tb1"},
+			want: "  create  task:     line 4  \"blocked\" (tb2) (blocked_by tb1 dropped: that task was rejected)\n",
+		},
+		"decision": {
+			r: portable.RecordResult{Type: portable.TypeDecision, ID: "dc1", Line: 3, Action: portable.ActionCreate,
+				Detail: "kept", DroppedRef: "dc2"},
+			want: "  create  decision: line 3  \"kept\" (dc1) (superseded_by dc2 dropped: that decision was rejected)\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := printRecordLine(&buf, tc.r); err != nil {
+				t.Fatalf("printRecordLine: %v", err)
+			}
+			if got := buf.String(); got != tc.want {
+				t.Errorf("record line:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := printRecordLine(&buf, portable.RecordResult{Type: portable.TypeTask, ID: "tb2", Line: 4,
+		Action: portable.ActionCreate, Detail: "blocked", DroppedRef: "AAAA\n- forged"}); err != nil {
+		t.Fatalf("printRecordLine: %v", err)
+	}
+	if out := buf.String(); strings.Count(out, "\n") != 1 {
+		t.Errorf("a hostile dropped id broke the record line:\n%q", out)
+	}
+}

@@ -67,10 +67,37 @@ func rwDSN(dbPath string) string {
 		// pragma here a row this connection deletes would leave its text in the
 		// freed cell for whoever reads the file next (#1043). It is per
 		// connection, so the DSN is the only place it can be set for this one.
-		RawQuery: "_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)&_txlock=immediate",
+		//
+		// foreign_keys(ON) matches memory.OpenDB for the reason the concurrency
+		// contract gives: a writer without it accepts a row for a project that no
+		// longer exists. The session hook resolves its project early and writes
+		// late, so a project deleted in between left a ghost_state orphan, and the
+		// next migration's foreign-key check then refused to open the store
+		// (#1155). Like secure_delete it is per connection. TestRwDSNEnforcesForeignKeys
+		// reads it back from a live connection, since TestMultiProcessSharedDatabase
+		// never opens this DSN.
+		RawQuery: "_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)&_pragma=foreign_keys(ON)&_txlock=immediate",
 	}
 	return u.String()
 }
+
+// bumpSessionCountSQL is bumpSessionCount's write. The SELECT from projects
+// is what makes a project deleted between the hook resolving it and this write
+// "nothing to count": no row is inserted, RETURNING yields nothing, and the
+// caller sees sql.ErrNoRows rather than a constraint error (#1155). The
+// foreign_keys(ON) on rwDSN refuses the same orphan; this guard is the half that
+// does not depend on the connection, and
+// TestBumpSessionCountStatementSkipsAVanishedProjectWithoutForeignKeys pins it on
+// one that does not enforce foreign keys. The WHERE also satisfies SQLite's
+// parsing rule for an upsert on INSERT ... SELECT.
+const bumpSessionCountSQL = `
+	INSERT INTO ghost_state (project_id, interaction_count)
+	SELECT id, 1 FROM projects WHERE id = ?
+	ON CONFLICT(project_id) DO UPDATE SET
+		interaction_count = interaction_count + 1,
+		updated_at = datetime('now')
+	RETURNING interaction_count
+`
 
 // bumpSessionCount increments the project's session counter and returns the
 // new count, or 0 on any failure. It is the session hook's single deliberate
@@ -161,15 +188,11 @@ func bumpSessionCount(dbPath, projectID string) int {
 	}
 
 	var n int
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO ghost_state (project_id, interaction_count)
-		VALUES (?, 1)
-		ON CONFLICT(project_id) DO UPDATE SET
-			interaction_count = interaction_count + 1,
-			updated_at = datetime('now')
-		RETURNING interaction_count
-	`, projectID).Scan(&n)
+	err = tx.QueryRowContext(ctx, bumpSessionCountSQL, projectID).Scan(&n)
 	if err != nil {
+		// sql.ErrNoRows is the project having been deleted since the hook
+		// resolved it: there is nothing to count, and it is as silent as every
+		// other failure here — a session start is never the place to report it.
 		_ = tx.Rollback()
 		return 0
 	}

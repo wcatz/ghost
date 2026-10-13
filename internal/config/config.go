@@ -505,7 +505,27 @@ func Load() (*Config, error) {
 	if err := checkContextValues(cfg); err != nil {
 		return nil, err
 	}
+	if err := checkEmbeddingValues(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// checkEmbeddingValues refuses an embedding.dimensions no model produces.
+//
+// The width is read twice downstream and both readings break at zero or less:
+// embedding.VectorIdentity leaves the width stamp out, so every vector already
+// stored stops matching the configured identity and reads as stale, and the
+// client refuses every vector whose length is not the configured width, so
+// none of them can be rewritten. The index is retired and cannot be rebuilt
+// until the value is fixed. It is refused whether or not embedding is enabled,
+// because the identity is declared unconditionally and a disabled worker
+// switched back on would meet the same wedge.
+func checkEmbeddingValues(cfg *Config) error {
+	if d := cfg.Embedding.Dimensions; d <= 0 {
+		return fmt.Errorf("embedding.dimensions: the width of the model's vectors, a positive number (768 for %s), got %d", DefaultEmbeddingModel, d)
+	}
+	return nil
 }
 
 // checkContextValues refuses a context.abstain_cosine no cosine can be, on the
@@ -771,6 +791,14 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
 	}
 	resolveNoAnswerBar(cfg, explicitBar)
+	// The environment survives into this path, so a width Load refuses would
+	// otherwise reach the server and every hook anyway. It is replaced with the
+	// compiled default, the way an unreadable GHOST_* value is skipped.
+	if err := checkEmbeddingValues(cfg); err != nil {
+		def := defaultConfig().Embedding.Dimensions
+		warnf("%v — using the built-in default %d", err, def)
+		cfg.Embedding.Dimensions = def
+	}
 	return cfg, true
 }
 

@@ -310,14 +310,30 @@ func (s *Store) GetLinks(ctx context.Context, memoryID string) ([]Link, error) {
 // MarkLinkScanned records that the linking worker has processed this memory.
 // Rows cascade-delete with the memory, so reflection churn resets scans
 // automatically and the worker self-heals.
-func (s *Store) MarkLinkScanned(ctx context.Context, memoryID string) error {
+//
+// scanned is the vector the worker compared with the memory's neighbours, and
+// the slot is written only while that vector is still the memory's stored
+// embedding, checked inside the same statement. A content edit deletes the
+// vector and the slot together, but a scan already in flight read the old
+// vector before that: recording it would put the slot back for text it never
+// compared, and since StoreEmbedding keeps the slot when the new vector is in
+// the same space, the new text would never be scanned. The check has to live
+// here rather than in StoreEmbedding because the re-embed can land on either
+// side of this write; when it lands first there is no later write to undo the
+// slot. When the vector no longer matches, nothing is written and nil is
+// returned — the memory simply stays queued. Byte equality is the identity:
+// a new text that embeds to the identical vector has the identical neighbours.
+func (s *Store) MarkLinkScanned(ctx context.Context, memoryID string, scanned []float32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	_, err := s.execGuardedWrite(ctx, "mark-link-scanned", `
-		INSERT INTO link_scans (memory_id) VALUES (?)
+		INSERT INTO link_scans (memory_id)
+		SELECT ? WHERE EXISTS (
+			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND embedding = ?
+		)
 		ON CONFLICT(memory_id) DO UPDATE SET scanned_at = datetime('now')
-	`, memoryID)
+	`, memoryID, memoryID, float32sToBytes(scanned))
 	if err != nil {
 		return fmt.Errorf("mark link scanned: %w", err)
 	}
@@ -421,6 +437,12 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 // or of an install whose embedding was only just enabled. Both are reported by
 // `ghost mcp status` and `ghost_health`.
 //
+// The three counts describe memories, so an embedding row counts only while a
+// memory still backs it: a delete made with foreign keys off (a migration step)
+// leaves the row behind, the vector leg drops it by joining memories, and
+// counting it here would report embedded+stale > total and a negative
+// unembedded count.
+//
 // The three counts come from one statement so they describe one snapshot.
 // Three separate COUNTs could straddle a write and report embedded+stale >
 // total, which in a coverage line reads as corruption rather than as a race.
@@ -431,8 +453,10 @@ func (s *Store) EmbeddingStats(ctx context.Context) (embedded, stale, total int,
 	identity := s.embeddingIdentity
 	const countQuery = `
 		SELECT
-			(SELECT COUNT(*) FROM memory_embeddings WHERE ? = '' OR model = ?),
-			(SELECT COUNT(*) FROM memory_embeddings WHERE ? <> '' AND model <> ?),
+			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
+				WHERE ? = '' OR e.model = ?),
+			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
+				WHERE ? <> '' AND e.model <> ?),
 			(SELECT COUNT(*) FROM memories)
 	`
 	if err = s.db.QueryRowContext(ctx, countQuery, identity, identity, identity, identity).

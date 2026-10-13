@@ -129,7 +129,7 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 
 	switch len(ids) {
 	case 0:
-		return "", fmt.Errorf("task not found: %s", idOrPrefix)
+		return "", fmt.Errorf("task not found: %s", RefusalArg("task_id", idOrPrefix))
 	case 1:
 		return ids[0], nil
 	default:

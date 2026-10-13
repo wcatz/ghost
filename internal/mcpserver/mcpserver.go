@@ -525,7 +525,7 @@ type markCapableStore interface {
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
 	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
-	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	DeletePurgeInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // asOfCapableStore narrows provider.MemoryStore to the historical read
@@ -1337,7 +1337,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 	}
 
 	importance, err := optFloat32(args.Importance, "importance")
@@ -1493,10 +1493,10 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID == "_global" {
-		return "", fmt.Errorf("memory %s is already global", memoryID)
+		return "", fmt.Errorf("memory %s is already global", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", projectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", projectID))
 	}
 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
@@ -1945,7 +1945,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	// The same ownership check a live row gets, against the project the
 	// tombstone was filed under. One entry is enough to name it.
 	if entries[0].ProjectID != resolvedProjectID {
-		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", requestedProjectID))
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", requestedProjectID))
 	}
 	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
@@ -2750,7 +2750,11 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		// Verify the memory exists and belongs to the specified project.
+		// Verify the memory exists and belongs to the specified project. This
+		// read answers the caller's errors and finds the tombstone; it does not
+		// decide the write — every delete below carries resolvedProjectID, which
+		// the store checks inside its own transaction, so a row that moves to
+		// _global after this read is refused there rather than deleted (#1154).
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 		if err != nil {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
@@ -2766,7 +2770,7 @@ func (s *Server) registerTools() {
 			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if args.PurgeHistory {
@@ -2775,7 +2779,7 @@ func (s *Server) registerTools() {
 			// still purges and simply says less, rather than failing a redaction
 			// that would have worked.
 			if hs, ok := s.store.(historyCapableStore); ok {
-				outcome, err := hs.DeletePurge(ctx, args.MemoryID)
+				outcome, err := hs.DeletePurgeInProject(ctx, resolvedProjectID, args.MemoryID)
 				if err != nil {
 					return nil, nil, fmt.Errorf("delete failed: %w", err)
 				}
@@ -2786,7 +2790,7 @@ func (s *Server) registerTools() {
 							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
 				}, nil, nil
 			}
-			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
 				return nil, nil, fmt.Errorf("delete failed: %w", err)
 			}
 			s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -2800,7 +2804,7 @@ func (s *Server) registerTools() {
 					args.MemoryID)}},
 			}, nil, nil
 		}
-		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{}); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -3272,6 +3276,12 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
+		}
 		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
@@ -3329,7 +3339,7 @@ func (s *Server) registerTools() {
 		}
 		task, err := s.store.GetTask(ctx, args.TaskID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
+			return nil, nil, err
 		}
 		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)
@@ -3957,10 +3967,10 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
+		if err := s.store.TogglePinInProject(ctx, resolvedProjectID, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -4069,6 +4079,12 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 
@@ -4261,6 +4277,11 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -4312,6 +4333,11 @@ func (s *Server) registerResources() {
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
 		}
 
 		var sb strings.Builder

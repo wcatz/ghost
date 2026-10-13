@@ -25,7 +25,7 @@
 #   enabled: true
 #   ollama_url: "http://localhost:11434"
 #   model: "nomic-embed-text:v1.5"   # 274MB, runs fine on CPU
-#   dimensions: 768
+#   dimensions: 768                  # the model's vector width; must be positive
 
 # --- Memory Linking (requires embedding) ---
 # Background worker that links similar memories into a graph. The graph feeds
