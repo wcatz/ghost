@@ -29,10 +29,10 @@ type restoreAfterHistoryReadStore struct {
 func (s *restoreAfterHistoryReadStore) MemoryHistory(ctx context.Context, id string, limit int) ([]memory.HistoryEntry, error) {
 	entries, err := s.Store.MemoryHistory(ctx, id, limit)
 	if err == nil && s.armed.CompareAndSwap(true, false) {
-		if _, rerr := s.Store.RestoreSnapshot(ctx, "abc123"); rerr != nil {
+		if _, rerr := s.RestoreSnapshot(ctx, "abc123"); rerr != nil {
 			s.hookErr = rerr
 		} else if s.promote {
-			s.hookErr = s.Store.PromoteToGlobal(ctx, "abc123", s.target)
+			s.hookErr = s.PromoteToGlobal(ctx, "abc123", s.target)
 		}
 	}
 	return entries, err
