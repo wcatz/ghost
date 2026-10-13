@@ -3,6 +3,8 @@ package portable
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -176,5 +178,64 @@ func TestAnArtifactStatingAnUnknownRetentionIsRejectedByName(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "good" || got[0].Retention != memory.RetentionPersistent {
 		t.Errorf("the destination holds %+v, want only the good persistent record", got)
+	}
+}
+
+// TestARejectedArtifactRecordNeverPrintsTheValueItRejected: the report is the
+// only place the artifact's own words are echoed back — every rejected record's
+// error is carried in it and the CLI prints each one — so it is the surface a
+// value would actually reach a terminal through. A hand-edited file can put a
+// credential in any column, and the predicate that judges a record runs before
+// the secret guard, so each of the three value-set refusals must withhold the
+// value it refused rather than quote it back.
+func TestARejectedArtifactRecordNeverPrintsTheValueItRejected(t *testing.T) {
+	const token = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// One record per column a value SET guards, each holding the token and
+	// otherwise valid, so the refusal under test is the column's own. The record
+	// is built as JSON rather than a string so a duplicate key cannot hide which
+	// value the decoder actually saw.
+	line := func(field string) string {
+		rec := map[string]any{
+			"id": "bad-" + field, "project_id": "pv", "category": "fact", "content": "x",
+			"source": "mcp", "created_at": "2026-01-01 00:00:00", "updated_at": "2026-01-01 00:00:00",
+			field: token,
+		}
+		b, err := json.Marshal(map[string]any{"type": "memory", "memory": rec})
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		return string(b)
+	}
+	artifact := strings.Join([]string{
+		`{"type":"header","schema_version":2}`,
+		`{"type":"project","project":{"id":"pv","path":"/src/pv","name":"v","created_at":"2026-01-01 00:00:00","updated_at":"2026-01-01 00:00:00"}}`,
+		line("retention"),
+		line("category"),
+		line("source"),
+	}, "\n") + "\n"
+
+	dst := newTestStore(t)
+	report, err := Import(context.Background(), dst, strings.NewReader(artifact),
+		ImportOptions{Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rejected != 3 {
+		t.Fatalf("rejected %d record(s), want the three holding a token: %v", report.Rejected, report.Errors)
+	}
+	for _, e := range report.Errors {
+		if strings.Contains(e.Error(), token) {
+			t.Errorf("a report error printed the credential: %v", e)
+		}
+	}
+	// And rendered the way the CLI renders it, since %v on the error is what a
+	// user sees: an assertion on the error objects alone would miss a print
+	// path that re-encoded them.
+	var out strings.Builder
+	for _, e := range report.Errors {
+		fmt.Fprintf(&out, "%v\n", e)
+	}
+	if strings.Contains(out.String(), token) {
+		t.Errorf("the rendered report printed the credential:\n%s", out.String())
 	}
 }

@@ -222,6 +222,118 @@ func TestImportMemoryRefusesAnUnknownRetentionTier(t *testing.T) {
 	}
 }
 
+// TestARefusedImportNeverEchoesTheValueItRefused: CheckImportedMemory is a
+// boundary that refuses arguments, and it refuses them BEFORE the secret guard
+// further down — so the value is still whatever the file said. Its sentences
+// are printed: the import report carries every rejected record's error and the
+// CLI prints each one, which is the same route *SecretContentError exists to
+// keep a credential off. Every value-set refusal therefore renders its value
+// through RefusalArg, and this is the assertion that the boundary, not only the
+// renderer, holds: a credential-shaped or oversized value is withheld, and an
+// ordinary typo is still named because the diagnostic is the other half of the
+// rule.
+func TestARefusedImportNeverEchoesTheValueItRefused(t *testing.T) {
+	oversized := strings.Repeat("z", 200*1024)
+	for _, tc := range []struct {
+		name  string
+		value string
+		token bool
+		mut   func(*PortableMemory)
+	}{
+		{
+			name: "a category holding a token", value: credentialToken, token: true,
+			mut: func(m *PortableMemory) { m.Category = credentialToken },
+		},
+		{
+			name: "a category longer than a refusal repeats", value: oversized,
+			mut: func(m *PortableMemory) { m.Category = oversized },
+		},
+		{
+			name: "a source holding a token", value: credentialToken, token: true,
+			mut: func(m *PortableMemory) { m.Source = credentialToken },
+		},
+		{
+			name: "a source longer than a refusal repeats", value: oversized,
+			mut: func(m *PortableMemory) { m.Source = oversized },
+		},
+		{
+			name: "a tier holding a token", value: credentialToken, token: true,
+			mut: func(m *PortableMemory) { m.Retention = credentialToken },
+		},
+		{
+			name: "a tier longer than a refusal repeats", value: oversized,
+			mut: func(m *PortableMemory) { m.Retention = oversized },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := PortableMemory{ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp"}
+			tc.mut(&m)
+			// The predicate, which is the refusal `ghost export` also makes.
+			err := CheckImportedMemory(m)
+			if err == nil {
+				t.Fatalf("CheckImportedMemory accepted %s", tc.name)
+			}
+			assertRefusalWithholds(t, err, tc.value)
+			if tc.token && !strings.Contains(err.Error(), "withheld") {
+				t.Errorf("the refusal did not say it withheld the credential: %v", err)
+			}
+			// And the import itself, which is the path whose errors the report
+			// prints and the CLI reprints.
+			store := portableTestStore(t)
+			ctx := context.Background()
+			if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			if _, _, _, err := store.ImportMemory(ctx, m, ImportOptions{Apply: true}); err == nil {
+				t.Fatalf("ImportMemory accepted %s", tc.name)
+			} else {
+				assertRefusalWithholds(t, err, tc.value)
+			}
+		})
+	}
+
+	// The other half of the renderer, at the surface it exists for: an ordinary
+	// typo is still NAMED, because a fix that stopped naming anything would close
+	// the leak by taking the diagnostic with it.
+	for _, m := range []PortableMemory{
+		{ID: "m1", ProjectID: "p1", Category: "nope", Content: "x", Source: "mcp"},
+		{ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "telepathy"},
+		{ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp", Retention: "forever"},
+	} {
+		err := CheckImportedMemory(m)
+		if err == nil {
+			t.Fatalf("CheckImportedMemory accepted %+v", m)
+		}
+		want := m.Retention
+		if m.Category != "fact" {
+			want = m.Category
+		} else if m.Source != "mcp" {
+			want = m.Source
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("a refusal no longer names the ordinary value %q it refused: %v", want, err)
+		}
+	}
+}
+
+// assertRefusalWithholds is the one rule every refusal on this boundary owes: no
+// part of the value is in the sentence, and the sentence is bounded so an
+// oversized argument cannot arrive back through it.
+func assertRefusalWithholds(t *testing.T, err error, value string) {
+	t.Helper()
+	if strings.Contains(err.Error(), value) {
+		t.Errorf("the refusal echoed the value it refused: %v", err)
+	}
+	// A refusal that echoed even the first 256 bytes of an oversized value would
+	// slip past a Contains of the whole thing, so the run is what is asserted.
+	if len(value) > ArgEchoMaxBytes && strings.Contains(err.Error(), value[:64]) {
+		t.Errorf("the refusal echoed a prefix of an oversized value: %v", err)
+	}
+	if len(err.Error()) > 1024 {
+		t.Errorf("the refusal is %d bytes — it repeated an argument: %v", len(err.Error()), err)
+	}
+}
+
 // TestARestoredSessionRowStaysPrunable: the artifact carries no expiry —
 // expires_at is derived for a session save and stated by nobody else — so a
 // restore that put the tier back without deriving one would leave a row the
