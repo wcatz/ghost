@@ -634,7 +634,12 @@ func shortID(id string) string {
 // description that tells an agent the limit, and the test that pins the cut.
 const tagMaxLen = 64
 
-// tagMaxCount is how many tags one row may carry. A list longer than this is
+// tagMaxCount is how many tags the four MCP writers accept. It is a
+// WRITE-BOUNDARY rule, not a property of the store: a fold or a portable import
+// can leave a row carrying more tags (Store.FoldRows unions a cluster's tags
+// with no bound, and CheckImportedMemory keeps an artifact's tag list as
+// written), and a row that crossed the boundary that way cannot be re-submitted
+// as-is through ghost_memory_update. A list longer than this is
 // REFUSED rather than cut, and that is the behaviour #1041 asks for: a caller
 // passing twelve labels has asked for more slots than the row has, and silently
 // keeping ten answers a question the caller did not ask — the eleventh label
@@ -753,8 +758,13 @@ func unsafeTagRune(t string) string {
 // to the store as a raw `list failed:` or — on a project Ghost has never heard
 // of — never reached the store at all and was answered as "not registered",
 // naming the project rather than the argument that was wrong (#1041).
+//
+// The value is rendered through `memory.RefusalArg`, never `%q`, so the refusal
+// carries a bounded, token-guarded form of it: a category carrying a newline or a
+// credential shape is quoted or withheld rather than printed raw, and a 200 KB one
+// is withheld with its length (#1072).
 func invalidCategory(category string) error {
-	return fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", category)
+	return fmt.Errorf("invalid category %s — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", memory.RefusalArg("category", category))
 }
 
 // taskStatusValues is the one list of task statuses, in the order the refusal
@@ -767,14 +777,35 @@ func invalidCategory(category string) error {
 var taskStatusValues = []string{"pending", "active", "blocked", "done"}
 
 // taskStatusError returns the refusal for a status outside taskStatusValues, and
-// nil for one inside it.
+// nil for one inside it. Like invalidCategory it renders the value through
+// memory.RefusalArg, so the refusal is bounded and token-guarded (#1072).
 func taskStatusError(status string) error {
 	for _, v := range taskStatusValues {
 		if status == v {
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid status %q — must be one of: %s", status, strings.Join(taskStatusValues, ", "))
+	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(taskStatusValues, ", "))
+}
+
+// decisionStatusValues is the one list of decision statuses, in the order the
+// refusal names them: active, superseded, revisit — the three `decisions.status`
+// is CHECKed to, and the three `ghost_decisions_list`'s own jsonschema
+// advertises. That tool used to hand the raw value to `Store.ListDecisions`, whose
+// `AND status = ?` matched nothing and answered "No decisions found." for a
+// misspelt status on a project that has decisions (#1041).
+var decisionStatusValues = []string{"active", "superseded", "revisit"}
+
+// decisionStatusError returns the refusal for a status outside
+// decisionStatusValues, and nil for one inside it. It is the decisions counterpart
+// of taskStatusError, and renders the value the same way (#1072).
+func decisionStatusError(status string) error {
+	for _, v := range decisionStatusValues {
+		if status == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(decisionStatusValues, ", "))
 }
 
 // defaultImportance returns the importance value, defaulting to fallback when nil.
@@ -2528,6 +2559,15 @@ func (s *Server) registerTools() {
 		if args.Category != "" && !memory.IsValidCategory(args.Category) {
 			return nil, nil, invalidCategory(args.Category)
 		}
+		// Retention is judged before the resolve too, for the same reason the
+		// category is: asked after it, an unresolved project short-circuits to the
+		// not-registered sentence and the retention is never examined, and a
+		// resolved one hands it to the store whose refusal arrives wrapped in
+		// `list failed:`. Either way the caller is told about the project rather
+		// than the argument that was wrong (#1041).
+		if _, err := memory.NormalizeRetention(args.Retention); err != nil {
+			return nil, nil, err
+		}
 		// The RAW name is kept, because `ResolveProject` answers an unknown name
 		// with `("", "", nil)` and the message below formats what it is given:
 		// assigning the resolved id over `args.ProjectID` and then formatting that
@@ -3283,20 +3323,35 @@ func (s *Server) registerTools() {
 				// content, and the content is the one place the committed
 				// decision_id and memory_id live. Returning the result with
 				// IsError set keeps both ids, tells the caller the new decision
-				// stands, and names the old id through `assemble.Token` so a
-				// hostile id cannot forge a line in this sentence.
+				// stands, and names the old id through `memory.RefusalArg` — the
+				// bounded, token-guarded renderer — so a hostile or oversized id
+				// cannot forge a line here or bloat the answer (#1041, #1072).
+				//
+				// The store error is appended rather than dropped because it says
+				// WHICH write failed, and it is safe to append: the id-carrying
+				// sentences in `SupersedeDecisionReport` render their ids through
+				// the same renderer, so the whole sentence is bounded and nothing
+				// raw comes back through it.
 				supersedeFailed = true
 				supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
-					assemble.Token(args.Supersedes), err)
+					memory.RefusalArg("supersedes", args.Supersedes), err)
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {
 					supersedeNote += fmt.Sprintf(" Its companion memory (%s) was retired: it is withheld from session start and demoted in search.", joinTokens(retirement.Retired))
 				}
+				// Ambiguous and Declined are the same partial failure the error
+				// branch reports: the decisions row is marked, but the companion
+				// memory keeps answering search and session start, so the caller
+				// did not get the write it asked for. They were WARNING text on an
+				// ordinary success while a failed supersede was an error; now one
+				// check of `isError` reads both (#1041).
 				if len(retirement.Ambiguous) > 0 {
+					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
 				}
 				if len(retirement.Declined) > 0 {
+					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
 				}
 			}
@@ -3837,6 +3892,15 @@ func (s *Server) registerTools() {
 		}
 		if args.Limit > 100 {
 			args.Limit = 100
+		}
+		// The status is judged before the project is resolved, so a misspelt one
+		// is refused as the argument it is rather than handed to `ListDecisions`,
+		// whose `AND status = ?` matches nothing and answers "No decisions
+		// found." — the same sentence a project with no decisions gets (#1041).
+		if args.Status != "" {
+			if err := decisionStatusError(args.Status); err != nil {
+				return nil, nil, err
+			}
 		}
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {

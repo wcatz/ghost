@@ -247,3 +247,131 @@ func TestEveryTagBearingWriteToolRefusesMoreTagsThanTheBound(t *testing.T) {
 		}
 	})
 }
+
+// TestDecisionsListRefusesAnUnknownStatus closes the harness the first #1041
+// round left open: `ghost_task_list` learned to judge its status, but
+// `ghost_decisions_list` still handed `status` to `Store.ListDecisions`, whose
+// `AND status = ?` matched nothing and answered `No decisions found.` — the same
+// sentence a project with no decisions gets, from a project that has them.
+// `decisions.status` is CHECKed to active|superseded|revisit and the tool's own
+// jsonschema advertises those three, so "supersed" is a typo, not an empty list.
+//
+// It is tested against an UNRESOLVED project too, because resolving first meant
+// the project's absence answered for the argument the caller actually got wrong.
+func TestDecisionsListRefusesAnUnknownStatus(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	seed := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "p", "title": "a recorded call", "decision": "we chose A", "rationale": "for a reason",
+	})
+	if seed.IsError {
+		t.Fatalf("seed record failed: %s", resultText(seed))
+	}
+
+	want := `invalid status "bogus" — must be one of: active, superseded, revisit`
+	for name, project := range map[string]string{
+		"an unresolved project": "no-such-project-here",
+		"a registered project":  "p",
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := callTool(t, session, "ghost_decisions_list", map[string]any{
+				"project_id": project, "status": "bogus",
+			})
+			out := resultText(res)
+			if !res.IsError {
+				t.Fatalf("an unknown status was answered instead of refused:\n%s", out)
+			}
+			if strings.Contains(out, "No decisions found") || strings.Contains(out, "not registered") {
+				t.Errorf("the answer is about the project, not the argument:\n%s", out)
+			}
+			if !strings.Contains(out, want) {
+				t.Errorf("the refusal does not name the allowed statuses (%q):\n%s", want, out)
+			}
+		})
+	}
+
+	// The control: a valid status still filters, so this is not "always refuse".
+	ok := resultText(callTool(t, session, "ghost_decisions_list", map[string]any{
+		"project_id": "p", "status": "active",
+	}))
+	if !strings.Contains(ok, "a recorded call") {
+		t.Errorf("a valid status stopped listing:\n%s", ok)
+	}
+}
+
+// TestDecisionSupersedeLeavingACompanionLiveIsAPartialFailure is the other half
+// of the supersede shape: a `supersedes` id the tool CAN mark, but whose
+// companion memory the resolve guard refuses (a pinned memory). The decision row
+// is marked and the companion keeps answering search and session start, so the
+// write is not the one the caller asked for. It used to be a `WARNING:` on an
+// ordinary success while the failed supersede was an error; both are now the same
+// partial failure the caller checks one way.
+func TestDecisionSupersedeLeavingACompanionLiveIsAPartialFailure(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	seed := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "p", "title": "the first call", "decision": "we chose A", "rationale": "for a reason",
+	})
+	if seed.IsError {
+		t.Fatalf("seed record failed: %s", resultText(seed))
+	}
+	seedOut := resultText(seed)
+	oldDecision := labeledID(t, seedOut, "decision_id: ")
+	companion := labeledID(t, seedOut, "memory_id: ")
+
+	pin := callTool(t, session, "ghost_memory_pin", map[string]any{
+		"project_id": "p", "memory_id": companion, "pinned": true,
+	})
+	if pin.IsError {
+		t.Fatalf("pinning the companion failed: %s", resultText(pin))
+	}
+
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "p", "title": "the second call", "decision": "we chose B", "rationale": "A failed",
+		"supersedes": oldDecision,
+	})
+	out := resultText(res)
+	if !res.IsError {
+		t.Fatalf("a companion left live was reported as a plain success; a caller checking only isError "+
+			"reads the reversal as fully done:\n%s", out)
+	}
+	if !strings.Contains(out, companion) {
+		t.Errorf("the answer does not name the companion left live (%s):\n%s", companion, out)
+	}
+}
+
+// TestTheSupersedePartialFailureDoesNotEchoTheOffendingID is the #1072 rule
+// applied to #1041's note. The failure sentence names the `supersedes` id the
+// caller passed, and it used to name it twice — once through the safe token
+// renderer and once inside the raw store error, which prints the id with `%s`.
+// An id carrying a newline forged a line in the answer, a token-shaped id came
+// back whole, and a 200 KB one came back in full.
+func TestTheSupersedePartialFailureDoesNotEchoTheOffendingID(t *testing.T) {
+	big := strings.Repeat("z", refusalBigValue)
+	values := map[string]string{
+		"token":  echoToken,
+		"big":    big,
+		"forged": "zz\nFORGED LINE sk-ant-api03-" + strings.Repeat("A", 30),
+	}
+	for label, v := range values {
+		t.Run(label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			seed := callTool(t, session, "ghost_decision_record", map[string]any{
+				"project_id": "p", "title": "the first call", "decision": "we chose A", "rationale": "for a reason",
+			})
+			if seed.IsError {
+				t.Fatalf("seed record failed: %s", resultText(seed))
+			}
+			res := callTool(t, session, "ghost_decision_record", map[string]any{
+				"project_id": "p", "title": "the second call", "decision": "we chose B", "rationale": "A failed",
+				"supersedes": v,
+			})
+			out := resultText(res)
+			if !res.IsError {
+				t.Fatalf("the partial failure was reported as a success:\n%s", out)
+			}
+			if strings.Contains(out, "\nFORGED") {
+				t.Errorf("the answer carries a forged line from the id:\n%s", out)
+			}
+			assertNoRefusalEcho(t, out, v)
+		})
+	}
+}
