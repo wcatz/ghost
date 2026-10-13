@@ -5825,7 +5825,8 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
 	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("memory %s not found in project %s", id, projectID)
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	if err != nil {
 		return fmt.Errorf("lookup memory: %w", err)
@@ -6046,7 +6047,8 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 		return fmt.Errorf("promote memory rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found in project %s", id, projectID)
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_history SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
