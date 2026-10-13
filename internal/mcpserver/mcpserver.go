@@ -3333,7 +3333,7 @@ func (s *Server) registerTools() {
 		}
 		task, err := s.store.GetTask(ctx, args.TaskID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
+			return nil, nil, err
 		}
 		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)

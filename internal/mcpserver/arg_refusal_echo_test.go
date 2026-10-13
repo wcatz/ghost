@@ -129,6 +129,27 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 				assertNoRefusalEcho(t, out, v)
 			})
 		}
+		for tool, extra := range map[string]map[string]any{
+			"ghost_task_complete": {},
+			"ghost_task_update":   {"priority": 1},
+		} {
+			t.Run("task_id "+tool+"/"+label, func(t *testing.T) {
+				_, session, _ := echoLogSession(t)
+				callTool(t, session, "ghost_task_create", map[string]any{"project_id": "p", "title": "seed task"})
+				args := map[string]any{"task_id": v}
+				for k, x := range extra {
+					args[k] = x
+				}
+				out := callToolErr(t, session, tool, args)
+				if !strings.Contains(out, "task not found") {
+					t.Fatalf("%s did not reach its not-found refusal: %.200s", tool, out)
+				}
+				if strings.Count(out, "task not found") != 1 {
+					t.Errorf("%s says task not found more than once: %.200s", tool, out)
+				}
+				assertNoRefusalEcho(t, out, v)
+			})
+		}
 		t.Run("memory_id purge/"+label, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
 			callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
