@@ -27,7 +27,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status; a status outside pending, active, blocked, done is refused with the allowed list |
 | Tasks | `ghost_task_update` | Change task status, priority, or description; a `priority` outside 0-4 is refused and the stored priority is left unchanged; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done`. The row is read and merged inside the write transaction that writes it, so two clients editing different fields of one task (two MCP servers on one store, for instance) both land, and a task deleted in that window is an error rather than a reported success |
 | Tasks | `ghost_task_complete` | Mark a task done with optional notes |
-| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports as a partial failure (an `isError` result) — the same shape a `supersedes` id the project cannot mark takes; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
+| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports as a partial failure (an `isError` result) — the same shape a `supersedes` id the project cannot mark takes — and the retirement reaches the companion even after it was promoted to `_global`, because the `decision:<id>` link travels with it, so a reversed decision cannot keep ranking from every project; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions; a status outside those three is refused with the allowed list before the project is looked up |
 
 `ghost_resolve` is dry-run by default. `ghost_project_delete` is also dry-run by default and is irreversible when applied: the apply form accepts only the exact project id its own dry run printed, and refuses a name, path or basename with a message pointing back at the dry run — those identifiers resolve to a project, and an irreversible delete must not delete whichever one they happen to resolve to. Core memory CRUD and search do not call an LLM; maintenance-oriented tools may use the calling session's CLI harness. `ghost_resolve --apply` stamps only the rows that still hold the exact text the classifier judged (#1052): the pass spends a classify call between reading candidates and writing, so a row a concurrent save or edit rewrote in that window is not stamped and the result names it as skipped stale, because `resolved_at` is persistent and would otherwise hide the new text on a verdict about the old one. The resolved listing prints only the rows the write actually stamped — never a refused row, and never the pre-write text a verdict was reached on, which is no longer what the store holds. The match covers the project as well as the text, so a row `ghost_memory_promote` moved to `_global` mid-pass is refused the stamp and counted as stale: promotion changes `project_id` only, which a content-only match cannot see, and a pass over one project cannot decide for all of them. A tag- or importance-only edit changes no text and so validates a verdict as before.
@@ -449,6 +449,45 @@ and *except* any length, because a project id is routinely a filesystem path and
 import` refuse a file `ghost export` had just written. An id is a primary key, so
 a shortened one would name a *different row* — a memory under a key the artifact
 never chose, colliding with whatever genuinely holds it.
+
+**Free text is refused at WRITE time when it is blank or malformed.** The tools
+that store free text — `ghost_memory_save`, `ghost_save_global` and
+`ghost_memory_update` for `content`; `ghost_task_create` for `title`; and
+`ghost_decision_record` for `title`, `decision` and `rationale` — refuse a value
+that is blank, that is not valid UTF-8, or that carries a NUL byte. Blank means
+empty, whitespace-only, or holding nothing but invisible FORMAT characters
+(`U+200B` ZERO WIDTH SPACE, `U+2060` WORD JOINER, `U+FEFF` ZERO WIDTH NO-BREAK
+SPACE), which render as nothing but are not Unicode spaces, so a `TrimSpace`
+check misses them. The old check at each site was `value == ""`, which accepted
+`"   "`, `"\n\t"` and `"a\x00b"` and stored them verbatim: a blank memory is a
+row that answers a later search with nothing, and a blank title is a task no
+listing can name. The refusal names the field and never the value, because an
+invalid-UTF-8 or NUL-bearing argument is exactly the caller text this codebase
+keeps out of its answers. A `ghost_memory_update` that is refused leaves the
+stored content byte-identical to what it was — a refused edit is not a partial
+write. The rule is a write-boundary rule and lives beside `validateTags`, not in
+the import predicates: `CheckImportedMemory`, `CheckImportedTask` and
+`CheckImportedDecision` still accept a blank `content`, `title`, `decision` or
+`rationale` from an artifact, because an import is another way to reach the same
+table and must not be the way around a store's existing rows.
+
+**A `project_id` is capped at WRITE time, and the cap is a write rule alone.**
+`ensureProjectFor` refuses a `project_id` that is whitespace-only, that is not
+valid UTF-8, that carries a NUL byte, or that exceeds 4096 bytes — the largest
+path a POSIX filesystem can address, and a project id is routinely a filesystem
+path. A value wider than that is not a checkout anyone can open or a project
+anyone can name; it is a payload wearing a project's clothes, and
+`ghost_list_projects` renders the name of every project uncapped, so one
+accepted id turns into megabytes of listing. The cap deliberately does NOT live
+in `memory.CheckImportedProjectID`, which has no length bound ON PURPOSE (#844):
+`ghost export` writes a project id into the artifact and `ghost import` refuses
+a project the predicate refuses, and a refusal there CASCADES — a failed project
+step never records its id, so every memory, task and decision naming it is then
+rejected and a whole project is lost on restore. So the bound is a WRITE rule,
+like `validateTags`'s shape rule: it refuses a NEW project, and the importer
+keeps the bound-free predicate it needs to round-trip a legacy or artifact id.
+The gate at the call site is creation too — an existing project addressed by a
+long recorded path resolves before this is asked.
 
 A memory's **retention tier** is the same class of check over a value set rather
 than over characters: the three tiers the column's CHECK accepts are checked

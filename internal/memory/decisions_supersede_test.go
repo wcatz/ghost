@@ -104,6 +104,104 @@ func TestSupersedeDecisionRetiresTheCompanionMemory(t *testing.T) {
 	}
 }
 
+// A companion promoted to _global before the supersede is still this decision's
+// companion. Promotion moves memories.project_id only and leaves the
+// source_ref link naming the decision alone, so the retirement that scoped
+// every read to the project found nothing and left the reversed decision live
+// in the one project every other project reads its session start from.
+func TestSupersedeDecisionRetiresAPromotedCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	oldDecisionID, newDecisionID, oldMemoryID, newMemoryID := decisionSupersedeFixture(t, s, ctx)
+	if err := s.PromoteToGlobal(ctx, testProject, oldMemoryID); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDecisionID, newDecisionID)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMemoryID {
+		t.Fatalf("retirement report = %+v, want the promoted companion retired", got)
+	}
+	if !decisionMemoryResolved(t, s, oldMemoryID) {
+		t.Error("the promoted companion was left live")
+	}
+	// The retirement withholds the row; it does not move it. A promoted memory
+	// stays in _global, because that is where the caller put it.
+	projectID := memoryProject(t, s, oldMemoryID)
+	if projectID != GlobalProjectID {
+		t.Errorf("the promoted companion now reads as project %q, want %q", projectID, GlobalProjectID)
+	}
+	// The reason survives, and it names the replacement's companion.
+	if phases := decisionHistoryPhases(t, s, ctx, oldMemoryID); len(phases) < 2 || phases[len(phases)-1] != phaseSupersede {
+		t.Errorf("history phases = %v, want a final %q naming the replacement", phases, phaseSupersede)
+	}
+	links, err := s.GetLinks(ctx, oldMemoryID)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var edge bool
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == newMemoryID && l.TargetID == oldMemoryID {
+			edge = true
+		}
+	}
+	if !edge {
+		t.Errorf("no supersedes edge %s -> %s, so nothing records what replaced the promoted companion", newMemoryID, oldMemoryID)
+	}
+}
+
+// A replacement whose own companion was promoted names the reason from just as
+// little as one that was not: the retirement reaches _global on both sides of
+// the edge, so the two promoted rows are joined by the edge that claims it.
+func TestSupersedeDecisionNamesAPromotedReplacementAsTheReason(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	oldDecisionID, newDecisionID, oldMemoryID, newMemoryID := decisionSupersedeFixture(t, s, ctx)
+	if err := s.PromoteToGlobal(ctx, testProject, newMemoryID); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDecisionID, newDecisionID)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMemoryID {
+		t.Fatalf("retirement report = %+v, want the companion retired", got)
+	}
+	links, err := s.GetLinks(ctx, oldMemoryID)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var edge bool
+	for _, l := range links {
+		if l.Relation != "supersedes" {
+			continue
+		}
+		edge = true
+		if l.SourceID != newMemoryID || l.TargetID != oldMemoryID {
+			t.Errorf("the edge runs %s -> %s, want it from the promoted replacement %s", l.SourceID, l.TargetID, newMemoryID)
+		}
+	}
+	if !edge {
+		t.Errorf("no supersedes edge %s -> %s, so nothing records what replaced the companion", newMemoryID, oldMemoryID)
+	}
+}
+
+// memoryProject reads the project a memory row currently names, which is the
+// one thing the supersede must not change.
+func memoryProject(t *testing.T, s *Store, id string) string {
+	t.Helper()
+	var projectID string
+	if err := s.db.QueryRow(`SELECT project_id FROM memories WHERE id = ?`, id).Scan(&projectID); err != nil {
+		t.Fatalf("read project of %s: %v", id, err)
+	}
+	return projectID
+}
+
 // TestSupersedeDecisionRecordsTheNewDecisionAsTheReason pins the half of the
 // retirement that is not a filter: the memory must say what replaced it, or a
 // reader of its history can only see that it was retired and not by what. The
