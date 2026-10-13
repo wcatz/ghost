@@ -408,8 +408,16 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	case err == nil:
 		rep.HasManifest = true
 		manifest = m
-	case os.IsNotExist(err):
+	case os.IsNotExist(err) && !rep.ManifestPresent:
 		// Expected for a pre-migration copy. Recorded as the absence it is.
+		//
+		// Gated on the Lstat, not on the error alone: a dangling symlink at
+		// this path makes the read report ENOENT exactly as a genuinely absent
+		// manifest does, and the Lstat above is the only thing that tells the
+		// two apart. Reading a sidecar Lstat found as absent here is the bug
+		// this gate exists to prevent — it leaves ManifestErr nil, so the
+		// report prints "present but could not be read: <nil>" and returns a
+		// zero exit that a backup script reads as nothing failed.
 	default:
 		rep.ManifestErr = err
 		return rep, err
