@@ -514,6 +514,51 @@ func TestRestoreUndoesTheEvidenceAMergeCarriedOntoARowItKeeps(t *testing.T) {
 		check(t, s, before, keptID, other)
 	})
 
+	// A kept row the restore leaves alone — pinned, resolved or persistent after
+	// the merge — keeps everything the merge gave it: the restore does not revert
+	// its columns, so taking its carried records would leave it claiming the
+	// merged verification with none of the evidence behind it.
+	for _, guard := range []struct {
+		name, sql string
+	}{
+		{"a kept row pinned after the merge is left alone", `UPDATE memories SET pinned = 1 WHERE id = ?`},
+		{"a kept row resolved after the merge is left alone", `UPDATE memories SET resolved_at = datetime('now') WHERE id = ?`},
+		{"a kept row made persistent after the merge is left alone", `UPDATE memories SET retention = '` + RetentionPersistent + `', expires_at = NULL WHERE id = ?`},
+	} {
+		t.Run(guard.name, func(t *testing.T) {
+			s := testStore(t)
+			const kept = "the job queue backend is Redis lists"
+			keptID, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: kept, Source: "mcp", Importance: 0.5, Agent: "claude-code",
+			})
+			if err != nil {
+				t.Fatalf("Create kept: %v", err)
+			}
+			other := absorbed(t, s, "mcp", "the queue worker reads Redis lists with BLPOP")
+			before := snapshotState(t, s, keptID)
+
+			if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+				Category: "fact", Content: kept, Importance: 0.5, ReplacesIDs: []string{keptID, other},
+			}}, "", nil); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if _, err := s.db.ExecContext(ctx, guard.sql, keptID); err != nil {
+				t.Fatalf("guard the kept row: %v", err)
+			}
+			merged := snapshotState(t, s, keptID)
+			if merged[keptID] == before[keptID] {
+				t.Fatalf("the merge carried nothing onto %s, so this test proves nothing: %s", keptID, merged[keptID])
+			}
+
+			if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+				t.Fatalf("RestoreSnapshot: %v", err)
+			}
+			if after := snapshotState(t, s, keptID); after[keptID] != merged[keptID] {
+				t.Errorf("the restore changed a row it leaves alone:\n  %s\nwant its merged state\n  %s", after[keptID], merged[keptID])
+			}
+		})
+	}
+
 	t.Run("FoldRows survivor", func(t *testing.T) {
 		s := testStore(t)
 		survivor, err := s.Create(ctx, testProject, Memory{
