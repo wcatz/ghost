@@ -898,6 +898,8 @@ Which tool edits which field is derived from the tools' own arguments, so the li
 
 Where the route is "the database directly", the alternative is the delete command above. The field lists in the first three rows are derived from the tools' own arguments, so they cannot drift from them; the rest are stated per group because each has a different reason and a different route.
 
+The two task writers are the only row editors in Ghost that read the row they are about to write, and both now do it inside the write transaction that writes it (#1083): `ghost_task_update` reads the task, merges the caller's fields and writes the result in ONE `beginWrite` transaction, so two clients editing different fields of one task — two MCP servers on one store is a documented, supported mode — each land rather than one overwriting the other with a copy it read before the other's write, and `completed_at` is stamped from the status the row holds when the write lands. Nothing about the argument list changes. Both writers also read their UPDATE's `RowsAffected`, so a task deleted between the read and the write is an ERROR naming the field's tool rather than a reported success, which is the silent half of the same defect: the old `ghost_task_complete` and `ghost_task_update` both committed a 0-row UPDATE and returned success, so a completion nobody could detect was reported as saved.
+
 ### `ghost import`
 
 Loads an artifact written by `ghost export`:
