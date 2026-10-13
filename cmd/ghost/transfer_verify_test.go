@@ -158,16 +158,26 @@ func TestRunBackupVerifyCoreFailsOnADamagedBackup(t *testing.T) {
 
 	// The manifest's own hash, edited to a wrong value: the file is untouched
 	// and perfectly restorable, so the only thing wrong is the description of
-	// it. A verify that trusted the file because it opens would pass this.
+	// it. A verify that trusted the file because it opens would pass this. The
+	// edit swaps one hex digit for another, so the value is still a well-formed
+	// digest — one that is not would be refused as an unreadable manifest
+	// before the sha256 check ran.
 	manifest := memory.ManifestPath(dest)
 	raw, err := os.ReadFile(manifest)
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	tampered := strings.Replace(string(raw), `"sha256": "`, `"sha256": "0`, 1)
-	if tampered == string(raw) {
+	const field = `"sha256": "`
+	at := strings.Index(string(raw), field)
+	if at < 0 {
 		t.Fatalf("manifest has no sha256 field to tamper with:\n%s", raw)
 	}
+	digit := at + len(field)
+	swapped := byte('0')
+	if raw[digit] == '0' {
+		swapped = '1'
+	}
+	tampered := string(raw[:digit]) + string(swapped) + string(raw[digit+1:])
 	if err := os.WriteFile(manifest, []byte(tampered), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
