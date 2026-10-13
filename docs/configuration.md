@@ -153,6 +153,17 @@ embedding:
   dimensions: 768
 ```
 
+`dimensions` is the width of the vectors the model returns (768 for
+`nomic-embed-text:v1.5`) and must be a positive number, whether or not embedding
+is enabled. A value of zero or less is a load error naming
+`embedding.dimensions`: every stored vector is stamped with the width, and the
+client checks every new vector against it, so a zero width would retire the
+whole index and refuse to rebuild it. A CLI command fails on it and
+`ghost mcp status` prints the error; the MCP server and the session hooks fall
+back to the environment and built-in defaults as for any broken config, and a
+`GHOST_EMBEDDING_DIMENSIONS` of zero or less is replaced there by the default
+768 with a warning.
+
 Install the model once:
 
 ```bash
