@@ -46,7 +46,7 @@ func TestPhaseFailureCauseFallsBackToArgvWhenSilent(t *testing.T) {
 		"   \n\t  ",
 	)
 
-	for _, want := range []string{"exit 1", "--project ghost", "reflect"} {
+	for _, want := range []string{"exit 1", `--project "ghost"`, "reflect"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("cause is missing %q — with empty stderr this is the only evidence:\n%s", want, got)
 		}
@@ -77,8 +77,9 @@ func TestPhaseFailureCauseOmitsPromptSizedArguments(t *testing.T) {
 	if !strings.Contains(got, promptOmittedMarker) {
 		t.Errorf("omitted argument left no marker, so the reader cannot tell one was dropped:\n%s", got)
 	}
-	// Short arguments must survive intact.
-	if !strings.Contains(got, "--project ghost") {
+	// Short arguments must survive intact. The project operand is rendered
+	// through memory.ProjectArg, so it keeps its quotes around the same value.
+	if !strings.Contains(got, `--project "ghost"`) {
 		t.Errorf("ordinary arguments were dropped too:\n%s", got)
 	}
 }
@@ -117,7 +118,7 @@ func TestPhaseFailureCauseCarriesRealExitCode(t *testing.T) {
 	if !strings.Contains(got, "exit 3") {
 		t.Errorf("exit code not recorded from the real status: %q", got)
 	}
-	if !strings.Contains(got, "--project ghost") {
+	if !strings.Contains(got, `--project "ghost"`) {
 		t.Errorf("argv missing: %q", got)
 	}
 }

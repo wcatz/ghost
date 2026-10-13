@@ -317,27 +317,35 @@ func printContextAudit(w io.Writer, rep audit.Report) error {
 
 // runContextAudit implements the mode: parse, open read-only, print.
 //
-// Failures exit non-zero with the reason and nothing else on stdout, because a
+// Failures return exit 1 with the reason and nothing else on stdout, because a
 // report that printed partial figures beside an error would be pasted into an issue
-// as if it were the whole answer.
-func runContextAudit(args []string) {
+// as if it were the whole answer. It is 1 and not 2 for the argument refusals
+// parseContextAuditArgs raises: 2 is the dispatch's code for a command line it
+// cannot route (#1090), and the dispatch already found and routed this command —
+// what rejected the argument is the command's own parser.
+//
+// The code is RETURNED rather than passed to os.Exit so the dispatch can hand it
+// back to runCLI, exactly as every other routed command's failures do; a test can
+// therefore read the code instead of taking the process down with it.
+func runContextAudit(args []string) int {
 	opts, err := parseContextAuditArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context --audit: %v\n", err)
-		os.Exit(2)
+		return 1
 	}
 	dataDir, err := dataDirPath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context --audit: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	rep, err := buildContextAudit(context.Background(), opts, dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context --audit: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	if err := printContextAudit(os.Stdout, rep); err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context --audit: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
