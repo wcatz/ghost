@@ -489,8 +489,9 @@ CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id)
 --
 -- A table rather than a column on memory_snapshots because a memory can have
 -- several records and a snapshot row is one row; and it is pruned with the
--- snapshots themselves (ReplaceNonManual's prune), so it cannot outlive the
--- snapshot it describes.
+-- snapshots themselves, so it cannot outlive the snapshot it describes: by
+-- ReplaceNonManual's prune, and — since a snapshot can also leave through the
+-- projects cascade — by DeleteProject's own prune statement.
 CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
     snapshot_id  TEXT NOT NULL,
     memory_id    TEXT NOT NULL,
@@ -668,8 +669,11 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(projec
 -- flag is a claim somebody made at a time, and overwriting it would destroy the
 -- very disagreement the count is meant to report.
 CREATE TABLE IF NOT EXISTS memory_flags (
-    -- No FK, matching retrieval_audit: the flags of a deleted project are
-    -- removed by DeleteProject's own DELETE, and a merge reassigns them.
+    -- No FK, like retrieval_audit: DeleteProject does not follow this column to
+    -- find a project's flags — it follows the MEMORY each flag names, so it
+    -- cannot take the flag of a memory that has moved elsewhere — and the writer
+    -- that moves a memory between projects (a merge, or PromoteToGlobal)
+    -- reassigns this column.
     project_id   TEXT NOT NULL,
     -- On delete CASCADE, so a memory that goes takes its flags with it in the
     -- SAME transaction: the count is a property of the memory, and a surviving
@@ -808,7 +812,16 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	//
 	// Every other BeginTx here is write-first, so immediate changes nothing
 	// for them — they acquire the same lock on their first statement anyway.
-	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	//
+	// secure_delete(ON) is what makes a DELETE actually remove the text rather
+	// than only unlink it: without it a freed b-tree cell keeps its bytes for
+	// the next reader of the file, which is the difference a redaction turns on
+	// (#1043). It is per-connection and must precede the delete, so it belongs
+	// on the DSN rather than beside one caller. FAST is not enough here — it
+	// overwrites the deleted cell but not the free space on the page, which is
+	// where a spilled content value lives, and not the FTS5 segment blobs a
+	// rebuild has to be free to reclaim.
+	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -993,8 +1006,10 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 //
 // The vector query joins memory_embeddings to memories and reads
 // memory_id, embedding, model from the first and scope, project_id, resolved_at
-// from the second, so those are the writes that fire it: any insert, update or
-// delete on memory_embeddings; an UPDATE OF resolved_at, scope or project_id on
+// and (since the query path filters a row's window before the cut, #1053)
+// valid_from, valid_until from the second, so those are the writes that fire it:
+// any insert, update or delete on memory_embeddings; an UPDATE OF resolved_at,
+// scope or project_id on memories; an UPDATE OF valid_from or valid_until on
 // memories; and a delete of a memory. An update fires only when the value it
 // names actually changed (an edit rewrites resolved_at in the same statement
 // whether or not it changed it, and a vector rewritten to the same bytes is the
@@ -1002,6 +1017,12 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 // tags, importance, content, pinned) is read by other queries and deliberately
 // does NOT fire it: the retrieval write every search makes would otherwise
 // invalidate every other process's copy. TestVectorEpoch* pins both lists.
+//
+// The validity arm is a SEPARATE trigger (vector_epoch_mem_validity_au) rather
+// than a fourth column on vector_epoch_mem_au, because that trigger is frozen in
+// migrateV24 and a fresh database's spelling of it must stay byte-identical to
+// the migration's (TestMigrateV24MatchesTheFreshDatabaseSchema). It is delivered
+// to existing databases by migrateV25.
 //
 // vector_epoch_mem_ai covers the one insert that does change the query: a memory
 // whose id already has an embedding row (an orphan left by a delete made with
@@ -1030,6 +1051,10 @@ CREATE TRIGGER IF NOT EXISTS vector_epoch_emb_ad AFTER DELETE ON memory_embeddin
 END;
 CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_au AFTER UPDATE OF resolved_at, scope, project_id ON memories
     WHEN old.resolved_at IS NOT new.resolved_at OR old.scope IS NOT new.scope OR old.project_id IS NOT new.project_id BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_validity_au AFTER UPDATE OF valid_from, valid_until ON memories
+    WHEN old.valid_from IS NOT new.valid_from OR old.valid_until IS NOT new.valid_until BEGIN
     INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
 END;
 CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ad AFTER DELETE ON memories BEGIN

@@ -48,14 +48,16 @@ func instant(t *testing.T, key, field string, s *string) time.Time {
 }
 
 // TestBuiltinDatasetCarriesValidityIntoRetrieval is the fixture's own guarantee:
-// the validity_* rows reach the store with their claims intact and come back out
-// of the retrieval read with them still attached.
+// the validity_* rows reach the store with their claims intact, and the retrieval
+// read the assembler's stage 2 consumes WITHHOLDS an out-of-window row before the
+// window closes (#1053) while the rows it does return carry their stamps.
 //
-// The read is Candidates rather than SearchHybrid because that is the seam the
-// assembler's stage 2 evaluates — it is the shape a stage-2 consumer receives,
-// so a test over a different read would leave the actual consumer unproven. Each
-// row is fetched with a term only it contains, so the assertion is about that row
-// and not about whichever rows happen to rank near it.
+// The read is Candidates because that is the seam the assembler's stage 2
+// evaluates. Since #1053 the legs filter validity in SQL before their LIMIT, so
+// an expired or future row is not in the set at all — the stamp survival of those
+// rows is asserted through SearchFTSAll, a browse reader that deliberately returns
+// an out-of-window row marked rather than withheld. A test that read an expired
+// row's stamp back through Candidates would now be asserting the old contract.
 func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 	// Parallel: opens its own stores and reads no process-global state, so it
 	// overlaps the corpus-wide tests instead of running ahead of them.
@@ -75,6 +77,7 @@ func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 	for i := range ds.Memories {
 		byKey[ds.Memories[i].Key] = &ds.Memories[i]
 	}
+	now := time.Now().UTC()
 
 	for _, want := range wantValidity {
 		t.Run(want.key, func(t *testing.T) {
@@ -82,6 +85,20 @@ func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 			if !ok {
 				t.Fatalf("corpus row %q is missing, so the validity fixture is not in the dataset at all", want.key)
 			}
+			// The stamp survived seeding: a browse read that does not withhold
+			// returns the row and the value, whatever its window says.
+			browse, err := store.SearchFTSAll(ctx, want.term, 100)
+			if err != nil {
+				t.Fatalf("SearchFTSAll: %v", err)
+			}
+			seeded := memoryWithContent(browse, spec.Content)
+			if seeded == nil {
+				t.Fatalf("%q is not among the browse results for %q, so the fixture never reaches the store", want.key, want.term)
+			}
+			assertValidityStamps(t, want, *seeded)
+
+			// The stage-2 seam: Candidates returns a row only when its window
+			// contains Now, and when it does the stamps travel with it.
 			const window = 100
 			set, err := store.Candidates(ctx, memory.CandidateRequest{
 				ProjectID: ds.Project,
@@ -89,7 +106,7 @@ func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 				Query:     want.term,
 				Condition: memory.CondFTSOnly,
 				Fetch:     memory.Fetch{FTSTopK: window, VectorTopK: window, Limit: window},
-				Now:       time.Now().UTC(),
+				Now:       now,
 			})
 			if err != nil {
 				t.Fatalf("Candidates: %v", err)
@@ -100,32 +117,69 @@ func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 					got = &set.Rows[i]
 				}
 			}
+			if withheld(spec, now) {
+				if got != nil {
+					t.Errorf("%q is outside its window at %s but Candidates returned it: the legs must withhold it before the cut",
+						want.key, now.Format("2006-01-02"))
+				}
+				return
+			}
 			if got == nil {
-				t.Fatalf("%q is not among the %d candidates for %q, so the fixture never reaches retrieval",
+				t.Fatalf("%q is inside its window but is not among the %d candidates for %q",
 					want.key, len(set.Rows), want.term)
 			}
-			c := *got
-			for _, tc := range []struct {
-				field string
-				got   *string
-				want  string
-				set   bool
-			}{
-				{"valid_from", c.ValidFrom, want.from, want.wantFrom},
-				{"valid_until", c.ValidUntil, want.until, want.wantUntil},
-				{"verified_at", c.VerifiedAt, want.verified, want.wantVerified},
-			} {
-				if !tc.set {
-					if tc.got != nil {
-						t.Errorf("%s.%s = %q, want NULL — a row that states no claim must not acquire one in the corpus", want.key, tc.field, *tc.got)
-					}
-					continue
-				}
-				if gotAt, wantAt := instant(t, want.key, tc.field, tc.got), stampInstant(t, tc.want); !gotAt.Equal(wantAt) {
-					t.Errorf("%s.%s = %v, want %v — the stamp did not survive seeding", want.key, tc.field, gotAt, wantAt)
-				}
-			}
+			assertValidityStamps(t, want, got.Memory)
 		})
+	}
+}
+
+// withheld reports whether a fixture row's window excludes it at now, by the one
+// rule stage 2 and the leg predicates share.
+func withheld(m *MemorySpec, now time.Time) bool {
+	from, until := derefStamp(m.ValidFrom), derefStamp(m.ValidUntil)
+	if until != nil && until.Before(now) {
+		return true
+	}
+	return from != nil && from.After(now)
+}
+
+func memoryWithContent(rows []memory.Memory, content string) *memory.Memory {
+	for i := range rows {
+		if rows[i].Content == content {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+// assertValidityStamps checks one returned row's validity triple against the
+// fixture's declared claim, so a stamp that did not survive the trip is named.
+func assertValidityStamps(t *testing.T, want struct {
+	key                               string
+	term                              string
+	from, until, verified             string
+	wantFrom, wantUntil, wantVerified bool
+}, m memory.Memory) {
+	t.Helper()
+	for _, tc := range []struct {
+		field string
+		got   *string
+		want  string
+		set   bool
+	}{
+		{"valid_from", m.ValidFrom, want.from, want.wantFrom},
+		{"valid_until", m.ValidUntil, want.until, want.wantUntil},
+		{"verified_at", m.VerifiedAt, want.verified, want.wantVerified},
+	} {
+		if !tc.set {
+			if tc.got != nil {
+				t.Errorf("%s.%s = %q, want NULL — a row that states no claim must not acquire one in the corpus", want.key, tc.field, *tc.got)
+			}
+			continue
+		}
+		if gotAt, wantAt := instant(t, want.key, tc.field, tc.got), stampInstant(t, tc.want); !gotAt.Equal(wantAt) {
+			t.Errorf("%s.%s = %v, want %v — the stamp did not survive seeding", want.key, tc.field, gotAt, wantAt)
+		}
 	}
 }
 

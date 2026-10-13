@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"slices"
@@ -602,6 +603,14 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if err != nil || physical == id || !storedPathIsUsable(physical) {
 		return false, nil
 	}
+	// EvalSymlinks resolves a regular file exactly as it resolves a directory, so
+	// the resolved string alone does not make a checkout: a session stands in a
+	// directory, and a file recorded here would claim a location no session can
+	// be. Declined before the transaction, like every other unusable path, so the
+	// save opens its project unbound rather than bound to something it is not.
+	if info, statErr := os.Stat(physical); statErr != nil || !info.IsDir() {
+		return false, nil
+	}
 	dir = physical
 
 	s.mu.Lock()
@@ -945,7 +954,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		// writable. So the same renderer that holds `ResolveProject`'s refusals
 		// holds this one, for the same reason and at the same cost: the sentence
 		// is returned to the saving agent as a tool answer.
-		return "", false, fmt.Errorf("project reference %s matches multiple projects", ProjectArg("project_id", projectRef))
+		return "", false, fmt.Errorf("project reference %s matches multiple projects", RefusalArg("project_id", projectRef))
 	}
 	var existingRemote, matchedPath string
 	norm := strings.ReplaceAll(projectRef, `\`, "/")
@@ -2004,9 +2013,14 @@ type DeleteProjectSummary struct {
 // memories (with their FTS index entries, embeddings, links, and link_scans),
 // tasks, decisions, ghost_state, and memory_snapshots all cascade from the
 // projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log,
-// retrieval_record, retrieval_audit and memory_flags carry a project_id column
-// but no foreign key to projects, so they're deleted explicitly in the same
-// transaction.
+// retrieval_record and retrieval_audit carry a project_id column but no foreign
+// key to projects, so they're deleted explicitly in the same transaction, by
+// that column. memory_flags is reached by MEMORY OWNERSHIP instead: the memory is
+// the fact and the flag's own project_id is a name a writer has to keep in step,
+// so the delete follows the memory and leaves a flag about a memory that has
+// moved elsewhere alone. memory_snapshot_evidence has no key to follow at all, so
+// it is pruned by the same "snapshot no longer exists" statement the snapshot
+// prune uses.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
@@ -2033,7 +2047,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		// both callers agree on is the value, not the argument. The MCP boundary
 		// wraps this sentence in `ghost_project_delete: `, which is what tells an
 		// agent which tool refused it and therefore which argument to change.
-		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", ProjectArg(ProjectIdentifierLabel, input))
+		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, input))
 	}
 	if id == "_global" {
 		return DeleteProjectSummary{}, fmt.Errorf("refusing to delete the _global project")
@@ -2097,29 +2111,47 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
 	}
-	// And the verdicts, for the same reason with one difference that makes them
-	// the harder case: a verdict's ONLY payload is a memory id and a bucket, so a
-	// surviving row names a memory that is gone under a project that is gone, in a
-	// table nothing else reaches — `ghost history purge` deletes by memory id and
-	// the report reads by project id, and neither of those ids is reachable from
-	// what a delete leaves behind.
+	// And the verdicts, by the CALL they were filed against — which is their own
+	// project_id, because a verdict's project is the project whose retrieval it
+	// judged (`audit.Run` stamps the call's project, and the schema's column
+	// comment says the project is the report's denominator). This is the same
+	// predicate the record delete above uses, and it is deliberately NOT memory
+	// ownership: a verdict is a claim about a call, not about the memory the call
+	// happened to admit, so it belongs with the call. That is also why a
+	// promotion does NOT reassign this column (only memory_flags and
+	// supersede_checked move with the memory): moving it would detach the verdict
+	// from the call its record_rowid still names, and the next audit pass would
+	// re-file it under the call's project anyway.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
 	}
-	// And the flags, for the same reason with one difference: memory_flags has a
-	// foreign key to MEMORIES, not to projects, and this transaction is about to
-	// take the memories with it — so the cascade would fire on most rows. The
-	// explicit delete is still the right shape rather than belt to its braces:
-	// it states the intent in the same statement the counts were taken under,
-	// and it runs before deleteProjectRowTx so the ORDER of statements in this
-	// transaction is not what decides whether the rows go — a reader of this
-	// function should not have to know which parent the foreign key is on to
-	// know the flags are gone.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_flags WHERE project_id = ?`, id); err != nil {
+	// And the flags, by the same ownership rule and for the same reason. Their
+	// foreign key is to MEMORIES, not to projects, so this transaction's coming
+	// delete of the memories would take most of them by cascade; reaching by the
+	// memory states the intent in the same predicate the count was taken under,
+	// and it runs before deleteProjectRowTx so the ORDER of statements is not
+	// what decides whether the rows go.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_flags WHERE `+deleteProjectFlagRowsSQL, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete memory_flags: %w", err)
 	}
 	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
 		return DeleteProjectSummary{}, err
+	}
+	// memory_snapshot_evidence has no foreign key — evidence is addressed by
+	// (snapshot_id, memory_id), which is not a key any cascade can follow — so
+	// the project's snapshots go with the projects cascade and would leave their
+	// evidence behind to accumulate until a later reflect prunes the snapshot
+	// again, a run that may never come. This is the same statement shape
+	// pruneSnapshotsTx uses, and for the same reason the schema states: evidence
+	// is pruned with the snapshot it describes. It runs after the snapshots are
+	// gone, and it cannot touch another project's evidence, whose snapshots still
+	// exist.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshot_evidence
+		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
+	`); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("delete snapshot evidence: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2145,6 +2177,17 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 type queryRower interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
+
+// deleteProjectFlagRowsSQL is the ONE predicate that decides which flags a
+// project delete removes and which its dry run counts, so a preview and an apply
+// can never disagree about the same store. It is MEMORY OWNERSHIP rather than the
+// row's own project_id column: the memory is the fact and the column is a name a
+// writer has to keep in step, so a row about a memory that has moved elsewhere is
+// not this project's to remove — the divergence a store written before
+// PromoteToGlobal reassigned these holds. A flag always names a live memory
+// (memory_flags.memory_id is a cascading foreign key), so there is no
+// gone-memory arm to add here.
+const deleteProjectFlagRowsSQL = `memory_id IN (SELECT id FROM memories WHERE project_id = ?)`
 
 // countProjectRows computes the per-table counts for DeleteProjectSummary.
 // It does not set ProjectID/ProjectName — the caller already has both from
@@ -2184,7 +2227,7 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_audit: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
-		`SELECT count(*) FROM memory_flags WHERE project_id = ?`, id,
+		`SELECT count(*) FROM memory_flags WHERE `+deleteProjectFlagRowsSQL, id,
 	).Scan(&summary.MemoryFlags); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count memory_flags: %w", err)
 	}
@@ -2448,7 +2491,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // a NormalizeRepoRemote'd remote, which has had its userinfo stripped, so there is
 // no credential left in it to withhold.
 func ambiguousProject(input, reason string) error {
-	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, ProjectArg(ProjectIdentifierLabel, input), reason)
+	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, input), reason)
 }
 
 // basenameCandidate is one projects row that answers to a name.
@@ -4481,42 +4524,69 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	return results, nil
 }
 
-// SearchFTS searches memories using full-text search.
+// SearchFTS searches memories using full-text search. It returns every match in
+// the window, an expired row included: the browse surfaces show a row outside
+// its window MARKED, not withheld, so this reader must not filter. The query
+// path calls searchFTSValidating directly, which applies the window predicate
+// before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT `+memoryColumnsPrefixed+`
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE (m.project_id = ? OR m.project_id = '_global')
-		  AND memories_fts MATCH ?
-		ORDER BY rank, m.importance DESC
-		LIMIT ?
-	`, projectID, sanitizeFTS(query), limit)
-	if err != nil {
-		return nil, fmt.Errorf("search memories: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanMemories(rows)
+	return s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
 }
 
 // SearchFTSAll searches memories across ALL projects using full-text search.
 func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Memory, error) {
+	return s.searchFTSValidating(ctx, "", query, limit, time.Time{}, true)
+}
+
+// searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
+// the query path's keyword leg run. A non-zero now applies the validity window
+// predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
+// unfiltered statement, byte for byte what SearchFTS always ran.
+//
+// Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
+// the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
+// the predicate applied after the cut, expired rows fill the leg's depth and a
+// valid match ranked below it is never fetched, so a small window reports nothing
+// while a match exists. docs/architecture.md states the rule: filters precede
+// window closure.
+//
+// The predicate is a SUPERSET of Go's ValidityState (see validityMatchesSQLFor):
+// it may admit a row stage 2 then drops — that costs one slot, never a valid row.
+// The columns are already named by memoryColumnsPrefixed, so a store that can run
+// SearchFTS at all has them; there is nothing to gate on.
+func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string, limit int, now time.Time, allProjects bool) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	where := "memories_fts MATCH ?"
+	args := []any{}
+	if !allProjects {
+		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
+		args = append(args, projectID)
+	}
+	args = append(args, sanitizeFTS(query))
+	if !now.IsZero() {
+		where += " AND " + validityMatchesSQLFor("m.")
+		// The predicate's placeholders are bound in its own text order: until,
+		// then from, both to the same whole-second-truncated instant.
+		stamp := now.UTC().Format(stampLayoutForSQL)
+		args = append(args, stamp, stamp)
+	}
+	args = append(args, limit)
 
 	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT `+memoryColumnsPrefixed+`
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE memories_fts MATCH ?
+		WHERE `+where+`
 		ORDER BY rank, m.importance DESC
 		LIMIT ?
-	`, sanitizeFTS(query), limit)
+	`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("search all memories: %w", err)
+		if allProjects {
+			return nil, fmt.Errorf("search all memories: %w", err)
+		}
+		return nil, fmt.Errorf("search memories: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
@@ -4585,7 +4655,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 // become unreachable.
 func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
 	if category != "" && !IsValidCategory(category) {
-		return nil, fmt.Errorf("invalid category %q — must be one of %s", category, categoryList())
+		return nil, fmt.Errorf("invalid category %s — must be one of %s", RefusalArg("category", category), categoryList())
 	}
 	if retention != "" && !IsValidRetention(retention) {
 		return nil, InvalidRetentionError(retention)
@@ -5165,9 +5235,15 @@ type DeleteOptions struct {
 	// credential "removed" by deleting its memory survives in a table with a
 	// longer life than the row. A delete meant to ERASE rather than to retire has
 	// to say so here. It erases every copy of the text this database holds,
-	// including the reflection snapshot that could restore the row; it cannot
-	// reach a backup taken earlier. See the ghost_memory_delete purge_history
-	// argument and `ghost history purge`.
+	// including the reflection snapshot that could restore the row and the
+	// deleted bytes themselves: the write connection runs secure_delete, the
+	// purge rebuilds the full-text index from the surviving rows, and a
+	// checkpoint folds the zeroed pages out of the WAL (rebuildFTSAfterPurgeTx
+	// and checkpointAfterPurge). It cannot reach a backup taken earlier, nor
+	// bytes an older build freed before secure_delete was on — those stay in
+	// the file's free space until a compaction rewrites it, and only a fresh
+	// `ghost backup` (VACUUM INTO) is a copy without them. See the
+	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
 }
 
@@ -5186,12 +5262,25 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // tombstone) or purged (nothing). Both happen inside the one transaction that
 // removes the row, so a memory and its history can never come apart.
 func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
+	_, err := s.deleteWithOptionsLocked(ctx, id, opts)
+	return err
+}
+
+// DeletePurge deletes a memory and erases every recorded copy of its text,
+// reporting what the purge reached. It is DeleteWithOptions(PurgeHistory: true)
+// with the checkpoint's result; that call delegates here and drops the detail.
+func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error) {
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
+}
+
+func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var out PurgeOutcome
 	tx, _, err := s.beginWrite(ctx, "delete")
 	if err != nil {
-		return fmt.Errorf("begin delete: %w", err)
+		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -5201,7 +5290,7 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 		// "memory not found" in its own words, and a bad id must produce that.
 		if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
 			!errors.Is(err, errHistoryNoMemory) {
-			return err
+			return out, err
 		}
 	}
 
@@ -5215,20 +5304,41 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	// And it writes no tombstone of its own, which is the point: a purge must
 	// leave nothing behind that could carry the text being redacted.
 	if opts.PurgeHistory {
-		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
-			return err
+		n, err := purgeHistoryTx(ctx, tx, id)
+		if err != nil {
+			return out, err
 		}
+		out.Rows = n
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("delete memory: %w", err)
+		return out, fmt.Errorf("delete memory: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", id)
 	}
-	return tx.Commit()
+	// After the DELETE, so the row is gone from the content table the rebuild
+	// reads: the index still carries the deleted row's tokens in segments the
+	// trigger's 'delete' tombstone does not rewrite, and rebuilding is what
+	// removes them. It belongs in this transaction so the row and every index
+	// of it move together; see rebuildFTSAfterPurgeTx.
+	if opts.PurgeHistory {
+		if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
+			return out, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return out, err
+	}
+	if opts.PurgeHistory {
+		// The delete has committed, so the checkpoint can only add a warning
+		// about the file: an incomplete one is reported through the outcome, and
+		// it is never returned as an error for a row that is already gone.
+		out.CheckpointComplete = s.checkpointAfterPurgeUncancelled(ctx)
+	}
+	return out, nil
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is
@@ -5587,6 +5697,41 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 		`UPDATE memory_history SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
 	); err != nil {
 		return fmt.Errorf("promote memory history: %w", err)
+	}
+	// The rest of the memory's rows travel with it, and each is reached by a
+	// different predicate because each names the memory differently. The schema
+	// comment on memory_history states the rule for every writer that moves a
+	// memory BETWEEN projects; these are the rows a promotion used to leave
+	// behind, so that a later DeleteProject of the old project took them from a
+	// memory that had already left it.
+	//
+	// retrieval_audit is deliberately NOT among them. Its project_id is the
+	// project of the retrieval CALL a verdict was filed against — `audit.Run`
+	// stamps the call's project, and the report groups by it — so the verdict
+	// belongs with the call, not with the memory the call admitted. Moving it
+	// would detach the verdict from the call its record_rowid still names and the
+	// next audit pass would re-file it under the call's project anyway, so a
+	// promotion leaves it alone and a project delete takes it with the calls
+	// whose project it records.
+	//
+	//   - memory_flags.project_id carries no foreign key, so nothing cascades it
+	//     and a flag left naming the old project is one the per-project evidence
+	//     read no longer reaches. Keyed by memory_id, the column that names the
+	//     memory itself.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memory_flags SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
+	); err != nil {
+		return fmt.Errorf("promote memory flags: %w", err)
+	}
+	//   - supersede_checked names the memory as one of TWO endpoints and its
+	//     project_id cascades from projects, so a row left naming the old project
+	//     is destroyed when that project is deleted, discarding a verdict the
+	//     pass had already paid for.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE supersede_checked SET project_id = ? WHERE newer_id = ? OR older_id = ?`,
+		GlobalProjectID, id, id,
+	); err != nil {
+		return fmt.Errorf("promote supersede checks: %w", err)
 	}
 	return tx.Commit()
 }
@@ -7034,6 +7179,14 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 // (cmd/ghost/lifecycle.go), so a hallucinated credential costs one unrecorded
 // summary rather than the whole consolidation — the memories it summarised have
 // already been applied by this point.
+//
+// A project with no ghost_state row is a failure too, and it is the reason this
+// is not a fire-and-forget UPDATE. The row is written by every project creation
+// route, so a missing one means a store this build did not create that row for —
+// notably a project imported before ImportProject wrote it — and an UPDATE that
+// matched nothing returns nil just as an UPDATE that wrote does. Reporting the
+// empty result instead turns that silent loss into the warning the caller
+// already knows how to print.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
 	if err := rejectSecret("learned_context", learnedContext); err != nil {
 		return err
@@ -7044,13 +7197,23 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.execGuardedWrite(ctx, "update-learned-context", `
+	res, err := s.execGuardedWrite(ctx, "update-learned-context", `
 		UPDATE ghost_state
 		SET learned_context = ?, reflection_summary = ?,
 		    last_reflection_at = datetime('now'), updated_at = datetime('now')
 		WHERE project_id = ?
 	`, learnedContext, summary, projectID)
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("update learned context: no ghost_state row for %s", ProjectArg(ProjectIdentifierLabel, projectID))
+	}
+	return nil
 }
 
 // GetReflectInputSignature returns the fingerprint of the memory set that

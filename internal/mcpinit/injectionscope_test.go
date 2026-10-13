@@ -133,7 +133,7 @@ func TestSessionStartOnAStoreBehindTheScopeColumnStillRenders(t *testing.T) {
 	// The vector epoch triggers (schema v24) read memories.scope, and SQLite refuses
 	// to drop a column a trigger names. A store from before the scope column has
 	// none of them, so the fixture removes them with the column they postdate.
-	for _, trg := range []string{"vector_epoch_mem_au", "vector_epoch_mem_ad", "vector_epoch_mem_ai", "vector_epoch_emb_ai", "vector_epoch_emb_au", "vector_epoch_emb_ad"} {
+	for _, trg := range []string{"vector_epoch_mem_au", "vector_epoch_mem_validity_au", "vector_epoch_mem_ad", "vector_epoch_mem_ai", "vector_epoch_emb_ai", "vector_epoch_emb_au", "vector_epoch_emb_ad"} {
 		if _, err := stamper.Exec(`DROP TRIGGER IF EXISTS ` + trg); err != nil {
 			t.Fatalf("drop %s: %v", trg, err)
 		}

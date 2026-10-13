@@ -615,7 +615,7 @@ Binding the same project to the same directory again succeeds and changes nothin
 
 A successful bind that records a directory is followed by one more step **on the standalone, init-managed Claude Code integration**: run `ghost mcp init` to write that checkout's memory redirect. The installer only writes redirects for projects with an absolute path, and `ghost mcp status` counts every project that has one — looking under the path currently recorded — so until init runs again the redirect check reports the repair as incomplete. That includes **re-pointing** a project at a moved checkout: the redirect on disk is under the old directory, so status goes red exactly as it does after a first bind. A re-run that records the same directory again changes nothing and needs no step. This applies to neither of the other setups: the ghost Claude Code plugin manages its own wiring (its `mcp init` returns early writing nothing, and `mcp status` returns before the redirect check), and the opencode, codex and goose installers have no redirect at all.
 
-One case needs action before init will write anything: `writeRedirects` decides by file content, not by who wrote the file. It skips a `MEMORY.md` that does not contain the `stored in Ghost` marker, and rewrites one that does when it still carries the stale `ghost_list_projects` tool-call marker — so a checkout whose own `MEMORY.md` still holds an old Ghost redirect can be replaced, while one that merely mentions Ghost is left alone. Merge or remove such a file first. `mcp status` counts a skipped project as not redirected and prints the same line as any other failure, so the bind output states the condition init uses rather than promising a redirect that will not appear. The bind output names the installation the step belongs to as well.
+One case needs action before init will write anything: `writeRedirects` decides by file content, not by who wrote the file. It skips a `MEMORY.md` that does not contain the `stored in Ghost` marker, and rewrites one that does when it still carries the stale `ghost_list_projects` tool-call marker — so a checkout whose own `MEMORY.md` still holds an old Ghost redirect can be replaced, while one that merely mentions Ghost is left alone. Merge or remove such a file first. `mcp status` counts a skipped project as not redirected and prints the same line as any other failure, so the bind output states the condition init uses rather than promising a redirect that will not appear. The bind output names the installation the step belongs to as well. The directory it writes under is named by Claude Code's own project-path encoding — every character outside `[a-zA-Z0-9]` folds to `-`, and a checkout path longer than 200 UTF-16 units is truncated and suffixed with a base-36 hash of the full path — so the redirect lands where Claude Code actually reads it, including for a checkout under a dot-directory or one with a space, underscore or non-ASCII character in its name.
 
 ## Obsidian
 
@@ -898,6 +898,8 @@ Which tool edits which field is derived from the tools' own arguments, so the li
 
 Where the route is "the database directly", the alternative is the delete command above. The field lists in the first three rows are derived from the tools' own arguments, so they cannot drift from them; the rest are stated per group because each has a different reason and a different route.
 
+The two task writers were the last row editors that read on the pool OUTSIDE the write transaction and now read inside it (#1083), joining the arrangement `Store.UpdateMemoryWithOptions` (the memory edit) and `Upsert`'s dedup probe already had. `ghost_task_update` reads the task, merges the caller's fields and writes the result in ONE `beginWrite` transaction, so two clients editing different fields of one task — two MCP servers on one store is a documented, supported mode — each land rather than one overwriting the other with a copy it read before the other's write, and `completed_at` is stamped from the status the row holds when the write lands. `ghost_task_complete` reads no row of its own: it resolves the id prefix and UPDATEs by id, so for it the fix is the other half below. Nothing about the argument list changes. Both writers also read their UPDATE's `RowsAffected`, so a task deleted between the read and the write is an ERROR naming the field's tool rather than a reported success, which is the silent half of the same defect: the old `ghost_task_complete` and `ghost_task_update` both committed a 0-row UPDATE and returned success, so a completion nobody could detect was reported as saved.
+
 ### `ghost import`
 
 Loads an artifact written by `ghost export`:
@@ -1106,6 +1108,21 @@ row back, with its text and no history:
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
 
+The erasure reaches the database file, not only the rows: every writer opens the
+store with `secure_delete` on, a purge rebuilds the full-text index from the rows
+that survive (a delete's FTS5 tombstone marks a row dead but leaves its tokens in
+the segment blobs, which a merge is under no obligation to rewrite), and the purge
+then checkpoints the WAL with `TRUNCATE`. If another Ghost reader held the store
+for the whole timeout, the checkpoint could not truncate the log and the command
+says so — the text stays in `-wal` until that reader closes and a later purge or
+checkpoint completes — rather than reporting the erase as done
+([#1043](https://github.com/wcatz/ghost/issues/1043)). Two copies this still does
+not reach: text an older Ghost version, one running before `secure_delete` was on,
+already freed into the file's free space and left there until a compaction
+rewrites it; and a copy outside this file — a backup taken before the purge, or
+another machine's store. `ghost backup` writes a clean copy without the freed
+bytes.
+
 `purge` takes the **whole id** and refuses a prefix, which is the one difference
 from the read above. It erases recorded text for good, so a mistyped argument is
 not a message but an unprintable memory, and echoing the resolved id would not make
@@ -1119,10 +1136,11 @@ that already succeeded looks like.
 The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
 directions — including for a memory that is already deleted, where it purges the
 recorded text without restoring the row; use it whenever the intent is to erase
-something rather than to retire a memory. Neither can reach a backup taken before
-the purge, or another machine's copy of the store. The MCP equivalent is
-`ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
-erase something rather than to retire a memory.
+something rather than to retire a memory. Its answer carries the same two
+limits: text an older Ghost version freed before `secure_delete` was on stays in
+the file's free space, and neither a backup taken before the purge nor another
+machine's copy of the store is reachable. `ghost backup` writes a clean copy
+without the freed bytes.
 
 Reading a history (`ghost history <ref>`, and `as_of`) writes no memory, history or
 project row, and neither does `ghost history compact` **without** `--apply` — a dry

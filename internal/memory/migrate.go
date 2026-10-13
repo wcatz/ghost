@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 24
+const schemaVersion = 25
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -87,6 +87,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV22,
 	migrateV23,
 	migrateV24,
+	migrateV25,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1864,3 +1865,44 @@ END`,
 // vectorEpochStepTables is the table each statement of migrateV24 depends on,
 // in statement order: "" for the one that creates the counter itself.
 var vectorEpochStepTables = []string{"", "memory_embeddings", "memory_embeddings", "memory_embeddings", "memories", "memories", "memories"}
+
+// migrateV25 adds the validity arm of the vector epoch: a trigger that bumps the
+// counter when a memory's validity window changes (#1053). The vector leg now
+// reads valid_from and valid_until to withhold an out-of-window row before the
+// window closes, so a cached corpus that held those bounds would go stale on an
+// edit that changes one — a search would keep offering a row that just expired.
+//
+// It is a SEPARATE trigger rather than a fourth column on vector_epoch_mem_au,
+// and that is not tidiness: migrateV24 is frozen and TestMigrateV24MatchesThe-
+// FreshDatabaseSchema compares its spelling of that trigger with initSQL's, so
+// adding a column to the fresh one would break the migration path.
+//
+// The DDL is repeated from vectorEpochSQL for the reason migrateV24 repeats its
+// own: a step is frozen in time. The trigger names memories.valid_from/valid_until,
+// which arrived at v10, so a database reaching v25 always has them; the table
+// guard is for the partial fixtures the earlier steps' tests build, which a step
+// must not refuse over a table it does not fire on.
+func migrateV25(tx *sql.Tx) error {
+	ok, err := tableExists(tx, "memories")
+	if err != nil {
+		return fmt.Errorf("v25 vector epoch validity: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS vector_epoch (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch INTEGER NOT NULL DEFAULT 0
+)`,
+		`CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_validity_au AFTER UPDATE OF valid_from, valid_until ON memories
+    WHEN old.valid_from IS NOT new.valid_from OR old.valid_until IS NOT new.valid_until BEGIN
+    INSERT INTO vector_epoch (id, epoch) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET epoch = epoch + 1;
+END`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v25 vector epoch validity: %w", err)
+		}
+	}
+	return nil
+}

@@ -28,10 +28,83 @@ func TestClaudeMemoryDir(t *testing.T) {
 		}
 	})
 
+	t.Run("encoding_special_chars", func(t *testing.T) {
+		if got := EncodeProjectPath("/srv/u/.config/app"); got != "-srv-u--config-app" {
+			t.Errorf("dot in path: got %q, want %q", got, "-srv-u--config-app")
+		}
+		if got := EncodeProjectPath("/srv/u/git/my_proj"); got != "-srv-u-git-my-proj" {
+			t.Errorf("underscore: got %q, want %q", got, "-srv-u-git-my-proj")
+		}
+		if got := EncodeProjectPath("/srv/u/git/foo.bar"); got != "-srv-u-git-foo-bar" {
+			t.Errorf("dot: got %q, want %q", got, "-srv-u-git-foo-bar")
+		}
+		if got := EncodeProjectPath("/srv/u/My Docs/x"); got != "-srv-u-My-Docs-x" {
+			t.Errorf("space: got %q, want %q", got, "-srv-u-My-Docs-x")
+		}
+	})
+
+	t.Run("encoding_nonascii", func(t *testing.T) {
+		if got := EncodeProjectPath("/srv/u/café/repo"); got != "-srv-u-caf--repo" {
+			t.Errorf("non-ascii: got %q, want %q", got, "-srv-u-caf--repo")
+		}
+	})
+
+	t.Run("encoding_nonbmp_is_two_hyphens", func(t *testing.T) {
+		// Claude Code's [^a-zA-Z0-9] regex runs over UTF-16 code units, so a
+		// non-BMP character (an emoji) is two units and gets two '-' — not the
+		// one a rune-wise fold would produce.
+		if got := EncodeProjectPath("/srv/u/😀/repo"); got != "-srv-u----repo" {
+			t.Errorf("emoji: got %q, want %q", got, "-srv-u----repo")
+		}
+	})
+
 	t.Run("returns_empty_for_missing_dir", func(t *testing.T) {
 		got := ClaudeMemoryDir("/nonexistent/project/path")
 		if got != "" {
 			t.Errorf("expected empty for missing dir, got %q", got)
+		}
+	})
+}
+
+// TestEncodeProjectPathLongName pins the >200-char branch against Claude
+// Code's own encoder: truncate to 200 UTF-16 code units, then append '-' and
+// the base-36 absolute value of a Java-style String.hashCode of the FULL path.
+// A mismatch here is silent — the encoded name points at a directory Claude
+// Code never wrote.
+func TestEncodeProjectPathLongName(t *testing.T) {
+	t.Run("at_cap_is_unhashed", func(t *testing.T) {
+		atCap := "/" + strings.Repeat("d", 199) // folds to exactly 200 units
+		if got, want := EncodeProjectPath(atCap), "-"+strings.Repeat("d", 199); got != want {
+			t.Errorf("EncodeProjectPath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("past_cap_truncates_and_hashes", func(t *testing.T) {
+		// "-" + 200 b's folds to 201 units; claude keeps the first 200 and
+		// appends the base-36 hash of "/bbb…b" (201 b's).
+		overCap := "/" + strings.Repeat("b", 200)
+		if got, want := EncodeProjectPath(overCap), "-"+strings.Repeat("b", 199)+"-86ms41"; got != want {
+			t.Errorf("EncodeProjectPath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("negative_hash_takes_absolute_value", func(t *testing.T) {
+		// "/ccc…c" (201 c's) hashes to a negative int32; Math.abs before
+		// toString(36) is what makes this "id6lpo" rather than a "-" prefix.
+		overCap := "/" + strings.Repeat("c", 201)
+		if got, want := EncodeProjectPath(overCap), "-"+strings.Repeat("c", 199)+"-id6lpo"; got != want {
+			t.Errorf("EncodeProjectPath = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("hash_covers_the_whole_path", func(t *testing.T) {
+		// Two paths sharing the kept 200-unit prefix must not collide, which
+		// only holds if the hash is over the full path rather than the kept
+		// prefix.
+		a := "/" + strings.Repeat("b", 200)
+		b := a + "x"
+		if EncodeProjectPath(a) == EncodeProjectPath(b) {
+			t.Errorf("paths %q and %q shared a 200-unit prefix and encoded identically", a, b)
 		}
 	})
 }
