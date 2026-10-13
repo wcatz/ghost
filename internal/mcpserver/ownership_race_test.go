@@ -28,7 +28,7 @@ type promoteAfterReadStore struct {
 func (s *promoteAfterReadStore) GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	mems, err := s.Store.GetByIDs(ctx, ids)
 	if err == nil && s.armed.CompareAndSwap(true, false) {
-		if perr := s.Store.PromoteToGlobal(ctx, "abc123", s.target); perr != nil {
+		if perr := s.PromoteToGlobal(ctx, "abc123", s.target); perr != nil {
 			return nil, perr
 		}
 	}
