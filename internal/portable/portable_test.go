@@ -517,6 +517,33 @@ func TestExportRefusesAFilterThatMatchesMoreThanOneProject(t *testing.T) {
 	}
 }
 
+// TestExportPrefersAnExactIDOverANameCollision: ids and names share the filter's
+// one namespace, and a real store can hold a project whose id is literally another
+// project's name — `ghost import` writes artifact ids verbatim and an MCP-created
+// project's id can be path-shaped. The refusal above is for an ambiguous NAME, not
+// for a filter that names a project by its unique id, so an exact id wins before
+// any name is considered (the same precedence `ResolveProject` gives an id).
+// Without that precedence this filter would be refused and tell the operator to do
+// exactly what they already did.
+func TestExportPrefersAnExactIDOverANameCollision(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "samename", "/src/byid", "the by-id project"); err != nil {
+		t.Fatalf("EnsureProject id: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "other", "/src/byname", "samename"); err != nil {
+		t.Fatalf("EnsureProject name: %v", err)
+	}
+
+	artifact := exportBytes(t, store, "samename")
+	if !strings.Contains(string(artifact), `"id":"samename"`) {
+		t.Errorf("filtering by an exact id did not select that project:\n%s", artifact)
+	}
+	if strings.Contains(string(artifact), `"id":"other"`) {
+		t.Errorf("filtering by an exact id also selected the project named the same:\n%s", artifact)
+	}
+}
+
 // TestImportSkipsExistingIDs: importing the same artifact twice must leave the
 // second run a no-op. An import that duplicated on a second run would make the
 // command unsafe to retry after an interrupted first one.
