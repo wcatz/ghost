@@ -5672,7 +5672,7 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return out, fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", RefusalArg("memory_id", id))
 	}
 	// After the DELETE, so the row is gone from the content table the rebuild
 	// reads: the index still carries the deleted row's tokens in segments the
@@ -6181,7 +6181,7 @@ func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool
 	}
 	if n == 0 {
 		if projectID == "" {
-			return fmt.Errorf("memory %s not found", id)
+			return fmt.Errorf("memory %s not found", RefusalArg("memory_id", id))
 		}
 		return fmt.Errorf("memory %s not found in project %s",
 			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
