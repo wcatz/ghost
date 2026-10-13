@@ -3820,7 +3820,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
 			t.Fatalf("StoreEmbedding: %v", err)
 		}
-		if err := s.MarkLinkScanned(ctx, id); err != nil {
+		if err := s.MarkLinkScanned(ctx, id, vec); err != nil {
 			t.Fatalf("MarkLinkScanned: %v", err)
 		}
 		content := "Entirely rewritten content"

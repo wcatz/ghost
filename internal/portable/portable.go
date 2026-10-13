@@ -177,14 +177,13 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		keptProjects = append(keptProjects, p)
 	}
 	orphaned := func(projectID string) bool { return droppedProjects[projectID] }
-	const orphanReason = "the project it names was left out of this artifact"
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
-		reason, secret, scope := "", false, false
+		reason, secret, scope, orphan := "", false, false, false
 		switch {
 		case orphaned(m.ProjectID):
-			reason = orphanReason
+			reason, orphan = orphanReason, true
 		default:
 			err := memory.CheckImportedMemory(m)
 			reason, secret = exportRefusal(err)
@@ -192,37 +191,37 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			scope = errors.As(err, &bound)
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope})
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, Orphan: orphan})
 			continue
 		}
 		keptMemories = append(keptMemories, m)
 	}
 	keptTasks := make([]memory.Task, 0, len(tasks))
 	for _, t := range tasks {
-		reason, secret := "", false
+		reason, secret, orphan := "", false, false
 		switch {
 		case orphaned(t.ProjectID):
-			reason = orphanReason
+			reason, orphan = orphanReason, true
 		default:
 			reason, secret = exportRefusal(memory.CheckImportedTask(t))
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: reason, Secret: secret})
+			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: reason, Secret: secret, Orphan: orphan})
 			continue
 		}
 		keptTasks = append(keptTasks, t)
 	}
 	keptDecisions := make([]memory.Decision, 0, len(decisions))
 	for _, d := range decisions {
-		reason, secret := "", false
+		reason, secret, orphan := "", false, false
 		switch {
 		case orphaned(d.ProjectID):
-			reason = orphanReason
+			reason, orphan = orphanReason, true
 		default:
 			reason, secret = exportRefusal(memory.CheckImportedDecision(d))
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: reason, Secret: secret})
+			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: reason, Secret: secret, Orphan: orphan})
 			continue
 		}
 		keptDecisions = append(keptDecisions, d)
@@ -329,7 +328,16 @@ type SkippedRecord struct {
 	// Scope marks a record refused for a scope that breaks a bound. The id is not
 	// the problem, so the report points at the scope instead of at re-keying.
 	Scope bool
+	// Orphan marks a child left out only because its PROJECT was left out. The
+	// record's own bytes were never judged and its id is fine, so the report
+	// advises fixing the project and re-exporting, and gives the child none of
+	// the re-key or delete advice: deleting it would drop the only copy and leave
+	// the project as broken as before.
+	Orphan bool
 }
+
+// orphanReason is the Reason every Orphan record carries.
+const orphanReason = "the project it names was left out of this artifact"
 
 // Stats is what an export wrote, and what it deliberately left out.
 type Stats struct {

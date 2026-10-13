@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,6 +87,11 @@ type lifecycleFailureMarker struct {
 	Error        string   `json:"error"`
 	At           string   `json:"at"` // RFC3339, UTC
 	Version      int      `json:"version"`
+
+	// path is the file this marker was read from (readMarkerAtPath), never
+	// stored. The self-clean removes it directly because a withheld project
+	// (markerProjectField) names no file.
+	path string
 }
 
 // WriteLifecycleFailure records a failed (or never-started) consolidation
@@ -106,8 +112,10 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 		return fmt.Errorf("locate data dir: %w", err)
 	}
 	resolved := resolveMarkerProject(dataDir, project)
+	recorded := resolved
 	if resolved == "" {
 		resolved = project
+		recorded = markerProjectField(project)
 	}
 	if resolved == "" {
 		return fmt.Errorf("cannot record lifecycle failure without a project")
@@ -122,7 +130,7 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 		text = "phase failed"
 	}
 	m := lifecycleFailureMarker{
-		Project:      resolved,
+		Project:      recorded,
 		PhasesFailed: append([]string(nil), phasesFailed...),
 		Error:        truncateUTF8(text, lifecycleMarkerDetailMaxBytes),
 		At:           time.Now().UTC().Format(time.RFC3339),
@@ -155,6 +163,26 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 		return err
 	}
 	return nil
+}
+
+// markerProjectField is what the marker's project field records for an operand
+// the store could not resolve: the operand itself, unless it is credential
+// shaped, in which case the token guard's placeholder naming the format. The
+// file stays keyed on the raw operand's digest (projectMarkerFile), so two
+// token operands keep two markers and the same operand's clean run still
+// clears its own; only the field, which is read back and printed, loses the
+// value. Not empty: an empty project means an unattributed marker, which the
+// alert would show in every session under that session's own project.
+func markerProjectField(operand string) string {
+	refusal := memory.RejectSecret("project", operand)
+	if refusal == nil {
+		return operand
+	}
+	var detected *memory.SecretContentError
+	if errors.As(refusal, &detected) {
+		return "<project withheld: it holds a " + detected.Format + ">"
+	}
+	return "<project withheld: it holds a credential>"
 }
 
 // ClearLifecycleFailure removes THIS project's marker. A missing marker is
@@ -361,6 +389,7 @@ func readMarkerAtPath(path string) *lifecycleFailureMarker {
 	if _, err := time.Parse(time.RFC3339, m.At); err != nil {
 		return nil
 	}
+	m.path = path
 	return &m
 }
 
@@ -497,6 +526,12 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// Clear the marker that was actually read, keyed by its own recorded
 		// project — never a blanket removal that could touch another's.
 		_ = ClearLifecycleFailure(m.Project)
+		// A withheld project names no file, so the clear above cannot find
+		// the marker it records; remove the file that was read. Its path came
+		// from config.DataDirPath through readLifecycleFailure.
+		if m.path != "" {
+			_ = os.Remove(m.path)
+		}
 		return ""
 	}
 	if age > lifecycleAlertMaxAge {

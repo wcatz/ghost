@@ -225,7 +225,7 @@ func TestEveryAutocommitWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *t
 	}{
 		{"toggle-pin", func() error { return s.TogglePin(ctx, id, true) }},
 		{"touch", func() error { return s.Touch(ctx, []string{id}) }},
-		{"mark-link-scanned", func() error { return s.MarkLinkScanned(ctx, id) }},
+		{"mark-link-scanned", func() error { return s.MarkLinkScanned(ctx, id, nil) }},
 		{"invalidate-link", func() error {
 			_, err := s.InvalidateLink(ctx, id, otherID, "related")
 			return err
