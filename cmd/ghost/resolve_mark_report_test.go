@@ -152,6 +152,30 @@ func TestResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
 	}
 }
 
+// TestResolveMarkReportNamesAPersistentTierRow: a persistent-tier row is exempt
+// from resolve, so it is neither something a dry run would mark nor a row the
+// write-time guard declined under --apply. Both reports name the tier, and the
+// summary counts it on its own.
+func TestResolveMarkReportNamesAPersistentTierRow(t *testing.T) {
+	res := resolve.MarkResult{Resolved: 1, PersistentTier: 1, Memories: []resolve.MarkedMemory{
+		{ID: "55555555555555555555555555555555", Category: "fact", Content: "juliet keeps the release key offline", PersistentTier: true},
+	}}
+	for _, apply := range []bool{false, true} {
+		out := resolveMarkReport("myproj", res, apply)
+		if !strings.Contains(out, "  persistent tier  ") {
+			t.Errorf("apply=%v: the report does not name the persistent tier:\n%s", apply, out)
+		}
+		if !strings.Contains(out, "1 persistent tier") {
+			t.Errorf("apply=%v: the summary does not count the persistent-tier row:\n%s", apply, out)
+		}
+		for _, wrong := range []string{"no longer eligible", "would mark resolved 1", "  would mark  ", "--apply to stamp"} {
+			if strings.Contains(out, wrong) {
+				t.Errorf("apply=%v: the report says %q for a persistent-tier row:\n%s", apply, wrong, out)
+			}
+		}
+	}
+}
+
 func TestResolveMarkReportNamesNothingForARequestThatNamedNothing(t *testing.T) {
 	for _, apply := range []bool{false, true} {
 		if out := resolveMarkReport("myproj", resolve.MarkResult{}, apply); out != "" {
