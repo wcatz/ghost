@@ -2,7 +2,9 @@ package mcpinit
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -184,6 +186,17 @@ func ClearLifecycleFailure(project string) error {
 		if err := os.Remove(filepath.Join(dataDir, projectMarkerFile(project))); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		// The name an older build gave this project. Removed only when the file
+		// records THIS project: the old stem folded punctuation, so the same
+		// file may hold another project's failure ("my project" and
+		// "my_project" both keyed lifecycle-last-failure-my_project.json), and
+		// deleting it would be the very coupling the digest stem removes.
+		old := filepath.Join(dataDir, oldProjectMarkerFile(project))
+		if m := readMarkerAtPath(old); m != nil && m.Project == project {
+			if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
 	}
 	legacy := filepath.Join(dataDir, legacyMarkerFile)
 	// Compared with no emptiness guard: an unattributed legacy marker
@@ -197,16 +210,57 @@ func ClearLifecycleFailure(project string) error {
 }
 
 // projectMarkerFile is the marker file name for one project inside
-// config.DataDir(). Sanitized because the project may be an unresolved name,
-// which the filesystem will not accept as-is; resolved ids are already safe.
+// config.DataDir(): the prefix and a digest of the project, never the project
+// itself. The project may be an unresolved --project operand holding anything
+// at all, and the stem has to be injective over it — the sanitized stem it
+// replaces folded every byte outside [A-Za-z0-9._-] onto "_", so "my project"
+// and "my_project" shared one file and one project's clean run erased the
+// other's still-active failure. A digest has no folding to collide on, is
+// lowercase hex (so a case-insensitive filesystem cannot merge "A" and "a"
+// either), is a fixed length, and keeps the operand out of the directory
+// listing entirely: whatever the operand is, the file name does not spell it.
+//
+// Markers written under the old stem are still read (oldProjectMarkerFile,
+// markerCandidates) and cleared, so an upgrade neither loses nor strands a
+// failure recorded before it.
 func projectMarkerFile(project string) string {
+	return lifecycleMarkerPrefix + "-" + markerStem(project) + ".json"
+}
+
+// LifecycleFailureMarkerFile is projectMarkerFile for callers outside the
+// package — the lifecycle command's tests, which must name the file the
+// writer really produces rather than spell a stem of their own (a stale
+// spelling would make an "is absent" assertion pass vacuously).
+func LifecycleFailureMarkerFile(project string) string {
+	return projectMarkerFile(project)
+}
+
+// markerStem is the first lifecycleMarkerStemBytes of the project's SHA-256,
+// hex-encoded. 128 bits makes an accidental collision between two projects'
+// markers a non-event, and the prefix-plus-"-" shape keeps the file inside
+// the lifecycle-last-failure-*.json glob the no-project read uses.
+func markerStem(project string) string {
+	sum := sha256.Sum256([]byte(project))
+	return hex.EncodeToString(sum[:lifecycleMarkerStemBytes])
+}
+
+// lifecycleMarkerStemBytes is how much of the digest names the file.
+const lifecycleMarkerStemBytes = 16
+
+// oldProjectMarkerFile is the name an older build gave a project's marker:
+// the sanitized stem. Never written now. It is NOT injective — a marker found
+// under it may belong to another project whose name folded onto the same
+// stem — so every reader and clearer of it checks the recorded project.
+func oldProjectMarkerFile(project string) string {
 	return lifecycleMarkerPrefix + "-" + sanitizeMarkerProject(project) + ".json"
 }
 
-// sanitizeMarkerProject maps a project id or name onto a file-name-safe stem.
-// Anything outside the common set becomes "_" rather than being dropped, so
-// two names differing only in punctuation cannot collapse onto each other and
-// silently share a marker. Capped only against absurd lengths.
+// sanitizeMarkerProject maps an id onto a file-name-safe stem. Anything
+// outside the common set becomes "_" rather than being dropped, and the
+// result is capped against absurd lengths. It is NOT injective: "my project"
+// and "my_project" both map to "my_project", which is why the lifecycle
+// failure marker no longer keys on it (see projectMarkerFile) and only reads
+// its old names through oldProjectMarkerFile.
 func sanitizeMarkerProject(project string) string {
 	var b strings.Builder
 	for _, r := range project {
@@ -328,10 +382,19 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		return newestMarker(filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
 			filepath.Join(dataDir, legacyMarkerFile))
 	}
-	for _, name := range markerCandidates(projectID, projectName) {
-		if m := readMarkerAtPath(filepath.Join(dataDir, name)); m != nil {
-			return m
+	for _, c := range markerCandidates(projectID, projectName) {
+		m := readMarkerAtPath(filepath.Join(dataDir, c.name))
+		if m == nil {
+			continue
 		}
+		// An old-stem file may hold another project's failure (the old stem
+		// folded punctuation). Passing over it, rather than returning it for
+		// the alert to suppress, lets this project's own legacy marker after
+		// it still be found.
+		if c.checkProject && m.Project != "" && m.Project != projectID && m.Project != projectName {
+			continue
+		}
+		return m
 	}
 	return nil
 }
@@ -362,24 +425,40 @@ func newestMarker(patterns ...string) *lifecycleFailureMarker {
 	return newest
 }
 
+// markerCandidate is one file readLifecycleFailure tries. checkProject marks a
+// name that is not injective over projects, whose marker counts only when it
+// records the session's own project.
+type markerCandidate struct {
+	name         string
+	checkProject bool
+}
+
 // markerCandidates is the lookup order: the resolved id, the display name (a
-// marker written when the id could not be resolved keys on the name), then the
-// legacy shared file. Duplicates collapse so a session whose id and name match
-// reads the same file twice.
-func markerCandidates(ids ...string) []string {
-	out := make([]string, 0, len(ids)+1)
-	seen := make(map[string]bool, len(ids)+1)
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		f := projectMarkerFile(id)
-		if !seen[f] {
-			seen[f] = true
-			out = append(out, f)
+// marker written when the id could not be resolved keys on the name), then
+// the same two under the old sanitized stem an older build wrote, then the
+// legacy shared file. Duplicates collapse so a session whose id and name
+// match does not read the same file twice.
+func markerCandidates(ids ...string) []markerCandidate {
+	out := make([]markerCandidate, 0, 2*len(ids)+1)
+	seen := make(map[string]bool, 2*len(ids)+1)
+	add := func(name string, check bool) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, markerCandidate{name: name, checkProject: check})
 		}
 	}
-	return append(out, legacyMarkerFile)
+	for _, id := range ids {
+		if id != "" {
+			add(projectMarkerFile(id), false)
+		}
+	}
+	for _, id := range ids {
+		if id != "" {
+			add(oldProjectMarkerFile(id), true)
+		}
+	}
+	add(legacyMarkerFile, false)
+	return out
 }
 
 // lifecycleFailureAlert renders the one-line session-start alert for the
