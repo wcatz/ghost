@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -461,6 +462,50 @@ func appliedSummary(appliedByCategory map[string]int, globalMems []reflection.Re
 		return summary + fmt.Sprintf(", %d promoted to global", promoted)
 	}
 	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", crossProjectKept(globalMems, globalDropped))
+}
+
+// writeAppliedReport prints the Applied block of a round that wrote something
+// and returns the summary for the learned-context record. wrote is false when
+// the round wrote nothing (the caller's !applied branch already said why).
+//
+// A round that wrote something counts as applied, and that includes a
+// candidate that could not be promoted and was written back into the project:
+// it is a row the project now holds. Keying this on the project-memory count
+// alone dropped the summary for a promotion-only round.
+//
+// deleted is the store's count of rows the replace removed. It is stated on
+// the Applied line only when non-zero, because a round whose every emission
+// was refused by the concurrent-edit guard still deletes the rows nothing
+// claimed, and "0 memories consolidated" alone would hide that.
+func writeAppliedReport(w io.Writer, applied, promoteGlobals bool, appliedByCategory map[string]int,
+	keptProject, keptGlobal []reflection.ReflectMemory, keptMems []memory.Memory,
+	projectForSummary []reflection.ReflectMemory, promoted, droppedGlobal, deleted int) (summary string, wrote bool) {
+	if !applied || (promoted == 0 && len(keptMems) == 0 && len(keptProject) == 0 && len(keptGlobal) == 0) {
+		return "", false
+	}
+	// With promotion off every cross-project refusal counts as the global
+	// half's, so one subtraction covers both guard passes.
+	summaryGlobalDropped := 0
+	if !promoteGlobals {
+		summaryGlobalDropped = droppedGlobal
+	}
+	// The REAL promoted count, so a partial promotion does not print "3
+	// promoted to global" one line after "Promoted 1/3".
+	summary = appliedSummary(appliedByCategory, keptGlobal, promoted, summaryGlobalDropped, promoteGlobals)
+	line := summary
+	if deleted > 0 {
+		line += fmt.Sprintf(", %d removed", deleted)
+	}
+	_, _ = fmt.Fprintf(w, "Applied: %s\n", line)
+	if !promoteGlobals && crossProjectKept(keptGlobal, summaryGlobalDropped) > 0 {
+		_, _ = fmt.Fprintln(w, "(re-run with --promote-globals to inject them into every project)")
+	}
+	if len(projectForSummary) > 0 {
+		_, _ = fmt.Fprintln(w, restoreHint(promoted))
+	} else if promoted > 0 {
+		_, _ = fmt.Fprintln(w, "(promoted globals must be removed from _global by hand; no project snapshot was created)")
+	}
+	return summary, true
 }
 
 func restoreHint(promoted int) string {

@@ -83,11 +83,18 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 		return noop, true, nil
 	}
 	if !safeProjectIDComponent(id) {
-		return noop, true, fmt.Errorf("project id %q is not a safe filename component", id)
+		return noop, true, fmt.Errorf("project id %s is not a safe filename component", memory.RefusalArg("project id", id))
 	}
 
 	pidPath := filepath.Join(dataDir, "lifecycle-"+id+".pid")
-	if !claimPidFile(pidPath) {
+	claimed, err := claimPidFile(pidPath)
+	if err != nil {
+		// The claim could not be evaluated, which is not evidence that another
+		// run holds it: reporting it as "held" stopped maintenance for the
+		// project while naming a run that did not exist. Unknowns read as "run".
+		return noop, true, fmt.Errorf("claim the lifecycle lock for project id %s: %w", memory.RefusalArg("project id", id), err)
+	}
+	if !claimed {
 		return nil, false, nil
 	}
 	return func() {
