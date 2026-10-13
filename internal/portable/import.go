@@ -153,8 +153,11 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, opts ImportOption
 			onRecord(bad.result)
 		}
 	}
+	// The ids this run creates, which is what lets a dry run answer a repeated id
+	// the way the apply run it previews does. See createdIDs.
+	created := createdIDs{}
 	for _, step := range plan {
-		step.run(ctx, s, &report, onRecord)
+		step.run(ctx, s, &report, onRecord, created)
 	}
 	return report, nil
 }
@@ -679,10 +682,44 @@ func actionFor(created bool) Action {
 	return ActionSkip
 }
 
+// createdIDs is the set of record ids this run has already created, per record
+// kind. It is the half of the store's presence check that a dry run cannot read:
+// that check answers from the database, and an apply run has committed the first
+// record by the time a repeated id asks, while a dry run has written nothing and
+// so answers "absent" for every occurrence. The plan keeps the other half — an id
+// an earlier step created is present for every step after it — which is what makes
+// the preview's skip the same skip the apply run makes.
+//
+// It records what the run actually CREATED rather than what the artifact repeats,
+// and the difference is the point: a repeated id whose first record was refused
+// wrote nothing under it, so the second is judged on its own record, exactly as
+// the apply run judges it.
+type createdIDs map[string]map[string]bool
+
+func (c createdIDs) has(kind, id string) bool {
+	return c[kind] != nil && c[kind][id]
+}
+
+func (c createdIDs) add(kind, id string) {
+	if c[kind] == nil {
+		c[kind] = make(map[string]bool)
+	}
+	c[kind][id] = true
+}
+
 // run performs one step and records the outcome.
-func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, onRecord func(RecordResult)) {
+//
+// created is the run's set of ids already created. It is read after the project
+// check and before the store is asked, which is the order the apply run answers
+// in: the project check is this function's own and runs ahead of the store in
+// both modes, so a repeated id naming a missing project is refused in both; and
+// the store's presence check runs ahead of its record checks, so a repeated id
+// whose second record is invalid is a skip in the apply run and has to be one
+// here before the store's validation can refuse it.
+func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, onRecord func(RecordResult), created createdIDs) {
 	var got outcome
-	if st.check != nil && !st.check.available(st.check.projectID) {
+	switch {
+	case st.check != nil && !st.check.available(st.check.projectID):
 		// The project is available neither in the store nor from this run's
 		// earlier records, so there is nothing to attach the record to. Refused
 		// here rather than left to the store's own pre-write check, so a dry run
@@ -691,8 +728,20 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		got = outcome{action: ActionReject, err: fmt.Errorf(
 			"project %s not found — the artifact carries no record for it and this store does not have it",
 			memory.RefusalArg("project_id", st.check.projectID))}
-	} else {
+	case created.has(st.kind, st.rec.id()):
+		// An earlier step in this run wrote this id, so the store's presence
+		// check answers "present" — in the apply run it already has. Reported
+		// without asking the store again: the answer is the one the apply run
+		// got, and asking a second time is a second code path to drift.
+		got = outcome{action: ActionSkip}
+	default:
 		got = st.runFunc(ctx, s, st.opts)
+	}
+	// A created id is present for every step after this one, so the run records
+	// it whether or not anything was written: a dry run's create is a promise to
+	// write, and the next record with the same id has to read as a skip.
+	if got.action == ActionCreate {
+		created.add(st.kind, st.rec.id())
 	}
 	result := RecordResult{
 		Type:       st.kind,
