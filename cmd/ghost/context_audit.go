@@ -186,7 +186,7 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// the value the reader typed rather than the flag they mistyped.
 			d, err := time.ParseDuration(value)
 			if err != nil {
-				return opts, fmt.Errorf("--since %q is not a duration: %w (e.g. 24h, 168h, 30m)", value, err)
+				return opts, fmt.Errorf("--since %s is not a duration (e.g. 24h, 168h, 30m)", memory.RefusalArg("since", value))
 			}
 			if d < 0 {
 				return opts, fmt.Errorf("--since %s is negative: it is how far BACK to look, not how far forward", d)
@@ -219,9 +219,9 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 		case arg == "--as-of" || strings.HasPrefix(arg, "--as-of="):
 			return opts, errors.New("--as-of prints the session-start block as the store stood at an instant; it cannot be combined with --audit, which reports retrieval verdicts over a window instead (`ghost context --as-of ...` or `ghost context --audit`, not both)")
 		case strings.HasPrefix(arg, "-"):
-			return opts, fmt.Errorf("unknown flag %q", arg)
+			return opts, fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		default:
-			return opts, fmt.Errorf("ghost context --audit takes flags only, got %q", arg)
+			return opts, fmt.Errorf("ghost context --audit takes flags only, got %s", memory.RefusalArg("argument", arg))
 		}
 	}
 	return opts, nil
