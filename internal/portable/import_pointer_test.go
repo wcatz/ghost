@@ -174,3 +174,95 @@ func TestADecisionWhoseSupersederIsRejectedStillImports(t *testing.T) {
 		}
 	}
 }
+
+// TestAPointerToARecordAlreadyInTheStoreIsKept: a target the store already
+// holds is skipped by the import, and a skip has landed — the row is there to
+// point at. The dependent record is created with its pointer intact in both
+// modes, whether the artifact lists it before its target or after.
+func TestAPointerToARecordAlreadyInTheStoreIsKept(t *testing.T) {
+	const header = `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n"
+	const target = `{"type":"task","task":{"id":"tt1","project_id":"pb","title":"target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dt1","project_id":"pb","title":"superseder","decision":"d","rationale":"r","status":"active"}}` + "\n"
+	const taskDependent = `{"type":"task","task":{"id":"tt2","project_id":"pb","title":"dependent","status":"pending","priority":2,"blocked_by":"tt1"}}` + "\n"
+	const decisionDependent = `{"type":"decision","decision":{"id":"dt2","project_id":"pb","title":"superseded","decision":"d","rationale":"r","status":"superseded","superseded_by":"dt1"}}` + "\n"
+
+	for name, artifact := range map[string]string{
+		"dependent listed after its target":  header + target + taskDependent + decisionDependent,
+		"dependent listed before its target": header + taskDependent + decisionDependent + target,
+	} {
+		t.Run(name, func(t *testing.T) {
+			runs := map[string]pointerRun{}
+			for mode, apply := range map[string]bool{"dry run": false, "apply": true} {
+				s := newTestStore(t)
+				if _, err := Import(context.Background(), s, strings.NewReader(header+target), ImportOptions{Apply: true}, nil); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				run := pointerRun{actions: map[string]Action{}, dropped: map[string]string{}, store: s}
+				report, err := Import(context.Background(), s, strings.NewReader(artifact), ImportOptions{Apply: apply}, func(r RecordResult) {
+					key := fmt.Sprintf("%s/%s", r.Type, r.ID)
+					run.actions[key] = r.Action
+					if r.DroppedRef != "" {
+						run.dropped[key] = r.DroppedRef
+					}
+				})
+				if err != nil {
+					t.Fatalf("Import(%s): %v", mode, err)
+				}
+				run.report = report
+				runs[mode] = run
+			}
+			assertSameOutcome(t, runs["dry run"], runs["apply"])
+
+			for mode, run := range runs {
+				for key, want := range map[string]Action{
+					"task/tt1":     ActionSkip,
+					"task/tt2":     ActionCreate,
+					"decision/dt1": ActionSkip,
+					"decision/dt2": ActionCreate,
+				} {
+					if got := run.actions[key]; got != want {
+						t.Errorf("%s: %s was %q, want %q", mode, key, got, want)
+					}
+				}
+				if len(run.dropped) != 0 {
+					t.Errorf("%s: dropped pointers %v, want none — every target is already in the store", mode, run.dropped)
+				}
+			}
+
+			s := runs["apply"].store
+			tasks, err := selectTasks(context.Background(), s, []string{"pb"})
+			if err != nil {
+				t.Fatalf("selectTasks: %v", err)
+			}
+			found := false
+			for _, task := range tasks {
+				if task.ID == "tt2" {
+					found = true
+					if task.BlockedBy != "tt1" {
+						t.Errorf("task tt2 blocked_by = %q, want %q", task.BlockedBy, "tt1")
+					}
+				}
+			}
+			if !found {
+				t.Errorf("task tt2 is not in the store after the apply")
+			}
+			decisions, err := selectDecisions(context.Background(), s, []string{"pb"})
+			if err != nil {
+				t.Fatalf("selectDecisions: %v", err)
+			}
+			found = false
+			for _, d := range decisions {
+				if d.ID == "dt2" {
+					found = true
+					if d.SupersededBy != "dt1" {
+						t.Errorf("decision dt2 superseded_by = %q, want %q", d.SupersededBy, "dt1")
+					}
+				}
+			}
+			if !found {
+				t.Errorf("decision dt2 is not in the store after the apply")
+			}
+		})
+	}
+}
