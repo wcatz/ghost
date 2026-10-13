@@ -2262,8 +2262,9 @@ func TestSupersedeReassessReport(t *testing.T) {
 }
 
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
-// resolve, --threshold exists in both value forms, defaulting to 0.80 when the
-// value does not parse, and --reassess is resolve's repair flag with the same
+// resolve, --threshold exists in both value forms, defaulting to 0.80 when it
+// is not typed and refused when its value is not a number in (0, 1] (see
+// supersede_threshold_test.go), and --reassess is resolve's repair flag with the same
 // meaning (#686): the edges are already in the graph, so --apply withdraws them
 // instead of writing new ones. The project repeats — flag then flag, operand
 // then flag, either order — are in TestScopeFlagParsersRefuseEmptyAndRepeated,
@@ -2285,7 +2286,6 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, 0.80},
 		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, false, 0.5},
 		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, false, 0.25},
-		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, false, 0.80},
 		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, 0.80},
 		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, 0.80},
 		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, 0.80},
@@ -2318,6 +2318,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"project empty equals value", []string{"--project="}, "--project requires a value"},
 		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
+		{"threshold bad value", []string{"myproj", "--threshold", "abc"}, `--threshold needs a cosine similarity in (0, 1], e.g. 0.85: got "abc"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)

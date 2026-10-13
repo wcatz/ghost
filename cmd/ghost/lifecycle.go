@@ -1716,8 +1716,9 @@ type supersedePair struct{ source, target string }
 // value flags accept both "--flag value" and "--flag=value", exactly one
 // project is named (by --project or by a bare positional — two of them is a
 // command line whose scope is ambiguous, and last-one-wins would silently
-// answer for whichever project the last spelling named), a
-// non-numeric --threshold keeps the default, --reassess selects the repair
+// answer for whichever project the last spelling named), a --threshold
+// that is not a number in (0, 1] is refused (parseSupersedeThreshold),
+// --reassess selects the repair
 // pass over the edges already in the graph (issue #686), --withdraw names the
 // edges to remove outright, and any other flag is an unknown-flag error (which
 // the caller prints and exits on). The project may come from --project, which
@@ -1776,6 +1777,33 @@ func checkSupersedeConsensus(n int) error {
 		return fmt.Errorf("--consensus needs at least %d passes (1 would run the pass again and gate on nothing)", supersede.MinConsensus)
 	}
 	return nil
+}
+
+// parseSupersedeThreshold reads a --threshold value and refuses one that is not a
+// number in (0, 1]. The threshold is the minimum cosine similarity a neighbour
+// needs to become a candidate pair (supersede.SelectCandidates drops a neighbour
+// whose score is below it), and every candidate that survives the filters is a
+// billed classify call. Cosine lies in [-1, 1], so a threshold of 0 or below
+// admits every neighbour however unrelated, and one above 1 admits nothing: the
+// pass runs and proposes no pair. Neither is a value an operator means, and a
+// value that does not parse (a typo, a decimal comma) used to be dropped in
+// favour of the 0.80 default, so the pass ran at a threshold nobody typed.
+//
+// The check is written as "inside the range" rather than "outside it" so NaN,
+// which every comparison answers false for, is refused rather than admitted:
+// `score < NaN` is false, so a NaN threshold would filter nothing. It is applied
+// after the float32 conversion, so a value too small for float32 (1e-50 rounds
+// to 0) is judged by what the pass would actually compare against. One function
+// for both spellings, for the reason checkSupersedeConsensus gives. The operand
+// is echoed through memory.RefusalArg, as every refusal that repeats caller
+// text is.
+func parseSupersedeThreshold(raw string) (float32, error) {
+	v, err := strconv.ParseFloat(raw, 32)
+	t := float32(v)
+	if err != nil || !(t > 0 && t <= 1) {
+		return 0, fmt.Errorf("--threshold needs a cosine similarity in (0, 1], e.g. 0.85: got %s", memory.RefusalArg("threshold", raw))
+	}
+	return t, nil
 }
 
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, relation string, err error) {
@@ -1865,14 +1893,18 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = v
 			projectSeen = true
 		case args[i] == "--threshold" && i+1 < len(args):
-			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(args[i+1])
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 			i++
 		case strings.HasPrefix(args[i], "--threshold="):
-			if v, verr := strconv.ParseFloat(strings.TrimPrefix(args[i], "--threshold="), 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(strings.TrimPrefix(args[i], "--threshold="))
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 		case args[i] == "--source" && i+1 < len(args):
 			source = args[i+1]
 			i++
@@ -2008,7 +2040,8 @@ Flags:
                       costs no classify call, and is never voted on. Refused with
                       --withdraw, which asks no model at all. In a dry run it tells
                       you what --apply would do.
-  --threshold float   Min cosine similarity for a candidate pair (default 0.80)
+  --threshold float   Min cosine similarity for a candidate pair, in (0, 1]
+                      (default 0.80). Anything else is refused.
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
                       (detected from the environment and process ancestry); an
