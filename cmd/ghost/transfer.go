@@ -1168,6 +1168,17 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 			detail = strconv.Quote(detail)
 		}
 	}
+	// A pointer dropped because the record it named was rejected is the one
+	// thing about this record the artifact says and the store will not: the row
+	// lands without it. The id goes through assemble.Token for the reason the
+	// record's own id does.
+	if r.DroppedRef != "" {
+		field := "blocked_by"
+		if r.Type == portable.TypeDecision {
+			field = "superseded_by"
+		}
+		detail += fmt.Sprintf(" (%s %s dropped: that %s was rejected)", field, assemble.Token(r.DroppedRef), r.Type)
+	}
 	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
 	return err
 }
