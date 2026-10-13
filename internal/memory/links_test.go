@@ -181,7 +181,7 @@ func TestUnscannedEmbeddedMemoryIDs(t *testing.T) {
 	if err := s.StoreEmbedding(ctx, b, vec, "test-model"); err != nil {
 		t.Fatalf("StoreEmbedding: %v", err)
 	}
-	if err := s.MarkLinkScanned(ctx, b); err != nil {
+	if err := s.MarkLinkScanned(ctx, b, vec); err != nil {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestEmbeddingAndLinkStats(t *testing.T) {
 	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	if err := s.MarkLinkScanned(ctx, a); err != nil {
+	if err := s.MarkLinkScanned(ctx, a, []float32{1, 0}); err != nil {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
 

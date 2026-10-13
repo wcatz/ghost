@@ -71,7 +71,7 @@ func TestSelectCandidatesOrientsByAgeAfterAVerbatimReflect(t *testing.T) {
 			Category: m.Category, Content: m.Content, Importance: m.Importance, Tags: tags,
 		})
 	}
-	if _, err := store.ReplaceNonManual(ctx, "p", emitted, ""); err != nil {
+	if _, _, _, _, err := store.ReplaceNonManual(ctx, "p", emitted, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	// The ages the decision is made from, checked first so a failure says which

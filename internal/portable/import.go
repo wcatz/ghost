@@ -60,6 +60,12 @@ type RecordResult struct {
 	// run's create too, for the same reason Clamped is: the rewrite is the thing
 	// to read the preview for.
 	Downgraded bool
+	// DroppedRef is the id a task's blocked_by or a decision's superseded_by
+	// named when the pointer was dropped because the record it names is in the
+	// artifact but was rejected. The record itself is still imported, without
+	// the pointer; this is how the report says what it lost. Set for a create,
+	// a dry run's included, so the preview shows the drop the apply will make.
+	DroppedRef string
 	Error      error
 }
 
@@ -364,6 +370,7 @@ type outcome struct {
 	action     Action
 	clamped    bool
 	downgraded bool
+	droppedRef string
 	err        error
 }
 
@@ -382,7 +389,9 @@ type outcome struct {
 // written first, so those are ordered topologically. A reference to a record the
 // artifact does not contain, or a cycle, has its pointer dropped rather than
 // failing the import — an artifact that cannot be read in full is still worth
-// importing as far as it goes, and the report says what was dropped.
+// importing as far as it goes. A reference to a record the artifact contains but
+// this run rejects is dropped the same way, as the steps run, and that drop is
+// named on the dependent record's report line (RecordResult.DroppedRef).
 //
 // Each child step is given the set of project ids its project will exist under
 // by the time it runs: what the store already holds plus what this artifact's
@@ -411,8 +420,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			// know is a file from a newer build or a different format, and
 			// dropping it would import a store that is missing data the file
 			// plainly contains.
-			return nil, fmt.Errorf("line %d: unknown record type %q — this ghost build reads %q, %q, %q and %q records",
-				p.line, p.rec.Type, TypeProject, TypeMemory, TypeTask, TypeDecision)
+			return nil, fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q and %q records",
+				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision)
 		}
 		if err := requirePayload(p); err != nil {
 			return nil, err
@@ -493,16 +502,39 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				return outcome{action: actionFor(created), clamped: clamped, downgraded: downgraded}
 			}})
 	}
+	// Which of the artifact's tasks and decisions have landed — been created, or
+	// found already present — by the time a later step runs. orderTasks and
+	// orderDecisions leave a pointer only when it names a record of the artifact
+	// that is ordered before the one holding it, so a target that has not landed
+	// is one this run rejected. Such a pointer can never resolve, exactly like one
+	// naming a record the artifact does not contain, and is dropped the same way
+	// rather than taking its record down with it.
+	//
+	// The set is filled as steps run, in both modes, and it is the dry run's
+	// stand-in for the store's own pre-write check of the pointer, which only an
+	// apply can make (the target of a dry run is never written). It is what keeps
+	// the preview and the apply agreeing about the dependent record (#1147).
+	landedTasks := map[string]bool{}
+	landedDecisions := map[string]bool{}
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
 		t.ProjectID = under(t.ProjectID)
 		steps = append(steps, step{rec: p, kind: TypeTask, detail: safeDetail(t.Title, t.Title, t.ID), check: checkFor(t.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
-				created, err := s.ImportTask(ctx, *t, opts.Apply)
+				task := *t
+				dropped := ""
+				if task.BlockedBy != "" && !landedTasks[task.BlockedBy] {
+					dropped, task.BlockedBy = task.BlockedBy, ""
+				}
+				created, err := s.ImportTask(ctx, task, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				return outcome{action: actionFor(created)}
+				landedTasks[task.ID] = true
+				if !created {
+					dropped = ""
+				}
+				return outcome{action: actionFor(created), droppedRef: dropped}
 			}})
 	}
 	for _, p := range orderDecisions(decisions) {
@@ -510,11 +542,20 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 		d.ProjectID = under(d.ProjectID)
 		steps = append(steps, step{rec: p, kind: TypeDecision, detail: safeDetail(d.Title, d.Title, d.ID), check: checkFor(d.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
-				created, err := s.ImportDecision(ctx, *d, opts.Apply)
+				decision := *d
+				dropped := ""
+				if decision.SupersededBy != "" && !landedDecisions[decision.SupersededBy] {
+					dropped, decision.SupersededBy = decision.SupersededBy, ""
+				}
+				created, err := s.ImportDecision(ctx, decision, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				return outcome{action: actionFor(created)}
+				landedDecisions[decision.ID] = true
+				if !created {
+					dropped = ""
+				}
+				return outcome{action: actionFor(created), droppedRef: dropped}
 			}})
 	}
 	return steps, nil
@@ -623,7 +664,7 @@ func requirePayload(p parsedRecord) error {
 		}
 	}
 	if missing != "" {
-		return fmt.Errorf("line %d: %q record carries no %q payload", p.line, p.rec.Type, missing)
+		return fmt.Errorf("line %d: %s record carries no %q payload", p.line, memory.RefusalArg("type", p.rec.Type), missing)
 	}
 	return nil
 }
@@ -648,8 +689,8 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		// reaches the same verdict an apply run would. The reason alone: the
 		// report line names the record and the line number around it.
 		got = outcome{action: ActionReject, err: fmt.Errorf(
-			"project %q not found — the artifact carries no record for it and this store does not have it",
-			st.check.projectID)}
+			"project %s not found — the artifact carries no record for it and this store does not have it",
+			memory.RefusalArg("project_id", st.check.projectID))}
 	} else {
 		got = st.runFunc(ctx, s, st.opts)
 	}
@@ -661,6 +702,7 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		Detail:     st.detail,
 		Clamped:    got.clamped,
 		Downgraded: got.downgraded,
+		DroppedRef: got.droppedRef,
 		Error:      got.err,
 	}
 	action, err := got.action, got.err
@@ -765,7 +807,9 @@ const contentPreviewMax = 60
 // field is a better outcome than refusing records over it. The store reports a
 // dropped reference as a skip-free create, so what was lost shows up as a task
 // that is simply not blocked — the honest state, since the blocker does not
-// exist to be blocked by.
+// exist to be blocked by. A blocker the artifact contains but the run rejects is
+// the same case discovered later, when the steps run, and planRecords drops that
+// pointer too.
 func orderTasks(recs []parsedRecord) []parsedRecord {
 	present := make(map[string]bool, len(recs))
 	for _, r := range recs {

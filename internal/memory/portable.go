@@ -509,10 +509,10 @@ func requireProject(ctx context.Context, db *sql.DB, kind, id, projectID string)
 	var present int
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, projectID).Scan(&present)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("%s %s: project %q not found", kind, id, projectID)
+		return fmt.Errorf("%s %s: project %s not found", kind, id, RefusalArg("project_id", projectID))
 	}
 	if err != nil {
-		return fmt.Errorf("%s %s: lookup project %q: %w", kind, id, projectID, err)
+		return fmt.Errorf("%s %s: lookup project %s: %w", kind, id, RefusalArg("project_id", projectID), err)
 	}
 	return nil
 }
@@ -1032,11 +1032,14 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 // blocked_by is inserted as given: the caller is responsible for having ordered
 // the records so a blocker exists before the task that points at it (see the
 // portable package's ordering), and a pointer to a task that is not in the
-// artifact at all is dropped there rather than written as a foreign key that can
-// never resolve.
+// artifact at all, or that the same run rejected, is dropped there rather than
+// written as a foreign key that can never resolve.
 //
 // The project and the blocker are checked immediately before the write, for the
-// reason ImportMemory gives.
+// reason ImportMemory gives. Both checks come after the dry-run return because a
+// dry run writes nothing, so its blocker is never in the store to be found; the
+// portable plan makes the dry run's equivalent check against the records the run
+// has landed so far, which is what keeps the preview and the apply agreeing.
 func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created bool, err error) {
 	// The lock is taken HERE, above the presence check, for the reason
 	// ImportMemory gives in full: a read that decides whether a write happens is
@@ -1080,7 +1083,7 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		var blocker int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.BlockedBy).Scan(&blocker); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("task %s: blocked_by names task %q, which is not in this store", t.ID, t.BlockedBy)
+				return false, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", t.ID, RefusalArg("blocked_by", t.BlockedBy))
 			}
 			return false, fmt.Errorf("import task %s: %w", t.ID, err)
 		}
@@ -1138,8 +1141,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 //
 // superseded_by is inserted as given: the caller orders the records so a
 // superseding decision exists first, and drops a pointer to a decision that is
-// not in the artifact. As with a task, the project and the reference are checked
-// immediately before the write.
+// not in the artifact or that the same run rejected. As with a task, the project
+// and the reference are checked immediately before the write, after the dry-run
+// return, and the portable plan makes the dry run's equivalent check.
 func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (created bool, err error) {
 	// The lock is taken HERE, above the presence check, for the reason
 	// ImportMemory gives in full: a read that decides whether a write happens is
@@ -1183,7 +1187,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		var superseder int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.SupersededBy).Scan(&superseder); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("decision %s: superseded_by names decision %q, which is not in this store", d.ID, d.SupersededBy)
+				return false, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", d.ID, RefusalArg("superseded_by", d.SupersededBy))
 			}
 			return false, fmt.Errorf("import decision %s: %w", d.ID, err)
 		}

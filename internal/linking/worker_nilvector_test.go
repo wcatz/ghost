@@ -49,7 +49,7 @@ func (s *nilVectorStore) CreateLink(context.Context, string, string, string, flo
 	return nil
 }
 
-func (s *nilVectorStore) MarkLinkScanned(context.Context, string) error {
+func (s *nilVectorStore) MarkLinkScanned(context.Context, string, []float32) error {
 	s.marked.Add(1)
 	return nil
 }

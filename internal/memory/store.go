@@ -3896,6 +3896,42 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 	return tx, ok && tx != nil
 }
 
+// applyViewContextKey carries the ONE view both halves of an ApplyReflection
+// share. applyView.concurrent is the rows saved or edited since consolidation,
+// plus every source of an emission the corpus guard refused. ReplaceNonManual
+// seeds its own map from it, so a refused cross-project merge keeps ALL of its
+// sources from the project replace's delete set — not just the ones that moved,
+// which the guard's own sameAs check marks. Without the seed, the unchanged
+// source of a refused global emission matches no surviving emission and the
+// whole-set replace deletes it as unaccounted.
+//
+// crossProjectFrom/crossProjectDropped carry the OTHER direction: with promotion
+// off, ApplyReflection folds the surviving cross-project candidates into the
+// replace's input, and the replace guards that folded list AGAIN. The second
+// pass refuses a folded candidate the global half's guard accepted — the marks
+// this very pass makes decide it (see fedGuard.drop) — and a refusal the
+// replace makes about a folded candidate belongs to the half that PRODUCED it.
+// Without the count, ApplyReflection reports it as a project drop and the
+// caller's cross-project component over-reports a candidate nothing kept.
+type applyViewContextKey struct{}
+
+// applyView is shared state between the two halves of one apply. The replace
+// fills crossProjectDropped; ApplyReflection reads it after the replace returns.
+type applyView struct {
+	concurrent          map[string]bool
+	crossProjectFrom    int
+	crossProjectDropped int
+}
+
+func withApplyView(ctx context.Context, view *applyView) context.Context {
+	return context.WithValue(ctx, applyViewContextKey{}, view)
+}
+
+func applyViewFromContext(ctx context.Context) (*applyView, bool) {
+	view, ok := ctx.Value(applyViewContextKey{}).(*applyView)
+	return view, ok && view != nil
+}
+
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
 	// Before the lock, the transaction, and the FTS probe: a refused value
@@ -5529,6 +5565,14 @@ type DeleteOptions struct {
 	// `ghost backup` (VACUUM INTO) is a copy without them. See the
 	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
+	// ProjectID, when set, scopes the delete to the memory's owning project: a
+	// row that is not in that project is refused with "not found in project"
+	// and nothing is written — no tombstone, no purge. The check is a read
+	// inside the delete's own write transaction, before either of those, so a
+	// row another handle promoted to _global after the caller's own ownership
+	// read cannot be deleted or purged by a project-scoped call (#1154). Empty
+	// is the operator path that names a row by id alone (`ghost history purge`).
+	ProjectID string
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
@@ -5557,6 +5601,16 @@ func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error
 	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
 }
 
+// DeletePurgeInProject is DeletePurge scoped to the memory's owning project, the
+// way DeleteOptions.ProjectID scopes a delete: a row outside projectID is refused
+// inside the write and nothing is purged.
+func (s *Store) DeletePurgeInProject(ctx context.Context, projectID, id string) (PurgeOutcome, error) {
+	if projectID == "" {
+		return PurgeOutcome{}, fmt.Errorf("delete purge: project_id is required")
+	}
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true, ProjectID: projectID})
+}
+
 func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5567,6 +5621,23 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if opts.ProjectID != "" {
+		// The ownership read is in the write, ahead of the tombstone and the
+		// purge, because it is what decides them: read on the pool before the
+		// transaction, it left a window in which another handle could move the
+		// row to _global and this call would delete it anyway (#1154). A missing
+		// row falls through to the DELETE, which reports it in its own words.
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, id).Scan(&owner)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return out, fmt.Errorf("lookup memory: %w", err)
+		}
+		if err == nil && owner != opts.ProjectID {
+			return out, fmt.Errorf("memory %s not found in project %s",
+				RefusalArg("memory_id", id), RefusalArg("project_id", opts.ProjectID))
+		}
+	}
 
 	if !opts.PurgeHistory {
 		// Before the DELETE, because afterwards there is nothing left to read. A
@@ -5601,7 +5672,7 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return out, fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", RefusalArg("memory_id", id))
 	}
 	// After the DELETE, so the row is gone from the content table the rebuild
 	// reads: the index still carries the deleted row's tokens in segments the
@@ -6068,7 +6139,25 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 // columns a version records, and the row that does change (pinned) is one the
 // history table does not carry — the same rule Touch and the resolve KEEP cache
 // already follow.
+//
+// It names the row by id alone; a caller acting for a project uses
+// TogglePinInProject, which refuses a row outside it.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
+	return s.togglePin(ctx, "", id, pinned)
+}
+
+// TogglePinInProject is TogglePin scoped the way PromoteToGlobal is: the UPDATE
+// matches (id, project_id), so a row that is not in projectID — including one
+// another handle promoted to _global after the caller's own ownership read
+// (#1154) — is refused as "not found in project" and left as it was.
+func (s *Store) TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error {
+	if projectID == "" {
+		return fmt.Errorf("toggle pin: project_id is required")
+	}
+	return s.togglePin(ctx, projectID, id, pinned)
+}
+
+func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -6081,8 +6170,8 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	// the comment above has to be able to see that one column is missing rather
 	// than infer it.
 	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
-		UPDATE memories SET pinned = ? WHERE id = ?
-	`, pinnedInt, id)
+		UPDATE memories SET pinned = ? WHERE id = ? AND (? = '' OR project_id = ?)
+	`, pinnedInt, id, projectID, projectID)
 	if err != nil {
 		return fmt.Errorf("toggle pin: %w", err)
 	}
@@ -6091,7 +6180,11 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 		return fmt.Errorf("toggle pin rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found", id)
+		if projectID == "" {
+			return fmt.Errorf("memory %s not found", RefusalArg("memory_id", id))
+		}
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	return nil
 }
@@ -6119,6 +6212,156 @@ type replaceCandidate struct {
 	importance float64
 	tags       string
 	scope      sql.NullString
+	// updatedAt is the row's write clock as the pass will compare it: the fed
+	// corpus carries the value read before the harness answered, and a row whose
+	// column has moved since is not the row the pass is about (#1051).
+	updatedAt string
+}
+
+// CorpusRow is one row as a reflection pass READ it: the identity and the state
+// the write transaction re-checks before a claim on it is honoured. A row is
+// only replaceable while the store still holds that content, at that write
+// clock, carrying the same metadata the harness was shown; anything else is a
+// concurrent edit, the row is kept as it is, and any emission claiming it is
+// dropped rather than written beside it.
+//
+// The metadata columns are here because updated_at is not the whole signal. A
+// save that only folds a duplicate — UpsertWithOptions' strengthen-memory update
+// — raises importance WITHOUT moving updated_at, so a row the pass answered
+// about can sit at the write clock it read with its importance already drifted,
+// and the reuse branch would then write the stale value back over the edit.
+// Comparing the columns that branch writes closes that gap. Scope is
+// deliberately absent: the reuse branch reaches a scope only through COALESCE,
+// so an emission that states none can never erase a concurrent one.
+//
+// updated_at is a write clock, not a content clock (#879), and that is the safe
+// direction here: UpdateMemory moves it on a retag, a reweight or a scope
+// narrowing alone, and treating such a row as concurrent keeps the edit and
+// drops the emission where reading it as "content unchanged" would let the
+// re-emission overwrite a change it never saw.
+type CorpusRow struct {
+	ID         string
+	Content    string
+	UpdatedAt  string
+	Category   string
+	Importance float32
+	Tags       []string
+}
+
+// sameAs reports whether the stored candidate is still the row this corpus
+// entry read. It compares exactly what the reuse branch writes into a row it
+// re-emits — content, category, importance, tags — plus the write clock, which
+// stands for every other column an edit moves.
+func (f CorpusRow) sameAs(c replaceCandidate) bool {
+	return f.Content == c.content &&
+		f.UpdatedAt == c.updatedAt &&
+		f.Category == c.category &&
+		float32(c.importance) == f.Importance &&
+		sameTags(c.tags, f.Tags)
+}
+
+// fedGuard is the #1051 concurrency guard over ONE replaceable candidate set.
+// It is built before the write that consumes the emissions so that every half of
+// an apply reads the same view of the project: ReplaceNonManual uses it for the
+// project replace, and ApplyReflection uses it for the cross-project promotions
+// that name those rows but are written into _global, where the project's reuse
+// map is not consulted.
+type fedGuard struct {
+	// inactive is a caller that carried no corpus: the pre-#1051 behaviour
+	// exactly, with no row kept and no emission dropped on this guard's account.
+	inactive        bool
+	candidates      []replaceCandidate
+	candidateByID   map[string]replaceCandidate
+	fedIDsByContent map[string][]string
+	// concurrent is the caller's map, already holding the rows a concurrent
+	// writer saved during the round trip, so the two guards keep one definition
+	// of "concurrent" and one preserved list.
+	concurrent map[string]bool
+}
+
+// newFedGuard marks every candidate the pass did not read, or read differently,
+// as concurrent: an edit or a delete landed while the harness was answering.
+func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[string]bool) *fedGuard {
+	g := &fedGuard{
+		candidates:      candidates,
+		candidateByID:   make(map[string]replaceCandidate, len(candidates)),
+		fedIDsByContent: make(map[string][]string, len(fed)),
+		concurrent:      concurrent,
+	}
+	if len(fed) == 0 {
+		g.inactive = true
+		return g
+	}
+	fedByID := make(map[string]CorpusRow, len(fed))
+	for _, f := range fed {
+		fedByID[f.ID] = f
+		g.fedIDsByContent[f.Content] = append(g.fedIDsByContent[f.Content], f.ID)
+	}
+	for _, c := range candidates {
+		g.candidateByID[c.id] = c
+	}
+	for _, c := range candidates {
+		f, read := fedByID[c.id]
+		if !read || !f.sameAs(c) {
+			concurrent[c.id] = true
+		}
+	}
+	return g
+}
+
+// drop reports whether the emission must not be written at all, and keeps every
+// row it would otherwise have taken. A keep restates its source byte-for-byte,
+// so the emitted text IS the claim on the fed row carrying that text; a merge or
+// a rewrite claims the ids it names in ReplacesIDs. Either claim is void the
+// moment the row it points at changed or is gone, and the caller that honours a
+// void claim writes a duplicate beside a live edit or resurrects a delete.
+func (g *fedGuard) drop(m Memory) bool {
+	if g.inactive {
+		return false
+	}
+	drop := false
+	for _, fid := range g.fedIDsByContent[m.Content] {
+		if _, stored := g.candidateByID[fid]; !stored || g.concurrent[fid] {
+			drop = true
+			break
+		}
+	}
+	if !drop {
+		for _, replaced := range m.ReplacesIDs {
+			if _, stored := g.candidateByID[replaced]; !stored || g.concurrent[replaced] {
+				drop = true
+				break
+			}
+		}
+	}
+	if !drop {
+		return false
+	}
+	// Keep every row this emission would otherwise have deleted: the sources it
+	// names, and any stored row carrying the text it emits. Nothing may be lost
+	// to a claim the pass is not allowed to make.
+	//
+	// The marking is ORDER-DEPENDENT and must be: the whole drop loop runs
+	// before any reuse claim is made, so an emission refused here marks every
+	// row it names as concurrent even when an earlier emission in the same pass
+	// was accepted and also claims one of them — an accepted merge and a refused
+	// keep can share a source. The accepted merge then cannot reuse the shared
+	// row: it inserts a fresh copy instead, and the source survives BESIDE the
+	// merged row, excluded from the delete set by its concurrent mark and
+	// reported in preserved. The direction is deliberate — a refused emission
+	// errs toward keeping, never toward an overlap where its void claim could
+	// delete a row a live claim reaches for.
+	for _, replaced := range m.ReplacesIDs {
+		if _, stored := g.candidateByID[replaced]; stored {
+			g.concurrent[replaced] = true
+		}
+	}
+	for _, c := range g.candidates {
+		if c.content == m.Content {
+			g.concurrent[c.id] = true
+		}
+	}
+	return true
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -6381,6 +6624,16 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 // It returns the IDs of memories preserved because they were saved during the
 // consolidation round trip (the consolidatedSince race) — callers must not
 // treat the post-apply corpus as fully consolidated when this is non-empty.
+//
+// dropped is the count of emissions the #1051 corpus guard refused. deleted is
+// the count of stored rows this replace removed — the unmatched candidates —
+// so a caller can tell a round that wrote nothing from one that changed the
+// corpus, and can base its "nothing happened" report and its restore hint on
+// what was actually written or deleted rather than on the drop count alone.
+// appliedByCategory counts what the replace landed per category — every
+// emission that survived the guard (reused, verbatim-kept, or freshly
+// inserted) — so a summary can break down the applied total without counting
+// an emission the guard refused.
 //
 // rowClaims is the set of columns a rewrite inherits from the rows it replaces: the
 // validity triple, the trust rating, and the three provenance strings.
@@ -6696,6 +6949,105 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // beside it, those rows are merged into this one and the merged knowledge takes
 // the longest life any of them had (raiseReusedRetentionTx, #773).
 //
+// replaceableCandidatesTx is the set of rows a reflection apply may delete,
+// reuse, or have to leave alone: every row that is not a manual/builtin
+// preservation class, not pinned, not resolved, and not retention-exempt.
+//
+// ORDER BY pins the order takeReusableRow consumes, so which same-content row a
+// reuse claims is a decision and not whatever order the planner happens to
+// return (this predicate is served by idx_memories_project_cat or
+// idx_memories_project_source). created_at ascending means a duplicate keeps the
+// age of the oldest copy — the one the age belongs to — and id breaks
+// same-second ties deterministically. Before #623 the order was irrelevant,
+// because every reused row was re-stamped created_at = now anyway; now it
+// decides the age that survives.
+func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]replaceCandidate, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
+		ORDER BY created_at, id
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list replaceable memories: %w", err)
+	}
+	var candidates []replaceCandidate
+	for rows.Next() {
+		var c replaceCandidate
+		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope, &c.updatedAt); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("scan replaceable memory: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	rowsErr := rows.Err()
+	rows.Close() //nolint:errcheck
+	if rowsErr != nil {
+		return nil, fmt.Errorf("iterate replaceable memories: %w", rowsErr)
+	}
+	return candidates, nil
+}
+
+// concurrentSinceTx adds to concurrent the ids of memories saved during the
+// consolidation round trip: they never reached the consolidator, so they must
+// survive untouched — the same predicate as ReplaceNonManual's, matched by ID so
+// the row itself is never deleted. >= (not >) errs toward a rare same-second
+// duplicate, which the next reflection merges, rather than toward silent loss.
+// An empty consolidatedSince writes nothing.
+func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, concurrent map[string]bool) (map[string]bool, error) {
+	if consolidatedSince == "" {
+		return concurrent, nil
+	}
+	crows, err := tx.QueryContext(ctx, `
+		SELECT id FROM memories
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+		  AND `+retentionExemptSQL+`
+	`, projectID, consolidatedSince)
+	if err != nil {
+		return nil, fmt.Errorf("find concurrent memories: %w", err)
+	}
+	for crows.Next() {
+		var id string
+		if err := crows.Scan(&id); err != nil {
+			crows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("scan concurrent memory: %w", err)
+		}
+		concurrent[id] = true
+	}
+	crowsErr := crows.Err()
+	crows.Close() //nolint:errcheck
+	if crowsErr != nil {
+		return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
+	}
+	return concurrent, nil
+}
+
+// fedGuardFor builds the #1051 guard over projectID's replaceable set, reading
+// the same candidates and the same concurrent window ReplaceNonManual reads.
+// ApplyReflection calls it before that replace, because a cross-project
+// candidate names rows the project replace is also deciding the fate of, and
+// both halves have to answer from one view: an emission the project half may not
+// apply must not reach _global through the promotion loop. It runs inside the
+// caller's transaction, which already holds the write lock, so the read is the
+// same one the replace makes — it is not a second race window.
+//
+// The caller supplies `concurrent` rather than fedGuardFor minting one, because
+// that map must be the same one the replace consumes: drop() marks every source
+// of an emission it refuses into the guard's map, and a refused cross-project
+// merge keeps all of its sources only if that marking reaches the replace's
+// delete set. ReplaceNonManual picks the shared map up from the context and
+// seeds its own from it.
+func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, fed []CorpusRow, concurrent map[string]bool) (*fedGuard, error) {
+	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
+		return nil, err
+	}
+	return newFedGuard(candidates, fed, concurrent), nil
+}
+
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
 // before the caller fetched the memories it fed to the consolidator. ghost
 // reflect runs as a separate process from the long-lived MCP server, so a
@@ -6704,9 +7056,21 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) (preserved []string, err error) {
+// The two preserved []string / dropped int returns answer the caller's two
+// "did anything change" questions separately. preserved is the ids of rows kept
+// untouched: the ones edited or saved during the round trip, and the ones a
+// refused emission named as its sources — those did not change, but they were
+// spared from the delete set and nothing consumed them, so they need the next
+// run as much as an edited row does. dropped is how many EMISSIONS the corpus
+// guard refused because the row they claimed changed or is gone. A dropped
+// emission is invisible to preserved in the delete case — the row it claimed no
+// longer exists, so there is nothing to preserve — but the caller must still know
+// the round wrote nothing, or it will print "Applied" and record a skip
+// fingerprint over a project the consolidator's answer never landed in. Either
+// value non-zero means the next run has to revisit the corpus.
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
-		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+		return nil, 0, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -6720,7 +7084,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var lock writeLock
 	if ownTx {
 		if tx, lock, err = s.beginWrite(ctx, "replace"); err != nil {
-			return nil, fmt.Errorf("begin tx: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
 	}
@@ -6736,7 +7100,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// through"). See issue #318.
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, nil, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -6746,65 +7110,49 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// DELETE CASCADE), so identical content used to mean a re-embedded memory
 	// and a lost link graph on every reflection. Rows saved concurrently with
 	// the consolidation round trip are kept in place for the same reason.
-	// ORDER BY pins the order takeReusableRow consumes, so which same-content
-	// row a reuse claims is a decision and not whatever order the planner
-	// happens to return (this predicate is served by idx_memories_project_cat
-	// or idx_memories_project_source). created_at ascending means a duplicate
-	// keeps the age of the oldest copy — the one the age belongs to — and id
-	// breaks same-second ties deterministically. Before #623 the order was
-	// irrelevant, because every reused row was re-stamped created_at = now
-	// anyway; now it decides the age that survives.
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, content, category, importance, tags, scope FROM memories
-		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		  AND `+retentionExemptSQL+`
-		ORDER BY created_at, id
-	`, projectID)
+	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list replaceable memories: %w", err)
+		return nil, 0, 0, nil, err
 	}
-	var candidates []replaceCandidate
-	for rows.Next() {
-		var c replaceCandidate
-		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope); err != nil {
-			rows.Close() //nolint:errcheck
-			return nil, fmt.Errorf("scan replaceable memory: %w", err)
-		}
-		candidates = append(candidates, c)
-	}
-	rowsErr := rows.Err()
-	rows.Close() //nolint:errcheck
-	if rowsErr != nil {
-		return nil, fmt.Errorf("iterate replaceable memories: %w", rowsErr)
-	}
-
-	// Memories saved during the round trip never reached the consolidator, so
-	// they must survive untouched — same predicate as before, but matched by
-	// ID so the row itself is never deleted. >= (not >) errs toward a rare
-	// same-second duplicate, which the next reflection merges, rather than
-	// toward silent loss.
+	// Seed the concurrent window from the shared view when this replace is one
+	// half of an ApplyReflection: the global half's guard has already marked
+	// every source of an emission it refused into that map, and those sources
+	// must survive this replace's delete set whether they moved or not (#1051).
+	view, shared := applyViewFromContext(ctx)
 	concurrent := make(map[string]bool)
-	if consolidatedSince != "" {
-		crows, err := tx.QueryContext(ctx, `
-			SELECT id FROM memories
-			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
-			  AND `+retentionExemptSQL+`
-		`, projectID, consolidatedSince)
-		if err != nil {
-			return nil, fmt.Errorf("find concurrent memories: %w", err)
-		}
-		for crows.Next() {
-			var id string
-			if err := crows.Scan(&id); err != nil {
-				crows.Close() //nolint:errcheck
-				return nil, fmt.Errorf("scan concurrent memory: %w", err)
-			}
+	if shared {
+		for id := range view.concurrent {
 			concurrent[id] = true
 		}
-		crowsErr := crows.Err()
-		crows.Close() //nolint:errcheck
-		if crowsErr != nil {
-			return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
+	}
+	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
+		return nil, 0, 0, nil, err
+	}
+
+	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
+	// content, write clock or metadata has moved since it was read, is not the
+	// row the pass was given: an edit or a delete landed while the harness was
+	// answering. Such a row is kept as it is, and any emission claiming it is
+	// dropped rather than written beside it. This is the same guard FoldRows
+	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
+	// behaviour above exactly.
+	guard := newFedGuard(candidates, fed, concurrent)
+	dropEmission := make([]bool, len(memories))
+	for i, m := range memories {
+		dropEmission[i] = guard.drop(m)
+		// A refusal about a FOLDED cross-project candidate belongs to the half
+		// that produced it, not to the project replace that happens to evaluate
+		// it: ApplyReflection subtracted both halves' drops from different
+		// summary components, and a candidate counted as kept project-scoped
+		// that was refused is a line that contradicts the applied total beside
+		// it. Only meaningful while this replace is one half of an apply.
+		if dropEmission[i] && shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
+			view.crossProjectDropped++
+		}
+	}
+	for _, d := range dropEmission {
+		if d {
+			dropped++
 		}
 	}
 
@@ -6830,6 +7178,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	reuseFor := make(map[int]replaceCandidate, len(memories))
 	for i, m := range memories {
+		if dropEmission[i] {
+			continue
+		}
 		// Matching is exact, not trimmed: reuse preserves the existing
 		// embedding, so it is only valid when the stored text is byte-identical
 		// to what the consolidator emitted. A whitespace-only difference takes
@@ -6847,6 +7198,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			deleteIDs = append(deleteIDs, c.id)
 		}
 	}
+	// deleted is the number of rows this replace will actually remove — the
+	// candidates no emission claimed. A caller that reports the round by its
+	// drop count alone can call a round that changed the corpus "nothing
+	// written": an all-dropped round (every emission refused) still deletes
+	// the unclaimed candidates beside the refused claims, and the snapshot it
+	// took must then be offered for restore.
+	deleted = len(deleteIDs)
 	// The emissions run BEFORE the delete below, which is a reordering with a
 	// reason: a rewrite or a merge carries its sources' evidence onto the row it
 	// becomes, and that copy has to READ those rows. The foreign key takes them
@@ -6874,7 +7232,19 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// any other reason — a drop, a concurrent save it outran — has no successor
 	// and must not be given one.
 	successorOf := map[string]string{}
+	// appliedByCategory counts what this replace LANDS per category: every
+	// emission that survived the guard, whether it is a fresh insert, a reuse
+	// update, or a verbatim re-emission that writes nothing (#727). The caller's
+	// "memories consolidated" total is the sum of this map, and the category
+	// breakdown next to it must come from the SAME map — counting the emitted
+	// slices instead would include an emission the guard refused, and the parts
+	// would no longer sum to the total.
+	appliedByCategory = make(map[string]int, len(memories))
 	for i, m := range memories {
+		if dropEmission[i] {
+			continue
+		}
+		appliedByCategory[m.Category]++
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
 			id := stored.id
@@ -6917,7 +7287,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, fmt.Errorf("update retained memory: %w", err)
+					return nil, 0, 0, nil, fmt.Errorf("update retained memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			default:
@@ -6928,7 +7298,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    created_at = datetime('now'), updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, fmt.Errorf("update reused memory: %w", err)
+					return nil, 0, 0, nil, fmt.Errorf("update reused memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			}
@@ -6941,7 +7311,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
-				return nil, err
+				return nil, 0, 0, nil, err
 			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
@@ -6968,7 +7338,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// runs before it: the same reordering the carry already depends on.
 		claims, err := inheritedClaims(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, err
+			return nil, 0, 0, nil, err
 		}
 		// The tier, from the same rows and for the same reason: the successor
 		// stands in for the memories this pass is about to delete, so it inherits
@@ -6981,7 +7351,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// reordering: the delete below is what takes the sources.
 		tier, err := inheritedRetention(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, err
+			return nil, 0, 0, nil, err
 		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
@@ -6997,7 +7367,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
-			return nil, fmt.Errorf("insert memory: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that
 		// now holds the text. Without it a rewrite or a merge mints an id whose
@@ -7011,7 +7381,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// carries nothing, because a brand-new memory has no inherited support and
 		// "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
-			return nil, err
+			return nil, 0, 0, nil, err
 		}
 		reflected = append(reflected, newID)
 		for _, replaced := range m.ReplacesIDs {
@@ -7026,16 +7396,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// a real concern rather than a theoretical one: one applied reflect can
 		// drop and rewrite the whole non-manual corpus at once.
 		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
-			return nil, err
+			return nil, 0, 0, nil, err
 		}
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
-			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("prepare delete replaced memory: %w", err)
 		}
 		for _, id := range deleteIDs {
 			if _, err := stmt.ExecContext(ctx, id); err != nil {
 				stmt.Close() //nolint:errcheck
-				return nil, fmt.Errorf("delete replaced memory: %w", err)
+				return nil, 0, 0, nil, fmt.Errorf("delete replaced memory: %w", err)
 			}
 		}
 		stmt.Close() //nolint:errcheck
@@ -7047,7 +7417,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
 	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
-		return nil, err
+		return nil, 0, 0, nil, err
 	}
 	// Now that every emission's final id is known, close the chain: each consumed
 	// row's delete row names the row that replaced it. Without this a rewrite or a
@@ -7055,7 +7425,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// different id and nothing says so.
 	for oldID, newID := range successorOf {
 		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
-			return nil, err
+			return nil, 0, 0, nil, err
 		}
 	}
 
@@ -7071,11 +7441,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit replace: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("commit replace: %w", err)
 		}
 		lock.reportHold("replace", time.Now())
 	}
-	return preserved, nil
+	return preserved, dropped, deleted, appliedByCategory, nil
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project.

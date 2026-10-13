@@ -1590,6 +1590,16 @@ func TestCLIBackup(t *testing.T) {
 	// rather than overwrite a snapshot someone may still need.
 	again := s.mustFail("backup", "--out", dest)
 	mustMatch(t, "backup over an existing file", again.stderr, "(?i)exist")
+
+	// An explicit empty --out is the unset-variable spelling, not the default:
+	// `ghost backup --out="$DEST"` with DEST unset used to write the timestamped
+	// file inside the data directory and exit 0, so a script that then looked in
+	// $DEST found no backup. Both spellings are refused, and the refusal names
+	// the flag.
+	for _, args := range [][]string{{"backup", "--out="}, {"backup", "--out", ""}} {
+		empty := s.mustFail(args...)
+		mustMatch(t, "backup with an empty --out", empty.stderr, "--out")
+	}
 }
 
 // TestCLIExportImport covers the round trip, including that a second export of
@@ -1621,6 +1631,14 @@ func TestCLIExportImport(t *testing.T) {
 	out := filepath.Join(s.t.TempDir(), "artifact.jsonl")
 	exp := s.mustRun("export", "--out", out)
 	mustMatch(t, "export", exp.stdout, "(?i)wrote|export|memor")
+
+	// The same rule on export: an explicit empty --out is the unset-variable
+	// spelling and is refused, rather than written to the timestamped default
+	// inside the data directory under a success exit.
+	for _, args := range [][]string{{"export", "--out="}, {"export", "--out", ""}} {
+		empty := s.mustFail(args...)
+		mustMatch(t, "export with an empty --out", empty.stderr, "--out")
+	}
 	first := mustReadFile(t, out)
 	records := parseJSONLines(t, out)
 	// The artifact holds the whole store, which includes the builtin global

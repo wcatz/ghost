@@ -89,9 +89,12 @@ type MemoryStore interface {
 	// Access tracking
 	Touch(ctx context.Context, ids []string) error
 	TogglePin(ctx context.Context, id string, pinned bool) error
+	// TogglePinInProject is TogglePin scoped to projectID: a row outside it is
+	// refused inside the write, not pinned.
+	TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error
 
 	// Reflection
-	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string) ([]string, error)
+	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, int, int, map[string]int, error)
 	CurrentTimestamp(ctx context.Context) (string, error)
 
 	// Tasks
@@ -109,6 +112,9 @@ type MemoryStore interface {
 	// the project with the same title (trimmed, case-insensitive), or "".
 	FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
+	// LiveDecisionSuccessor returns the id of the still-live decision that
+	// superseded decisionID, or "" when it has none.
+	LiveDecisionSuccessor(ctx context.Context, projectID, decisionID string) (string, error)
 	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
 	// decision's companion memory (retired, or left live because it is pinned).
 	SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (memory.DecisionRetirement, error)
