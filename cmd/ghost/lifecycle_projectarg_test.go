@@ -8,11 +8,12 @@ package main
 // `--project <value>` — into the failure marker, which persists for up to 30 days
 // and is printed at every later session start.
 //
-// docs/invariants.md's #839 rule is the shape these take: `memory.ProjectArg`
-// names an ordinary value (byte-identically, as `%q`) and withholds a
+// docs/invariants.md's #839 rule is the shape these take: `memory.RefusalArg`
+// names an ordinary value (byte-identically, as `%q`), withholds a
 // credential-shaped one behind a placeholder naming the argument and the
-// credential's format and no part of the value. The neighbours in the same
-// function already did this; these tests hold the three that did not.
+// credential's format and no part of the value, and withholds an oversized one
+// with its length. The neighbours in the same function already did this; these
+// tests hold the three that did not.
 
 import (
 	"errors"
@@ -100,5 +101,51 @@ func TestLifecycleLockRefusalWithholdsACredentialShapedProject(t *testing.T) {
 	}
 	if got := lifecycleLockRefusal("ghost"); !strings.Contains(got, `"ghost"`) {
 		t.Errorf("an ordinary project operand was not named:\n%s", got)
+	}
+}
+
+// TestLifecycleRefusalRendererBoundsAnOversizedOperand: these are refusal
+// sentences, so an operand past ArgEchoMaxBytes is withheld with its length
+// rather than repeated whole — the same bound the neighbouring refusals use, so
+// a 200 KB clone URL cannot be handed back into the log.
+func TestLifecycleRefusalRendererBoundsAnOversizedOperand(t *testing.T) {
+	oversized := strings.Repeat("proj", 100) // 400 bytes, past ArgEchoMaxBytes
+	for name, out := range map[string]string{
+		"lock refusal": lifecycleLockRefusal(oversized),
+		"clamp notice": supersedeConsensusClampNotice(oversized, 1),
+	} {
+		if strings.Contains(out, oversized) {
+			t.Errorf("%s repeated the oversized operand:\n%s", name, out)
+		}
+		if !strings.Contains(out, "withheld") || !strings.Contains(out, "bytes") {
+			t.Errorf("%s did not withhold the oversized operand with its length:\n%s", name, out)
+		}
+	}
+	// And an ordinary short value is still named on these same sentences.
+	if got := supersedeConsensusClampNotice("ghost", 1); !strings.Contains(got, `"ghost"`) {
+		t.Errorf("an ordinary project operand was not named:\n%s", got)
+	}
+}
+
+// TestRunLifecycleAuditSkipWithholdsACredentialShapedProject: the audit phase's
+// skip line is a fourth place the project operand reaches lifecycle.log, and the
+// reviewer found it after the first three. The path is reachable in-process:
+// isolatedLifecycleEnv supplies a retrieval key and a sidecar, and a project
+// that resolves to nothing takes the skip branch.
+func TestRunLifecycleAuditSkipWithholdsACredentialShapedProject(t *testing.T) {
+	dataHome := isolatedLifecycleEnv(t)
+	seedAuditedCall(t, dataHome)
+	sidecar := writeAuditSidecar(t, t.TempDir())
+
+	key := lifecycleCredential()
+	printed := captureStderr(t, func() {
+		runLifecycleWithArgs(t, "--project", key, "--signals", sidecar)
+	})
+
+	if strings.Contains(printed, key) {
+		t.Errorf("the audit skip line printed the credential-shaped operand:\n%s", printed)
+	}
+	if !strings.Contains(printed, "withheld") {
+		t.Errorf("the audit skip line did not withhold with a placeholder:\n%s", printed)
 	}
 }

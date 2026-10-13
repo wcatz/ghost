@@ -367,7 +367,10 @@ func runAuditPhase(projectName, signalsPath string) {
 		return
 	}
 	if projectID == "" {
-		skip("project " + projectName + " does not exist")
+		// Rendered, not concatenated: this line lands in lifecycle.log on the
+		// detached path, and `--project` is the session's own clone URL about as
+		// often as it is a project name (#1087).
+		skip(fmt.Sprintf("project %s does not exist", memory.RefusalArg("project", projectName)))
 		return
 	}
 
@@ -627,14 +630,16 @@ func supersedePhaseConsensus(cfg *config.Config) int {
 // branch is not reachable from a test.
 //
 // It is a refusal sentence, so its project operand goes through
-// `memory.ProjectArg` rather than `%q`: the refusal is printed to stderr, which
+// `memory.RefusalArg` rather than `%q`: the refusal is printed to stderr, which
 // the detached path appends to `lifecycle.log`, and `--project` is the session's
-// own clone URL about as often as it is a project name (#1087). An ordinary value
-// comes back quoted and a credential-shaped one as the guard's placeholder, which
-// is what the neighbouring refusals in `internal/mcpinit` already do.
+// own clone URL about as often as it is a project name (#1087). RefusalArg is the
+// bounded renderer the neighbouring refusals in `internal/mcpinit` already use: an
+// ordinary value comes back quoted, a credential-shaped one as the guard's
+// placeholder, and a value past `ArgEchoMaxBytes` is withheld with its length
+// rather than repeated whole.
 func lifecycleLockRefusal(projectName string) string {
 	return fmt.Sprintf("lifecycle: another lifecycle is already running for project %s; exiting\n",
-		memory.ProjectArg("project", projectName))
+		memory.RefusalArg("project", projectName))
 }
 
 // supersedeConsensusClampNotice is the one line `ghost lifecycle` prints when
@@ -656,7 +661,7 @@ func supersedeConsensusClampNotice(projectName string, n int) string {
 		return ""
 	}
 	return fmt.Sprintf("lifecycle: reflection.supersede_consensus is %d, below the minimum of %d — the supersede phase for %s runs UNGATED (one classification pass, no agreement gate)\n",
-		n, supersede.MinConsensus, memory.ProjectArg("project", projectName))
+		n, supersede.MinConsensus, memory.RefusalArg("project", projectName))
 }
 
 // clampReflectMemories applies the shared content cap (memory.MaxContentLen)
