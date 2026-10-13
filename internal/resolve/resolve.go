@@ -8,8 +8,10 @@
 // standing rule or an open problem without asking anything, an LLM Classifier
 // adjudicates the rest in batches of up to eight with a numbered
 // KEEP/RESOLVED question (biased to KEEP, and a RESOLVED must name what closed
-// the note), and — with apply — the confirmed set is stamped via SetResolved
-// while newly-judged KEEP verdicts are stamped into memories.resolve_kept_hash
+// the note), and — with apply — the confirmed set is stamped via
+// SetResolvedJudged, which refuses a row whose content changed while it was
+// being classified and reports those rows as stale (#1052), while newly-judged
+// KEEP verdicts are stamped into memories.resolve_kept_hash
 // (KeepStamp: the content hash when the verdict saw no negative audit evidence,
 // that hash combined with the evidence when it did) so a converged project makes
 // no classifier calls at all — while still paying the one bounded evidence read
@@ -221,7 +223,15 @@ func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.Usefulne
 type resolveStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
-	SetResolved(ctx context.Context, ids []string) (int, error)
+	// SetResolvedJudged is the resolved writer, not SetResolved: the pass spends
+	// a classify call between reading candidates and stamping them, so it stamps
+	// only rows that still hold the judged identity and gets the changed ones
+	// back as stale (#1052). The identity is BOTH the content the classifier was
+	// handed and the project the row sat in when read: a concurrent
+	// PromoteToGlobal changes project_id only, so a content match alone would
+	// stamp a row the pass's project no longer owns. It returns stamped and
+	// stale as disjoint id lists.
+	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
@@ -333,6 +343,12 @@ type Result struct {
 	Skipped    int // candidates skipped via the KEEP cache
 	Unknown    int // candidates whose verdict could not be parsed; eligible for a later pass
 	Resolved   int // rows written (0 in dry-run)
+	// Stale is confirmed rows the writer refused because their content changed
+	// between the read and the classify (#1052): the verdict was about text the
+	// row no longer holds. Counted separately so a pass that buried nothing
+	// because everything moved is not reported as "resolved 0" with no reason.
+	// Always 0 in a dry run, which writes nothing.
+	Stale int
 }
 
 // Prefilter keeps only memories whose content contains a resolution keyword.
@@ -354,10 +370,15 @@ func Prefilter(mems []memory.Memory) []memory.Memory {
 // Run loads eligible candidates, applies two deterministic demotion signals,
 // prefilters the rest, settles the KEEP vetoes and the KEEP cache, classifies
 // what is left in batches, and — when apply is true — stamps resolved_at on
-// every confirmed memory in one batch and records the newly-judged KEEP hashes.
-// Dry-run (apply=false) writes nothing but returns the confirmed set for
-// preview. A classifier error on any batch is fatal so a partial pass is never
-// silently applied.
+// every confirmed memory still holding the judged identity in one batch (a row
+// rewritten or promoted while it was being classified is refused and counted as
+// stale, #1052) and records the newly-judged KEEP hashes. On apply the second
+// return is the confirmed rows the write ACTUALLY stamped — the applied
+// listing — so a refused row is never rendered as resolved, least of all with
+// the pre-write text the verdict was reached on; a dry run (apply=false) writes
+// nothing and returns the full confirmed set, because that is exactly what an
+// apply would stamp. A classifier error on any batch is fatal so a partial pass
+// is never silently applied.
 //
 // The veto is not a demotion: a candidate VetoKeep settles is KEEP, so it is
 // never classified and never cached. Issue #640 measured the pass burying about
@@ -596,18 +617,31 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 
 	if apply {
 		if len(confirmed) > 0 {
-			ids := make([]string, len(confirmed))
-			for i, m := range confirmed {
-				ids[i] = m.ID
-			}
-			n, err := store.SetResolved(ctx, ids)
+			stamped, stale, err := store.SetResolvedJudged(ctx, confirmed)
 			if err != nil {
 				return res, nil, fmt.Errorf("set resolved: %w", err)
 			}
-			res.Resolved = n
+			res.Resolved = len(stamped)
+			res.Stale = len(stale)
 			if logger != nil {
-				logger.Info("resolve applied", "resolved", res.Resolved)
+				logger.Info("resolve applied", "resolved", res.Resolved, "stale", res.Stale)
 			}
+			// The second return is the APPLIED listing, and on apply it is the
+			// stamped rows only: a confirmed row the writer refused was left
+			// live, so printing it here would report a row as resolved that
+			// stayed live — with the pre-write text a verdict was reached on,
+			// which is no longer what the store holds (#1052 review).
+			stampedSet := make(map[string]bool, len(stamped))
+			for _, id := range stamped {
+				stampedSet[id] = true
+			}
+			applied := make([]memory.Memory, 0, len(stamped))
+			for _, m := range confirmed {
+				if stampedSet[m.ID] {
+					applied = append(applied, m)
+				}
+			}
+			confirmed = applied
 		}
 		if len(newKept) > 0 {
 			if err := store.MarkResolveKept(ctx, projectID, newKept); err != nil {
