@@ -52,7 +52,7 @@ func ensureObsidianSyncRunning() {
 	// both pass it and both spawn a vault-writing process. claimPidFile
 	// re-checks under an OS-level lock so exactly one wins, matching the
 	// resolve/supersede/reflect lifecycle spawns.
-	if !claimPidFile(pidPath) {
+	if claimed, err := claimPidFile(pidPath); err != nil || !claimed {
 		return
 	}
 

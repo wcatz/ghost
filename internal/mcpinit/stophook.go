@@ -3,8 +3,10 @@ package mcpinit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -259,8 +261,18 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 // rejecting spaces or non-ASCII names would silently switch off
 // auto-consolidation for an existing project, which is a worse failure than the
 // narrow path issue this guards.
+//
+// It also refuses an id too long for the names built from it. The store accepts
+// ids far past a filename's limit, and a lifecycle-<id>.pid.lock that cannot be
+// created leaves nothing for the lock, the cooldown stamp or the hook's spawn
+// guard to work with — the hook would start a child every turn that could not
+// record that it ran. The bound is in bytes, which is what the limit counts on
+// the filesystems Ghost runs on (see maxProjectIDComponentBytes).
 func safeProjectIDComponent(id string) bool {
 	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	if len(id) > maxProjectIDComponentBytes {
 		return false
 	}
 	// Control characters are unusable in a filename on Windows and have no
@@ -278,6 +290,22 @@ func safeProjectIDComponent(id string) bool {
 	}
 	return filepath.Base(id) == id
 }
+
+// fileNameMaxBytes is NAME_MAX, the longest single file name the common
+// filesystems accept (ext4, xfs, btrfs, APFS; NTFS counts 255 UTF-16 units,
+// which a byte bound never exceeds).
+const fileNameMaxBytes = 255
+
+// longestDerivedNameOverhead is what the longest file name built around a
+// project id adds to it: the start stamp's temp file,
+// "lifecycle-" + id + ".last.tmp" + os.CreateTemp's random suffix, which is a
+// uint32 in decimal and so at most 10 bytes. Every other derived name — the
+// ".pid", ".pid.lock" and ".pid.tmp" claim files, the ".last" stamp, the
+// working-moment marker — is shorter.
+const longestDerivedNameOverhead = len("lifecycle-") + len(".last.tmp") + 10
+
+// maxProjectIDComponentBytes is the longest id safeProjectIDComponent accepts.
+const maxProjectIDComponentBytes = fileNameMaxBytes - longestDerivedNameOverhead
 
 // spawnLifecycleIfConfigured starts `ghost lifecycle <project>` as a single
 // detached background process for the project matching cwd, if one isn't
@@ -363,7 +391,7 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	// than build a path from it. Fail open: the hook must never block.
 	if !safeProjectIDComponent(projectID) {
 		slog.Warn("lifecycle spawn: refusing a project id that is not a safe filename component",
-			"project_id", projectID)
+			"project_id", memory.RefusalArg("project id", projectID))
 		return
 	}
 	// Best-effort fast path: skip spawning when a lifecycle is visibly running.
@@ -556,23 +584,47 @@ func atomicWritePID(path string, pid int, token string, haveToken bool) error {
 // nothing stops a second caller from reaching the same decision against the
 // same stale content and reclaiming it too. The lock is kernel-owned, so a
 // process that dies mid-claim releases it automatically — a crash here can
-// never deadlock a later caller. Returns false if the slot is genuinely held
-// by a live process, or on any I/O failure.
-func claimPidFile(pidPath string) bool {
+// never deadlock a later caller.
+//
+// Returns (true, nil) when this process now holds the slot, (false, nil) when a
+// live process genuinely holds it, and (false, err) when the claim could not be
+// evaluated at all — the lock file cannot be opened or locked, or the pid cannot
+// be written. The last two are different answers and a caller must not merge
+// them: "held" means a run is in progress, and an I/O failure says nothing about
+// that. The error names the step and the operating system's reason but not the
+// path, because the path is built from a project id and a caller prints it.
+func claimPidFile(pidPath string) (bool, error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("open the claim lock: %w", withoutPath(err))
 	}
 	defer lockFile.Close() //nolint:errcheck
 
 	if err := lockExclusive(lockFile); err != nil {
-		return false
+		return false, fmt.Errorf("lock the claim: %w", withoutPath(err))
 	}
 	defer unlockFile(lockFile) //nolint:errcheck
 
 	if isAlive(pidPath) {
-		return false
+		return false, nil
 	}
 	token, haveToken := processStartTime(os.Getpid())
-	return atomicWritePID(pidPath, os.Getpid(), token, haveToken) == nil
+	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {
+		return false, fmt.Errorf("write the claim: %w", withoutPath(err))
+	}
+	return true, nil
+}
+
+// withoutPath strips the file name from an os path error, keeping the
+// operation's own reason: claim file names carry a project id.
+func withoutPath(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err
+	}
+	return err
 }

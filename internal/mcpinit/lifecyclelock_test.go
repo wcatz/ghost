@@ -111,3 +111,65 @@ func TestAcquireLifecycleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestAcquireLifecycleLockReportsAnUnevaluatableClaimAsAnError pins the third
+// outcome for a claim that could not be evaluated. A directory sitting where the
+// claim's ".lock" file belongs cannot be opened, so nothing can say whether a run
+// holds the slot — and that is not the same answer as "another live run holds
+// it". Reported as the second, the coordinator printed "already running" and
+// exited with no phase run, for as long as the directory stayed: maintenance
+// stopped for the project while naming a cause that did not exist. The documented
+// direction for an unknown is "run": the lock returns a no-op release, true and
+// the error, so the caller warns and runs the chain.
+func TestAcquireLifecycleLockReportsAnUnevaluatableClaimAsAnError(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "proj-123", "/tmp/my-project", "My Project")
+	lockPath := filepath.Join(dataHome, "ghost", "lifecycle-proj-123.pid.lock")
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	release, ok, err := AcquireLifecycleLock("proj-123")
+	if !ok || err == nil {
+		t.Fatalf("an unopenable claim lock must fail open with an error, not read as a live holder (ok=%v err=%v)", ok, err)
+	}
+	if release == nil {
+		t.Fatal("the fail-open outcome must hand back a callable release")
+	}
+	release()
+
+	// The slot is free again once the obstruction is gone: the same call claims.
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err = AcquireLifecycleLock("proj-123")
+	if !ok || err != nil {
+		t.Fatalf("with the obstruction removed the lock must be claimed (ok=%v err=%v)", ok, err)
+	}
+	release()
+}
+
+// TestAcquireLifecycleLockRefusesAnOverlongProjectID pins the other trigger: a
+// project id the store accepts but whose claim file name the filesystem does
+// not. lifecycle-<id>.pid.lock past NAME_MAX cannot be created, and before the
+// fix that read as "another lifecycle is already running" — every run, forever.
+// The id is refused as a filename component before any path is built from it,
+// which is the fail-open outcome with an error, and the refusal does not repeat
+// the whole id back.
+func TestAcquireLifecycleLockRefusesAnOverlongProjectID(t *testing.T) {
+	dataHome := isolatedHome(t)
+	id := strings.Repeat("p", 300)
+	seedProject(t, dataHome, id, "/tmp/long-project", "Long Project")
+
+	release, ok, err := AcquireLifecycleLock(id)
+	if !ok || err == nil {
+		t.Fatalf("an over-long project id must fail open with an error, not read as a live holder (ok=%v err=%v)", ok, err)
+	}
+	if release == nil {
+		t.Fatal("the fail-open outcome must hand back a callable release")
+	}
+	release()
+	if strings.Contains(err.Error(), id) {
+		t.Errorf("the refusal repeats the whole %d-byte id: %v", len(id), err)
+	}
+}
