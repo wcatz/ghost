@@ -458,7 +458,13 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 					"embedded", embedded, "reachability", got.String())
 				return embedded, got
 			}
-			continue
+			// Embed failed but liveness is still Reachable: the endpoint answers
+			// / but stalls /api/embed (a "pacified" endpoint). Stopping here
+			// prevents burning the client's timeout on every remaining memory in
+			// this batch.
+			w.logger.Info("ollama unavailable, pausing embedding",
+				"embedded", embedded, "reachability", got.String())
+			return embedded, got
 		}
 
 		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.Identity()); err != nil {
