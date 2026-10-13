@@ -1578,10 +1578,11 @@ func runReflect() {
 		// appliedSummary counts what the store reports landing in the project:
 		// the replace's own writes PLUS the candidates written back into it
 		// (the full folded set when promotion is off, the kept subset when it
-		// is on). The dropped counts are subtracted the way each component
-		// counts: with promotion off the cross-project candidates were folded
-		// into the project replace, so their drops sit in the project count
-		// too; with it on they never reach the project replace.
+		// is on). Only the cross-project component still subtracts a drop
+		// count, and with promotion off every cross-project refusal counts as
+		// the global half's: the replace guards the folded list a second time
+		// and the store moves those refusals back to the half that produced the
+		// candidates, so one subtraction covers both guard passes.
 		summaryGlobalDropped := 0
 		if !parsed.promoteGlobals {
 			summaryGlobalDropped = droppedGlobal
@@ -1591,7 +1592,10 @@ func runReflect() {
 		// global" one line after "Promoted 1/3".
 		summary := appliedSummary(appliedByCategory, keptGlobalMems, promoted, summaryGlobalDropped, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
-		if len(keptGlobalMems) > 0 && !parsed.promoteGlobals {
+		// The follow-up names candidates that are actually in the project: a
+		// round whose cross-project candidates were all refused has nothing to
+		// inject into every project.
+		if !parsed.promoteGlobals && crossProjectKept(keptGlobalMems, summaryGlobalDropped) > 0 {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
 		}
 		if len(projectForSummary) > 0 {
@@ -1628,9 +1632,9 @@ func runReflect() {
 		// all. The round did not happen; it must not be recorded as having.
 		fmt.Fprintln(os.Stderr, "note: nothing was written this round, so no skip fingerprint is recorded — the next run will reconsider this project")
 	} else if len(preserved) > 0 && droppedTotal > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d memory(ies) changed or were saved while consolidation ran and were preserved, and %d emission(s) claiming a row that changed or was deleted were dropped; not recording the skip fingerprint so the next run re-merges them\n", len(preserved), droppedTotal)
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were kept untouched (edited, saved, or claimed by a dropped emission), and %d emission(s) claiming a row that changed or was deleted were dropped; not recording the skip fingerprint so the next run re-merges them\n", len(preserved), droppedTotal)
 	} else if len(preserved) > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d memory(ies) changed or were saved while consolidation ran and were preserved; not recording the skip fingerprint so the next run re-merges them\n", len(preserved))
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were kept untouched (edited, saved, or claimed by a dropped emission); not recording the skip fingerprint so the next run re-merges them\n", len(preserved))
 	} else if droppedTotal > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d emission(s) claimed a memory that changed or was deleted while consolidation ran and were dropped; not recording the skip fingerprint so the next run can consolidate the project again\n", droppedTotal)
 	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {

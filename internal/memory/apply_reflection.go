@@ -65,19 +65,20 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// replace so that half and this one answer from a single view of the project,
 	// and it is the same fed corpus the CLI handed to the replace.
 	//
-	// The view is the map itself, shared with the replace: fedGuardFor fills it
+	// The view is the shared state itself: fedGuardFor fills its concurrent map
 	// with the rows saved or edited since consolidation, and dropConcurrentClaims
 	// below additionally marks every source of an emission it refuses there. That
 	// second marking must reach the project replace, or the unchanged source of a
 	// refused cross-project merge matches no surviving emission and the replace
 	// deletes it as unaccounted — the merge was refused, so NONE of its sources
-	// may be taken. ReplaceNonManual seeds its own concurrent map from this one.
-	sharedConcurrent := make(map[string]bool)
-	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, sharedConcurrent)
+	// may be taken. ReplaceNonManual seeds its own concurrent map from this one,
+	// and counts back the refusals it makes about folded candidates.
+	view := &applyView{concurrent: make(map[string]bool), crossProjectFrom: -1}
+	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, view.concurrent)
 	if guardErr != nil {
 		return nil, 0, nil, 0, 0, 0, nil, guardErr
 	}
-	txCtx = withConcurrentView(txCtx, sharedConcurrent)
+	txCtx = withApplyView(txCtx, view)
 
 	// A candidate the guard drops is dropped entirely: it is neither promoted
 	// nor recovered into the project, and with promotion off it is not folded
@@ -92,6 +93,10 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	globalMems, globalDropped = dropConcurrentClaims(globalGuard, globalMems)
 
 	if !promoteGlobals && len(globalMems) > 0 {
+		// From here on the replace's input ENDS with the folded candidates, so a
+		// refusal at or after this index is a refusal of a cross-project
+		// candidate even though the replace is what made it.
+		view.crossProjectFrom = len(projectMems)
 		projectMems = append(append([]Memory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
@@ -103,6 +108,15 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("replace project memories: %w", err)
 		}
 		projectDropped = projectDrop
+		// Move the replace's refusals of folded candidates onto the half that
+		// produced them. The caller's summary subtracts each half's drops from
+		// a different component — the cross-project count only knows the global
+		// half's — so a folded refusal left in projectDropped makes the Applied
+		// line claim a cross-project candidate was kept project-scoped beside a
+		// total that never counted it. The sum the caller adds back is
+		// unchanged: this is attribution, not a second drop.
+		projectDropped -= view.crossProjectDropped
+		globalDropped += view.crossProjectDropped
 	}
 
 	if len(globalMems) > 0 {

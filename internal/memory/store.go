@@ -3896,23 +3896,40 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 	return tx, ok && tx != nil
 }
 
-// concurrentViewContextKey carries the ONE concurrent map both halves of an
-// ApplyReflection share: the rows saved or edited since consolidation, plus
-// every source of an emission the corpus guard refused. ReplaceNonManual seeds
-// its own map from it, so a refused cross-project merge keeps ALL of its
+// applyViewContextKey carries the ONE view both halves of an ApplyReflection
+// share. applyView.concurrent is the rows saved or edited since consolidation,
+// plus every source of an emission the corpus guard refused. ReplaceNonManual
+// seeds its own map from it, so a refused cross-project merge keeps ALL of its
 // sources from the project replace's delete set — not just the ones that moved,
 // which the guard's own sameAs check marks. Without the seed, the unchanged
 // source of a refused global emission matches no surviving emission and the
 // whole-set replace deletes it as unaccounted.
-type concurrentViewContextKey struct{}
+//
+// crossProjectFrom/crossProjectDropped carry the OTHER direction: with promotion
+// off, ApplyReflection folds the surviving cross-project candidates into the
+// replace's input, and the replace guards that folded list AGAIN. The second
+// pass refuses a folded candidate the global half's guard accepted — the marks
+// this very pass makes decide it (see fedGuard.drop) — and a refusal the
+// replace makes about a folded candidate belongs to the half that PRODUCED it.
+// Without the count, ApplyReflection reports it as a project drop and the
+// caller's cross-project component over-reports a candidate nothing kept.
+type applyViewContextKey struct{}
 
-func withConcurrentView(ctx context.Context, concurrent map[string]bool) context.Context {
-	return context.WithValue(ctx, concurrentViewContextKey{}, concurrent)
+// applyView is shared state between the two halves of one apply. The replace
+// fills crossProjectDropped; ApplyReflection reads it after the replace returns.
+type applyView struct {
+	concurrent          map[string]bool
+	crossProjectFrom    int
+	crossProjectDropped int
 }
 
-func concurrentViewFromContext(ctx context.Context) (map[string]bool, bool) {
-	concurrent, ok := ctx.Value(concurrentViewContextKey{}).(map[string]bool)
-	return concurrent, ok && concurrent != nil
+func withApplyView(ctx context.Context, view *applyView) context.Context {
+	return context.WithValue(ctx, applyViewContextKey{}, view)
+}
+
+func applyViewFromContext(ctx context.Context) (*applyView, bool) {
+	view, ok := ctx.Value(applyViewContextKey{}).(*applyView)
+	return view, ok && view != nil
 }
 
 // UpsertWithOptions is Upsert plus provenance and/or scope.
@@ -6809,13 +6826,16 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 // instead. Pass "" to skip the check (tests that don't exercise the race).
 // The two preserved []string / dropped int returns answer the caller's two
 // "did anything change" questions separately. preserved is the ids of rows kept
-// because they were edited or saved during the round trip; dropped is how many
-// EMISSIONS the corpus guard refused because the row they claimed changed or is
-// gone. A dropped emission is invisible to preserved in the delete case — the
-// row it claimed no longer exists, so there is nothing to preserve — but the
-// caller must still know the round wrote nothing, or it will print "Applied" and
-// record a skip fingerprint over a project the consolidator's answer never
-// landed in. Either value non-zero means the next run has to revisit the corpus.
+// untouched: the ones edited or saved during the round trip, and the ones a
+// refused emission named as its sources — those did not change, but they were
+// spared from the delete set and nothing consumed them, so they need the next
+// run as much as an edited row does. dropped is how many EMISSIONS the corpus
+// guard refused because the row they claimed changed or is gone. A dropped
+// emission is invisible to preserved in the delete case — the row it claimed no
+// longer exists, so there is nothing to preserve — but the caller must still know
+// the round wrote nothing, or it will print "Applied" and record a skip
+// fingerprint over a project the consolidator's answer never landed in. Either
+// value non-zero means the next run has to revisit the corpus.
 func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
 		return nil, 0, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
@@ -6866,9 +6886,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// half of an ApplyReflection: the global half's guard has already marked
 	// every source of an emission it refused into that map, and those sources
 	// must survive this replace's delete set whether they moved or not (#1051).
+	view, shared := applyViewFromContext(ctx)
 	concurrent := make(map[string]bool)
-	if shared, ok := concurrentViewFromContext(ctx); ok {
-		for id := range shared {
+	if shared {
+		for id := range view.concurrent {
 			concurrent[id] = true
 		}
 	}
@@ -6887,6 +6908,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	dropEmission := make([]bool, len(memories))
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+		// A refusal about a FOLDED cross-project candidate belongs to the half
+		// that produced it, not to the project replace that happens to evaluate
+		// it: ApplyReflection subtracted both halves' drops from different
+		// summary components, and a candidate counted as kept project-scoped
+		// that was refused is a line that contradicts the applied total beside
+		// it. Only meaningful while this replace is one half of an apply.
+		if dropEmission[i] && shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
+			view.crossProjectDropped++
+		}
 	}
 	for _, d := range dropEmission {
 		if d {

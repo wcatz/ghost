@@ -454,6 +454,85 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		}
 	})
 
+	// With promotion off the surviving cross-project candidates are folded into
+	// the replace's input, and the replace guards that folded list AGAIN. The
+	// second pass refuses a candidate the global half's own pass accepted, and a
+	// refusal about a folded candidate belongs to the half that PRODUCED it: the
+	// caller's cross-project component subtracts only the global half's drops, so
+	// leaving the refusal in the project count makes the Applied line claim a
+	// candidate was kept project-scoped beside a total that never counted it.
+	t.Run("a folded candidate the replace refuses second counts as the global half's drop", func(t *testing.T) {
+		s := testStore(t)
+		xID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the relay host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create X: %v", err)
+		}
+		setAgesDaysAgo(t, s, xID, 2)
+		yID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is beta", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create Y: %v", err)
+		}
+		setAgesDaysAgo(t, s, yID, 2)
+
+		fed := corpusRows(t, s, xID, yID)
+
+		// Y moved mid-round, so the project half's merge — which claims both
+		// rows — is refused, and refusing it spares BOTH of its sources.
+		edited := "the deploy host is bravo"
+		if err := s.UpdateMemory(ctx, testProject, yID, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory Y: %v", err)
+		}
+
+		_, promoted, kept, projectDropped, globalDropped, _, appliedByCategory, err := s.ApplyReflection(ctx, testProject,
+			[]Memory{{
+				Category: "fact", Content: "alpha and beta, one fact", Importance: 0.7,
+				Tags: []string{}, ReplacesIDs: []string{xID, yID},
+			}},
+			[]Memory{{Category: "fact", Content: "the relay host is alpha", Importance: 0.6, Tags: []string{}}},
+			"", false, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+
+		// The verbatim keep of X passed the global half's guard (X was untouched
+		// when the fold happened) and was refused only inside the replace, after
+		// the refused merge marked X concurrent. It is still a cross-project
+		// candidate's refusal, so the global half owns it.
+		if globalDropped != 1 {
+			t.Errorf("globalDropped = %d, want 1: the folded candidate the replace refused belongs to the half that produced it", globalDropped)
+		}
+		if projectDropped != 1 {
+			t.Errorf("projectDropped = %d, want 1: only the project half's own merge was refused", projectDropped)
+		}
+		if projectDropped+globalDropped != 2 {
+			t.Errorf("dropped total = %d, want 2: re-attribution moves a refusal between halves, it does not create one", projectDropped+globalDropped)
+		}
+		if len(appliedByCategory) != 0 {
+			t.Errorf("appliedByCategory = %v, want empty: every emission was refused", appliedByCategory)
+		}
+		if promoted != 0 || len(kept) != 0 {
+			t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(kept))
+		}
+		project, err := s.GetAll(ctx, testProject, -1)
+		if err != nil {
+			t.Fatalf("GetAll project: %v", err)
+		}
+		byID := map[string]Memory{}
+		for _, m := range project {
+			byID[m.ID] = m
+		}
+		if got := byID[xID]; got.Content != "the relay host is alpha" {
+			t.Errorf("X = %q, want the untouched row kept: a refused merge spares its sources from the delete set", got.Content)
+		}
+		if got := byID[yID]; got.Content != edited {
+			t.Errorf("Y = %q, want the concurrent edit %q kept", got.Content, edited)
+		}
+	})
+
 	t.Run("a promotion with nothing concurrent still reaches _global", func(t *testing.T) {
 		s := testStore(t)
 		aID, err := s.Create(ctx, testProject, Memory{

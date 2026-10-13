@@ -421,6 +421,22 @@ func reflectRepairNote(turns int) string {
 	return fmt.Sprintf("  repair: %d (a rejected response was re-read)", turns)
 }
 
+// crossProjectKept is the number of cross-project candidates the round actually
+// left in the project: every candidate the caller handed over, minus the ones
+// the store refused. With promotion off a candidate can be refused by EITHER
+// guard pass — the global half's own pass, or the replace's second pass over the
+// folded list — and the store attributes both to the same drop count precisely
+// so this one subtraction covers them. Callers that print per-candidate
+// follow-ups must count with this too: a round that refused every candidate has
+// nothing to promote, and saying otherwise contradicts the applied total
+// printed next to it.
+func crossProjectKept(globalMems []reflection.ReflectMemory, globalDropped int) int {
+	if kept := len(globalMems) - globalDropped; kept > 0 {
+		return kept
+	}
+	return 0
+}
+
 // appliedSummary describes the rows that actually landed in the project. The
 // caller passes the store's per-category applied counts — what the replace
 // wrote, plus any kept-back global candidate written into the project — so the
@@ -444,7 +460,7 @@ func appliedSummary(appliedByCategory map[string]int, globalMems []reflection.Re
 	if promoteGlobals {
 		return summary + fmt.Sprintf(", %d promoted to global", promoted)
 	}
-	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems)-globalDropped)
+	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", crossProjectKept(globalMems, globalDropped))
 }
 
 func restoreHint(promoted int) string {

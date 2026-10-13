@@ -195,6 +195,47 @@ func TestAppliedSummaryCountsOnlyRowsAppliedToProject(t *testing.T) {
 	}
 }
 
+func TestCrossProjectKeptCountsOnlyCandidatesTheStoreKept(t *testing.T) {
+	// With promotion off the candidate list is the caller's post-credential-drop
+	// set and the drop count covers BOTH guard passes — the global half's own and
+	// the replace's second pass over the folded list, which the store attributes
+	// back to the half that produced the candidate. One subtraction therefore has
+	// to describe the whole round, and the "(re-run with --promote-globals)"
+	// follow-up is gated on this count: a round that refused every candidate has
+	// nothing in the project to inject into every other one.
+	one := globals("a candidate")
+	two := append(globals("a candidate"), globals("a second candidate")...)
+
+	for _, tc := range []struct {
+		name     string
+		cands    []reflection.ReflectMemory
+		dropped  int
+		wantKept int
+	}{
+		{"nothing refused", one, 0, 1},
+		{"one refused", one, 1, 0},
+		{"one of two refused", two, 1, 1},
+		{"more refusals than candidates floors at zero", two, 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := crossProjectKept(tc.cands, tc.dropped)
+			if got != tc.wantKept {
+				t.Errorf("crossProjectKept = %d, want %d", got, tc.wantKept)
+			}
+			if got < 0 {
+				t.Errorf("crossProjectKept = %d, must never be negative", got)
+			}
+			// The report and the "(re-run with --promote-globals)" follow-up both
+			// read this count, so the report's component is asserted against the
+			// same number runReflect gates the follow-up on.
+			summary := appliedSummary(map[string]int{}, tc.cands, 0, tc.dropped, false)
+			if want := fmt.Sprintf(", %d cross-project candidates kept project-scoped", tc.wantKept); !strings.HasSuffix(summary, want) {
+				t.Errorf("summary = %q, want it to end with %q", summary, want)
+			}
+		})
+	}
+}
+
 func TestRestoreHintQualifiesPromotedGlobals(t *testing.T) {
 	if got := restoreHint(0); got != "(use --restore to undo)" {
 		t.Errorf("restoreHint(0) = %q", got)
