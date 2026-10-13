@@ -21,6 +21,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -257,7 +258,7 @@ func TestRunLifecycleSurvivesAnUnreadableSidecar(t *testing.T) {
 	// The witness that the chain ran on: reflect is skipped for want of an LLM
 	// backend in this environment, and the marker for that skip is the last
 	// thing runLifecycle writes.
-	marker := filepath.Join(dataHome, "ghost", "lifecycle-last-failure-"+auditLifecycleProject+".json")
+	marker := filepath.Join(dataHome, "ghost", mcpinit.LifecycleFailureMarkerFile(auditLifecycleProject))
 	raw, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("the chain did not reach its end after a refused sidecar: %v", err)
@@ -299,7 +300,7 @@ func TestRunLifecycleSurvivesAMissingSidecar(t *testing.T) {
 	if rows := storedVerdicts(t, dataHome); len(rows) != 0 {
 		t.Errorf("a missing sidecar filed %d verdict(s), want 0", len(rows))
 	}
-	marker := filepath.Join(dataHome, "ghost", "lifecycle-last-failure-"+auditLifecycleProject+".json")
+	marker := filepath.Join(dataHome, "ghost", mcpinit.LifecycleFailureMarkerFile(auditLifecycleProject))
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("the chain did not reach its end after a missing sidecar: %v", err)
 	}
@@ -337,7 +338,7 @@ func TestAnAuditFailureIsNotAConsolidationFailure(t *testing.T) {
 
 	runLifecycleWithArgs(t, "--project", auditLifecycleProject, "--signals", foreign)
 
-	marker := filepath.Join(dataHome, "ghost", "lifecycle-last-failure-"+auditLifecycleProject+".json")
+	marker := filepath.Join(dataHome, "ghost", mcpinit.LifecycleFailureMarkerFile(auditLifecycleProject))
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		raw, _ := os.ReadFile(marker)
 		t.Errorf("a refused sidecar wrote a consolidation failure marker: %s", raw)
