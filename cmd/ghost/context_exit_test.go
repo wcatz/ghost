@@ -1,13 +1,13 @@
 package main
 
-// `ghost context` and `ghost context --audit` exit `2` when their own parsers
-// reject an argument (#1090). That is the code docs/cli.md and docs/invariants.md
-// reserve for a command line the DISPATCH cannot route — an unknown command, a
-// missing or unknown subcommand, no command — while an argument a command's own
-// parser rejects is a run that started and failed, and exits `1`. Both modes are
-// scripted (the block is what an adapter injects, the report is piped into a
-// check), so a wrapper that maps `2` to "the command was typed wrong" misread a
-// real argument error as a routing mistake.
+// `ghost context` and `ghost context --audit` used to exit `2` when their own
+// parsers rejected an argument (#1090); they exit `1` now. `2` is the code
+// docs/cli.md and docs/invariants.md reserve for a command line the DISPATCH
+// cannot route — an unknown command, a missing or unknown subcommand, no command
+// — while an argument a command's own parser rejects is a run that started and
+// failed, and exits `1`. Both modes are scripted (the block is what an adapter
+// injects, the report is piped into a check), so a wrapper that maps `2` to "the
+// command was typed wrong" misread a real argument error as a routing mistake.
 //
 // These drive the real dispatch through runCLI, with os.Args set the way
 // asof_test.go sets it, because runContext reads os.Args rather than the argv

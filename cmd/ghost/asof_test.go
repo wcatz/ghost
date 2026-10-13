@@ -104,8 +104,9 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 
 // TestContextRefusesAnInstantItCannotRead: an unreadable --as-of is a mistake at
 // the boundary, and the command says so instead of printing the present. The parse
-// is the thing under test rather than the process status, because the bad value
-// ends in os.Exit and a test that drove that would take the package with it.
+// is the thing under test rather than the exit code: runContext returns the code
+// rather than taking the process down, and TestContextArgumentRefusalsExitOne
+// pins the code itself.
 func TestContextRefusesAnInstantItCannotRead(t *testing.T) {
 	for _, bad := range []string{"yesterday", "2020-01-01", "2020-01-01 00:00:00", "2035-01-01"} {
 		got, err := contextAsOf([]string{"--as-of", bad})
