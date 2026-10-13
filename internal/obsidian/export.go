@@ -32,11 +32,9 @@ type Exporter struct {
 func truncated(n, limit int) bool { return n >= limit }
 
 // Export performs one full deterministic mirror pass. projectFilter of ""
-// mirrors everything; otherwise that project (by ID or name) plus _global.
+// mirrors everything; otherwise exactly one project (by ID, or by a name only
+// one project carries) plus _global. See selectProjects.
 func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) error {
-	if err := ensureVault(vaultDir); err != nil {
-		return err
-	}
 	limit := e.listLimit
 	if limit <= 0 {
 		limit = exportListLimit
@@ -45,26 +43,19 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}
+	// The filter is resolved BEFORE ensureVault, so a refused filter leaves the
+	// vault exactly as it was — not even created or marked.
+	selected, err := selectProjects(projects, projectFilter)
+	if err != nil {
+		return err
+	}
+	if err := ensureVault(vaultDir); err != nil {
+		return err
+	}
 	// Folder assignment is computed over ALL projects before filtering so a
 	// --project run places notes in exactly the same folder as an unfiltered
 	// run, regardless of case-collision disambiguation.
 	folders := folderNames(projects)
-	selected := projects[:0:0]
-	matched := false
-	for _, p := range projects {
-		switch {
-		case projectFilter == "":
-			selected = append(selected, p)
-		case p.ID == projectFilter || p.Name == projectFilter:
-			selected = append(selected, p)
-			matched = true
-		case p.ID == globalProjectID:
-			selected = append(selected, p) // globals ride along with any filter
-		}
-	}
-	if projectFilter != "" && !matched {
-		return fmt.Errorf("no project matches %q", projectFilter)
-	}
 
 	// Pass 1: load all memories, build the global id → filename map for wikilinks.
 	type projData struct {
@@ -167,6 +158,58 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	}
 	e.Logger.Info("obsidian export complete", "projects", len(data), "written", written, "unchanged", skipped)
 	return nil
+}
+
+// selectProjects filters the project list for one export pass: every project
+// when filter is "", otherwise the one project the filter names plus _global,
+// which rides along with any filter but never satisfies one on its own.
+//
+// It is the rule `ghost export --project` follows (internal/portable
+// selectProjects). An exact ID wins outright, before any name is considered:
+// an id is a primary key, and a store can hold a project whose id is literally
+// another project's name, so the id selects its project alone. A project's
+// NAME is not unique — `projects.path` and `projects.repo_remote` carry the only
+// unique indexes — so a name that more than one project answers to is REFUSED,
+// naming every matching id, rather than mirroring all of them into one vault
+// run. The filter and the ids are rendered through memory.RefusalArg, which
+// quotes the value and withholds one shaped like a credential.
+func selectProjects(projects []memory.Project, filter string) ([]memory.Project, error) {
+	if filter == "" {
+		return projects, nil
+	}
+	var match []memory.Project
+	for _, p := range projects {
+		if p.ID == filter {
+			match = []memory.Project{p}
+			break
+		}
+	}
+	if match == nil {
+		for _, p := range projects {
+			if p.Name == filter {
+				match = append(match, p)
+			}
+		}
+	}
+	if len(match) == 0 {
+		return nil, fmt.Errorf("no project matches %s", memory.RefusalArg("project", filter))
+	}
+	if len(match) > 1 {
+		ids := make([]string, 0, len(match))
+		for _, p := range match {
+			ids = append(ids, memory.RefusalArg("project_id", p.ID))
+		}
+		return nil, fmt.Errorf("project filter %s matches multiple projects by name: %s — name a project by its unique id",
+			memory.RefusalArg("project", filter), strings.Join(ids, ", "))
+	}
+	// Keep the store's listing order, so the pass order is the same as before.
+	selected := projects[:0:0]
+	for _, p := range projects {
+		if p.ID == match[0].ID || p.ID == globalProjectID {
+			selected = append(selected, p)
+		}
+	}
+	return selected, nil
 }
 
 func count(written, skipped *int, wrote bool) {

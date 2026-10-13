@@ -250,7 +250,32 @@ func ReadBackupManifest(path string) (BackupManifest, error) {
 	if m.ManifestVersion != ManifestVersion {
 		return BackupManifest{}, fmt.Errorf("the manifest at %s is format v%d, and this Ghost reads v%d", path, m.ManifestVersion, ManifestVersion)
 	}
+	// The sidecar arrives with the copy being judged, so it is untrusted input,
+	// and sha256 is the one string field of it that verify prints. A value that
+	// is not a digest is damage, refused here like any other unreadable manifest
+	// and named through RefusalArg, so a control byte in it — ESC [1F moving the
+	// cursor back onto the headline, a newline starting a forged line — can
+	// never reach the reader's terminal as itself.
+	if !isSHA256Hex(m.SHA256) {
+		return BackupManifest{}, fmt.Errorf("the manifest at %s is not readable as a manifest: its sha256 is not 64 lowercase hex digits: %s",
+			path, RefusalArg("sha256", m.SHA256))
+	}
 	return m, nil
+}
+
+// isSHA256Hex reports whether s is what FileSHA256 writes: exactly 64 lowercase
+// hex digits.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyState is one check's verdict.
@@ -706,6 +731,13 @@ func checkHash(path string, m BackupManifest, hasManifest bool, size int64) Veri
 	if err != nil {
 		c.State = VerifyFailed
 		c.Detail = fmt.Sprintf("could not hash the file: %v", err)
+		return c
+	}
+	if !isSHA256Hex(m.SHA256) {
+		// ReadBackupManifest already refuses this; checkHash takes any
+		// BackupManifest, so it does not print one it has not validated.
+		c.State = VerifyFailed
+		c.Detail = "the manifest's sha256 is not 64 lowercase hex digits: " + RefusalArg("sha256", m.SHA256)
 		return c
 	}
 	if sum != m.SHA256 {

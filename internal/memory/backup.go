@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -131,24 +132,50 @@ func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, 
 	}
 	info, err := os.Stat(dest)
 	if err != nil {
-		return BackupResult{}, fmt.Errorf("stat backup: %w", err)
+		return BackupResult{}, afterVacuumFailure(dest, fmt.Errorf("stat backup: %w", err))
 	}
 	// Counted from the snapshot, not from s.db: the counts a restore is checked
 	// against have to describe the file that was written, and a writer that
 	// committed after the VACUUM would otherwise make the two disagree.
 	counts, err := countBackupContents(ctx, dest)
 	if err != nil {
-		return BackupResult{}, err
+		return BackupResult{}, afterVacuumFailure(dest, err)
 	}
 	return BackupResult{Path: dest, Bytes: info.Size(), Counts: counts}, nil
+}
+
+// afterVacuumFailure is the account of a backup that failed after its vacuum
+// returned. The CLI prints no report for a failed backup, so this error is the
+// only description of what is now on disk at dest.
+//
+// An empty file is this run's own reservation — the vacuum wrote nothing into
+// it — and is removed, so the retry is not refused by it. Anything larger is a
+// copy of the memory database, and it is left in place and NAMED rather than
+// deleted, for the reason Backup gives about a failed manifest: deleting what
+// may be a user's only copy trades a smaller problem for a larger one, and a
+// full copy nothing names is the outcome the error must never leave.
+func afterVacuumFailure(dest string, cause error) error {
+	if info, err := os.Lstat(dest); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+		_ = os.Remove(dest)
+		return cause
+	}
+	return fmt.Errorf("%w — a copy of the database was written to %s and is left in place; check it with ghost backup verify, or delete it", cause, dest)
 }
 
 // countBackupContents counts the rows a restore cares about in a written
 // snapshot. It opens the file read-only and runs no DDL, so counting a backup
 // cannot change it and cannot create a database where the backup failed to
 // land.
+//
+// The path is made absolute first, for the reason vacuumTarget gives: a bare
+// ":memory:" is the literal file the vacuum wrote, not SQLite's private
+// in-memory database, which OpenReadDB refuses.
 func countBackupContents(ctx context.Context, path string) (BackupCounts, error) {
-	db, err := OpenReadDB(path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return BackupCounts{}, fmt.Errorf("resolve backup path %s: %w", path, err)
+	}
+	db, err := OpenReadDB(abs)
 	if err != nil {
 		return BackupCounts{}, fmt.Errorf("open backup for counting: %w", err)
 	}
@@ -208,10 +235,14 @@ func CountRows(ctx context.Context, db *sql.DB) (BackupCounts, error) {
 // vacuum does leave one, and the next run reports it as an existing file — the
 // empty file is 0600 and contains nothing, so deleting it is safe.
 func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
+	target, err := vacuumTarget(dest)
+	if err != nil {
+		return err
+	}
 	if err := reserveBackupPath(dest); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dest); err != nil {
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, target); err != nil {
 		_ = os.Remove(dest)
 		return fmt.Errorf("vacuum into %s: %w", dest, err)
 	}
@@ -224,6 +255,27 @@ func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
 	// database. Two cheap checks, neither load-bearing alone.
 	TightenPermissions(dest)
 	return nil
+}
+
+// vacuumTarget is the name VACUUM INTO is handed for dest: a file: URI for the
+// absolute path, percent-encoded the way OpenDB and readOnlyDSN build theirs.
+//
+// The bare path is not safe to pass. The live connection was opened through a
+// file: URI, so SQLite reads the VACUUM INTO argument as a URI as well: a
+// destination "file:snap.db" names ./snap.db, and ":memory:" names a private
+// in-memory database. Every other step — the reservation, the chmod, the size
+// check, the count — acts on the literal path, so the copy would land in a file
+// nothing reserved at 0600, through a dangling symlink if one sat there. A URI
+// built here is the one form SQLite cannot reinterpret, so the file it writes is
+// the file reserveBackupPath claimed. Absolute, so no leading component of a
+// relative path can be read as a scheme or a special name.
+func vacuumTarget(dest string) (string, error) {
+	abs, err := filepath.Abs(dest)
+	if err != nil {
+		return "", fmt.Errorf("resolve backup path %s: %w", dest, err)
+	}
+	u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: abs}).EscapedPath()}
+	return u.String(), nil
 }
 
 // reserveBackupPath creates dest as an empty 0600 regular file and closes it, so
