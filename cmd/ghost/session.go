@@ -76,9 +76,9 @@ the other reports retrieval over a window.
 // about the past. The count is the visible damage; the silent substitution is the
 // real one.
 //
-// It is a function so the parser can be tested without running the command: the
-// bad value ends in os.Exit(2), and a test that drove that would have to take the
-// process with it.
+// It is a function so the parser can be tested without running the command:
+// runContext turns a bad value into exit 1, and a test that drove the command
+// itself would have to be able to read that code back.
 func contextAsOf(args []string) (*time.Time, error) {
 	raw := ""
 	seen := false
@@ -124,19 +124,24 @@ func contextAsOf(args []string) (*time.Time, error) {
 // effects above: they exist because this command backs a session start, and a
 // request about the past is not one. The instant is parsed by contextAsOf so an
 // unreadable value is refused at the boundary, with the argument in the message
-// and a non-zero status, rather than rendering the present under a request that
-// asked for a past instant.
+// and exit 1, rather than rendering the present under a request that asked for a
+// past instant. Exit 1 and not 2: 2 is the dispatch's code for a command line it
+// cannot route (#1090), and the dispatch already routed this one — what rejected
+// the value is this command's own parser.
 //
 // --audit is the other mode, and it is the opposite in every respect: read-only,
 // no side effects, and a report of retrieval verdicts rather than a block of
 // memories. It is dispatched FIRST and on the flag alone, so an audit run never
 // reaches the side effects below — those exist because this command backs a
 // session start, and a report is not one. See context_audit.go.
-func runContext() {
+//
+// The exit code is RETURNED rather than passed to os.Exit, so the dispatch can
+// hand it back to runCLI and a test can read it; that is what makes #1090's
+// contract assertable.
+func runContext() int {
 	args := os.Args[2:]
 	if contextAuditRequested(args) {
-		runContextAudit(args)
-		return
+		return runContextAudit(args)
 	}
 	cwd := ""
 	for i := 2; i < len(os.Args); i++ {
@@ -151,13 +156,14 @@ func runContext() {
 	asOf, err := contextAsOf(os.Args[2:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)
-		os.Exit(2)
+		return 1
 	}
 	if asOf == nil {
 		fmt.Println(mcpinit.RenderSessionContext(cwd))
-		return
+		return 0
 	}
 	fmt.Println(mcpinit.RenderSessionContextAt(cwd, asOf))
+	return 0
 }
 
 // hookUsage is the help for `ghost hook`: stdout for -h/--help (see
