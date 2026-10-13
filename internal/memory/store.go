@@ -1823,6 +1823,12 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 			return fmt.Errorf("merge reassign: %w", err)
 		}
 	}
+
+	// Carry the outgoing project's learned context over to the survivor before
+	// its row is deleted. See mergeGhostStateTx for the rule.
+	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
@@ -1830,6 +1836,104 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 		return fmt.Errorf("merge delete project: %w", err)
 	}
 	return nil
+}
+
+// ghostStateRow is the mergeable slice of a ghost_state row. updated_at is not
+// read: the merged row's is written as now.
+type ghostStateRow struct {
+	interactionCount  int
+	learnedContext    string
+	lastReflectionAt  sql.NullString
+	reflectionSummary string
+	reflectInputSig   string
+}
+
+// mergeGhostStateTx folds the outgoing project's ghost_state into the survivor's.
+//
+// learned_context, reflection_summary, reflect_input_sig and last_reflection_at
+// are ONE unit, because UpdateLearnedContext writes all four in a single
+// reflection pass: a merged row that took the survivor's learned context but the
+// outgoing project's summary, signature and timestamp would describe a
+// reflection that never happened. The unit is taken whole from one project, with
+// two deliberate choices at the edges:
+//
+//   - A survivor that holds learned_context but no last_reflection_at is treated
+//     as HAVING a reflection and keeps its own unit. It is the project the merge
+//     is into, its context is the one already injected into sessions, and a
+//     missing timestamp is not evidence that the outgoing project's reflection is
+//     newer; overwriting would discard content for no gain.
+//   - A survivor with neither learned_context nor a timestamp has no reflection,
+//     so it takes the outgoing unit wholesale (or keeps its own empty one when
+//     the outgoing has nothing either).
+//
+// When both projects have a timestamped reflection the newer one wins whole.
+//
+// interaction_count is not part of the unit: it is a monotonic counter, so the
+// larger of the two is kept.
+//
+// The survivor's row is created with INSERT OR IGNORE when it is missing, so a
+// merge into a project that has never reflected still receives the outgoing
+// context rather than matching no UPDATE row and losing it.
+func mergeGhostStateTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	var surv ghostStateRow
+	err := tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, newID).
+		Scan(&surv.interactionCount, &surv.learnedContext, &surv.lastReflectionAt, &surv.reflectionSummary, &surv.reflectInputSig)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("merge read survivor ghost_state: %w", err)
+	}
+	var oldg ghostStateRow
+	err = tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, oldID).
+		Scan(&oldg.interactionCount, &oldg.learnedContext, &oldg.lastReflectionAt, &oldg.reflectionSummary, &oldg.reflectInputSig)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The outgoing project never reflected or interacted; there is nothing to
+		// carry over and no reason to create a survivor row.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("merge read outgoing ghost_state: %w", err)
+	}
+
+	merged := mergeGhostStateRows(surv, oldg)
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, newID); err != nil {
+		return fmt.Errorf("merge ensure survivor ghost_state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE ghost_state SET interaction_count = ?, learned_context = ?, last_reflection_at = ?, reflection_summary = ?, reflect_input_sig = ?, updated_at = datetime('now') WHERE project_id = ?`,
+		merged.interactionCount, merged.learnedContext, merged.lastReflectionAt, merged.reflectionSummary, merged.reflectInputSig, newID); err != nil {
+		return fmt.Errorf("merge update survivor ghost_state: %w", err)
+	}
+	return nil
+}
+
+// mergeGhostStateRows applies the rule documented on mergeGhostStateTx. It is a
+// pure function so the rule can be exercised directly, but the merge paths are
+// what call it.
+func mergeGhostStateRows(surv, oldg ghostStateRow) ghostStateRow {
+	merged := surv
+	if oldg.interactionCount > merged.interactionCount {
+		merged.interactionCount = oldg.interactionCount
+	}
+
+	survivorHasReflection := surv.lastReflectionAt.Valid || surv.learnedContext != ""
+	outgoingHasReflection := oldg.lastReflectionAt.Valid || oldg.learnedContext != ""
+
+	takeOutgoing := false
+	if !survivorHasReflection && outgoingHasReflection {
+		// The survivor has no reflection to keep, so the outgoing unit is the only
+		// content — including when the survivor row is absent entirely.
+		takeOutgoing = true
+	} else if surv.lastReflectionAt.Valid && oldg.lastReflectionAt.Valid &&
+		oldg.lastReflectionAt.String > surv.lastReflectionAt.String {
+		// Both projects have a timestamped reflection; the newer one wins whole.
+		takeOutgoing = true
+	}
+
+	if takeOutgoing {
+		merged.learnedContext = oldg.learnedContext
+		merged.reflectionSummary = oldg.reflectionSummary
+		merged.reflectInputSig = oldg.reflectInputSig
+		merged.lastReflectionAt = oldg.lastReflectionAt
+	}
+	return merged
 }
 
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
@@ -1947,7 +2051,12 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		}
 	}
 
-	// Delete old project's ghost_state (newID already has its own).
+	// Carry the outgoing project's learned context over to the survivor before
+	// its row is deleted, through the same helper the free function uses so the
+	// two copies cannot drift.
+	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
@@ -4501,42 +4610,69 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	return results, nil
 }
 
-// SearchFTS searches memories using full-text search.
+// SearchFTS searches memories using full-text search. It returns every match in
+// the window, an expired row included: the browse surfaces show a row outside
+// its window MARKED, not withheld, so this reader must not filter. The query
+// path calls searchFTSValidating directly, which applies the window predicate
+// before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT `+memoryColumnsPrefixed+`
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE (m.project_id = ? OR m.project_id = '_global')
-		  AND memories_fts MATCH ?
-		ORDER BY rank, m.importance DESC
-		LIMIT ?
-	`, projectID, sanitizeFTS(query), limit)
-	if err != nil {
-		return nil, fmt.Errorf("search memories: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanMemories(rows)
+	return s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
 }
 
 // SearchFTSAll searches memories across ALL projects using full-text search.
 func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Memory, error) {
+	return s.searchFTSValidating(ctx, "", query, limit, time.Time{}, true)
+}
+
+// searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
+// the query path's keyword leg run. A non-zero now applies the validity window
+// predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
+// unfiltered statement, byte for byte what SearchFTS always ran.
+//
+// Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
+// the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
+// the predicate applied after the cut, expired rows fill the leg's depth and a
+// valid match ranked below it is never fetched, so a small window reports nothing
+// while a match exists. docs/architecture.md states the rule: filters precede
+// window closure.
+//
+// The predicate is a SUPERSET of Go's ValidityState (see validityMatchesSQLFor):
+// it may admit a row stage 2 then drops — that costs one slot, never a valid row.
+// The columns are already named by memoryColumnsPrefixed, so a store that can run
+// SearchFTS at all has them; there is nothing to gate on.
+func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string, limit int, now time.Time, allProjects bool) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	where := "memories_fts MATCH ?"
+	args := []any{}
+	if !allProjects {
+		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
+		args = append(args, projectID)
+	}
+	args = append(args, sanitizeFTS(query))
+	if !now.IsZero() {
+		where += " AND " + validityMatchesSQLFor("m.")
+		// The predicate's placeholders are bound in its own text order: until,
+		// then from, both to the same whole-second-truncated instant.
+		stamp := now.UTC().Format(stampLayoutForSQL)
+		args = append(args, stamp, stamp)
+	}
+	args = append(args, limit)
 
 	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT `+memoryColumnsPrefixed+`
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE memories_fts MATCH ?
+		WHERE `+where+`
 		ORDER BY rank, m.importance DESC
 		LIMIT ?
-	`, sanitizeFTS(query), limit)
+	`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("search all memories: %w", err)
+		if allProjects {
+			return nil, fmt.Errorf("search all memories: %w", err)
+		}
+		return nil, fmt.Errorf("search memories: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
@@ -5185,9 +5321,15 @@ type DeleteOptions struct {
 	// credential "removed" by deleting its memory survives in a table with a
 	// longer life than the row. A delete meant to ERASE rather than to retire has
 	// to say so here. It erases every copy of the text this database holds,
-	// including the reflection snapshot that could restore the row; it cannot
-	// reach a backup taken earlier. See the ghost_memory_delete purge_history
-	// argument and `ghost history purge`.
+	// including the reflection snapshot that could restore the row and the
+	// deleted bytes themselves: the write connection runs secure_delete, the
+	// purge rebuilds the full-text index from the surviving rows, and a
+	// checkpoint folds the zeroed pages out of the WAL (rebuildFTSAfterPurgeTx
+	// and checkpointAfterPurge). It cannot reach a backup taken earlier, nor
+	// bytes an older build freed before secure_delete was on — those stay in
+	// the file's free space until a compaction rewrites it, and only a fresh
+	// `ghost backup` (VACUUM INTO) is a copy without them. See the
+	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
 }
 
@@ -5206,12 +5348,25 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // tombstone) or purged (nothing). Both happen inside the one transaction that
 // removes the row, so a memory and its history can never come apart.
 func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
+	_, err := s.deleteWithOptionsLocked(ctx, id, opts)
+	return err
+}
+
+// DeletePurge deletes a memory and erases every recorded copy of its text,
+// reporting what the purge reached. It is DeleteWithOptions(PurgeHistory: true)
+// with the checkpoint's result; that call delegates here and drops the detail.
+func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error) {
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
+}
+
+func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var out PurgeOutcome
 	tx, _, err := s.beginWrite(ctx, "delete")
 	if err != nil {
-		return fmt.Errorf("begin delete: %w", err)
+		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -5221,7 +5376,7 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 		// "memory not found" in its own words, and a bad id must produce that.
 		if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
 			!errors.Is(err, errHistoryNoMemory) {
-			return err
+			return out, err
 		}
 	}
 
@@ -5235,20 +5390,41 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	// And it writes no tombstone of its own, which is the point: a purge must
 	// leave nothing behind that could carry the text being redacted.
 	if opts.PurgeHistory {
-		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
-			return err
+		n, err := purgeHistoryTx(ctx, tx, id)
+		if err != nil {
+			return out, err
 		}
+		out.Rows = n
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("delete memory: %w", err)
+		return out, fmt.Errorf("delete memory: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", id)
 	}
-	return tx.Commit()
+	// After the DELETE, so the row is gone from the content table the rebuild
+	// reads: the index still carries the deleted row's tokens in segments the
+	// trigger's 'delete' tombstone does not rewrite, and rebuilding is what
+	// removes them. It belongs in this transaction so the row and every index
+	// of it move together; see rebuildFTSAfterPurgeTx.
+	if opts.PurgeHistory {
+		if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
+			return out, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return out, err
+	}
+	if opts.PurgeHistory {
+		// The delete has committed, so the checkpoint can only add a warning
+		// about the file: an incomplete one is reported through the outcome, and
+		// it is never returned as an error for a row that is already gone.
+		out.CheckpointComplete = s.checkpointAfterPurgeUncancelled(ctx)
+	}
+	return out, nil
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is

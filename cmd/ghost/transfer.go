@@ -128,11 +128,14 @@ Loads a JSONL artifact written by ` + "`ghost export`" + `.
                        reports what it would create, skip and reject, and writes
                        nothing — over a read-only connection, so the preview
                        cannot migrate or seed the store either.
-  --trust-provenance   Keep each memory's own source and pin state. Without it
-                       every imported memory is stamped "onboarding" and
-                       unpinned, so a file from somewhere else cannot plant rows
-                       that read as your own words or as Ghost's shipped rules.
-                       Pass it when the artifact is your own export.
+  --trust-provenance   Keep each memory's own source, pin state and retention
+                       tier. Without it every imported memory is stamped
+                       "onboarding", unpinned and set to the durable "project"
+                       tier, so a file from somewhere else cannot plant rows
+                       that read as your own words or as Ghost's shipped rules,
+                       and cannot plant a keep-forever tier no lifecycle pass
+                       may take back. Pass it when the artifact is your own
+                       export.
 
 A record whose id is already in the database is skipped, never overwritten: the
 artifact is the older of the two copies, so overwriting would restore stale data
@@ -159,11 +162,12 @@ type (
 	importOptions struct {
 		File  string
 		Apply bool
-		// TrustProvenance keeps each memory's own source and pin state instead
-		// of downgrading them. See memory.ImportOptions.TrustProvenance; the
-		// short version is that an artifact is a file that arrived from
-		// somewhere, and on its own authority it does not get to plant rows that
-		// read as your own words or as Ghost's shipped rules.
+		// TrustProvenance keeps each memory's own source, pin state and retention
+		// tier instead of downgrading them. See
+		// memory.ImportOptions.TrustProvenance; the short version is that an artifact
+		// is a file that arrived from somewhere, and on its own authority it does
+		// not get to plant rows that read as your own words or as Ghost's shipped
+		// rules, nor a tier that puts a row beyond every lifecycle pass.
 		TrustProvenance bool
 	}
 )
@@ -1083,8 +1087,10 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// The provenance rewrite is the one thing about the record that is not
 		// visible afterwards: the stored source is the downgraded one, so the
 		// artifact's own value is gone from the store entirely. It is said here
-		// or not at all.
-		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned)"
+		// or not at all. The tier rides the same rewrite for the same reason —
+		// a keep-forever tier a file planted is one no pass can take back — so
+		// the line names both.
+		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
 	case isCreate && r.Clamped:
 		// A clamp is the other thing a reader cannot see in the file afterwards,
 		// because the stored text is the cut version.
@@ -1153,9 +1159,9 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 	// lines: it decides what every memory in the file becomes, so a reader who
 	// skips the per-record output still has to learn it.
 	if report.Created["memory"] > 0 {
-		note := "provenance downgraded to " + memory.DowngradedSource + " and unpinned — pass --trust-provenance to keep the artifact's own"
+		note := "provenance and retention downgraded to " + memory.DowngradedSource + ", unpinned and " + memory.RetentionProject + " — pass --trust-provenance to keep the artifact's own"
 		if opts.TrustProvenance {
-			note = "provenance kept as the artifact states it (--trust-provenance)"
+			note = "provenance and retention kept as the artifact states them (--trust-provenance)"
 		}
 		if _, err := fmt.Fprintf(out, "  %s\n", note); err != nil {
 			return err

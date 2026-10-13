@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // PortableProject is a project as the export/import artifact carries it.
@@ -44,9 +45,10 @@ type PortableProject struct {
 //
 // Every other column is here, including the ones Memory does not expose:
 // access_count, last_accessed, the validity triple (valid_from, valid_until,
-// verified_at) and the pinned flag. Those are what a restore has to put back —
-// restoring a memory with a fresh created_at would age it out of injection
-// immediately, and restoring it unpinned would silently drop a user's pin.
+// verified_at), the pinned flag and the retention tier. Those are what a restore
+// has to put back — restoring a memory with a fresh created_at would age it out
+// of injection immediately, and restoring it unpinned would silently drop a
+// user's pin.
 type PortableMemory struct {
 	ID        string `json:"id"`
 	ProjectID string `json:"project_id"`
@@ -76,6 +78,22 @@ type PortableMemory struct {
 	SourceRef    string            `json:"source_ref,omitempty"`
 	Confidence   *float64          `json:"confidence,omitempty"`
 	Scope        map[string]string `json:"scope,omitempty"`
+
+	// Retention is the tier: how long the memory is wanted and what may be done
+	// to it. It is a plain string rather than a pointer, and no `omitempty`,
+	// because the two states that would need telling apart fold safely: an
+	// absent key and an empty string both mean "the record says nothing", and
+	// NormalizeRetention resolves both to the column's own `project` default —
+	// the one tier that changes nothing. So a v1 artifact, which states none,
+	// imports exactly as it did before the field existed, while every record
+	// this build writes carries the tier it holds so a reader of the file does
+	// not have to infer the common case.
+	//
+	// It is CHECKed at its column and ImportMemory normalizes it through
+	// NormalizeRetention, so a fourth value is refused by name rather than
+	// failing the INSERT; by default an import downgrades it to `project` under
+	// the same flag that downgrades source and pin.
+	Retention string `json:"retention"`
 
 	// Evidence are the memory_provenance records this memory has: every agent that
 	// reported it, every session, every reference, in the order they were
@@ -158,12 +176,12 @@ type ImportOptions struct {
 	// returned, and nothing is written.
 	Apply bool
 
-	// TrustProvenance keeps each memory's own source and pin state instead of
-	// downgrading them. It is off by default, and the default is the safe one to
-	// ship: an artifact is a file that arrived from somewhere, and on its own
-	// authority it gets to say that a row is `manual` (the user's own words, and
-	// exempt from consolidation) or `builtin` (a rule Ghost ships, which
-	// CanonicalOriginSource presents as such) or `pinned` (exempt from
+	// TrustProvenance keeps each memory's own source, pin state and retention
+	// tier instead of downgrading them. It is off by default, and the default is
+	// the safe one to ship: an artifact is a file that arrived from somewhere,
+	// and on its own authority it gets to say that a row is `manual` (the user's
+	// own words, and exempt from consolidation) or `builtin` (a rule Ghost ships,
+	// which CanonicalOriginSource presents as such) or `pinned` (exempt from
 	// consolidation whatever its source). A file a user downloaded would then be
 	// able to plant rows that read as the user's own material and as Ghost's own
 	// rules, permanently exempt from consolidation and indistinguishable from
@@ -171,6 +189,13 @@ type ImportOptions struct {
 	// `onboarding` and unpinned — the same source internal/claudeimport uses for
 	// memories imported from outside Ghost at first contact — which keeps it
 	// consolidatable and honest about where it came from.
+	//
+	// The retention tier rides the same flag for the same reason, one field over:
+	// `persistent` is the one tier every lifecycle pass spares and `session` is a
+	// row scheduled for deletion by its own derived expiry, so a file that
+	// arrived from somewhere must not be able to plant either. Off, a stated tier
+	// is replaced with `project` — the durable default, which is the direction
+	// that keeps a memory rather than the one that ends it.
 	//
 	// A user importing their OWN export wants the fidelity, and gets it with
 	// this flag. That asymmetry is deliberate: the cost of the default being
@@ -258,7 +283,7 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, created_at, updated_at,
 		       resolved_at, valid_from, valid_until, verified_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, retention
 		FROM memories`
 	// Ghost's own seeds are excluded, and the reason is that no import could ever
 	// reconcile them: SeedGlobalMemories writes each seed under the schema's
@@ -502,7 +527,11 @@ type rowScanner interface {
 // scope arrive as JSON text and are decoded the same defensive way the search
 // path decodes them: a malformed value costs that one field, never the record,
 // because losing a whole memory over a side-channel field would be the wrong
-// trade for a restore.
+// trade for a restore. retention arrives as the plain tier the column's CHECK
+// allows — a store is migrated on every open, so the column is always there —
+// and is carried through without a default, because the default is the
+// import's to apply and an absent record means something different from a row
+// that states `project`.
 func scanPortableMemory(sc rowScanner) (PortableMemory, error) {
 	var m PortableMemory
 	var tagsJSON, scopeJSON sql.NullString
@@ -516,7 +545,7 @@ func scanPortableMemory(sc rowScanner) (PortableMemory, error) {
 		&m.ID, &m.ProjectID, &m.Category, &m.Content, &importance, &m.AccessCount,
 		&m.LastAccessed, &m.Source, &tagsJSON, &m.Pinned, &m.CreatedAt, &m.UpdatedAt,
 		&m.ResolvedAt, &m.ValidFrom, &m.ValidUntil, &m.VerifiedAt,
-		&agent, &sessionID, &sourceRef, &confidence, &scopeJSON,
+		&agent, &sessionID, &sourceRef, &confidence, &scopeJSON, &m.Retention,
 	); err != nil {
 		return PortableMemory{}, err
 	}
@@ -811,9 +840,22 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// what stands between "I am importing someone's file" and "these are my own
 	// rows" — see ImportOptions.TrustProvenance for what each of the two values
 	// is protecting.
+	//
+	// The tier rides the same flag and is the same argument: a `persistent` row
+	// is exempt from consolidation, resolve, supersede and pruning, and a
+	// `session` row is scheduled for deletion by its own derived expiry — so a
+	// file that arrived from somewhere must not be able to plant either. An
+	// absent or empty tier is the column's own default, which the untrusted path
+	// lands on as well, so a record that states nothing and one that states
+	// `project` are the same row under it.
+	retention, err := NormalizeRetention(m.Retention)
+	if err != nil {
+		return false, false, false, err
+	}
 	source, pinned := m.Source, m.Pinned
 	if !opts.TrustProvenance {
 		source, pinned = DowngradedSource, false
+		retention = RetentionProject
 		downgraded = true
 	}
 
@@ -860,6 +902,15 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// COALESCE is here, as it already is in the three sibling importers, and a
 	// record that omits either field takes the column's own default.
 	//
+	// The expiry is DERIVED for a session row and nothing else, through the one
+	// function every save uses, because the artifact carries no expires_at and a
+	// session row restored without one would be a row no prune can ever reach:
+	// a row that outlives the conversation tier it was saved under is the growth
+	// the tier exists to bound. A restored `project` or `persistent` row takes
+	// NULL, which is the unprunable direction and the right one for a durable
+	// row. The clock is read once, here, for the same reason a save reads it
+	// once: the row and its expiry are one decision.
+	expires := sessionExpiry(retention, time.Now())
 	// The insert and the history row that records it share a transaction, so an
 	// imported memory cannot land without its origin. phaseImport rather than
 	// phaseSave because the artifact is a file that arrived from somewhere, and
@@ -890,17 +941,17 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
 			valid_from, valid_until, verified_at, agent, session_id, source_ref,
-			confidence, scope)
+			confidence, scope, retention, expires_at)
 		VALUES (?, ?, ?, ?, COALESCE(?, 0.5), ?, ?, ?, ?, ?,
 		        COALESCE(NULLIF(?, ''), datetime('now')),
 		        COALESCE(NULLIF(?, ''), datetime('now')), ?,
-		        ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, m.ID, m.ProjectID, m.Category, content, importance, m.AccessCount,
 		m.LastAccessed, source, string(tags), pinned,
 		m.CreatedAt, m.UpdatedAt, m.ResolvedAt,
 		m.ValidFrom, m.ValidUntil, m.VerifiedAt,
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID), nullIfEmpty(m.SourceRef),
-		m.Confidence, scopeJSON(m.Scope))
+		m.Confidence, scopeJSON(m.Scope), retention, expires)
 	if err != nil {
 		return false, false, downgraded, fmt.Errorf("import memory %s: %w", m.ID, err)
 	}
