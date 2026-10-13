@@ -1225,8 +1225,9 @@ func TestEmbedPending_StopsAfterTheFirstStalledEmbed(t *testing.T) {
 	if n != 0 {
 		t.Errorf("embedded %d against a stalled endpoint, want 0", n)
 	}
-	if got := embeds.Load(); got != 1 {
-		t.Errorf("made %d embed attempt(s) against a stalled endpoint, want 1 (stop after first stall)", got)
+	// Two consecutive timeouts are the stall: one could be a single slow row.
+	if got := embeds.Load(); got != 2 {
+		t.Errorf("made %d embed attempt(s) against a stalled endpoint, want 2 (stop after two consecutive timeouts)", got)
 	}
 	// Reachable would mean "nothing to act on" to SweepOnce, which would then
 	// start the next project against the same stalled endpoint.
@@ -1266,7 +1267,8 @@ func stalledEmbedEndpoint(t *testing.T) (*httptest.Server, *atomic.Int64) {
 // TestSweepOnce_EndsOnAStalledEmbed is the sweep-level half of the stall stop:
 // the batch's verdict is what SweepOnce acts on, so a stalled project must end
 // the sweep rather than send the next project into the same stall. Three
-// projects with pending rows cost one stalled request in total.
+// projects with pending rows cost the first project's two stalled requests in
+// total.
 func TestSweepOnce_EndsOnAStalledEmbed(t *testing.T) {
 	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
 
@@ -1290,8 +1292,8 @@ func TestSweepOnce_EndsOnAStalledEmbed(t *testing.T) {
 
 	worker.SweepOnce(context.Background())
 
-	if got := embeds.Load(); got != 1 {
-		t.Errorf("sweep made %d embed request(s) against a stalled endpoint, want 1 (end the sweep after the first stall)", got)
+	if got := embeds.Load(); got != 2 {
+		t.Errorf("sweep made %d embed request(s) against a stalled endpoint, want 2 (end the sweep after the first project's stall)", got)
 	}
 }
 
@@ -1409,6 +1411,215 @@ func TestSweepOnce_MovesOnAfterABudgetThatMadeProgress(t *testing.T) {
 	}
 	if requested["proj-b"] < 1 {
 		t.Errorf("proj-b got no embed request: a budget spent while embedding ended the sweep")
+	}
+}
+
+// slowRowEndpoint answers every embed at once except one whose input contains
+// slowMarker, which it holds until the request gives up (one over-long document
+// on a healthy endpoint), and one containing "bad row", which it refuses with a
+// 400. It records the inputs in the order they arrived.
+func slowRowEndpoint(t *testing.T, slowMarker string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var order []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			order = append(order, string(body))
+			mu.Unlock()
+			if strings.Contains(string(body), slowMarker) {
+				<-r.Context().Done()
+				return
+			}
+			if strings.Contains(string(body), "bad row") {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), order...)
+	}
+}
+
+// TestEmbedPending_ASlowRowDoesNotBlockTheRest: one row whose embed times out
+// on every attempt, on an endpoint that answers every other row at once. The
+// store hands that row back first on every pass (it is never embedded), so
+// stopping on it would leave every row behind it unembedded for good. The batch
+// skips it and embeds the rest, and the next batch tries it last.
+func TestEmbedPending_ASlowRowDoesNotBlockTheRest(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	srv, requests := slowRowEndpoint(t, "slow row")
+
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	// mem-0 sorts first, so it is the first row of every batch the store returns.
+	store.memories["mem-0"] = "slow row"
+	for i := 1; i <= 3; i++ {
+		store.memories[fmt.Sprintf("mem-%d", i)] = fmt.Sprintf("content %d", i)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	n, verdict := worker.EmbedPending(context.Background(), "proj-a", 0)
+	if n != 3 {
+		t.Errorf("first batch embedded %d, want 3 (every row but the slow one)", n)
+	}
+	if verdict != Reachable {
+		t.Errorf("first batch verdict = %v, want %v (one slow row is not a stalled endpoint)", verdict, Reachable)
+	}
+
+	// New rows arrive; the slow row still sorts first in the store's answer.
+	store.memories["mem-4"] = "content 4"
+	store.memories["mem-5"] = "content 5"
+	before := len(requests())
+
+	n, _ = worker.EmbedPending(context.Background(), "proj-a", 0)
+	if n != 2 {
+		t.Errorf("second batch embedded %d, want 2", n)
+	}
+	second := requests()[before:]
+	if len(second) == 0 || !strings.Contains(second[len(second)-1], "slow row") {
+		t.Errorf("second batch did not try the slow row last: %q", second)
+	}
+}
+
+// TestEmbedPending_ALoneTimedOutRowIsAStall: a batch whose only row times
+// out has no next row to tell a slow row from a stalled endpoint and nothing
+// embedded to show the endpoint working, so it reports Inconclusive. Once that
+// row is known to be slow, its timeout is no longer read as a stall.
+func TestEmbedPending_ALoneTimedOutRowIsAStall(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	srv, embeds := stalledEmbedEndpoint(t)
+
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	store.memories["mem-0"] = "content 0"
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	if _, verdict := worker.EmbedPending(context.Background(), "proj-a", 0); verdict != Inconclusive {
+		t.Errorf("verdict after a lone timed-out row = %v, want %v", verdict, Inconclusive)
+	}
+	if _, verdict := worker.EmbedPending(context.Background(), "proj-a", 0); verdict != Reachable {
+		t.Errorf("verdict after the same, now known-slow, row = %v, want %v", verdict, Reachable)
+	}
+	if got := embeds.Load(); got != 2 {
+		t.Errorf("made %d embed attempt(s), want 2", got)
+	}
+}
+
+// TestEmbedPending_AnAnsweredRowResetsTheTimeoutCount: two slow rows are not
+// a stall when the endpoint answered a row between them, whether with a vector
+// or with a 400. Only consecutive timeouts are.
+func TestEmbedPending_AnAnsweredRowResetsTheTimeoutCount(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	for _, between := range []string{"content fast", "bad row"} {
+		t.Run(between, func(t *testing.T) {
+			srv, requests := slowRowEndpoint(t, "slow row")
+
+			store := newMockStore()
+			store.projects = []string{"proj-a"}
+			store.memories["mem-0"] = "slow row one"
+			store.memories["mem-1"] = between
+			store.memories["mem-2"] = "slow row two"
+			store.memories["mem-3"] = "content 3"
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			client := NewClient(srv.URL, "test-model", 3)
+			client.httpClient.Timeout = 120 * time.Millisecond
+			worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+			_, verdict := worker.EmbedPending(context.Background(), "proj-a", 0)
+			if verdict != Reachable {
+				t.Errorf("verdict = %v, want %v (the timeouts were not consecutive)", verdict, Reachable)
+			}
+			if len(store.embeddings["mem-3"]) == 0 {
+				t.Errorf("mem-3 was not embedded; requests: %q", requests())
+			}
+		})
+	}
+}
+
+// TestSweepOnce_ASlowFirstRowDoesNotStopLaterProjects: a project whose first
+// row always times out must not end the sweep, or every project after it is
+// skipped on every tick while the endpoint answers.
+func TestSweepOnce_ASlowFirstRowDoesNotStopLaterProjects(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	srv, _ := slowRowEndpoint(t, "slow row")
+
+	store := newMockStore()
+	store.projects = []string{"proj-a", "proj-b"}
+	store.projectsOf = map[string]string{
+		"proj-a-mem-0": "proj-a", "proj-a-mem-1": "proj-a",
+		"proj-b-mem-0": "proj-b", "proj-b-mem-1": "proj-b",
+	}
+	store.memories["proj-a-mem-0"] = "slow row"
+	store.memories["proj-a-mem-1"] = "content a1"
+	store.memories["proj-b-mem-0"] = "content b0"
+	store.memories["proj-b-mem-1"] = "content b1"
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+
+	for _, id := range []string{"proj-a-mem-1", "proj-b-mem-0", "proj-b-mem-1"} {
+		if len(store.embeddings[id]) == 0 {
+			t.Errorf("%s was not embedded: a slow row in proj-a held it back", id)
+		}
+	}
+}
+
+// TestSweepOnce_ASingleSlowRowDoesNotStarveLaterProjects: a project whose
+// ONLY pending row always times out looks like a stall the first time (one
+// timeout, nothing embedded, no next row), and ends that sweep. From then on the
+// row is known to be slow, so its timeout is not counted as a stall again and
+// the next sweep reaches the later projects.
+func TestSweepOnce_ASingleSlowRowDoesNotStarveLaterProjects(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	srv, _ := slowRowEndpoint(t, "slow row")
+
+	store := newMockStore()
+	store.projects = []string{"proj-a", "proj-b"}
+	store.projectsOf = map[string]string{"proj-a-mem-0": "proj-a", "proj-b-mem-0": "proj-b"}
+	store.memories["proj-a-mem-0"] = "slow row"
+	store.memories["proj-b-mem-0"] = "content b0"
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+	worker.SweepOnce(context.Background())
+
+	if len(store.embeddings["proj-b-mem-0"]) == 0 {
+		t.Errorf("proj-b was not embedded after two sweeps: proj-a's one slow row ends every sweep")
 	}
 }
 

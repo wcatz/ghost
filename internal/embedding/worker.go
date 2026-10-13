@@ -44,11 +44,70 @@ type Worker struct {
 	interval time.Duration
 	dataDir  string
 
-	// mu guards inconclusive, which the sweep carries between intervals.
+	// mu guards inconclusive, which the sweep carries between intervals, and
+	// slowRows.
 	mu sync.Mutex
 	// inconclusive counts consecutive SWEEPS that did not answer. It is the
 	// evidence a single probe cannot be: see inconclusiveStampsAfter.
 	inconclusive int
+
+	// slowRows holds the ids of memories whose embed timed out, so later
+	// batches try them last (see EmbedPending). In memory only and bounded by
+	// maxSlowRows; guarded by mu.
+	slowRows map[string]struct{}
+}
+
+// maxSlowRows bounds Worker.slowRows. Past it a newly timed-out row is not
+// recorded, which only means it is tried in the store's order again.
+const maxSlowRows = 1024
+
+// stallAfterTimeouts is how many consecutive embed timeouts in one batch are
+// read as a stalled endpoint rather than slow rows. One is not enough: the
+// client's timeout firing on one over-long document looks exactly like a
+// stall, and that row, never embedded, comes back first on every pass. Two
+// costs a pacified endpoint one extra request per batch.
+const stallAfterTimeouts = 2
+
+// isSlowRow reports whether id timed out in an earlier batch.
+func (w *Worker) isSlowRow(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.slowRows[id]
+	return ok
+}
+
+// noteSlowRow records that id's embed timed out.
+func (w *Worker) noteSlowRow(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.slowRows == nil {
+		w.slowRows = make(map[string]struct{})
+	}
+	if len(w.slowRows) < maxSlowRows {
+		w.slowRows[id] = struct{}{}
+	}
+}
+
+// forgetSlowRow drops id once it has been embedded.
+func (w *Worker) forgetSlowRow(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.slowRows, id)
+}
+
+// slowRowsLast reorders ids so the rows that timed out before come after every
+// other row, keeping the store's order within each group.
+func (w *Worker) slowRowsLast(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	var slow []string
+	for _, id := range ids {
+		if w.isSlowRow(id) {
+			slow = append(slow, id)
+			continue
+		}
+		out = append(out, id)
+	}
+	return append(out, slow...)
 }
 
 // inconclusiveStampsAfter is how many consecutive sweep TICKS must fail to
@@ -283,10 +342,12 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 // machine is to skip this tick, not to spend it.
 //
 // A "pacified" endpoint — one that answers GET / but stalls /api/embed — costs
-// one stalled embed request per sweep, not one per project: EmbedPending stops
-// its batch at the first timed-out embed and reports Inconclusive, as it does
-// for a batch that spent embedPendingBudget without embedding anything, and the
-// check below ends the sweep on that. The remaining projects wait for the next
+// stallAfterTimeouts stalled embed requests per sweep, not that many per
+// project: EmbedPending stops its batch on that many consecutive timeouts and
+// reports Inconclusive, as it does for a batch that spent embedPendingBudget
+// without embedding anything, and the check below ends the sweep on that. One
+// slow row is not a stall: the batch skips it, tries it last from then on, and
+// the sweep goes on. The remaining projects wait for the next
 // tick. A batch that spent its budget while still embedding reports Reachable,
 // so a slow but working endpoint costs at most one budget per project and the
 // sweep reaches every project.
@@ -399,12 +460,19 @@ var embedPendingBudget = time.Minute
 // request in the batch, so a batch never runs past it by more than the store
 // calls around one embed; when it is spent the batch stops and logs "embed
 // budget spent", reporting Inconclusive if it embedded nothing and Reachable if
-// it made progress (see budgetSpent). The loop also stops at the first embed that
-// fails with a timeout while the liveness re-check is still Reachable — the
+// it made progress (see budgetSpent).
+//
+// An embed that times out while the liveness re-check is still Reachable is
+// either one slow row (the client's timeout on an over-long document) or the
 // "pacified endpoint" shape where the server answers GET / but hangs
-// /api/embed — and reports Inconclusive for that too. Ordinary per-row errors (a
-// 400 for an over-long or malformed input, a model error for that one row)
-// still continue to the next row, so one bad memory does not block the rest.
+// /api/embed. The row is recorded on the Worker as slow, so this and every
+// later batch try it after every other row, and the batch moves on. It stops
+// and reports Inconclusive only on stallAfterTimeouts consecutive timeouts, or
+// when it ends on a timeout having embedded nothing; a row already recorded as
+// slow does not count toward either, so one row that always times out cannot
+// end every sweep. Ordinary per-row errors (a 400 for an over-long or
+// malformed input, a model error for that one row) reset the count and
+// continue to the next row, so one bad memory does not block the rest.
 // The caller's own context ending stops the batch without either line.
 //
 // `SweepOnce` gates STRICTLY on the same probe, for the cost reason its own
@@ -415,7 +483,7 @@ var embedPendingBudget = time.Minute
 // "the endpoint's last answer", because a probe with nothing behind it is not
 // evidence. The in-batch re-probe's verdict is reported as itself: a batch
 // actually attempted an embed, so an endpoint that then stopped answering HAS said
-// something. A batch stopped by a stalled embed, or by a budget spent without
+// something. A batch stopped as a stalled endpoint, or by a budget spent without
 // embedding anything, reports Inconclusive although the re-probe answered: the
 // endpoint did not do the work in time, and a Reachable there would send the
 // sweep's next project into the same wait. A budget spent while embedding
@@ -465,7 +533,10 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	got = Reachable
 	budgetCtx, budgetCancel := context.WithTimeout(ctx, embedPendingBudget)
 	defer budgetCancel()
-	for _, id := range ids {
+	// timeouts counts consecutive embed timeouts on rows not already known to
+	// be slow; stallAfterTimeouts of them is a stalled endpoint.
+	timeouts := 0
+	for _, id := range w.slowRowsLast(ids) {
 		if ctx.Err() != nil {
 			return embedded, got
 		}
@@ -509,27 +580,50 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 					"embedded", embedded, "reachability", got.String())
 				return embedded, got
 			}
-			// A timeout on an embed whose liveness re-check is still Reachable
-			// means the endpoint answers / but stalls /api/embed (a "pacified"
-			// endpoint). Stop this batch rather than spend the client's timeout on
-			// every remaining memory, and report Inconclusive so SweepOnce ends
-			// the sweep instead of sending the next project into the same stall.
-			// Ordinary per-row errors (a 400 for an over-long or malformed input,
-			// a model error for that one row) still continue to the next row.
+			// A timeout on an embed whose liveness re-check is still Reachable is
+			// either one slow row (the client's timeout firing on an over-long
+			// document) or an endpoint that answers / but stalls /api/embed (a
+			// "pacified" endpoint), and one timeout cannot tell them apart. So the
+			// row is recorded as slow, to be tried last from now on, and the batch
+			// moves on; stallAfterTimeouts in a row is the stall, which stops the
+			// batch and reports Inconclusive so SweepOnce ends the sweep instead
+			// of sending the next project into it. A row already known to be slow
+			// is not counted: its timeout is that row's, and counting it would let
+			// one such row end every sweep. Ordinary per-row errors (a 400 for an
+			// over-long or malformed input, a model error for that one row) prove
+			// the endpoint answered, reset the count and continue.
 			var urlErr *url.Error
 			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &urlErr) && urlErr.Timeout()) {
-				w.logger.Info("embed stalled, pausing batch",
-					"embedded", embedded, "memory_id", id, "reachability", Inconclusive.String())
-				return embedded, Inconclusive
+				if w.isSlowRow(id) {
+					continue
+				}
+				w.noteSlowRow(id)
+				timeouts++
+				if timeouts >= stallAfterTimeouts {
+					return embedded, w.embedStalled(embedded, id)
+				}
+				continue
 			}
+			timeouts = 0
 			continue
 		}
+		timeouts = 0
 
 		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.Identity()); err != nil {
 			w.logger.Error("embed: store", "error", err, "memory_id", id)
 			continue
 		}
+		w.forgetSlowRow(id)
 		embedded++
+	}
+
+	// A batch that ended on a timeout and embedded nothing had no next row to
+	// tell a slow row from a stall, and nothing it did shows the endpoint
+	// working: read it as a stall. Only a row not known to be slow counts, so
+	// a project whose one pending row always times out ends the sweep once, not
+	// on every tick.
+	if timeouts > 0 && embedded == 0 {
+		return embedded, w.embedStalled(embedded, "")
 	}
 
 	// Surface persistent embed failures once per sweep — a missing Ollama
@@ -543,6 +637,14 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 		w.logger.Info("embedding batch complete", "project_id", projectID, "embedded", embedded)
 	}
 	return embedded, got
+}
+
+// embedStalled logs a batch stopped on a stalled endpoint and returns the
+// verdict it reports: Inconclusive, which ends SweepOnce's sweep.
+func (w *Worker) embedStalled(embedded int, lastID string) Reachability {
+	w.logger.Info("embed stalled, pausing batch",
+		"embedded", embedded, "memory_id", lastID, "reachability", Inconclusive.String())
+	return Inconclusive
 }
 
 // budgetSpent logs a batch that ran out of embedPendingBudget and returns the

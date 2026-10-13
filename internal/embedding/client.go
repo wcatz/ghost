@@ -136,7 +136,7 @@ const (
 	// and simply too slow to answer this time: a machine under load, a proxy, a
 	// disk stall. It is evidence of nothing, and the difference from Unreachable
 	// is the whole point of this type. EmbedPending also returns it for a batch
-	// it stopped on a stalled embed or on a budget spent without embedding
+	// it stopped on a stalled endpoint or on a budget spent without embedding
 	// anything: the endpoint answered its liveness probe and still did not do
 	// the work in time.
 	Inconclusive
