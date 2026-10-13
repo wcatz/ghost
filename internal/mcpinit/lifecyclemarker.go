@@ -125,6 +125,11 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	// the moment it was recorded. The alert still renders one line
 	// (lifecycleFailureAlert splits), so a multi-line marker costs the reader
 	// nothing and gives anyone opening the file the actual evidence.
+	//
+	// The cause is the failed phase's raw output tail — whatever the harness or
+	// the model printed last — so it is asked of the token guard before it is
+	// stored, and judged whole, before the cap, so a value straddling the cut
+	// is still recognised (markerErrorField).
 	text := strings.TrimSpace(firstErr)
 	if text == "" {
 		text = "phase failed"
@@ -132,7 +137,7 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	m := lifecycleFailureMarker{
 		Project:      recorded,
 		PhasesFailed: append([]string(nil), phasesFailed...),
-		Error:        truncateUTF8(text, lifecycleMarkerDetailMaxBytes),
+		Error:        truncateUTF8(markerErrorField(text), lifecycleMarkerDetailMaxBytes),
 		At:           time.Now().UTC().Format(time.RFC3339),
 		Version:      lifecycleMarkerVersion,
 	}
@@ -183,6 +188,25 @@ func markerProjectField(operand string) string {
 		return "<project withheld: it holds a " + detected.Format + ">"
 	}
 	return "<project withheld: it holds a credential>"
+}
+
+// markerErrorField is the marker's error text as stored and as rendered: the
+// text itself, unless the token guard finds a credential in it, in which case
+// the guard's placeholder naming the format. The whole text is withheld rather
+// than the matching span, because the guard reports a format and not a
+// position; the full output is still in lifecycle.log for whoever has to
+// diagnose the run. Asked at write time, so the file never holds the value, and
+// again at render time, because a marker an older build wrote does.
+func markerErrorField(text string) string {
+	refusal := memory.RejectSecret("error", text)
+	if refusal == nil {
+		return text
+	}
+	var detected *memory.SecretContentError
+	if errors.As(refusal, &detected) {
+		return "<error withheld: it holds a " + detected.Format + ">"
+	}
+	return "<error withheld: it holds a credential>"
 }
 
 // ClearLifecycleFailure removes THIS project's marker. A missing marker is
@@ -511,7 +535,8 @@ func markerCandidates(ids ...string) []markerCandidate {
 // project is a raw `--project` operand the store could not resolve, so it is
 // RENDERED rather than interpolated — see renderMarkerProject. The alert never
 // includes paths — only the project identifier and the first (≤300-byte) line
-// of the recorded error.
+// of the recorded error, withheld by the token guard or framed as data — see
+// renderMarkerError.
 func lifecycleFailureAlert(projectID, projectName string) string {
 	m := readLifecycleFailure(projectID, projectName)
 	if m == nil {
@@ -550,11 +575,24 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		return ""
 	}
 	p = renderMarkerProject(p)
-	errLine := strings.SplitN(m.Error, "\n", 2)[0]
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
-		truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes), p)
+		renderMarkerError(m.Error), p)
+}
+
+// renderMarkerError renders the marker's error for the alert. The error is the
+// failed phase's output tail, so it is text a harness or a model wrote, printed
+// at the top of every session start for the marker's lifetime: it goes through
+// the token guard again (markerErrorField — the file may predate the write-side
+// guard), the whole error rather than the line shown, so a credential the line
+// only begins is still caught; then its first line is capped and framed as
+// «...» data (quoteData), so instruction-like output reads as quoted text
+// rather than as Ghost's own words. The cap applies before the frame, so the
+// closing delimiter is never cut.
+func renderMarkerError(text string) string {
+	errLine := strings.SplitN(markerErrorField(text), "\n", 2)[0]
+	return quoteData(truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes))
 }
 
 // renderMarkerProject renders the marker's project for the alert, and it is two
