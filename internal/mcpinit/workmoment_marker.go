@@ -137,6 +137,12 @@ func readMomentState(path string) (momentState, error) {
 		}
 		if clash || base+e.bytes > workMomentBudget {
 			st.valid[e.token] = false
+			// The host prints a start block whether or not it fits, so its
+			// bytes are spent either way; only a lost delivery charges nothing.
+			if isStart {
+				st.spent = base + e.bytes
+				assumed = false
+			}
 			continue
 		}
 		for _, id := range e.ids {
