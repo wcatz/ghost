@@ -1160,6 +1160,12 @@ func TestCandidatesPassiveReadsAStoreBelowTheValidityFloor(t *testing.T) {
 	st := passiveFixture(t)
 	ctx := context.Background()
 
+	// The vector epoch triggers read memories.scope (v24) and, since v25,
+	// memories.valid_from/valid_until, and SQLite refuses to drop a column a
+	// trigger names. A pre-v10 store has none of these triggers, so the fixture
+	// removes them with the columns they postdate — exactly as the tier-floor case
+	// above does for scope.
+	dropVectorEpoch(t, st.db)
 	// No index reads the validity columns, so they drop cleanly. The steps FAIL
 	// LOUDLY rather than skipping: a skip would leave the substitution path with no
 	// coverage while the test reported nothing wrong.

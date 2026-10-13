@@ -97,6 +97,12 @@ type vectorCorpus struct {
 	identity string
 
 	ids, scopes, projects, embeds []byte
+	// validFroms and validUntils are the validity bounds, in row order, so a
+	// view can judge a row's window before the cut exactly as the uncached scan
+	// does (#1053). They are the reason the epoch has a validity arm: a cached
+	// copy that held them would otherwise go stale the moment a row's window was
+	// edited, and a search would keep offering a row that has just expired.
+	validFroms, validUntils []byte
 	// rows are the rows whose identity is the configured one, in scan order.
 	rows []vectorRowSpan
 	// rowModel[i] is rows[i]'s stored identity, an index into models.
@@ -268,7 +274,7 @@ func loadVectorCorpus(rows *sql.Rows, identity string) (*vectorCorpus, error) {
 	var d vectorScanDest
 	first := true
 	for rows.Next() {
-		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq); err != nil {
+		if err := rows.Scan(&d.id, &d.embed, &d.model, &d.scope, &d.project, &d.resolvedAt, &d.seq, &d.validFrom, &d.validUntil); err != nil {
 			return nil, err
 		}
 		if identity != "" && !bytes.Equal(d.model, identityBytes) {
@@ -280,18 +286,22 @@ func loadVectorCorpus(rows *sql.Rows, identity string) (*vectorCorpus, error) {
 			continue
 		}
 		cp.rows = append(cp.rows, vectorRowSpan{
-			id:       vecSpan{len(cp.ids), len(d.id)},
-			scope:    vecSpan{len(cp.scopes), len(d.scope)},
-			project:  vecSpan{len(cp.projects), len(d.project)},
-			embed:    vecSpan{len(cp.embeds), len(d.embed)},
-			resolved: len(d.resolvedAt) > 0,
-			seq:      d.seq,
+			id:         vecSpan{len(cp.ids), len(d.id)},
+			scope:      vecSpan{len(cp.scopes), len(d.scope)},
+			project:    vecSpan{len(cp.projects), len(d.project)},
+			embed:      vecSpan{len(cp.embeds), len(d.embed)},
+			validFrom:  vecSpan{len(cp.validFroms), len(d.validFrom)},
+			validUntil: vecSpan{len(cp.validUntils), len(d.validUntil)},
+			resolved:   len(d.resolvedAt) > 0,
+			seq:        d.seq,
 		})
 		cp.rowModel = append(cp.rowModel, intern(d.model))
 		cp.ids = append(cp.ids, d.id...)
 		cp.scopes = append(cp.scopes, d.scope...)
 		cp.projects = append(cp.projects, d.project...)
 		cp.embeds = append(cp.embeds, d.embed...)
+		cp.validFroms = append(cp.validFroms, d.validFrom...)
+		cp.validUntils = append(cp.validUntils, d.validUntil...)
 		if first {
 			first = false
 			duringVectorCopy()
@@ -318,6 +328,7 @@ const globalProject = "_global"
 func (s *Store) viewVectorCorpus(cp *vectorCorpus, scratch *vectorRows, projectID string, allProjects bool, queryVec []float32) *vectorRows {
 	v := &vectorRows{
 		ids: cp.ids, scopes: cp.scopes, projects: cp.projects, embeds: cp.embeds,
+		validFroms: cp.validFroms, validUntils: cp.validUntils,
 		rows:  scratch.rows[:0],
 		cands: scratch.cands[:0],
 	}

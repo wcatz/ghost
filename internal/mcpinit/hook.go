@@ -60,7 +60,14 @@ func rwDSN(dbPath string) string {
 		// migration can commit between the check and the write. Without it a
 		// transaction starts deferred, so it would read the stamp, then take the
 		// lock, and the whole guard would be the pre-BEGIN race with extra steps.
-		RawQuery: "_pragma=busy_timeout(5000)&_txlock=immediate",
+		//
+		// secure_delete(ON) matches memory.OpenDB too. This is a write
+		// connection to the same store, and the redaction promise is about the
+		// file rather than about which handle did the deleting: without the
+		// pragma here a row this connection deletes would leave its text in the
+		// freed cell for whoever reads the file next (#1043). It is per
+		// connection, so the DSN is the only place it can be set for this one.
+		RawQuery: "_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)&_txlock=immediate",
 	}
 	return u.String()
 }
