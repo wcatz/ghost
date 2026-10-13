@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -302,7 +303,7 @@ func TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims(t *testing.T) {
 			t.Errorf("session_id = %q, want the absorbed source's ses_b", row.SessionID)
 		}
 		if row.Confidence == nil || *row.Confidence != confidence {
-			t.Errorf("confidence = %v, want %v", row.Confidence, confidence)
+			t.Errorf("confidence = %s, want %v", floatOrNil(row.Confidence), confidence)
 		}
 		for _, tc := range []struct {
 			name string
@@ -314,7 +315,7 @@ func TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims(t *testing.T) {
 			{"verified_at", row.VerifiedAt, "2026-09-20 00:00:00"},
 		} {
 			if tc.got == nil || *tc.got != tc.want {
-				t.Errorf("%s = %v, want the absorbed source's %q", tc.name, tc.got, tc.want)
+				t.Errorf("%s = %s, want the absorbed source's %q", tc.name, strOrNil(tc.got), tc.want)
 			}
 		}
 	})
@@ -339,13 +340,39 @@ func TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims(t *testing.T) {
 			t.Errorf("agent/source_ref = %q/%q, want the reused row's own claude-code/docs/retries.md", row.Agent, row.SourceRef)
 		}
 		if row.ValidFrom == nil || *row.ValidFrom != "2026-03-01 00:00:00" {
-			t.Errorf("valid_from = %v, want the reused row's own 2026-03-01", row.ValidFrom)
+			t.Errorf("valid_from = %s, want the reused row's own 2026-03-01", strOrNil(row.ValidFrom))
 		}
 		if row.ValidUntil != nil {
 			t.Errorf("valid_until = %q, want NULL — completing the reused row's half window from another row composes a pair no row asserted", *row.ValidUntil)
 		}
 		if row.VerifiedAt == nil || *row.VerifiedAt != "2026-09-20 00:00:00" {
-			t.Errorf("verified_at = %v, want the absorbed source's, since the reused row stated none", row.VerifiedAt)
+			t.Errorf("verified_at = %s, want the absorbed source's, since the reused row stated none", strOrNil(row.VerifiedAt))
+		}
+	})
+
+	t.Run("the reused row's own confidence and complete window win", func(t *testing.T) {
+		s := testStore(t)
+		own := 0.3
+		const kept = "the queue drains in under a minute after a deploy"
+		keptID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: kept, Source: "mcp", Importance: 0.5, Confidence: &own,
+			ValidFrom:  stampPtr("2025-06-01 00:00:00"),
+			ValidUntil: stampPtr("2026-06-01 00:00:00"),
+		})
+		if err != nil {
+			t.Fatalf("Create kept: %v", err)
+		}
+		other := absorbed(t, s, "a deploy pauses the queue consumers first")
+
+		reuseMerge(t, s, kept, keptID, other)
+
+		row := readRow(t, s, keptID)
+		if row.Confidence == nil || *row.Confidence != own {
+			t.Errorf("confidence = %s, want the reused row's own %v", floatOrNil(row.Confidence), own)
+		}
+		if row.ValidFrom == nil || *row.ValidFrom != "2025-06-01 00:00:00" ||
+			row.ValidUntil == nil || *row.ValidUntil != "2026-06-01 00:00:00" {
+			t.Errorf("window = %s..%s, want the reused row's own 2025-06-01..2026-06-01", strOrNil(row.ValidFrom), strOrNil(row.ValidUntil))
 		}
 	})
 
@@ -379,6 +406,141 @@ func TestReuseMergeCarriesTheAbsorbedSourcesEvidenceAndClaims(t *testing.T) {
 		if row := readRow(t, s, keptID); row.SourceRef != link {
 			t.Errorf("source_ref = %q, want the absorbed companion's decision link %q", row.SourceRef, link)
 		}
+	})
+}
+
+// claimsOf renders the claim columns a merge can fill, for a before/after
+// comparison.
+func claimsOf(m Memory) string {
+	return fmt.Sprintf("agent=%q session=%q ref=%q conf=%s from=%s until=%s verified=%s",
+		m.Agent, m.SessionID, m.SourceRef, floatOrNil(m.Confidence),
+		strOrNil(m.ValidFrom), strOrNil(m.ValidUntil), strOrNil(m.VerifiedAt))
+}
+
+func strOrNil(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
+func floatOrNil(p *float64) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprint(*p)
+}
+
+// TestRestoreUndoesTheEvidenceAMergeCarriedOntoARowItKeeps: a merge that keeps
+// one row in place — ReplaceNonManual's reuse branch, and FoldRows' survivor —
+// carries the absorbed rows' evidence onto it. A restore brings the absorbed rows
+// back with their own evidence from the snapshot, and restores the kept row in
+// place, so unless it also takes the carried copies off the kept row, every
+// absorbed record exists twice and the kept row's evidence claims a verification
+// its restored verified_at no longer states.
+func TestRestoreUndoesTheEvidenceAMergeCarriedOntoARowItKeeps(t *testing.T) {
+	ctx := context.Background()
+	confidence := 0.7
+	snapshotState := func(t *testing.T, s *Store, ids ...string) map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		for _, id := range ids {
+			ev, err := s.MemoryProvenance(ctx, id)
+			if err != nil {
+				t.Fatalf("MemoryProvenance(%s): %v", id, err)
+			}
+			got, err := s.GetByIDs(ctx, []string{id})
+			if err != nil || len(got) != 1 {
+				t.Fatalf("GetByIDs(%s): %v (n=%d)", id, err, len(got))
+			}
+			out[id] = strings.Join(evidenceRowsOf(t, ev), ",") + " | " + claimsOf(got[0])
+		}
+		return out
+	}
+	absorbed := func(t *testing.T, s *Store, source, content string) string {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: content, Source: source, Importance: 0.5,
+			Agent: "codex", SessionID: "ses_b", SourceRef: "docs/queue.md", Confidence: &confidence,
+			ValidFrom:  stampPtr("2026-01-15 00:00:00"),
+			ValidUntil: stampPtr("2027-12-31 23:59:59"),
+			VerifiedAt: stampPtr("2026-09-20 00:00:00"),
+		})
+		if err != nil {
+			t.Fatalf("Create absorbed: %v", err)
+		}
+		return id
+	}
+	check := func(t *testing.T, s *Store, before map[string]string, keptID, otherID string) {
+		t.Helper()
+		if merged := snapshotState(t, s, keptID)[keptID]; merged == before[keptID] {
+			t.Fatalf("the merge carried nothing onto %s, so the restore has nothing to undo: %s", keptID, merged)
+		}
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("RestoreSnapshot: %v", err)
+		}
+		after := snapshotState(t, s, keptID, otherID)
+		for _, id := range []string{keptID, otherID} {
+			if after[id] != before[id] {
+				t.Errorf("after the restore %s is\n  %s\nwant its pre-merge state\n  %s", id, after[id], before[id])
+			}
+		}
+		// A second restore is a no-op: the snapshot is kept and restore repeatable.
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("second RestoreSnapshot: %v", err)
+		}
+		if again := snapshotState(t, s, keptID, otherID); again[keptID] != before[keptID] || again[otherID] != before[otherID] {
+			t.Errorf("a second restore moved the state: %v, want %v", again, before)
+		}
+	}
+
+	t.Run("ReplaceNonManual reuse merge", func(t *testing.T) {
+		s := testStore(t)
+		const kept = "the job queue backend is Redis lists"
+		keptID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: kept, Source: "mcp", Importance: 0.5, Agent: "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("Create kept: %v", err)
+		}
+		other := absorbed(t, s, "mcp", "the queue worker reads Redis lists with BLPOP")
+		before := snapshotState(t, s, keptID, other)
+
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: kept, Importance: 0.5, ReplacesIDs: []string{keptID, other},
+		}}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		check(t, s, before, keptID, other)
+	})
+
+	t.Run("FoldRows survivor", func(t *testing.T) {
+		s := testStore(t)
+		survivor, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the job queue backend is Redis lists", Source: "reflection",
+			Importance: 0.5, Agent: "claude-code",
+		})
+		if err != nil {
+			t.Fatalf("Create survivor: %v", err)
+		}
+		folded := absorbed(t, s, "reflection", "the job queue backend is Redis lists, per the runbook")
+		before := snapshotState(t, s, survivor, folded)
+		rows, err := s.GetByIDs(ctx, []string{survivor, folded})
+		if err != nil || len(rows) != 2 {
+			t.Fatalf("GetByIDs: %v (n=%d)", err, len(rows))
+		}
+		plan := map[string]FoldRow{}
+		for _, m := range rows {
+			plan[m.ID] = FoldRow{ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt}
+		}
+		res, err := s.FoldRows(ctx, testProject, []FoldCluster{{Survivor: plan[survivor], Folded: []FoldRow{plan[folded]}}}, "")
+		if err != nil {
+			t.Fatalf("FoldRows: %v", err)
+		}
+		if len(res.Folded) != 1 {
+			t.Fatalf("FoldRows folded %v (skipped %+v), want the one row", res.Folded, res.Skipped)
+		}
+		check(t, s, before, survivor, folded)
 	})
 }
 

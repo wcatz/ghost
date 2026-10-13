@@ -7790,7 +7790,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// The evidence of the rows that were genuinely GONE, from the snapshot that
 	// carried it. Only the reinserted half needs it: a row restored IN PLACE was
 	// never deleted, so its evidence was never in danger, and copying it would
-	// double its records on every repeated restore.
+	// double its records on every repeated restore. What an in-place row DID gain
+	// is the copies a merge carried onto it from the rows coming back here, and
+	// those go (uncarryRestoredSourcesTx), so each restored record exists once.
 	//
 	// The copy replaces rather than appends, and it is scoped to the ids the
 	// INSERT above just created — so it cannot touch a row that came back earlier
@@ -7802,6 +7804,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// restore and the row comes back with none. That is the truth — this database
 	// never recorded the support of a row it could not name — and the alternative
 	// would be inventing it.
+	if err := uncarryRestoredSourcesTx(ctx, tx, snapshotID); err != nil {
+		return 0, err
+	}
 	if len(reinserted) > 0 {
 		if err := restoreSnapshotEvidenceTx(ctx, tx, snapshotID, reinserted); err != nil {
 			return 0, err
