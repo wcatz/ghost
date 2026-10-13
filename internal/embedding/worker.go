@@ -2,7 +2,9 @@ package embedding
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -280,6 +282,12 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 // notifications the worker exists to service. The daemon's answer to a busy
 // machine is to skip this tick, not to spend it.
 //
+// A "pacified" endpoint — one that answers GET / but stalls /api/embed — still
+// costs one embed timeout per project, because EmbedPending's early stop on a
+// timed-out embed returns Reachable (the liveness re-check passed) and SweepOnce
+// cannot distinguish that from a healthy batch. The per-project cost is bounded
+// by the client's per-request timeout, and the next tick retries.
+//
 // The streak is still counted, so a hung endpoint still accrues the outage clock
 // noteSweep maintains: the strictness changes what the sweep DOES, not what it
 // concludes about the endpoint.
@@ -345,6 +353,11 @@ func (w *Worker) EmbedOne(ctx context.Context, memoryID string) {
 // row in a project unembedded at once.
 const projectBatch = 50
 
+// embedPendingBudget is the default per-batch time budget for EmbedPending.
+// Like supersedeEmbedBudget, it bounds time even when the row count bound
+// would allow many attempts against a stalled endpoint.
+const embedPendingBudget = time.Minute
+
 // EmbedPending embeds up to limit of a project's memories that have no vector in
 // this client's identity, and returns how many it wrote. It is the worker's
 // per-project body, exported so a caller that must READ the vector index to do
@@ -372,9 +385,17 @@ const projectBatch = 50
 // the machine's mood: `ghost supersede` calls this to fill the corpus it is
 // about to scan (issue #716), so a stall here left it reporting a clean
 // "0 candidate pairs" for a pair the operator could see. The cost of trying is
-// bounded and small — one request, capped by the client's own timeout, and the
-// loop below stops at the first failure — so the two errors are not symmetric
-// and this is the one worth making.
+// bounded and small — one request, capped by the client's own timeout — so the
+// two errors are not symmetric and this is the one worth making.
+//
+// The batch is bounded in time as well as rows (embedPendingBudget, in the
+// spirit of supersedeEmbedBudget): a stalled endpoint costs at most that budget
+// per batch, never one client timeout per remaining memory. The loop stops
+// early when an embed fails with a timeout or deadline exceeded while the
+// liveness re-check is still Reachable — the "pacified endpoint" shape where
+// the server answers GET / but hangs /api/embed. Ordinary per-row errors (a
+// 400 for an over-long or malformed input, a model error for that one row)
+// still continue to the next row, so one bad memory does not block the rest.
 //
 // `SweepOnce` gates STRICTLY on the same probe, for the cost reason its own
 // comment gives. This leniency is for the callers with no second chance, and a
@@ -428,7 +449,16 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	// embed proves the endpoint is answering, and whatever the re-probe found
 	// after that.
 	got = Reachable
+	budgetCtx, budgetCancel := context.WithTimeout(ctx, embedPendingBudget)
+	defer budgetCancel()
 	for _, id := range ids {
+		if budgetCtx.Err() != nil {
+			if ctx.Err() == nil {
+				w.logger.Info("ollama unavailable, pausing embedding",
+					"embedded", embedded, "reachability", got.String())
+			}
+			return embedded, got
+		}
 		if ctx.Err() != nil {
 			return embedded, got
 		}
@@ -458,13 +488,20 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 					"embedded", embedded, "reachability", got.String())
 				return embedded, got
 			}
-			// Embed failed but liveness is still Reachable: the endpoint answers
-			// / but stalls /api/embed (a "pacified" endpoint). Stopping here
-			// prevents burning the client's timeout on every remaining memory in
-			// this batch.
-			w.logger.Info("ollama unavailable, pausing embedding",
-				"embedded", embedded, "reachability", got.String())
-			return embedded, got
+			// A timeout or deadline exceeded on an embed whose liveness re-check is
+			// still Reachable means the endpoint answers / but stalls /api/embed
+			// (a "pacified" endpoint). Stop this batch to avoid burning the client's
+			// timeout on every remaining memory. Ordinary per-row errors (a 400 for
+			// an over-long or malformed input, a model error for that one row)
+			// still continue to the next row.
+			var urlErr *url.Error
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+				(errors.As(err, &urlErr) && urlErr.Timeout()) {
+				w.logger.Info("embed stalled, pausing batch",
+					"embedded", embedded, "memory_id", id)
+				return embedded, got
+			}
+			continue
 		}
 
 		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.Identity()); err != nil {

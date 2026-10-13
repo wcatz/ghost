@@ -3,11 +3,13 @@ package embedding
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1187,6 +1189,114 @@ func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
 	// for as long as the machine stays busy.
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
 		t.Errorf("a probe that did not answer wrote the ollama-down marker: err=%v", err)
+	}
+}
+
+// TestEmbedPending_StopsAfterTheFirstStalledEmbed is the regression test for
+// #1089: an endpoint that answers GET / with 200 but hangs /api/embed (a
+// "pacified" endpoint). Before the fix, the loop continued past each failed
+// embed, burning the client's per-request timeout on every remaining memory in
+// the batch. After the fix, the batch stops after the first timeout/deadline
+// failure whose liveness re-check is still Reachable.
+func TestEmbedPending_StopsAfterTheFirstStalledEmbed(t *testing.T) {
+	// The probe deadline is lowered so the liveness re-check is cheap.
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
+
+	release := make(chan struct{})
+	var embeds atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			embeds.Add(1)
+			<-release // hang until the test ends
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	for i := 0; i < 8; i++ {
+		store.memories[fmt.Sprintf("mem-%d", i)] = fmt.Sprintf("content %d", i)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	client.httpClient.Timeout = 120 * time.Millisecond
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	started := time.Now()
+	n, verdict := worker.EmbedPending(context.Background(), "proj-a", 0)
+	elapsed := time.Since(started)
+
+	if n != 0 {
+		t.Errorf("embedded %d against a stalled endpoint, want 0", n)
+	}
+	if got := embeds.Load(); got != 1 {
+		t.Errorf("made %d embed attempt(s) against a stalled endpoint, want 1 (stop after first stall)", got)
+	}
+	// One client timeout (120ms) plus probe overhead, not 8 timeouts.
+	if elapsed > 5*time.Second {
+		t.Errorf("batch took %v against a stalled endpoint, want roughly one client timeout", elapsed)
+	}
+	_ = verdict
+}
+
+// TestEmbedPending_ContinuesPastOrdinaryPerRowErrors verifies that a
+// deterministic per-row error (a 400 for one specific input) does NOT stop the
+// batch — every other row is still embedded. This is the guard against the
+// over-correction where any failed embed ends the batch, which would leave
+// every row behind a bad row permanently unembedded.
+func TestEmbedPending_ContinuesPastOrdinaryPerRowErrors(t *testing.T) {
+	release := make(chan struct{})
+	var embeds atomic.Int64
+	const badContent = "this row is rejected with 400"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			embeds.Add(1)
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), badContent) {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	store.memories["mem-bad"] = badContent
+	store.memories["mem-good-1"] = "good content 1"
+	store.memories["mem-good-2"] = "good content 2"
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
+
+	n, _ := worker.EmbedPending(context.Background(), "proj-a", 0)
+
+	if n != 2 {
+		t.Errorf("embedded %d, want 2 (the two good rows; the bad row is skipped but does not stop the batch)", n)
+	}
+	if len(store.embeddings["mem-good-1"]) == 0 || len(store.embeddings["mem-good-2"]) == 0 {
+		t.Errorf("good rows were not embedded: good-1=%v good-2=%v",
+			len(store.embeddings["mem-good-1"]) > 0, len(store.embeddings["mem-good-2"]) > 0)
 	}
 }
 
