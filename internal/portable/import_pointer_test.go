@@ -410,3 +410,114 @@ func TestAPointerToARecordOnlyInTheStoreIsKept(t *testing.T) {
 		nil,
 		map[string]string{"task/ts2": "ts1", "decision/ds2": "ds1", "task/tk1": "", "task/tk2": "tk1"})
 }
+
+// chainIntoCycle is n task records, task i blocked by task i+1, the last two
+// blocking each other: one long chain that ends in a 2-cycle.
+func chainIntoCycle(n int) []struct{ id, blockedBy string } {
+	rows := make([]struct{ id, blockedBy string }, n)
+	for i := range rows {
+		next := i + 1
+		if i == n-1 {
+			next = n - 2
+		}
+		rows[i].id, rows[i].blockedBy = fmt.Sprintf("c%d", i), fmt.Sprintf("c%d", next)
+	}
+	return rows
+}
+
+// TestCycleMembersIsLinear: finding a cycle's members walks each record once.
+// It counts the calls made to the id and pointer accessors rather than timing
+// anything, so it fails on a quadratic or cubic walk however fast the machine.
+// The walk that preceded it re-walked every record's whole path with a linear
+// scan per step and made a dry run of 4000 such tasks take minutes; at this
+// size it fails in seconds rather than minutes.
+func TestCycleMembersIsLinear(t *testing.T) {
+	const n = 1000
+	recs := taskRecords(chainIntoCycle(n))
+	calls := 0
+	idOf := func(r parsedRecord) string { calls++; return r.rec.Task.ID }
+	refOf := func(r parsedRecord) string { calls++; return r.rec.Task.BlockedBy }
+
+	members := cycleMembers(recs, idOf, refOf)
+	for i, on := range members {
+		if want := i >= n-2; on != want {
+			t.Errorf("record c%d on a cycle = %v, want %v", i, on, want)
+		}
+	}
+	if calls > 4*n {
+		t.Errorf("cycleMembers made %d accessor calls for %d records, want at most %d — the walk is no longer linear", calls, n, 4*n)
+	}
+}
+
+// TestTopoOrderOfAChainIntoACycleIsBounded: the whole ordering of that chain —
+// the stall, the cycle broken, and one pass per link after it — stays within a
+// quadratic number of accessor calls. A membership test that scanned the
+// pending slice made each pass quadratic and the whole ordering cubic. Every
+// link keeps its pointer and follows its target; only the two cycle members
+// lose theirs.
+func TestTopoOrderOfAChainIntoACycleIsBounded(t *testing.T) {
+	const n = 1000
+	calls := 0
+	idOf := func(r parsedRecord) string { calls++; return r.rec.Task.ID }
+	refOf := func(r parsedRecord) string { calls++; return r.rec.Task.BlockedBy }
+	clearRef := func(r parsedRecord) parsedRecord {
+		task := *r.rec.Task
+		task.BlockedBy = ""
+		r.rec.Task = &task
+		return r
+	}
+
+	got := topoOrder(taskRecords(chainIntoCycle(n)), idOf, refOf, clearRef)
+	if len(got) != n {
+		t.Fatalf("ordered %d records, want %d", len(got), n)
+	}
+	pos := map[string]int{}
+	for i, r := range got {
+		pos[r.rec.Task.ID] = i
+	}
+	for i, r := range got {
+		task := r.rec.Task
+		cycle := task.ID == fmt.Sprintf("c%d", n-1) || task.ID == fmt.Sprintf("c%d", n-2)
+		if cycle != (task.BlockedBy == "") {
+			t.Errorf("record %s blocked_by = %q after ordering", task.ID, task.BlockedBy)
+		}
+		if task.BlockedBy != "" && pos[task.BlockedBy] > i {
+			t.Errorf("record %s is ordered before its blocker %s", task.ID, task.BlockedBy)
+		}
+	}
+	if limit := 4 * n * n; calls > limit {
+		t.Errorf("topoOrder made %d accessor calls for %d records, want at most %d — the ordering is worse than quadratic", calls, n, limit)
+	}
+}
+
+// TestCycleMembersMarksOnlyCycles: membership is exact whatever the order the
+// records are walked in — a tail listed after its cycle, a second tail joining
+// the first one partway, a record pointing at itself, a pointer to an id
+// outside the set, and two separate cycles. A walk that reaches a record an
+// earlier walk finished must not mark its own path as a cycle.
+func TestCycleMembersMarksOnlyCycles(t *testing.T) {
+	rows := []struct{ id, blockedBy string }{
+		{id: "a", blockedBy: "b"}, // cycle a <-> b
+		{id: "b", blockedBy: "a"},
+		{id: "c", blockedBy: "a"},       // tail into the cycle, listed after it
+		{id: "d", blockedBy: "c"},       // tail of the tail
+		{id: "e", blockedBy: "d"},       // joins the finished path at d
+		{id: "s", blockedBy: "s"},       // points at itself
+		{id: "x", blockedBy: "outside"}, // names an id outside the set
+		{id: "p", blockedBy: "q"},       // a second cycle p -> q -> r -> p
+		{id: "q", blockedBy: "r"},
+		{id: "r", blockedBy: "p"},
+		{id: "f", blockedBy: "q"}, // tail into the second cycle
+		{id: "g", blockedBy: ""},
+	}
+	want := map[string]bool{"a": true, "b": true, "s": true, "p": true, "q": true, "r": true}
+	recs := taskRecords(rows)
+	members := cycleMembers(recs,
+		func(r parsedRecord) string { return r.rec.Task.ID },
+		func(r parsedRecord) string { return r.rec.Task.BlockedBy })
+	for i, r := range rows {
+		if members[i] != want[r.id] {
+			t.Errorf("record %s on a cycle = %v, want %v", r.id, members[i], want[r.id])
+		}
+	}
+}

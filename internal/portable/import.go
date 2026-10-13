@@ -940,21 +940,54 @@ func orderDecisions(recs []parsedRecord) []parsedRecord {
 // outcome: the rows themselves are good, and a pointer within a cycle describes
 // no ordering anyone could have intended.
 func topoOrder(recs []parsedRecord, idOf, refOf func(parsedRecord) string, clearRef func(parsedRecord) parsedRecord) []parsedRecord {
-	pending := make([]parsedRecord, len(recs))
-	copy(pending, recs)
-	out := make([]parsedRecord, 0, len(recs))
-	emitted := make(map[string]bool, len(recs))
+	// The passes work on indices into a private copy, with each record's id and
+	// pointer read once. A chain hanging off a cycle takes one pass per link
+	// once the cycle is broken, so a pass has to cost no more than a walk over
+	// the indices still pending: copying the records themselves, or asking the
+	// pending slice whether it holds an id, made the whole ordering cubic.
+	//
+	// Ids are numbered once, so a pass compares integers rather than hashing
+	// strings. Every record is either emitted or pending, so "the pointer names
+	// a pending record" is "it names an id of recs that has not been emitted";
+	// a pointer to an id outside recs (ref -1) constrains nothing.
+	work := make([]parsedRecord, len(recs))
+	copy(work, recs)
+	number := make(map[string]int, len(work))
+	idNum := make([]int, len(work))
+	for i, r := range work {
+		id := idOf(r)
+		n, ok := number[id]
+		if !ok {
+			n = len(number)
+			number[id] = n
+		}
+		idNum[i] = n
+	}
+	refNum := make([]int, len(work))
+	for i, r := range work {
+		refNum[i] = -1
+		if ref := refOf(r); ref != "" {
+			if n, ok := number[ref]; ok {
+				refNum[i] = n
+			}
+		}
+	}
+	emitted := make([]bool, len(number))
+	pending := make([]int, len(work))
+	for i := range pending {
+		pending[i] = i
+	}
+	out := make([]parsedRecord, 0, len(work))
 	for len(pending) > 0 {
-		var deferred []parsedRecord
+		deferred := pending[:0:0]
 		progressed := false
-		for _, r := range pending {
-			ref := refOf(r)
-			if ref != "" && !emitted[ref] && containsID(pending, ref, idOf) {
-				deferred = append(deferred, r)
+		for _, i := range pending {
+			if ref := refNum[i]; ref != -1 && !emitted[ref] {
+				deferred = append(deferred, i)
 				continue
 			}
-			out = append(out, r)
-			emitted[idOf(r)] = true
+			out = append(out, work[i])
+			emitted[idNum[i]] = true
 			progressed = true
 		}
 		if !progressed {
@@ -975,14 +1008,16 @@ func topoOrder(recs []parsedRecord, idOf, refOf func(parsedRecord) string, clear
 			// Membership is decided for every record before any pointer is
 			// cleared: clearing as the scan goes would break the cycle at its
 			// first member and leave the rest of it looking acyclic.
-			members := make([]bool, len(deferred))
-			for i, r := range deferred {
-				members[i] = onCycle(deferred, r, idOf, refOf)
+			stalled := make([]parsedRecord, len(deferred))
+			for k, i := range deferred {
+				stalled[k] = work[i]
 			}
+			members := cycleMembers(stalled, idOf, refOf)
 			cleared := false
-			for i, r := range deferred {
-				if members[i] {
-					deferred[i] = clearRef(r)
+			for k, i := range deferred {
+				if members[k] {
+					work[i] = clearRef(work[i])
+					refNum[i] = -1
 					cleared = true
 				}
 			}
@@ -990,8 +1025,8 @@ func topoOrder(recs []parsedRecord, idOf, refOf func(parsedRecord) string, clear
 				// Unreachable with one pointer per record — a remainder that
 				// cannot progress always holds a cycle — but the loop must end
 				// whatever the input, so the old rule stands behind it.
-				for _, r := range deferred {
-					out = append(out, clearRef(r))
+				for _, i := range deferred {
+					out = append(out, clearRef(work[i]))
 				}
 				break
 			}
@@ -1001,38 +1036,64 @@ func topoOrder(recs []parsedRecord, idOf, refOf func(parsedRecord) string, clear
 	return out
 }
 
-// onCycle reports whether following pointers from r, through recs, comes back
-// to r. Each record has at most one pointer, so the walk is a single path and
-// len(recs) steps are enough to close any cycle it is on.
-func onCycle(recs []parsedRecord, r parsedRecord, idOf, refOf func(parsedRecord) string) bool {
-	id := idOf(r)
-	cur := refOf(r)
-	for range len(recs) {
-		if cur == "" {
-			return false
+// cycleMembers reports, for each record, whether it lies on a cycle of
+// pointers through recs. Each record has at most one pointer, so the records
+// form a graph in which every node has at most one successor (the first record
+// carrying the id its pointer names), and every walk is a single path.
+//
+// It runs in time linear in len(recs): each record is walked once. A walk
+// stops at a record with no successor or one an earlier walk has finished
+// (neither can lead back into this walk), or at one this walk has already
+// visited — and then exactly the records from that one to the end of the path
+// are the cycle. Walking every record's path afresh, as this once did, made an
+// import of a long chain ending in a cycle cubic in the chain's length.
+func cycleMembers(recs []parsedRecord, idOf, refOf func(parsedRecord) string) []bool {
+	index := make(map[string]int, len(recs))
+	for i, r := range recs {
+		if _, seen := index[idOf(r)]; !seen {
+			index[idOf(r)] = i
 		}
-		if cur == id {
-			return true
-		}
-		next := ""
-		for _, c := range recs {
-			if idOf(c) == cur {
-				next = refOf(c)
-				break
+	}
+	next := make([]int, len(recs))
+	for i, r := range recs {
+		next[i] = -1
+		if ref := refOf(r); ref != "" {
+			if j, ok := index[ref]; ok {
+				next[i] = j
 			}
 		}
-		cur = next
 	}
-	return false
-}
-
-func containsID(recs []parsedRecord, id string, idOf func(parsedRecord) string) bool {
-	for _, r := range recs {
-		if idOf(r) == id {
-			return true
+	const (
+		unvisited = iota
+		onPath
+		done
+	)
+	state := make([]int, len(recs))
+	members := make([]bool, len(recs))
+	pos := make([]int, len(recs)) // a record's position in the current path
+	var path []int
+	for start := range recs {
+		if state[start] != unvisited {
+			continue
+		}
+		path = path[:0]
+		cur := start
+		for cur != -1 && state[cur] == unvisited {
+			state[cur] = onPath
+			pos[cur] = len(path)
+			path = append(path, cur)
+			cur = next[cur]
+		}
+		if cur != -1 && state[cur] == onPath {
+			for _, i := range path[pos[cur]:] {
+				members[i] = true
+			}
+		}
+		for _, i := range path {
+			state[i] = done
 		}
 	}
-	return false
+	return members
 }
 
 // sortTasksByID puts tasks in id order, for the deterministic export.
