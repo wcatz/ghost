@@ -101,10 +101,11 @@ var ErrInvalidRetention = errors.New("invalid retention tier")
 // InvalidRetentionError is the one refusal, built once so the MCP save tool, the
 // CLI and the store cannot word it three ways. It names the value that was
 // refused and the three that were available: a caller who typed "forever" learns
-// which word to type, rather than that something was wrong.
+// which word to type, rather than that something was wrong. The value is
+// rendered through ProjectArg, so a token-shaped or oversized one is withheld.
 func InvalidRetentionError(got string) error {
-	return fmt.Errorf("%w %q: must be one of %s — %s (useful for this conversation only), %s (the default: persists until resolved), %s (keep-forever, exempt from consolidation, supersede, resolve and pruning)",
-		ErrInvalidRetention, got, strings.Join(retentionTiers, ", "),
+	return fmt.Errorf("%w %s: must be one of %s — %s (useful for this conversation only), %s (the default: persists until resolved), %s (keep-forever, exempt from consolidation, supersede, resolve and pruning)",
+		ErrInvalidRetention, RefusalArg("retention", got), strings.Join(retentionTiers, ", "),
 		RetentionSession, RetentionProject, RetentionPersistent)
 }
 

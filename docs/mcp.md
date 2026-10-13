@@ -23,9 +23,9 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
 | Context | `ghost_list_projects` | List known projects and their IDs |
 | Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
-| Tasks | `ghost_task_create` | Create a durable task |
+| Tasks | `ghost_task_create` | Create a durable task; `priority` is 0-4 (default 2), and a value outside that range is refused by name rather than reset to the default |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
-| Tasks | `ghost_task_update` | Change task status, priority, or description; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done`. The row is read and merged inside the write transaction that writes it, so two clients editing different fields of one task (two MCP servers on one store, for instance) both land, and a task deleted in that window is an error rather than a reported success |
+| Tasks | `ghost_task_update` | Change task status, priority, or description; a `priority` outside 0-4 is refused and the stored priority is left unchanged; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done`. The row is read and merged inside the write transaction that writes it, so two clients editing different fields of one task (two MCP servers on one store, for instance) both land, and a task deleted in that window is an error rather than a reported success |
 | Tasks | `ghost_task_complete` | Mark a task done with optional notes |
 | Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
@@ -38,7 +38,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 The `source_ref` argument of `ghost_memory_save`, `ghost_save_global` and `ghost_memory_update` may not start with `decision:`: that prefix is reserved for the link `ghost_decision_record` writes between a decision and its companion memory, and a save or update that carries it is refused. (`ghost import` keeps the link of an exported companion. If more than one memory claims a decision and none is uniquely the one the decision tool wrote, nothing is retired and the `ghost_decision_record` answer warns that the old memory is still live.)
 
-The `scope` argument of `ghost_memory_save` is an object of string values naming where a memory applies, such as `{"environment": "production", "component": "api"}`. It is bounded and guarded like the other text a save stores: at most 16 keys, a key of at most 64 bytes, a value of at most 128 bytes, each refused with the limit named rather than cut, and a key or value shaped like a token (or a `key=value` pair that is one) is refused with `refusing to store credential-shaped content in scope…` and nothing is stored. The same checks run on `ghost import`. No tool edits a scope after the save. A value that is not a string is refused by its position among the keys in sorted order, never by quoting the key, so a refusal carries no caller text. A listing prints at most 16 scope keys, with each key and value cut to those lengths and marked, for a row stored before the bound existed.
+The `scope` argument of `ghost_memory_save` is an object of string values naming where a memory applies, such as `{"environment": "production", "component": "api"}`. It is bounded and guarded like the other text a save stores: at most 16 keys, a key of at most 64 bytes, a value of at most 128 bytes, each refused with the limit named rather than cut, and a key or value shaped like a token (or a `key=value` pair that is one) is refused with `refusing to store credential-shaped content in scope…` and nothing is stored. The same checks run on `ghost import`. No tool edits a scope after the save. A value that is not a string is refused by its position among the keys in sorted order, never by quoting the key, so a refusal carries no caller text. An argument refusal names the argument and the shape it expected and never repeats the value past the token guard and a 256-byte bound: a token-shaped or longer value is withheld (with its length), and a value of the wrong type is named by type and, in an array, by position. A listing prints at most 16 scope keys, with each key and value cut to those lengths and marked, for a row stored before the bound existed.
 
 `ghost_health` also lists the pinned memories a newer memory contradicts through a live `contradicts` edge, under `**Pinned rows with open contradictions:** N` (at most 20 entries, then `... and M more`; a failed read says `could not be read`). It is report-only: nothing is unpinned, resolved or withheld, and the owner decides whether to unpin or update the row.
 
@@ -518,7 +518,11 @@ before its own INSERT.
 
 A project a save OPENS from a name-shaped id is bound to the checkout the server
 is actually in — the git top level of its own working directory, plus that
-checkout's origin remote — so a session in the same checkout resolves it. Both
+checkout's origin remote — so a session in the same checkout resolves it. The
+recorded checkout must be a directory: `EvalSymlinks` resolves a regular file
+exactly as it resolves a directory, so the resolved path is statted and a
+non-directory is declined, opening the project unbound rather than bound to a
+location no session can stand in. Both
 answers come from `repo.GitCommand`, the one helper every git child in Ghost is
 built by, which drops from the child every inherited git variable that can
 relocate the repository or replace the file its configuration is read from. The

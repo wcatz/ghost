@@ -148,7 +148,7 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// naming the argument rather than as the argument (#839's way out).
 			if seenProject {
 				return opts, fmt.Errorf("--project was given twice (%s and %s)",
-					memory.ProjectArg("project", opts.Project), memory.ProjectArg("project", value))
+					memory.RefusalArg("project", opts.Project), memory.RefusalArg("project", value))
 			}
 			if value == "" {
 				return opts, errors.New("--project was given an empty value (drop it to report on the project this directory resolves to, or name one explicitly)")
@@ -209,7 +209,7 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			// they ran.
 			if seenCwd {
 				return opts, fmt.Errorf("--cwd was given twice (%s and %s)",
-					memory.ProjectArg("cwd", opts.Cwd), memory.ProjectArg("cwd", value))
+					memory.RefusalArg("cwd", opts.Cwd), memory.RefusalArg("cwd", value))
 			}
 			if value == "" {
 				return opts, errors.New("--cwd was given an empty value (drop it to use the directory you are standing in, or name one explicitly)")
@@ -278,12 +278,12 @@ func buildContextAudit(ctx context.Context, opts contextAuditOptions, dataDir st
 	}
 	resolved, _, rErr := store.ResolveProject(ctx, scope)
 	if rErr != nil {
-		return audit.Report{}, fmt.Errorf("resolve project %s: %w", memory.ProjectArg("project", scope), rErr)
+		return audit.Report{}, fmt.Errorf("resolve project %s: %w", memory.RefusalArg("project", scope), rErr)
 	}
 	if resolved == "" {
 		return audit.Report{}, fmt.Errorf(
 			"project %s not found — nothing was reported, and this command never reports over every project at once; name one explicitly (--project <name-or-id>) or run it inside a project directory",
-			memory.ProjectArg("project", scope))
+			memory.RefusalArg("project", scope))
 	}
 	return audit.BuildReport(ctx, store, audit.ReportOptions{
 		ProjectID: resolved,
