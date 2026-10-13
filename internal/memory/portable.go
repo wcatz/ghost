@@ -668,6 +668,17 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import project %s: %w", p.ID, err)
 	}
+	// The project's ghost_state row, in the SAME transaction as the projects
+	// insert and for the same reason the other two creation routes write it
+	// (EnsureProject, createRepoProjectTx): a project row without it is a project
+	// whose learned context cannot be recorded. `ghost reflect` writes learned
+	// context with a plain UPDATE, so without this row that UPDATE affects 0 rows
+	// and used to report success while storing nothing. INSERT OR IGNORE keeps a
+	// re-import of an id the store already holds a skip either way, though the
+	// presence re-check above already returned for that case.
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, p.ID); err != nil {
+		return false, fmt.Errorf("import project %s: state row: %w", p.ID, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("import project %s: commit: %w", p.ID, err)
 	}

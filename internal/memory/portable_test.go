@@ -812,6 +812,62 @@ func TestImportProjectSkipsExistingAndNeverRebinds(t *testing.T) {
 	}
 }
 
+// TestImportProjectCreatesItsGhostStateRow: ImportProject writes the projects row
+// directly, with the artifact's own id and timestamps, and it has to write the
+// project's ghost_state row in the SAME transaction. The other project creation
+// routes (EnsureProject and createRepoProjectTx) already do. Without it an
+// imported project has no state row, so `ghost reflect`'s learned context — a
+// plain UPDATE against ghost_state — affects 0 rows and reports success while
+// storing nothing, and IncrementInteraction fails outright.
+//
+// The dry run is asserted too, because the state row belongs beside the project
+// INSERT inside the apply, not on the preview path: a dry run that created one
+// would write state for a project it says it has not created.
+func TestImportProjectCreatesItsGhostStateRow(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	created, err := store.ImportProject(ctx,
+		PortableProject{ID: "p1", Path: "/src/p1", Name: "p1"}, true)
+	if err != nil || !created {
+		t.Fatalf("ImportProject = %v, %v; want created", created, err)
+	}
+
+	stateRows := func(id string) int {
+		t.Helper()
+		var n int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM ghost_state WHERE project_id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("count ghost_state for %q: %v", id, err)
+		}
+		return n
+	}
+	if n := stateRows("p1"); n != 1 {
+		t.Fatalf("imported project has %d ghost_state row(s), want 1", n)
+	}
+
+	// The state row is usable: reflection's learned context lands on the
+	// imported project rather than vanishing.
+	if err := store.UpdateLearnedContext(ctx, "p1", "what reflection concluded", "summary"); err != nil {
+		t.Fatalf("UpdateLearnedContext on an imported project: %v", err)
+	}
+	got, err := store.GetLearnedContext(ctx, "p1")
+	if err != nil {
+		t.Fatalf("GetLearnedContext: %v", err)
+	}
+	if got != "what reflection concluded" {
+		t.Errorf("learned context = %q, want the value written", got)
+	}
+
+	created, err = store.ImportProject(ctx,
+		PortableProject{ID: "p2", Path: "/src/p2", Name: "p2"}, false)
+	if err != nil || !created {
+		t.Fatalf("dry-run ImportProject = %v, %v; want previewed", created, err)
+	}
+	if n := stateRows("p2"); n != 0 {
+		t.Errorf("a dry run created %d ghost_state row(s)", n)
+	}
+}
+
 // findDecision reads one decision back by id, the only decision read the store
 // offers being a per-project list.
 func findDecision(t *testing.T, s *Store, id string) Decision {

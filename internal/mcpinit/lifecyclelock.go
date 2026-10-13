@@ -76,7 +76,7 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 		// about as often as it is a project name (#839). Quoting it here put a
 		// credential-shaped operand into the operator's stderr in the one package
 		// that had no call to the renderer.
-		return noop, true, fmt.Errorf("resolve project %s: %w", memory.ProjectArg("project", project), err)
+		return noop, true, fmt.Errorf("resolve project %s: %w", memory.RefusalArg("project", project), err)
 	}
 	if id == "" {
 		// Unknown project: nothing to lock, and the phases will report it.
