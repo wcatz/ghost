@@ -963,3 +963,103 @@ func TestAnOverBoundScopeValueUnderATokenShapedKeyDoesNotPrintTheKey(t *testing.
 		t.Errorf("the report printed the token-shaped scope key:\n%s", report)
 	}
 }
+
+// TestAnOrphanChildAloneIsAdvisedToFixItsProjectAndNotTheRow pins the bucket the
+// report puts an orphan in, at the seam where it can be stated alone. An orphan's
+// own bytes passed every predicate and its id is fine — the project was the
+// problem — so the re-key/delete advice names a repair that cannot fix it: the
+// memory is the only copy of itself, and deleting it does not touch the refused
+// project. It is neither repairable (the row is not what is wrong) nor
+// unrepairable (that sentence is about a kind with no delete surface, which is a
+// different fact), so it must set neither bucket.
+//
+// Through an export an orphan is never alone — a child is orphaned only when its
+// project was refused, so the refused project is left out beside it — which is
+// why this drives `reportSkippedRecords` directly rather than through a store.
+func TestAnOrphanChildAloneIsAdvisedToFixItsProjectAndNotTheRow(t *testing.T) {
+	var out strings.Builder
+	err := reportSkippedRecords(&out, []portable.SkippedRecord{{
+		Type:   portable.TypeMemory,
+		ID:     "m-orphan",
+		Reason: "the project it names was left out of this artifact",
+		Orphan: true,
+	}})
+	if err == nil {
+		t.Fatal("a report with a left-out record returned no error, so the command would exit 0 and a backup script would not notice")
+	}
+	report := out.String()
+
+	if !strings.Contains(report, "fix the project and re-export") {
+		t.Errorf("the orphan is not told to fix its project:\n%s", report)
+	}
+	if strings.Contains(report, "To include it, delete the row") {
+		t.Errorf("the orphan is handed the re-key/delete advice, which is the project's repair and drops the only copy of the memory:\n%s", report)
+	}
+	if strings.Contains(report, "NO delete surface") {
+		t.Errorf("the orphan is reported as unremovable, which is a fact about its own kind and not about the project that left it out:\n%s", report)
+	}
+}
+
+// TestAnExportThatLeavesAChildWithItsProjectOutAdvisesTheProjectNotTheRow is the
+// issue's own reproduction: a project with an empty name and one child memory.
+// The child is named with the orphan reason, and the batch advice that follows
+// is about the PROJECT — `ghost project delete <project>` — with the child's own
+// sentence telling the operator to repair the project and re-export.
+//
+// Without that sentence the delete advice sits under the memory's `!` line and
+// reads as advice for the memory, which deletes the only copy and fixes neither
+// the project nor the row. The assertion the issue asks for is that the child is
+// advised as a consequence of its project, so it is asserted by name and not
+// merely by the absence of the delete wording — which the skipped project
+// legitimately still prints.
+func TestAnExportThatLeavesAChildWithItsProjectOutAdvisesTheProjectNotTheRow(t *testing.T) {
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO projects (id, path, name) VALUES (?, '/src/nameless', '')`, "p-nameless")
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at)
+	                        VALUES (?, 'p-nameless', 'gotcha', 'a fact of the project', 'mcp', datetime('now'), datetime('now'))`, "m-orphan")
+
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn,
+		filepath.Join(t.TempDir(), "artifact.jsonl"), "")
+	report := summary.String() + warn.String() + fmtErr(err)
+
+	if err == nil {
+		t.Fatal("an export that left records out exited 0; a backup script would not notice")
+	}
+	if !strings.Contains(report, "left out: project p-nameless") {
+		t.Errorf("the report does not name the project it left out:\n%s", report)
+	}
+	if !strings.Contains(report, "left out: memory m-orphan — the project it names was left out of this artifact") {
+		t.Errorf("the report does not name the child with the orphan reason:\n%s", report)
+	}
+	if !strings.Contains(report, "fix the project and re-export") {
+		t.Errorf("the report does not give the orphan its own advice, so the child looks like a row refused over its own bytes:\n%s", report)
+	}
+}
+
+// TestAnOrphanTaskOrDecisionIsNotReportedAsUnremovable covers the kinds with no
+// selective delete surface. That sentence is a fact about a row refused over its
+// own bytes; a task or decision left out only because its project was left out
+// needs no delete at all, so naming the kind there sends the operator to edit the
+// database for a row that comes back when the project is fixed.
+func TestAnOrphanTaskOrDecisionIsNotReportedAsUnremovable(t *testing.T) {
+	for _, kind := range []string{portable.TypeTask, portable.TypeDecision} {
+		t.Run(kind, func(t *testing.T) {
+			var out strings.Builder
+			_ = reportSkippedRecords(&out, []portable.SkippedRecord{
+				{Type: portable.TypeProject, ID: "p-nameless", Reason: "ghost import refuses it: name is required"},
+				{Type: kind, ID: "x-orphan", Reason: "the project it names was left out of this artifact", Orphan: true},
+			})
+			report := out.String()
+			if strings.Contains(report, "NO delete surface") {
+				t.Errorf("the orphaned %s is reported as unremovable:\n%s", kind, report)
+			}
+			if !strings.Contains(report, "fix the project and re-export") {
+				t.Errorf("the orphaned %s is not told to fix its project:\n%s", kind, report)
+			}
+			if !strings.Contains(report, "ghost project delete <project>") {
+				t.Errorf("the refused project lost its own repair advice:\n%s", report)
+			}
+		})
+	}
+}
