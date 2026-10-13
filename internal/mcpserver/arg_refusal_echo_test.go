@@ -59,6 +59,18 @@ func TestArgumentRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 		{"status", "ghost_task_update", func(v string) map[string]any {
 			return map[string]any{"task_id": "t", "status": v}
 		}},
+		{"status list", "ghost_task_list", func(v string) map[string]any {
+			return map[string]any{"project_id": "p", "status": v}
+		}},
+		{"status decisions list", "ghost_decisions_list", func(v string) map[string]any {
+			return map[string]any{"project_id": "p", "status": v}
+		}},
+		{"category list", "ghost_memories_list", func(v string) map[string]any {
+			return map[string]any{"project_id": "p", "category": v}
+		}},
+		{"retention list", "ghost_memories_list", func(v string) map[string]any {
+			return map[string]any{"project_id": "p", "retention": v}
+		}},
 		{"relation", "ghost_link_withdraw", func(v string) map[string]any {
 			return map[string]any{"project_id": "p", "source_id": "s", "target_id": "t", "relation": v}
 		}},

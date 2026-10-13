@@ -198,7 +198,7 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
 	if oldID == newID {
-		return out, fmt.Errorf("supersede decision: a decision cannot supersede itself (%s)", oldID)
+		return out, fmt.Errorf("supersede decision: a decision cannot supersede itself (%s)", RefusalArg("decision_id", oldID))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -219,10 +219,10 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM decisions WHERE id = ? AND project_id = ?`,
 		newID, projectID).Scan(&exists); err != nil {
-		return out, fmt.Errorf("supersede decision: lookup %s: %w", newID, err)
+		return out, fmt.Errorf("supersede decision: lookup %s: %w", RefusalArg("decision_id", newID), err)
 	}
 	if exists == 0 {
-		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
+		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", RefusalArg("decision_id", newID), RefusalArg("project_id", projectID))
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -238,7 +238,7 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: rows affected: %w", err)
 	}
 	if n == 0 {
-		return out, fmt.Errorf("supersede decision: decision %s not found in project %s", oldID, projectID)
+		return out, fmt.Errorf("supersede decision: decision %s not found in project %s", RefusalArg("decision_id", oldID), RefusalArg("project_id", projectID))
 	}
 
 	out, err = retireDecisionCompanionTx(ctx, tx, projectID, oldID, newID)
