@@ -45,8 +45,10 @@ jobs:
     # provider refuses CI calls anyway.
     #
     # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
-    # not Kimi: Muse Spark 1.3 Contributor is the cheapest suitable current
-    # opencode-go route. The secret is injected only around its invocation.
+    # not Kimi: DeepSeek V4.1 Flash is the current opencode-go route, chosen
+    # after Muse Spark 1.3 Contributor hit the Go usage limit while the free
+    # tier refused every anonymous CI call. The secret is injected only around
+    # its invocation.
     # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: >-
@@ -59,7 +61,7 @@ jobs:
         opencode/space-bunny-free
         opencode/muse-spark-1.3-contributor-free
         opencode/big-pickle
-      PAID_MODEL: opencode-go/muse-spark-1.3-contributor
+      PAID_MODEL: opencode-go/deepseek-v4.1-flash
     # Must stay above the bounded model-selection phase (15 min), the free
     # review phase (70 min), the paid fallback phase (15 min), and the
     # ~3 min of checkout/install/prepare ahead of them, or the job ceiling

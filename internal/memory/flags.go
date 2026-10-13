@@ -155,7 +155,7 @@ func (s *Store) FlagMemory(ctx context.Context, req FlagMemoryRequest) error {
 		`SELECT project_id, content FROM memories WHERE id = ?`, req.MemoryID,
 	).Scan(&owner, &content)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: %s", ErrFlagNoMemory, req.MemoryID)
+		return fmt.Errorf("%w: %s", ErrFlagNoMemory, RefusalArg("memory_id", req.MemoryID))
 	}
 	if err != nil {
 		return fmt.Errorf("flag memory: read the memory: %w", err)
