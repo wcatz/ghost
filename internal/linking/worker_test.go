@@ -185,8 +185,8 @@ func (p *panicOnceStore) ListProjects(ctx context.Context) ([]memory.Project, er
 	return p.Store.ListProjects(ctx)
 }
 
-func (p *panicOnceStore) MarkLinkScanned(ctx context.Context, memoryID string) error {
-	err := p.Store.MarkLinkScanned(ctx, memoryID)
+func (p *panicOnceStore) MarkLinkScanned(ctx context.Context, memoryID string, scanned []float32) error {
+	err := p.Store.MarkLinkScanned(ctx, memoryID, scanned)
 	if err == nil && p.scanned != nil {
 		select {
 		case p.scanned <- memoryID:

@@ -779,7 +779,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasOrphan bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -792,6 +792,13 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// no SkippedRecord field and never reaches this writer.
 		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
 			return err
+		}
+		// An orphan is in neither bucket: its own bytes were never judged and its
+		// id is fine, so re-keying or deleting it repairs nothing — the project is
+		// what was refused, and the child comes back when the project does.
+		if sk.Orphan {
+			hasOrphan = true
+			continue
 		}
 		// A batch can hold both kinds, so the advice is collected rather than
 		// decided from the first row: naming a project command for a task is the
@@ -846,8 +853,15 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
-		return err
+	if hasRepairable || hasUnrepairable {
+		if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
+			return err
+		}
+	}
+	if hasOrphan {
+		if _, err := fmt.Fprintln(out, "  A record left out because its project was left out is not refused for anything of its own, and deleting it would drop the only copy: fix the project and re-export, and the record is written with it."); err != nil {
+			return err
+		}
 	}
 	// Both advice sentences below are per-BATCH and each names only the kinds it
 	// applies to, so a mixed batch gets both: an operator with a skipped project
@@ -890,7 +904,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		unrepairable := []string{}
 		for _, kind := range []string{portable.TypeTask, portable.TypeDecision} {
 			for _, sk := range skipped {
-				if sk.Type == kind {
+				if sk.Type == kind && !sk.Orphan {
 					unrepairable = append(unrepairable, kind)
 					break
 				}
