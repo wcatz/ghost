@@ -478,10 +478,10 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			i++
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				return "", "", "", fmt.Errorf("unknown flag %q", args[i])
+				return "", "", "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 			}
 			if projectSet {
-				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+				return "", "", "", fmt.Errorf("unexpected extra argument %s", memory.RefusalArg("project", args[i]))
 			}
 			project, projectSet = args[i], true
 		}
@@ -1513,7 +1513,7 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, _, appliedByCategory, applied, err := applyReflection(
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
@@ -1595,35 +1595,8 @@ func runReflect() {
 	// Keying this on the project-memory count alone dropped both the summary
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
-	if applied && (promoted > 0 || len(keptMems) > 0 || len(keptProjectMems) > 0 || len(keptGlobalMems) > 0) {
-		// appliedSummary counts what the store reports landing in the project:
-		// the replace's own writes PLUS the candidates written back into it
-		// (the full folded set when promotion is off, the kept subset when it
-		// is on). Only the cross-project component still subtracts a drop
-		// count, and with promotion off every cross-project refusal counts as
-		// the global half's: the replace guards the folded list a second time
-		// and the store moves those refusals back to the half that produced the
-		// candidates, so one subtraction covers both guard passes.
-		summaryGlobalDropped := 0
-		if !parsed.promoteGlobals {
-			summaryGlobalDropped = droppedGlobal
-		}
-		// appliedSummary reports the REAL promoted count rather than the number
-		// of candidates, so a partial promotion does not print "3 promoted to
-		// global" one line after "Promoted 1/3".
-		summary := appliedSummary(appliedByCategory, keptGlobalMems, promoted, summaryGlobalDropped, parsed.promoteGlobals)
-		fmt.Printf("Applied: %s\n", summary)
-		// The follow-up names candidates that are actually in the project: a
-		// round whose cross-project candidates were all refused has nothing to
-		// inject into every project.
-		if !parsed.promoteGlobals && crossProjectKept(keptGlobalMems, summaryGlobalDropped) > 0 {
-			fmt.Println("(re-run with --promote-globals to inject them into every project)")
-		}
-		if len(projectForSummary) > 0 {
-			fmt.Println(restoreHint(promoted))
-		} else if promoted > 0 {
-			fmt.Println("(promoted globals must be removed from _global by hand; no project snapshot was created)")
-		}
+	if summary, wrote := writeAppliedReport(os.Stdout, applied, parsed.promoteGlobals, appliedByCategory,
+		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal, deleted); wrote {
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
@@ -1915,7 +1888,7 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = args[i]
 			projectSeen = true
 		default:
-			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	if len(withdraw) > 0 && reassess {
@@ -3830,7 +3803,7 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			out.project = args[i]
 			projectSeen = true
 		default:
-			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
+			return resolveArgs{}, fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	// An empty POSITIONAL is the same missing operand in the third spelling, and

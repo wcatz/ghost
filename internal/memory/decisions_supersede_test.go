@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -715,5 +716,68 @@ func TestWriterPathsRefuseTheReservedDecisionRef(t *testing.T) {
 	}
 	if err := s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{Provenance: Provenance{SourceRef: "decision:abc"}}); err == nil {
 		t.Error("UpdateMemoryWithOptions accepted a reserved source_ref")
+	}
+}
+
+// TestSupersedeDecisionRefusesToDropALiveSuccessor is #1144 at the store: A was
+// replaced by B and B is still live, so a supersede of A by C would overwrite
+// the only record that B replaced A. It is refused inside the transaction, so a
+// second writer that passed the handler's read-only check cannot slip it through,
+// and A keeps pointing at B. The same pair again stays a clean no-op
+// (TestSupersedeDecisionTwiceIsIdempotent).
+func TestSupersedeDecisionRefusesToDropALiveSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, b, _, _ := decisionSupersedeFixture(t, s, ctx)
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	c, _, _, err := s.RecordDecision(ctx, testProject, "Use SQS", "SQS", "managed", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (C): %v", err)
+	}
+
+	err = s.SupersedeDecision(ctx, testProject, a, c)
+	if err == nil {
+		t.Fatal("SupersedeDecision(A, C) succeeded while A's successor B is live; B's link was dropped")
+	}
+	if !strings.Contains(err.Error(), b) {
+		t.Errorf("the refusal does not name the live successor %s: %v", b, err)
+	}
+
+	succ, err := s.LiveDecisionSuccessor(ctx, testProject, a)
+	if err != nil {
+		t.Fatalf("LiveDecisionSuccessor: %v", err)
+	}
+	if succ != b {
+		t.Errorf("LiveDecisionSuccessor(A) = %q, want %s", succ, b)
+	}
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	for _, d := range all {
+		switch d.ID {
+		case a:
+			if d.Status != "superseded" || d.SupersededBy != b {
+				t.Errorf("A is %s superseded_by %q, want superseded by %s", d.Status, d.SupersededBy, b)
+			}
+		case b, c:
+			if d.Status != "active" {
+				t.Errorf("%s is %s, want active", d.ID, d.Status)
+			}
+		}
+	}
+
+	// Once B is itself replaced, A has no live successor and repoints.
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if succ, err := s.LiveDecisionSuccessor(ctx, testProject, a); err != nil || succ != "" {
+		t.Errorf("LiveDecisionSuccessor(A) after B was replaced = %q, %v; want none", succ, err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Errorf("SupersedeDecision(A, C) after B was replaced: %v", err)
 	}
 }

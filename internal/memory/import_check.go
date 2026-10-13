@@ -295,7 +295,7 @@ func CheckImportedMemory(m PortableMemory) error {
 	// explicit DELETE reaches. The field is named per record, never the value.
 	for i, e := range m.Evidence {
 		if !IsValidEvidenceKind(e.Kind) {
-			return fmt.Errorf("evidence record %d has invalid kind %q — must be one of: observed, imported, verified, legacy", i, e.Kind)
+			return fmt.Errorf("evidence record %d has invalid kind %s — must be one of: observed, imported, verified, legacy", i, RefusalArg("kind", e.Kind))
 		}
 		if err := rejectSecretFields(
 			secretField{fmt.Sprintf("evidence[%d].agent", i), e.Agent},
@@ -333,7 +333,7 @@ func CheckImportedTask(t Task) error {
 		return fmt.Errorf("title is required")
 	}
 	if !validTaskStatuses[t.Status] {
-		return fmt.Errorf("invalid status %q — must be one of: pending, active, done, blocked", t.Status)
+		return fmt.Errorf("invalid status %s — must be one of: pending, active, done, blocked", RefusalArg("status", t.Status))
 	}
 	if t.Priority < 0 || t.Priority > 4 {
 		return fmt.Errorf("invalid priority %d — must be between 0 and 4", t.Priority)
@@ -387,7 +387,7 @@ func CheckImportedDecision(d Decision) error {
 		return fmt.Errorf("rationale is required")
 	}
 	if !validDecisionStatuses[d.Status] {
-		return fmt.Errorf("invalid status %q — must be one of: active, superseded, revisit", d.Status)
+		return fmt.Errorf("invalid status %s — must be one of: active, superseded, revisit", RefusalArg("status", d.Status))
 	}
 	// Same window as the memory's. alternatives is a list because it is one:
 	// ghost_decisions_list renders it back to the agent, so an entry is stored and

@@ -225,8 +225,21 @@ func manifestOpenError(path string, err error) error {
 // file is reported as fs.ErrNotExist so a caller can tell "there is no manifest"
 // from "the manifest is unreadable" — the first is an expected state a pre-
 // migration copy is always in, and the second is damage.
+//
+// A symlink is followed, and its target must be a regular file. The target is
+// stat'ed BEFORE it is opened and anything else — a FIFO, a device, a socket, a
+// directory — is refused unopened: opening a FIFO for reading blocks until a
+// writer appears, so a read-first check would hang `ghost backup verify` on a
+// sidecar that is sitting right there.
 func ReadBackupManifest(path string) (BackupManifest, error) {
 	var m BackupManifest
+	info, err := os.Stat(path)
+	if err != nil {
+		return BackupManifest{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return BackupManifest{}, fmt.Errorf("the manifest at %s is not a regular file (%s)", path, info.Mode().Type())
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return BackupManifest{}, err
