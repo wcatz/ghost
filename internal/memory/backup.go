@@ -130,24 +130,36 @@ func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, 
 	if err := vacuumInto(ctx, s.db, dest); err != nil {
 		return BackupResult{}, err
 	}
-	// A failure from here on is still a failed backup, and the CLI prints no
-	// report for one, so the snapshot is removed rather than left behind: a full
-	// copy of the memory database that nothing names, sitting at the path the
-	// retry is then refused by.
 	info, err := os.Stat(dest)
 	if err != nil {
-		_ = os.Remove(dest)
-		return BackupResult{}, fmt.Errorf("stat backup: %w", err)
+		return BackupResult{}, afterVacuumFailure(dest, fmt.Errorf("stat backup: %w", err))
 	}
 	// Counted from the snapshot, not from s.db: the counts a restore is checked
 	// against have to describe the file that was written, and a writer that
 	// committed after the VACUUM would otherwise make the two disagree.
 	counts, err := countBackupContents(ctx, dest)
 	if err != nil {
-		_ = os.Remove(dest)
-		return BackupResult{}, err
+		return BackupResult{}, afterVacuumFailure(dest, err)
 	}
 	return BackupResult{Path: dest, Bytes: info.Size(), Counts: counts}, nil
+}
+
+// afterVacuumFailure is the account of a backup that failed after its vacuum
+// returned. The CLI prints no report for a failed backup, so this error is the
+// only description of what is now on disk at dest.
+//
+// An empty file is this run's own reservation — the vacuum wrote nothing into
+// it — and is removed, so the retry is not refused by it. Anything larger is a
+// copy of the memory database, and it is left in place and NAMED rather than
+// deleted, for the reason Backup gives about a failed manifest: deleting what
+// may be a user's only copy trades a smaller problem for a larger one, and a
+// full copy nothing names is the outcome the error must never leave.
+func afterVacuumFailure(dest string, cause error) error {
+	if info, err := os.Lstat(dest); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+		_ = os.Remove(dest)
+		return cause
+	}
+	return fmt.Errorf("%w — a copy of the database was written to %s and is left in place; check it with ghost backup verify, or delete it", cause, dest)
 }
 
 // countBackupContents counts the rows a restore cares about in a written
