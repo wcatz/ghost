@@ -102,11 +102,10 @@ per line, readable, diffable and editable.
                      that matches nothing is an error, and so is a name that
                      matches MORE than one project (the ids are named). An exact
                      id is matched first and selects exactly one project. Default:
-                     every project. An EMPTY value
-                     is refused rather than read as the default — --project= is a
-                     script with an unset variable, and the way to export
-                     everything is to leave the flag off. Naming the flag twice is
-                     refused too, whatever the values are.
+                     every project. An EMPTY value is refused rather than read as
+                     the default — --project= is a script with an unset variable,
+                     and the way to export everything is to leave the flag off.
+                     Naming the flag twice is refused too, whatever the values are.
   --out <path>       Where to write it. Default: a timestamped .jsonl beside
                      the database. Use "-" for standard output. An EMPTY value
                      is refused rather than read as the default — --out= is a
