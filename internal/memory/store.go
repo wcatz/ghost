@@ -5565,6 +5565,14 @@ type DeleteOptions struct {
 	// `ghost backup` (VACUUM INTO) is a copy without them. See the
 	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
+	// ProjectID, when set, scopes the delete to the memory's owning project: a
+	// row that is not in that project is refused with "not found in project"
+	// and nothing is written — no tombstone, no purge. The check is a read
+	// inside the delete's own write transaction, before either of those, so a
+	// row another handle promoted to _global after the caller's own ownership
+	// read cannot be deleted or purged by a project-scoped call (#1154). Empty
+	// is the operator path that names a row by id alone (`ghost history purge`).
+	ProjectID string
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
@@ -5593,6 +5601,16 @@ func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error
 	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
 }
 
+// DeletePurgeInProject is DeletePurge scoped to the memory's owning project, the
+// way DeleteOptions.ProjectID scopes a delete: a row outside projectID is refused
+// inside the write and nothing is purged.
+func (s *Store) DeletePurgeInProject(ctx context.Context, projectID, id string) (PurgeOutcome, error) {
+	if projectID == "" {
+		return PurgeOutcome{}, fmt.Errorf("delete purge: project_id is required")
+	}
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true, ProjectID: projectID})
+}
+
 func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5603,6 +5621,23 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if opts.ProjectID != "" {
+		// The ownership read is in the write, ahead of the tombstone and the
+		// purge, because it is what decides them: read on the pool before the
+		// transaction, it left a window in which another handle could move the
+		// row to _global and this call would delete it anyway (#1154). A missing
+		// row falls through to the DELETE, which reports it in its own words.
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, id).Scan(&owner)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return out, fmt.Errorf("lookup memory: %w", err)
+		}
+		if err == nil && owner != opts.ProjectID {
+			return out, fmt.Errorf("memory %s not found in project %s",
+				RefusalArg("memory_id", id), RefusalArg("project_id", opts.ProjectID))
+		}
+	}
 
 	if !opts.PurgeHistory {
 		// Before the DELETE, because afterwards there is nothing left to read. A
@@ -5637,7 +5672,7 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return out, fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", RefusalArg("memory_id", id))
 	}
 	// After the DELETE, so the row is gone from the content table the rebuild
 	// reads: the index still carries the deleted row's tokens in segments the
@@ -6104,7 +6139,25 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 // columns a version records, and the row that does change (pinned) is one the
 // history table does not carry — the same rule Touch and the resolve KEEP cache
 // already follow.
+//
+// It names the row by id alone; a caller acting for a project uses
+// TogglePinInProject, which refuses a row outside it.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
+	return s.togglePin(ctx, "", id, pinned)
+}
+
+// TogglePinInProject is TogglePin scoped the way PromoteToGlobal is: the UPDATE
+// matches (id, project_id), so a row that is not in projectID — including one
+// another handle promoted to _global after the caller's own ownership read
+// (#1154) — is refused as "not found in project" and left as it was.
+func (s *Store) TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error {
+	if projectID == "" {
+		return fmt.Errorf("toggle pin: project_id is required")
+	}
+	return s.togglePin(ctx, projectID, id, pinned)
+}
+
+func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -6117,8 +6170,8 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	// the comment above has to be able to see that one column is missing rather
 	// than infer it.
 	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
-		UPDATE memories SET pinned = ? WHERE id = ?
-	`, pinnedInt, id)
+		UPDATE memories SET pinned = ? WHERE id = ? AND (? = '' OR project_id = ?)
+	`, pinnedInt, id, projectID, projectID)
 	if err != nil {
 		return fmt.Errorf("toggle pin: %w", err)
 	}
@@ -6127,7 +6180,11 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 		return fmt.Errorf("toggle pin rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found", id)
+		if projectID == "" {
+			return fmt.Errorf("memory %s not found", RefusalArg("memory_id", id))
+		}
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	return nil
 }

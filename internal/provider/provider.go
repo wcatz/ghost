@@ -89,6 +89,9 @@ type MemoryStore interface {
 	// Access tracking
 	Touch(ctx context.Context, ids []string) error
 	TogglePin(ctx context.Context, id string, pinned bool) error
+	// TogglePinInProject is TogglePin scoped to projectID: a row outside it is
+	// refused inside the write, not pinned.
+	TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error
 
 	// Reflection
 	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, int, int, map[string]int, error)
