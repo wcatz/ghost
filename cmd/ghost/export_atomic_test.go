@@ -136,3 +136,59 @@ func TestExportCancelledLeavesNothing(t *testing.T) {
 		t.Fatalf("leftovers: %v", names)
 	}
 }
+
+func forceNoLinks(t *testing.T) {
+	t.Helper()
+	orig := exportLink
+	exportLink = func(string, string) error { return errors.New("operation not supported") }
+	t.Cleanup(func() { exportLink = orig })
+}
+
+// On a filesystem without hard links the fallback must still refuse a file that
+// appeared after the up-front check, and leave it untouched.
+func TestExportCopyFallbackDoesNotReplaceARacingFile(t *testing.T) {
+	dir, path, run := plantAtomicExportRow(t)
+	forceNoLinks(t)
+	orig := exportPublish
+	exportPublish = func(tmp, dest string) error {
+		if err := os.WriteFile(dest, []byte("raced"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return orig(tmp, dest)
+	}
+	t.Cleanup(func() { exportPublish = orig })
+	err := run()
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Fatalf("err = %v, want refusal", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "raced" {
+		t.Fatalf("racing file replaced: %q", b)
+	}
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Fatalf("stray files: %v", names)
+	}
+}
+
+// The fallback publishes the same bytes a link would.
+func TestExportCopyFallbackPublishesSameBytes(t *testing.T) {
+	_, path, run := plantAtomicExportRow(t)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	forceNoLinks(t)
+	dir := filepath.Dir(path)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != string(want) || len(want) == 0 {
+		t.Fatalf("fallback bytes differ")
+	}
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Fatalf("stray files: %v", names)
+	}
+}

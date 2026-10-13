@@ -656,19 +656,52 @@ func runExport() {
 //
 // os.Link, not os.Rename, because a rename silently replaces whatever appeared
 // at dest since the check in runExportCore, and the contract is that an existing
-// file is never overwritten. A filesystem without hard links falls back to the
-// rename, which is the same atomic publish with the check's window as the only
-// difference.
+// file is never overwritten. A filesystem without hard links (FAT, some network
+// mounts) falls back to claiming dest with O_EXCL and copying the temporary file
+// in, which refuses an existing file just as the link does. That fallback is not
+// atomic: a kill mid-copy can leave a partial file at dest, so it is the degraded
+// path, and on any error it removes the file it created.
 var exportPublish = func(tmp, dest string) error {
-	if err := os.Link(tmp, dest); err == nil {
+	if err := exportLink(tmp, dest); err == nil {
 		_ = os.Remove(tmp)
 		return nil
 	} else if os.IsExist(err) {
 		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
 	}
-	if err := os.Rename(tmp, dest); err != nil {
+	return exportPublishByCopy(tmp, dest)
+}
+
+// exportLink is the hard-link step of exportPublish, a variable so a test can
+// make it fail the way a link-less filesystem does.
+var exportLink = os.Link
+
+// exportPublishByCopy claims dest exclusively, copies the finished temporary
+// file into it, syncs, and removes the temporary file.
+func exportPublishByCopy(tmp, dest string) error {
+	src, err := os.Open(tmp)
+	if err != nil {
 		return fmt.Errorf("publish %s: %w", dest, err)
 	}
+	defer src.Close() //nolint:errcheck
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+		}
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	_, err = io.Copy(out, src)
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	_ = os.Remove(tmp)
 	return nil
 }
 
