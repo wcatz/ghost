@@ -574,3 +574,128 @@ func TestDeleteProjectTakesTheFlagsWithIt(t *testing.T) {
 		t.Errorf("the surviving flag belongs to project %q, want %q", rows[0].project, testProject)
 	}
 }
+
+// TestPromoteToGlobalReassignsTheFlags: a promotion moves a memory BETWEEN
+// projects, and memory_flags.project_id is the project the per-project evidence
+// read asks for. A flag left naming the project the memory just left is one no
+// per-project reader reaches — the same orphan the merge test above guards
+// against, and the schema's own comment names every writer that moves a memory
+// rather than only the merge.
+func TestPromoteToGlobalReassignsTheFlags(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const source = "promote-flag-source"
+	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id := seedFlaggable(t, s, "the gateway times out after thirty seconds")
+	moveMemoryTo(t, s, id, source)
+	if err := s.FlagMemory(ctx, FlagMemoryRequest{
+		ProjectID: source, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
+	}); err != nil {
+		t.Fatalf("FlagMemory: %v", err)
+	}
+
+	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	rows := readFlagRows(t, s)
+	if len(rows) != 1 {
+		t.Fatalf("memory_flags holds %d rows after the promotion, want 1 — the flag did not move with its memory",
+			len(rows))
+	}
+	if rows[0].project != GlobalProjectID {
+		t.Errorf("flag's project_id = %q, want the memory's new project %q", rows[0].project, GlobalProjectID)
+	}
+	// And the reader reaches it, which is what the reassignment is for: the
+	// evidence is read per project, so an orphan here is invisible rather than
+	// merely misattributed.
+	got, err := s.UsefulnessByMemory(ctx, GlobalProjectID)
+	if err != nil {
+		t.Fatalf("UsefulnessByMemory: %v", err)
+	}
+	if ev := got[id]; ev.Flagged != 1 {
+		t.Errorf("the global project's evidence for the promoted memory = %+v, want Flagged 1", ev)
+	}
+}
+
+// TestDeleteProjectAfterPromoteKeepsThePromotedFlags is the sequence the issue
+// reports: flag M, promote M, delete the project it came from. M survives in
+// `_global`, so its flag has to survive with it — a delete that took the flag
+// would leave the surviving memory with none of the objection recorded against
+// it.
+func TestDeleteProjectAfterPromoteKeepsThePromotedFlags(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const source = "promote-then-delete"
+	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id := seedFlaggable(t, s, "the queue drains every ten seconds")
+	moveMemoryTo(t, s, id, source)
+	if err := s.FlagMemory(ctx, FlagMemoryRequest{
+		ProjectID: source, MemoryID: id, Kind: FlagKindWrong, Reason: flagReasonMarker,
+	}); err != nil {
+		t.Fatalf("FlagMemory: %v", err)
+	}
+
+	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	if _, err := s.DeleteProject(ctx, source, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	rows := readFlagRows(t, s)
+	if len(rows) != 1 {
+		t.Fatalf("memory_flags holds %d rows after deleting the source project, want 1 — the promoted memory's "+
+			"objection went with a project the memory is no longer in", len(rows))
+	}
+	if rows[0].project != GlobalProjectID || rows[0].memory != id {
+		t.Errorf("the surviving flag is %+v, want memory %s under %q", rows[0], id, GlobalProjectID)
+	}
+}
+
+// TestDeleteProjectSparesAFlagWhoseMemoryHasLeft pins DeleteProject's predicate
+// as MEMORY OWNERSHIP rather than the row's own project_id column. The column is
+// a name a writer has to keep in step, and the memory's location is the fact; a
+// delete that trusted the column would take a memory's objection with whichever
+// project the column last named. The state below is the one a promotion left
+// before this reassignment existed: the memory has moved out of the project and
+// the flag still names it.
+func TestDeleteProjectSparesAFlagWhoseMemoryHasLeft(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const doomed = "flag-project-left"
+	if err := s.EnsureProject(ctx, doomed, "/tmp/"+doomed, doomed); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id := seedFlaggable(t, s, "the flag outlives the project column")
+	moveMemoryTo(t, s, id, doomed)
+	if err := s.FlagMemory(ctx, FlagMemoryRequest{
+		ProjectID: doomed, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
+	}); err != nil {
+		t.Fatalf("FlagMemory: %v", err)
+	}
+	// Move only the memory; the flag's project_id is deliberately left naming
+	// `doomed`, which is exactly the divergence a pre-reassignment promotion
+	// produced.
+	moveMemoryTo(t, s, id, testProject)
+
+	summary, err := s.DeleteProject(ctx, doomed, false)
+	if err != nil {
+		t.Fatalf("DeleteProject (dry run): %v", err)
+	}
+	if summary.MemoryFlags != 0 {
+		t.Errorf("the dry run counts %d flag(s) for a project holding none of their memories", summary.MemoryFlags)
+	}
+
+	if _, err := s.DeleteProject(ctx, doomed, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	rows := readFlagRows(t, s)
+	if len(rows) != 1 || rows[0].memory != id {
+		t.Errorf("memory_flags after the delete = %+v, want the flag whose memory is elsewhere", rows)
+	}
+}

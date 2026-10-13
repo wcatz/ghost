@@ -421,7 +421,7 @@ func projectNotRegistered(asked string) string {
 func projectNotRegisteredAsOf(asked string, asOf time.Time) string {
 	return fmt.Sprintf("Project %s is not registered with Ghost yet, so there is nothing to read as of %s: "+
 		"Ghost has never held a row for it, at any instant. Call ghost_memory_save to create it.",
-		memory.ProjectArg("project_id", asked), asOf.Format(time.RFC3339))
+		memory.RefusalArg("project_id", asked), asOf.Format(time.RFC3339))
 }
 
 // projectContextWithNotRegistered appends the not-registered sentence to whatever

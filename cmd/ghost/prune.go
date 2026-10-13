@@ -129,7 +129,7 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 				// --audit parser's refusal —
 				// TestNoDuplicateFlagRefusalQuotesWithPercentQ holds both of them.
 				return opts, fmt.Errorf("--project was given twice (%s and %s)",
-					memory.ProjectArg("project", opts.Project), memory.ProjectArg("project", value))
+					memory.RefusalArg("project", opts.Project), memory.RefusalArg("project", value))
 			}
 			// An empty value is not "no value". `runPrune` resolves a scope only
 			// when opts.Project != "", so `--project=` would fall through to the
@@ -444,11 +444,11 @@ func runPrune(args []string) {
 	if opts.Project != "" {
 		resolved, _, rErr := store.ResolveProject(ctx, opts.Project)
 		if rErr != nil {
-			fmt.Fprintf(os.Stderr, "error: resolve project %s: %v\n", memory.ProjectArg("project", opts.Project), rErr)
+			fmt.Fprintf(os.Stderr, "error: resolve project %s: %v\n", memory.RefusalArg("project", opts.Project), rErr)
 			os.Exit(1)
 		}
 		if resolved == "" {
-			fmt.Fprintf(os.Stderr, "error: project %s not found — nothing was pruned\n", memory.ProjectArg("project", opts.Project))
+			fmt.Fprintf(os.Stderr, "error: project %s not found — nothing was pruned\n", memory.RefusalArg("project", opts.Project))
 			os.Exit(1)
 		}
 		scope = resolved
