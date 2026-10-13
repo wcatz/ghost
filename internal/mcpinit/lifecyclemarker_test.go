@@ -631,6 +631,40 @@ func TestSessionStart_MarkerProjectThatIsBothHostileAndKeyShapedIsWithheld(t *te
 	}
 }
 
+// TestSessionStart_MarkerProjectIsBounded pins the length half of the render
+// (#1088): the marker's project is caller text printed TWICE on the first line
+// of every session for the whole alert horizon, and nothing upstream bounds it —
+// parseLifecycleArgs accepts any size and WriteLifecycleFailure stores it raw —
+// so a file of text pasted into --project would be reproduced at every session
+// start. The error line beside it is capped for exactly this reason, and the
+// project must be too. The cap is applied AFTER the renderer, so a credential's
+// placeholder is never cut mid-word.
+func TestSessionStart_MarkerProjectIsBounded(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	long := strings.Repeat("p", 4096)
+	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: long, PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("a long marker project must still alert, got:\n%s", out)
+	}
+	if strings.Contains(out, long) {
+		t.Errorf("the alert carried the full 4096-byte project unbounded:\n%s", out)
+	}
+	// The line is bounded by the two caps it carries, with room for the
+	// surrounding sentence: a kilobyte-scale line is the failure.
+	if len(firstLine) > 1000 {
+		t.Errorf("the alert line is %d bytes; the project operand must be bounded:\n%s", len(firstLine), firstLine)
+	}
+}
+
 // TestSessionStart_ResumeWithMarkerStaysSilent pins the alert placement: it
 // rides the full context-injection path only. Resume short-circuits before
 // injection (existing stdout discipline), so a marker must not add output

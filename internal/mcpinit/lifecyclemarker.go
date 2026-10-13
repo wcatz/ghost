@@ -52,6 +52,14 @@ const (
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
 	lifecycleMarkerErrorMaxBytes = 300
+	// lifecycleMarkerProjectMaxBytes caps the project the ALERT renders, beside
+	// the error cap above because it is caller text on the same line and the
+	// same surface: the value is printed TWICE on the first line of every
+	// session for the marker's lifetime, and nothing upstream bounds it —
+	// parseLifecycleArgs accepts any size and WriteLifecycleFailure stores it
+	// raw. It is applied AFTER the renderer, so a credential's placeholder is
+	// never cut mid-word.
+	lifecycleMarkerProjectMaxBytes = 300
 	// lifecycleMarkerDetailMaxBytes caps what the FILE stores. Larger than
 	// the alert cap deliberately: the marker now carries the captured stderr
 	// tail, and truncating it at write time to one line would discard exactly
@@ -456,9 +464,13 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 // the credential verdict has to win over the line verdict: a value that is both
 // hostile and credential-shaped must come back as the placeholder, not as an
 // escaped rendering of the token.
+//
+// The result is bounded beside the error line (lifecycleMarkerProjectMaxBytes),
+// and the bound is applied AFTER the branch above rather than before it, so the
+// one value that is already short — the placeholder — is never cut.
 func renderMarkerProject(p string) string {
 	if memory.RejectSecret("project", p) != nil {
 		return memory.ProjectArg("project", p)
 	}
-	return assemble.Label(p)
+	return truncateUTF8(assemble.Label(p), lifecycleMarkerProjectMaxBytes)
 }
