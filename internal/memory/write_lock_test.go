@@ -382,7 +382,7 @@ func TestApplyReflectionRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget(t *tes
 		Source:     "reflection",
 	}}
 	start := time.Now()
-	if _, _, _, err := store.ApplyReflection(context.Background(), testProject, batch, nil, "", false); err != nil {
+	if _, _, _, _, _, _, _, err := store.ApplyReflection(context.Background(), testProject, batch, nil, "", false, nil); err != nil {
 		t.Fatalf("ApplyReflection lost to lock contention after %s: %v — one bounded retry should have taken "+
 			"the lock", time.Since(start), err)
 	}

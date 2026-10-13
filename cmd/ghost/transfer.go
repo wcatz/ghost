@@ -31,7 +31,9 @@ Writes a consistent snapshot of the memory database while Ghost is running.
 
   --out <path>   Where to write it. Default: a timestamped file beside the
                  database, in the Ghost data directory. The path must not
-                 already exist — an existing backup is never replaced.
+                 already exist — an existing backup is never replaced. An EMPTY
+                 value is refused, not read as the default: --out= is a script
+                 with an unset variable, and the default is the flag left off.
 
 The snapshot is taken with SQLite's VACUUM INTO, which reads one consistent
 snapshot of a live WAL database rather than copying its files: a copy made by
@@ -103,7 +105,10 @@ per line, readable, diffable and editable.
                      the flag off. Naming the flag twice is refused too, whatever
                      the values are.
   --out <path>       Where to write it. Default: a timestamped .jsonl beside
-                     the database. Use "-" for standard output.
+                     the database. Use "-" for standard output. An EMPTY value
+                     is refused rather than read as the default — --out= is a
+                     script with an unset variable, and the way to the default
+                     is to leave the flag off.
 
 Embeddings are not exported: they are derived from content by a local model and
 the embedding worker rebuilds them. Memory links are not exported either — they
@@ -176,6 +181,15 @@ type (
 // than being ignored, because the one flag that matters here is --out: a
 // misspelled --ou would otherwise write the default file and leave the user
 // believing it went where they asked.
+//
+// An explicit empty --out is refused for the same reason, and it is more than a
+// spelling nit: `ghost backup --out="$DEST"` with DEST unset reaches the parser
+// as `--out=`, and reading it as "no flag given" wrote the snapshot into the
+// data directory under the timestamped default name and exited 0, so a script
+// that then looked in $DEST did not find the backup it believed it took. Both
+// spellings are refused, as --project is in export, and the default is the flag
+// left off. (VACUUM INTO's O_EXCL means nothing is destroyed either way; the
+// artifact simply lands where the caller did not name.)
 func parseBackupArgs(args []string) (backupOptions, error) {
 	var opts backupOptions
 	for i := 0; i < len(args); i++ {
@@ -186,11 +200,18 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if args[i] == "" {
+				return opts, errors.New("--out requires a value")
+			}
 			opts.Out = args[i]
 		case strings.HasPrefix(arg, "--out="):
-			opts.Out = strings.TrimPrefix(arg, "--out=")
+			v := strings.TrimPrefix(arg, "--out=")
+			if v == "" {
+				return opts, errors.New("--out requires a value")
+			}
+			opts.Out = v
 		default:
-			return opts, fmt.Errorf("unknown argument %q", arg)
+			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
 	}
 	return opts, nil
@@ -204,7 +225,7 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 	var positional []string
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
-			return "", fmt.Errorf("unknown flag %q", arg)
+			return "", fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		}
 		positional = append(positional, arg)
 	}
@@ -219,6 +240,12 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 //
 // --out is last-one-wins: it names a destination, and a second one is an operator
 // overriding their own earlier flag rather than a second copy of the same scope.
+// An explicit EMPTY --out is still refused, and is the one thing last-one-wins
+// cannot answer: `--out=` is a script with an unset variable, and reading it as
+// "no flag given" wrote the artifact to the timestamped default path instead of
+// the destination the command line appeared to name. The refusal names the flag
+// in both spellings, and the default is the flag left off.
+//
 // --project is the opposite case and refuses a second value, because it is a SCOPE:
 // runExportCore reads an empty projectFilter as every project, so a second --project
 // is two answers to which corpus this artifact holds, and an empty one is the
@@ -243,9 +270,16 @@ func parseExportArgs(args []string) (exportOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if args[i] == "" {
+				return opts, errors.New("--out requires a value")
+			}
 			opts.Out = args[i]
 		case strings.HasPrefix(arg, "--out="):
-			opts.Out = strings.TrimPrefix(arg, "--out=")
+			v := strings.TrimPrefix(arg, "--out=")
+			if v == "" {
+				return opts, errors.New("--out requires a value")
+			}
+			opts.Out = v
 		case arg == "--project":
 			if i+1 >= len(args) {
 				return opts, errors.New("--project requires a value")
@@ -270,7 +304,7 @@ func parseExportArgs(args []string) (exportOptions, error) {
 			opts.Project = v
 			projectSeen = true
 		default:
-			return opts, fmt.Errorf("unknown argument %q", arg)
+			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
 	}
 	return opts, nil
@@ -290,7 +324,7 @@ func parseImportArgs(args []string) (importOptions, error) {
 		case arg == "--trust-provenance":
 			opts.TrustProvenance = true
 		case strings.HasPrefix(arg, "-"):
-			return opts, fmt.Errorf("unknown flag %q", arg)
+			return opts, fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		default:
 			positional = append(positional, arg)
 		}

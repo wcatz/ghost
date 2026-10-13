@@ -42,9 +42,9 @@ func TestReplaceNonManualRetainedRowKeepsCreatedAtAndSource(t *testing.T) {
 	setCreatedAtDaysAgo(t, s, id, 100)
 	staleCreatedAt := memoryCreatedAt(t, s, id)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		retainedMemory("architecture", content, 0.6, []string{"worker"}),
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -86,9 +86,9 @@ func TestReplaceNonManualRetainedRowStillDecays(t *testing.T) {
 	}
 	setCreatedAtDaysAgo(t, s, staleID, 100)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		retainedMemory("architecture", staleContent, 0.6, []string{}),
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -136,9 +136,9 @@ func TestReplaceNonManualRewrittenRowStillRefreshesCreatedAt(t *testing.T) {
 		t.Fatalf("CurrentTimestamp: %v", err)
 	}
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "convention", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -179,10 +179,10 @@ func TestReplaceNonManualUnchangedReuseStillAppliesRewriteFields(t *testing.T) {
 	setCreatedAtDaysAgo(t, s, id, 100)
 	createdAt := memoryCreatedAt(t, s, id)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "convention", Content: content, Importance: 0.9, Tags: []string{"deploy", "ci"},
 		Scope: map[string]string{"environment": "production"},
-	}}, ""); err != nil {
+	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -242,9 +242,9 @@ func TestReplaceNonManualReusePickPrefersMatchingCategory(t *testing.T) {
 	setCreatedAtDaysAgo(t, s, archID, 10)
 	archCreatedAt := memoryCreatedAt(t, s, archID)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -297,9 +297,9 @@ func TestReplaceNonManualReusePickIsDeterministic(t *testing.T) {
 	oldestID := ids[len(ids)-1]
 	oldest := memoryCreatedAt(t, s, oldestID)
 
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

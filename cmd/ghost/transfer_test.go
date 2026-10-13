@@ -206,6 +206,67 @@ func TestParseExportArgsTakesOneProject(t *testing.T) {
 	}
 }
 
+// TestParseTransferRefusesAnEmptyOut: an explicit empty --out is the
+// unset-variable spelling and is a refusal, never "no flag given".
+//
+// `ghost backup --out="$DEST"` with DEST unset reaches the parser as `--out=`,
+// and `ghost backup --out ""` as a separate empty token. Both were read as the
+// flag never having been typed, so the snapshot was written to the timestamped
+// default path inside the data directory and the command exited 0 — a backup a
+// script then looks for in $DEST and does not find. The two commands that write
+// to a named destination now share the rule --project already has: the empty
+// value is refused, and the refusal names the flag, in every spelling the parser
+// accepts. The default is the flag left off.
+func TestParseTransferRefusesAnEmptyOut(t *testing.T) {
+	parsers := []struct {
+		name  string
+		parse func([]string) (string, error)
+	}{
+		{"backup", func(args []string) (string, error) {
+			opts, err := parseBackupArgs(args)
+			return opts.Out, err
+		}},
+		{"export", func(args []string) (string, error) {
+			opts, err := parseExportArgs(args)
+			return opts.Out, err
+		}},
+	}
+	for _, p := range parsers {
+		for _, tc := range []struct {
+			name string
+			args []string
+		}{
+			{"attached empty", []string{"--out="}},
+			{"separate empty", []string{"--out", ""}},
+		} {
+			t.Run(p.name+"/"+tc.name, func(t *testing.T) {
+				got, err := p.parse(tc.args)
+				if err == nil {
+					t.Fatalf("%s(%v) = %q with no error: an empty --out is the unset-variable spelling and must be refused, not read as the default path", p.name, tc.args, got)
+				}
+				if !strings.Contains(err.Error(), "--out") {
+					t.Errorf("%s(%v) error = %q, want it to name the flag the reader has to fix", p.name, tc.args, err)
+				}
+			})
+		}
+	}
+
+	// The control: a destination that is not empty still parses, in both
+	// spellings, so a parser that refused every --out would not pass here — and
+	// "-" (export's stdout marker) is a value, not an empty one.
+	for _, args := range [][]string{{"--out", "x.jsonl"}, {"--out=x.jsonl"}} {
+		if opts, err := parseBackupArgs(args); err != nil || opts.Out != "x.jsonl" {
+			t.Errorf("parseBackupArgs(%v) = %+v (err %v), want the destination used verbatim", args, opts, err)
+		}
+		if opts, err := parseExportArgs(args); err != nil || opts.Out != "x.jsonl" {
+			t.Errorf("parseExportArgs(%v) = %+v (err %v), want the destination used verbatim", args, opts, err)
+		}
+	}
+	if opts, err := parseExportArgs([]string{"--out=-"}); err != nil || opts.Out != "-" {
+		t.Errorf(`parseExportArgs(--out=-) = %+v (err %v), want the stdout marker "-"`, opts, err)
+	}
+}
+
 func TestParseImportArgs(t *testing.T) {
 	t.Run("file required", func(t *testing.T) {
 		if _, err := parseImportArgs(nil); err == nil {

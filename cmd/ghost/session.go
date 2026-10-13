@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/mcpinit"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // contextUsage is the help for `ghost context`: stdout for -h/--help (see
@@ -106,7 +107,7 @@ func contextAsOf(args []string) (*time.Time, error) {
 	}
 	instant, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return nil, fmt.Errorf("--as-of %q is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z): %w", raw, err)
+		return nil, fmt.Errorf("--as-of %s is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z)", memory.RefusalArg("as-of", raw))
 	}
 	utc := instant.UTC()
 	return &utc, nil

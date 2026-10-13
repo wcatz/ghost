@@ -509,10 +509,10 @@ func requireProject(ctx context.Context, db *sql.DB, kind, id, projectID string)
 	var present int
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, projectID).Scan(&present)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("%s %s: project %q not found", kind, id, projectID)
+		return fmt.Errorf("%s %s: project %s not found", kind, id, RefusalArg("project_id", projectID))
 	}
 	if err != nil {
-		return fmt.Errorf("%s %s: lookup project %q: %w", kind, id, projectID, err)
+		return fmt.Errorf("%s %s: lookup project %s: %w", kind, id, RefusalArg("project_id", projectID), err)
 	}
 	return nil
 }
@@ -1080,7 +1080,7 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		var blocker int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.BlockedBy).Scan(&blocker); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("task %s: blocked_by names task %q, which is not in this store", t.ID, t.BlockedBy)
+				return false, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", t.ID, RefusalArg("blocked_by", t.BlockedBy))
 			}
 			return false, fmt.Errorf("import task %s: %w", t.ID, err)
 		}
@@ -1183,7 +1183,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		var superseder int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.SupersededBy).Scan(&superseder); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("decision %s: superseded_by names decision %q, which is not in this store", d.ID, d.SupersededBy)
+				return false, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", d.ID, RefusalArg("superseded_by", d.SupersededBy))
 			}
 			return false, fmt.Errorf("import decision %s: %w", d.ID, err)
 		}

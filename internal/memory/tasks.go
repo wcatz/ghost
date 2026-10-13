@@ -139,6 +139,12 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 
 // CompleteTask marks a task as done. Accepts a full task ID or a unique prefix.
 //
+// Completing is idempotent (#1143): a task that is already done keeps the
+// completed_at it got when it became done (the rule UpdateTask follows, #1040),
+// and an empty notes argument never overwrites stored notes; a non-empty one
+// replaces them. Both are decided inside the single UPDATE, against the row as
+// it stands when the write lands, so a concurrent edit cannot interleave.
+//
 // The RowsAffected of the UPDATE is read and a 0-row update is an error rather
 // than a success (#1083): the row is resolved above and a task deleted in
 // between leaves nothing for the write to land on, which is a completion the
@@ -160,9 +166,12 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 	}
 
 	res, err := s.execGuardedWrite(ctx, "complete-task", `
-		UPDATE tasks SET status = 'done', notes = ?, completed_at = datetime('now'), updated_at = datetime('now')
+		UPDATE tasks SET status = 'done',
+			notes = CASE WHEN ? = '' THEN notes ELSE ? END,
+			completed_at = CASE WHEN status = 'done' AND completed_at IS NOT NULL THEN completed_at ELSE datetime('now') END,
+			updated_at = datetime('now')
 		WHERE id = ?
-	`, notes, id)
+	`, notes, notes, id)
 	if err != nil {
 		return fmt.Errorf("complete task: %w", err)
 	}

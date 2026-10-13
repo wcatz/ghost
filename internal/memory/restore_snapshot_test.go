@@ -28,9 +28,9 @@ func TestRestoreKeepsSavesMadeAfterSnapshot(t *testing.T) {
 	}
 
 	// Takes a snapshot of the project, then replaces it.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -101,9 +101,9 @@ func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 
 	// Emit different content so the original row is really deleted, not
 	// reused in place — that is the path that lost identity.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "gotcha", Content: "entirely different consolidated content", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
@@ -157,9 +157,9 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -217,9 +217,9 @@ func TestSnapshotRetentionIsWidened(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 			{Category: "fact", Content: "consolidated content", Importance: 0.6},
-		}, ""); err != nil {
+		}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual %d: %v", i, err)
 		}
 	}
@@ -367,11 +367,11 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 
 	// A verbatim replace takes the snapshot. Nothing about the three rows
 	// changes, so restoration comes back to exactly this state.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha content", Importance: 0.5},
 		{Category: "fact", Content: "psi content", Importance: 0.5},
 		{Category: "fact", Content: "chi content", Importance: 0.5},
-	}, ""); err != nil {
+	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

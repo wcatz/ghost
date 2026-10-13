@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/mcpinit"
 )
 
 // isolatedLifecycleEnv points HOME/USERPROFILE/XDG_DATA_HOME/XDG_CONFIG_HOME
@@ -74,7 +75,7 @@ func TestRunLifecycle_ReflectSkippedWithoutLLMWritesMarker(t *testing.T) {
 
 	// Per-project marker: runLifecycle resolves the session directory to
 	// projx, and the writer keys the file on that resolved id.
-	markerFile := filepath.Join(dataHome, "ghost", "lifecycle-last-failure-projx.json")
+	markerFile := filepath.Join(dataHome, "ghost", mcpinit.LifecycleFailureMarkerFile("projx"))
 	b, err := os.ReadFile(markerFile)
 	if err != nil {
 		t.Fatalf("expected a failure marker after reflect was skipped for no LLM backend: %v", err)
