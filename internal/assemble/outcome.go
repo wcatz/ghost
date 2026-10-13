@@ -246,6 +246,16 @@ func (p *pipeline) emptyReason() string {
 		// above.
 		return reasonNoMemories
 	}
+	// The query path's own counterpart, for the reason the passive branch above
+	// gives it in its own terms: since #1053 the keyword leg applies the window
+	// predicate in SQL BEFORE its LIMIT, so a query whose every match lies
+	// outside its window comes back with no candidate and no stage having run.
+	// `no_candidates` is the last reason a caller may read as absence, and this
+	// is not absence — rows were found and withheld as out of date, which is
+	// `all_invalid` everywhere else. The retriever states the count.
+	if p.set.ValidityExcluded > 0 {
+		return reasonAllInvalid
+	}
 	return reasonNoCandidates
 }
 

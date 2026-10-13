@@ -219,13 +219,13 @@ type CandidateSet struct {
 	// they are counted here because a shorter set that says nothing about the gap
 	// reads as the whole truth. Zero on every current read.
 	Unrecorded int
-	// ValidityExcluded counts the passive window's rows the validity predicate
-	// removed in SQL, before the LIMIT, so a bucket that came back empty can say
-	// whether it was empty of valid rows or EMPTY of rows. It is only set by the
-	// passive path, and only for a bucket whose fetch returned nothing; a fusion
-	// read leaves it zero because its legs apply the same predicate silently
-	// before their own LIMIT and report no count — the rows simply never became
-	// candidates (#1053).
+	// ValidityExcluded counts the rows a validity predicate removed in SQL,
+	// before the window closed, so a set that came back empty can say whether it
+	// was empty of valid rows or EMPTY of rows. The passive path sets it for a
+	// bucket whose fetch returned nothing; the query path's keyword leg sets it
+	// when the query's every match lay outside its window (#1053). Both are zero
+	// on a read whose predicate admitted everything, and zero on the vector leg,
+	// which has no lexical match to count.
 	ValidityExcluded int
 	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
 	// entered the window: the window is a LIMIT, and a bucket holding more pinned
@@ -546,7 +546,10 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		p.trace = newSearchTrace()
 	}
 
-	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
+	fts, vec, err := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
+	if err != nil {
+		return nil, err
+	}
 	// A leg the condition made applicable but the request could not run (a
 	// hybrid search with no query vector) is a skip, not a failure, so it does
 	// not count towards "every leg failed".
@@ -855,7 +858,12 @@ type candidateLegFact struct {
 // leg's status. A leg that fails is recorded, not returned: a keyword leg that
 // errored while the vector leg returned rows is a partial retrieval, and the
 // assembler reports that rather than calling it an empty store.
-func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p SearchParams, ftsTopK, vecTopK int, set *CandidateSet) (ftsLeg, vecLeg) {
+//
+// The error return is the keyword leg's validity-exclusion count, which is read
+// on the same snapshot as the legs. It is not folded into the leg's own status:
+// a failed count would otherwise mark the keyword leg unavailable, which tells a
+// caller a search it cannot reproduce failed.
+func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p SearchParams, ftsTopK, vecTopK int, set *CandidateSet) (ftsLeg, vecLeg, error) {
 	project := req.ProjectID
 	if req.Mode == GlobalOnly {
 		// The legs filter on `project_id = ? OR project_id = '_global'`, so a
@@ -896,6 +904,21 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 		ftsStatus.CoverageComplete = ftsStatus.Available && !ftsStatus.Truncated
 	}
 	set.Legs["fts"] = ftsStatus
+
+	// #1053 moved the window predicate into the keyword leg's SQL, so a query
+	// whose every match is outside its window comes back with no candidate and no
+	// stage having run. The count is taken ONLY then, and it is what keeps the
+	// empty reason honest: rows were found and withheld as out of date
+	// (`all_invalid`), rather than nothing matching (`no_candidates`). The query
+	// path's counterpart to passiveValidityExcluded, gated on emptiness for the
+	// same reason that probe is.
+	if ftsStatus.Applicable && ftsStatus.Available && len(out.rows) == 0 {
+		n, err := s.keywordValidityExcluded(ctx, req, project, req.Mode == AllProjects)
+		if err != nil {
+			return out, vecLeg{}, err
+		}
+		set.ValidityExcluded += n
+	}
 
 	var vec vecLeg
 	vecStatus := LegStatus{Applicable: req.Condition == CondHybrid || req.Condition == CondVectorOnly}
@@ -972,7 +995,52 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 		}
 	}
 	set.Legs["vector"] = vecStatus
-	return out, vec
+	return out, vec, nil
+}
+
+// keywordValidityExcluded counts the rows that matched the query but lie outside
+// their validity window — the rows the keyword leg's SQL predicate removed
+// before its LIMIT (#1053).
+//
+// It is the query path's counterpart to passiveValidityExcluded, and for the same
+// reason: the predicate now runs in the leg's own statement, so a set that came
+// back empty carries NO stage verdict, and "the window came back empty"
+// (no_candidates) and "rows were found and withheld as out of date" (all_invalid)
+// are different facts a caller acts on differently — the tool's reason vocabulary
+// allows only no_candidates to claim the store holds nothing matching.
+//
+// ONLY the keyword leg can answer it. A vector match is a cosine rather than a
+// term, so there is no cheap statement that counts the rows a vector leg WOULD
+// have retrieved; counting the project's out-of-window rows instead would report
+// rows that never matched as withheld, which is exactly the false claim
+// no_candidates exists to avoid. A vector-only empty therefore stays
+// no_candidates, and that is honest rather than a gap.
+//
+// The population is the leg's own — the same predicate, the same bindings, the
+// same project clause, and no resolved_at or scope filter, both of which the
+// keyword leg applies later rather than in its statement — so the count cannot
+// describe rows the leg never considered.
+func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
+	where := "memories_fts MATCH ?"
+	args := []any{}
+	if !allProjects {
+		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
+		args = append(args, project)
+	}
+	args = append(args, sanitizeFTS(req.Query))
+	// NOT (validityMatchesSQLFor(...)) is "the predicate would have dropped this
+	// row". The two ? placeholders are bound in the predicate's own text order
+	// (until, then from), after the project and the match term.
+	stamp := req.Now.UTC().Format(stampLayoutForSQL)
+	args = append(args, stamp, stamp)
+
+	query := `SELECT COUNT(*) FROM memories m JOIN memories_fts f ON f.rowid = m.rowid WHERE ` + where +
+		` AND NOT (` + validityMatchesSQLFor("m.") + `)`
+	var n int
+	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("candidates: keyword validity exclusion count: %w", err)
+	}
+	return n, nil
 }
 
 // poolIDsOf lists the fused pool in rank order, which is the order a window

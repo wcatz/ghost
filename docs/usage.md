@@ -120,7 +120,10 @@ axes that decide eligibility:
   slot a valid match needed), and the assembler's stage 2 withholds any that reach
   it, so a row reported with `expired`/`future` is one that reached the candidate
   set and was dropped there. A row the legs withheld before the window is not a
-  candidate at all, so the payload has no row for it. `validity_penalty` stays `0`.
+  candidate at all, so the payload has no row for it — but a query whose matches
+  all retired is still answered `empty reason=all_invalid` ("withheld as out of
+  date"), not `no_candidates`, because the leg reports how many it withheld.
+  `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
 

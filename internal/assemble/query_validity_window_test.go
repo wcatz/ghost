@@ -3,6 +3,7 @@ package assemble
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,5 +146,101 @@ func TestValidityFiltersTheVectorLegBeforeTheCut(t *testing.T) {
 		if id != valid[0] && id != valid[1] && id != valid[2] {
 			t.Errorf("item %s is an expired row; want only the valid matches", id)
 		}
+	}
+}
+
+// TestAQueryWhoseOnlyMatchRetiredStaysAllInvalid is the other half of #1053.
+// Moving the window predicate into the leg SQL means a query whose every match
+// lies outside its window comes back with no candidate and NO stage having run,
+// and the empty reason has to stay honest: rows were found and withheld as out
+// of date (`all_invalid`), not nothing matched (`no_candidates`). The reason
+// vocabulary allows only the latter to claim the store holds nothing, and an
+// agent told "nothing found" about a corpus whose match simply retired looks
+// for a missing memory instead of a retired one.
+//
+// The keyword leg states the count it withheld and the empty reason follows it,
+// which is the query path's counterpart to the passive path's own count.
+func TestAQueryWhoseOnlyMatchRetiredStaysAllInvalid(t *testing.T) {
+	ctx := context.Background()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "proj", "/src/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	expired := "2020-01-01 00:00:00"
+	if _, err := s.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "the kubernetes upgrade runbook is on the wiki", Source: "manual",
+		Importance: 0.7, ValidUntil: &expired,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	req := Request{
+		ProjectID: "proj",
+		Query:     "kubernetes upgrade runbook",
+		Source:    SourceSearch,
+		Budget:    Budget{MaxItems: 3},
+		Condition: CondFTSOnly,
+		Now:       time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC),
+	}
+	res := run(t, s, req)
+
+	if len(res.Items) != 0 {
+		t.Fatalf("items = %v, want none: the only match is out of its window", itemIDs(res.Items))
+	}
+	if res.Outcome != OutcomeEmpty {
+		t.Errorf("outcome = %q, want %q", res.Outcome, OutcomeEmpty)
+	}
+	if res.Reason != "all_invalid" {
+		t.Errorf("reason = %q, want all_invalid: the query matched, and the rows it matched were "+
+			"withheld as out of date, which is not the same fact as nothing matching", res.Reason)
+	}
+	if !strings.Contains(res.Abstention, "withheld as out of date") {
+		t.Errorf("abstention = %q, want it to say the candidates were withheld as out of date", res.Abstention)
+	}
+}
+
+// TestAQueryWithNoMatchAtAllStaysNoCandidates is the control for the reason
+// above, and the reason it is not simply "every empty says all_invalid": a
+// query that matched nothing has withheld nothing, and the leg's count is what
+// tells the two cases apart.
+func TestAQueryWithNoMatchAtAllStaysNoCandidates(t *testing.T) {
+	ctx := context.Background()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "proj", "/src/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// A live row the query never mentions: the store holds a memory, so an
+	// "absence" here is about the query rather than the store.
+	if _, err := s.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "the cache warmer runs hourly", Source: "manual", Importance: 0.7,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	req := Request{
+		ProjectID: "proj",
+		Query:     "kubernetes upgrade runbook",
+		Source:    SourceSearch,
+		Budget:    Budget{MaxItems: 3},
+		Condition: CondFTSOnly,
+		Now:       time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC),
+	}
+	res := run(t, s, req)
+
+	if len(res.Items) != 0 {
+		t.Fatalf("items = %v, want none", itemIDs(res.Items))
+	}
+	if res.Reason != "no_candidates" {
+		t.Errorf("reason = %q, want no_candidates: nothing matched, so nothing was withheld", res.Reason)
 	}
 }
