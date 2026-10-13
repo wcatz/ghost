@@ -9,7 +9,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened. `pin: true` exempts it from consolidation and guarantees it a slot on every passive context surface in the same call, and `retention` sets its tier |
 | Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors; filterable by category and retention tier |
 | Memory | `ghost_search_all` | Search across all projects |
-| Memory | `ghost_memories_list` | Browse memories, optionally by category and retention tier |
+| Memory | `ghost_memories_list` | Browse memories, optionally by category and retention tier; a category or tier outside the vocabulary is refused before the project is looked up |
 | Memory | `ghost_memory_update` | Update memory content or metadata |
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
 | Memory | `ghost_memory_flag` | Record that this memory is wrong or stale, with a short reason: an append-only objection that changes nothing by itself — resolve and reflect count it as negative evidence, and the reason stays in the store. Its `session_id` is the transport's only (`provenanceFor`), so under Claude Code a flag records no session while the `retrieval_record` beside it carries a session id whenever one can be named — the host's own under Claude Code, the same id the stop hook's payload carries — so the audit can match the call to the scan that judged it (#922) |
@@ -24,11 +24,11 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Context | `ghost_list_projects` | List known projects and their IDs |
 | Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
 | Tasks | `ghost_task_create` | Create a durable task; `priority` is 0-4 (default 2), and a value outside that range is refused by name rather than reset to the default |
-| Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
+| Tasks | `ghost_task_list` | List tasks, optionally filtered by status; a status outside pending, active, blocked, done is refused with the allowed list |
 | Tasks | `ghost_task_update` | Change task status, priority, or description; a `priority` outside 0-4 is refused and the stored priority is left unchanged; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done`. The row is read and merged inside the write transaction that writes it, so two clients editing different fields of one task (two MCP servers on one store, for instance) both land, and a task deleted in that window is an error rather than a reported success |
 | Tasks | `ghost_task_complete` | Mark a task done with optional notes |
-| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
-| Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
+| Decisions | `ghost_decision_record` | Record a decision, rationale, and alternatives; `supersedes` also retires the reversed decision's companion memory (withheld from session start and demoted in search, linked, recorded in history) unless it is pinned, retention-exempt or a convention/preference, or ambiguous, which the answer reports as a partial failure (an `isError` result) — the same shape a `supersedes` id the project cannot mark takes; the description and the server instructions tell the agent to find a changed decision with `ghost_decisions_list` and pass `supersedes`, and a record without `supersedes` whose title matches a live decision in the same project (case-insensitive, trimmed) is answered with that decision's id and a note to pass it, advice only, never a refusal or an automatic link  |
+| Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions; a status outside those three is refused with the allowed list before the project is looked up |
 
 `ghost_resolve` is dry-run by default. `ghost_project_delete` is also dry-run by default and is irreversible when applied: the apply form accepts only the exact project id its own dry run printed, and refuses a name, path or basename with a message pointing back at the dry run — those identifiers resolve to a project, and an irreversible delete must not delete whichever one they happen to resolve to. Core memory CRUD and search do not call an LLM; maintenance-oriented tools may use the calling session's CLI harness.
 
@@ -476,7 +476,10 @@ export paths carry a tag byte for byte, a store's existing tags round-trip
 unchanged, and the renderer above is what makes an old one safe to read. An
 over-long tag is trimmed on a rune boundary rather than refused, and a tag over 64
 bytes is stored as the first 64 — a shortened *label* is a different label, not a
-different row, which is the whole difference from an id.
+different row, which is the whole difference from an id. A list longer than ten
+tags is refused rather than cut, because a silent cut leaves a label unaccounted
+for behind a success answer and the count is a number the caller can act on
+(#1041).
 
 **A decision's tags are the same rule, and the same reason.** `ghost_decision_record`
 is the only tool that writes a decision's tag list, so a decision's tags are
