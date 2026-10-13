@@ -43,7 +43,7 @@ func TestReembedUnderNewIdentityRequeuesForLinking(t *testing.T) {
 	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityStale); err != nil {
 		t.Fatalf("StoreEmbedding(stale): %v", err)
 	}
-	if err := store.MarkLinkScanned(ctx, id); err != nil {
+	if err := store.MarkLinkScanned(ctx, id, []float32{1, 0, 0}); err != nil {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
 	if linkScanQueued(t, store, ctx, "test-proj", id) {
@@ -74,7 +74,7 @@ func TestReembedInSameIdentityKeepsLinkScan(t *testing.T) {
 	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityCurrent); err != nil {
 		t.Fatalf("StoreEmbedding: %v", err)
 	}
-	if err := store.MarkLinkScanned(ctx, id); err != nil {
+	if err := store.MarkLinkScanned(ctx, id, []float32{1, 0, 0}); err != nil {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
 
