@@ -128,8 +128,10 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	//
 	// The cause is the failed phase's raw output tail — whatever the harness or
 	// the model printed last — so it is asked of the token guard before it is
-	// stored, and judged whole, before the cap, so a value straddling the cut
-	// is still recognised (markerErrorField).
+	// stored, and judged whole, before the storage cap below, so a value that
+	// cap would split is still recognised (markerErrorField). The guard sees
+	// only what the caller kept: a token the caller's own head cut (phaseTail)
+	// already split has lost its prefix and is not recognised here.
 	text := strings.TrimSpace(firstErr)
 	if text == "" {
 		text = "phase failed"
