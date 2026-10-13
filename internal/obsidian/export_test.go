@@ -814,3 +814,92 @@ func TestExportTypedEdgesDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestExportRefusesAmbiguousProjectName: a project's name is not unique, so a
+// --project filter two projects answer to must be refused, naming both ids,
+// before the vault is touched — not mirror both into one run. A fresh vault
+// path is not even created, and an existing vault keeps every note it had.
+func TestExportRefusesAmbiguousProjectName(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"dup-a", "dup-b"} {
+		if err := store.EnsureProject(ctx, id, "/tmp/"+id, "dup"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(ctx, id, memory.Memory{Category: "fact", Content: "Fact under " + id, Importance: 0.8, Source: "mcp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+
+	fresh := filepath.Join(t.TempDir(), "vault")
+	err := ex.Export(ctx, fresh, "dup")
+	if err == nil {
+		t.Fatal("an export of a name two projects answer to succeeded")
+	}
+	if !strings.Contains(err.Error(), "multiple projects") {
+		t.Errorf("error = %v, want it to say the name is ambiguous", err)
+	}
+	for _, id := range []string{"dup-a", "dup-b"} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error = %v, want it to name %s so the operator can pick one", err, id)
+		}
+	}
+	if _, statErr := os.Stat(fresh); !os.IsNotExist(statErr) {
+		t.Errorf("a refused export created the vault: %v", statErr)
+	}
+
+	// An existing vault: mirror ghost only, then the refused run must leave it
+	// exactly as it was.
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	if err := ex.Export(ctx, vault, "ghost"); err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	before := snapshotVault(t, vault)
+	if err := ex.Export(ctx, vault, "dup"); err == nil {
+		t.Fatal("an export of a name two projects answer to succeeded")
+	}
+	after := snapshotVault(t, vault)
+	if len(after) != len(before) {
+		t.Fatalf("refused export changed the vault: before %v, after %v", before, after)
+	}
+	for k, v := range before {
+		if after[k] != v {
+			t.Errorf("refused export changed %s", k)
+		}
+	}
+}
+
+// TestExportProjectIDBeatsAnotherProjectsName: ids and names share the one
+// filter namespace, so a store can hold a project whose id is literally
+// another project's name. The exact id wins and selects only its project.
+func TestExportProjectIDBeatsAnotherProjectsName(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "shared", "/tmp/xproj", "xproj"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureProject(ctx, "yid", "/tmp/yproj", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"shared", "yid"} {
+		if _, err := store.Create(ctx, id, memory.Memory{Category: "fact", Content: "Fact under " + id, Importance: 0.8, Source: "mcp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, "shared"); err != nil {
+		t.Fatalf("export by an id another project's name collides with: %v", err)
+	}
+	notes, _ := filepath.Glob(filepath.Join(vault, "xproj", "Memories", "*.md"))
+	if len(notes) != 1 {
+		t.Fatalf("want the id's project mirrored (1 note under xproj), got %d", len(notes))
+	}
+	if _, err := os.Stat(filepath.Join(vault, "shared")); !os.IsNotExist(err) {
+		t.Errorf("the project whose NAME matched was mirrored too: %v", err)
+	}
+}
