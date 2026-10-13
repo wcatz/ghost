@@ -37,7 +37,7 @@ func TestConsolidationLeavesAPersistentRowAlone(t *testing.T) {
 	keep := retentionTierFixture(t, s, "the bastion is reached on port 2222, never on 22", RetentionPersistent)
 	consolidatable := retentionTierFixture(t, s, "an ordinary durable fact the consolidator will replace", RetentionProject)
 
-	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "the corpus after consolidation", Importance: 0.6, Tags: []string{}},
 	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
@@ -85,7 +85,7 @@ func TestRestoreCannotRewriteARowThatBecamePersistentAfterTheSnapshot(t *testing
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha beta gamma", Importance: 0.5, Tags: []string{}},
 	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)

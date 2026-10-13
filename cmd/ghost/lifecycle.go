@@ -1492,7 +1492,7 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, applied, err := applyReflection(
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, _, appliedByCategory, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
@@ -1519,7 +1519,9 @@ func runReflect() {
 	// refused every emission it was handed (#1051) ran a transaction but wrote
 	// nothing either: every proposal claimed a memory that changed or was
 	// deleted while the harness was answering, and those rows were left exactly
-	// as they are. In both cases a report that went on to say "Applied" and
+	// as they are — this branch is reachable only when that transaction ALSO
+	// deleted nothing, so "left exactly as they are" is the store's done work,
+	// not a guess at it. In both cases a report that went on to say "Applied" and
 	// record the skip fingerprint would be telling the operator the round landed
 	// while the value is still in the store, still injected into every later
 	// session, and now pinned by a signature that makes --skip-unchanged skip the
@@ -1573,41 +1575,21 @@ func runReflect() {
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
 	if applied && (promoted > 0 || len(keptMems) > 0 || len(keptProjectMems) > 0 || len(keptGlobalMems) > 0) {
-		// Everything the project ends up holding, which is projectMems plus the
-		// candidates that landed back in it: all of them when promotion is off,
-		// and the kept subset when it is on. appliedSummary counts rows, so
-		// leaving these out understates what was written.
-		appliedProjectMems := append([]reflection.ReflectMemory(nil), keptProjectMems...)
+		// appliedSummary counts what the store reports landing in the project:
+		// the replace's own writes PLUS the candidates written back into it
+		// (the full folded set when promotion is off, the kept subset when it
+		// is on). The dropped counts are subtracted the way each component
+		// counts: with promotion off the cross-project candidates were folded
+		// into the project replace, so their drops sit in the project count
+		// too; with it on they never reach the project replace.
+		summaryGlobalDropped := 0
 		if !parsed.promoteGlobals {
-			appliedProjectMems = append(appliedProjectMems, keptGlobalMems...)
-		} else {
-			// Only the candidates that actually failed promotion. Adding all of
-			// globalMems here would count the promoted rows as project memories
-			// too, which is the over-count this replaced.
-			keptText := make(map[string]bool, len(keptMems))
-			for _, m := range keptMems {
-				keptText[m.Content] = true
-			}
-			for _, m := range keptGlobalMems {
-				if keptText[m.Content] {
-					appliedProjectMems = append(appliedProjectMems, m)
-				}
-			}
+			summaryGlobalDropped = droppedGlobal
 		}
 		// appliedSummary reports the REAL promoted count rather than the number
 		// of candidates, so a partial promotion does not print "3 promoted to
-		// global" one line after "Promoted 1/3". The dropped counts are
-		// subtracted the way each component counts: with promotion off the
-		// cross-project candidates were folded into the project replace, so
-		// their drops sit in the project count too; with it on they never reach
-		// the project replace, so only the project half's drops do.
-		summaryProjectDropped := droppedProject
-		summaryGlobalDropped := 0
-		if !parsed.promoteGlobals {
-			summaryProjectDropped = droppedTotal
-			summaryGlobalDropped = droppedGlobal
-		}
-		summary := appliedSummary(appliedProjectMems, keptGlobalMems, promoted, summaryProjectDropped, summaryGlobalDropped, parsed.promoteGlobals)
+		// global" one line after "Promoted 1/3".
+		summary := appliedSummary(appliedByCategory, keptGlobalMems, promoted, summaryGlobalDropped, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
 		if len(keptGlobalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")

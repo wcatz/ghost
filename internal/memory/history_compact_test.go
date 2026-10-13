@@ -1514,7 +1514,7 @@ func TestCompactHistoryLeavesTheRestatementACurrentWriterStillMakes(t *testing.T
 		for _, id := range ids[1:] {
 			emitted = append(emitted, keptReemit(t, s, id))
 		}
-		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 	}

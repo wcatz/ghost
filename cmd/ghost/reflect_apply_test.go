@@ -13,26 +13,28 @@ import (
 )
 
 type fakeReflectionApplier struct {
-	calls                int
-	projectMems          []memory.Memory
-	globalMems           []memory.Memory
-	promote              bool
-	consolidated         string
-	resultPreserved      []string
-	resultPromoted       int
-	resultKept           []memory.Memory
-	resultProjectDropped int
-	resultGlobalDropped  int
-	err                  error
+	calls                 int
+	projectMems           []memory.Memory
+	globalMems            []memory.Memory
+	promote               bool
+	consolidated          string
+	resultPreserved       []string
+	resultPromoted        int
+	resultKept            []memory.Memory
+	resultProjectDropped  int
+	resultGlobalDropped   int
+	resultDeleted         int
+	resultAppliedCategory map[string]int
+	err                   error
 }
 
-func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool, _ []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped int, err error) {
+func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool, _ []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error) {
 	f.calls++
 	f.projectMems = append([]memory.Memory(nil), projectMems...)
 	f.globalMems = append([]memory.Memory(nil), globalMems...)
 	f.promote = promote
 	f.consolidated = consolidatedSince
-	return f.resultPreserved, f.resultPromoted, f.resultKept, f.resultProjectDropped, f.resultGlobalDropped, f.err
+	return f.resultPreserved, f.resultPromoted, f.resultKept, f.resultProjectDropped, f.resultGlobalDropped, f.resultDeleted, f.resultAppliedCategory, f.err
 }
 
 func projectMemories(contents ...string) []reflection.ReflectMemory {
@@ -57,7 +59,7 @@ func globals(contents ...string) []reflection.ReflectMemory {
 // memories.
 func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.T) {
 	f := &fakeReflectionApplier{resultPromoted: 1}
-	_, _, preserved, promoted, kept, _, _, _, err := applyReflection(
+	_, _, preserved, promoted, kept, _, _, _, _, _, err := applyReflection(
 		context.Background(), f, "p1", nil, globals("global"), "since", true, nil, nil)
 
 	if err != nil {
@@ -88,7 +90,7 @@ func TestApplyReflectionForwardsBothHalvesSeparately(t *testing.T) {
 	for _, promote := range []bool{false, true} {
 		t.Run(fmt.Sprintf("promote=%t", promote), func(t *testing.T) {
 			f := &fakeReflectionApplier{}
-			_, _, _, _, _, _, _, _, err := applyReflection(
+			_, _, _, _, _, _, _, _, _, _, err := applyReflection(
 				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", promote, nil, nil)
 
 			if err != nil {
@@ -107,7 +109,7 @@ func TestApplyReflectionForwardsBothHalvesSeparately(t *testing.T) {
 func TestApplyReflectionPropagatesStoreFailure(t *testing.T) {
 	want := errors.New("transaction failed")
 	f := &fakeReflectionApplier{err: want}
-	_, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil, nil)
+	_, _, _, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil, nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
@@ -127,7 +129,7 @@ func TestApplyReflectionCoversPromotionMatrix(t *testing.T) {
 					if fail {
 						f.err = errors.New("injected apply failure")
 					}
-					_, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil, nil)
+					_, _, _, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil, nil)
 					if (err != nil) != fail {
 						t.Fatalf("error = %v, want error=%t", err, fail)
 					}
@@ -148,18 +150,19 @@ func TestApplyReflectionCoversPromotionMatrix(t *testing.T) {
 }
 
 func TestAppliedSummaryCountsOnlyRowsAppliedToProject(t *testing.T) {
-	project := projectMemories("project")
-	project[0].Category = "fact"
 	global := globals("global")
 	global[0].Category = "preference"
 
-	got := appliedSummary(project, global, 1, 0, 0, true)
+	// Total and category breakdown come from the store's per-category applied
+	// counts, so a dropped emission is counted in NEITHER and the parts always
+	// sum to the total.
+	got := appliedSummary(map[string]int{"fact": 1}, global, 1, 0, true)
 	want := "1 memories consolidated (1 fact), 1 promoted to global"
 	if got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
 
-	kept := appliedSummary(append(append([]reflection.ReflectMemory(nil), project...), global...), global, 0, 0, 0, false)
+	kept := appliedSummary(map[string]int{"fact": 1, "preference": 1}, global, 0, 0, false)
 	wantKept := "2 memories consolidated (1 fact, 1 preference), 1 cross-project candidates kept project-scoped"
 	if kept != wantKept {
 		t.Errorf("kept summary = %q, want %q", kept, wantKept)
@@ -170,15 +173,25 @@ func TestAppliedSummaryCountsOnlyRowsAppliedToProject(t *testing.T) {
 	// the promoted component is the store's real count; with promotion off, the
 	// cross-project rows were folded into the project replace, so the project
 	// count loses both halves and the cross-project component loses its own.
-	partial := appliedSummary(project, global, 0, 1, 0, true)
-	wantPartial := "0 memories consolidated (1 fact), 0 promoted to global"
+	// The map already excludes the refused emissions, so the parts next to a
+	// zero total are empty — "0 memories consolidated", not "(1 fact)".
+	partial := appliedSummary(map[string]int{}, global, 0, 0, true)
+	wantPartial := "0 memories consolidated, 0 promoted to global"
 	if partial != wantPartial {
 		t.Errorf("promoted partial summary = %q, want %q", partial, wantPartial)
 	}
-	folded := appliedSummary(append(append([]reflection.ReflectMemory(nil), project...), global...), global, 0, 2, 1, false)
-	wantFolded := "0 memories consolidated (1 fact, 1 preference), 0 cross-project candidates kept project-scoped"
+	folded := appliedSummary(map[string]int{}, global, 0, 1, false)
+	wantFolded := "0 memories consolidated, 0 cross-project candidates kept project-scoped"
 	if folded != wantFolded {
 		t.Errorf("folded summary = %q, want %q", folded, wantFolded)
+	}
+
+	// The same map drives both numbers: one landed fact among two emissions
+	// (the other refused) reports exactly the row that landed.
+	landed := appliedSummary(map[string]int{"fact": 1}, global, 0, 0, false)
+	wantLanded := "1 memories consolidated (1 fact), 1 cross-project candidates kept project-scoped"
+	if landed != wantLanded {
+		t.Errorf("landed summary = %q, want %q", landed, wantLanded)
 	}
 }
 
@@ -231,7 +244,7 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, _, _, promoted, kept, _, _, _, err := applyReflection(ctx, store, "proj", projectMemories("a consolidated project fact"), globals("prefer running the linter before pushing"), "", false, nil, nil)
+	_, _, _, promoted, kept, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMemories("a consolidated project fact"), globals("prefer running the linter before pushing"), "", false, nil, nil)
 
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
@@ -272,7 +285,7 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	t.Run("every emission refused is applied=false", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultProjectDropped: 2}
-		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, applied, err := applyReflection(
+		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
@@ -293,7 +306,7 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 
 	t.Run("a partial refusal stays applied with the count", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultProjectDropped: 1}
-		_, _, preserved, promoted, kept, projectDropped, globalDropped, applied, err := applyReflection(
+		_, _, preserved, promoted, kept, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
@@ -311,7 +324,7 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 
 	t.Run("an all-dropped global half alone is applied=false", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultGlobalDropped: 1}
-		_, _, _, _, _, projectDropped, globalDropped, applied, err := applyReflection(
+		_, _, _, _, _, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", nil, globals("g"), "", true, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
@@ -323,4 +336,150 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 			t.Errorf("drops = %d/%d, want 0/1", projectDropped, globalDropped)
 		}
 	})
+
+	// The should-fix for this test: applied keyed on the drop count also hid an
+	// all-dropped round that still changed the corpus. Refusing every emission
+	// does not stop the replace from deleting the unclaimed candidates beside
+	// the refused claims, and a round that deleted rows took a snapshot the
+	// operator can restore — so it must report as applied: "Applied: 0
+	// memories consolidated" with the restore hint, never "nothing was written
+	// this round".
+	t.Run("an all-dropped round that still deletes rows is applied with the delete count", func(t *testing.T) {
+		f := &fakeReflectionApplier{resultProjectDropped: 2, resultDeleted: 1}
+		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, deleted, appliedByCategory, applied, err := applyReflection(
+			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
+		if err != nil {
+			t.Fatalf("applyReflection: %v", err)
+		}
+		if !applied {
+			t.Error("applied = false, want true: the store deleted an unclaimed candidate, so the round changed the corpus and its snapshot must be offered for restore")
+		}
+		if projectDropped != 2 || globalDropped != 0 {
+			t.Errorf("drops = %d/%d, want 2/0: the refusal is still reported", projectDropped, globalDropped)
+		}
+		if deleted != 1 {
+			t.Errorf("deleted = %d, want 1: the number of rows the replace removed must travel to the caller", deleted)
+		}
+		if len(appliedByCategory) != 0 {
+			t.Errorf("appliedByCategory = %v, want empty: no emission landed, so the summary total is zero and the parts are empty", appliedByCategory)
+		}
+		// runReflect prints the summary branch because applied is true and the
+		// reporting set is non-empty: the report admits the round wrote nothing
+		// but replaced the corpus (restore hint offered), instead of the
+		// !applied branch's "left exactly as they are".
+		if len(keptProject) != 2 || len(keptGlobal) != 0 {
+			t.Errorf("kept sets = %d/%d, want 2/0", len(keptProject), len(keptGlobal))
+		}
+		if got := appliedSummary(appliedByCategory, nil, 0, 0, false); got != "0 memories consolidated" {
+			t.Errorf("report line = %q, want %q: the summary must not hang a category on a dropped emission", got, "0 memories consolidated")
+		}
+		if got := restoreHint(0); got != "(use --restore to undo)" {
+			t.Errorf("restore hint = %q, want %q for a round whose snapshot is offering the deleted rows", got, "(use --restore to undo)")
+		}
+	})
+}
+
+// TestApplyReflectionAllDroppedWithOmittedRowReportsReplaceAndRestore drives
+// the should-fix through a REAL store, with the reviewer's exact scenario: a
+// kept row whose source the #1051 guard refuses — the source's metadata moved
+// while the harness was answering, so the emission is dropped — BESIDE an
+// omitted row that no emission claims. The drop count alone says "all refused,
+// nothing written", but the replace still deletes the omitted row, so the round
+// changed the corpus and its snapshot must be offered for restore: applied
+// stays true, the store's delete count travels, the summary admits zero writes
+// with NO category hung on a dropped emission, and the restore hint is offered.
+func TestApplyReflectionAllDroppedWithOmittedRowReportsReplaceAndRestore(t *testing.T) {
+	db, err := memory.OpenDB(filepath.Join(t.TempDir(), "reflect.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/tmp/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	claimed, err := store.Create(ctx, "p1", memory.Memory{
+		Category: "gotcha", Content: "the claimed row", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create claimed row: %v", err)
+	}
+	omitted, err := store.Create(ctx, "p1", memory.Memory{
+		Category: "fact", Content: "the omitted row", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create omitted row: %v", err)
+	}
+
+	// The corpus runReflect hands the harness: every replaceable row as read.
+	rows, err := store.GetByIDs(ctx, []string{claimed, omitted})
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	var fed []memory.CorpusRow
+	for _, m := range rows {
+		fed = append(fed, memory.CorpusRow{
+			ID: m.ID, Content: m.Content, UpdatedAt: m.UpdatedAt,
+			Category: m.Category, Importance: m.Importance, Tags: m.Tags,
+		})
+	}
+
+	// The harness answered, and a concurrent save reweighted the claimed row in
+	// between: its write clock moved, so the keep below claims a row that is no
+	// longer the one the pass was shown — the guard refuses it.
+	reweighted := float32(0.95)
+	if err := store.UpdateMemory(ctx, "p1", claimed, nil, nil, &reweighted, nil); err != nil {
+		t.Fatalf("UpdateMemory claimed row: %v", err)
+	}
+
+	keptProject, keptGlobal, preserved, promoted, keptMems, projectDropped, globalDropped, deleted, appliedByCategory, applied, err := applyReflection(
+		ctx, store, "p1", []reflection.ReflectMemory{{Category: "gotcha", Content: "the claimed row"}}, nil, "", false, nil, fed)
+	if err != nil {
+		t.Fatalf("applyReflection: %v", err)
+	}
+
+	if !applied {
+		t.Error("applied = false, want true: the replace deleted the omitted row, so the round changed the corpus and its snapshot must be offered for restore")
+	}
+	if projectDropped != 1 || globalDropped != 0 {
+		t.Errorf("drops = %d/%d, want 1/0: only the claimed emission was refused", projectDropped, globalDropped)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1: the omitted row is the one stored row nothing claimed", deleted)
+	}
+	if len(appliedByCategory) != 0 {
+		t.Errorf("appliedByCategory = %v, want empty: the refused emission landed nowhere", appliedByCategory)
+	}
+	if promoted != 0 || len(keptMems) != 0 {
+		t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(keptMems))
+	}
+	// The refused emission's source survives (concurrent, preserved), and the
+	// omitted row is gone — the store-observable half of the report.
+	if len(preserved) != 1 || preserved[0] != claimed {
+		t.Errorf("preserved = %v, want the claimed row %q kept", preserved, claimed)
+	}
+	after, err := store.GetByIDs(ctx, []string{omitted})
+	if err != nil {
+		t.Fatalf("GetByIDs after apply: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("the omitted row survived the all-dropped replace — it must be the deleted count's row")
+	}
+	// The user-facing half: runReflect prints the summary branch (applied &&
+	// the reporting set is non-empty), whose report and restore hint are the
+	// exact strings a captured run would show.
+	if len(keptProject) != 1 {
+		t.Errorf("keptProject = %d rows, want 1: the reporting set still carries the post-drop emission", len(keptProject))
+	}
+	if len(keptGlobal) != 0 {
+		t.Errorf("keptGlobal = %d rows, want 0", len(keptGlobal))
+	}
+	report := appliedSummary(appliedByCategory, keptGlobal, promoted, 0, false)
+	if report != "0 memories consolidated" {
+		t.Errorf("report = %q, want %q — nothing landed, so no category may appear next to the zero total", report, "0 memories consolidated")
+	}
+	if hint := restoreHint(promoted); hint != "(use --restore to undo)" {
+		t.Errorf("restore hint = %q, want %q — an all-dropped round that deleted rows took a snapshot worth offering", hint, "(use --restore to undo)")
+	}
 }

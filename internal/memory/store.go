@@ -6068,6 +6068,17 @@ func (g *fedGuard) drop(m Memory) bool {
 	// Keep every row this emission would otherwise have deleted: the sources it
 	// names, and any stored row carrying the text it emits. Nothing may be lost
 	// to a claim the pass is not allowed to make.
+	//
+	// The marking is ORDER-DEPENDENT and must be: the whole drop loop runs
+	// before any reuse claim is made, so an emission refused here marks every
+	// row it names as concurrent even when an earlier emission in the same pass
+	// was accepted and also claims one of them — an accepted merge and a refused
+	// keep can share a source. The accepted merge then cannot reuse the shared
+	// row: it inserts a fresh copy instead, and the source survives BESIDE the
+	// merged row, excluded from the delete set by its concurrent mark and
+	// reported in preserved. The direction is deliberate — a refused emission
+	// errs toward keeping, never toward an overlap where its void claim could
+	// delete a row a live claim reaches for.
 	for _, replaced := range m.ReplacesIDs {
 		if _, stored := g.candidateByID[replaced]; stored {
 			g.concurrent[replaced] = true
@@ -6341,6 +6352,16 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 // It returns the IDs of memories preserved because they were saved during the
 // consolidation round trip (the consolidatedSince race) — callers must not
 // treat the post-apply corpus as fully consolidated when this is non-empty.
+//
+// dropped is the count of emissions the #1051 corpus guard refused. deleted is
+// the count of stored rows this replace removed — the unmatched candidates —
+// so a caller can tell a round that wrote nothing from one that changed the
+// corpus, and can base its "nothing happened" report and its restore hint on
+// what was actually written or deleted rather than on the drop count alone.
+// appliedByCategory counts what the replace landed per category — every
+// emission that survived the guard (reused, verbatim-kept, or freshly
+// inserted) — so a summary can break down the applied total without counting
+// an emission the guard refused.
 //
 // rowClaims is the set of columns a rewrite inherits from the rows it replaces: the
 // validity triple, the trust rating, and the three provenance strings.
@@ -6772,9 +6793,9 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 // caller must still know the round wrote nothing, or it will print "Applied" and
 // record a skip fingerprint over a project the consolidator's answer never
 // landed in. Either value non-zero means the next run has to revisit the corpus.
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped int, err error) {
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
-		return nil, 0, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+		return nil, 0, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -6788,7 +6809,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var lock writeLock
 	if ownTx {
 		if tx, lock, err = s.beginWrite(ctx, "replace"); err != nil {
-			return nil, 0, fmt.Errorf("begin tx: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
 	}
@@ -6804,7 +6825,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// through"). See issue #318.
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, nil, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -6816,7 +6837,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the consolidation round trip are kept in place for the same reason.
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, nil, err
 	}
 	// Seed the concurrent window from the shared view when this replace is one
 	// half of an ApplyReflection: the global half's guard has already marked
@@ -6829,7 +6850,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, nil, err
 	}
 
 	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
@@ -6892,6 +6913,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			deleteIDs = append(deleteIDs, c.id)
 		}
 	}
+	// deleted is the number of rows this replace will actually remove — the
+	// candidates no emission claimed. A caller that reports the round by its
+	// drop count alone can call a round that changed the corpus "nothing
+	// written": an all-dropped round (every emission refused) still deletes
+	// the unclaimed candidates beside the refused claims, and the snapshot it
+	// took must then be offered for restore.
+	deleted = len(deleteIDs)
 	// The emissions run BEFORE the delete below, which is a reordering with a
 	// reason: a rewrite or a merge carries its sources' evidence onto the row it
 	// becomes, and that copy has to READ those rows. The foreign key takes them
@@ -6919,10 +6947,19 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// any other reason — a drop, a concurrent save it outran — has no successor
 	// and must not be given one.
 	successorOf := map[string]string{}
+	// appliedByCategory counts what this replace LANDS per category: every
+	// emission that survived the guard, whether it is a fresh insert, a reuse
+	// update, or a verbatim re-emission that writes nothing (#727). The caller's
+	// "memories consolidated" total is the sum of this map, and the category
+	// breakdown next to it must come from the SAME map — counting the emitted
+	// slices instead would include an emission the guard refused, and the parts
+	// would no longer sum to the total.
+	appliedByCategory = make(map[string]int, len(memories))
 	for i, m := range memories {
 		if dropEmission[i] {
 			continue
 		}
+		appliedByCategory[m.Category]++
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
 			id := stored.id
@@ -6965,7 +7002,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, 0, fmt.Errorf("update retained memory: %w", err)
+					return nil, 0, 0, nil, fmt.Errorf("update retained memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			default:
@@ -6976,7 +7013,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    created_at = datetime('now'), updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, 0, fmt.Errorf("update reused memory: %w", err)
+					return nil, 0, 0, nil, fmt.Errorf("update reused memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			}
@@ -6989,7 +7026,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
-				return nil, 0, err
+				return nil, 0, 0, nil, err
 			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
@@ -7016,7 +7053,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// runs before it: the same reordering the carry already depends on.
 		claims, err := inheritedClaims(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, nil, err
 		}
 		// The tier, from the same rows and for the same reason: the successor
 		// stands in for the memories this pass is about to delete, so it inherits
@@ -7029,7 +7066,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// reordering: the delete below is what takes the sources.
 		tier, err := inheritedRetention(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, nil, err
 		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
@@ -7045,7 +7082,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
-			return nil, 0, fmt.Errorf("insert memory: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that
 		// now holds the text. Without it a rewrite or a merge mints an id whose
@@ -7059,7 +7096,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// carries nothing, because a brand-new memory has no inherited support and
 		// "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, nil, err
 		}
 		reflected = append(reflected, newID)
 		for _, replaced := range m.ReplacesIDs {
@@ -7074,16 +7111,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// a real concern rather than a theoretical one: one applied reflect can
 		// drop and rewrite the whole non-manual corpus at once.
 		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, nil, err
 		}
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
-			return nil, 0, fmt.Errorf("prepare delete replaced memory: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("prepare delete replaced memory: %w", err)
 		}
 		for _, id := range deleteIDs {
 			if _, err := stmt.ExecContext(ctx, id); err != nil {
 				stmt.Close() //nolint:errcheck
-				return nil, 0, fmt.Errorf("delete replaced memory: %w", err)
+				return nil, 0, 0, nil, fmt.Errorf("delete replaced memory: %w", err)
 			}
 		}
 		stmt.Close() //nolint:errcheck
@@ -7095,7 +7132,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
 	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, nil, err
 	}
 	// Now that every emission's final id is known, close the chain: each consumed
 	// row's delete row names the row that replaced it. Without this a rewrite or a
@@ -7103,7 +7140,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// different id and nothing says so.
 	for oldID, newID := range successorOf {
 		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, nil, err
 		}
 	}
 
@@ -7119,11 +7156,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
-			return nil, 0, fmt.Errorf("commit replace: %w", err)
+			return nil, 0, 0, nil, fmt.Errorf("commit replace: %w", err)
 		}
 		lock.reportHold("replace", time.Now())
 	}
-	return preserved, dropped, nil
+	return preserved, dropped, deleted, appliedByCategory, nil
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project.

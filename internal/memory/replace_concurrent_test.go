@@ -38,7 +38,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory A: %v", err)
 		}
 
-		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -84,7 +84,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory A: %v", err)
 		}
 
-		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -124,7 +124,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -158,7 +158,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory C: %v", err)
 		}
 
-		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -218,7 +218,7 @@ func TestApplyReflectionCountsGlobalDrops(t *testing.T) {
 		// One clean project emission plus one global emission claiming the
 		// deleted row: the project half reports its own drop count, the global
 		// half reports its own.
-		preserved, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+		preserved, promoted, kept, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject,
 			[]Memory{{Category: "fact", Content: "the relay needs a restart", Importance: 0.7, Tags: []string{}}},
 			[]Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
 			"", true, fed)
@@ -254,7 +254,7 @@ func TestApplyReflectionCountsGlobalDrops(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		_, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, kept, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject,
 			nil,
 			[]Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
 			"", false, fed)
@@ -306,7 +306,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			nil, []Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
 			"", true, fed)
 		if err != nil {
@@ -351,7 +351,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		}
 
 		// A cross-project merge naming the row that was just edited.
-		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			nil, []Memory{{
 				Category: "fact", Content: "the relay host, one fact across projects", Importance: 0.7,
 				Tags: []string{}, ReplacesIDs: []string{aID},
@@ -416,7 +416,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		// delete the unchanged B as unaccounted. That is the project replace doing
 		// exactly what the guard exists to prevent — the merge was not allowed to
 		// consume A or B, so neither may be taken.
-		_, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, kept, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject,
 			[]Memory{{Category: "fact", Content: "unrelated stable fact", Importance: 0.6, Tags: []string{}}},
 			[]Memory{{
 				Category: "fact", Content: "alpha and beta, one fact across projects", Importance: 0.7,
@@ -466,7 +466,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 
 		fed := corpusRows(t, s, aID)
 
-		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			[]Memory{{Category: "fact", Content: "the relay host is alpha", Importance: 0.6, Tags: []string{}}},
 			[]Memory{{Category: "fact", Content: "always run the linter before pushing", Importance: 0.6, Tags: []string{}}},
 			"", true, fed)
@@ -520,7 +520,7 @@ func TestReplaceNonManualKeepsAConcurrentImportanceFold(t *testing.T) {
 	// The harness re-emits the row with the importance it READ, and the reuse
 	// branch would write it back over the fold.
 	emitted := []Memory{{Category: "fact", Content: "a stable deployment fact", Importance: 0.5, Tags: []string{}}}
-	preserved, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	preserved, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 	if err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestReplaceNonManualWithACompleteCorpusReflectsNormally(t *testing.T) {
 		},
 	}
 
-	preserved, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	preserved, _, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 	if err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
@@ -676,7 +676,7 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 			t.Fatalf("UpdateMemory A: %v", err)
 		}
 
-		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
@@ -710,7 +710,7 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
@@ -726,6 +726,117 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 		}
 		if len(all) != 1 || all[0].Content != "the relay needs a restart" {
 			t.Errorf("corpus after partial round = %v, want the fresh fact alone written", contents(all))
+		}
+	})
+}
+
+// The store's report of an all-dropped round must carry what the round actually
+// did to the corpus, not just what it refused. Refusing every emission does
+// not stop the replace from deleting the unclaimed candidates beside the
+// refused claims — the deleted count is what lets a caller tell a round that
+// changed the corpus (and took a snapshot worth restoring) from one that
+// really left it alone. appliedByCategory is the same report in the other
+// direction: which categories LANDED, so a summary can break down the applied
+// total without counting a refused emission.
+func TestReplaceNonManualReportsDeletesAndLandedCategories(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an all-dropped round still reports the rows it deleted", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "the claimed row", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the omitted row", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, aID, bID)
+		emitted := []Memory{{Category: "gotcha", Content: "the claimed row", Importance: 0.5, Tags: []string{}}}
+
+		// The claimed row's metadata moved while the harness was answering, so
+		// the keep is refused; B is claimed by nobody.
+		reweighted := float32(0.95)
+		if err := s.UpdateMemory(ctx, testProject, aID, nil, nil, &reweighted, nil); err != nil {
+			t.Fatalf("UpdateMemory A: %v", err)
+		}
+
+		preserved, dropped, deleted, appliedByCategory, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped != 1 {
+			t.Errorf("dropped = %d, want 1: the only emission was refused", dropped)
+		}
+		if deleted != 1 {
+			t.Errorf("deleted = %d, want 1: the omitted row is the one stored row nothing claimed", deleted)
+		}
+		if len(appliedByCategory) != 0 {
+			t.Errorf("appliedByCategory = %v, want empty: the refused emission landed nowhere", appliedByCategory)
+		}
+		if len(preserved) != 1 || preserved[0] != aID {
+			t.Errorf("preserved = %v, want [%s]: the edited claimed row survives", preserved, aID)
+		}
+		after, err := s.GetByIDs(ctx, []string{bID})
+		if err != nil {
+			t.Fatalf("GetByIDs B: %v", err)
+		}
+		if len(after) != 0 {
+			t.Errorf("the omitted row survived the all-dropped replace, but it must be the deleted count's row")
+		}
+	})
+
+	t.Run("the landed categories count only what landed", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "the claimed row", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the omitted row", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, aID, bID)
+		// A is re-emitted verbatim (lands as a reuse), a fresh fact is
+		// inserted, and B is claimed by nobody and must be deleted.
+		emitted := []Memory{
+			{Category: "gotcha", Content: "the claimed row", Importance: 0.5, Tags: []string{}},
+			{Category: "fact", Content: "the relay needs a restart", Importance: 0.7, Tags: []string{}},
+		}
+
+		_, dropped, deleted, appliedByCategory, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped != 0 {
+			t.Errorf("dropped = %d, want 0: both emissions claim live rows", dropped)
+		}
+		if deleted != 1 {
+			t.Errorf("deleted = %d, want 1", deleted)
+		}
+		if len(appliedByCategory) != 2 || appliedByCategory["gotcha"] != 1 || appliedByCategory["fact"] != 1 {
+			t.Errorf("appliedByCategory = %v, want {fact:1 gotcha:1}: the two landed emissions, one per category", appliedByCategory)
+		}
+		total := 0
+		for _, n := range appliedByCategory {
+			total += n
+		}
+		if total != 2 {
+			t.Errorf("applied total = %d, want 2: the parts must sum to what the summary reports", total)
 		}
 	})
 }
