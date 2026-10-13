@@ -342,9 +342,7 @@ func (s *Store) searchVectorLegAt(ctx context.Context, projectID string, queryVe
 	// connection is taken for its duration either way (OpenDB pins the pool at
 	// one), so releasing the mutex without releasing the connection would not
 	// have let a writer through.
-	if err := s.snapshotVectors(ctx, vectorScanColumns+`
-		WHERE m.project_id = ? OR m.project_id = '_global'
-	`, []any{projectID}, queryVec, identity, rows); err != nil {
+	if err := s.snapshotVectors(ctx, vectorProjectScanQuery, []any{projectID}, vectorProjectPredicate, []any{projectID}, queryVec, identity, rows); err != nil {
 		return nil, vectorLegFacts{}, err
 	}
 	// rows.facts is what the copy pass could not use; the scoring pass below is
@@ -1317,7 +1315,7 @@ func (s *Store) searchVectorAllLegAt(ctx context.Context, queryVec []float32, li
 	// The same snapshot, the same scoring pass and the same bounded window as
 	// the project leg — the only difference is the query, which here has no
 	// WHERE clause at all.
-	if err := s.snapshotVectors(ctx, vectorScanColumns, nil, queryVec, identity, rows); err != nil {
+	if err := s.snapshotVectors(ctx, vectorScanColumns, nil, "", nil, queryVec, identity, rows); err != nil {
 		return nil, vectorLegFacts{}, err
 	}
 	rows.now = now

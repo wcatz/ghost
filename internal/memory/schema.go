@@ -489,8 +489,9 @@ CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id)
 --
 -- A table rather than a column on memory_snapshots because a memory can have
 -- several records and a snapshot row is one row; and it is pruned with the
--- snapshots themselves (ReplaceNonManual's prune), so it cannot outlive the
--- snapshot it describes.
+-- snapshots themselves, so it cannot outlive the snapshot it describes: by
+-- ReplaceNonManual's prune, and — since a snapshot can also leave through the
+-- projects cascade — by DeleteProject's own prune statement.
 CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
     snapshot_id  TEXT NOT NULL,
     memory_id    TEXT NOT NULL,
@@ -668,8 +669,11 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(projec
 -- flag is a claim somebody made at a time, and overwriting it would destroy the
 -- very disagreement the count is meant to report.
 CREATE TABLE IF NOT EXISTS memory_flags (
-    -- No FK, matching retrieval_audit: the flags of a deleted project are
-    -- removed by DeleteProject's own DELETE, and a merge reassigns them.
+    -- No FK, like retrieval_audit: DeleteProject does not follow this column to
+    -- find a project's flags — it follows the MEMORY each flag names, so it
+    -- cannot take the flag of a memory that has moved elsewhere — and the writer
+    -- that moves a memory between projects (a merge, or PromoteToGlobal)
+    -- reassigns this column.
     project_id   TEXT NOT NULL,
     -- On delete CASCADE, so a memory that goes takes its flags with it in the
     -- SAME transaction: the count is a property of the memory, and a surviving

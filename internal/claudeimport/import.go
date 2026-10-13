@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
@@ -61,15 +63,68 @@ var importanceMap = map[string]float32{
 
 const defaultImportance float32 = 0.7
 
-// EncodeProjectPath converts an absolute path to Claude's directory name format.
-// E.g., "/home/wayne/git/ghost" → "-home-wayne-git-ghost".
-// Windows paths also carry backslashes and a drive-letter colon (e.g.
-// "C:\Users\me\repo"); both are folded into "-" the same as "/" so the
-// encoded name never embeds a literal ":" or "\", which would otherwise
-// break directory creation and the path-traversal check in ClaudeMemoryDir.
+// maxEncodedPathLen mirrors Claude Code's MAX_ENCODED_LENGTH. A name at or
+// under it is the plain fold; past it Claude Code truncates to this many
+// UTF-16 code units and appends a hash of the full path so long workspaces
+// stay distinguishable.
+const maxEncodedPathLen = 200
+
+// EncodeProjectPath converts an absolute path to the directory name Claude
+// Code stores it under, e.g. "/home/wayne/git/ghost" →
+// "-home-wayne-git-ghost". Claude Code replaces every character outside
+// [a-zA-Z0-9] with '-' — not just path separators — so a path carrying a
+// '.', '_', space or non-ASCII rune gets one '-' where this package used to
+// keep the character, and Claude Code then never read the redirect or memory
+// file Ghost wrote. The fold, the truncation and the hash are copied from
+// Claude Code's own encoder (a Java-style String.hashCode rendered base36),
+// so the name matches byte for byte.
+//
+// The fold walks UTF-16 code units rather than runes, because Claude Code is
+// a JavaScript program and its [^a-zA-Z0-9] regex matches each surrogate half
+// of a non-BMP character separately: one emoji becomes two '-'. The hash is
+// over the same units.
 func EncodeProjectPath(projectPath string) string {
-	projectPath = strings.NewReplacer(`\`, "-", ":", "-").Replace(projectPath)
-	return strings.ReplaceAll(projectPath, "/", "-")
+	units := utf16.Encode([]rune(projectPath))
+	keep := len(units)
+	if keep > maxEncodedPathLen {
+		keep = maxEncodedPathLen
+	}
+
+	var b strings.Builder
+	b.Grow(keep)
+	for _, u := range units[:keep] {
+		if isEncodedAlnum(u) {
+			b.WriteByte(byte(u))
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	encoded := b.String()
+
+	if len(units) > maxEncodedPathLen {
+		encoded += "-" + strconv.FormatInt(encodedPathHash(units), 36)
+	}
+	return encoded
+}
+
+// isEncodedAlnum reports whether a UTF-16 code unit survives Claude Code's
+// [^a-zA-Z0-9] fold unchanged.
+func isEncodedAlnum(u uint16) bool {
+	return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9')
+}
+
+// encodedPathHash is Claude Code's 32-bit rolling String.hashCode —
+// h = h*31 + unit, wrapped to int32 — over the path's UTF-16 code units, its
+// absolute value taken in int64 so the int32 minimum does not overflow.
+func encodedPathHash(units []uint16) int64 {
+	var h int32
+	for _, u := range units {
+		h = h*31 + int32(u)
+	}
+	if h < 0 {
+		return -int64(h)
+	}
+	return int64(h)
 }
 
 // ClaudeMemoryDir returns the path to Claude Code's memory directory for the
