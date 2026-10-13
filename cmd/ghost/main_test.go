@@ -1674,6 +1674,19 @@ func TestResolveSummaryLineReportsVetoes(t *testing.T) {
 	}
 }
 
+// TestResolveSummaryLineReportsStale: a confirmed note a concurrent writer
+// rewrote while it was classified is not stamped, and the count is named so
+// "resolved 0" is not read as a pass that found nothing (#1052). The suffix is
+// absent when the count is zero, which is what keeps every other report line
+// here stable.
+func TestResolveSummaryLineReportsStale(t *testing.T) {
+	got := resolveSummaryLine("proj", resolve.Result{Loaded: 1, Candidates: 1, Confirmed: 1, Stale: 1}, true, 1, 1)
+	want := "proj: 1 loaded, 1 after prefilter, 1 confirmed evidence, 0 KEEP vetoed, 0 KEEP cached, 0 UNKNOWN, resolved 0 (1 classify call(s)), 1 skipped as stale\n"
+	if got != want {
+		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
+	}
+}
+
 // TestReassessSummaryLine: the reassess pass reports what it found per outcome
 // and what --apply would clear, in both the dry-run and apply verb forms.
 func TestReassessSummaryLine(t *testing.T) {
