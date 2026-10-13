@@ -505,9 +505,10 @@ session row with none would be one no `ghost prune` could ever reach.
 **A tag is refused at WRITE time, and never costs a record.** All four tools that
 take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
 and `ghost_decision_record` — refuse a tag holding a control character, a backtick
-or a `«»`, naming the position and the tag itself. That is the only place the
-refusal belongs, and the reason is worth stating because getting it wrong costs
-data: an import-side guard cannot protect a store it never sees, and a
+or a `«»`, naming the position and the tag itself, except that a token-shaped
+tag is withheld behind its format and one sent longer than 256 bytes behind its
+length, as in every argument refusal. That is the only place the refusal
+belongs, and the reason is worth stating because getting it wrong costs data: an import-side guard cannot protect a store it never sees, and a
 `ghost_memory_save` that accepted `["«urgent»"]` produced a row that then fell out
 of every `ghost export`, because the exporter applies the importer's own checks. A
 backup that loses a memory because of a label is not a backup. So the import and

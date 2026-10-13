@@ -700,7 +700,9 @@ const tagMaxCount = 10
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
 // the ASCII-only quoted string. Interpolating it raw would be a second injection
 // on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain.
+// because it is a character this error string must never contain. A tag that is
+// token-shaped, or that the caller sent longer than the bound a refusal repeats,
+// is withheld instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -713,6 +715,7 @@ func validateTags(tags []string) ([]string, error) {
 			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
+		orig := t
 		if len(t) > tagMaxLen {
 			// Cut on a RUNE boundary. This was `t[:64]`, which on a CJK tag
 			// returned half a rune — and the invalid bytes were STORED, not merely
@@ -736,10 +739,27 @@ func validateTags(tags []string) ([]string, error) {
 			return nil, fmt.Errorf("tag %d (%s) must hold no %s — a tag is printed in the metadata of a memory row, "+
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
-				"any length are fine. Change the tag and call again", i, assemble.Token(t), reason)
+				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
 		}
 	}
 	return tags, nil
+}
+
+// refusedTag renders a tag the shape check refused. A tag the token guard
+// recognises, or one the caller sent longer than memory.ArgEchoMaxBytes, is
+// withheld through memory.RefusalArg like every other argument refusal: the
+// shape check runs before the guard, so naming the tag here would hand a
+// credential back that the guard would have refused to store. Both are decided
+// on the tag as the caller sent it, before the cut, so a value cut to the tag
+// bound is not repeated and the length reported is the caller's own. Every
+// other tag is named through assemble.Token, in the form the row would print.
+// RefusalArg alone would not do for those: it quotes with %q, which keeps the
+// data delimiters this sentence must not carry.
+func refusedTag(orig, cut string) string {
+	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
+		return memory.RefusalArg("tag", orig)
+	}
+	return assemble.Token(cut)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
