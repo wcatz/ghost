@@ -780,12 +780,23 @@ type PurgeOutcome struct {
 // incomplete instead of either claiming it is done or rolling back a delete that
 // has already committed.
 //
-// It stays inside the caller's s.mu rather than being moved out. The busy wait
-// occupies the store's one pinned connection (SetMaxOpenConns(1)), and every
-// other write and read on this Store queues for that same connection, so
-// releasing the mutex would move the queue from the mutex to the pool without
-// letting any of them through; holding it also keeps the checkpoint from
-// interleaving with a second transaction on the one connection.
+// It stays inside the caller's s.mu rather than being moved out, and that is an
+// explicit decision with a cost, not a free consequence of the connection pool.
+//
+// Every writer queues on the store's one pinned connection (SetMaxOpenConns(1)),
+// whether it waits on s.mu or on the pool: releasing the mutex would only move
+// that queue from one to the other, and holding it keeps the checkpoint from
+// interleaving with a second transaction on the one connection. What the lock
+// also does is stall in-process READS that do not compete for that connection at
+// all: the production store carries a separate read handle (NewStoreWithRead,
+// wired in cmd/ghost/bootstrap.go), so a snapshot read runs on readDB and never
+// touches the write connection — but it still takes s.mu.RLock(), so it waits
+// behind this s.mu.Lock() for as long as the checkpoint's busy wait lasts.
+//
+// The window is narrow — only while a reader holds a snapshot old enough to stop
+// the checkpoint, usually sub-second and up to the 5s busy_timeout under
+// sustained contention — and it is accepted because a purge is not a hot path
+// and the lock keeps the checkpoint atomic against the store's writers.
 func (s *Store) checkpointAfterPurge(ctx context.Context) (bool, error) {
 	var busy, walFrames, folded int
 	err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &walFrames, &folded)
