@@ -635,7 +635,7 @@ ghost obsidian export --project myproject --out ~/Documents/GhostVault
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. |
+| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. An EMPTY value is refused (`--out requires a value`, exit 1) rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
 | `--project <name>` | Mirror one project plus global records. |
 
 ### `ghost obsidian sync`
@@ -648,7 +648,7 @@ ghost obsidian sync --interval 30s
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. |
+| `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`. |
 | `--project <name>` | Mirror one project plus global records. |
 | `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. |
 
