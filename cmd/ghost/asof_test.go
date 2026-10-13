@@ -68,7 +68,7 @@ func TestContextAsOfFlagReachesTheRenderer(t *testing.T) {
 			// is the shape runContext's hand-rolled scan indexes from.
 			os.Args = append([]string{origArgs[0], "context"}, argv...)
 			defer func() { os.Args = origArgs }()
-			stdout, stderr := captureStreams(t, runContext)
+			stdout, stderr := captureStreams(t, func() { runContext() })
 			if !strings.Contains(stdout, "as_of 2035-01-01T00:00:00Z") {
 				t.Errorf("the block does not name the instant the flag asked for:\n%s\nstderr: %s", stdout, stderr)
 			}
@@ -90,7 +90,7 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 	origArgs := os.Args
 	os.Args = []string{origArgs[0], "context", "--cwd", dir}
 	defer func() { os.Args = origArgs }()
-	stdout, _ := captureStreams(t, runContext)
+	stdout, _ := captureStreams(t, func() { runContext() })
 	if !strings.Contains(stdout, "the nightly sweep compacts the WAL file") {
 		t.Errorf("the current block does not show the memory:\n%s", stdout)
 	}
