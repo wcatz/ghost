@@ -274,7 +274,7 @@ ghost import ghost-export.jsonl --apply --trust-provenance
                                       # restoring your own export
 ```
 
-The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"` and unpinned whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules — pass the flag when the artifact is your own export.
+The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"`, unpinned and set to the durable `project` tier whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules, and cannot plant a keep-forever tier no lifecycle pass may take back — pass the flag when the artifact is your own export.
 
 Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 

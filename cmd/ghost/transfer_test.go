@@ -523,9 +523,13 @@ func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 	}
 	// The provenance policy is in the summary, not only on the record lines: it
 	// decides what every memory in the file becomes, and the stored source is the
-	// rewritten one, so the artifact's own value is gone from the store.
-	if !strings.Contains(text, "provenance downgraded") {
+	// rewritten one, so the artifact's own value is gone from the store. The
+	// retention tier is part of the same rewrite and is named beside it.
+	if !strings.Contains(text, "provenance and retention downgraded") {
 		t.Errorf("report does not state the provenance downgrade:\n%s", text)
+	}
+	if !strings.Contains(text, memory.RetentionProject) {
+		t.Errorf("report does not name the tier a downgraded memory lands on:\n%s", text)
 	}
 	if !strings.Contains(text, "--trust-provenance") {
 		t.Errorf("report does not name the flag that changes it:\n%s", text)
@@ -535,7 +539,7 @@ func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 	if err := printImportReport(&out, "x.jsonl", trusted, portable.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
 		t.Fatalf("printImportReport(trusted): %v", err)
 	}
-	if !strings.Contains(out.String(), "kept as the artifact states it") {
+	if !strings.Contains(out.String(), "provenance and retention kept as the artifact states them") {
 		t.Errorf("a --trust-provenance run does not say it kept the provenance:\n%s", out.String())
 	}
 	// A plural-aware noun for a count of 1, so a single record is not reported

@@ -390,8 +390,9 @@ Commands:
                               Load a JSONL artifact (dry-run by default over a
                                read-only connection; never overwrites a record
                                whose id already exists; imported memories are
-                               downgraded to source "onboarding" and unpinned
-                               unless --trust-provenance)
+                               downgraded to source "onboarding", unpinned and
+                               the durable "project" tier unless
+                               --trust-provenance)
   upgrade [--allow-downgrade] [--allow-prerelease] [--allow-unattested]
                               Update ghost to the latest release (refuses an older
                               release unless --allow-downgrade is given, a
