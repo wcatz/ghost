@@ -2596,7 +2596,7 @@ func TestGhostProjectDelete_ApplyRemovesProject(t *testing.T) {
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
-		Arguments: map[string]any{"project": "test-project", "apply": true},
+		Arguments: map[string]any{"project": "abc123", "apply": true},
 	})
 	if err != nil {
 		t.Fatalf("CallTool ghost_project_delete: %v", err)
@@ -2622,6 +2622,79 @@ func TestGhostProjectDelete_ApplyRemovesProject(t *testing.T) {
 	if id != "" {
 		t.Error("expected project to be gone after apply")
 	}
+}
+
+// TestGhostProjectDelete_ApplyRefusesAFuzzyIdentifier: with apply:true the
+// tool may only be pointed at a project by the exact id its own dry run
+// printed. The dry-run side resolves fuzzy identifiers — the shared
+// ResolveProject accepts an id, a name, a canonical path prefix, a repository
+// remote and a basename — and an apply that handed the same identifier
+// straight through would delete whichever project those words happened to
+// resolve to at delete time. A basename and a path must therefore be refused
+// before anything is resolved or deleted.
+func TestGhostProjectDelete_ApplyRefusesAFuzzyIdentifier(t *testing.T) {
+	ctx := context.Background()
+
+	refusesApply := func(t *testing.T, store *memory.Store, identifier string) {
+		t.Helper()
+		if _, err := store.Create(ctx, "abc123", memory.Memory{
+			Category: "fact", Content: "must survive a refused apply", Source: "manual", Importance: 0.5, Tags: []string{},
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		srv := New(store, logger, "test")
+		session := connectedClient(t, srv)
+
+		got := callToolErr(t, session, "ghost_project_delete",
+			map[string]any{"project": identifier, "apply": true})
+		if !strings.Contains(got, "dry run") {
+			t.Errorf("expected the refusal to point at the dry run, got %q", got)
+		}
+
+		// The refusal must have deleted nothing: the project row and
+		// everything under it survive.
+		id, _, err := store.ResolveProject(ctx, "abc123")
+		if err != nil {
+			t.Fatalf("ResolveProject after refused apply: %v", err)
+		}
+		if id != "abc123" {
+			t.Errorf("expected the project to survive a refused apply, got id %q", id)
+		}
+		all, err := store.GetAll(ctx, "abc123", 100)
+		if err != nil {
+			t.Fatalf("GetAll after refused apply: %v", err)
+		}
+		if len(all) != 1 {
+			t.Errorf("expected the seeded memory to survive a refused apply, got %d memories", len(all))
+		}
+	}
+
+	t.Run("basename", func(t *testing.T) {
+		// "test-project" is the project's name, which ResolveProject matches
+		// before it ever consults the filesystem — under the pre-fix code
+		// apply:true with this identifier deleted the project.
+		refusesApply(t, testStore(t), "test-project")
+	})
+
+	t.Run("path", func(t *testing.T) {
+		// `testStore` records a path that does not exist, and a path resolves
+		// only when it names a real directory. Give the project a path that is
+		// actually on disk — the shape an agent standing in a checkout passes —
+		// so the path the refusal names is one the old code genuinely resolved.
+		checkout := t.TempDir()
+		db, err := memory.OpenDB(":memory:")
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		store := memory.NewStore(db, logger)
+		if err := store.EnsureProject(ctx, "abc123", checkout, "test-project"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		refusesApply(t, store, checkout)
+	})
 }
 
 func TestGhostProjectDelete_RejectsGlobal(t *testing.T) {
@@ -2695,7 +2768,7 @@ func TestGhostProjectDelete_NotifiesSubscribersOnApply(t *testing.T) {
 
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
-		Arguments: map[string]any{"project": "test-project", "apply": true},
+		Arguments: map[string]any{"project": "abc123", "apply": true},
 	}); err != nil {
 		t.Fatalf("CallTool ghost_project_delete: %v", err)
 	}

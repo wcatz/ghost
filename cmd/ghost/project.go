@@ -36,9 +36,9 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 	if projectID == "" {
 		names, listErr := store.ListProjectNames(ctx)
 		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %s not found\n", memory.ProjectArg("project", projectName))
+			fmt.Fprintf(os.Stderr, "error: project %s not found\n", memory.RefusalArg("project", projectName))
 		} else {
-			fmt.Fprintf(os.Stderr, "error: project %s not found. Known projects: %s\n", memory.ProjectArg("project", projectName), knownProjectsSentence(names))
+			fmt.Fprintf(os.Stderr, "error: project %s not found. Known projects: %s\n", memory.RefusalArg("project", projectName), knownProjectsSentence(names))
 		}
 		os.Exit(1)
 	}
@@ -256,10 +256,10 @@ func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer
 	oldID, oldName := resolveForMerge(ctx, store, oldArg)
 	newID, newName := resolveForMerge(ctx, store, newArg)
 	if oldID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if newID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if oldID == newID {
 		return fmt.Errorf("refusing to merge a project into itself (%q)", oldID)
@@ -304,9 +304,9 @@ func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID st
 	} else if !ok {
 		if names := knownProjectNames(ctx, store); len(names) > 0 {
 			return "", fmt.Errorf("project %s not found (bind takes a project id). Known projects: %s",
-				memory.ProjectArg("project", projectID), strings.Join(names, ", "))
+				memory.RefusalArg("project", projectID), strings.Join(names, ", "))
 		}
-		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.ProjectArg("project", projectID))
+		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.RefusalArg("project", projectID))
 	}
 	return projectID, nil
 }

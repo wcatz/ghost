@@ -473,10 +473,10 @@ func compactTargetProjects(ctx context.Context, s *memory.Store, project string)
 	}
 	id, _, err := s.ResolveProject(ctx, project)
 	if err != nil {
-		return nil, fmt.Errorf("resolve project %s: %w", memory.ProjectArg("project", project), err)
+		return nil, fmt.Errorf("resolve project %s: %w", memory.RefusalArg("project", project), err)
 	}
 	if id == "" {
-		return nil, fmt.Errorf("no project resolves to %s — nothing was compacted", memory.ProjectArg("project", project))
+		return nil, fmt.Errorf("no project resolves to %s — nothing was compacted", memory.RefusalArg("project", project))
 	}
 	return []string{id}, nil
 }

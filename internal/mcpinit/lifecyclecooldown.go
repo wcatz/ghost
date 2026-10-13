@@ -99,7 +99,7 @@ func TouchLifecycleStart(project string) error {
 		// session routinely supplies the clone URL it is standing in, credentials
 		// included (#839). A value the guard recognises would otherwise be quoted
 		// into the operator's stderr by the one package that never asked.
-		return fmt.Errorf("cannot record a lifecycle start for %s: no project resolves to it", memory.ProjectArg("project", project))
+		return fmt.Errorf("cannot record a lifecycle start for %s: no project resolves to it", memory.RefusalArg("project", project))
 	}
 	if !safeProjectIDComponent(id) {
 		return fmt.Errorf("project id %q is not a safe filename component", id)
