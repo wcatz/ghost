@@ -159,6 +159,70 @@ func TestAMixedBatchStampsOnlyTheRowsThatKeptTheirContent(t *testing.T) {
 	}
 }
 
+// TestRunReturnsOnlyStampedRowsWhenApplying is the listing half of #1052: Run's
+// second return is what the CLI and ghost_resolve print as the resolved
+// listing, so a confirmed row the writer refused must not be in it — with its
+// judged text as if it had been resolved, or at all. The store keeps the new
+// text and stays live; the listing names only the rows the write really
+// stamped, which are the rows whose read-time content still matched.
+func TestRunReturnsOnlyStampedRowsWhenApplying(t *testing.T) {
+	s, ctx, project := newFreshnessStore(t)
+	staleText := "the migration was shipped in v2 and is closed"
+	freshText := "the graph experiment was reverted after the postmortem"
+	staleID, err := s.Create(ctx, project, memory.Memory{Category: "fact", Content: staleText, Importance: 0.5, Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create stale: %v", err)
+	}
+	freshID, err := s.Create(ctx, project, memory.Memory{Category: "fact", Content: freshText, Importance: 0.5, Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create fresh: %v", err)
+	}
+	newText := "the migration rollback runbook is still the live procedure; keep following it"
+	cls := &rewritingClassifier{store: s, project: project, id: staleID, newText: newText}
+
+	res, applied, err := Run(ctx, s, cls, project, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Resolved != 1 || res.Stale != 1 {
+		t.Fatalf("Resolved = %d, Stale = %d; want 1 and 1", res.Resolved, res.Stale)
+	}
+	if len(applied) != 1 || applied[0].ID != freshID {
+		t.Fatalf("applied listing = %d rows (%v), want exactly the untouched row %s",
+			len(applied), memoryIDs(applied), freshID)
+	}
+	if applied[0].Content != freshText {
+		t.Errorf("applied row content = %q, want %q — the listing must show what the store holds, not a judged text that was refused", applied[0].Content, freshText)
+	}
+
+	// The store keeps the same split the listing reported: the untouched row is
+	// stamped under its judged text, the rewritten row keeps the NEW text and
+	// stays live (resolved_at NULL) so a later pass can re-judge it.
+	rows, err := s.GetByIDs(ctx, []string{staleID, freshID})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v (%d rows)", err, len(rows))
+	}
+	byID := make(map[string]memory.Memory, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	if got := byID[staleID]; got.Content != newText || got.ResolvedAt != nil {
+		t.Errorf("rewritten row: content = %q, resolved_at = %v; want the new text and NULL", got.Content, got.ResolvedAt)
+	}
+	if got := byID[freshID]; got.Content != freshText || got.ResolvedAt == nil {
+		t.Errorf("untouched row: content = %q, resolved_at = %v; want the judged text and a stamp", got.Content, got.ResolvedAt)
+	}
+}
+
+// memoryIDs renders the ids of a listing for a failure message.
+func memoryIDs(mems []memory.Memory) []string {
+	ids := make([]string, len(mems))
+	for i, m := range mems {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
 // promotingClassifier answers RESOLVED for every note, and on every call
 // promotes the one note under test to _global before returning — a
 // ghost_memory_promote landing inside the read-to-write window. PromoteToGlobal
