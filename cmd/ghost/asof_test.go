@@ -68,7 +68,7 @@ func TestContextAsOfFlagReachesTheRenderer(t *testing.T) {
 			// is the shape runContext's hand-rolled scan indexes from.
 			os.Args = append([]string{origArgs[0], "context"}, argv...)
 			defer func() { os.Args = origArgs }()
-			stdout, stderr := captureStreams(t, runContext)
+			stdout, stderr := captureStreams(t, func() { runContext() })
 			if !strings.Contains(stdout, "as_of 2035-01-01T00:00:00Z") {
 				t.Errorf("the block does not name the instant the flag asked for:\n%s\nstderr: %s", stdout, stderr)
 			}
@@ -90,7 +90,7 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 	origArgs := os.Args
 	os.Args = []string{origArgs[0], "context", "--cwd", dir}
 	defer func() { os.Args = origArgs }()
-	stdout, _ := captureStreams(t, runContext)
+	stdout, _ := captureStreams(t, func() { runContext() })
 	if !strings.Contains(stdout, "the nightly sweep compacts the WAL file") {
 		t.Errorf("the current block does not show the memory:\n%s", stdout)
 	}
@@ -104,8 +104,9 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 
 // TestContextRefusesAnInstantItCannotRead: an unreadable --as-of is a mistake at
 // the boundary, and the command says so instead of printing the present. The parse
-// is the thing under test rather than the process status, because the bad value
-// ends in os.Exit and a test that drove that would take the package with it.
+// is the thing under test rather than the exit code: runContext returns the code
+// rather than taking the process down, and TestContextArgumentRefusalsExitOne
+// pins the code itself.
 func TestContextRefusesAnInstantItCannotRead(t *testing.T) {
 	for _, bad := range []string{"yesterday", "2020-01-01", "2020-01-01 00:00:00", "2035-01-01"} {
 		got, err := contextAsOf([]string{"--as-of", bad})

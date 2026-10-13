@@ -5029,75 +5029,133 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 // (32766 on modern builds) so an unusually large batch can't hit that limit.
 const setResolvedBatchSize = 500
 
-// The two statements SetResolved and MarkResolved both issue, written once so
-// the two writers cannot drift apart on the guard that decides what resolve is
-// allowed to stamp. They differ in three placeholders each — the project
-// predicate, the KEEP-cache column and the id list — and in nothing else, which
-// is the point: the ordinary pass and an operator's named mark are the same
-// decision about the same row, so the row must reach the same answer whichever
-// door it came through.
+// The statements SetResolved, SetResolvedJudged and MarkResolved issue, written
+// once so the three writers cannot drift apart on the guard that decides what
+// resolve is allowed to stamp. They differ in the id-or-pair list they bind —
+// and, for the judged form, in whether an id is paired with the content the
+// verdict was judged against — and in nothing else, which is the point: the
+// ordinary pass, a freshness-checked pass and an operator's named mark are the
+// same decision about the same row, so the row must reach the same answer
+// whichever door it came through.
 const (
+	// setResolvedGuardSQL is the write-time eligibility predicate every resolve
+	// writer carries, as ONE string rather than a predicate copied into each
+	// statement: resolve's eligibility is one decision, and a protection asked by
+	// only some of the writers is lost the moment they disagree — the same reason
+	// retentionExemptSQL is shared. The project predicate is the `?` bound to
+	// projectID when there is one (SetResolved and SetResolvedJudged pass "");
+	// SQLite treats `project_id = ''` as false against every real id, which is how
+	// one statement serves a caller that has no project to bind and one that must
+	// not reach outside its own. It is eligibility and NOT the judged CAS:
+	// scope freshness lives in the `(id, content, project_id)` triple the judged
+	// statements carry, because a promoted row must be REPORTED stale (eligible,
+	// no longer the row the verdict was about) rather than skipped in silence.
+	setResolvedGuardSQL = `
+		  AND project_id != ''
+		  AND (? = '' OR project_id = ?)
+		  AND resolved_at IS NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')
+		  AND ` + retentionExemptSQL
 	// setResolvedSelectSQL reads the ids an UPDATE is about to change, inside
-	// the transaction that will change them. The project predicate is the `?`
-	// bound to projectID when there is one (SetResolved passes ""); SQLite
-	// treats `project_id = ''` as false against every real id, which is how one
-	// statement serves a caller that has no project to bind and one that must not
-	// reach outside its own.
+	// the transaction that will change them.
 	setResolvedSelectSQL = `
 		SELECT id FROM memories
 		WHERE id IN (%s)
-		  AND project_id != ''
-		  AND (? = '' OR project_id = ?)
-		  AND resolved_at IS NULL
-		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')
-		  AND ` + retentionExemptSQL
+		` + setResolvedGuardSQL
 	// setResolvedUpdateSQL stamps the row and drops its KEEP cache in ONE
 	// statement, so no reader can observe a resolved row still holding a
 	// verdict the next pass would honour.
-	//
-	// Both carry retentionExemptSQL, so a `persistent` row is not stamped by
-	// either half of the one transaction that would stamp it — the SELECT is what
-	// decides the row is eligible and the UPDATE re-checks it at write time, and a
-	// protection asked at only one of them is lost the moment the two disagree.
 	setResolvedUpdateSQL = `
 		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
 		WHERE id IN (%s)
-		  AND project_id != ''
-		  AND (? = '' OR project_id = ?)
-		  AND resolved_at IS NULL
-		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')
-		  AND ` + retentionExemptSQL
+		` + setResolvedGuardSQL
+	// setResolvedJudgedSelectSQL reads the eligible ids whose identity STILL
+	// equals what the verdict was judged against — row-value `(id, content,
+	// project_id) IN (VALUES ...)`, one `(?,?,?)` per memory. It is what tells a
+	// row a concurrent write rewrote apart from one that never matched the
+	// verdict: both are eligible and neither is stamped, but only the changed one
+	// is reported as stale, and the difference between this read and
+	// setResolvedSelectSQL's eligible set is exactly that.
+	//
+	// The triple covers TWO axes, because a verdict is scoped to both. Content
+	// is one: the classifier is handed content and decides about content — the
+	// KEEP cache is content-keyed for the same reason — so a metadata-only edit
+	// does not invalidate a verdict, and two writes inside one clock second
+	// cannot make updated_at unable to tell a rewrite from the write that saved
+	// the judged text. Project is the other: PromoteToGlobal moves a row by
+	// changing `project_id` ONLY, so a content match alone would keep a verdict
+	// alive over a row the pass's project no longer owns. The candidate was read
+	// under one project, and stamping it after it left that project is a
+	// project-scoped pass deciding for `_global` — the MarkResolved rule.
+	setResolvedJudgedSelectSQL = `
+		SELECT id FROM memories
+		WHERE (id, content, project_id) IN (VALUES %s)
+		` + setResolvedGuardSQL
+	// setResolvedJudgedUpdateSQL is setResolvedUpdateSQL with the same
+	// freshness in its WHERE clause, so the stamp is refused by the STATEMENT
+	// that would write it and not only by the read above it — a protection asked
+	// at only one of them is lost the moment the two disagree, which is the rule
+	// setResolvedGuardSQL states for retention. The CAS is the verdict's own
+	// freshness, over TWO axes: the row is stamped only when it still holds the
+	// EXACT content the classifier judged AND still sits in the project the pass
+	// read it under.
+	setResolvedJudgedUpdateSQL = `
+		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
+		WHERE (id, content, project_id) IN (VALUES %s)
+		` + setResolvedGuardSQL
 )
 
-// setResolvedStampTx is the shared body of the two resolve writers: one
-// transaction, batches of setResolvedBatchSize, and one history row per row the
-// UPDATE actually changed. It returns the ids it stamped, which is what a caller
-// that has to report per-row outcomes needs, and len() of it is the count the
-// older caller returns. An error returns NO ids, because an error here is always
-// a rollback of everything this call wrote.
+// judgedRow is the read-time identity of one judged candidate, and it has two
+// fields because a verdict is scoped to two things: the content the classifier
+// was actually handed, and the project the row sat in when the pass read it. The
+// write compares BOTH (see setResolvedJudgedSelectSQL), so a concurrent edit
+// invalidates the first and a concurrent PromoteToGlobal the second.
+type judgedRow struct {
+	content string
+	project string
+}
+
+// setResolvedStampTx is the shared body of the resolve writers: one transaction,
+// batches of setResolvedBatchSize, and one history row per row the UPDATE
+// actually changed. It returns the ids it stamped and the ids it found STALE,
+// which is what a caller that has to report per-row outcomes needs, and len() of
+// the first is the count the older caller returns. An error returns NO ids and
+// NO stale rows, because an error here is always a rollback of everything this
+// call wrote.
 //
 // projectID empty means the caller's ids are already project-scoped by the
 // selection it made — which is the ordinary pass's position, since it read
 // ResolveCandidates for one project — and is deliberately not "any project":
 // binding the project here costs one compared parameter and makes the guard the
 // same statement as the projection, so a caller cannot forget it.
-func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance) ([]string, error) {
+//
+// judged nil is the freshness-blind write SetResolved and MarkResolved make. A
+// non-nil judged map turns on the identity CAS (#1052): each id is stamped only
+// when the row still holds judged[id] — the exact content the verdict was judged
+// against, in the project it was read under. An eligible row whose content
+// differs is NOT stamped and is returned as stale, because the verdict was about
+// text the row no longer holds and stamping it would hide the new text on a
+// judgement about the old one; a row promoted to _global mid-pass is stale for
+// the same reason — the verdict was scoped to a project that row has left. A row
+// that is ineligible for any other reason (pinned, recategorized, already
+// resolved, retention-exempt) is neither stamped nor stale, exactly as before:
+// "no longer eligible" and "changed since judged" are different states and only
+// the second is this writer's to report.
+func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow) (stamped, stale []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, _, err := s.beginWrite(ctx, "set-resolved")
 	if err != nil {
-		return nil, fmt.Errorf("begin set resolved: %w", err)
+		return nil, nil, fmt.Errorf("begin set resolved: %w", err)
 	}
 	// A rollback is the whole point of one transaction, so every error path
-	// returns an EMPTY id list rather than the ids it had collected. Returning
-	// them would claim a stamp that the rollback undid, which is the one thing a
+	// returns EMPTY lists rather than the ids it had collected. Returning them
+	// would claim a stamp that the rollback undid, which is the one thing a
 	// caller of this method has no way to check for itself.
 	defer func() { _ = tx.Rollback() }()
 
-	var stamped []string
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > setResolvedBatchSize {
@@ -5114,29 +5172,81 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 		args = append(args, projectID, projectID)
 		in := strings.Join(placeholders, ",")
 
-		changed, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
-		if err != nil {
-			return nil, fmt.Errorf("select rows to resolve: %w", err)
-		}
-		if len(changed) == 0 {
+		if judged == nil {
+			changed, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
+			if err != nil {
+				return nil, nil, fmt.Errorf("select rows to resolve: %w", err)
+			}
+			if len(changed) == 0 {
+				continue
+			}
+			result, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedUpdateSQL, in), args...)
+			if err != nil {
+				return nil, nil, fmt.Errorf("set resolved: %w", err)
+			}
+			if _, err := result.RowsAffected(); err != nil {
+				return nil, nil, fmt.Errorf("set resolved rows affected: %w", err)
+			}
+			stamped = append(stamped, changed...)
+			if err := appendHistoryForIDsTx(ctx, tx, changed, phaseResolve, prov); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
-		result, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedUpdateSQL, in), args...)
+
+		// Judged path. Two reads, because they answer two different questions:
+		// the eligible set (guard only) and the still-identical set (guard plus
+		// content and project equal to what was judged). An eligible row absent
+		// from the matching set was REWRITTEN or PROMOTED since the verdict, so
+		// it is reported as stale; a row absent from the eligible set is declined
+		// for some other reason and says nothing. Both reads and the UPDATE carry
+		// the identity match in SQL, so no full memory text is copied into Go to
+		// compare and the stamp is refused by the statement that writes it.
+		eligible, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
 		if err != nil {
-			return nil, fmt.Errorf("set resolved: %w", err)
+			return nil, nil, fmt.Errorf("select rows to resolve: %w", err)
 		}
-		if _, err := result.RowsAffected(); err != nil {
-			return nil, fmt.Errorf("set resolved rows affected: %w", err)
+		if len(eligible) == 0 {
+			continue
 		}
-		stamped = append(stamped, changed...)
-		if err := appendHistoryForIDsTx(ctx, tx, changed, phaseResolve, prov); err != nil {
-			return nil, err
+		pairs := make([]string, len(batch))
+		pairArgs := make([]interface{}, 0, len(batch)*3+2)
+		for i, id := range batch {
+			pairs[i] = "(?,?,?)"
+			pairArgs = append(pairArgs, id, judged[id].content, judged[id].project)
+		}
+		pairArgs = append(pairArgs, projectID, projectID)
+		matched, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedJudgedSelectSQL, strings.Join(pairs, ",")), pairArgs...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("select rows still holding the judged content: %w", err)
+		}
+		matchedSet := make(map[string]bool, len(matched))
+		for _, id := range matched {
+			matchedSet[id] = true
+		}
+		fresh := make([]string, 0, len(eligible))
+		for _, id := range eligible {
+			if matchedSet[id] {
+				fresh = append(fresh, id)
+			} else {
+				stale = append(stale, id)
+			}
+		}
+		if len(fresh) == 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedJudgedUpdateSQL, strings.Join(pairs, ",")), pairArgs...); err != nil {
+			return nil, nil, fmt.Errorf("set resolved: %w", err)
+		}
+		stamped = append(stamped, fresh...)
+		if err := appendHistoryForIDsTx(ctx, tx, fresh, phaseResolve, prov); err != nil {
+			return nil, nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit set resolved: %w", err)
+		return nil, nil, fmt.Errorf("commit set resolved: %w", err)
 	}
-	return stamped, nil
+	return stamped, stale, nil
 }
 
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
@@ -5146,6 +5256,12 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 // time — a candidate pinned or recategorized during the classify loop is
 // excluded rather than stamped anyway. Returns the count actually stamped,
 // which callers should report instead of len(ids). A no-op on an empty slice.
+//
+// It does NOT check content freshness: a verdict about text the row no longer
+// holds is stamped all the same. That is right for a caller whose ids are not a
+// judgement about content — MarkResolved's operator named rows, a test, a
+// consolidation — and wrong for the resolve pass, which is why the pass goes
+// through SetResolvedJudged instead.
 //
 // Every batch runs in one transaction (it used to be an independent statement
 // each) and records one history row per row it stamped, so "which pass resolved
@@ -5163,8 +5279,66 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	stamped, err := s.setResolvedStampTx(ctx, ids, "", Provenance{})
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, "", Provenance{}, nil)
 	return len(stamped), err
+}
+
+// SetResolvedJudged stamps resolved_at on the memories a classifier confirmed
+// resolved, but only those that still hold the EXACT identity the verdict was
+// judged against (#1052). It returns the ids it stamped and the ids it found
+// stale — eligible rows whose content changed while they were being classified,
+// or that were promoted to another project in that window — each in
+// first-appearance order and each disjoint.
+//
+// It is the resolve pass's writer and SetResolved is the general one. The pass
+// reads candidates, spends a CLI-harness call per batch (seconds to minutes),
+// and only then writes; a concurrent save or edit that rewrites a candidate's
+// text in that window leaves the verdict about text the row no longer holds.
+// resolved_at is persistent and removes a row from every session start, so
+// stamping the rewritten row would hide a fresh instruction on a judgement about
+// its previous text — the exact harm the issue reproduces. supersede already
+// guards its edges this way (memory.CreateLinkJudged stamps the freshness of
+// what was judged, not the clock); resolve now does too.
+//
+// Content, not updated_at, is the freshness key, and the two are not
+// interchangeable: the classifier is handed content and decides about content,
+// the KEEP cache is content-keyed for the same reason, and two writes inside one
+// clock second make updated_at unable to tell a rewrite from the write that
+// saved the judged text. A tag- or importance-only edit therefore does not
+// invalidate a verdict — it never changed what the verdict was about — and the
+// CAS is in the UPDATE's WHERE clause, not only in the read above it.
+//
+// The project is the CAS's second field, and it closes the one hole the content
+// match cannot see. PromoteToGlobal moves a row to _global by changing
+// project_id ONLY — no content, no updated_at — so a promoted candidate still
+// matches its verdict byte for byte, and an unbound writer stamps it: a
+// project-scoped pass deciding for the shared scope, which is exactly what
+// MarkResolved refuses ("a lifecycle pass over one project cannot decide for all
+// of them"). Comparing the read-time project_id too makes the promoted row
+// eligible-but-unchanged-in-content-yet-unmatched: it is NOT stamped and it is
+// REPORTED stale, like a rewrite, rather than buried in silence.
+//
+// Duplicate ids collapse to their first content: the pass already dedups, and a
+// caller that named one id twice with two texts has no single row to judge.
+// A no-op on an empty slice.
+func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped, stale []string, err error) {
+	if len(judged) == 0 {
+		return nil, nil, nil
+	}
+	ids := make([]string, 0, len(judged))
+	want := make(map[string]judgedRow, len(judged))
+	for _, m := range judged {
+		if _, ok := want[m.ID]; ok {
+			continue
+		}
+		want[m.ID] = judgedRow{content: m.Content, project: m.ProjectID}
+		ids = append(ids, m.ID)
+	}
+	// projectID "" deliberately: the guard stays eligibility-only, so a promoted
+	// row is REPORTED stale instead of being silently ineligible. The pass's
+	// project rides in the judged map, where it is compared as the CAS's second
+	// field.
+	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want)
 }
 
 // MarkResolved stamps resolved_at on the named ids IN projectID and returns the
@@ -5231,7 +5405,8 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 		// guard the next caller forgets.
 		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
-	return s.setResolvedStampTx(ctx, ids, projectID, prov)
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil)
+	return stamped, err
 }
 
 // ResolveKeptHashes returns the key resolve recorded when it last judged each
