@@ -447,6 +447,10 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"store.go:UpdateMemoryWithOptions": true,
 		"portable.go:ImportMemory":         true, // attested by the artifact, on its own record
 		"store.go:RestoreSnapshot":         true, // pure SQL from the snapshot; evidence travels with it
+		// ReplaceNonManual's reuse branch: fills a reused row's unset verified_at
+		// from the sources merged into it. Its caller carries those sources'
+		// evidence (carryEvidenceTx) in the same transaction, as the fresh insert does.
+		"store.go:fillReusedClaimsTx": true,
 	}
 	// snapshotSide touches a verified_at that is not a memory row: the snapshot
 	// tables a restore reads back, and the evidence table's own copies. Here so a
