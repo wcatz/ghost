@@ -3719,9 +3719,9 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		// UpdateTask does its own read-merge-write under one lock, so a
-		// concurrent update between a separate read and this write can't be
-		// silently overwritten.
+		// UpdateTask reads the row and merges inside its own write
+		// transaction, so a concurrent update to another field of the same
+		// task lands too instead of overwriting this one (#1083).
 		updated, err := s.store.UpdateTask(ctx, args.TaskID, status, priority, args.Description)
 		if err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
