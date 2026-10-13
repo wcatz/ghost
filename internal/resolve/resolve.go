@@ -225,8 +225,12 @@ type resolveStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	// SetResolvedJudged is the resolved writer, not SetResolved: the pass spends
 	// a classify call between reading candidates and stamping them, so it stamps
-	// only rows that still hold the judged content and gets the rewritten ones
-	// back as stale (#1052). It returns stamped and stale as disjoint id lists.
+	// only rows that still hold the judged identity and gets the changed ones
+	// back as stale (#1052). The identity is BOTH the content the classifier was
+	// handed and the project the row sat in when read: a concurrent
+	// PromoteToGlobal changes project_id only, so a content match alone would
+	// stamp a row the pass's project no longer owns. It returns stamped and
+	// stale as disjoint id lists.
 	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
