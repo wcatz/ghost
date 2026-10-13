@@ -106,6 +106,59 @@ func TestANoteRewrittenWhileItIsClassifiedIsNotResolved(t *testing.T) {
 	}
 }
 
+// TestAMixedBatchStampsOnlyTheRowsThatKeptTheirContent is the mutation guard for
+// the UPDATE's OWN WHERE clause, which the issue requires and which the
+// single-row test above cannot reach.
+//
+// When every confirmed row was rewritten, the writer's early-out
+// (`if len(fresh) == 0 { continue }`) skips the UPDATE entirely, so that test
+// passes even if the UPDATE carries no content check at all. Putting one
+// rewritten row and one untouched row in the SAME pass makes the UPDATE run — and
+// then the content match in its WHERE clause is the only thing keeping the
+// rewritten row live. Dropping that match stamps the rewritten row, which this
+// test fails on.
+func TestAMixedBatchStampsOnlyTheRowsThatKeptTheirContent(t *testing.T) {
+	s, ctx, project := newFreshnessStore(t)
+	staleText := "the migration was shipped in v2 and is closed"
+	freshText := "the graph experiment was reverted after the postmortem"
+	staleID, err := s.Create(ctx, project, memory.Memory{Category: "fact", Content: staleText, Importance: 0.5, Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create stale: %v", err)
+	}
+	freshID, err := s.Create(ctx, project, memory.Memory{Category: "fact", Content: freshText, Importance: 0.5, Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create fresh: %v", err)
+	}
+	newText := "the migration rollback runbook is still the live procedure; keep following it"
+	cls := &rewritingClassifier{store: s, project: project, id: staleID, newText: newText}
+
+	res, _, err := Run(ctx, s, cls, project, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Confirmed != 2 {
+		t.Fatalf("Confirmed = %d, want 2 (both notes reached the classifier and answered RESOLVED)", res.Confirmed)
+	}
+	if res.Resolved != 1 || res.Stale != 1 {
+		t.Fatalf("Resolved = %d, Stale = %d; want 1 and 1", res.Resolved, res.Stale)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{staleID, freshID})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v (%d rows)", err, len(rows))
+	}
+	byID := make(map[string]memory.Memory, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	if got := byID[staleID]; got.Content != newText || got.ResolvedAt != nil {
+		t.Errorf("rewritten row: content = %q, resolved_at = %v; want the new text and NULL", got.Content, got.ResolvedAt)
+	}
+	if got := byID[freshID]; got.Content != freshText || got.ResolvedAt == nil {
+		t.Errorf("untouched row: content = %q, resolved_at = %v; want the judged text and a stamp", got.Content, got.ResolvedAt)
+	}
+}
+
 // TestANoteThatKeptItsJudgedContentIsStillResolved is the other half: the guard
 // refuses a rewrite and nothing else. A confirmed note no writer touched is
 // stamped exactly as it was before the freshness check existed.
