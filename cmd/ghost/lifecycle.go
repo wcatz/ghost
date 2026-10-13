@@ -86,7 +86,7 @@ func runLifecycle() {
 	case lockErr != nil:
 		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not take the per-project lock (%v); continuing unlocked\n", lockErr)
 	case !ok:
-		fmt.Fprintf(os.Stderr, "lifecycle: another lifecycle is already running for project %s; exiting\n", projectName)
+		fmt.Fprint(os.Stderr, lifecycleLockRefusal(projectName))
 		return
 	}
 	defer release()
@@ -621,6 +621,22 @@ func supersedePhaseConsensus(cfg *config.Config) int {
 	return n
 }
 
+// lifecycleLockRefusal is the line runLifecycle prints when another live run
+// holds the per-project claim, and it exists as a function so the operand it
+// names is testable: runLifecycle spawns child processes, so the early-return
+// branch is not reachable from a test.
+//
+// It is a refusal sentence, so its project operand goes through
+// `memory.ProjectArg` rather than `%q`: the refusal is printed to stderr, which
+// the detached path appends to `lifecycle.log`, and `--project` is the session's
+// own clone URL about as often as it is a project name (#1087). An ordinary value
+// comes back quoted and a credential-shaped one as the guard's placeholder, which
+// is what the neighbouring refusals in `internal/mcpinit` already do.
+func lifecycleLockRefusal(projectName string) string {
+	return fmt.Sprintf("lifecycle: another lifecycle is already running for project %s; exiting\n",
+		memory.ProjectArg("project", projectName))
+}
+
 // supersedeConsensusClampNotice is the one line `ghost lifecycle` prints when
 // reflection.supersede_consensus is below the minimum, and it exists because the
 // clamp is otherwise invisible: lifecyclePhases omits --consensus entirely, the
@@ -640,7 +656,7 @@ func supersedeConsensusClampNotice(projectName string, n int) string {
 		return ""
 	}
 	return fmt.Sprintf("lifecycle: reflection.supersede_consensus is %d, below the minimum of %d — the supersede phase for %s runs UNGATED (one classification pass, no agreement gate)\n",
-		n, supersede.MinConsensus, projectName)
+		n, supersede.MinConsensus, memory.ProjectArg("project", projectName))
 }
 
 // clampReflectMemories applies the shared content cap (memory.MaxContentLen)

@@ -1627,6 +1627,8 @@ This is an internal integration command rather than the normal way to start main
 
 When the Stop hook spawns it for a turn, it also passes `--signals <path>`, the audit sidecar holding the memory ids and token fingerprints of what the agent wrote this session. The command compares those against what retrieval admitted, records a verdict per kept memory, prints the figures to the log and deletes the file. The flag is never typed by hand: a run without it judges nothing, and a sidecar that cannot be read costs the audit and nothing else.
 
+A run reports its own preconditions and outcomes on stderr — a reflect skip, the scratch reap, the supersede-consensus clamp notice, a phase that failed — and records the outcome durably in the `lifecycle-last-failure` marker the next session start surfaces. The project operand in those lines and in the marker's recorded argv is rendered through the credential guard (`memory.ProjectArg`): an ordinary name appears as usual (quoted), and a token-shaped `--project` value is withheld behind a placeholder naming the argument and its format, so neither `lifecycle.log` nor the marker relocates one.
+
 ## Development builds: refusing a real store
 
 `GHOST_DEV_FORBID_DATA_DIR` names data directories a build that is **not a
