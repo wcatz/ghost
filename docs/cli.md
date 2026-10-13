@@ -636,7 +636,7 @@ ghost obsidian export --project myproject --out ~/Documents/GhostVault
 | Flag | Meaning |
 |---|---|
 | `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. An EMPTY value is refused (`--out requires a value`, exit 1) rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
-| `--project <name>` | Mirror one project plus global records. |
+| `--project <name>` | Mirror one project plus global records, matched by id or name **exactly**, under the same rule as `ghost export --project`. An exact id is matched **first** and selects exactly one project, even when another project's name is the same string. A name that **more than one** project carries is refused, naming every id it matched, because a project's name is not unique and mirroring all of them would mix projects the caller never named into one vault run. A filter that matches nothing is an error. Either refusal happens before the vault is touched: the directory is not created, marked or written. |
 
 ### `ghost obsidian sync`
 
@@ -649,7 +649,7 @@ ghost obsidian sync --interval 30s
 | Flag | Meaning |
 |---|---|
 | `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`. |
-| `--project <name>` | Mirror one project plus global records. |
+| `--project <name>` | Mirror one project plus global records, matched as for `export`: an exact id first, and a name more than one project carries is refused. A refused filter fails every pass (logged, retried on the next tick) and never writes the vault. |
 | `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. |
 
 The sync opens the database read-only and is safe alongside a live MCP server. Press `Ctrl-C` to stop it.
