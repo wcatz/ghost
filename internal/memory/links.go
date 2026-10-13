@@ -437,6 +437,12 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 // or of an install whose embedding was only just enabled. Both are reported by
 // `ghost mcp status` and `ghost_health`.
 //
+// The three counts describe memories, so an embedding row counts only while a
+// memory still backs it: a delete made with foreign keys off (a migration step)
+// leaves the row behind, the vector leg drops it by joining memories, and
+// counting it here would report embedded+stale > total and a negative
+// unembedded count.
+//
 // The three counts come from one statement so they describe one snapshot.
 // Three separate COUNTs could straddle a write and report embedded+stale >
 // total, which in a coverage line reads as corruption rather than as a race.
@@ -447,8 +453,10 @@ func (s *Store) EmbeddingStats(ctx context.Context) (embedded, stale, total int,
 	identity := s.embeddingIdentity
 	const countQuery = `
 		SELECT
-			(SELECT COUNT(*) FROM memory_embeddings WHERE ? = '' OR model = ?),
-			(SELECT COUNT(*) FROM memory_embeddings WHERE ? <> '' AND model <> ?),
+			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
+				WHERE ? = '' OR e.model = ?),
+			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
+				WHERE ? <> '' AND e.model <> ?),
 			(SELECT COUNT(*) FROM memories)
 	`
 	if err = s.db.QueryRowContext(ctx, countQuery, identity, identity, identity, identity).

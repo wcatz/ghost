@@ -466,3 +466,38 @@ func TestShortMeasuresEightCharactersNotBytes(t *testing.T) {
 		t.Errorf("Short(%q) = %q, want it whole", "abc", got)
 	}
 }
+
+// TestAMissNeverEchoesATokenOrAnUnboundedRef: the no-match refusal fires before
+// the ref is known to name anything, so the ref is caller text and nothing more.
+// A token-shaped ref comes back named by its format and a 200 KB ref comes back
+// as its length, through both entry points — and the refusal is still a miss, or
+// the source fallback behind `ghost supersede --withdraw` stops reaching the
+// holders.
+func TestAMissNeverEchoesATokenOrAnUnboundedRef(t *testing.T) {
+	token := "ghp_" + strings.Repeat("a", 36)
+	big := strings.Repeat("z", 200*1024)
+	for label, ref := range map[string]string{"token": token, "big": big} {
+		for _, which := range []string{"source", "target", "id"} {
+			t.Run(label+"/"+which, func(t *testing.T) {
+				store := &fakeStore{ids: hexIDs("aaaaaaaa", 1)}
+				_, scoped := Resolve(context.Background(), store, "p", which, ref)
+				_, unscoped := ResolveIn(hexIDs("aaaaaaaa", 1), which, ref)
+				for name, err := range map[string]error{"Resolve": scoped, "ResolveIn": unscoped} {
+					if !errors.Is(err, ErrNoMatch) {
+						t.Fatalf("%s: a ref matching nothing = %v, want it to wrap ErrNoMatch", name, err)
+					}
+					msg := err.Error()
+					if strings.Contains(msg, token) || (len(ref) > 64 && strings.Contains(msg, ref[:64])) {
+						t.Errorf("%s: the refusal echoed the ref: %.300s", name, msg)
+					}
+					if len(msg) > 1024 {
+						t.Errorf("%s: the refusal is %d bytes, want a bounded sentence", name, len(msg))
+					}
+					if !strings.Contains(msg, which) || !strings.Contains(msg, "has an id starting with") {
+						t.Errorf("%s: the refusal no longer names the operand and the miss: %.300s", name, msg)
+					}
+				}
+			})
+		}
+	}
+}

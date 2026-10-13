@@ -44,6 +44,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // MinRefLen is the shortest PREFIX a caller may pass. A full id is always
@@ -206,7 +208,11 @@ func resolveIn(ids []string, scope, which, ref string) (string, error) {
 		// against "no memory in project p has an id starting with". A separate
 		// "project %s" placeholder would leave a double space in the second case
 		// and read as a hole in the sentence.
-		return "", fmt.Errorf("%w: no memory%s has an id starting with %q (%s)", ErrNoMatch, inProject(scope), ref, which)
+		//
+		// The ref goes through memory.RefusalArg because this refusal fires
+		// before it is known to name anything: it is caller text, so a token
+		// in it is named by its format and an oversized one by its length.
+		return "", fmt.Errorf("%w: no memory%s has an id starting with %s (%s)", ErrNoMatch, inProject(scope), memory.RefusalArg(which, ref), which)
 	case 1:
 		return matches[0], nil
 	}
