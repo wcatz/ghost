@@ -147,6 +147,73 @@ func TestExportOmitsWhatTheImporterWouldRefuseAndNamesEveryOne(t *testing.T) {
 	}
 }
 
+// TestAnOrphanedChildIsMarkedOrphanAndARefusalAboutTheRecordIsNot pins the
+// marker the export report reads to tell a child left out BECAUSE OF ITS PROJECT
+// from a record left out over its own bytes. The reason string cannot do it: the
+// report would have to match prose, and matching prose is the drift this marker
+// exists to remove — the same reason the exporter asks the importer's predicates
+// rather than describing them.
+//
+// The project here is refused for its OWN bytes (an empty name), so it is an
+// ordinary refusal; the child under it is an orphan; and the memory under the
+// good project is emptied so it is refused for its own too. All three are driven
+// in one run on purpose — a marker set on every skipped record would satisfy the
+// first two and be wrong, which is the version of this that looked right.
+func TestAnOrphanedChildIsMarkedOrphanAndARefusalAboutTheRecordIsNot(t *testing.T) {
+	ctx := context.Background()
+	db, src := newTestStoreWithDB(t)
+	goodProject := seed(t, src)
+
+	plantExportProject(t, db, "p-nameless", "", "/src/p-nameless")
+	plantExportMemory(t, db, "m-orphan", "p-nameless")
+	plantExportMemory(t, db, "m-empty-content", goodProject)
+	// The refusal of its own, planted after the planter because the planter
+	// writes a body: an empty content is a refusal the importer makes about the
+	// RECORD, which is the case the marker must not claim.
+	if _, err := db.Exec(`UPDATE memories SET content = '' WHERE id = 'm-empty-content'`); err != nil {
+		t.Fatalf("empty the memory's content: %v", err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := Export(ctx, src, &buf, "")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	byID := make(map[string]SkippedRecord, len(stats.Skipped))
+	for _, sk := range stats.Skipped {
+		byID[sk.Type+"\x00"+sk.ID] = sk
+	}
+
+	orphan, ok := byID[TypeMemory+"\x00m-orphan"]
+	if !ok {
+		t.Fatalf("the orphaned child was not named: %v", stats.Skipped)
+	}
+	if !orphan.Orphan {
+		t.Error("the child of a dropped project was not marked Orphan, so the report cannot tell it from a record left out over its own bytes")
+	}
+	if orphan.Reason != orphanReason {
+		t.Errorf("the orphan's reason is %q, want the orphan reason (%q) — a second spelling is the drift this test exists to catch", orphan.Reason, orphanReason)
+	}
+	// And the artifact must not carry it, which is the invariant from
+	// TestExportOmitsWhatTheImporterWouldRefuseAndNamesEveryOne restated here so
+	// the marker is not the only thing the fixture proves: named and written
+	// would be worse than either.
+	if bytes.Contains(buf.Bytes(), []byte(`"m-orphan"`)) {
+		t.Error("the orphaned child was written into the artifact")
+	}
+
+	for _, want := range []string{TypeProject + "\x00p-nameless", TypeMemory + "\x00m-empty-content"} {
+		sk, ok := byID[want]
+		if !ok {
+			t.Fatalf("%s was not named: %v", want, stats.Skipped)
+		}
+		if sk.Orphan {
+			t.Errorf("%s was refused over its OWN bytes but marked Orphan, so the report would withhold the repair that applies to it and print advice about a project that exported fine", want)
+		}
+	}
+}
+
 // TestAnOrdinaryExportSkipsNothing is the other half: the new filter must be
 // invisible for a store whose records are all importable, byte for byte, or every
 // existing export test would be a lie about the artifact.
