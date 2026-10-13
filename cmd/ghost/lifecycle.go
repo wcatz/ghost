@@ -4053,7 +4053,7 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 	verb := "would mark resolved"
 	count := 0
 	for _, m := range res.Memories {
-		if m.AlreadyResolved || m.Pinned || m.ExemptCategory {
+		if m.AlreadyResolved || m.Pinned || m.ExemptCategory || m.PersistentTier {
 			continue
 		}
 		count++
@@ -4063,8 +4063,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 		count = res.Marked
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d declined\n",
-		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
+	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d persistent tier, %d declined\n",
+		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.PersistentTier, res.Declined)
 	for _, m := range res.Memories {
 		// The default is the CLAIM, not the absence of one, and that ordering is
 		// deliberate: a state this switch does not know about must fall through
@@ -4091,6 +4091,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 			marker = "pinned"
 		case m.ExemptCategory:
 			marker = "standing category"
+		case m.PersistentTier:
+			marker = "persistent tier"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}

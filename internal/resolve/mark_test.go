@@ -425,6 +425,39 @@ func TestMarkReportsAPinAndAStandingCategoryRatherThanASilentNoOp(t *testing.T) 
 	}
 }
 
+// TestMarkReportsAPersistentTierRowAsExemptNotAsDeclined: the store's guard
+// also declines a persistent-tier row, and that is a permanent property of the
+// row rather than something that changed between the read and the write. A row
+// classified only by the write's absence lands in Declined, which tells the
+// caller a concurrent pin, recategorisation or move happened when none did.
+// It is named from the read, in a dry run as well as under apply.
+func TestMarkReportsAPersistentTierRowAsExemptNotAsDeclined(t *testing.T) {
+	store, _ := markSeed(t)
+	ctx := context.Background()
+	id, err := store.Create(ctx, "p", memory.Memory{
+		Category: "fact", Content: "juliet keeps the release key offline in the vault",
+		Source: "mcp", Retention: memory.RetentionPersistent,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, apply := range []bool{false, true} {
+		res, err := Mark(ctx, store, MarkRequest{ProjectID: "p", Refs: []string{id}, Apply: apply}, markLogger())
+		if err != nil {
+			t.Fatalf("apply=%v: Mark: %v", apply, err)
+		}
+		if res.Marked != 0 || res.PersistentTier != 1 || res.Declined != 0 {
+			t.Errorf("apply=%v: Mark = %+v, want nothing marked, one persistent-tier row and nothing declined", apply, res)
+		}
+		if len(res.Memories) != 1 || !res.Memories[0].PersistentTier || res.Memories[0].Declined || res.Memories[0].Marked {
+			t.Errorf("apply=%v: the persistent row is reported as %+v, want PersistentTier only", apply, res.Memories)
+		}
+		if isMarkResolved(t, store, id) {
+			t.Fatalf("apply=%v: the mark stamped a persistent-tier row", apply)
+		}
+	}
+}
+
 // TestMarkRefusesARefItCannotResolve: a ref that names nothing is a refusal, and
 // it says WHICH form failed. A reader who pasted a full id needs to be told the
 // store does not hold it, not that the string they pasted is malformed — and a
