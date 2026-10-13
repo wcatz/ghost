@@ -214,7 +214,7 @@ func TestReplaceNonManualNeverComposesAWindowThatEndsBeforeItStarts(t *testing.T
 	}
 
 	const merged = "the lane migration is complete and the legacy lane is gone"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: merged, Importance: 0.7,
 		ReplacesIDs: []string{a, b},
 	}}, "", nil); err != nil {
@@ -252,7 +252,7 @@ func TestReplaceNonManualDoesNotInheritAnOutOfOrderWindow(t *testing.T) {
 	}
 
 	const rewritten = "the cutover window has been recorded correctly since"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{a},
 	}}, "", nil); err != nil {
@@ -281,7 +281,7 @@ func TestReplaceNonManualStillInheritsAConsistentWindow(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	const rewritten = "retention is ninety days, and the policy is reviewed annually"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{a},
 	}}, "", nil); err != nil {
@@ -359,7 +359,7 @@ func TestReplaceNonManualPrefersACompleteWindowWhicheverSourceIsNamedFirst(t *te
 				ids = []string{half, whole}
 			}
 			content := "the support window is open through next year and the rollback is bounded"
-			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
 			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
@@ -400,7 +400,7 @@ func TestReplaceNonManualNeverComposesHalvesWhenNoSourceHasBoth(t *testing.T) {
 	}
 
 	const content = "the migration is scheduled for a window"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6,
 		ReplacesIDs: []string{from, until},
 	}}, "", nil); err != nil {
@@ -476,7 +476,7 @@ func TestReplaceNonManualAnUnreadableWindowNeverOutranksARealOne(t *testing.T) {
 				ids = []string{junk, real}
 			}
 			content := "the support window runs to the end of next year, and the prose note is retired"
-			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
 			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
@@ -512,7 +512,7 @@ func TestReplaceNonManualDoesNotWriteAnUnreadableStampOntoTheSuccessor(t *testin
 	}
 
 	const content = "the rollback is scheduled, in a form the reader can use"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
 	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
@@ -549,7 +549,7 @@ func TestReplaceNonManualRecordsTheEmptyMomentAsNoClaim(t *testing.T) {
 
 	const content = "the freeze happens before the release, and lasts a day"
 	empty := ""
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6,
 		ValidFrom:   &empty,
 		ReplacesIDs: []string{a},
@@ -593,7 +593,7 @@ func TestReplaceNonManualDoesNotWriteAnUnreadableVerifiedAtOntoTheSuccessor(t *t
 	}
 
 	const content = "the check is recorded in a form the reader can use"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
 	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
@@ -654,7 +654,7 @@ func TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow(t *testing.T)
 	}
 
 	const content = "the support window is open through next year, and the zero-instant note is retired"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{zero, real},
 	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
@@ -708,7 +708,7 @@ func TestReplaceNonManualTheEmissionsClaimBeatsTheSources(t *testing.T) {
 
 	const rewritten = "the read replica lags the primary by one commit under load"
 	restated := "2027-01-01 00:00:00"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "architecture", Content: rewritten, Importance: 0.7,
 		ReplacesIDs: []string{id},
 
@@ -819,7 +819,7 @@ func TestReplaceNonManualFreshRowKeepsTheColumnsItsCarriedEvidenceClaims(t *test
 	// The consolidation that supersedes it: a fresh row carrying the evidence
 	// forward, which is the path ReplaceNonManual's INSERT takes.
 	const rewritten = "the writer pins MaxOpenConns(1) so a pool query inside an open write transaction cannot deadlock"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "architecture", Content: rewritten, Importance: 0.8,
 		ReplacesIDs: []string{id},
 	}}, "", nil); err != nil {
@@ -892,7 +892,7 @@ func TestReplaceNonManualFreshRowInventsNoClaim(t *testing.T) {
 	}
 
 	const rewritten = "the mirror runs on a timer and skips any cycle it fails to start"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: rewritten, Importance: 0.6,
 		ReplacesIDs: []string{id},
 	}}, "", nil); err != nil {
@@ -933,7 +933,7 @@ func TestReplaceNonManualFreshRowKeepsTheSourcesTrustNotTheEmissions(t *testing.
 		t.Fatalf("Create: %v", err)
 	}
 	const rewritten = "the FTS leg truncates its query terms at ten"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "gotcha", Content: rewritten, Importance: 0.5,
 		ReplacesIDs: []string{id},
 	}}, "", nil); err != nil {

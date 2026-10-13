@@ -6562,9 +6562,18 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, err error) {
+// The two preserved []string / dropped int returns answer the caller's two
+// "did anything change" questions separately. preserved is the ids of rows kept
+// because they were edited or saved during the round trip; dropped is how many
+// EMISSIONS the corpus guard refused because the row they claimed changed or is
+// gone. A dropped emission is invisible to preserved in the delete case — the
+// row it claimed no longer exists, so there is nothing to preserve — but the
+// caller must still know the round wrote nothing, or it will print "Applied" and
+// record a skip fingerprint over a project the consolidator's answer never
+// landed in. Either value non-zero means the next run has to revisit the corpus.
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped int, err error) {
 	if len(memories) == 0 {
-		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+		return nil, 0, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -6578,7 +6587,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var lock writeLock
 	if ownTx {
 		if tx, lock, err = s.beginWrite(ctx, "replace"); err != nil {
-			return nil, fmt.Errorf("begin tx: %w", err)
+			return nil, 0, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
 	}
@@ -6594,7 +6603,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// through"). See issue #318.
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -6606,11 +6615,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the consolidation round trip are kept in place for the same reason.
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	concurrent := make(map[string]bool)
 	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
@@ -6624,6 +6633,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	dropEmission := make([]bool, len(memories))
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+	}
+	for _, d := range dropEmission {
+		if d {
+			dropped++
+		}
 	}
 
 	// Report the survivors so the caller can avoid recording a skip
@@ -6741,7 +6755,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, fmt.Errorf("update retained memory: %w", err)
+					return nil, 0, fmt.Errorf("update retained memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			default:
@@ -6752,7 +6766,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    created_at = datetime('now'), updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, fmt.Errorf("update reused memory: %w", err)
+					return nil, 0, fmt.Errorf("update reused memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			}
@@ -6765,7 +6779,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
@@ -6792,7 +6806,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// runs before it: the same reordering the carry already depends on.
 		claims, err := inheritedClaims(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		// The tier, from the same rows and for the same reason: the successor
 		// stands in for the memories this pass is about to delete, so it inherits
@@ -6805,7 +6819,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// reordering: the delete below is what takes the sources.
 		tier, err := inheritedRetention(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
@@ -6821,7 +6835,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
-			return nil, fmt.Errorf("insert memory: %w", err)
+			return nil, 0, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that
 		// now holds the text. Without it a rewrite or a merge mints an id whose
@@ -6835,7 +6849,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// carries nothing, because a brand-new memory has no inherited support and
 		// "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		reflected = append(reflected, newID)
 		for _, replaced := range m.ReplacesIDs {
@@ -6850,16 +6864,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// a real concern rather than a theoretical one: one applied reflect can
 		// drop and rewrite the whole non-manual corpus at once.
 		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
-			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
+			return nil, 0, fmt.Errorf("prepare delete replaced memory: %w", err)
 		}
 		for _, id := range deleteIDs {
 			if _, err := stmt.ExecContext(ctx, id); err != nil {
 				stmt.Close() //nolint:errcheck
-				return nil, fmt.Errorf("delete replaced memory: %w", err)
+				return nil, 0, fmt.Errorf("delete replaced memory: %w", err)
 			}
 		}
 		stmt.Close() //nolint:errcheck
@@ -6871,7 +6885,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
 	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// Now that every emission's final id is known, close the chain: each consumed
 	// row's delete row names the row that replaced it. Without this a rewrite or a
@@ -6879,7 +6893,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// different id and nothing says so.
 	for oldID, newID := range successorOf {
 		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
@@ -6895,11 +6909,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit replace: %w", err)
+			return nil, 0, fmt.Errorf("commit replace: %w", err)
 		}
 		lock.reportHold("replace", time.Now())
 	}
-	return preserved, nil
+	return preserved, dropped, nil
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project.

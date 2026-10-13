@@ -448,7 +448,7 @@ func TestAConsolidationSuccessorInheritsTheLongestTierOfItsSources(t *testing.T)
 			}
 
 			const merged = "the staging cluster answers health checks on port 8443 through the bastion"
-			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: merged, Importance: 0.5,
 				ReplacesIDs: sources,
 			}}, "", nil); err != nil {
@@ -499,7 +499,7 @@ func TestAConsolidationEmissionWithNoSourcesArrivesAsTheTierItStated(t *testing.
 			ctx := context.Background()
 			content := "a consolidated note that stands on its own: " + tc.name
 
-			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: content, Importance: 0.5, Retention: tc.tier,
 			}}, "", nil); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
@@ -541,7 +541,7 @@ func TestAReflectionMergeLeavesItsSessionSuccessorPrunable(t *testing.T) {
 	}
 
 	const merged = "the migrator is the one path a review has to re-run, and it refuses a down without a reason"
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: merged, Importance: 0.5, ReplacesIDs: sources,
 	}}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
@@ -628,7 +628,7 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			// Importance 0.5 with no tags and no scope, so the emission also matches
 			// reuseChangesNothing — the branch that writes nothing. The tier raise is
 			// not optional there, so the test runs against the strictest branch.
-			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: reused, Importance: 0.5,
 				ReplacesIDs: []string{a, b},
 			}}, "", nil); err != nil {
@@ -706,7 +706,7 @@ func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 	agePruneRow(t, s, control, aged, newer)
 
 	// The reflect run: re-emit the row byte-for-byte, naming only itself.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: "a session fact a reflect run re-emits every pass", Importance: 0.6,
 		ReplacesIDs: []string{reEmitted},
 	}}, "", nil); err != nil {
@@ -776,7 +776,7 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 	was := getOne(t, s, reused)
 
 	// ReplacesIDs names only the reused row. Reflection does this on every `keep`.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: "a session fact reflection keeps, without naming anything else", Importance: 0.5,
 		ReplacesIDs: []string{reused},
 	}}, "", nil); err != nil {
@@ -973,7 +973,7 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		// The snapshot, and a byte-identical re-emission so the row is REUSED and
 		// keeps the id the snapshot records. Without the reuse the snapshot names no
 		// live row and the restore would take the INSERT path instead.
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
 		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
@@ -1057,7 +1057,7 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("save the session row: %v", err)
 		}
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
 		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
@@ -1126,7 +1126,7 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("save the session row: %v", err)
 		}
-		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
 		}}, "", nil); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)

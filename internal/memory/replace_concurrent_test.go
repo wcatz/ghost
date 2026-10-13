@@ -38,7 +38,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory A: %v", err)
 		}
 
-		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -84,7 +84,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory A: %v", err)
 		}
 
-		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -124,7 +124,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -158,7 +158,7 @@ func TestReplaceNonManualKeepsConcurrentEditsAndDeletes(t *testing.T) {
 			t.Fatalf("UpdateMemory C: %v", err)
 		}
 
-		if _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
+		if _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -191,6 +191,96 @@ func corpusRows(t *testing.T, s *Store, ids ...string) []CorpusRow {
 	return out
 }
 
+// The global half's drops must be attributable to the half that produced them:
+// the caller's summary subtracts the project half from the project count and
+// the global half from the cross-project component, and the two are folded
+// (when promotion is off) inside the store AFTER the global half is guarded. A
+// drop counted after the fold would land on the wrong half, and the summary
+// would subtract it twice or not at all.
+func TestApplyReflectionCountsGlobalDrops(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("promotion keeps the global half's drop separate from the project half", func(t *testing.T) {
+		s := testStore(t)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "unrelated note beta", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, bID)
+		if err := s.Delete(ctx, bID); err != nil {
+			t.Fatalf("Delete B: %v", err)
+		}
+
+		// One clean project emission plus one global emission claiming the
+		// deleted row: the project half reports its own drop count, the global
+		// half reports its own.
+		preserved, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+			[]Memory{{Category: "fact", Content: "the relay needs a restart", Importance: 0.7, Tags: []string{}}},
+			[]Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
+			"", true, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if projectDropped != 0 {
+			t.Errorf("projectDropped = %d, want 0: the clean project emission was refused", projectDropped)
+		}
+		if globalDropped != 1 {
+			t.Errorf("globalDropped = %d, want 1: the global emission claiming the deleted row was refused but not reported", globalDropped)
+		}
+		if promoted != 0 || len(kept) != 0 {
+			t.Errorf("promoted/kept = %d/%d, want 0/0: the dropped candidate must not reach _global or the recovery path", promoted, len(kept))
+		}
+		if len(preserved) != 0 {
+			t.Errorf("preserved = %v, want empty: the deleted row has nothing to preserve", preserved)
+		}
+	})
+
+	t.Run("folding counts the global half's drop before the fold, and does not recover it", func(t *testing.T) {
+		s := testStore(t)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "unrelated note beta", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, bID)
+		if err := s.Delete(ctx, bID); err != nil {
+			t.Fatalf("Delete B: %v", err)
+		}
+
+		_, promoted, kept, projectDropped, globalDropped, err := s.ApplyReflection(ctx, testProject,
+			nil,
+			[]Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
+			"", false, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if globalDropped != 1 {
+			t.Errorf("globalDropped = %d, want 1: the global candidate claiming the deleted row was refused", globalDropped)
+		}
+		if projectDropped != 0 {
+			t.Errorf("projectDropped = %d, want 0: the refusal belongs to the global half, not the folded project list", projectDropped)
+		}
+		if promoted != 0 || len(kept) != 0 {
+			t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(kept))
+		}
+		project, err := s.GetAll(ctx, testProject, -1)
+		if err != nil {
+			t.Fatalf("GetAll project: %v", err)
+		}
+		if len(project) != 0 {
+			t.Errorf("project holds %d rows: %v — the dropped candidate was recovered into the project, resurrecting the deleted row",
+				len(project), contents(project))
+		}
+	})
+}
+
 // The global half of the apply writes into _global through the promotion loop,
 // which never consults the project's reuse map, so #1051's guard has to be
 // applied to the cross-project candidates as well. Without it a concurrently
@@ -216,7 +306,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 			t.Fatalf("Delete B: %v", err)
 		}
 
-		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			nil, []Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}},
 			"", true, fed)
 		if err != nil {
@@ -261,7 +351,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		}
 
 		// A cross-project merge naming the row that was just edited.
-		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			nil, []Memory{{
 				Category: "fact", Content: "the relay host, one fact across projects", Importance: 0.7,
 				Tags: []string{}, ReplacesIDs: []string{aID},
@@ -300,7 +390,7 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 
 		fed := corpusRows(t, s, aID)
 
-		_, promoted, _, err := s.ApplyReflection(ctx, testProject,
+		_, promoted, _, _, _, err := s.ApplyReflection(ctx, testProject,
 			[]Memory{{Category: "fact", Content: "the relay host is alpha", Importance: 0.6, Tags: []string{}}},
 			[]Memory{{Category: "fact", Content: "always run the linter before pushing", Importance: 0.6, Tags: []string{}}},
 			"", true, fed)
@@ -354,7 +444,7 @@ func TestReplaceNonManualKeepsAConcurrentImportanceFold(t *testing.T) {
 	// The harness re-emits the row with the importance it READ, and the reuse
 	// branch would write it back over the fold.
 	emitted := []Memory{{Category: "fact", Content: "a stable deployment fact", Importance: 0.5, Tags: []string{}}}
-	preserved, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	preserved, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 	if err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
@@ -410,7 +500,7 @@ func TestReplaceNonManualWithACompleteCorpusReflectsNormally(t *testing.T) {
 		},
 	}
 
-	preserved, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	preserved, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
 	if err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
@@ -447,4 +537,119 @@ func TestReplaceNonManualWithACompleteCorpusReflectsNormally(t *testing.T) {
 			t.Errorf("unexpected row %q in %v", m.Content, contents(all))
 		}
 	}
+}
+
+// The corpus guard's drops are the third filter on the emitted set, after the
+// credential drop in the CLI. The first two filters are visible above the
+// store: the CLI reports the credential drops and counts the post-drop
+// proposal sets. The guard's drops were invisible — preserved is built from the
+// concurrent map, which holds only rows that STILL EXIST — so a round where the
+// store refused an emission (its claimed row deleted mid-round) printed
+// "Applied" with no preserved note and recorded a skip fingerprint over a
+// project the consolidator's answer never landed in. The dropped return closes
+// that: it is the count of emissions refused, per transaction, and the caller
+// treats a non-zero count exactly like a non-empty preserved list.
+func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a deleted source reports a drop with nothing preserved", func(t *testing.T) {
+		s := testStore(t)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "unrelated note beta", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, bID)
+		emitted := []Memory{{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}}}
+
+		// The delete lands while the harness is answering.
+		if err := s.Delete(ctx, bID); err != nil {
+			t.Fatalf("Delete B: %v", err)
+		}
+
+		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped != 1 {
+			t.Errorf("dropped = %d, want 1: the emission claiming a deleted row was refused but not reported", dropped)
+		}
+		if len(preserved) != 0 {
+			t.Errorf("preserved = %v, want empty: the row is gone, so nothing was preserved — the drop itself is the signal", preserved)
+		}
+	})
+
+	t.Run("an edited source reports a drop alongside its preserved row", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		setAgesDaysAgo(t, s, aID, 2)
+
+		fed := corpusRows(t, s, aID)
+		emitted := []Memory{{Category: "fact", Content: "the deploy host is alpha", Importance: 0.6, Tags: []string{}}}
+
+		moved := "the deploy host is bravo (moved)"
+		if err := s.UpdateMemory(ctx, testProject, aID, &moved, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory A: %v", err)
+		}
+
+		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped != 1 {
+			t.Errorf("dropped = %d, want 1: the re-emission was refused", dropped)
+		}
+		if len(preserved) != 1 || preserved[0] != aID {
+			t.Errorf("preserved = %v, want [%s]: the edited row must be reported so the caller skips the fingerprint", preserved, aID)
+		}
+	})
+
+	t.Run("a partial round counts only the refused emission", func(t *testing.T) {
+		s := testStore(t)
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "unrelated note beta", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		setAgesDaysAgo(t, s, bID, 2)
+
+		fed := corpusRows(t, s, bID)
+		// One emission restates B (which is deleted mid-round), one is a fresh
+		// fact with no claim on any stored row.
+		emitted := []Memory{
+			{Category: "gotcha", Content: "unrelated note beta", Importance: 0.5, Tags: []string{}},
+			{Category: "fact", Content: "the relay needs a restart", Importance: 0.7, Tags: []string{}},
+		}
+
+		if err := s.Delete(ctx, bID); err != nil {
+			t.Fatalf("Delete B: %v", err)
+		}
+
+		preserved, dropped, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped != 1 {
+			t.Errorf("dropped = %d, want 1: only the emission claiming the deleted row was refused", dropped)
+		}
+		if len(preserved) != 0 {
+			t.Errorf("preserved = %v, want empty", preserved)
+		}
+		all, err := s.GetAll(ctx, testProject, -1)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+		if len(all) != 1 || all[0].Content != "the relay needs a restart" {
+			t.Errorf("corpus after partial round = %v, want the fresh fact alone written", contents(all))
+		}
+	})
 }

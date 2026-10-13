@@ -35,7 +35,7 @@ func TestRestoreSnapshotSkipsPromotedMemory(t *testing.T) {
 	}
 
 	// Snapshot both by re-emitting their text, which reuses each row in place.
-	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+	if _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: stayText, Importance: 0.5},
 		{Category: "fact", Content: moveText, Importance: 0.5},
 	}, "", nil); err != nil {

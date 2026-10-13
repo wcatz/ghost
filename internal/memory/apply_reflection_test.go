@@ -17,7 +17,7 @@ func TestApplyReflectionPromotesGlobalsAndReplacesProjectTogether(t *testing.T) 
 		t.Fatalf("seed project memory: %v", err)
 	}
 
-	preserved, promoted, kept, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "new global memory")}, "", true, nil)
+	preserved, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "new global memory")}, "", true, nil)
 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
@@ -53,7 +53,7 @@ func TestApplyReflectionPreservesScopeAndProvenanceOnPromotion(t *testing.T) {
 	candidate.SourceRef = "PR-567"
 	candidate.Confidence = &confidence
 
-	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true, nil); err != nil {
+	if _, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true, nil); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	} else if promoted != 1 || len(kept) != 0 {
 		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
@@ -90,7 +90,7 @@ func TestApplyReflectionPreservesScopeAndProvenanceOnRecovery(t *testing.T) {
 		t.Fatalf("create failure trigger: %v", err)
 	}
 
-	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true, nil); err != nil {
+	if _, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true, nil); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	} else if promoted != 0 || len(kept) != 1 {
 		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, len(kept))
@@ -122,7 +122,7 @@ func TestApplyReflectionRecoveryUsesProjectDedupSemantics(t *testing.T) {
 		t.Fatalf("create failure trigger: %v", err)
 	}
 
-	if _, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "duplicate candidate")}, "", true, nil); err != nil {
+	if _, _, _, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "duplicate candidate")}, "", true, nil); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
 	var links int
@@ -151,7 +151,7 @@ func TestApplyReflectionDoesNotFoldAcrossScopes(t *testing.T) {
 
 	development := production
 	development.Scope = map[string]string{"environment": "development"}
-	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{development}, "", true, nil); err != nil {
+	if _, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{development}, "", true, nil); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	} else if promoted != 1 || len(kept) != 0 {
 		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
@@ -189,7 +189,7 @@ func TestApplyReflectionReturnsFailedGlobalToProject(t *testing.T) {
 		t.Fatalf("create failure trigger: %v", err)
 	}
 
-	_, promoted, kept, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
+	_, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
@@ -228,7 +228,7 @@ func TestApplyReflectionRollsBackWhenFailedGlobalCannotBeReturned(t *testing.T) 
 		t.Fatalf("create failure trigger: %v", err)
 	}
 
-	_, promoted, kept, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
+	_, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, []Memory{reflectionMemory("fact", "new project memory")}, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
 
 	if err == nil {
 		t.Fatal("ApplyReflection succeeded despite both promotion and recovery failing")
@@ -256,7 +256,7 @@ func TestApplyReflectionKeepsGlobalsProjectScopedByDefault(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	_, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "global candidate")}, "", false, nil)
+	_, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "global candidate")}, "", false, nil)
 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
@@ -291,7 +291,7 @@ func TestApplyReflectionKeepsCandidatesWhenGlobalProjectCannotBeEnsured(t *testi
 		t.Fatalf("create project failure trigger: %v", err)
 	}
 
-	_, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
+	_, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "global candidate")}, "", true, nil)
 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
@@ -312,7 +312,7 @@ func TestApplyReflectionPromotesOnlyGlobals(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	_, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "only global")}, "", true, nil)
+	_, promoted, kept, _, _, err := s.ApplyReflection(ctx, testProject, nil, []Memory{reflectionMemory("preference", "only global")}, "", true, nil)
 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
@@ -366,12 +366,12 @@ func TestApplyReflectionFoldsParaphrasesIntoOneGlobalRow(t *testing.T) {
 	first := Memory{Category: "preference", Content: "run the gouroboros release checklist from the ops runbook", Source: "reflection", Importance: 0.6}
 	second := Memory{Category: "preference", Content: "Run The Gouroboros Release Checklist From The Ops Runbook.", Source: "reflection", Importance: 0.6}
 
-	if _, promoted, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{first}, "", true, nil); err != nil {
+	if _, promoted, _, _, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{first}, "", true, nil); err != nil {
 		t.Fatalf("first ApplyReflection: %v", err)
 	} else if promoted != 1 {
 		t.Fatalf("first promotion = %d, want 1", promoted)
 	}
-	if _, _, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{second}, "", true, nil); err != nil {
+	if _, _, _, _, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{second}, "", true, nil); err != nil {
 		t.Fatalf("second ApplyReflection: %v", err)
 	}
 

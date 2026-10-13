@@ -1492,12 +1492,13 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, applied, err := applyReflection(
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
 	}
+	droppedTotal := droppedProject + droppedGlobal
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
@@ -1511,15 +1512,19 @@ func runReflect() {
 	}
 
 	// Nothing was written, and the reason has to be stated rather than left to
-	// inference. A round whose only proposals held credentials is dropped
+	// inference. Two paths reach here, and both mean the corpus still holds
+	// whatever it held. A round whose only proposals held credentials is dropped
 	// down to nothing, applyReflection returns without calling the store, and
-	// the corpus is byte-identical to what it was — so a report that went on to
-	// say "Applied" and record the skip fingerprint would be telling the
-	// operator the round landed while the value is still in the store, still
-	// injected into every later session, and now pinned by a signature that
-	// makes --skip-unchanged skip the project forever. That is the worst
-	// possible outcome for this control, and it is one branch below the one
-	// that is careful.
+	// the corpus is byte-identical to what it was. A round where the store
+	// refused every emission it was handed (#1051) ran a transaction but wrote
+	// nothing either: every proposal claimed a memory that changed or was
+	// deleted while the harness was answering, and those rows were left exactly
+	// as they are. In both cases a report that went on to say "Applied" and
+	// record the skip fingerprint would be telling the operator the round landed
+	// while the value is still in the store, still injected into every later
+	// session, and now pinned by a signature that makes --skip-unchanged skip the
+	// project forever. That is the worst possible outcome for this control, and
+	// it is one branch below the one that is careful.
 	//
 	// The reduction report is the else-if rather than a second if because the two
 	// contradict each other in this case: nothing was applied, so kept is 0, and
@@ -1528,8 +1533,13 @@ func runReflect() {
 	// output are untouched in every case that already existed; the only
 	// behaviour this adds is in the !applied case, which did not exist before.
 	if !applied {
-		fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
-		fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+		if droppedTotal == 0 {
+			fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
+			fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+		} else {
+			fmt.Println("Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
+			fmt.Println("  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
+		}
 	} else if apply && parsed.promoteGlobals {
 		// The reduction warning, for the one case the pre-apply report had to skip:
 		// this run applies with promotion on, so only now is it knowable how many
@@ -1586,8 +1596,18 @@ func runReflect() {
 		}
 		// appliedSummary reports the REAL promoted count rather than the number
 		// of candidates, so a partial promotion does not print "3 promoted to
-		// global" one line after "Promoted 1/3".
-		summary := appliedSummary(appliedProjectMems, keptGlobalMems, promoted, parsed.promoteGlobals)
+		// global" one line after "Promoted 1/3". The dropped counts are
+		// subtracted the way each component counts: with promotion off the
+		// cross-project candidates were folded into the project replace, so
+		// their drops sit in the project count too; with it on they never reach
+		// the project replace, so only the project half's drops do.
+		summaryProjectDropped := droppedProject
+		summaryGlobalDropped := 0
+		if !parsed.promoteGlobals {
+			summaryProjectDropped = droppedTotal
+			summaryGlobalDropped = droppedGlobal
+		}
+		summary := appliedSummary(appliedProjectMems, keptGlobalMems, promoted, summaryProjectDropped, summaryGlobalDropped, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
 		if len(keptGlobalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
@@ -1625,8 +1645,12 @@ func runReflect() {
 		// permanently, which is how a stored credential stops being revisited at
 		// all. The round did not happen; it must not be recorded as having.
 		fmt.Fprintln(os.Stderr, "note: nothing was written this round, so no skip fingerprint is recorded — the next run will reconsider this project")
+	} else if len(preserved) > 0 && droppedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) changed or were saved while consolidation ran and were preserved, and %d emission(s) claiming a row that changed or was deleted were dropped; not recording the skip fingerprint so the next run re-merges them\n", len(preserved), droppedTotal)
 	} else if len(preserved) > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d memory(ies) changed or were saved while consolidation ran and were preserved; not recording the skip fingerprint so the next run re-merges them\n", len(preserved))
+	} else if droppedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d emission(s) claimed a memory that changed or was deleted while consolidation ran and were dropped; not recording the skip fingerprint so the next run can consolidate the project again\n", droppedTotal)
 	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)
 	} else if err := store.SetReflectInputSignature(ctx, projectID, reflection.InputSignature(consolidatable(postMemories))); err != nil {
