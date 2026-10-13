@@ -382,6 +382,12 @@ var defaultSeedMemories = []seedGlobalMemory{
 // missing seed memories. Seeds are pinned and source='builtin' so they
 // survive consolidation without being presented as user-authored. Idempotent —
 // skips memories whose content already exists.
+//
+// The idempotence is SQLite's, not the process's: this runs on every open, so
+// two handles — an editor-launched MCP server and a CLI command — meet on one
+// file, and s.mu is a per-Store mutex that closes nothing between them. Each
+// seed's existence probe therefore runs inside the transaction that writes it
+// (see seedMemoryTx).
 func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -400,15 +406,6 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	}
 
 	for _, seed := range defaultSeedMemories {
-		// Skip if content already exists in _global (exact match).
-		var exists int
-		err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND content = ?`,
-			seed.Content).Scan(&exists)
-		if err == nil && exists > 0 {
-			continue
-		}
-
 		tags, _ := json.Marshal(seed.Tags)
 		// One transaction per seed, and a failed seed stays a warning rather
 		// than aborting the rest: this runs on every open, and a store missing
@@ -424,16 +421,42 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 }
 
 // seedMemoryTx inserts one builtin seed and its first history row in a single
-// transaction. A seed is a memory like any other, so it gets a recorded origin:
-// the phase is save rather than a seed-specific value because the row's own
-// source column already says `builtin`, and a phase nothing reads is a phase no
-// filter can use.
+// transaction, and skips it when the content is already there. A seed is a
+// memory like any other, so it gets a recorded origin: the phase is save rather
+// than a seed-specific value because the row's own source column already says
+// `builtin`, and a phase nothing reads is a phase no filter can use.
+//
+// The probe that decides the write reads INSIDE this transaction, which is the
+// rule docs/architecture.md states for every read that decides a write, and the
+// only thing that makes the skip true across processes. BEGIN IMMEDIATE takes
+// SQLite's write lock before the probe runs, so the probe sees whatever every
+// other handle has committed and nothing it has not: a concurrent seed either
+// lands first — and this transaction then reads it and writes nothing — or
+// lands second, and it reads that first row and writes nothing. Two copies
+// cannot both be the first.
+//
+// Probed on the pool as an autocommit read, as this function used to, the check
+// answered about a moment before the transaction existed. Two handles then both
+// read zero and both inserted a byte-identical pinned `builtin` row, in the
+// Global section of every session-start block and every project context, which
+// nothing repairs: re-seeding skips by content, consolidation does not touch
+// pinned rows and no path deletes one. A probe that cannot be read fails the
+// seed rather than writing into a store whose existing rows it could not see.
 func (s *Store) seedMemoryTx(ctx context.Context, seed seedGlobalMemory, tagsJSON string) error {
 	tx, _, err := s.beginWrite(ctx, "seed")
 	if err != nil {
 		return fmt.Errorf("begin seed tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	var exists int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND content = ?`,
+		seed.Content).Scan(&exists); err != nil {
+		return fmt.Errorf("probe existing seed: %w", err)
+	}
+	if exists > 0 {
+		return nil
+	}
 	var id string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)

@@ -2,6 +2,7 @@ package portable
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -175,13 +176,16 @@ type unreadable struct {
 // treatment because they share the property that makes it right: one damaged
 // record must not abandon a file that may hold ten thousand good ones.
 func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
-	scanner := bufio.NewScanner(r)
-	// A memory is capped at MaxContentLen bytes, so a line can be larger than
-	// bufio's 64 KiB default. The cap here is 1 MiB per line: a single record
-	// cannot legitimately exceed the content cap by much, and a larger line
-	// means a file that is not this format.
-	const maxLine = 1 << 20
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLine)
+	// The artifact does not bound a record's length, so the reader must not put
+	// a fixed ceiling on a line. `content` is capped at MaxContentLen, but a
+	// memory's `evidence` list has no bound — one row is appended every time the
+	// same fact is saved again (see Store.Upsert's fold branch) — so an
+	// exporter's own output can pass any ceiling derived from the content cap
+	// (#1084). A fixed cap refused the exporter's own artifact as a whole file,
+	// before any record was read, so the one bloated record left every other
+	// record in the backup unimportable. bufio.Reader grows its buffer to fit the
+	// line instead: what the exporter can write, the importer reads.
+	reader := bufio.NewReaderSize(r, 64*1024)
 
 	var (
 		recs    []parsedRecord
@@ -189,9 +193,24 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 		header  bool
 		lineNum int
 	)
-	for scanner.Scan() {
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		// A read that did not end on the delimiter is a partial line: on any
+		// error other than EOF there is no line to judge, so the stream error is
+		// returned and the read stops. EOF with no bytes left is the end, while
+		// EOF with a final unterminated line still yields that line below — the
+		// same line bufio.ScanLines delivered.
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, nil, fmt.Errorf("read artifact: %w", readErr)
+		}
+		if len(raw) == 0 {
+			break
+		}
 		lineNum++
-		line := scanner.Bytes()
+		// TrimRight rather than one delimiter: ReadBytes yields the line ending,
+		// and "\r\n" is the Windows spelling of the same ending ScanLines
+		// dropped a "\r" from.
+		line := bytes.TrimRight(raw, "\r\n")
 		if len(strings.TrimSpace(string(line))) == 0 {
 			// A blank line is skipped rather than rejected: a file that has
 			// been through an editor may have them, and there is nothing to
@@ -270,12 +289,6 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 			}
 		}
 		recs = append(recs, parsedRecord{rec: rec, line: lineNum})
-	}
-	if err := scanner.Err(); err != nil {
-		if err == bufio.ErrTooLong {
-			return nil, nil, fmt.Errorf("a line exceeds the %d-byte limit — this does not look like a ghost artifact", maxLine)
-		}
-		return nil, nil, fmt.Errorf("read artifact: %w", err)
 	}
 	if !header {
 		if lineNum == 0 {
