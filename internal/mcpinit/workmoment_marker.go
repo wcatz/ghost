@@ -24,11 +24,11 @@ import (
 // first entry (its rows and its bytes), so a row it delivered is never repeated
 // and the two channels draw on one budget.
 //
-// Naming, sanitising and sweeping follow the lifecycle markers beside it: the
-// file lives in config.DataDirPath() (a refused resolve means do nothing, never
-// a fallback), the session id is untrusted and is mapped onto a file-name-safe
-// stem by sanitizeMarkerProject (an empty id means there is no marker and so no
-// delivery), the file is private (0600), and anything older than
+// Placement and sweeping follow the lifecycle markers beside it, naming does
+// not: the file lives in config.DataDirPath() (a refused resolve means do
+// nothing, never a fallback), the session id is untrusted and is mapped onto a
+// file-name-safe stem by sanitizeMarkerProject (an empty id means there is no
+// marker and so no delivery), the file is private (0600), and anything older than
 // workMomentMarkerMaxAge is deleted the next time a session starts.
 //
 // Concurrency. Parallel tool calls in one turn run their hooks at the same time,
