@@ -65,6 +65,14 @@ func TestRunRefusesMalformedSettingsBeforeRegistering(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("refusal must name the file and the field %q, got: %v", tc.field, err)
 			}
+			// The refusal must carry the edit that clears it, not Run's
+			// generic re-run hint: a re-run reproduces the same invalid file.
+			if !strings.Contains(err.Error(), "Fix the named field") {
+				t.Errorf("refusal must name the edit that clears it, got: %v", err)
+			}
+			if strings.Contains(err.Error(), "to retry") {
+				t.Errorf("refusal must not carry the generic re-run hint, got: %v", err)
+			}
 
 			// The refusal happens BEFORE registration: the recording stub
 			// writes a `calls` log on every invocation, so it must not exist.
