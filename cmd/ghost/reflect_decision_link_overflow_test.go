@@ -155,6 +155,184 @@ func TestRunReflectReportsAnOverflowingMergeAndDoesNotReproposeIt(t *testing.T) 
 // would be refused for contamination before the decision links were ever read.
 const mergeFoldText = "Each queue topic chose an option for it, and the measured rationale records why nothing cheaper did the job"
 
+// The overflow-only round: the ONE emission the harness answers with is the
+// merge that cannot be written.
+//
+// The corpus is two rows rather than thirteen because both rows have to carry
+// links already — that is what makes one merge over them overflow — and because
+// a two-row corpus is under gateMinInput (6), so the LLM tier's quality gate
+// never demands a second memory back and the round really is a single emission.
+// With every emission refused and nothing deleted, `applied` is false, which is
+// the branch the test above cannot reach: it seeds keeps, so there the round
+// applied something and both the fingerprint guard and the "Applied: nothing"
+// reason line sat unreachable.
+const (
+	// soloMergeLinks links, split evenly across the two rows. Each link is
+	// "decision:" plus a 32-character id plus a separator, so seven of them fit
+	// one source_ref (293 bytes) and all fourteen joined do not (587). Both
+	// properties are load-bearing: a row whose own reference overflowed could
+	// not exist, so the overflow has to arrive only through the merge.
+	soloMergeLinks = 14
+	// The three texts share a vocabulary on purpose, for the reason in
+	// mergeFoldText above: the drop guard scores each merged source against its
+	// OWN merge's tokens and re-adds any source the merge does not account for.
+	// A re-added source is a verbatim emission claiming a row the overflow drop
+	// had already marked kept, so it would be refused as a concurrent claim and
+	// this round would measure the corpus guard instead of the overflow.
+	soloMergeConsumerRow = "queue topic: the option we chose for the consumer is the measured one we recorded"
+	soloMergeRetryRow    = "queue topic: the option we chose for the retry path is the measured one we recorded"
+	soloMergeText        = "the queue topic, the option we chose, and the measured one we recorded for the consumer and for the retry path"
+)
+
+// TestRunReflectSaysAnOverflowOnlyRoundAppliedNothingAndStillSkips is the round
+// the test above cannot stage: the overflowing merge is the only thing the
+// harness proposed, so nothing was written and nothing was deleted, and the run
+// has to say so — in its OWN words, naming the links and the bound rather than a
+// credential or a row that moved — while still recording the skip fingerprint
+// that keeps the identical merge from being proposed again.
+//
+// The fingerprint is the whole point and the note is the other half. Reporting
+// the right reason while suppressing the fingerprint would re-propose the merge
+// on every run with a report nobody can act on; suppressing the note would make
+// a skip the operator cannot explain.
+func TestRunReflectSaysAnOverflowOnlyRoundAppliedNothingAndStillSkips(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake harness requires a POSIX shell")
+	}
+	dataHome := isolatedLifecycleEnv(t)
+	ctx := context.Background()
+	const project = "vault"
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	// Fourteen decisions, so every link in the fixture names a live decision
+	// instead of a made-up id. Their companion memories are then resolved: a
+	// resolved row is excluded from the consolidation input (#318) and from the
+	// replace's candidate query, which leaves the corpus as exactly the two rows
+	// under test.
+	s := openReflectStore(t, dataHome, project)
+	var links, companionIDs []string
+	for i := 0; i < soloMergeLinks; i++ {
+		decision, companion, _, err := s.RecordDecision(ctx, project,
+			fmt.Sprintf("Rotation %02d", i), "rotate the queue credential on a schedule",
+			"the consumer drops in-flight work while a token is stale", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision %d: %v", i, err)
+		}
+		links = append(links, decisionLinkPrefix+decision)
+		companionIDs = append(companionIDs, companion)
+	}
+	if n, err := s.SetResolved(ctx, companionIDs); err != nil || n != len(companionIDs) {
+		t.Fatalf("SetResolved = %d, %v; want %d companions resolved so they leave the corpus", n, err, len(companionIDs))
+	}
+	var rows []string
+	for _, content := range []string{soloMergeConsumerRow, soloMergeRetryRow} {
+		id, err := s.Create(ctx, project, memory.Memory{
+			Category: "fact", Source: "mcp", Importance: 0.6, Content: content,
+		})
+		if err != nil {
+			t.Fatalf("create row %q: %v", content, err)
+		}
+		rows = append(rows, id)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	// The links go in with a direct UPDATE because this state is unreachable
+	// through a writer: checkReservedSourceRef refuses a decision link anywhere
+	// in a caller-supplied source_ref, which is the whole point of the
+	// namespace. A row carrying several links only ever exists as what a
+	// consolidation left behind, and a test cannot run one consolidation to
+	// produce the input of another — the same reason the credential test seeds
+	// through CreateFromCorpus.
+	db, err := openRawDB(dataHome)
+	if err != nil {
+		t.Fatalf("open to write links: %v", err)
+	}
+	half := soloMergeLinks / 2
+	for i, id := range rows {
+		lo, hi := 0, half
+		if i > 0 {
+			lo, hi = half, soloMergeLinks
+		}
+		if _, err := db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, strings.Join(links[lo:hi], ","), id); err != nil {
+			t.Fatalf("write decision links onto %s: %v", id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close link writer: %v", err)
+	}
+	// An hour ago, so no seeded row reads as a save that raced this run.
+	if err := execBackdate(dataHome, project); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	calls := filepath.Join(t.TempDir(), "calls")
+	harness := fakeReflectHarness(t, calls, strings.Join(rows, ","), soloMergeText, "")
+	t.Setenv("GHOST_CLI_CLAUDE_BINARY", harness)
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+
+	report := captureStderr(t, func() {
+		runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply")
+	})
+
+	// The report's own line for a round that applied nothing has to name the
+	// links and the bound it did not fit — the reason, with the count and the
+	// bound taken from the store's own answer rather than restated.
+	if !strings.Contains(report, "every consolidation proposal folded more decision links than one source_ref can hold") {
+		t.Errorf("an overflow-only round did not report the overflow as its own reason:\n%s", report)
+	}
+	if !strings.Contains(report, fmt.Sprintf("(%d link(s), %d-byte bound)", soloMergeLinks, memory.MaxSourceRefLen)) {
+		t.Errorf("the report does not carry the link count and the bound the store refused (%d links, %d-byte bound):\n%s", soloMergeLinks, memory.MaxSourceRefLen, report)
+	}
+	// Neither of the two reasons it is not: a credential this round never held,
+	// and a row that never moved.
+	if strings.Contains(report, "held a credential value") {
+		t.Errorf("an overflow drop is reported as a credential drop:\n%s", report)
+	}
+	if strings.Contains(report, "changed or was deleted") {
+		t.Errorf("an overflow drop is reported as a claim on a row that moved:\n%s", report)
+	}
+
+	// Both rows are still live and still carry every link. The drop keeps its
+	// sources rather than truncating a link list, and a truncated list is the
+	// failure #1213 exists to prevent: it would retire nothing and say nothing.
+	live, err := openRawDB(dataHome)
+	if err != nil {
+		t.Fatalf("open for read: %v", err)
+	}
+	defer live.Close() //nolint:errcheck
+	for _, id := range rows {
+		var ref sql.NullString
+		if err := live.QueryRow(`SELECT source_ref FROM memories WHERE id = ? AND resolved_at IS NULL`, id).Scan(&ref); err != nil {
+			t.Fatalf("row %s is not live any more: %v", id, err)
+		}
+		if got := strings.Count(ref.String, decisionLinkPrefix); got != soloMergeLinks/2 {
+			t.Errorf("row %s carries %d decision link(s), want %d: the drop must keep the whole list", id, got, soloMergeLinks/2)
+		}
+	}
+
+	if got := readReflectSignature(t, dataHome); got == "" {
+		t.Fatal("no skip fingerprint was recorded: --skip-unchanged would re-propose this same merge on every run")
+	}
+	if strings.Contains(report, "no skip fingerprint is recorded") {
+		t.Errorf("the round reported itself as one that wrote nothing, and yet recorded its fingerprint:\n%s", report)
+	}
+
+	// And the second round must not reach the harness: the identical merge would
+	// overflow again, so paying for it twice is the cost this round avoids.
+	second := captureStderr(t, func() {
+		runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply", "--skip-unchanged")
+	})
+	if !strings.Contains(second, "unchanged since the last applied consolidation") {
+		t.Errorf("the second --skip-unchanged run did not skip: %s", second)
+	}
+	if n := countLines(t, calls); n != 1 {
+		t.Errorf("the harness answered %d rounds, want 1: the same merge was proposed again after an overflow drop that cannot resolve itself", n)
+	}
+}
+
 // decisionLinkPrefix is the reserved link a decision companion carries. The
 // store's constant is unexported; this is the documented public format (docs/
 // mcp.md), and it is spelled out here rather than imported so the assertion
@@ -168,10 +346,11 @@ const decisionLinkPrefix = "decision:"
 // line to calls for every turn it answers, so a test can count rounds rather
 // than infer them from output.
 //
-// The operation list is one merge over the decision companions and a keep for
-// each other memory — the shape of an ordinary consolidation round that happens
-// to fold too many links. `keep` takes exactly one id per line (parseOpLine
-// refuses several), so each is its own operation.
+// The operation list is one merge over the named ids and, when keepIDs is not
+// empty, a keep for each of them — an ordinary round that happens to fold too
+// many links, and a round whose only emission is that merge. `keep` takes
+// exactly one id per line (parseOpLine refuses several), so each is its own
+// operation.
 //
 // The capability list is the one ai's own fixture uses: a binary that lacks any
 // of the five required flags is refused with an error rather than run with a
