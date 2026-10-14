@@ -105,7 +105,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 - Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
-- Codex: `config.toml` registration plus `hooks.json` entries that require user trust.
+- Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command.
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
