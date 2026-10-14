@@ -114,6 +114,54 @@ func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
 	}
 }
 
+// TestParseObsidianFlagsRefusesAnEmptyInterval: --interval is the cadence half
+// of the same rule as --out, and an explicit empty value is the unset-variable
+// spelling rather than "no flag given". The parser returned "" for it, and
+// runObsidian reads "" as "use obsidian.interval" (30s by default), so
+// `ghost obsidian sync --interval "$INTERVAL"` with INTERVAL unset polled at a
+// cadence nobody chose and exited 0. The default is the flag left off.
+func TestParseObsidianFlagsRefusesAnEmptyInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"attached empty", []string{"--interval="}},
+		{"separate empty", []string{"--interval", ""}},
+		{"attached empty after a valid flag", []string{"--out", "/v", "--interval="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, interval, err := parseObsidianFlags(tc.args)
+			if err == nil {
+				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --interval must be refused, not read as the default cadence", tc.args, interval)
+			}
+			if err.Error() != "--interval requires a value" {
+				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--interval requires a value")
+			}
+		})
+	}
+
+	// The duplicate is asked FIRST, as for --out: a cadence followed by an
+	// empty one is "given twice" naming both, not a complaint about an empty
+	// value the reader could not have meant.
+	if _, _, _, err := parseObsidianFlags([]string{"--interval", "5m", "--interval="}); err == nil {
+		t.Fatal("a cadence followed by an empty one must be refused")
+	} else if !strings.Contains(err.Error(), "was given twice") {
+		t.Errorf("error = %q, want the duplicate refusal naming both values", err)
+	}
+
+	// Positive controls: a value still parses in both spellings, and an absent
+	// --interval is not an error and leaves interval empty for the default to
+	// fill.
+	for _, args := range [][]string{{"--interval", "30s"}, {"--interval=30s"}} {
+		if _, _, interval, err := parseObsidianFlags(args); err != nil || interval != "30s" {
+			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want 30s", args, interval, err)
+		}
+	}
+	if _, _, interval, err := parseObsidianFlags([]string{"--out=/v"}); err != nil || interval != "" {
+		t.Errorf("absent --interval = %q (err %v), want empty and no error", interval, err)
+	}
+}
+
 // TestParseMCPClient verifies --client parsing rejects a missing or empty
 // value (which previously silently fell back to Claude) and accepts both
 // "--client NAME" and "--client=NAME" forms.

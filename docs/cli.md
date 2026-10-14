@@ -670,7 +670,7 @@ ghost obsidian sync --interval 30s
 |---|---|
 | `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`, and so is a repeated `--out` (`--out was given twice ("A" and "B")`, exit 1). |
 | `--project <name>` | Mirror one project plus global records, matched as for `export`: an exact id first, and a name more than one project carries is refused. A refused filter fails every pass (logged, retried on the next tick) and never writes the vault. |
-| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. A repeated `--interval` is refused, naming both values (`--interval was given twice ("5m" and "9m")`, exit 1) rather than polling on the last one: the cadence in effect would not be the one the command line spelled twice, and the run says nothing about which it chose. |
+| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. An EMPTY value is refused (`--interval requires a value`, exit 1) rather than read as the default: `--interval=` is a script with an unset variable, and the way to the default is to leave the flag off. A repeated `--interval` is refused, naming both values (`--interval was given twice ("5m" and "9m")`, exit 1) rather than polling on the last one: the cadence in effect would not be the one the command line spelled twice, and the run says nothing about which it chose. |
 
 The sync opens the database read-only and is safe alongside a live MCP server. Press `Ctrl-C` to stop it.
 
