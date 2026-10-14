@@ -2501,12 +2501,14 @@ func (s *Server) registerTools() {
 		// whether the import had happened yet.
 		var skippedFiles []string
 		if asOf == nil {
-			if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
-				for _, p := range projects {
-					if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-						_, skipped, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
-						skippedFiles = append(skippedFiles, skipped...)
-						break
+			if count, cErr := s.store.CountMemories(ctx, args.ProjectID); cErr == nil && count == 0 {
+				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
+					for _, p := range projects {
+						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
+							_, skipped, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							skippedFiles = append(skippedFiles, skipped...)
+							break
+						}
 					}
 				}
 			}

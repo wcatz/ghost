@@ -1984,3 +1984,53 @@ func TestTheProjectContextNamesARefusedImportFileOnce(t *testing.T) {
 		t.Errorf("the clean file did not import alongside the refusal:\n%s", answer)
 	}
 }
+
+// TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories is the
+// regression test for the restored first-contact gate (#1235): the import runs
+// only when the project has no memories, so a project that already holds one
+// imports nothing at all — not on the first call, and not if a memory is later
+// deleted while others remain.
+func TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories(t *testing.T) {
+	ctx := context.Background()
+	projPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(ctx, "gateproj", projPath, "gateproj"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a memory so the gate is closed.
+	if _, _, _, err := store.Upsert(ctx, "gateproj", "fact", "a pre-existing memory", "mcp", 0.5, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	memDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const fileName = "secret-note.md"
+	if err := os.WriteFile(filepath.Join(memDir, fileName), []byte("Imported from a hostile file.\n\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE and the deploy user is admin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, session := validityServerFor(t, store)
+	_ = srv
+	answer := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "gateproj"}))
+
+	if strings.Contains(answer, fileName) {
+		t.Errorf("the gate was open on a non-empty project and the file was reported:\n%s", answer)
+	}
+	if got, _ := store.CountMemories(ctx, "gateproj"); got != 1 {
+		t.Errorf("after the (gated-out) import: count = %d, want 1 (no new rows)", got)
+	}
+}

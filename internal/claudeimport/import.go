@@ -6,7 +6,7 @@ package claudeimport
 import (
 	"bufio"
 	"context"
-
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -318,49 +318,54 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 	return importFromDir(ctx, store, projectID, dir, logger)
 }
 
-// importMarkerRef is the per-file source_ref marker the import stamps on every
-// row it writes. It is the durable record ImportedFileReads reads to tell a file
-// that has already been imported from one that still needs importing: the marker
-// survives an in-place edit of the memory, and a delete leaves a history
-// tombstone the store matches by content.
-func importMarkerRef(name string) string { return "claude-import:" + name }
-
 // importFromDir imports all Claude Code memories from a specific directory.
 //
-// Per-file gate: this is the ONLY caller in the codebase whose re-runs must be
-// true no-ops — ghost mcp init documents itself as idempotent and calls it
-// unconditionally, and the first-contact import runs on every context read so a
-// file that failed can be retried. Each file is checked against the store's
-// durable per-file record (ClaudeImportDone, keyed on the file's marker) before
-// it is written, and each write stamps that marker through Provenance.SourceRef.
-// So a file whose import landed is never written again — even after the user
-// edits or deletes the memory — while a file that failed for a transient reason
-// left no marker and is retried on the next call.
+// Dedup guard: this is the ONLY caller in the codebase whose re-runs must be
+// true no-ops (ghost mcp init documents itself as idempotent and safe to re-run,
+// and calls this unconditionally every time). A plain Upsert is
+// intentionally non-destructive — a byte-identical save creates a new, linked
+// row rather than silently merging — so the import asks for the skip itself:
+// each file is saved with UpsertOptions.SkipExactContent, which writes nothing
+// when the project already holds that exact content. This keeps re-imports of
+// previously-seen Claude Code memory files from doubling the project's memory
+// count on every init.
 //
-// A plain Upsert is intentionally non-destructive — a byte-identical save creates
-// a new, linked row rather than silently merging — so the gate above is what
-// keeps re-imports from doubling the project's memory count. The write still
-// asks for UpsertOptions.SkipExactContent as well, because two handles that reach
-// first contact together each see the other's marker as absent: the exact-content
-// check runs inside Upsert's write transaction, ahead of its near-duplicate
-// lookups, so the second handle stores nothing (#1234). That check also folds a
-// file whose text equals another file's in the same run.
+// Only an EXACT match is skipped. A file that is a near-duplicate of a stored
+// row (or of a file earlier in the same run) takes Upsert's ordinary path: it
+// is stored as its own row, linked to that row as a 'duplicate', and the row
+// it folded into is strengthened.
 //
-// Only an EXACT match is skipped. A file that is a near-duplicate of a stored row
-// (or of a file earlier in the same run) takes Upsert's ordinary path: it is
-// stored as its own row, linked to that row as a 'duplicate', and the row it
-// folded into is strengthened.
+// The exact-content check runs inside Upsert's write transaction, ahead of its
+// near-duplicate lookups, so it holds across handles: two clients that reach
+// first contact together cannot both store a file (#1234). The GetAll pre-read
+// below is only a cheap skip that saves a write transaction per file already
+// present; it does not decide anything on its own.
 //
-// Every failure — a token-guard refusal and a transient store error alike — is
-// reported by file name in the returned slice, so the answer names what did not
-// land without ever echoing the file's text. The write goes through
-// provider.MemoryStore's own UpsertWithOptions, so every store the import can be
-// handed has the guarded path, and there is no fallback to an unguarded one.
+// The guard is the original first-contact one: the import runs only when the
+// project has no memories, so a second run on an established project imports
+// nothing. A file refused by the token guard, or one that failed for any other
+// reason, is reported by name in the returned slice. The report uses errors.As
+// on wrapped errors so a wrapped rejection is still recognised. The name is
+// quoted downstream through quoteData or memory.ProjectArg; its text is never
+// echoed.
+//
+// The write goes through provider.MemoryStore's own UpsertWithOptions, so
+// every store the import can be handed has the guarded path, and there is no
+// fallback to an unguarded one.
 func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
 		return 0, nil, fmt.Errorf("read claude memory dir: %w", err)
+	}
+
+	existing, err := store.GetAll(ctx, projectID, 100000)
+	if err != nil {
+		logger.Warn("claude import: could not load existing content for dedup guard", "error", err)
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, m := range existing {
+		seen[m.Content] = true
 	}
 
 	var imported int
@@ -373,9 +378,6 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		path := filepath.Join(cleanDir, filepath.Base(entry.Name()))
 		content, category, importance, skip, err := ParseMemoryFile(path)
 		if err != nil {
-			// A file that could not be read is a per-file failure, not an
-			// intentional skip: it is named so the answer does not silently
-			// omit it, and it leaves no marker, so a later call retries it.
 			logger.Warn("claude import: file read failed", "file", entry.Name(), "error", err)
 			skipped = append(skipped, entry.Name())
 			continue
@@ -383,36 +385,26 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		if skip {
 			continue
 		}
-
-		ref := importMarkerRef(entry.Name())
-		done, err := store.ClaudeImportDone(ctx, projectID, ref, content)
-		if err != nil {
-			logger.Warn("claude import: marker lookup failed", "file", entry.Name(), "error", err)
-			skipped = append(skipped, entry.Name())
-			continue
-		}
-		if done {
+		if seen[content] {
 			continue
 		}
 
 		id, _, _, err := store.UpsertWithOptions(ctx, projectID, category, content, source, importance, importTags,
-			memory.UpsertOptions{
-				SkipExactContent: true,
-				Provenance:       memory.Provenance{SourceRef: ref},
-			})
+			memory.UpsertOptions{SkipExactContent: true})
 		if err != nil {
-			// Both a token-guard refusal and a transient store failure are
-			// reported by file name — never the file's text. A refusal cannot
-			// succeed on a retry; a transient failure is retried on a later
-			// call, because it left no marker.
+			var secretErr *memory.SecretContentError
+			if errors.As(err, &secretErr) {
+				skipped = append(skipped, entry.Name())
+			} else {
+				skipped = append(skipped, entry.Name())
+			}
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
-			skipped = append(skipped, entry.Name())
 			continue
 		}
-		// An empty id is the exact-content skip: another handle stored this
-		// content between the marker check and the write, or a file earlier in
-		// this run already stored it. The file is imported either way, so it is
-		// counted once, by whoever stored it.
+		seen[content] = true
+		// An empty id is the skip: another handle stored this exact content
+		// between the pre-read and the write. The file is imported either way,
+		// so it is counted once, by whoever stored it.
 		if id != "" {
 			imported++
 		}
