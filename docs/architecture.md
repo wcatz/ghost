@@ -103,7 +103,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 `internal/mcpinit` owns the host-specific setup paths:
 
-- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects.
+- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects. The MCP registration is replaced in place — the existing entry is removed before the new one is added — so a refused `claude mcp add-json` rolls the previous entry back from the `claude mcp get` output the same run read, and the error says whether that entry came back whole, came back without the parts the get rendering could not carry, or was removed, rather than failing silently over a user left with no ghost server.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
 - Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command.
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
