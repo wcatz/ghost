@@ -157,6 +157,44 @@ func TestReportStaleIntegrations(t *testing.T) {
 	})
 }
 
+// TestAuditStaleReportJudgesWithTheOldImage is #1215's reproduction: the
+// post-upgrade wiring check compares installed wiring against the sources
+// embedded in the image that RUNS it, so a check `ghost upgrade` runs in the
+// old process judges the installed plugin against what the OLD release
+// rendered. Installing the plugin exactly as the running image renders it and
+// then re-rendering it as the next release would is the two images inside one
+// package: the first run is what the old process prints (nothing), the second
+// is what the installed binary would print (the hint). That gap is why the
+// upgrade path runs the check in the NEW binary instead of in itself.
+func TestAuditStaleReportJudgesWithTheOldImage(t *testing.T) {
+	statusEnv(t)
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
+	ghostBin := stubPath(binDir, "ghost")
+	// Installed as the OLD release rendered it: byte-identical to this image's
+	// own render, which is the state an upgrade from the previous release
+	// leaves behind.
+	installOpencodePluginFile(t, ghostBin)
+
+	var out bytes.Buffer
+	ReportStaleIntegrations(&out)
+	if out.Len() != 0 {
+		t.Fatalf("the old image must see the plugin it rendered itself as current, got:\n%s", out.String())
+	}
+
+	// The next release's own source: what the binary the upgrade installs
+	// holds in its embed. Nothing but the embedded body changes.
+	orig := opencodeGhostPluginTS
+	opencodeGhostPluginTS = "// ghost-opencode lifecycle plugin — next release body\n" + orig
+	t.Cleanup(func() { opencodeGhostPluginTS = orig })
+
+	out.Reset()
+	ReportStaleIntegrations(&out)
+	if !strings.Contains(out.String(), "opencode lifecycle plugin is missing or outdated") {
+		t.Errorf("the new image must report the plugin the old release rendered, got:\n%s", out.String())
+	}
+}
+
 // TestStatus_ReportsOpenDBFailure verifies that a database which exists but
 // fails to open (e.g. mid-migration foreign-key corruption) is surfaced as a
 // failed check, not silently skipped. Before this fix, Status only inspected
