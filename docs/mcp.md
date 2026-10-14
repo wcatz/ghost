@@ -267,7 +267,7 @@ Each row reports the numbers the ranking recorded (`fts_rank`, `vector_rank`, `v
 | `ghost://project/{project}/tasks` | Project tasks (a project Ghost has never registered fails the read with `project "…" not found`) |
 | `ghost://memories/global` | Top 15 global memories shared across projects (assembled, so it withholds a memory whose validity window has closed, reports an empty window as withheld rather than as never saved, and records the read under `source=project_context`) |
 
-Clients that support MCP resource subscriptions can pin these resources to survive context compaction. Resource URIs accept the project name or the resolved project ID, depending on the client.
+Clients that support MCP resource subscriptions can pin these resources to survive context compaction. Resource URIs accept the project name or the resolved project ID, depending on the client. A write that changes a resource pushes `notifications/resources/updated` for it under both URI forms, so a pinned resource stays current: `ghost_decision_record` notifies the project's `decisions` **and** its `context` (the decision's companion memory and its `## Recent Decisions` entry both change that block), and a decision recorded under `_global` also notifies `ghost://memories/global`, exactly as `ghost_save_global` does.
 
 ## Prompts
 
