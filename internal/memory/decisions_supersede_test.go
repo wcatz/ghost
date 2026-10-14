@@ -1341,3 +1341,46 @@ func TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink(t *testing.T) 
 		t.Errorf("superseding the absorbed decision: shared = %v, want the reused row %s", got.Shared, reused)
 	}
 }
+
+// TestMergeReusedRowKeepsItsOwnLinkWhenItsPathGivesWay: on the reuse branch the
+// base is the reused row's own reference, which can carry a decision link of its
+// own beside an ordinary path. When the path no longer fits beside the absorbed
+// links it gives way — but the row's own link must survive with them, or the
+// decision the row was the companion of is left with none.
+func TestMergeReusedRowKeepsItsOwnLinkWhenItsPathGivesWay(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, bMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 450 bytes of path plus the row's own link fit the bound; adding the
+	// absorbed link does not.
+	own := "docs/" + strings.Repeat("p", 445) + decisionRefSeparator + decisionCompanionRef(aDec)
+	if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, own, aMem); err != nil {
+		t.Fatal(err)
+	}
+	var aText string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, aMem).Scan(&aText); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: aText, Importance: 0.9, ReplacesIDs: []string{aMem, bMem}},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	reused, ref := successorSourceRef(t, s, aText)
+	if reused != aMem {
+		t.Fatalf("the merge did not reuse the identical row: got %s, want %s", reused, aMem)
+	}
+	if len(ref) > MaxSourceRefLen {
+		t.Errorf("source_ref is %d bytes, over the %d-byte bound", len(ref), MaxSourceRefLen)
+	}
+	if !sourceRefNamesDecision(ref, aDec) || !sourceRefNamesDecision(ref, bDec) {
+		t.Errorf("source_ref %q does not keep both the row's own link and the absorbed one", ref)
+	}
+}
