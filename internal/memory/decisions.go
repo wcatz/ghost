@@ -319,6 +319,55 @@ func liveDecisionSuccessor(ctx context.Context, q queryRower, projectID, decisio
 // it requires the link to name exactly one memory instead.
 func decisionCompanionRef(decisionID string) string { return decisionRefPrefix + decisionID }
 
+// decisionRefSeparator separates the decision links a consolidation successor
+// records when it stands in for more than one decision. A decision id is hex, so
+// a comma cannot occur inside a link; a source_ref that is not a link list splits
+// into one token and is matched whole.
+const decisionRefSeparator = ","
+
+// decisionRefsInSourceRef returns every decision link a stored source_ref names,
+// in order. Most rows carry at most one; a successor that folded several decision
+// companions carries all of them, and it is that list — not just its first entry
+// — that says which decisions the row stands for.
+func decisionRefsInSourceRef(ref string) []string {
+	if ref == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(ref, decisionRefSeparator) {
+		if strings.HasPrefix(part, decisionRefPrefix) {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// sourceRefNamesDecision reports whether ref links decisionID.
+func sourceRefNamesDecision(ref, decisionID string) bool {
+	want := decisionCompanionRef(decisionID)
+	for _, part := range strings.Split(ref, decisionRefSeparator) {
+		if part == want {
+			return true
+		}
+	}
+	return false
+}
+
+// joinDecisionRefs renders the links of a successor that stands for more than one
+// decision, in the order they were gathered, with repeats removed.
+func joinDecisionRefs(refs []string) string {
+	seen := make(map[string]bool, len(refs))
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref == "" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	return strings.Join(out, decisionRefSeparator)
+}
+
 // decisionRefPrefix is the source_ref namespace only RecordDecision writes. The
 // writer tools (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
 // checkReservedSourceRef, so a caller cannot stamp an unrelated memory with a
@@ -369,23 +418,36 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		id     string
 		source string
 		live   bool
+		multi  bool
 	}
+	// The link is matched as a TOKEN, not by equality: a successor that folded
+	// more than one decision companion carries every link joined by
+	// decisionRefSeparator. The LIKE is deliberately broad — it selects candidates
+	// cheaply — and sourceRefNamesDecision then confirms the exact token, so a
+	// longer id sharing a prefix and a non-link source_ref carrying the substring
+	// are both rejected.
+	want := decisionCompanionRef(decisionID)
 	rows0, err := tx.QueryContext(ctx, `
-		SELECT id, source, resolved_at IS NULL FROM memories
-		WHERE project_id IN (?, ?) AND source_ref = ?
+		SELECT id, source, COALESCE(source_ref, ''), resolved_at IS NULL FROM memories
+		WHERE project_id IN (?, ?) AND source_ref LIKE ?
 		  AND (category = 'decision' OR source = 'decision_log')
 		ORDER BY rowid
-	`, projectID, GlobalProjectID, decisionCompanionRef(decisionID))
+	`, projectID, GlobalProjectID, "%"+want+"%")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	var linked []linkRow
 	for rows0.Next() {
 		var r linkRow
-		if err := rows0.Scan(&r.id, &r.source, &r.live); err != nil {
+		var ref string
+		if err := rows0.Scan(&r.id, &r.source, &ref, &r.live); err != nil {
 			_ = rows0.Close()
 			return nil, nil, fmt.Errorf("scan linked companion: %w", err)
 		}
+		if !sourceRefNamesDecision(ref, decisionID) {
+			continue
+		}
+		r.multi = len(decisionRefsInSourceRef(ref)) > 1
 		linked = append(linked, r)
 	}
 	if err := rows0.Err(); err != nil {
@@ -394,12 +456,30 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	_ = rows0.Close()
 	if len(linked) == 1 {
-		if linked[0].live {
-			return []string{linked[0].id}, nil, nil
+		r := linked[0]
+		if r.live && r.multi {
+			return nil, []string{r.id}, nil
+		}
+		if r.live {
+			return []string{r.id}, nil, nil
 		}
 		return nil, nil, nil
 	}
 	if len(linked) > 1 {
+		// A live row that stands for more than one decision is not this decision's
+		// clean companion: retiring it would withhold whatever other decision it
+		// still states. Report every live claimant and leave them standing, ahead
+		// of the decision_log preference, which would otherwise pick such a row.
+		for _, r := range linked {
+			if r.live && r.multi {
+				for _, rr := range linked {
+					if rr.live {
+						ambiguous = append(ambiguous, rr.id)
+					}
+				}
+				return nil, ambiguous, nil
+			}
+		}
 		var logged []linkRow
 		for _, r := range linked {
 			if r.source == "decision_log" {

@@ -833,3 +833,91 @@ func TestSupersedeDecisionRefusesToDropALiveSuccessor(t *testing.T) {
 		t.Errorf("SupersedeDecision(A, C) after B was replaced: %v", err)
 	}
 }
+
+// TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions covers the
+// finding that a consolidation merge folding two decision companions into one
+// row kept only the first decision's link. Superseding the other decision was
+// then answered as a clean success while its reversed text stayed live, and
+// superseding the first retired a row that still stated the other decision.
+// The successor records every decision it stands for; a successor standing for
+// more than one is reported rather than retired (which would withhold a current
+// decision along with the reversed one) or ignored (which would leave the
+// reversed one ranking).
+func TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions(t *testing.T) {
+	ctx := context.Background()
+	const merged = "Queue: use Postgres (SKIP LOCKED); retries max 5 attempts because of the upstream rate limit"
+
+	// build records three decisions and folds the first two companions into one
+	// successor, naming first first in the merge so both link orders are
+	// exercised; the third companion is kept verbatim and stands in as the
+	// replacement. It returns the store, the two folded decisions, the
+	// replacement decision, and the successor row.
+	build := func(t *testing.T, first string) (s *Store, firstDec, secondDec, replacementDec, successor string) {
+		t.Helper()
+		s = testStore(t)
+		record := func(title, decision, rationale string) (string, string) {
+			dec, mem, _, err := s.RecordDecision(ctx, testProject, title, decision, rationale, nil, nil)
+			if err != nil {
+				t.Fatalf("RecordDecision(%q): %v", title, err)
+			}
+			return dec, mem
+		}
+		aDec, aMem := record("Queue backend", "use Postgres", "already deployed for the cache")
+		cDec, cMem := record("Queue retries", "max 5 attempts", "the upstream rate limit")
+		dDec, dMem := record("Queue retries v2", "max 3 attempts", "the upstream limit is lower")
+		var heldContent string
+		if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, dMem).Scan(&heldContent); err != nil {
+			t.Fatalf("read held companion content: %v", err)
+		}
+		replaces := []string{aMem, cMem}
+		if first == "c" {
+			replaces = []string{cMem, aMem}
+		}
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "decision", Content: merged, Importance: 0.9, ReplacesIDs: replaces},
+			{Category: "decision", Content: heldContent, Importance: 0.9},
+		}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		successor = onlyMemoryWithContent(t, s, merged)
+		if first == "a" {
+			return s, aDec, cDec, dDec, successor
+		}
+		return s, cDec, aDec, dDec, successor
+	}
+
+	for _, first := range []string{"a", "c"} {
+		t.Run("merge names "+first+" first", func(t *testing.T) {
+			s, firstDec, secondDec, replacementDec, successor := build(t, first)
+
+			// The successor has to carry BOTH links whichever source was named
+			// first: one link is the defect, and neither decision may be the one
+			// silently dropped.
+			var ref string
+			if err := s.db.QueryRow(`SELECT COALESCE(source_ref, '') FROM memories WHERE id = ?`, successor).Scan(&ref); err != nil {
+				t.Fatalf("read successor link: %v", err)
+			}
+			if !sourceRefNamesDecision(ref, firstDec) || !sourceRefNamesDecision(ref, secondDec) {
+				t.Fatalf("the merge successor's link %q does not name both decisions", ref)
+			}
+
+			// Superseding either folded decision must report the successor
+			// rather than retire it or answer clean.
+			for _, oldDec := range []string{firstDec, secondDec} {
+				got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, replacementDec)
+				if err != nil {
+					t.Fatalf("SupersedeDecisionReport(%s): %v", oldDec, err)
+				}
+				if len(got.Retired) != 0 {
+					t.Errorf("superseding %s retired %v; the successor still states a live decision", oldDec, got.Retired)
+				}
+				if len(got.Ambiguous) != 1 || got.Ambiguous[0] != successor {
+					t.Errorf("superseding %s ambiguous = %v, want the multi-decision successor %s", oldDec, got.Ambiguous, successor)
+				}
+				if decisionMemoryResolved(t, s, successor) {
+					t.Errorf("superseding %s withheld the successor; the other decision's text went with it", oldDec)
+				}
+			}
+		})
+	}
+}

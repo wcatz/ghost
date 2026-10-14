@@ -6661,10 +6661,13 @@ type rowClaims struct {
 // filling them independently composes a pair no row ever asserted, and deciding
 // per source lets a single-boundary row lock the unit and lose a later source's
 // complementary end — a loss that depends on the order the consolidator named. See
-// the resolution below for the order of preference. verified_at, confidence, agent,
-// session_id and source_ref remain first-source-wins: each is one value with no
-// partner to disagree with, and a half-window problem cannot arise for any of
-// them. verified_at is a single value by that same reasoning AND is read by the
+// the resolution below for the order of preference. verified_at, confidence, agent
+// and session_id remain first-source-wins: each is one value with no partner to
+// disagree with, and a half-window problem cannot arise for any of them. source_ref
+// is one value EXCEPT for a decision link, which is a LIST: a merge that folds
+// several decision companions stands in for every one of them, so those links are
+// gathered and joined rather than truncated to the first, and the decision lookup
+// reads the whole list. verified_at is a single value by that same reasoning AND is read by the
 // same reader as the two boundaries, so it is judged by readability too rather
 // than for pairing alone. A maintainer reading this paragraph must not
 // reimplement the window the per-value way — that is the bug, and the resolution
@@ -6691,6 +6694,7 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	// set has been seen — deciding per source is the bug this shape exists to fix.
 	var completeWindow, firstHalfWindow Validity
 	var haveComplete, haveHalf bool
+	var decisionRefs []string
 	for _, id := range m.ReplacesIDs {
 		if id == "" {
 			continue
@@ -6753,6 +6757,18 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if claims.sourceRef == "" {
 			claims.sourceRef = sourceRef.String
 		}
+		// A decision link is gathered as a list, not a single value: a merge that
+		// folds two decision companions stands in for BOTH decisions, and carrying
+		// only the first link is what let supersede silently miss the second while
+		// wrongly retiring the row when the first was superseded.
+		decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
+	}
+	// A successor standing in for more than one decision records every link it
+	// carries, so no decision is left without its companion and none is retired on
+	// the strength of a link that names a different decision. A single link keeps
+	// the first-source-wins rule above unchanged.
+	if len(decisionRefs) > 1 {
+		claims.sourceRef = joinDecisionRefs(decisionRefs)
 	}
 	// The window is inherited AS A UNIT, from one source or from none — never half
 	// from one row and half from another.
