@@ -2,7 +2,6 @@ package mcpinit
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -242,25 +241,19 @@ func rollbackBase() error {
 	return errors.New("claude mcp add-json: " + addJSONRefusal + ": exit status 1")
 }
 
-// lastRestoredConfig reads back the config the fake was asked to re-add, so a
-// test can assert the re-add carries what it claims rather than only what the
-// error text says about it.
-func lastRestoredConfig(t *testing.T, dir string) map[string]any {
+// lastRestoredAdd reads back the command line of the add-json the fake
+// accepted, so a test can assert the re-add carries what it claims rather than
+// only what the error text says about it. It is returned as the raw recorded
+// text and asserted on by substring, NOT parsed as JSON: cmd.exe re-quotes and
+// backslash-escapes the JSON a re-add passes, so the two platforms render the
+// same argument differently and only the payload text survives both unchanged.
+func lastRestoredAdd(t *testing.T, dir string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(dir, "adds"))
 	if err != nil {
 		t.Fatalf("the rollback must re-add the previous registration: %v", err)
 	}
-	const marker = "mcp add-json -s user ghost "
-	at := strings.Index(string(raw), marker)
-	if at < 0 {
-		t.Fatalf("the fake recorded %q, want an add-json", raw)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw)[at+len(marker):])), &cfg); err != nil {
-		t.Fatalf("the re-add must be a JSON config, got %q: %v", raw, err)
-	}
-	return cfg
+	return string(raw)
 }
 
 // TestRollbackRegistrationNamesWhatTheReAddDidNotCarry is the #1216 honesty
@@ -293,9 +286,9 @@ func TestRollbackRegistrationNamesWhatTheReAddDidNotCarry(t *testing.T) {
 		t.Errorf("a partial re-add must not claim a restore, got %q", err.Error())
 	}
 	// Best effort still lands: the command comes back even though the rest does not.
-	cfg := lastRestoredConfig(t, dir)
-	if cfg["command"] != staleGhostCommand {
-		t.Errorf("the re-add must carry the previous command, got %q", cfg["command"])
+	recorded := lastRestoredAdd(t, dir)
+	if !strings.Contains(recorded, staleGhostCommand) {
+		t.Errorf("the re-add must carry the previous command, got %q", recorded)
 	}
 }
 
@@ -319,13 +312,11 @@ func TestRollbackRegistrationRestoresAnHTTPEntry(t *testing.T) {
 	if !strings.Contains(err.Error(), "the previous registration was restored") {
 		t.Errorf("an http entry with its URL and headers carried must claim a restore, got %q", err.Error())
 	}
-	cfg := lastRestoredConfig(t, dir)
-	if cfg["url"] != "https://example.com/mcp" {
-		t.Errorf("the re-add must carry the URL, got %q", cfg["url"])
-	}
-	headers, ok := cfg["headers"].(map[string]any)
-	if !ok || headers["Authorization"] != "Bearer token" {
-		t.Errorf("the re-add must carry the headers, got %q", cfg["headers"])
+	recorded := lastRestoredAdd(t, dir)
+	for _, want := range []string{"https://example.com/mcp", "Bearer token"} {
+		if !strings.Contains(recorded, want) {
+			t.Errorf("the re-add must carry %q, got %q", want, recorded)
+		}
 	}
 }
 
@@ -350,13 +341,18 @@ func TestRollbackRegistrationCarriesTheEnvironmentAndSpacedArgument(t *testing.T
 	if !strings.Contains(err.Error(), "the previous registration was restored") {
 		t.Errorf("a re-add that carried everything must claim a restore, got %q", err.Error())
 	}
-	cfg := lastRestoredConfig(t, dir)
-	args, ok := cfg["args"].([]any)
-	if !ok || len(args) != 2 || args[1] != "--flag with space" {
-		t.Fatalf("the re-add must carry the argument whole, got %q", cfg["args"])
+	recorded := lastRestoredAdd(t, dir)
+	// The argument carried WHOLE renders as `--flag with space`; a whitespace
+	// split would render it instead as `--flag","with","space`, so this
+	// substring is what tells the two apart. The environment is checked by its
+	// name and value, which only appear when the object was carried.
+	if !strings.Contains(recorded, "--flag with space") {
+		t.Errorf("the re-add must carry the argument whole, got %q", recorded)
 	}
-	if env, ok := cfg["env"].(map[string]any); !ok || env["GHOST_TOKEN"] != "abc123" {
-		t.Errorf("the re-add must carry the environment, got %q", cfg["env"])
+	for _, want := range []string{"GHOST_TOKEN", "abc123"} {
+		if !strings.Contains(recorded, want) {
+			t.Errorf("the re-add must carry the environment, got %q", recorded)
+		}
 	}
 }
 
