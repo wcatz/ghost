@@ -2401,6 +2401,13 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "context")
+		// `_global` is one project AND the bucket behind ghost://memories/global,
+		// so a save that resolved there changes the rows that resource serves; a
+		// subscriber to it must hear too. The mirror of the ghost_save_global
+		// case, which pushes the context resource this branch already handles.
+		if args.ProjectID == memory.GlobalProjectID {
+			s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		}
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -2506,12 +2513,15 @@ func (s *Server) registerTools() {
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
+		var refusedFiles, failedFiles []string
 		if asOf == nil {
-			if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
+			if count, cErr := s.store.CountMemories(ctx, args.ProjectID); cErr == nil && count == 0 {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							_, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							refusedFiles = append(refusedFiles, refused...)
+							failedFiles = append(failedFiles, failed...)
 							break
 						}
 					}
@@ -2654,7 +2664,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -3055,6 +3065,10 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		// `_global` is a project as well as a bucket: ghost://project/_global/context
+		// serves exactly these cross-project rows, so a subscriber to it must hear
+		// about this write, not only a subscriber to ghost://memories/global.
+		s.notifyProjectResource(ctx, memory.GlobalProjectID, "context")
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -3621,6 +3635,17 @@ func (s *Server) registerTools() {
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
+		// The decision also changes ghost://project/<id>/context: its companion
+		// memory and its ## Recent Decisions entry both appear there, so a
+		// client that pinned the context resource at session start keeps the
+		// pre-decision block without this push (#1271). It sits AFTER the
+		// supersedes step above so the pushed update reflects the companion the
+		// step just retired. The global resource is the same write reaching a
+		// second surface, as ghost_save_global pushes for a _global row.
+		s.notifyProjectResource(ctx, args.ProjectID, "context")
+		if args.ProjectID == memory.GlobalProjectID {
+			s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		}
 
 		// Notify the embedding worker of the companion memory, exactly as the
 		// three save tools do. RecordDecision writes a real memory row and

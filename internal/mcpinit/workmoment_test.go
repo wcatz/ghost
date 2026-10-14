@@ -452,7 +452,7 @@ func TestEnsureWorkingMomentHooksIsIdempotentAndNonDestructive(t *testing.T) {
 	}
 	var out bytes.Buffer
 	for i := 0; i < 3; i++ {
-		if err := ensureWorkingMomentHooks(&out, sf, "/opt/ghost"); err != nil {
+		if err := ensureWorkingMomentHooks(&out, sf, "/opt/ghost", false); err != nil {
 			t.Fatal(err)
 		}
 	}

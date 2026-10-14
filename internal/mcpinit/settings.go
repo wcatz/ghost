@@ -84,7 +84,15 @@ func loadSettings(path string) (*settingsFile, error) {
 	}
 
 	if err := json.Unmarshal(data, &s.raw); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
+	}
+	// A document that is the JSON literal null decodes into a nil map with no
+	// error — an empty object leaves the map above in place, so nil means null
+	// and nothing else. Refuse it by name rather than hand back a settingsFile
+	// whose raw map is nil: the first addPermissions write would panic on
+	// assignment to that nil map, mid-way through init's ten steps.
+	if s.raw == nil {
+		return nil, fmt.Errorf("%s is null", filepath.Base(path))
 	}
 	return s, nil
 }
@@ -311,19 +319,40 @@ func createTempWithMode(dir, base string, perm os.FileMode) (*os.File, error) {
 	return nil, lastErr
 }
 
-// getPermissions extracts the permissions.allow string slice.
+// getPermissions extracts the permissions.allow string slice. Absent
+// permissions is (nil, nil); a present value the merge cannot read — an
+// explicit null, a non-object, a null allow or an allow that is not a list of
+// strings — is refused with the file and the field named, so step 5 prints the
+// same refusal the preflight does.
 func (s *settingsFile) getPermissions() ([]string, error) {
 	permsRaw, ok := s.raw["permissions"]
 	if !ok {
 		return nil, nil
 	}
+	// An explicit null is present-but-structurally-invalid, not "absent": it
+	// decodes into a nil map with no error, and addPermissions would then panic
+	// assigning into that nil map. Unlike the hooks site, nothing here may fill
+	// the user's declaration in as an empty object, so refuse it by name.
+	if isJSONNull(permsRaw) {
+		return nil, fmt.Errorf("%s: permissions is null", s.base())
+	}
 	var perms struct {
-		Allow []string `json:"allow"`
+		Allow json.RawMessage `json:"allow"`
 	}
 	if err := json.Unmarshal(permsRaw, &perms); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: permissions must be an object", s.base())
 	}
-	return perms.Allow, nil
+	// An absent allow (and an explicit null allow) is empty, not invalid: the
+	// merge has always filled it in with ghost's permissions, and a null there
+	// cannot panic the way a null permissions does.
+	if perms.Allow == nil || isJSONNull(perms.Allow) {
+		return nil, nil
+	}
+	var allow []string
+	if err := json.Unmarshal(perms.Allow, &allow); err != nil {
+		return nil, fmt.Errorf("%s: permissions.allow must be a list of strings", s.base())
+	}
+	return allow, nil
 }
 
 // addPermissions adds any missing ghost permissions and returns the list of
@@ -351,13 +380,17 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Rebuild the permissions object, preserving other fields.
+	// Rebuild the permissions object, preserving other fields. The nil guard
+	// mirrors addHook's: a null value decodes into a nil map with no error, and
+	// getPermissions refuses it, but the assignment below must not be able to
+	// panic if this is ever reached another way.
 	var permsMap map[string]json.RawMessage
 	if raw, ok := s.raw["permissions"]; ok {
 		if err := json.Unmarshal(raw, &permsMap); err != nil {
 			permsMap = make(map[string]json.RawMessage)
 		}
-	} else {
+	}
+	if permsMap == nil {
 		permsMap = make(map[string]json.RawMessage)
 	}
 
@@ -442,40 +475,127 @@ func isJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
 }
 
+// settingsReadHookEvents are the hook events `ghost mcp init` reads in steps
+// 6-8: the SessionStart, Stop and working-moment events it reconciles. Every
+// other event is carried through as raw JSON — addHook and replaceHookCommand
+// only decode the event they are given — so init must not refuse a file on a
+// shape it would have carried as written.
+var settingsReadHookEvents = []string{"SessionStart", "Stop", "UserPromptSubmit", "PostToolUse"}
+
+// base is the file name a refusal names.
+func (s *settingsFile) base() string {
+	return filepath.Base(s.path)
+}
+
+// hooksMap returns the parsed "hooks" object. present is false when the key is
+// absent, which is safe to fill in; an explicit null or any other non-object is
+// refused by name, because addHook and findHookCommand decode it into a map and
+// a nil one panics on the next write.
+func (s *settingsFile) hooksMap() (hooks map[string]json.RawMessage, present bool, err error) {
+	raw, ok := s.raw["hooks"]
+	if !ok {
+		return nil, false, nil
+	}
+	if isJSONNull(raw) {
+		return nil, true, fmt.Errorf("%s: hooks is null", s.base())
+	}
+	if err := json.Unmarshal(raw, &hooks); err != nil {
+		return nil, true, fmt.Errorf("%s: hooks must be an object", s.base())
+	}
+	return hooks, true, nil
+}
+
+// hookEventRaw returns the raw value registered for event. present is false
+// when hooks or the event is absent; an explicit null is refused by name.
+func (s *settingsFile) hookEventRaw(event string) (raw json.RawMessage, present bool, err error) {
+	hooks, hooksPresent, err := s.hooksMap()
+	if err != nil || !hooksPresent {
+		return nil, false, err
+	}
+	raw, ok := hooks[event]
+	if !ok {
+		return nil, false, nil
+	}
+	if isJSONNull(raw) {
+		return nil, true, fmt.Errorf("%s: hooks[%q] is null", s.base(), event)
+	}
+	return raw, true, nil
+}
+
+// hookEventList decodes hooks[event] as a JSON array of raw entries, the shape
+// the host writes. It is the shared list check behind hookEntries and the
+// repair path's replaceHookCommand, so a reader that models entries and one
+// that preserves them as raw agree on what "a list" means.
+func (s *settingsFile) hookEventList(event string) (list []json.RawMessage, present bool, err error) {
+	raw, present, err := s.hookEventRaw(event)
+	if err != nil || !present {
+		return nil, present, err
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, true, fmt.Errorf("%s: hooks[%q] must be a list", s.base(), event)
+	}
+	return list, true, nil
+}
+
+// hookEntries returns hooks[event] decoded into entries. present is false when
+// hooks or the event is absent. err is non-nil when the value is present but
+// structurally invalid — including an explicit JSON null, which decodes into a
+// nil slice with no error — so callers must treat that as "stop", not "absent".
+func (s *settingsFile) hookEntries(event string) (entries []hookEntry, present bool, err error) {
+	list, present, err := s.hookEventList(event)
+	if err != nil || !present {
+		return nil, present, err
+	}
+	entries = make([]hookEntry, 0, len(list))
+	for _, elem := range list {
+		var entry hookEntry
+		if err := json.Unmarshal(elem, &entry); err != nil {
+			return nil, true, fmt.Errorf("%s: hooks[%q] must be a list", s.base(), event)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, true, nil
+}
+
+// validate checks every part of an already-loaded settings.json that
+// `ghost mcp init` parses, so a structurally invalid file is refused BEFORE
+// step 4 registers the MCP server and the file is left exactly as the user
+// wrote it; without it the same document is discovered only after
+// registration, or panics on the nil map a JSON null decodes into, leaving
+// Claude Code half-wired.
+//
+// It calls the SAME readers steps 5-8 call (getPermissions and hookEntries),
+// so the preflight's refusals and the readers' are one parser and print the
+// same messages. Only the events in settingsReadHookEvents are checked: every
+// other event is carried through as raw JSON, so a file whose unrelated event
+// has an unusual shape still installs.
+func (s *settingsFile) validate() error {
+	if s.raw == nil {
+		return fmt.Errorf("%s is null", s.base())
+	}
+	if _, err := s.getPermissions(); err != nil {
+		return err
+	}
+	for _, event := range settingsReadHookEvents {
+		if _, _, err := s.hookEntries(event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // findHookCommand returns the first hook command for event containing
 // cmdSubstr, and whether one was found. err is non-nil when the existing
 // "hooks" value (or the specific event's value within it) is present but
-// structurally invalid — including explicit JSON null, which unmarshals into
-// a nil map/slice with no error — so callers must treat that as "stop", not
-// "absent": proceeding to addHook on a nil "hooks" map panics, and on a nil
-// per-event value silently discards it.
+// structurally invalid, through hookEntries — including explicit JSON null,
+// which unmarshals into a nil map/slice with no error — so callers must treat
+// that as "stop", not "absent": proceeding to addHook on a nil "hooks" map
+// panics, and on a nil per-event value silently discards it.
 func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok bool, err error) {
-	hooksRaw, present := s.raw["hooks"]
-	if !present {
-		return "", false, nil
+	entries, present, err := s.hookEntries(event)
+	if err != nil || !present {
+		return "", false, err
 	}
-	if isJSONNull(hooksRaw) {
-		return "", false, fmt.Errorf("hooks is null")
-	}
-
-	var hooksMap map[string]json.RawMessage
-	if uerr := json.Unmarshal(hooksRaw, &hooksMap); uerr != nil {
-		return "", false, fmt.Errorf("parse hooks: %w", uerr)
-	}
-
-	eventRaw, present := hooksMap[event]
-	if !present {
-		return "", false, nil
-	}
-	if isJSONNull(eventRaw) {
-		return "", false, fmt.Errorf("hooks[%s] is null", event)
-	}
-
-	var entries []hookEntry
-	if uerr := json.Unmarshal(eventRaw, &entries); uerr != nil {
-		return "", false, fmt.Errorf("parse %s hooks: %w", event, uerr)
-	}
-
 	for _, entry := range entries {
 		for _, h := range entry.Hooks {
 			if strings.Contains(h.Command, cmdSubstr) {
@@ -488,35 +608,13 @@ func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok 
 
 // hookCommands returns every hook command registered for event, preserving
 // order. err is non-nil when the "hooks" value (or the event's value) is
-// present but structurally invalid, including explicit JSON null — callers
-// must treat that as "stop", mirroring findHookCommand.
+// present but structurally invalid, through hookEntries — callers must treat
+// that as "stop", mirroring findHookCommand.
 func (s *settingsFile) hookCommands(event string) ([]string, error) {
-	hooksRaw, present := s.raw["hooks"]
-	if !present {
-		return nil, nil
+	entries, present, err := s.hookEntries(event)
+	if err != nil || !present {
+		return nil, err
 	}
-	if isJSONNull(hooksRaw) {
-		return nil, fmt.Errorf("hooks is null")
-	}
-
-	var hooksMap map[string]json.RawMessage
-	if uerr := json.Unmarshal(hooksRaw, &hooksMap); uerr != nil {
-		return nil, fmt.Errorf("parse hooks: %w", uerr)
-	}
-
-	eventRaw, present := hooksMap[event]
-	if !present {
-		return nil, nil
-	}
-	if isJSONNull(eventRaw) {
-		return nil, fmt.Errorf("hooks[%s] is null", event)
-	}
-
-	var entries []hookEntry
-	if uerr := json.Unmarshal(eventRaw, &entries); uerr != nil {
-		return nil, fmt.Errorf("parse %s hooks: %w", event, uerr)
-	}
-
 	var cmds []string
 	for _, entry := range entries {
 		for _, h := range entry.Hooks {
@@ -532,32 +630,10 @@ func (s *settingsFile) hookCommands(event string) ([]string, error) {
 // can legitimately contain "hook session-start" too, and must never be
 // mistaken for the legacy command.
 func (s *settingsFile) hasExactHookCommand(event, cmd string) (bool, error) {
-	hooksRaw, present := s.raw["hooks"]
-	if !present {
-		return false, nil
+	entries, present, err := s.hookEntries(event)
+	if err != nil || !present {
+		return false, err
 	}
-	if isJSONNull(hooksRaw) {
-		return false, fmt.Errorf("hooks is null")
-	}
-
-	var hooksMap map[string]json.RawMessage
-	if err := json.Unmarshal(hooksRaw, &hooksMap); err != nil {
-		return false, fmt.Errorf("parse hooks: %w", err)
-	}
-
-	eventRaw, present := hooksMap[event]
-	if !present {
-		return false, nil
-	}
-	if isJSONNull(eventRaw) {
-		return false, fmt.Errorf("hooks[%s] is null", event)
-	}
-
-	var entries []hookEntry
-	if err := json.Unmarshal(eventRaw, &entries); err != nil {
-		return false, fmt.Errorf("parse %s hooks: %w", event, err)
-	}
-
 	for _, entry := range entries {
 		for _, h := range entry.Hooks {
 			if h.Command == cmd {
@@ -575,34 +651,18 @@ func (s *settingsFile) hasExactHookCommand(event, cmd string) (bool, error) {
 // disturb other events or unrelated top-level keys. Returns false if no
 // exact match was found.
 func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, error) {
-	raw, ok := s.raw["hooks"]
-	if !ok {
-		return false, nil
+	hooks, hooksPresent, err := s.hooksMap()
+	if err != nil || !hooksPresent {
+		return false, err
 	}
-	if isJSONNull(raw) {
-		return false, fmt.Errorf("hooks is null")
-	}
-
-	var hooks map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &hooks); err != nil {
-		return false, fmt.Errorf("parse hooks: %w", err)
-	}
-
-	eventRaw, ok := hooks[event]
-	if !ok {
-		return false, nil
-	}
-	if isJSONNull(eventRaw) {
-		return false, fmt.Errorf("hooks[%s] is null", event)
-	}
-	// Decode only as far as the command strings: every entry and every hook
-	// action stays a raw object, so the fields hookEntry/hookAction do not
-	// model (timeout, async, a non-command hook's own payload field, keys
-	// the host adds later) and every entry that holds no match are written
-	// back exactly as they were. Same policy as mergeCodexHooksConfig.
-	var entries []json.RawMessage
-	if err := json.Unmarshal(eventRaw, &entries); err != nil {
-		return false, fmt.Errorf("parse %s hooks: %w", event, err)
+	// Decode only as far as the raw entries: every entry and every hook action
+	// stays a raw object, so the fields hookEntry/hookAction do not model
+	// (timeout, async, a non-command hook's own payload field, keys the host
+	// adds later) and every entry that holds no match are written back exactly
+	// as they were. Same policy as mergeCodexHooksConfig.
+	entries, present, err := s.hookEventList(event)
+	if err != nil || !present {
+		return false, err
 	}
 
 	found := false

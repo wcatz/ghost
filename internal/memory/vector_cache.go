@@ -82,7 +82,20 @@ const vectorEpochQuery = `SELECT COALESCE((SELECT epoch FROM vector_epoch WHERE 
 
 // vectorRowCountQuery is the corpus size, read only on a miss: it is the bound's
 // pre-check, and a hit has no use for it.
-const vectorRowCountQuery = `SELECT COUNT(*) FROM memory_embeddings`
+//
+// It names the rows the cache would keep, the way vectorCountQuery names the rows
+// an uncached copy appends: the same join the scan reads, the configured identity
+// (an empty identity counts every stored one, because the loader keeps every model
+// when none is configured), and the query's width. A row of another identity or
+// width is not what the estimate below is for — the estimate multiplies this count
+// by the query's width, so it sizes the configured rows the search may score.
+// Counting the whole table instead made a corpus that fits the bound look over it
+// as soon as another vector space had rows in the table (#1257).
+const vectorRowCountQuery = `
+	SELECT COUNT(*)
+	FROM memory_embeddings e
+	JOIN memories m ON m.id = e.memory_id
+	WHERE (? = '' OR e.model = ?) AND length(e.embedding)/4 = ?`
 
 // foreignVector is a row of another vector space: no bytes, only what the
 // per-search facts and warnings need.
@@ -220,10 +233,10 @@ func (s *Store) vectorCorpusFor(ctx context.Context, queryVec []float32, identit
 		return cp, nil
 	}
 	// A corpus that cannot be kept is not loaded for the cache: the estimate is
-	// the row count at the query's width, which is the width of the rows that
-	// would be scored. A failed count is "do not cache".
+	// the configured rows' count at the query's width (vectorRowCountQuery). A
+	// failed count is "do not cache".
 	var n int64
-	if err := q.QueryRowContext(ctx, vectorRowCountQuery).Scan(&n); err != nil {
+	if err := q.QueryRowContext(ctx, vectorRowCountQuery, identity, identity, len(queryVec)).Scan(&n); err != nil {
 		return nil, nil
 	}
 	if n*int64(len(queryVec))*4 > vectorCacheMaxBytes {

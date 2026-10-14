@@ -38,6 +38,19 @@ func Run(w io.Writer, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
+	// Validate settings.json before any step touches it. Steps 5-8 read the
+	// document, permissions, permissions.allow, hooks and each event, so a
+	// structurally invalid file would otherwise be discovered only after step 4
+	// had registered the MCP server — leaving Claude Code with a ghost server
+	// but no hooks, no tool permissions and autoMemoryEnabled untouched, or
+	// panicking on the nil map a JSON null decodes into. Refusing here registers
+	// nothing and leaves the file exactly as the user wrote it. No retryHint:
+	// the file stays invalid until the named field is fixed, so a re-run hint
+	// would misdirect exactly the way the Step 1 comment below describes.
+	if err := validateSettingsFile(); err != nil {
+		return err
+	}
+
 	// Step 1: Prerequisites. No retryHint here: a missing binary is an
 	// install-first problem that re-running init cannot fix, and the
 	// claude-missing error carries its own next-step guidance (alternative
@@ -66,23 +79,23 @@ func Run(w io.Writer, dryRun bool) error {
 
 	// Step 5: Tool permissions.
 	_, _ = fmt.Fprintln(w, "\n[5/10] Adding tool permissions...")
-	settingsFile, err := ensurePermissions(w)
+	settingsFile, err := ensurePermissions(w, dryRun)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 6: SessionStart hook.
 	_, _ = fmt.Fprintln(w, "\n[6/10] Configuring SessionStart hook...")
-	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
+	if err := ensureHook(w, settingsFile, ghostBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 7: Stop hook.
 	_, _ = fmt.Fprintln(w, "\n[7/10] Configuring Stop and working-moment hooks...")
-	if err := ensureStopHook(w, settingsFile, ghostBin); err != nil {
+	if err := ensureStopHook(w, settingsFile, ghostBin, dryRun); err != nil {
 		return retryHint(err)
 	}
-	if err := ensureWorkingMomentHooks(w, settingsFile, ghostBin); err != nil {
+	if err := ensureWorkingMomentHooks(w, settingsFile, ghostBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
@@ -534,8 +547,30 @@ func parseJSONObject(value string) (map[string]any, bool) {
 	return obj, true
 }
 
+// validateSettingsFile loads ~/.claude/settings.json and validates every part
+// of it `ghost mcp init` parses, before any step acts on the file. An absent
+// file is valid: init populates it. A refusal names the file and the field and
+// carries the edit that clears it rather than Run's generic re-run hint, which
+// a re-run cannot satisfy — the file stays invalid until the user repairs it.
+func validateSettingsFile() error {
+	path, err := settingsPath()
+	if err != nil {
+		return err
+	}
+	sf, err := loadSettings(path)
+	if err == nil {
+		err = sf.validate()
+	}
+	if err != nil {
+		return fmt.Errorf("%w\n  Fix the named field in %s, then re-run `ghost mcp init`", err, path)
+	}
+	return nil
+}
+
 // ensurePermissions loads settings.json and adds missing ghost permissions.
-func ensurePermissions(w io.Writer) (*settingsFile, error) {
+// On a dry run it reports the permissions it would add instead of the marker a
+// written change carries.
+func ensurePermissions(w io.Writer, dryRun bool) (*settingsFile, error) {
 	path, err := settingsPath()
 	if err != nil {
 		return nil, err
@@ -556,7 +591,11 @@ func ensurePermissions(w io.Writer) (*settingsFile, error) {
 		_, _ = fmt.Fprintf(w, "  ✓ %d permissions already present\n", existing)
 	}
 	for _, p := range added {
-		_, _ = fmt.Fprintf(w, "  + %s\n", p)
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would add %s\n", p)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + %s\n", p)
+		}
 	}
 	if len(added) == 0 {
 		_, _ = fmt.Fprintf(w, "  ✓ all %d ghost permissions configured\n", len(ghostPermissions))
@@ -749,8 +788,8 @@ func splitHookCommand(cmd string) (bin, rest string, ok bool) {
 // ensureHook adds a SessionStart hook if not already present, migrates it off
 // the pre-#251 quoting that's broken under cmd.exe, and migrates any
 // pre-contract bare invocation (`… hook session-start`, no --source) onto the
-// contract-v1 form.
-func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
+// contract-v1 form. A dry run reports what it would do and writes nothing.
+func ensureHook(w io.Writer, sf *settingsFile, ghostBin string, dryRun bool) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook session-start"
 	warnPercentPath(w, ghostBin)
@@ -766,9 +805,17 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	}
 	switch {
 	case action == hookAdded:
-		_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would add SessionStart hook: %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+		}
 	case action == hookMigrated || contractMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to current invocation: %s\n", hookCmd)
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would migrate SessionStart hook to current invocation: %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to current invocation: %s\n", hookCmd)
+		}
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 	}
@@ -777,8 +824,9 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 
 // ensureStopHook adds a Stop hook if not already present, migrates it off the
 // pre-#251 quoting that's broken under cmd.exe, and migrates any pre-contract
-// bare invocation (`… hook stop`, no --source) onto the contract-v1 form.
-func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
+// bare invocation (`… hook stop`, no --source) onto the contract-v1 form. A dry
+// run reports what it would do and writes nothing.
+func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string, dryRun bool) error {
 	hookCmd := shellQuote(ghostBin) + " hook stop --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook stop"
 
@@ -793,9 +841,17 @@ func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	}
 	switch {
 	case action == hookAdded:
-		_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would add Stop hook: %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
+		}
 	case action == hookMigrated || contractMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to current invocation: %s\n", hookCmd)
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would migrate Stop hook to current invocation: %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + migrated Stop hook to current invocation: %s\n", hookCmd)
+		}
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
 	}
@@ -811,8 +867,9 @@ const workMomentMatcher = "Edit|Write|MultiEdit"
 // (PostToolUse, matched to Edit|Write|MultiEdit). Idempotent and
 // non-destructive like the hooks above: a re-run adds nothing, an existing
 // entry for the event is never duplicated or rewritten beyond a stale ghost
-// binary path, and every other hook is left alone.
-func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string) error {
+// binary path, and every other hook is left alone. A dry run reports what it
+// would add and writes nothing.
+func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string, dryRun bool) error {
 	for _, h := range []struct {
 		event, matcher, token, label string
 	}{
@@ -826,9 +883,17 @@ func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string) er
 		}
 		switch action {
 		case hookAdded:
-			_, _ = fmt.Fprintf(w, "  + added %s hook (%s): %s\n", h.event, h.label, hookCmd)
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "  ~ would add %s hook (%s): %s\n", h.event, h.label, hookCmd)
+			} else {
+				_, _ = fmt.Fprintf(w, "  + added %s hook (%s): %s\n", h.event, h.label, hookCmd)
+			}
 		case hookMigrated:
-			_, _ = fmt.Fprintf(w, "  + migrated %s hook to current invocation: %s\n", h.event, hookCmd)
+			if dryRun {
+				_, _ = fmt.Fprintf(w, "  ~ would migrate %s hook to current invocation: %s\n", h.event, hookCmd)
+			} else {
+				_, _ = fmt.Fprintf(w, "  + migrated %s hook to current invocation: %s\n", h.event, hookCmd)
+			}
 		default:
 			_, _ = fmt.Fprintf(w, "  ✓ %s hook already configured\n", h.event)
 		}
@@ -1006,7 +1071,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			continue
 		}
 
-		n, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
+		n, refused, failed, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
 			continue
@@ -1015,6 +1080,12 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
 		} else {
 			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
+		}
+		for _, f := range refused {
+			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", p.Name, memory.ProjectArg("file", f))
+		}
+		for _, f := range failed {
+			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", p.Name, memory.ProjectArg("file", f))
 		}
 	}
 

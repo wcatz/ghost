@@ -274,3 +274,19 @@ func TestTheCLIReferenceStatesARefusedRepeatedDestination(t *testing.T) {
 		})
 	}
 }
+
+// TestTheCLIReferenceStatesARefusedEmptyInterval holds the documented contract
+// to the parser the way TestTheCLIReferenceStatesARefusedRepeatedDestination
+// does for the duplicate: docs/cli.md documented the default as applying when
+// the flag is left OFF, which is exactly what let a caller read `--interval=`
+// as "not given" and poll at obsidian.interval with no complaint. The row must
+// now say the empty value is refused.
+func TestTheCLIReferenceStatesARefusedEmptyInterval(t *testing.T) {
+	row := docRowContaining(t, readCLIDoc(t), "| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`.")
+	if row == "" {
+		t.Fatal("docs/cli.md no longer has the --interval flag row, so this test cannot tell whether it documents the refusal")
+	}
+	if !strings.Contains(row, "--interval requires a value") {
+		t.Errorf("docs/cli.md's --interval row does not document the empty-value refusal: %s", row)
+	}
+}

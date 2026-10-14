@@ -208,6 +208,16 @@ func TestTheImportRecordLineNamesACutField(t *testing.T) {
 				Action: portable.ActionCreate, Detail: "a claim", Downgraded: true},
 			want: "  create  memory:   line 2  \"a claim (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")\" (A1B2C3D4)\n",
 		},
+		// The pair the switch used to make mutually exclusive: a record that is
+		// BOTH provenance-downgraded and over the content cap carried only the
+		// downgrade note, so the common restore path never said the body would be
+		// shortened. Both facts are built independently now and the line carries
+		// both, downgrade first, then the cut (#1275).
+		"a memory that is both downgraded and over-long says both": {
+			r: portable.RecordResult{Type: portable.TypeMemory, ID: "A1B2C3D4", Line: 2,
+				Action: portable.ActionCreate, Detail: "a claim", Downgraded: true, Clamped: []string{"content"}},
+			want: "  create  memory:   line 2  \"a claim (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ") …(truncated at the cap: content)\" (A1B2C3D4)\n",
+		},
 		"a task with nothing cut says nothing about a cap": {
 			r: portable.RecordResult{Type: portable.TypeTask, ID: "tb3", Line: 6,
 				Action: portable.ActionCreate, Detail: "a title"},
@@ -223,6 +233,47 @@ func TestTheImportRecordLineNamesACutField(t *testing.T) {
 				t.Errorf("record line:\n got %q\nwant %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestADefaultImportNamesBothTheRewriteAndTheCut drives #1275 end to end: a
+// memory past the content cap imported under the DEFAULT policy — no
+// --trust-provenance — is both downgraded and cut, and its one line has to say
+// both. The per-record case above pins the function; this pins that the real
+// importer hands it both facts at once on the path an operator actually takes,
+// the common restore that is not the user's own export.
+func TestADefaultImportNamesBothTheRewriteAndTheCut(t *testing.T) {
+	// A digit-and-dot run rather than words, for the reason cutReportArtifact
+	// gives: space-separated lowercase filler is a BIP-39 mnemonic's shape and
+	// the credential guard would refuse the record before any cap applied.
+	oversize := strings.Repeat("bo02.", memory.MaxContentLen/5+1)
+	body := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"gotcha",` +
+		`"content":"` + oversize + `","source":"manual","pinned":true,"retention":"persistent"}}` + "\n"
+	path := filepath.Join(t.TempDir(), "both.jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	var dry strings.Builder
+	if err := runImportCore(context.Background(), transferTestStore(t), path, portable.ImportOptions{}, &dry); err != nil {
+		t.Fatalf("runImportCore(dry run): %v", err)
+	}
+	line := recordLines(dry.String())
+
+	rewrite := "(provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
+	cut := "…(truncated at the cap: content)"
+	if !strings.Contains(line, rewrite) {
+		t.Errorf("the default import does not name the rewrite:\n%s", line)
+	}
+	if !strings.Contains(line, cut) {
+		t.Errorf("the default import does not name the cut:\n%s", line)
+	}
+	// A fixed order, so the combined line is not two lines' worth of facts in
+	// whatever arrangement a later edit leaves: the rewrite first, the cut after.
+	if ri, ci := strings.Index(line, rewrite), strings.Index(line, cut); ri < 0 || ci < 0 || ri > ci {
+		t.Errorf("the line does not state the rewrite before the cut:\n%s", line)
 	}
 }
 

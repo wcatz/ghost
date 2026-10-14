@@ -146,6 +146,7 @@ var stages = []stage{
 	{name: stageConflicts, run: runConflicts},
 	{name: stageDedup, run: runDedup},
 	{name: stageDiversity, run: runDiversity},
+	{name: stageLegConsensus, run: runLegConsensus},
 	{name: stageCutoff, run: runCutoff},
 	{name: stageNoAnswer, run: runNoAnswer},
 	{name: stageBudget, run: runBudget},
@@ -1067,6 +1068,90 @@ type diversityDeferral struct {
 	slots int
 }
 
+// maxSingleLegVectorRank and maxSingleLegFTSRank are the rank ceilings that
+// admit a row found by only one retrieval leg into a QUERY block. Ranks are
+// 0-based, so rank 0 is the best. A row found by both legs is always admitted;
+// a row found by the vector leg only survives when that leg ranks it at or
+// below maxSingleLegVectorRank, and a row found by the keyword leg only when
+// its FTS rank is at or below maxSingleLegFTSRank. Tuned on the synthetic
+// bench corpus (#1251); keep them named constants.
+const (
+	maxSingleLegVectorRank = 1
+	maxSingleLegFTSRank    = 2
+)
+
+// runLegConsensus is a query-mode admission gate (#1251): admit a row that
+// only one retrieval leg found only when that leg ranks it near the top, so
+// single-leg noise clustered just above the relevance floor is dropped. It is a
+// query-mode rule: passive blocks are untouched. When one leg is unavailable
+// (no embedding endpoint, vector leg down or degraded) both legs are not in
+// play, so the consensus rule cannot apply and the stage is skipped rather than
+// emptying the block.
+func runLegConsensus(p *pipeline) {
+	in := len(p.rows)
+	if p.passive {
+		p.trace.record(stageLegConsensus, in, in, nil)
+		return
+	}
+	var ftsLive, vecLive bool
+	if p.set != nil && p.set.Legs != nil {
+		fs, ok := p.set.Legs["fts"]
+		ftsLive = ok && fs.Applicable && fs.Available
+		vs, ok := p.set.Legs["vector"]
+		vecLive = ok && vs.Applicable && vs.Available
+	} else {
+		hasFTS, hasVec := false, false
+		for _, c := range p.rows {
+			if c.FTSRank >= 0 {
+				hasFTS = true
+			}
+			if c.VectorRank >= 0 {
+				hasVec = true
+			}
+		}
+		ftsLive, vecLive = hasFTS, hasVec
+	}
+	if !ftsLive || !vecLive {
+		p.trace.record(stageLegConsensus, in, in, nil)
+		return
+	}
+	if in == 0 {
+		p.trace.record(stageLegConsensus, in, 0, nil)
+		return
+	}
+	keptRows := make([]memory.Candidate, 0, in)
+	keptItems := make([]Item, 0, in)
+	var dropped []string
+	for i := range p.rows {
+		c := p.rows[i]
+		bothLegs := c.FTSRank >= 0 && c.VectorRank >= 0
+		// The same exemptions the cutoff and diversity stages apply. The top
+		// row is always kept, so this stage can never empty a query block and
+		// its removals never need an outcome reason: a block it would have
+		// emptied still carries its best row. A pin is a slot guarantee (#936)
+		// and a keyword-reserved row was admitted through the reservation, so
+		// cutting it would undo the reservation.
+		kept := i == 0 || c.Pinned || c.KeywordReserved || bothLegs
+		if !kept && c.FTSRank == -1 && c.VectorRank >= 0 && c.VectorRank <= maxSingleLegVectorRank {
+			kept = true
+		}
+		if !kept && c.VectorRank == -1 && c.FTSRank >= 0 && c.FTSRank <= maxSingleLegFTSRank {
+			kept = true
+		}
+		if kept {
+			keptRows = append(keptRows, c)
+			keptItems = append(keptItems, p.items[i])
+			continue
+		}
+		dropped = append(dropped, c.ID)
+		p.dropped[c.ID] = reasonLegConsensus
+		p.droppedBy[stageLegConsensus]++
+		p.trace.decide(c.ID, c.ProjectID, stageLegConsensus, reasonLegConsensus, c.Score)
+	}
+	p.rows, p.items = keptRows, keptItems
+	p.trace.record(stageLegConsensus, in, len(keptRows), dropped)
+}
+
 // runCutoff is stage 8, on QUERY-mode requests only: the relative relevance
 // cutoff (#954).
 //
@@ -1742,7 +1827,7 @@ func (p *pipeline) removalBreakdown() string {
 	// response_fit is last because it runs last: it is a Run post-pass, not a
 	// stage, and counting it separately is what lets a reader tell a set the
 	// pipeline emptied from one the byte cap emptied.
-	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageCutoff, stageNoAnswer, stageBudget, stageResponseFit}
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageLegConsensus, stageCutoff, stageNoAnswer, stageBudget, stageResponseFit}
 	parts := make([]string, 0, len(order))
 	for _, stage := range order {
 		if n := p.droppedBy[stage]; n > 0 {

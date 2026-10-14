@@ -397,8 +397,11 @@ in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
 scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
-Above the bound it is never loaded for the cache — on a miss the row count at the
-query's width is checked first; a hit reads only the counter — and the search is the uncached path, whose pooled scratch the copy sizes from the row count before it starts ([#1036](#the-vector-scan)).
+Above the bound it is never loaded for the cache — on a miss the row count of the
+rows the cache would keep (the configured identity, at the query's width, the same
+filters the uncached copy's count applies) is checked first; a hit reads only the
+counter — and the search is the uncached path, whose pooled scratch the copy sizes
+from the row count before it starts ([#1036](#the-vector-scan)).
 A database without the counter (a schema older than v24
 opened read-only) is "do not cache", not an error.
 
@@ -663,9 +666,9 @@ carries, and `RestoreSnapshot` brings a row back under the id it had.
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
 which asks `Store.Candidates` for the same legs, parameters and configured
-vector floor, and then applies the caller's category filter to the widened
-candidate set before the window closes. Retrieval is unchanged; what moved is
-which set the filter sees.
+vector floor, and then applies the caller's category, retention and scope
+filters to the widened candidate set before the window closes. Retrieval is
+unchanged; what moved is which set the filter sees.
 
 The main schema tables are:
 
@@ -1463,17 +1466,19 @@ are four, deliberately separate by caller:
 | is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite; an embedding row whose memory is gone is not counted |
 
 Rewriting a row under a new identity also clears the `link_scans` slot the
-memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
-memory is re-queued for linking and the linker compares it again in the new
-space. The re-scan adds current-space edges alongside the ones the old space
-produced — nothing deletes the old `related` rows (only `supersede` calls
-`InvalidateLink`), and `CreateLink` upserts with `MAX(strength, ...)`, so an
-edge whose new-space similarity is lower keeps the strength the old space gave
-it; retiring those edges is a separate decision this change does not make. The
-failure ordering of the delete and the upsert fails safe in both directions, so
-they need no transaction. The foreign-vector warning in `loadVectorRows` is
-likewise logged once per retired identity rather than once per search — a
-process that reconfigures twice warns about both retirements.
+memory earned in the old space (in `StoreEmbedding`, in the same write
+transaction as the upsert), so the memory is re-queued for linking and the
+linker compares it again in the new space. The re-scan adds current-space edges
+alongside the ones the old space produced — nothing deletes the old `related`
+rows (only `supersede` calls `InvalidateLink`), and `CreateLink` upserts with
+`MAX(strength, ...)`, so an edge whose new-space similarity is lower keeps the
+strength the old space gave it; retiring those edges is a separate decision this
+change does not make. The clear and the upsert share one transaction so a
+concurrent `MarkLinkScanned` cannot commit between them and re-arm the slot from
+the retired bytes the row still holds at that instant (#1258). The
+foreign-vector warning in `loadVectorRows` is likewise logged once per retired
+identity rather than once per search — a process that reconfigures twice warns
+about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it
@@ -2480,7 +2485,7 @@ Strict on both sides — equal and only equal passes — which is stricter than 
 
 Import never overwrites a record whose id already exists, and that is the property the rest of its behaviour rests on. The artifact is the older of the two copies by construction, so an overwrite would restore stale data over live data — and making re-running a no-op is what lets a rejected record be repaired by fixing the file and running the import again. The rule also holds **inside one artifact**, and that is the caller's business rather than the store's: the store's create-or-skip answer is a presence check against the database, which an apply run has written to and a dry run has not, so `internal/portable`'s import tracks the ids the run has created and answers a repeated id as a skip — after its own project check and before asking the store, the order the apply run answers in — recording what the run actually created rather than what the artifact repeats, so a repeated id whose first record was refused leaves the second to be judged on its own record. A record that cannot be imported is rejected individually and the run continues, because one hand-edited line must not abandon ten thousand good ones; the rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
 
-**An imported task's and decision's text is cut by the caps its own writers apply, and this is a store rule rather than a caller's.** `ImportTask` and `ImportDecision` store a title through `TruncateUTF8(…, MaxTitleLen)` and a description, notes, decision and rationale through `ClampContent`, and a decision's `alternatives` through `memory.BoundAlternatives` (at most `MaxAlternatives` entries, in artifact order, each cut at the title cap) — the same numbers `ghost_task_create` and `ghost_decision_record` apply, and now declared once in `internal/memory` beside `MaxContentLen` rather than twice. The reason is the row-rendering read tools: `capResponseParts` keeps the FIRST row whole rather than dropping it, which is only sound while a row is bounded by construction, and an artifact carrying 100 KB per field produced a single `ghost_task_list` row of about 200 KB and a single `ghost_decisions_list` row of megabytes. The cut is in the importer and not in `CheckImportedTask` / `CheckImportedDecision` because those predicates answer what a build ACCEPTS and `ghost export` calls them — a size rule there would have the exporter transform stored rows on the way out — and because it is a cut rather than a refusal: a size refusal in those predicates costs the record, and the exporter applying them would drop the task, the decision and its companion memory out of every artifact, on the day the operator needs the backup. **The import report then says which field it cut**, by name and before the write: `ImportTask` and `ImportDecision` return the fields the caps touched, `RecordResult.Clamped` carries those names to `printRecordLine`, and the line prints them — `…(truncated at the cap: title, notes)` — on a dry run's create as well as an apply's. The marker in a stored body cannot carry this alone, because a title's cut appends nothing and the alternatives past the twentieth are not in the row at all, so for those the record is silent and the report is the only place the loss can be said; and it must be said before the apply, because the reader of a preview is approving a run rather than auditing a finished one. It names fields and never their text, as every refusal in this command does, and it takes the names from the calls that made the cut rather than from the cap constants applied again — `memory.AlternativesClamped` is the predicate `BoundAlternatives` itself decides on, exported so the importer can report from the same rule instead of a second copy of it. The credential guard still sees the UNCLAMPED text, so a token past the cap is refused rather than quietly cut out of sight, and a `tags` list is still carried byte for byte.
+**An imported task's and decision's text is cut by the caps its own writers apply, and this is a store rule rather than a caller's.** `ImportTask` and `ImportDecision` store a title through `TruncateUTF8(…, MaxTitleLen)` and a description, notes, decision and rationale through `ClampContent`, and a decision's `alternatives` through `memory.BoundAlternatives` (at most `MaxAlternatives` entries, in artifact order, each cut at the title cap) — the same numbers `ghost_task_create` and `ghost_decision_record` apply, and now declared once in `internal/memory` beside `MaxContentLen` rather than twice. The reason is the row-rendering read tools: `capResponseParts` keeps the FIRST row whole rather than dropping it, which is only sound while a row is bounded by construction, and an artifact carrying 100 KB per field produced a single `ghost_task_list` row of about 200 KB and a single `ghost_decisions_list` row of megabytes. The cut is in the importer and not in `CheckImportedTask` / `CheckImportedDecision` because those predicates answer what a build ACCEPTS and `ghost export` calls them — a size rule there would have the exporter transform stored rows on the way out — and because it is a cut rather than a refusal: a size refusal in those predicates costs the record, and the exporter applying them would drop the task, the decision and its companion memory out of every artifact, on the day the operator needs the backup. **The import report then says which field it cut**, by name and before the write: `ImportTask` and `ImportDecision` return the fields the caps touched, `RecordResult.Clamped` carries those names to `printRecordLine`, and the line prints them — `…(truncated at the cap: title, notes)` — on a dry run's create as well as an apply's. The marker in a stored body cannot carry this alone, because a title's cut appends nothing and the alternatives past the twentieth are not in the row at all, so for those the record is silent and the report is the only place the loss can be said; and it must be said before the apply, because the reader of a preview is approving a run rather than auditing a finished one. It names fields and never their text, as every refusal in this command does, and it takes the names from the calls that made the cut rather than from the cap constants applied again — `memory.AlternativesClamped` is the predicate `BoundAlternatives` itself decides on, exported so the importer can report from the same rule instead of a second copy of it. A memory's cut is stated independently of its provenance rewrite, not as an alternative to it (#1275): the downgrade note and the cut note are two steps, and a record over `MaxContentLen` imported under the default policy — always downgraded, because it is not the user's own export — states the downgrade clause first and the cut second, where the mutually exclusive switch used to let the downgrade arm win and say nothing about the cut. The `provenance kept as exported` clause is stated only when neither rewrite happened, since a downgrade or a cut has already said what became of the artifact's own value. The credential guard still sees the UNCLAMPED text, so a token past the cap is refused rather than quietly cut out of sight, and a `tags` list is still carried byte for byte.
 
 Three decisions belong to the caller rather than to the store, and they are the same shape: the store owns what a row may be, the importer owns what a run means.
 
