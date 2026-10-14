@@ -307,7 +307,8 @@ func importanceForType(claudeType string) float32 {
 
 // Import discovers and imports all Claude Code memories for a project.
 // Returns the number of memories imported. Read-only — never modifies
-// Claude's files. Uses store.Upsert for dedup.
+// Claude's files. Writes through store.UpsertWithOptions with SkipExactContent;
+// see importFromDir.
 func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, error) {
 	dir := ClaudeMemoryDir(projectPath)
 	if dir == "" {
@@ -320,13 +321,29 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 //
 // Dedup guard: this is the ONLY caller in the codebase that needs re-runs to
 // be true no-ops (ghost mcp init documents itself as idempotent and safe to
-// re-run, and calls this unconditionally every time). Store.Upsert itself is
-// intentionally non-destructive — a duplicate save always creates a new,
-// linked row rather than silently merging, since ordinary ghost_memory_save
-// callers must never have content dropped. So the guard belongs here: before
-// importing a file's content, skip it if that exact content already exists
-// for this project. This keeps re-imports of previously-seen Claude Code
-// memory files from doubling the project's memory count on every init.
+// re-run, and calls this unconditionally every time). A plain Upsert is
+// intentionally non-destructive — a byte-identical save creates a new, linked
+// row rather than silently merging, since ordinary ghost_memory_save callers
+// must never have content dropped. So the import asks for the skip itself:
+// each file is saved with UpsertOptions.SkipExactContent, which writes nothing
+// when the project already holds that exact content. This keeps re-imports of
+// previously-seen Claude Code memory files from doubling the project's memory
+// count on every init.
+//
+// Only an EXACT match is skipped. A file that is a near-duplicate of a stored
+// row (or of a file earlier in the same run) takes Upsert's ordinary path: it
+// is stored as its own row, linked to that row as a 'duplicate', and the row
+// it folded into is strengthened.
+//
+// The exact-content check runs inside Upsert's write transaction, ahead of its
+// near-duplicate lookups, so it holds across handles: two clients that reach
+// first contact together cannot both store a file (#1234). The GetAll pre-read
+// below is only a cheap skip that saves a write transaction per file already
+// present; it does not decide anything on its own.
+//
+// The write goes through provider.MemoryStore's own UpsertWithOptions, so
+// every store the import can be handed has the guarded path, and there is no
+// fallback to an unguarded one.
 func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
@@ -362,13 +379,19 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 			continue
 		}
 
-		_, _, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
+		id, _, _, err := store.UpsertWithOptions(ctx, projectID, category, content, source, importance, importTags,
+			memory.UpsertOptions{SkipExactContent: true})
 		if err != nil {
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
 			continue
 		}
 		seen[content] = true
-		imported++
+		// An empty id is the skip: another handle stored this exact content
+		// between the pre-read and the write. The file is imported either way,
+		// so it is counted once, by whoever stored it.
+		if id != "" {
+			imported++
+		}
 	}
 
 	if imported > 0 {
