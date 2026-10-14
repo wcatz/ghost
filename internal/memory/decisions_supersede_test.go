@@ -1278,3 +1278,54 @@ func TestMergeDecisionLinksStayWithinTheSourceRefBound(t *testing.T) {
 		}
 	})
 }
+
+// TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink: when the merge's
+// text is byte-identical to one source, that row is reused in place and the
+// others are deleted into it. The reused row's own reference wins, but a decision
+// link the absorbed sources carried must be added to it — otherwise the absorbed
+// decision has no companion left, and superseding it answers clean while the
+// merged row keeps stating it.
+func TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, bMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dDec, dMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries v2", "max 3", "lower limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := func(id string) string {
+		var c string
+		if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, id).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	aText, dText := content(aMem), content(dMem)
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: aText, Importance: 0.9, ReplacesIDs: []string{aMem, bMem}},
+		{Category: "decision", Content: dText, Importance: 0.9},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	reused, ref := successorSourceRef(t, s, aText)
+	if reused != aMem {
+		t.Fatalf("the merge did not reuse the identical row: got %s, want %s", reused, aMem)
+	}
+	if !sourceRefNamesDecision(ref, aDec) || !sourceRefNamesDecision(ref, bDec) {
+		t.Fatalf("the reused row's source_ref %q does not name both decisions", ref)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, bDec, dDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Shared) != 1 || got.Shared[0] != reused {
+		t.Errorf("superseding the absorbed decision: shared = %v, want the reused row %s", got.Shared, reused)
+	}
+}

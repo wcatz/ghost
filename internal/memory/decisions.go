@@ -424,7 +424,9 @@ func boundedDecisionRefs(base string, refs []string) (string, error) {
 	if out := extendDecisionRefs(base, refs); len(out) <= MaxSourceRefLen {
 		return out, nil
 	}
-	if out := joinDecisionRefs(refs); len(out) <= MaxSourceRefLen {
+	// The base's own links are links too, and a fallback that kept only refs
+	// would drop them (the reuse branch's base is the reused row's link).
+	if out := joinDecisionRefs(append(decisionRefsInSourceRef(base), refs...)); len(out) <= MaxSourceRefLen {
 		return out, nil
 	}
 	return "", errDecisionRefsOverflow
@@ -506,7 +508,8 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	// The third arm is the reflect successor of that companion, and it is the one
 	// that closes the silent supersede: ReplaceNonManual hands the link to the row
 	// that stands in for the companion (the INSERT branch carries it through
-	// inheritedClaims, the reuse branch never drops it) and writes the row with
+	// inheritedClaims, the reuse branch appends the absorbed sources' links to the
+	// reused row's own in fillReusedClaimsTx) and writes the row with
 	// source 'reflection' and the survivor's own category — which for a merge or
 	// for the SQLite tier's cross-category clustering is a category that is not
 	// 'decision'. No writer tool can set that source, so a linked row carrying it

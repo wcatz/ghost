@@ -7001,7 +7001,9 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // with it — a decision companion's `decision:<id>` link among them — while the
 // fresh INSERT path keeps every one. The reused row is the FIRST source: its own
 // value wins, and an absorbed source supplies a value only where the row has none,
-// in ReplacesIDs order, by inheritedClaims' own rules.
+// in ReplacesIDs order, by inheritedClaims' own rules — except that the decision
+// links the absorbed sources carried are APPENDED to the row's own source_ref,
+// since a link is a list and keeping only the row's value drops a decision.
 //
 // The window is still a unit. It is filled only when the reused row states
 // neither boundary; a row holding one boundary keeps exactly that half, because
@@ -7029,6 +7031,22 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	if claims == (rowClaims{}) {
 		return nil
 	}
+	// source_ref is resolved here rather than by a COALESCE, because a decision
+	// link is a LIST: the reused row's own reference wins, but the decision links
+	// the absorbed sources carried are appended to it, exactly as on the fresh
+	// INSERT. A COALESCE kept the row's own value whole and threw the gathered
+	// links away, so an absorbed decision lost its only companion. A row with no
+	// reference of its own takes the inherited value, as before.
+	sourceRef := claims.sourceRef
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, id).Scan(&own); err != nil {
+		return fmt.Errorf("read the reused memory's source_ref: %w", err)
+	}
+	if own.String != "" {
+		if sourceRef, err = boundedDecisionRefs(own.String, decisionRefsInSourceRef(claims.sourceRef)); err != nil {
+			return err
+		}
+	}
 	// SQLite evaluates every SET expression against the row as it was, so the
 	// valid_until CASE reads the ORIGINAL valid_from and the window moves together.
 	if _, err := tx.ExecContext(ctx, `
@@ -7041,11 +7059,11 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 			confidence  = COALESCE(confidence, ?),
 			agent       = COALESCE(NULLIF(agent, ''), ?, agent),
 			session_id  = COALESCE(NULLIF(session_id, ''), ?, session_id),
-			source_ref  = COALESCE(NULLIF(source_ref, ''), ?, source_ref)
+			source_ref  = COALESCE(?, source_ref)
 		WHERE id = ?`,
 		nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 		claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
-		nullIfEmpty(claims.sourceRef), id); err != nil {
+		nullIfEmpty(sourceRef), id); err != nil {
 		return fmt.Errorf("fill the reused memory's claims: %w", err)
 	}
 	return nil
