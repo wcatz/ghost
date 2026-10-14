@@ -2,12 +2,50 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
 
 func reflectionMemory(category, content string) Memory {
 	return Memory{Category: category, Content: content, Source: "reflection", Importance: 0.7, Tags: []string{}}
+}
+
+// TestApplyReflectionReportsAnOverflowDropApartFromAGuardDrop is #1228 at the
+// apply boundary: the split the store makes has to reach the caller, because the
+// caller's report and its skip-fingerprint decision are what the issue names.
+// One emission is refused for each reason in the same round, and the two counts
+// must name them separately rather than as one total that reads as "a row
+// changed underneath".
+func TestApplyReflectionReportsAnOverflowDropApartFromAGuardDrop(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	var mems []string
+	for i := 0; i < 13; i++ {
+		_, mem, _, err := s.RecordDecision(ctx, testProject, fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mems = append(mems, mem)
+	}
+	fresh := reflectionMemory("fact", "a brand new consolidated fact")
+
+	_, _, _, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject, []Memory{
+		{Category: "decision", Content: "Thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems},
+		fresh,
+	}, nil, "", false, nil)
+	if err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	if projectDropped.Overflow != 1 || projectDropped.OverflowLinks != 13 {
+		t.Errorf("project overflow = %+v, want 1 emission over 13 decision links", projectDropped)
+	}
+	if projectDropped.Changed != 0 {
+		t.Errorf("project guard drops = %d, want 0: nothing changed under this pass", projectDropped.Changed)
+	}
+	if globalDropped.Total() != 0 {
+		t.Errorf("global drops = %+v, want none", globalDropped)
+	}
 }
 
 func TestApplyReflectionPromotesGlobalsAndReplacesProjectTogether(t *testing.T) {

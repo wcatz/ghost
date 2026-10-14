@@ -7,6 +7,62 @@ import (
 	"time"
 )
 
+// EmissionDrops counts the emissions one replace refused to write, by reason.
+// The two reasons are not interchangeable and the caller treats them
+// differently, which is why they are fields and not one integer (#1228):
+//
+//   - Changed is the #1051 corpus guard refusing a claim on a row that changed
+//     or was deleted while the harness was answering. The row is still live and
+//     still needs consolidating, so a later run has to revisit it, and a caller
+//     that recorded a skip fingerprint over it would absorb the survivor.
+//   - Overflow is a merge whose decision links alone do not fit in a source_ref.
+//     That is a property of the corpus as it stands, so every later run would
+//     refuse the same merge again: it is reported on its own, and the round it
+//     happened in may record its skip fingerprint, because nothing was lost that
+//     another run could recover.
+//
+// Total is the count of refused emissions either way, which is what "every
+// proposal was refused" and "the round wrote nothing" read.
+type EmissionDrops struct {
+	Changed  int
+	Overflow int
+	// OverflowLinks is how many decision links the overflowing merges stood for
+	// in total. It is the reason's own number, printed beside the byte bound it
+	// exceeds so an operator can see how far over the merge was.
+	OverflowLinks int
+}
+
+// Total is the number of emissions refused for either reason.
+func (d EmissionDrops) Total() int { return d.Changed + d.Overflow }
+
+// record adds one refused emission under the reason it was refused for.
+func (d *EmissionDrops) record(overflow bool, links int) {
+	if overflow {
+		d.Overflow++
+		d.OverflowLinks += links
+		return
+	}
+	d.Changed++
+}
+
+// add is the sum two halves' counts are combined with, and sub moves one half's
+// refusals onto the half that produced them (see applyView.crossProjectDropped).
+func (d EmissionDrops) add(o EmissionDrops) EmissionDrops {
+	return EmissionDrops{
+		Changed:       d.Changed + o.Changed,
+		Overflow:      d.Overflow + o.Overflow,
+		OverflowLinks: d.OverflowLinks + o.OverflowLinks,
+	}
+}
+
+func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
+	return EmissionDrops{
+		Changed:       d.Changed - o.Changed,
+		Overflow:      d.Overflow - o.Overflow,
+		OverflowLinks: d.OverflowLinks - o.OverflowLinks,
+	}
+}
+
 // ApplyReflection replaces the project-scoped reflection result and, when
 // requested, writes cross-project candidates in the same transaction. A
 // candidate that cannot be written to _global is inserted into the project in
@@ -18,13 +74,15 @@ import (
 // holds cannot be built from an integer when it also has to say which rows those
 // are.
 //
-// projectDropped and globalDropped count the emissions the #1051 corpus guard
-// refused in each half — the ones whose claimed row changed or was deleted
-// while the harness was answering. Keep them attributable: once the two lists
-// are folded nobody can say which input a dropped emission came from, so the
-// global half is guarded before the fold below. The caller needs the split to
-// report only what was written (a project summary and a cross-project component
-// subtract different halves) and to recognise a round that wrote nothing.
+// projectDropped and globalDropped count the emissions each half refused, by
+// reason (EmissionDrops): the ones whose claimed row changed or was deleted
+// while the harness was answering, and the merges whose decision links do not
+// fit in a source_ref. Keep them attributable: once the two lists are folded
+// nobody can say which input a dropped emission came from, so the global half is
+// guarded before the fold below. The caller needs the split to report only what
+// was written (a project summary and a cross-project component subtract
+// different halves), to recognise a round that wrote nothing, and to tell a drop
+// a later run can repair from one it cannot.
 //
 // deleted is the number of rows the project replace removed, and
 // appliedByCategory is what it landed per category (including the kept-back
@@ -33,9 +91,9 @@ import (
 // round that changed the corpus from one that did not: an all-dropped round
 // that still deleted unclaimed candidates is not "nothing written", and must
 // report the replace and offer its snapshot for restore.
-func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool, fed []CorpusRow) (preserved []string, promoted int, keptMems []Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error) {
+func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool, fed []CorpusRow) (preserved []string, promoted int, keptMems []Memory, projectDropped, globalDropped EmissionDrops, deleted int, appliedByCategory map[string]int, err error) {
 	if len(projectMems) == 0 && len(globalMems) == 0 {
-		return nil, 0, nil, 0, 0, 0, nil, nil
+		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, nil
 	}
 
 	// The category map is a caller-visible return, so it must never come back
@@ -50,7 +108,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 
 	tx, lock, err := s.beginWrite(ctx, "reflect-apply")
 	if err != nil {
-		return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
+		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -76,7 +134,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	view := &applyView{concurrent: make(map[string]bool), crossProjectFrom: -1}
 	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, view.concurrent)
 	if guardErr != nil {
-		return nil, 0, nil, 0, 0, 0, nil, guardErr
+		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, guardErr
 	}
 	txCtx = withApplyView(txCtx, view)
 
@@ -102,10 +160,10 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	}
 
 	if len(projectMems) > 0 {
-		var projectDrop int
+		var projectDrop EmissionDrops
 		preserved, projectDrop, deleted, appliedByCategory, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
 		if err != nil {
-			return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("replace project memories: %w", err)
+			return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("replace project memories: %w", err)
 		}
 		projectDropped = projectDrop
 		// Move the replace's refusals of folded candidates onto the half that
@@ -115,8 +173,8 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 		// line claim a cross-project candidate was kept project-scoped beside a
 		// total that never counted it. The sum the caller adds back is
 		// unchanged: this is attribution, not a second drop.
-		projectDropped -= view.crossProjectDropped
-		globalDropped += view.crossProjectDropped
+		projectDropped = projectDropped.sub(view.crossProjectDropped)
+		globalDropped = globalDropped.add(view.crossProjectDropped)
 	}
 
 	if len(globalMems) > 0 {
@@ -127,7 +185,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			var recoveryErr error
 			keptMems, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
 			if recoveryErr != nil {
-				return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
+				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
 			}
 			// The recovered rows landed in the project, so they belong in the
 			// applied summary and its category breakdown exactly like the
@@ -139,7 +197,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			for _, m := range globalMems {
 				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m)
 				if candidateErr != nil {
-					return nil, 0, nil, 0, 0, 0, nil, candidateErr
+					return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, candidateErr
 				}
 				if promotedOK {
 					promoted++
@@ -154,7 +212,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, 0, nil, 0, 0, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
+		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
 	}
 	lock.reportHold("reflect-apply", time.Now())
 	if s.onSave != nil {
@@ -172,14 +230,14 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 // claimed row changed or was deleted while the harness was answering — and
 // returns how many were refused, so the caller can report only what was written
 // and can tell a round that wrote nothing from one that did.
-func dropConcurrentClaims(g *fedGuard, memories []Memory) (live []Memory, dropped int) {
+func dropConcurrentClaims(g *fedGuard, memories []Memory) (live []Memory, dropped EmissionDrops) {
 	if len(memories) == 0 {
-		return memories, 0
+		return memories, EmissionDrops{}
 	}
 	live = make([]Memory, 0, len(memories))
 	for _, m := range memories {
 		if g.drop(m) {
-			dropped++
+			dropped.record(false, 0)
 			continue
 		}
 		live = append(live, m)

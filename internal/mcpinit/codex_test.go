@@ -1994,6 +1994,55 @@ func TestMergeCodexHooksRepairsGhostsOwnActionFields(t *testing.T) {
 	}
 }
 
+// TestAuditCodexHooksNull pins #1219: a hooks.json whose "hooks" value is the
+// JSON literal null must be refused, not merged into. json.Unmarshal decodes
+// null into a nil map with no error, so without the isJSONNull guard the
+// assignment of ghost's rendered rules panics with "assignment to entry in nil
+// map" — under a dry run too, because the merge runs before the dry-run check,
+// and with it every client after codex in a multi-client run. The Claude
+// settings path refuses the same value the same way (findHookCommand's
+// "hooks is null").
+func TestAuditCodexHooksNull(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("mergeCodexHooksConfig panicked on a null hooks value: %v", r)
+		}
+	}()
+
+	if _, err := mergeCodexHooksConfig([]byte(`{"description":"my hooks","hooks":null}`), "/new/ghost"); err == nil {
+		t.Fatal("a null hooks value must be refused, not silently overwritten with ghost's rules")
+	}
+}
+
+// TestRunCodex_NullHooksIsRefused pins the install path the audit walked: a
+// hooks.json carrying an explicit null is refused with an error rather than
+// crashing, and the file is left exactly as it was. It runs the dry-run form,
+// where the merge happens before the dry-run check and the panic used to take
+// the whole command down.
+func TestRunCodex_NullHooksIsRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = `{"description":"my hooks","hooks":null}`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, true); err == nil {
+		t.Fatal("a null hooks value must be refused, not merged into")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused merge must leave the file untouched:\ngot:\n%s", got)
+	}
+}
+
 func TestRunCodex_DryRunWritesNothing(t *testing.T) {
 	home, xdg := setupCodexTestEnv(t)
 
