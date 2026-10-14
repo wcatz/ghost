@@ -2069,6 +2069,17 @@ func (s *Server) registerTools() {
 				return nil, nil, err
 			}
 		}
+		// Refused with the allowed list, as every other tool that takes a category
+		// refuses it (#1041/#1079), and before the project is resolved so the
+		// caller is told about the argument that was wrong. Handed on, a plural or
+		// capitalised category reached the assembler's category predicate, which
+		// dropped every candidate and answered "nothing found passed the category
+		// filter" with advice to raise the limit — a confident false negative no
+		// limit could fix. Checked here, above the explain and as_of branches, so
+		// all three paths refuse it alike.
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
@@ -2078,6 +2089,23 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as ghost_task_list and
+		// ghost_decisions_list refuse it (#1179). `ResolveProject` answers an
+		// unknown name with `""`, which the assembler reads as a `_global`-only
+		// search, so a misspelt project came back as "no match — widen the
+		// limit", or as a `_global` row presented as an answerable hit for the
+		// misspelt name, with nothing saying the named project was never searched.
+		//
+		// A refusal rather than the not-registered sentence ghost_project_context
+		// appends, because this answer is rendered and measured by the assembler:
+		// a sentence added here would ship bytes the response cap never saw, the
+		// assembler's own verdict text (widen the limit, the query was not wrong)
+		// would still be in the body, and explain's JSON payload has no place for
+		// it. A refusal says the one true thing on the plain, explain and as_of
+		// paths alike. `_global` itself is a registered project and still resolves.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 

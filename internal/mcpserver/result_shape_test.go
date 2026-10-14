@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -335,6 +336,79 @@ func TestDecisionSupersedeLeavingACompanionLiveIsAPartialFailure(t *testing.T) {
 	}
 	if !strings.Contains(out, companion) {
 		t.Errorf("the answer does not name the companion left live (%s):\n%s", companion, out)
+	}
+}
+
+// TestDecisionSupersedeFindsARecategorisedCompanion is the path the tool itself
+// advertises: decision_record tells the caller to edit the companion with
+// ghost_memory_update, and recategorising it is an ordinary edit. The companion
+// keeps the decision link and its decision_log source, so a supersede still
+// finds it whatever its category is now — and either retires it (architecture)
+// or names it as left live through the resolve guard (convention). It used to
+// fail the lookup's category check, so the decision row flipped, the reversed
+// decision kept answering search and session start, and the answer was a clean
+// success that mentioned neither.
+func TestDecisionSupersedeFindsARecategorisedCompanion(t *testing.T) {
+	for _, tc := range []struct {
+		category string
+		retired  bool
+	}{
+		{category: "architecture", retired: true},
+		{category: "convention", retired: false},
+	} {
+		t.Run(tc.category, func(t *testing.T) {
+			db, session, _ := echoLogSession(t)
+			seed := callTool(t, session, "ghost_decision_record", map[string]any{
+				"project_id": "p", "title": "retry limit", "decision": "max 5 attempts", "rationale": "the upstream rate limit",
+			})
+			if seed.IsError {
+				t.Fatalf("seed record failed: %s", resultText(seed))
+			}
+			seedOut := resultText(seed)
+			oldDecision := labeledID(t, seedOut, "decision_id: ")
+			companion := labeledID(t, seedOut, "memory_id: ")
+
+			upd := callTool(t, session, "ghost_memory_update", map[string]any{
+				"project_id": "p", "memory_id": companion, "category": tc.category,
+			})
+			if upd.IsError {
+				t.Fatalf("recategorising the companion failed: %s", resultText(upd))
+			}
+
+			res := callTool(t, session, "ghost_decision_record", map[string]any{
+				"project_id": "p", "title": "retry limit", "decision": "max 3 attempts", "rationale": "measured",
+				"supersedes": oldDecision,
+			})
+			out := resultText(res)
+			if !strings.Contains(out, companion) {
+				t.Errorf("the answer does not name the recategorised companion (%s):\n%s", companion, out)
+			}
+			var resolved sql.NullString
+			if err := db.QueryRow(`SELECT resolved_at FROM memories WHERE id = ?`, companion).Scan(&resolved); err != nil {
+				t.Fatalf("read companion: %v", err)
+			}
+			if tc.retired {
+				if res.IsError {
+					t.Errorf("a retired companion was reported as a partial failure:\n%s", out)
+				}
+				if !strings.Contains(out, "was retired") {
+					t.Errorf("the answer does not say the companion was retired:\n%s", out)
+				}
+				if !resolved.Valid {
+					t.Errorf("the %s companion is still live after the supersede", tc.category)
+				}
+				return
+			}
+			if !res.IsError {
+				t.Errorf("a companion left live was reported as a plain success:\n%s", out)
+			}
+			if !strings.Contains(out, "left live") {
+				t.Errorf("the answer does not say the companion was left live:\n%s", out)
+			}
+			if resolved.Valid {
+				t.Errorf("the resolve guard was bypassed: a %s companion was retired", tc.category)
+			}
+		})
 	}
 }
 
