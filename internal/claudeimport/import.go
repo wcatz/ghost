@@ -305,9 +305,22 @@ func importanceForType(claudeType string) float32 {
 	return defaultImportance
 }
 
+// absentWriter is the one store capability this package needs beyond
+// provider.MemoryStore: a memory stored only when the project does not already
+// hold that exact content, with the check and the write in one transaction.
+//
+// It is deliberately not on provider.MemoryStore — that interface is the
+// capability surface the MCP tools expose, and this is a write only the import
+// makes — so store is type-asserted to this at call time; *memory.Store
+// satisfies it. A store that cannot do this gets an error rather than the
+// GetAll-then-Upsert path, which is the duplication this exists to close.
+type absentWriter interface {
+	CreateIfAbsent(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (bool, error)
+}
+
 // Import discovers and imports all Claude Code memories for a project.
 // Returns the number of memories imported. Read-only — never modifies
-// Claude's files. Uses store.Upsert for dedup.
+// Claude's files.
 func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, error) {
 	dir := ClaudeMemoryDir(projectPath)
 	if dir == "" {
@@ -327,11 +340,23 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 // importing a file's content, skip it if that exact content already exists
 // for this project. This keeps re-imports of previously-seen Claude Code
 // memory files from doubling the project's memory count on every init.
+//
+// The pre-read below is a cheap skip, not the guard: it is one pool read whose
+// answer decides whether a write happens, and two clients that reach first
+// contact together both read an empty project. The guard that holds is
+// CreateIfAbsent, whose exact-content probe runs inside the write transaction,
+// so a file this handle loses the race for is skipped rather than saved a
+// second time.
 func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
 		return 0, fmt.Errorf("read claude memory dir: %w", err)
+	}
+
+	writer, ok := store.(absentWriter)
+	if !ok {
+		return 0, fmt.Errorf("claude import: %T cannot write conditionally, so importing could store every file twice; refusing", store)
 	}
 
 	existing, err := store.GetAll(ctx, projectID, 100000)
@@ -362,13 +387,18 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 			continue
 		}
 
-		_, _, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
+		created, err := writer.CreateIfAbsent(ctx, projectID, category, content, source, importance, importTags)
 		if err != nil {
-			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
+			logger.Warn("claude import: save failed", "file", entry.Name(), "error", err)
 			continue
 		}
 		seen[content] = true
-		imported++
+		// Not created means another handle stored this content between the
+		// pre-read and the write. The file is imported either way, so it is
+		// counted once, by whoever won.
+		if created {
+			imported++
+		}
 	}
 
 	if imported > 0 {

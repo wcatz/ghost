@@ -3207,6 +3207,19 @@ type insertOptions struct {
 	// writer draws its id, so a row's identity is still nobody's choice but the
 	// column's.
 	id string
+
+	// onlyIfAbsent makes the insert conditional on the project not already
+	// holding a row with this exact content, and reports the skip as an empty
+	// id. Only CreateIfAbsent sets it.
+	//
+	// It has to be a bit on the INSERT rather than a read the caller makes,
+	// because it is a read whose answer decides whether a write happens: read
+	// on the pool and the window between the read and the insert belongs to any
+	// other handle, so two first-contact importers both see an empty project
+	// and both insert the same file. Set here, the probe runs inside the write
+	// transaction beginWrite already opened with BEGIN IMMEDIATE, so the second
+	// importer waits for the lock and then finds the row.
+	onlyIfAbsent bool
 }
 
 // insertMemory is Create's statement, with the credential guard and nothing
@@ -3252,6 +3265,26 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		return "", fmt.Errorf("begin create: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	if opts.onlyIfAbsent {
+		// The decision and the INSERT share this transaction, which is the
+		// whole point: the transaction was opened with BEGIN IMMEDIATE, so the
+		// write lock is held from before this read to the commit. A second
+		// importer that reaches the same branch waits on that lock, and its
+		// read then sees the first one's committed row rather than the empty
+		// project the pre-read saw. The comparison is byte-exact and scoped to
+		// the project, which is exactly the import's skip rule — a similarity
+		// fold would be Upsert, and the import deliberately does not fold.
+		var present string
+		switch err := tx.QueryRowContext(ctx, `
+			SELECT id FROM memories WHERE project_id = ? AND content = ? LIMIT 1
+		`, projectID, m.Content).Scan(&present); {
+		case err == nil:
+			return "", nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", fmt.Errorf("probe imported content: %w", err)
+		}
+	}
 
 	var id string
 	err = tx.QueryRowContext(ctx, `
@@ -3302,6 +3335,44 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		s.onSave(projectID)
 	}
 	return id, nil
+}
+
+// CreateIfAbsent inserts the memory unless the project already holds a row with
+// this exact content, and reports whether it inserted one. It is the write the
+// Claude auto-memory import makes.
+//
+// The import's own guard reads the project once, before it walks the files, to
+// skip what is already there; that read cannot decide a write on its own, so
+// two clients that reach first contact together both read an empty project and
+// both import every file. This is the check that runs inside the write
+// transaction instead, where the second writer's probe sees the first writer's
+// row. The import keeps its pre-read as a cheap skip — a file already present
+// costs no transaction — and relies on this for correctness.
+//
+// The predicate is byte-identical content within the project, which is the
+// import's skip rule and deliberately not Upsert's similarity fold: a Claude
+// memory file that was already imported is a duplicate to drop, not a fact to
+// strengthen, and folding it would add a linked copy rather than skip it.
+//
+// The credential guard runs here, before any transaction, exactly as Create's
+// does: a Claude auto-memory file is text that arrived from somewhere, and a
+// refused value must cost nothing and write nothing.
+func (s *Store) CreateIfAbsent(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (created bool, err error) {
+	m := Memory{
+		Category:   category,
+		Content:    content,
+		Source:     source,
+		Importance: importance,
+		Tags:       tags,
+	}
+	if err := checkMemoryWrite(m); err != nil {
+		return false, err
+	}
+	id, err := s.insertMemory(ctx, projectID, m, insertOptions{onlyIfAbsent: true})
+	if err != nil {
+		return false, err
+	}
+	return id != "", nil
 }
 
 // Upsert checks for an existing similar memory, probing in two stages:
