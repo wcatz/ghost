@@ -1167,3 +1167,5 @@ instead of writing to your store.
 3. Per-category tables with sample sizes; raw per-question logs attached to the release.
 4. Token cost and latency reported next to accuracy.
 5. Negative or mediocre results get published too.
+
+- #1251: with the leg-consensus stage, `ghost bench --context` reports about 1518 admitted rows, 298 relevant, precision 0.196, 204.6 est. tokens per answer, result rate 0.991; baseline was 2060 admitted, 306 relevant, 0.149, 280.4.

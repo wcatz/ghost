@@ -330,3 +330,5 @@ backend at all, and `TestLiveGooseRunsATurnInChatMode` runs the production argv
 under the production environment to answer it — behind `GHOST_LIVE_TESTS=1`,
 because a real turn costs a model call. So the mode is confirmed end-to-end only
 where goose is installed and a provider is configured, and not in CI.
+
+- `internal/assemble/` (update, #1251): query-mode leg-consensus stage admits a single-leg row only when its leg ranks it top (vector-only requires VectorRank <= 1, FTS-only requires FTSRank <= 2; dual-leg rows always admitted). It runs only when p.passive is false and both legs are live; one unavailable leg makes it a pass-through so the block is not emptied. A keyword-reserved FTS hit at rank 0 or 1 is kept by this rule.

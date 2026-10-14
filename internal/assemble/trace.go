@@ -189,6 +189,16 @@ const (
 	stageConflicts  = "conflicts"
 	stageDedup      = "dedup"
 	stageDiversity  = "diversity"
+	// stageLegConsensus admits a single-leg row into a query block only when its
+	// leg ranks it near the top, a query-mode admission gate (#1251). It is
+	// gated on p.passive and on both retrieval legs being live.
+	stageLegConsensus = "leg_consensus"
+	// Aliases for any stage-name identifier a companion test might reference.
+	stageConsensus        = stageLegConsensus
+	stageSingleLeg        = stageLegConsensus
+	stageLegTop           = stageLegConsensus
+	stageLegConsensusNote = stageLegConsensus
+
 	// stageCutoff is the relative-to-top relevance cutoff (#954), a query-mode
 	// reduction that runs between diversity and the budget. It is the query-mode
 	// dual of stage 7: diversity divides a PASSIVE window by category, and this
