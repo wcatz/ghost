@@ -946,12 +946,59 @@ func (p *pipeline) response(res Result) string {
 		}
 		b.WriteString(p.filterCaveat())
 	}
+	// The cut notice sits where the filter caveat would, and only ever on the
+	// answer that suppresses the caveat: a response-fit trim. It is written HERE
+	// and not by the surface because the post-pass measures this function — a
+	// notice the caller appended would be bytes the cap never saw, and the answer
+	// would ship over its budget to disclose that it had been trimmed to fit it.
+	b.WriteString(p.responseCutNotice())
 	// The machine line is last in every case, so a reader working bottom-up
 	// meets the verdict before the prose it qualifies.
 	if res.Machine != "" {
 		b.WriteString("\n" + res.Machine + "\n")
 	}
 	return b.String()
+}
+
+// CutNotice is the parenthesised sentence every response the byte budget cuts
+// ends its body with — the last line of a listing, and for a search answer the
+// line just above the machine-readable verdict line, which stays last. It names
+// how many WHOLE rows went, the budget they were fitted to and the caller's own
+// advice for reaching the rest. It is exported because two renderers emit the
+// same cut: the assembler's response-fit post-pass trims a query answer, and
+// `capResponseParts` trims the five row-rendering listing tools, and one
+// sentence built in one place is how the two cannot spell the same cut two ways.
+func CutNotice(cut, budget int, advice string) string {
+	verb := "rows were"
+	if cut == 1 {
+		verb = "row was"
+	}
+	return fmt.Sprintf("(%d %s cut from the end of this answer to stay within the %d-byte response "+
+		"budget, which bounds the answer and not what is stored. %s)", cut, verb, budget, advice)
+}
+
+// searchFitAdvice is the advice a trimmed query answer carries. It matches the
+// sentence `capResponseParts` gives `ghost_search_all` for the same cut, because
+// both answers are bounded by the same one lever — fewer results — and the same
+// way to narrow: the query.
+const searchFitAdvice = "Ask for fewer results (a lower `limit`) or narrow the query to see the rest."
+
+// responseCutNotice is the cut notice for a query answer the response-fit
+// post-pass trimmed, wrapped in the blank line that separates a block from its
+// commentary. It returns nothing for a passive block, whose surfaces render an
+// abstention or their own bounded listing rather than this field, and nothing
+// for an answer the trim emptied: `reasonAllOverBudget` already names the budget
+// and the action, and a notice over no rows would be a sentence about rows the
+// reader cannot see.
+func (p *pipeline) responseCutNotice() string {
+	if p.passive || len(p.items) == 0 {
+		return ""
+	}
+	cut := p.droppedBy[stageResponseFit]
+	if cut <= 0 {
+		return ""
+	}
+	return "\n\n" + CutNotice(cut, p.req.Budget.MaxBytes, searchFitAdvice)
 }
 
 // filterCaveat is the windowed-answer hint, already wrapped in the blank line
@@ -970,8 +1017,9 @@ func (p *pipeline) filterCaveat() string {
 	// Never after a response-fit trim. That trim removed rows the window
 	// admitted, so the window is not what made the answer short, and the caveat's
 	// advice — raise the limit — admits more rows and makes the response larger,
-	// which is the one move that cannot help. The machine line's `admitted=` still
-	// carries the shortfall.
+	// which is the one move that cannot help. The cut notice takes its place, so
+	// the shortfall is still disclosed in words rather than only in the machine
+	// line's `admitted=`.
 	if p.droppedBy[stageResponseFit] > 0 {
 		return ""
 	}

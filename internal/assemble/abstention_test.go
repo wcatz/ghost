@@ -534,10 +534,14 @@ func TestAFractionOfATokenIsStillAToken(t *testing.T) {
 func TestTheResponseFitPassDropsTheLowestRankedRowAndFits(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
+	// A3 is deliberately the LARGE row: the trim earns a cut notice that is
+	// itself counted against the cap, so dropping a tiny last row would not free
+	// enough for it and the pass would cut again. With A3 this size, one drop
+	// frees more than the notice costs and the boundary stays exactly one row.
 	rows := []memory.Candidate{
 		ranked("A1", 0, "first row text"),
 		ranked("A2", 1, "second row text"),
-		ranked("A3", 2, "third row text"),
+		ranked("A3", 2, "third row text "+strings.Repeat("tail ", 80)),
 	}
 	set := ftsOnlySet(rows...)
 
@@ -582,7 +586,9 @@ func TestTheResponseFitPassRecomputesTheOutcome(t *testing.T) {
 	long := strings.Repeat("top ranked row ", 40)
 
 	t.Run("the surviving row still clears the floor", func(t *testing.T) {
-		set := hybridSet(ranked("A1", 0, long), ranked("A2", -1, "second row"))
+		// A2 is the row the pass drops, and it is LARGE: the cut notice takes its
+		// own share of the cap, so a small dropped row would not free room for it.
+		set := hybridSet(ranked("A1", 0, long), ranked("A2", -1, strings.Repeat("second row ", 60)))
 		req := baseRequest()
 		req.Budget.MaxItems = 5
 		full := run(t, &fakeRetriever{set: set}, req)
@@ -619,9 +625,11 @@ func TestTheResponseFitPassRecomputesTheOutcome(t *testing.T) {
 		// The cap is the size the same verdict takes with the surviving row ALONE,
 		// measured rather than taken off the seed: a weak answer carries an
 		// abstention sentence the seed does not, so trimming a row's worth off the
-		// seed lands past the one-row size and empties the answer instead.
+		// seed lands past the one-row size and empties the answer instead. The cut
+		// notice the trim adds is counted too — withCutNotice raises the measured
+		// one-row size by that notice's own length.
 		alone := run(t, &fakeRetriever{set: hybridSet(ranked("A1", 4, "short row"))}, req)
-		req.Budget.MaxBytes = alone.Bytes
+		req.Budget.MaxBytes = withCutNotice(alone.Bytes, 1)
 		res := run(t, &fakeRetriever{set: set}, req)
 
 		if !eq(itemIDs(res.Items), []string{"A1"}) {
@@ -924,7 +932,10 @@ func TestTheLegSummarySeparatesAbsentFromNotRun(t *testing.T) {
 func TestTheResponseFitPassStopsAtTheLimit(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
-	body := strings.Repeat("row content ", 12)
+	// Rows large enough that one drop frees more than the cut notice the drop
+	// earns: the notice is counted against the cap, and a smaller row would make
+	// the "one byte over" case cut a second row to pay for it.
+	body := strings.Repeat("row content ", 40)
 	set := ftsOnlySet(
 		ranked("A1", 0, body),
 		ranked("A2", 1, body),
@@ -1568,10 +1579,15 @@ func TestTheWindowCaveatIsNotBlamedForAByteCapTrim(t *testing.T) {
 	req.Budget.MaxItems = 5
 	req.Category = "fact"
 
-	// The cap fits one row and not two, measured from the one-row render so the
-	// fixture's size does not decide the boundary.
-	one := run(t, &fakeRetriever{set: ftsOnlySet(ranked("A1", 0, body))}, req)
-	req.Budget.MaxBytes = one.Bytes
+	// The cap fits one row and not two. It is measured from the one-row render
+	// with NO category, which is the row the trim leaves behind: the trim drops
+	// the window caveat, so the untrimmed one-row render (which carries it) is
+	// the wrong base. withCutNotice then adds the length of the notice the trim
+	// substitutes for the caveat, since that notice is counted against the cap.
+	plain := baseRequest()
+	plain.Budget.MaxItems = 5
+	one := run(t, &fakeRetriever{set: ftsOnlySet(ranked("A1", 0, body))}, plain)
+	req.Budget.MaxBytes = withCutNotice(one.Bytes, 2)
 	res := run(t, &fakeRetriever{set: set}, req)
 
 	if len(res.Items) != 1 {
