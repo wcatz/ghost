@@ -35,9 +35,13 @@ func TestLegConsensusKeepsDualAndTopSingleLegs(t *testing.T) {
 		// past the ceiling; the stage must never empty a query block.
 		legCandidate("topSingle", -1, 9, 1.0),
 		legCandidate("dual", 3, 4, 0.9),
-		legCandidate("vecTop", -1, 1, 0.8),
+		// A single-leg row is admitted only when its own leg ranked it FIRST
+		// (rank 0): a rank-1 single-leg row is dropped.
+		legCandidate("vecTop", -1, 0, 0.8),
+		legCandidate("vecRank1", -1, 1, 0.78),
 		legCandidate("vecDrop", -1, 5, 0.7),
 		legCandidate("ftsTop", 0, -1, 0.6),
+		legCandidate("ftsRank1", 1, -1, 0.55),
 		legCandidate("ftsDrop", 5, -1, 0.5),
 	}
 	pinned := legCandidate("pinned", -1, 7, 0.75)
@@ -49,14 +53,14 @@ func TestLegConsensusKeepsDualAndTopSingleLegs(t *testing.T) {
 	set := &memory.CandidateSet{Rows: rows, Legs: aliveLegs()}
 	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
 	if ids := itemIDs(res.Items); !eq(ids, []string{"topSingle", "dual", "vecTop", "ftsTop", "pinned", "reserved"}) {
-		t.Fatalf("items = %v, want the top row, dual rows, top single-leg rows and the pinned/reserved rows admitted", ids)
+		t.Fatalf("items = %v, want the top row, dual rows, rank-0 single-leg rows and the pinned/reserved rows admitted", ids)
 	}
 	if d := traceDecision(res, "topSingle", stageLegConsensus); d != nil {
 		t.Errorf("the top-ranked row should never be dropped by the leg-consensus stage: %+v", d)
 	}
-	for _, id := range []string{"vecDrop", "ftsDrop"} {
+	for _, id := range []string{"vecRank1", "vecDrop", "ftsRank1", "ftsDrop"} {
 		if d := traceDecision(res, id, stageLegConsensus); d == nil || d.Reason != reasonLegConsensus {
-			t.Errorf("%s should be dropped as single-leg non-top: %+v", id, d)
+			t.Errorf("%s should be dropped as single-leg past rank 0: %+v", id, d)
 		}
 	}
 	for _, id := range []string{"pinned", "reserved"} {
