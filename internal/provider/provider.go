@@ -58,6 +58,13 @@ type MemoryStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
 	CountMemories(ctx context.Context, projectID string) (int, error)
+	// ClaudeImportDone is the durable per-file record the first-contact Claude
+	// auto-memory import is gated on (#1235): ref is the file's per-file marker
+	// ("claude-import:<name>") and content is the text the file still holds. It
+	// answers true once that file's import landed (a live row carrying the
+	// marker, or a delete tombstone keeping the same text) and false when it
+	// never did, so a later import retries exactly the files that still need one.
+	ClaudeImportDone(ctx context.Context, projectID, ref, content string) (bool, error)
 
 	// Embeddings
 	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error

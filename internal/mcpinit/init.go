@@ -1017,7 +1017,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
 		}
 		for _, f := range skipped {
-			_, _ = fmt.Fprintf(w, "  ! %s — skipped file (token-shaped): %s\n", p.Name, f)
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped file (refused or not imported yet): %s\n", p.Name, memory.ProjectArg("file", f))
 		}
 	}
 

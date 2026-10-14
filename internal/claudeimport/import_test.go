@@ -2,6 +2,7 @@ package claudeimport
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -431,3 +432,118 @@ func writeTempFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+// failTransientStore wraps a store and fails the first UpsertWithOptions call
+// with a transient error, then delegates. It stands in for a busy store losing
+// its BEGIN budget on one file during a first-contact import.
+type failTransientStore struct {
+	*memory.Store
+	calls int
+}
+
+func (s *failTransientStore) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts memory.UpsertOptions) (string, string, float64, error) {
+	s.calls++
+	if s.calls == 1 {
+		return "", "", 0, fmt.Errorf("simulated transient store failure")
+	}
+	return s.Store.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, opts)
+}
+
+// TestTransientFailureIsRetriedAndRerunIsNoopAfterDelete is the regression test
+// for the durable per-file marker (#1235). A file that failed transiently leaves
+// no marker, so a later call retries it. Once imported, later calls are no-ops —
+// even after the user deletes the memory, because the delete tombstone keeps the
+// content and the marker check matches it.
+func TestTransientFailureIsRetriedAndRerunIsNoopAfterDelete(t *testing.T) {
+	memDir := filepath.Join(t.TempDir(), "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTempFile(t, memDir, "notes.md", `---
+name: Notes
+description: Test notes
+type: project
+---
+Some project notes here.`)
+
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(ctx, "proj", filepath.Dir(memDir), "proj"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1: the store fails the first upsert — a transient error.
+	transient := &failTransientStore{Store: store}
+	imported, skipped, err := importFromDir(ctx, transient, "proj", memDir, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported != 0 {
+		t.Errorf("run 1: imported = %d, want 0 (transient failure)", imported)
+	}
+	if len(skipped) != 1 || skipped[0] != "notes.md" {
+		t.Errorf("run 1: skipped = %v, want [notes.md]", skipped)
+	}
+
+	// Run 2: the store is healthy — the file is retried and imports.
+	imported, skipped, err = importFromDir(ctx, store, "proj", memDir, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported != 1 {
+		t.Errorf("run 2: imported = %d, want 1 (retried after transient failure)", imported)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("run 2: skipped = %v, want []", skipped)
+	}
+
+	// The imported row carries the file's marker: that is the durable record
+	// the next run reads instead of the file's text.
+	mems, err := store.GetAll(ctx, "proj", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("after import: %d memories, want 1", len(mems))
+	}
+	if mems[0].SourceRef != importMarkerRef("notes.md") {
+		t.Errorf("imported row SourceRef = %q, want %q", mems[0].SourceRef, importMarkerRef("notes.md"))
+	}
+
+	// Run 3: the file's marker is present — a true no-op.
+	imported, _, err = importFromDir(ctx, store, "proj", memDir, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported != 0 {
+		t.Errorf("run 3: imported = %d, want 0 (marker says already imported)", imported)
+	}
+
+	// The user deletes the imported memory. The delete tombstone keeps the content.
+	if err := store.Delete(ctx, mems[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 4: the memory is gone, but the tombstone matches — still a no-op.
+	imported, _, err = importFromDir(ctx, store, "proj", memDir, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported != 0 {
+		t.Errorf("run 4: imported = %d, want 0 (tombstone matches deleted memory)", imported)
+	}
+	count, err := store.CountMemories(ctx, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("after delete + re-import: count = %d, want 0 (no re-insert)", count)
+	}
+}
+

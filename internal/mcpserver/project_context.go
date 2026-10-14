@@ -952,9 +952,6 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 			text = "Project lookup failed — unable to determine whether it is registered. Try again or call ghost_memory_save to create it."
 		case exists:
 			text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
-			if len(skippedFiles) > 0 {
-				text += "\n\nClaude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
-			}
 		default:
 			text = projectNotRegistered(asked)
 		}
@@ -963,15 +960,24 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		return text + s.skippedImportNote(skippedFiles), nil
 	}
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+		// A block made entirely of cross-project rows is not this project's
+		// context, and it is only visible from OUTSIDE the empty gate: with
+		// `IncludeGlobal` the section is populated by `_global` whenever the
+		// store holds any, so this case never reached an empty block. Appended
+		// rather than substituted, because there IS an answer above — the
+		// cross-project rows are wanted, they are simply not this project's.
+		//
+		// The other shape that reaches only this branch is a block made of the
+		// sections rendered OUTSIDE the assembler, with an empty memory read
+		// behind it: `## Learned Context` above is exactly that, and for a
+		// project reflection has summarised it means the summary's own source
+		// rows were withheld (#788). The function picks the sentence by the
+		// verdict, so this call site does not ask what kind of non-empty block
+		// it is holding.
 		parts = append(parts, responsePart{text: "\n\n" + note})
 	}
 	if sn := s.skippedImportNote(skippedFiles); sn != "" {
 		parts = append(parts, responsePart{text: sn})
-	}
-
-	if len(skippedFiles) > 0 {
-		msg := "Claude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
-		parts = append(parts, responsePart{text: "\n\n" + msg})
 	}
 	// The response byte budget (#1039): fit the whole block by cutting whole
 	// memory rows from the end, framing (headings, the learned summary, the
@@ -1021,13 +1027,22 @@ func newMeasuredServer(store provider.MemoryStore, now time.Time) *Server {
 	}
 }
 
+// skippedImportNote renders the trailing note naming the Claude memory files
+// this project's first-contact import could not store — a file the token guard
+// refused, and a file that failed transiently and will be retried on a later
+// call. The names are reported, never any of the files' text. An empty slice
+// renders nothing, so a caller with nothing to report appends no note.
 func (s *Server) skippedImportNote(skippedFiles []string) string {
 	if len(skippedFiles) == 0 {
 		return ""
 	}
-	return "\n\nClaude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
+	return "\n\nClaude memory import skipped files (refused or not imported yet): " + renderSkippedImportFiles(skippedFiles)
 }
 
+// renderSkippedImportFiles renders the skipped file names as a comma-separated
+// list, bounding the answer to the first ten names and folding the rest into a
+// count. Each name is quoted through the data delimiter rather than printed
+// raw, so a filename containing « or » cannot break out of the data block.
 func renderSkippedImportFiles(skipped []string) string {
 	const maxNames = 10
 	names := skipped
@@ -1036,7 +1051,11 @@ func renderSkippedImportFiles(skipped []string) string {
 		more = len(names) - maxNames
 		names = names[:maxNames]
 	}
-	out := strings.Join(names, ", ")
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = quoteData(name)
+	}
+	out := strings.Join(quoted, ", ")
 	if more > 0 {
 		out += fmt.Sprintf(" (+%d more)", more)
 	}

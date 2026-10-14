@@ -8026,6 +8026,61 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 	return count, err
 }
 
+// ClaudeImportDone reports whether the Claude auto-memory file recorded under
+// ref — its per-file marker, "claude-import:<name>" — has already been imported
+// into projectID. It is the durable per-file record the first-contact import is
+// gated on (#1235): a file answers true once its import landed and false when it
+// never did, so a later import retries exactly the files that still need one and
+// a re-run stays a true no-op even after the user deletes or edits an imported
+// memory.
+//
+// A file is done when EITHER of two records stands:
+//
+//   - a live row still carries its marker (source_ref = ref). This is the common
+//     case, and it is what makes a re-run a no-op after the user EDITED the
+//     memory: an in-place update keeps source_ref (`COALESCE(NULLIF(?, ''),
+//     source_ref)`), so the marker survives a content change and the edited text
+//     is never re-inserted beside the user's correction.
+//   - the row was DELETED and memory_history's delete tombstone keeps the same
+//     text. The tombstone has no source_ref column (adding one is a schema change
+//     the owner has not approved), so it is matched by the content the file still
+//     holds, scoped to source = 'onboarding' — the only source this import writes.
+//     That is what makes a re-run a no-op after a delete: without it the deleted
+//     row's marker would be gone and the file would be re-inserted.
+//
+// A file that failed before it wrote either record — a busy store losing its
+// BEGIN budget, or a per-file read error — answers false, so the next import
+// retries it.
+func (s *Store) ClaudeImportDone(ctx context.Context, projectID, ref, content string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM memories WHERE project_id = ? AND source_ref = ? LIMIT 1`,
+		projectID, ref).Scan(&one)
+	switch {
+	case err == nil:
+		return true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("look up claude import marker: %w", err)
+	}
+
+	// 'onboarding' is the source internal/claudeimport binds on every row it
+	// writes, so a tombstone under any other source is not this import's record.
+	err = s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM memory_history
+		 WHERE project_id = ? AND phase = 'delete' AND source = 'onboarding' AND content = ? LIMIT 1`,
+		projectID, content).Scan(&one)
+	switch {
+	case err == nil:
+		return true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("look up claude import tombstone: %w", err)
+	}
+	return false, nil
+}
+
 // CountActiveMemories counts the project's memories that pass the one predicate
 // every retrieval window binds regardless of caller: `resolved_at IS NULL`. It is
 // not CountMemories with a filter applied for tidiness — the two answer different

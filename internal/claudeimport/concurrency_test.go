@@ -12,23 +12,24 @@ import (
 )
 
 // firstContactStore is one client's handle on a shared database, with the
-// project read that opens the import held until every client has reached it.
+// per-file marker check that opens each import held until every client has
+// reached it.
 //
-// That read decides whether the import writes, so holding it is how two
+// That check decides whether the import writes, so holding it is how two
 // simultaneous first contacts are made deterministic: without the hold the two
 // goroutines below usually serialize by luck, and a test that only sometimes
 // reproduces the interleaving is not a regression test. With it, both clients
-// read the project as empty, which is exactly the state two real clients reach
-// when they arrive together.
+// read the file as not-yet-imported, which is exactly the state two real
+// clients reach when they arrive together.
 type firstContactStore struct {
 	*memory.Store
 	arrived *sync.WaitGroup
 }
 
-func (s *firstContactStore) GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error) {
+func (s *firstContactStore) ClaudeImportDone(ctx context.Context, projectID, ref, content string) (bool, error) {
 	s.arrived.Done()
 	s.arrived.Wait()
-	return s.Store.GetAll(ctx, projectID, limit)
+	return s.Store.ClaudeImportDone(ctx, projectID, ref, content)
 }
 
 // TestConcurrentFirstContactImportsEachFileOnce is the regression test for the
