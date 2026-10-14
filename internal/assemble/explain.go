@@ -262,8 +262,8 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			// or above the ceiling for its leg. It names the rule and the two
 			// ceilings so a caller can see why a one-leg match was withheld.
 			return fmt.Sprintf("withheld by the leg-consensus rule: only one retrieval leg found this memory, and it "+
-				"ranked it past the admission ceiling (vector-only rows need vector rank <= %d; keyword-only rows "+
-				"need keyword rank <= %d)", maxSingleLegVectorRank, maxSingleLegFTSRank)
+				"ranked it worse than the admission ceiling (ranks are 0-based, so vector-only rows need vector rank "+
+				"<= %d and keyword-only rows need keyword rank <= %d)", maxSingleLegVectorRank, maxSingleLegFTSRank)
 		case reasonNothingClearedBar:
 			// The no-answer bar (#955): no row in the block was a close enough
 			// vector match, so the whole block was withheld. It names the rule and

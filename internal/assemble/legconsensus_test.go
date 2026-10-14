@@ -84,6 +84,30 @@ func TestLegConsensusSkipsWhenOneLegUnavailable(t *testing.T) {
 	}
 }
 
+// TestLegConsensusSkipsWithoutAnEmbedder is the no-embedder shape of the same
+// rule: the vector leg is not applicable, so the consensus rule cannot apply
+// and the stage must leave the keyword-only block untouched rather than cut
+// single-leg rows against a missing leg.
+func TestLegConsensusSkipsWithoutAnEmbedder(t *testing.T) {
+	rows := []memory.Candidate{
+		legCandidate("ftsFirst", 0, -1, 1.0),
+		legCandidate("ftsFar", 9, -1, 0.8),
+	}
+	legs := map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Available: true},
+		"vector": {Applicable: false},
+	}
+	set := &memory.CandidateSet{Rows: rows, Legs: legs}
+	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
+	if ids := itemIDs(res.Items); !eq(ids, []string{"ftsFirst", "ftsFar"}) {
+		t.Fatalf("items = %v, want all keyword rows kept without an embedder", ids)
+	}
+	st := stageTraceFor(res, stageLegConsensus)
+	if st.In != st.Out || len(st.DroppedIDs) != 0 {
+		t.Errorf("stage = in %d out %d dropped %v, want pass-through", st.In, st.Out, st.DroppedIDs)
+	}
+}
+
 func traceDecision(res Result, id, stage string) *Decision {
 	for i := range res.Trace.Decisions {
 		d := &res.Trace.Decisions[i]

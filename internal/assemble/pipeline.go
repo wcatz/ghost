@@ -1069,11 +1069,12 @@ type diversityDeferral struct {
 }
 
 // maxSingleLegVectorRank and maxSingleLegFTSRank are the rank ceilings that
-// admit a row found by only one retrieval leg into a QUERY block. A row found
-// by both legs is always admitted; a row found by the vector leg only survives
-// when that leg ranks it at or above maxSingleLegVectorRank, and a row found by
-// the keyword leg only when its FTS rank is at or above maxSingleLegFTSRank.
-// Tuned on the synthetic bench corpus (#1251); keep them named constants.
+// admit a row found by only one retrieval leg into a QUERY block. Ranks are
+// 0-based, so rank 0 is the best. A row found by both legs is always admitted;
+// a row found by the vector leg only survives when that leg ranks it at or
+// below maxSingleLegVectorRank, and a row found by the keyword leg only when
+// its FTS rank is at or below maxSingleLegFTSRank. Tuned on the synthetic
+// bench corpus (#1251); keep them named constants.
 const (
 	maxSingleLegVectorRank = 1
 	maxSingleLegFTSRank    = 2
