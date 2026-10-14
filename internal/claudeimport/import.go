@@ -307,24 +307,26 @@ func importanceForType(claudeType string) float32 {
 }
 
 // Import discovers and imports all Claude Code memories for a project.
-// Returns the number of memories imported. Read-only — never modifies
-// Claude's files. Writes through store.UpsertWithOptions with SkipExactContent;
-// see importFromDir.
-func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, []string, error) {
+// Returns the number of memories imported, the names of files the store's
+// token guard refused, and the names of files whose write failed. Read-only —
+// never modifies Claude's files. Writes through store.UpsertWithOptions with
+// SkipExactContent; see importFromDir.
+func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, []string, []string, error) {
 	dir := ClaudeMemoryDir(projectPath)
 	if dir == "" {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
 	return importFromDir(ctx, store, projectID, dir, logger)
 }
 
 // importFromDir imports all Claude Code memories from a specific directory.
 //
-// Dedup guard: this is the ONLY caller in the codebase whose re-runs must be
-// true no-ops (ghost mcp init documents itself as idempotent and safe to re-run,
-// and calls this unconditionally every time). A plain Upsert is
+// Dedup guard: this is the ONLY caller in the codebase that needs re-runs to
+// be true no-ops (ghost mcp init documents itself as idempotent and safe to
+// re-run, and calls this unconditionally every time). A plain Upsert is
 // intentionally non-destructive — a byte-identical save creates a new, linked
-// row rather than silently merging — so the import asks for the skip itself:
+// row rather than silently merging, since ordinary ghost_memory_save callers
+// must never have content dropped. So the import asks for the skip itself:
 // each file is saved with UpsertOptions.SkipExactContent, which writes nothing
 // when the project already holds that exact content. This keeps re-imports of
 // previously-seen Claude Code memory files from doubling the project's memory
@@ -341,22 +343,30 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 // below is only a cheap skip that saves a write transaction per file already
 // present; it does not decide anything on its own.
 //
-// The guard is the original first-contact one: the import runs only when the
-// project has no memories, so a second run on an established project imports
-// nothing. A file refused by the token guard, or one that failed for any other
-// reason, is reported by name in the returned slice. The report uses errors.As
-// on wrapped errors so a wrapped rejection is still recognised. The name is
-// quoted downstream through quoteData or memory.ProjectArg; its text is never
-// echoed.
+// The two callers gate differently, and the difference is deliberate.
+// ghost_project_context imports only on FIRST CONTACT, when the project holds no
+// memories at all, so an established project is never re-scanned there. ghost
+// mcp init re-runs this unconditionally on every init and stays a true no-op by
+// the skip above rather than by a gate. So a file that FAILS is retried only by
+// a later ghost mcp init run — never by another project_context call, which
+// will not race the import at all once any memory exists.
+//
+// The two failure slices are kept apart because they mean different things and
+// are answered differently downstream. `refused` names files the store's token
+// guard rejected — that cannot succeed on a retry. `failed` names files whose
+// write failed for a reason the import does not recognise, which a later init
+// retries. A token-guard refusal is matched through errors.As on a wrapped
+// error, so a guard that wrapped its refusal is still told apart from a write
+// that failed. The names are reported, never any of the files' text.
 //
 // The write goes through provider.MemoryStore's own UpsertWithOptions, so
 // every store the import can be handed has the guarded path, and there is no
 // fallback to an unguarded one.
-func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, error) {
+func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, []string, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
-		return 0, nil, fmt.Errorf("read claude memory dir: %w", err)
+		return 0, nil, nil, fmt.Errorf("read claude memory dir: %w", err)
 	}
 
 	existing, err := store.GetAll(ctx, projectID, 100000)
@@ -369,7 +379,7 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 	}
 
 	var imported int
-	var skipped []string
+	var refused, failed []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
@@ -378,8 +388,10 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		path := filepath.Join(cleanDir, filepath.Base(entry.Name()))
 		content, category, importance, skip, err := ParseMemoryFile(path)
 		if err != nil {
+			// A file that could not be read is a write that did not happen, so
+			// it is a failure rather than a refusal: a later init retries it.
 			logger.Warn("claude import: file read failed", "file", entry.Name(), "error", err)
-			skipped = append(skipped, entry.Name())
+			failed = append(failed, entry.Name())
 			continue
 		}
 		if skip {
@@ -392,11 +404,15 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		id, _, _, err := store.UpsertWithOptions(ctx, projectID, category, content, source, importance, importTags,
 			memory.UpsertOptions{SkipExactContent: true})
 		if err != nil {
+			// errors.As on a WRAPPED error, so a refusal the store wrapped is
+			// still told apart from a write that failed. The two are reported
+			// apart because they mean different things: a refused file cannot
+			// succeed on a retry, while a failed one can.
 			var secretErr *memory.SecretContentError
 			if errors.As(err, &secretErr) {
-				skipped = append(skipped, entry.Name())
+				refused = append(refused, entry.Name())
 			} else {
-				skipped = append(skipped, entry.Name())
+				failed = append(failed, entry.Name())
 			}
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
 			continue
@@ -414,5 +430,5 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		logger.Info("claude memory import complete", "project", projectID, "memories", imported)
 	}
 
-	return imported, skipped, nil
+	return imported, refused, failed, nil
 }

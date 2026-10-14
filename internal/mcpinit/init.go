@@ -1006,7 +1006,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			continue
 		}
 
-		n, skipped, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
+		n, refused, failed, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
 			continue
@@ -1016,8 +1016,11 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		} else {
 			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
 		}
-		for _, f := range skipped {
-			_, _ = fmt.Fprintf(w, "  ! %s — skipped file (refused or not imported yet): %s\n", p.Name, memory.ProjectArg("file", f))
+		for _, f := range refused {
+			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", p.Name, memory.ProjectArg("file", f))
+		}
+		for _, f := range failed {
+			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", p.Name, memory.ProjectArg("file", f))
 		}
 	}
 

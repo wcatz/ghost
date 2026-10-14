@@ -846,7 +846,7 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 // New side effects. The handler resolves the name and handles as_of and the
 // unregistered name before it gets here; `asked` is the name as the caller wrote
 // it, which the not-registered sentence has to quote.
-func (s *Server) projectContextBlock(ctx context.Context, projectID, asked string, limit int, skippedFiles []string) (string, error) {
+func (s *Server) projectContextBlock(ctx context.Context, projectID, asked string, limit int, refused, failed []string) (string, error) {
 	// The block is built as RESPONSE PARTS, not straight into a builder (#1039):
 	// the memory rows are cuttable, every heading, count line and learned summary
 	// is framing, so fitting the answer to the response byte budget drops whole
@@ -926,7 +926,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// `CountMemories`, which has no `resolved_at` predicate, still counts
 		// them) with the never-saved census, which is false.
 		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-			return note + s.skippedImportNote(skippedFiles), nil
+			return note + s.skippedImportNote(refused, failed), nil
 		}
 		// `_global` is not a project, and the switch below asks whether a PROJECT
 		// is registered — so for that id the census is false in the same way, and
@@ -942,9 +942,9 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// in the first place.
 		if projectID == memory.GlobalProjectID {
 			if note := projectContextEmptyNote(memories); note != "" {
-				return note + s.skippedImportNote(skippedFiles), nil
+				return note + s.skippedImportNote(refused, failed), nil
 			}
-			return "No memories found among the cross-project rows." + s.skippedImportNote(skippedFiles), nil
+			return "No memories found among the cross-project rows." + s.skippedImportNote(refused, failed), nil
 		}
 		exists, existsErr := s.projectExists(ctx, projectID)
 		switch {
@@ -957,7 +957,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		}
 		// A sentence about the store is not a large answer and has no rows to cut,
 		// so it is not fitted to the budget.
-		return text + s.skippedImportNote(skippedFiles), nil
+		return text + s.skippedImportNote(refused, failed), nil
 	}
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 		// A block made entirely of cross-project rows is not this project's
@@ -976,7 +976,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// it is holding.
 		parts = append(parts, responsePart{text: "\n\n" + note})
 	}
-	if sn := s.skippedImportNote(skippedFiles); sn != "" {
+	if sn := s.skippedImportNote(refused, failed); sn != "" {
 		parts = append(parts, responsePart{text: sn})
 	}
 	// The response byte budget (#1039): fit the whole block by cutting whole
@@ -1006,7 +1006,7 @@ func (s *Server) now() time.Time {
 // block is built, and so does a caller of this.
 func ProjectContextAt(ctx context.Context, store provider.MemoryStore, projectID string, limit int, now time.Time) (string, error) {
 	s := newMeasuredServer(store, now)
-	return s.projectContextBlock(ctx, projectID, projectID, limit, nil)
+	return s.projectContextBlock(ctx, projectID, projectID, limit, nil, nil)
 }
 
 // ProjectResourceAt is ProjectContextAt for the `ghost://project/{id}/context`
@@ -1028,15 +1028,25 @@ func newMeasuredServer(store provider.MemoryStore, now time.Time) *Server {
 }
 
 // skippedImportNote renders the trailing note naming the Claude memory files
-// this project's first-contact import could not store — a file the token guard
-// refused, and a file that failed transiently and will be retried on a later
-// call. The names are reported, never any of the files' text. An empty slice
-// renders nothing, so a caller with nothing to report appends no note.
-func (s *Server) skippedImportNote(skippedFiles []string) string {
-	if len(skippedFiles) == 0 {
+// this project's first-contact import could not store. Two groups are kept
+// apart because they mean different things to the reader: `refused` are files
+// the store's token guard refused (they cannot succeed on a retry), and
+// `failed` are files whose write failed for a reason the import did not
+// recognise (a later ghost mcp init run retries those). The names are reported,
+// never any of the files' text. An empty pair renders nothing, so a caller with
+// nothing to report appends no note.
+func (s *Server) skippedImportNote(refused, failed []string) string {
+	if len(refused) == 0 && len(failed) == 0 {
 		return ""
 	}
-	return "\n\nClaude memory import skipped files (refused or not imported yet): " + renderSkippedImportFiles(skippedFiles)
+	var out string
+	if len(refused) > 0 {
+		out += "\n\nClaude memory import skipped files (refused by the token guard): " + renderSkippedImportFiles(refused)
+	}
+	if len(failed) > 0 {
+		out += "\n\nClaude memory import could not store (failed; a later ghost mcp init run retries): " + renderSkippedImportFiles(failed)
+	}
+	return out
 }
 
 // renderSkippedImportFiles renders the skipped file names as a comma-separated
