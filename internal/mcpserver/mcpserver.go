@@ -2491,14 +2491,14 @@ func (s *Server) registerTools() {
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
+		var skippedFiles []string
 		if asOf == nil {
-			if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
-				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
-					for _, p := range projects {
-						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
-							break
-						}
+			if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
+				for _, p := range projects {
+					if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
+						_, skipped, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+						skippedFiles = append(skippedFiles, skipped...)
+						break
 					}
 				}
 			}
@@ -2642,6 +2642,9 @@ func (s *Server) registerTools() {
 		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(skippedFiles) > 0 {
+			text += "\n\nClaude memory import skipped files (token-shaped): " + strings.Join(skippedFiles, ", ")
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},

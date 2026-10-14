@@ -1006,7 +1006,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			continue
 		}
 
-		n, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
+		n, skipped, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
 			continue
@@ -1015,6 +1015,9 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
 		} else {
 			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
+		}
+		for _, f := range skipped {
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped file (token-shaped): %s\n", p.Name, f)
 		}
 	}
 

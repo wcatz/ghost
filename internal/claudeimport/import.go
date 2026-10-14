@@ -6,6 +6,7 @@ package claudeimport
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -309,10 +310,10 @@ func importanceForType(claudeType string) float32 {
 // Returns the number of memories imported. Read-only — never modifies
 // Claude's files. Writes through store.UpsertWithOptions with SkipExactContent;
 // see importFromDir.
-func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, error) {
+func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, []string, error) {
 	dir := ClaudeMemoryDir(projectPath)
 	if dir == "" {
-		return 0, nil
+		return 0, nil, nil
 	}
 	return importFromDir(ctx, store, projectID, dir, logger)
 }
@@ -344,11 +345,11 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 // The write goes through provider.MemoryStore's own UpsertWithOptions, so
 // every store the import can be handed has the guarded path, and there is no
 // fallback to an unguarded one.
-func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, error) {
+func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
-		return 0, fmt.Errorf("read claude memory dir: %w", err)
+		return 0, nil, fmt.Errorf("read claude memory dir: %w", err)
 	}
 
 	existing, err := store.GetAll(ctx, projectID, 100000)
@@ -361,6 +362,7 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 	}
 
 	var imported int
+	var skipped []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
@@ -382,6 +384,10 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		id, _, _, err := store.UpsertWithOptions(ctx, projectID, category, content, source, importance, importTags,
 			memory.UpsertOptions{SkipExactContent: true})
 		if err != nil {
+			var secretErr *memory.SecretContentError
+			if errors.As(err, &secretErr) {
+				skipped = append(skipped, entry.Name())
+			}
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
 			continue
 		}
@@ -398,5 +404,5 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		logger.Info("claude memory import complete", "project", projectID, "memories", imported)
 	}
 
-	return imported, nil
+	return imported, skipped, nil
 }
