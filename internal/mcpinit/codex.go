@@ -1384,6 +1384,19 @@ func (o *codexObject) set(key string, value json.RawMessage) {
 	o.fields = append(o.fields, codexField{key: key, value: value})
 }
 
+// remove deletes key and the value it carried, keeping the order of the rest.
+// Nothing is written in its place: rendering no timeout is what distinguishes
+// an event that has none from one whose budget is zero.
+func (o *codexObject) remove(key string) {
+	kept := make([]codexField, 0, len(o.fields))
+	for _, f := range o.fields {
+		if f.key != key {
+			kept = append(kept, f)
+		}
+	}
+	o.fields = kept
+}
+
 // marshal renders the object back out in the order it was decoded in.
 func (o codexObject) marshal() (json.RawMessage, error) {
 	var buf bytes.Buffer
@@ -1436,14 +1449,14 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // and every rule that is not ghost's own are preserved verbatim.
 //
 // A rule that carries ghost's own hook action is repaired IN PLACE, one action
-// at a time: only the command of an action ghost rendered for that event is
-// replaced, so the rule keeps its matcher, the user's other actions and every
-// field either carries. Ghost owns exactly one action per event, so a second
-// copy of it is pruned rather than left to fire twice, and a rule whose every
-// action was such a copy disappears with them. Ghost's canonical rule is
-// appended only when no rule holds its action at all. The result is
-// deterministically rendered, so feeding the output back through this function
-// is a byte-level no-op.
+// at a time: ghost's own action is rewritten to what ghost renders for that
+// event, and every other key of that action, the user's other actions and the
+// rule's matcher are the user's and are left where they are. Ghost owns exactly
+// one action per event, so a second copy of it is pruned rather than left to
+// fire twice, and a rule whose every action was such a copy disappears with
+// them. Ghost's canonical rule is appended only when no rule holds its action
+// at all. The result is deterministically rendered, so feeding the output back
+// through this function is a byte-level no-op.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(existing, &top); err != nil {
@@ -1497,10 +1510,13 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 
 // mergeCodexEventRules rewrites ghost's own hook action where it already sits
 // in an event's rule list and appends ghost's canonical rule when it sits
-// nowhere. Every other rule is carried across byte for byte, and a rule that
-// is repaired is re-encoded in the key order it was read in.
+// nowhere. What ghost renders for that action is the whole of it — command,
+// type and timeout — so a stale path, a hand-edited type or a budget from
+// another build are all repaired. Every other rule is carried across byte for
+// byte, every other key of a repaired action stays where it sits, and a rule
+// that is repaired is re-encoded in the key order it was read in.
 func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
-	command := renderCodexHookAction(eventToken, ghostBin).Command
+	desired := renderCodexHookAction(eventToken, ghostBin)
 	// No +1: capacity arithmetic over an unbounded rule count reads as a
 	// possible size overflow to static analysis, and the append below runs
 	// for at most one event per merge.
@@ -1536,11 +1552,30 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				dropped++
 				continue
 			}
-			fresh, err := json.Marshal(command)
+			fresh, err := json.Marshal(desired.Command)
 			if err != nil {
 				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
 			}
 			actionObj.set("command", fresh)
+			// The WHOLE of ghost's action is what ghost rendered, so a stale
+			// or hand-edited type and timeout are repaired beside the command.
+			// Every other key is the user's and stays where it sits.
+			typed, err := json.Marshal(desired.Type)
+			if err != nil {
+				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+			}
+			actionObj.set("type", typed)
+			if desired.Timeout > 0 {
+				budget, err := json.Marshal(desired.Timeout)
+				if err != nil {
+					return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+				}
+				actionObj.set("timeout", budget)
+			} else {
+				// An event with no timeout of its own must not inherit a stale
+				// one, so the key goes rather than being rewritten to 0.
+				actionObj.remove("timeout")
+			}
 			rewritten, err := actionObj.marshal()
 			if err != nil {
 				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)

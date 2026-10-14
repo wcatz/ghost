@@ -1884,6 +1884,116 @@ func TestMergeCodexHooksRecognizesAWindowsBatchShim(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksRepairsGhostsOwnActionFields pins the whole-action repair.
+// Rewriting only ghost's command left a stale budget on the action itself:
+// a hand-edited or pre-#1217 `"timeout":1` on the SessionEnd action is not the
+// same thing as a current one, and SessionStart/Stop carry no timeout of their
+// own, so a budget someone left on them survives every run. Ghost's action is
+// therefore written as what ghost renders — command, type and timeout. Every
+// other key of that action, and every user action beside it, is not ghost's to
+// touch. It also pins that a ghost action is matched by its executable and its
+// event alone, so a `--source` copied from another host's file is rewritten to
+// this host's.
+func TestMergeCodexHooksRepairsGhostsOwnActionFields(t *testing.T) {
+	const userAction = "https://example.com/end"
+	stalePath := shellQuote("/old/ghost") + " hook session-end --source codex"
+	foreignSource := shellQuote("/old/ghost") + " hook stop --source claude"
+	currentStart := shellQuote("/new/ghost") + " hook session-start --source codex"
+	seed := []byte(`{
+  "hooks": {
+    "SessionEnd": [
+      {"matcher":"end","hooks":[
+        {"type":"command","command":` + jsonString(stalePath) + `,"timeout":1,"note":"mine"},
+        {"type":"http","command":` + jsonString(userAction) + `,"timeout":9}
+      ]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(foreignSource) + `}]}
+    ],
+    "SessionStart": [
+      {"hooks": [
+        {"type":"command","command":` + jsonString(currentStart) + `,"timeout":42,"async":true}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+
+	// SessionEnd: the stale path AND its stale budget are repaired, and the
+	// action keeps the key the user added to it.
+	endRules := codexMergedEvent(t, []byte(got), "SessionEnd")
+	if len(endRules) != 1 || endRules[0].Matcher != "end" {
+		t.Fatalf("the user's rule must survive with its matcher, got %+v", endRules)
+	}
+	actions := endRules[0].Hooks
+	if len(actions) != 2 {
+		t.Fatalf("the user's action must survive beside ghost's, got %+v", actions)
+	}
+	ghostAction := actions[0]
+	if want := shellQuote("/new/ghost") + " hook session-end --source codex"; ghostAction["command"] != want {
+		t.Errorf("ghost action command = %v, want %q", ghostAction["command"], want)
+	}
+	if ghostAction["type"] != "command" {
+		t.Errorf("ghost action type = %v, want %q", ghostAction["type"], "command")
+	}
+	if timeout, _ := ghostAction["timeout"].(float64); timeout != float64(codexSessionEndTimeoutSec) {
+		t.Errorf("ghost action timeout = %v, want %d", ghostAction["timeout"], codexSessionEndTimeoutSec)
+	}
+	if ghostAction["note"] != "mine" {
+		t.Errorf("an unknown key on ghost's own action is not ghost's to delete, got %v", ghostAction["note"])
+	}
+	user := actions[1]
+	if user["type"] != "http" || user["command"] != userAction {
+		t.Errorf("a user action must survive untouched, got %+v", user)
+	}
+	if timeout, _ := user["timeout"].(float64); timeout != 9 {
+		t.Errorf("a user action's own timeout was rewritten, got %v", user["timeout"])
+	}
+
+	// Stop: matched on the executable and the event alone, so another host's
+	// --source is rewritten to this host's, and the budget it did not need goes.
+	stop := codexMergedEvent(t, []byte(got), "Stop")
+	if len(stop) != 1 || len(stop[0].Hooks) != 1 {
+		t.Fatalf("Stop should carry exactly one action, got %+v", stop)
+	}
+	if want := shellQuote("/new/ghost") + " hook stop --source codex"; stop[0].Hooks[0]["command"] != want {
+		t.Errorf("ghost action --source = %v, want %q", stop[0].Hooks[0]["command"], want)
+	}
+	if _, ok := stop[0].Hooks[0]["timeout"]; ok {
+		t.Errorf("Stop carries no timeout of its own, so a stale one must go, got %+v", stop[0].Hooks[0])
+	}
+
+	// SessionStart: already at the current path, so only the fields are still
+	// repaired — the budget some other event needs is not left on this one.
+	start := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(start) != 1 || len(start[0].Hooks) != 1 {
+		t.Fatalf("SessionStart should carry exactly one action, got %+v", start)
+	}
+	startAction := start[0].Hooks[0]
+	if startAction["command"] != currentStart {
+		t.Errorf("a current ghost action command changed, got %v", startAction["command"])
+	}
+	if _, ok := startAction["timeout"]; ok {
+		t.Errorf("SessionStart carries no timeout of its own, so a stale one must go, got %+v", startAction)
+	}
+	if startAction["async"] != true {
+		t.Errorf("an unknown key on ghost's own action is not ghost's to delete, got %v", startAction["async"])
+	}
+
+	// A repair settles: merging the merged document again changes no byte.
+	again, err := mergeCodexHooksConfig([]byte(got), "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+	}
+	if again != got {
+		t.Errorf("merging the merged document again must be a byte-level no-op:\nfirst:\n%s\nsecond:\n%s", got, again)
+	}
+}
+
 func TestRunCodex_DryRunWritesNothing(t *testing.T) {
 	home, xdg := setupCodexTestEnv(t)
 
