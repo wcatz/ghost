@@ -1740,6 +1740,15 @@ Obsidian mirror's pid file, and the marker read on every session start. Nothing
 is created, migrated, written or deleted in a refused directory, and a command
 that resolved nothing does not fall back to a raw name and write there anyway.
 
+`ghost mcp init` resolves the directory once, after its settings pre-flight and
+before its first step, so a refusal stops the install there: the MCP server is
+not registered, no configuration file is written, and it exits `1` instead of
+printing `Done!`. The two steps that resolve the directory for real — the
+scratch root and the memory import — both treat a failure as a best-effort
+warning when a run does reach them (the harnesses fall back to the inherited
+temp dir, and a per-project import failure is not fatal), so the guard is asked
+up front and only its refusal is fatal.
+
 Two paths behave differently, and both are deliberate:
 
 - **The hook paths fail open.** A SessionStart/Stop hook, and the `ghost context`
