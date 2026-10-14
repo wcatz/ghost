@@ -69,13 +69,13 @@ func runClaudeHookInit(t *testing.T, path, ghostBin string) string {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := ensureHook(&out, sf, ghostBin); err != nil {
+	if err := ensureHook(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureStopHook(&out, sf, ghostBin); err != nil {
+	if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureWorkingMomentHooks(&out, sf, ghostBin); err != nil {
+	if err := ensureWorkingMomentHooks(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := sf.save(); err != nil {
