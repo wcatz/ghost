@@ -2499,12 +2499,15 @@ func (s *Server) registerTools() {
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
+		var refusedFiles, failedFiles []string
 		if asOf == nil {
-			if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
+			if count, cErr := s.store.CountMemories(ctx, args.ProjectID); cErr == nil && count == 0 {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							_, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							refusedFiles = append(refusedFiles, refused...)
+							failedFiles = append(failedFiles, failed...)
 							break
 						}
 					}
@@ -2647,7 +2650,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -3614,6 +3617,20 @@ func (s *Server) registerTools() {
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
+
+		// Notify the embedding worker of the companion memory, exactly as the
+		// three save tools do. RecordDecision writes a real memory row and
+		// calls the store's optional onSave callback, but no production caller
+		// registers one, so without this push the row has no vector until the
+		// worker's next sweep and the vector leg, ghost_health's coverage and
+		// any reflect/supersede/resolve pass in that window cannot see it.
+		if s.projectCh != nil {
+			select {
+			case s.projectCh <- args.ProjectID:
+			default: // non-blocking
+			}
+		}
+
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)

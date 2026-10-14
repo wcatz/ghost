@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
@@ -1926,4 +1928,109 @@ func mustProjectContext(t *testing.T, srv *Server, projectID string) string {
 		t.Fatalf("buildProjectContext %s: %v", projectID, err)
 	}
 	return body
+}
+
+// TestTheProjectContextNamesARefusedImportFileOnce is the regression test for
+// the silent first-contact refusal (#1235): a Claude memory file the guard
+// refuses is reported by file name in the tool answer — exactly once, and never
+// by its text. Without the reporting the name appears zero times; with the
+// duplicated note it appeared twice.
+func TestTheProjectContextNamesARefusedImportFileOnce(t *testing.T) {
+	ctx := context.Background()
+	projPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(ctx, "refproj", projPath, "refproj"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The memory directory is derived from the process home, so the fixture
+	// points home at a temp dir and plants one clean file and one the guard
+	// refuses.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	memDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memDir, "clean-note.md"), []byte("A plain project note with nothing sensitive in it."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const refusedName = "refused-note.md"
+	const refusedText = "The service account value is ghp_0123456789abcdefghijklmnopqrstuvwxyzAB for CI"
+	if err := os.WriteFile(filepath.Join(memDir, refusedName), []byte("Imported from a hostile file.\n\n"+refusedText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, session := validityServerFor(t, store)
+	answer := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "refproj"}))
+
+	if got := strings.Count(answer, refusedName); got != 1 {
+		t.Errorf("the refused file is named %d times, want exactly once:\n%s", got, answer)
+	}
+	if strings.Contains(answer, refusedText) {
+		t.Errorf("the answer echoes the refused file's text:\n%s", answer)
+	}
+	if !strings.Contains(answer, "clean project note") && !strings.Contains(answer, "plain project note") {
+		t.Errorf("the clean file did not import alongside the refusal:\n%s", answer)
+	}
+}
+
+// TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories is the
+// regression test for the restored first-contact gate (#1235): the import runs
+// only when the project has no memories, so a project that already holds one
+// imports nothing at all — not on the first call, and not if a memory is later
+// deleted while others remain.
+func TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories(t *testing.T) {
+	ctx := context.Background()
+	projPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(ctx, "gateproj", projPath, "gateproj"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a memory so the gate is closed.
+	if _, _, _, err := store.Upsert(ctx, "gateproj", "fact", "a pre-existing memory", "mcp", 0.5, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	memDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const fileName = "secret-note.md"
+	if err := os.WriteFile(filepath.Join(memDir, fileName), []byte("Imported from a hostile file.\n\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE and the deploy user is admin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, session := validityServerFor(t, store)
+	_ = srv
+	answer := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "gateproj"}))
+
+	if strings.Contains(answer, fileName) {
+		t.Errorf("the gate was open on a non-empty project and the file was reported:\n%s", answer)
+	}
+	if got, _ := store.CountMemories(ctx, "gateproj"); got != 1 {
+		t.Errorf("after the (gated-out) import: count = %d, want 1 (no new rows)", got)
+	}
 }

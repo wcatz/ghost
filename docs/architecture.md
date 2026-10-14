@@ -105,7 +105,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 - Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects. The MCP registration is replaced in place — the existing entry is removed before the new one is added — so a refused `claude mcp add-json` rolls the previous entry back from the `claude mcp get` output the same run read, and the error says whether that entry came back whole, came back without the parts the get rendering could not carry, or was removed, rather than failing silently over a user left with no ghost server.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
-- Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command.
+- Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command. It recognises its own action by the binary path init bakes — under any name — or by a `ghost` basename, so the merge stays a fixed point for whatever the binary is called (#1249).
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
@@ -397,8 +397,11 @@ in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
 scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
-Above the bound it is never loaded for the cache — on a miss the row count at the
-query's width is checked first; a hit reads only the counter — and the search is the uncached path, whose pooled scratch the copy sizes from the row count before it starts ([#1036](#the-vector-scan)).
+Above the bound it is never loaded for the cache — on a miss the row count of the
+rows the cache would keep (the configured identity, at the query's width, the same
+filters the uncached copy's count applies) is checked first; a hit reads only the
+counter — and the search is the uncached path, whose pooled scratch the copy sizes
+from the row count before it starts ([#1036](#the-vector-scan)).
 A database without the counter (a schema older than v24
 opened read-only) is "do not cache", not an error.
 
@@ -663,9 +666,9 @@ carries, and `RestoreSnapshot` brings a row back under the id it had.
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
 which asks `Store.Candidates` for the same legs, parameters and configured
-vector floor, and then applies the caller's category filter to the widened
-candidate set before the window closes. Retrieval is unchanged; what moved is
-which set the filter sees.
+vector floor, and then applies the caller's category, retention and scope
+filters to the widened candidate set before the window closes. Retrieval is
+unchanged; what moved is which set the filter sees.
 
 The main schema tables are:
 
@@ -1460,17 +1463,19 @@ are four, deliberately separate by caller:
 | is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite; an embedding row whose memory is gone is not counted |
 
 Rewriting a row under a new identity also clears the `link_scans` slot the
-memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
-memory is re-queued for linking and the linker compares it again in the new
-space. The re-scan adds current-space edges alongside the ones the old space
-produced — nothing deletes the old `related` rows (only `supersede` calls
-`InvalidateLink`), and `CreateLink` upserts with `MAX(strength, ...)`, so an
-edge whose new-space similarity is lower keeps the strength the old space gave
-it; retiring those edges is a separate decision this change does not make. The
-failure ordering of the delete and the upsert fails safe in both directions, so
-they need no transaction. The foreign-vector warning in `loadVectorRows` is
-likewise logged once per retired identity rather than once per search — a
-process that reconfigures twice warns about both retirements.
+memory earned in the old space (in `StoreEmbedding`, in the same write
+transaction as the upsert), so the memory is re-queued for linking and the
+linker compares it again in the new space. The re-scan adds current-space edges
+alongside the ones the old space produced — nothing deletes the old `related`
+rows (only `supersede` calls `InvalidateLink`), and `CreateLink` upserts with
+`MAX(strength, ...)`, so an edge whose new-space similarity is lower keeps the
+strength the old space gave it; retiring those edges is a separate decision this
+change does not make. The clear and the upsert share one transaction so a
+concurrent `MarkLinkScanned` cannot commit between them and re-arm the slot from
+the retired bytes the row still holds at that instant (#1258). The
+foreign-vector warning in `loadVectorRows` is likewise logged once per retired
+identity rather than once per search — a process that reconfigures twice warns
+about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it

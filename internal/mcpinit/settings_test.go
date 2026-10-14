@@ -228,6 +228,40 @@ func TestFindHookCommand_NullEventReturnsError(t *testing.T) {
 	}
 }
 
+// TestLoadSettings_NullDocumentReturnsError pins the first #1263 trigger: a
+// settings.json whose whole document is the JSON literal null. Unmarshal
+// decodes null into a nil map with no error, and addPermissions would then
+// panic assigning into it. loadSettings refuses it, naming the file, instead
+// of handing back a settingsFile whose raw map is nil.
+func TestLoadSettings_NullDocumentReturnsError(t *testing.T) {
+	path := tempSettings(t, `null`)
+	_, err := loadSettings(path)
+	if err == nil {
+		t.Fatal("loadSettings must refuse a null settings.json, not decode it into a nil map")
+	}
+	if !strings.Contains(err.Error(), "settings.json") {
+		t.Errorf("loadSettings error %q should name the file settings.json", err)
+	}
+}
+
+// TestAddPermissions_NullPermissionsReturnsError pins the second #1263 trigger:
+// "permissions": null is present-but-structurally-invalid, not absent, and both
+// the allow-slice read and the permsMap rebuild decode it into nil with no
+// error. addPermissions must refuse it — naming the field — rather than panic on
+// permsMap["allow"] = ...
+func TestAddPermissions_NullPermissionsReturnsError(t *testing.T) {
+	path := tempSettings(t, `{"permissions":null}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sf.addPermissions([]string{"mcp__ghost__ghost_health"}); err == nil {
+		t.Fatal("addPermissions must refuse permissions:null, not panic on a nil map")
+	} else if !strings.Contains(err.Error(), "permissions is null") {
+		t.Errorf("addPermissions error %q should name the permissions field as null", err)
+	}
+}
+
 // TestAddHook_NeverCalledWithNullHooks documents the invariant that prevents
 // the CodeRabbit-flagged panic: addHook assigns into the "hooks" map
 // unconditionally, so it must never be reached when "hooks" is null. In

@@ -90,7 +90,7 @@ The system uses a 3-layer architecture with memory, orchestrator, and AI layers.
 		wg.Add(1)
 		go func(i int, store *firstContactStore) {
 			defer wg.Done()
-			results[i], errs[i] = importFromDir(ctx, store, projectID, memDir, logger)
+			results[i], _, _, errs[i] = importFromDir(ctx, store, projectID, memDir, logger)
 		}(i, store)
 	}
 	wg.Wait()
