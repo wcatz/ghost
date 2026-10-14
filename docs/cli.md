@@ -820,6 +820,8 @@ A memory record carries every column of the row that describes the memory: categ
 
 The header's `schema_version` is the *artifact* format version, not the database schema version: an artifact is a file that outlives the Ghost that wrote it, and its meaning is the shape of its records. A build reads a range rather than one version, and refuses a file outside it — a newer one is records whose fields it cannot interpret, and an older one would be a file written under rules that no longer hold.
 
+A file export is **atomic**: the artifact is written to a temporary `.ghost-export-*.tmp` file (mode `0600`) in the destination directory, flushed and synced, and only then given the name asked for. A failure, or a kill mid-write, leaves nothing at that name, because the format has no trailer and a file cut on a record boundary would otherwise import cleanly while missing records. An existing file at the destination is still refused, never replaced. On a filesystem without hard links the final step claims the name exclusively and copies the file in instead, which still refuses an existing file but is not atomic. A killed run can leave its temporary file behind; it is safe to delete. `--out -` is unchanged.
+
 Two exports of an unchanged database are **byte-identical**: projects come first, then memories, tasks and decisions, each in id order, and the header carries no timestamp. An artifact can therefore be diffed against the previous one, and a diff shows only what changed in the store.
 
 These things are deliberately **not** exported:
