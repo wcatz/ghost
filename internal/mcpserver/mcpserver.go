@@ -1014,11 +1014,13 @@ const searchResponseMaxBytes = 2 * memory.MaxContentLen
 // content cap itself lives in memory.MaxContentLen — one named constant
 // shared by every writer (MCP tools, reflection proposals, imports) — and
 // memory.ClampContent both enforces it and appends the explicit truncation
-// marker. These remain MCP-local: titles and list items have their own,
-// smaller display-oriented budgets.
+// marker. The title cap and the alternatives bound are shared the same way, in
+// memory.MaxTitleLen and memory.BoundAlternatives, because the portable importers
+// are writers of those fields too and a second copy of the number here is how an
+// imported row stops being what this package stores (#1226). What stays here is
+// the response-side budget, which is about an ANSWER rather than a stored value.
 const (
-	maxTitleLen     = 300
-	maxAlternatives = 20
+	maxTitleLen = memory.MaxTitleLen
 
 	// globalMemoriesLimit bounds the ghost://memories/global resource. Shared by
 	// the resource Description and its handler so the advertised count and the
@@ -3444,12 +3446,10 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(alternatives) > maxAlternatives {
-			alternatives = alternatives[:maxAlternatives]
-		}
-		for i, alt := range alternatives {
-			alternatives[i] = truncateUTF8(alt, maxTitleLen)
-		}
+		// memory.BoundAlternatives is the same bound the portable import applies,
+		// through the same call, so a decision's list is capped identically whichever
+		// route wrote it.
+		alternatives = memory.BoundAlternatives(alternatives)
 		if alternatives == nil {
 			alternatives = []string{}
 		}
