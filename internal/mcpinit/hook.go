@@ -452,6 +452,20 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			it := sessionMemoryToItem(m, asOf)
 			fmt.Fprintf(&gsb, "%s\n", it.Line())
 		}
+	} else if note := tally.globals.WithheldNote(); note != "" {
+		// A wholly-withheld global half: the same shape the project half
+		// renders at its own branch below, for the same reason (#1316, the
+		// global counterpart of #897). The rows were seen and refused — not
+		// absent, and not ranked out — so the section keeps its heading and
+		// says so in the assembler's own words, pointing at the tool that still
+		// shows them with the window they carry. The heading is the bucket
+		// label ALONE: the origin-guidance sentence the shown-rows branch
+		// prints describes whose preferences the SHOWN rows are, and with
+		// nothing shown the only true claim is the bucket's, so it is not
+		// reprinted (claiming these were "the user's own saved cross-project
+		// preferences" would present rows the block never read as
+		// authoritative, the #545 chain).
+		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):**\n%s\n", note)
 	}
 	globalSection := gsb.String()
 
