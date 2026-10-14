@@ -52,7 +52,9 @@ const contextFixtureKey = "global_rule"
 //   - q_pool's vector sets every component, so it has a positive cosine with every
 //     embedded row and the keyword leg names every one of them too — including
 //     "sqlite", which is how a `_global` row reaches two of the three blocks and
-//     gives the bucket table a query count as well as a row count.
+//     gives the bucket table a query count as well as a row count. The global row
+//     is embedded like the project rows, so the query-mode leg-consensus gate
+//     admits it in q_pool as a row both legs found rather than a keyword-only one.
 //   - q_global's vector is orthogonal to every project row, so its whole block is
 //     one keyword-leg hit on the global row. A fixture whose second query returned
 //     the whole corpus could not tell a narrow block from a lopsided one.
@@ -105,7 +107,13 @@ func contextFixture(t *testing.T) (Dataset, Vectors) {
 		"live_fact": vec(0), "resolved_fact": vec(1), "stale_fact": vec(2),
 		"valid_window_open": vec(3), "valid_current": vec(4),
 		"future_scheduled": vec(5), "expired_policy": vec(6),
-		"q_pool": every, "q_global": vec(7),
+		// The `_global` row is not in ds.Memories (seedContextGlobal writes it),
+		// but its fixture vector lives here so the store helper can embed it:
+		// the query-mode leg-consensus gate drops a single-leg row that is not
+		// ranked first, and this fixture needs the global row admitted to BOTH
+		// q_pool and q_global.
+		contextFixtureKey: vec(7),
+		"q_pool":          every, "q_global": vec(7),
 	}
 	return ds, vecs
 }
@@ -125,7 +133,7 @@ func contextFixtureStore(t *testing.T) (*memory.Store, []Query, time.Time) {
 	if err != nil {
 		t.Fatalf("seed the context fixture: %v", err)
 	}
-	seedContextGlobal(t, store, ds.Project)
+	seedContextGlobal(t, store, ds.Project, vecs[contextFixtureKey])
 	// The seeder translates a query's relevance keys from the dataset's own rows,
 	// and the `_global` row is written after it returns — so q_global's one grade
 	// is attached here. A fixture that asserted the row was retrieved without
@@ -139,18 +147,26 @@ func contextFixtureStore(t *testing.T) (*memory.Store, []Query, time.Time) {
 	return store, queries, at
 }
 
-// seedContextGlobal writes the fixture's `_global` row and resolves the one row
-// the contamination arm has to fire on.
-func seedContextGlobal(t *testing.T, store *memory.Store, project string) {
+// seedContextGlobal writes the fixture's `_global` row, embeds it, and resolves
+// the one row the contamination arm has to fire on. The embedding is what keeps
+// the row in a block the query-mode leg-consensus gate admits: a row only the
+// keyword leg found at any rank past first is dropped, and the fixture needs the
+// global row admitted to both q_pool (whose vector reaches every embedded row)
+// and q_global.
+func seedContextGlobal(t *testing.T, store *memory.Store, project string, globalVec []float32) {
 	t.Helper()
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, globalProject, globalProject, "global"); err != nil {
 		t.Fatalf("ensure the global project: %v", err)
 	}
-	if _, err := store.CreateWithIDFromCorpus(ctx, globalProject, corpusID(globalProject, contextFixtureKey), memory.Memory{
+	id, err := store.CreateWithIDFromCorpus(ctx, globalProject, corpusID(globalProject, contextFixtureKey), memory.Memory{
 		Category: "fact", Content: "sqlite fts5 is the storage engine", Importance: 0.7, Source: "mcp",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create the global row: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, id, globalVec, "bench"); err != nil {
+		t.Fatalf("embed the global row: %v", err)
 	}
 	// SetResolved is the production write path and stamps resolved_at with the
 	// store's own clock. Nothing measured here reads that value — the demote is
@@ -408,12 +424,15 @@ func TestContextEmptyResultCountsOnlyTowardTheResultRate(t *testing.T) {
 //
 // The vector shapes are the reason each candidate set is the size it is. q_wide
 // sets every component, so it has a positive cosine with every embedded row;
-// q_narrow sets the one component no row uses, so its vector leg returns nothing
-// and the keyword leg alone decides its three. That is why dim is rows+1.
+// q_narrow sets the three components its own rows use, so both retrieval legs
+// reach those three and its block stays the size the keyword leg alone used to
+// decide. A query-mode single-leg row that is not ranked first is dropped by the
+// leg-consensus gate, so a narrow block resting on the keyword leg alone would no
+// longer reach three.
 func contextTrimFixture(t *testing.T) (Dataset, Vectors) {
 	t.Helper()
 	const rows = 12
-	dim := rows + 1
+	dim := rows
 	vec := func(at int) []float32 {
 		out := make([]float32, dim)
 		out[at] = 1
@@ -460,7 +479,13 @@ func contextTrimFixture(t *testing.T) (Dataset, Vectors) {
 		},
 	}
 	vecs["q_wide"] = every
-	vecs["q_narrow"] = vec(rows)
+	// q_narrow points at the three rows that carry "zephyr", so the vector leg
+	// returns exactly those three and both legs agree on the block.
+	narrowVec := make([]float32, dim)
+	for i := 0; i < 3; i++ {
+		narrowVec[i] = 1
+	}
+	vecs["q_narrow"] = narrowVec
 	return ds, vecs
 }
 
@@ -668,7 +693,7 @@ func TestContextReportIsAFunctionOfTheCorpusAndTheClock(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		seedContextGlobal(t, store, ds.Project)
+		seedContextGlobal(t, store, ds.Project, vecs[contextFixtureKey])
 		rep, err := RunContext(ctx, store, queries, at)
 		if err != nil {
 			t.Fatalf("RunContext: %v", err)
