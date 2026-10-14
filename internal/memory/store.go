@@ -7116,6 +7116,48 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	return nil
 }
 
+// markReusedSuccessorSourceTx stamps reflection provenance on a REUSED row when
+// the emission absorbed a source beside it (#1283).
+//
+// A reuse keeps the reused row's own provenance while the emission re-states
+// that row alone — the row has not been re-asserted by anybody, and overwriting
+// its source would relabel an agent save as consolidation output. The moment
+// ReplacesIDs names a second source, though, those rows are deleted into this
+// one: the reused row is the merge's successor, exactly as a fresh INSERT's row
+// is, and findDecisionCompanionsTx reads `source = 'reflection'` as one of the
+// arms that trust a carried `decision:<id>` link. Without this stamp a merge
+// that absorbed a decision companion left the link on a row the lookup
+// rejected, so SupersedeDecisionReport found nothing, answered a clean success,
+// and the reversed decision kept answering search and session start.
+//
+// source only: no content version is recorded and updated_at does not move,
+// because the row's recorded state is unchanged (#727) and source is not a
+// column memory_history carries. It runs outside the switch for all three reuse
+// branches, because the verbatim branch writes nothing at all.
+func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m Memory) error {
+	if !reuseAbsorbsOthers(id, m) {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memories SET source = 'reflection' WHERE id = ? AND source <> 'reflection'`, id); err != nil {
+		return fmt.Errorf("stamp the reused memory's provenance: %w", err)
+	}
+	return nil
+}
+
+// reuseAbsorbsOthers reports whether the emission names a source other than the
+// reused row itself, which is what tells a consolidation successor from a row
+// restating itself. An empty entry is not a source, matching the discrimination
+// fillReusedClaimsTx makes when it gathers the absorbed sources.
+func reuseAbsorbsOthers(id string, m Memory) bool {
+	for _, replaced := range m.ReplacesIDs {
+		if replaced != "" && replaced != id {
+			return true
+		}
+	}
+	return false
+}
+
 // The fresh INSERT below is the one writer in the package that mints a row a save
 // did not ask for, so it is the one that has to decide a tier nobody stated: the
 // successor of rows that are being replaced. It inherits (inheritedRetention)
@@ -7536,6 +7578,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
+				return nil, EmissionDrops{}, 0, nil, err
+			}
+			// A reuse that absorbed another source is that source's consolidation
+			// successor, so it carries the provenance the decision lookup trusts —
+			// the same source a fresh INSERT and the default reuse stamp. Its own
+			// statement for the same reason the tier raise is: the verbatim branch
+			// above wrote nothing at all, and that is the branch a merge of
+			// byte-identical text takes. See markReusedSuccessorSourceTx.
+			if err := markReusedSuccessorSourceTx(ctx, tx, id, m); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
 			// The other sources' support and claims, for the same reason and in the

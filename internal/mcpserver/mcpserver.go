@@ -3623,7 +3623,7 @@ func (s *Server) registerTools() {
 				}
 				if len(retirement.Declined) > 0 {
 					supersedeFailed = true
-					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
+					supersedeNote += fmt.Sprintf(" WARNING: a live memory (%s) that names this decision was left live — either the resolve guard refuses it (pinned, retention-exempt or a convention/preference), or the link it carries is not one Ghost recognises — so session start and search still return it at full rank and the reversed text may still be in it.", joinTokens(retirement.Declined))
 				}
 			}
 		}
