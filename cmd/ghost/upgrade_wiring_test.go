@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -240,4 +243,79 @@ func TestMCPWiringIsDispatchedAndItsHelpHasNoSideEffect(t *testing.T) {
 			t.Errorf("`ghost mcp wiringg` stderr = %q, want the unrecognised word named at the mcp level", stderr)
 		}
 	})
+}
+
+// wiringCallName returns the name a call expression invokes — an identifier's own
+// name, or a selector's function name — so a source scan can tell a bare
+// `reportStaleIntegrations(...)` from `mcpinit.ReportStaleIntegrations(...)`:
+// the two differ only in their leading identifier, and it is the difference
+// between the child-spawning wrapper and the in-process call this file exists to
+// forbid.
+func wiringCallName(call *ast.CallExpr) string {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name
+	case *ast.SelectorExpr:
+		return fn.Sel.Name
+	}
+	return ""
+}
+
+// TestRunUpgradeRunsTheWiringCheckThroughTheSeam holds the call site itself,
+// which no functional test in this package can reach. runUpgrade exits the
+// process on every failure path and reaches GitHub on every success path, so the
+// post-upgrade step can only ever be driven through the seam it is written on —
+// and the tests above call that seam directly, which is exactly why they cannot
+// see who calls it. Restoring the pre-#1215 line
+// (mcpinit.ReportStaleIntegrations in the upgrading process) leaves all of them
+// green while reintroducing the defect: the comparison would again be against the
+// OLD image's embedded sources. This scan is the missing half, and it is the same
+// go/ast shape as the package's other structural guards.
+//
+// It fails in both directions, so it cannot pass by doing nothing: runUpgrade
+// must call the local reportStaleIntegrations (the wrapper around
+// spawnWiringCheck), and must not call any ReportStaleIntegrations in this
+// process. A missing runUpgrade is a failure too, rather than a scan over
+// nothing.
+func TestRunUpgradeRunsTheWiringCheckThroughTheSeam(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "upgrade.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse upgrade.go: %v", err)
+	}
+
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "runUpgrade" {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatal("runUpgrade not found in upgrade.go: the post-upgrade wiring check has no call site this guard can hold")
+	}
+
+	var callsSeam bool
+	var inProcess []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch wiringCallName(call) {
+		case "reportStaleIntegrations":
+			callsSeam = true
+		case "ReportStaleIntegrations":
+			inProcess = append(inProcess, fset.Position(call.Pos()).String())
+		}
+		return true
+	})
+
+	for _, pos := range inProcess {
+		t.Errorf("%s: runUpgrade calls ReportStaleIntegrations in this process, so the embedded-source comparisons judge against the OLD image — the defect #1215 fixed. Run it in the binary just installed, through reportStaleIntegrations", pos)
+	}
+	if !callsSeam {
+		t.Error("runUpgrade does not call reportStaleIntegrations: the post-upgrade wiring check is gone, and an upgrade would report success while checking nothing")
+	}
 }
