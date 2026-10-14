@@ -1469,7 +1469,7 @@ rows (only `supersede` calls `InvalidateLink`), and `CreateLink` upserts with
 strength the old space gave it; retiring those edges is a separate decision this
 change does not make. The clear and the upsert share one transaction so a
 concurrent `MarkLinkScanned` cannot commit between them and re-arm the slot from
-the retired bytes the row still holds at that instant (§ #1258). The
+the retired bytes the row still holds at that instant (#1258). The
 foreign-vector warning in `loadVectorRows` is likewise logged once per retired
 identity rather than once per search — a process that reconfigures twice warns
 about both retirements.
