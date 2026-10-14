@@ -657,11 +657,11 @@ func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCm
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
-// (basename "ghost"/"ghost.exe", case-insensitive) at a different path than
-// desiredCmd, with the same trailing arguments — the #273 case where an
-// upgrade moved the binary and left the hook pointing at the old location.
-// Hand-edited wrapper commands (whose leading token isn't a ghost binary) are
-// left untouched.
+// (basename "ghost" under the launcher extensions, case-insensitive) at a
+// different path than desiredCmd, with the same trailing arguments — the #273
+// case where an upgrade moved the binary and left the hook pointing at the old
+// location. Hand-edited wrapper commands (whose leading token isn't a ghost
+// binary) are left untouched.
 func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 	existingBin, existingRest, ok := splitHookCommand(existingCmd)
 	if !ok || !isGhostBinaryName(existingBin) {
@@ -674,12 +674,16 @@ func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 	return existingBin != desiredBin && existingRest == desiredRest
 }
 
-// isGhostBinaryName reports whether path's basename is "ghost" or
-// "ghost.exe" (case-insensitive).
+// isGhostBinaryName reports whether path's basename is "ghost" under any of
+// the extensions a launcher gives it: the native ".exe", or the ".bat"/".cmd"
+// batch shim an install may place on PATH instead. The comparison is
+// case-insensitive, and a Windows path is recognised on any host (the
+// basename split handles both separators).
 func isGhostBinaryName(path string) bool {
-	base := hookCommandBase(path)
-	base = strings.ToLower(base)
-	base = strings.TrimSuffix(base, ".exe")
+	base := strings.ToLower(hookCommandBase(path))
+	for _, ext := range []string{".exe", ".bat", ".cmd"} {
+		base = strings.TrimSuffix(base, ext)
+	}
 	return base == "ghost"
 }
 

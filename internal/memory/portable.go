@@ -1041,7 +1041,15 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 // dry run writes nothing, so its blocker is never in the store to be found; the
 // portable plan makes the dry run's equivalent check against the records the run
 // has landed so far, which is what keeps the preview and the apply agreeing.
-func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created bool, err error) {
+//
+// The second return names the fields the caps below cut, in the record's own
+// field order, so the portable import can put the loss on the record's report
+// line (#1232). It is empty whenever the record was not written — a skip and a
+// rejection both say nothing about the caps, because nothing was cut. The names
+// are the artifact's field names rather than the caps': a report that says
+// `title` was truncated names the field the reader can go and shorten, while
+// MaxTitleLen is this build's number.
+func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created bool, clamped []string, err error) {
 	// The lock is taken HERE, above the presence check, for the reason
 	// ImportMemory gives in full: a read that decides whether a write happens is
 	// part of the write, and outside the lock two imports of the same new id both
@@ -1058,16 +1066,16 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import task: check whether the id is present: %w", err)
+			return false, nil, fmt.Errorf("import task: check whether the id is present: %w", err)
 		}
 	} else {
-		return false, nil
+		return false, nil, nil
 	}
 	// THEN CheckImportedTask, the importer's OWN refusal predicate and the same
 	// one `ghost export` calls (#813). One rule with two callers, so a refusal the
 	// importer can make is one the exporter cannot miss.
 	if err := CheckImportedTask(t); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// What is left here, and belongs here, is everything that is a fact about this
 	// store or a TRANSFORMATION of the record — the presence check above and these
@@ -1091,14 +1099,29 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	// Above the apply=false return below, so a dry run classifies and previews the
 	// apply run exactly, which is the same window the credential guard sits in.
 	title := TruncateUTF8(t.Title, MaxTitleLen)
-	description, _ := ClampContent(t.Description)
-	notes, _ := ClampContent(t.Notes)
+	description, descriptionCut := ClampContent(t.Description)
+	notes, notesCut := ClampContent(t.Notes)
+	// Which of the three the cut actually touched, answered from the two calls
+	// above rather than from the caps re-applied here: a title is cut when
+	// TruncateUTF8 returned something other than what it was given (it returns
+	// its input unchanged whenever the input fits), and a body field is cut when
+	// ClampContent says so. Asking the calls that made the cut is why the report
+	// cannot name a field that was not cut.
+	if title != t.Title {
+		clamped = append(clamped, "title")
+	}
+	if descriptionCut {
+		clamped = append(clamped, "description")
+	}
+	if notesCut {
+		clamped = append(clamped, "notes")
+	}
 	if !apply {
-		return true, nil
+		return true, clamped, nil
 	}
 
 	if err := requireProject(ctx, s.db, "task", t.ID, t.ProjectID); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// blocked_by is a self-reference, so a pointer to a task that is not present
 	// is a reference that can never resolve. Naming it here is what turns a raw
@@ -1108,9 +1131,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		var blocker int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.BlockedBy).Scan(&blocker); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", t.ID, RefusalArg("blocked_by", t.BlockedBy))
+				return false, nil, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", t.ID, RefusalArg("blocked_by", t.BlockedBy))
 			}
-			return false, fmt.Errorf("import task %s: %w", t.ID, err)
+			return false, nil, fmt.Errorf("import task %s: %w", t.ID, err)
 		}
 	}
 
@@ -1122,16 +1145,16 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	// lock, so the re-check inside it is the atomic half of the check-then-write.
 	tx, _, err := s.beginWrite(ctx, "import-task")
 	if err != nil {
-		return false, fmt.Errorf("import task %s: begin tx: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: begin tx: %w", t.ID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	var presentInTx int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&presentInTx); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import task %s: re-check presence: %w", t.ID, err)
+			return false, nil, fmt.Errorf("import task %s: re-check presence: %w", t.ID, err)
 		}
 	} else {
-		return false, nil
+		return false, nil, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (id, project_id, title, description, status, priority,
@@ -1143,12 +1166,12 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	`, t.ID, t.ProjectID, title, description, t.Status, t.Priority,
 		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, notes,
 		t.CreatedAt, t.UpdatedAt, t.CompletedAt); err != nil {
-		return false, fmt.Errorf("import task %s: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: %w", t.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("import task %s: commit: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: commit: %w", t.ID, err)
 	}
-	return true, nil
+	return true, clamped, nil
 }
 
 // HasTask reports whether a task with exactly this id is in the store. The
@@ -1198,7 +1221,13 @@ func (s *Store) hasRow(ctx context.Context, query, id string) (bool, error) {
 // rejected, or that is part of a cycle. As with a task, the project
 // and the reference are checked immediately before the write, after the dry-run
 // return, and the portable plan makes the dry run's equivalent check.
-func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (created bool, err error) {
+//
+// The second return names the fields the caps below cut, in the record's own
+// field order, for the reason ImportTask gives: a decision's stored row shows a
+// cut `decision` or `rationale` in the marker ClampContent appends, but nothing
+// at all about a cut title or about alternatives dropped past the twentieth,
+// so the report is the only place the loss can be said (#1232).
+func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (created bool, clamped []string, err error) {
 	// The lock is taken HERE, above the presence check, for the reason
 	// ImportMemory gives in full: a read that decides whether a write happens is
 	// part of the write, and outside the lock two imports of the same new id both
@@ -1213,10 +1242,10 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import decision: check whether the id is present: %w", err)
+			return false, nil, fmt.Errorf("import decision: check whether the id is present: %w", err)
 		}
 	} else {
-		return false, nil
+		return false, nil, nil
 	}
 	// THEN CheckImportedDecision, the importer's OWN refusal predicate and the same
 	// one `ghost export` calls (#813). Every refusal about the record's own bytes
@@ -1225,7 +1254,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	// tags column arrives from an artifact file and is re-emitted into the next
 	// one, so an entry in either is as replayable as the rationale beside it.
 	if err := CheckImportedDecision(d); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// The caps `ghost_decision_record` applies, for the reason ImportTask gives in
 	// full (#1226): every one of them bounds a row the row-rendering read tools
@@ -1238,15 +1267,32 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	// Clamps rather than refusals, for the reason MaxTitleLen states, and above the
 	// apply=false return below so a dry run previews the apply run exactly.
 	title := TruncateUTF8(d.Title, MaxTitleLen)
-	decision, _ := ClampContent(d.Decision)
-	rationale, _ := ClampContent(d.Rationale)
+	decision, decisionCut := ClampContent(d.Decision)
+	rationale, rationaleCut := ClampContent(d.Rationale)
 	alternatives := BoundAlternatives(d.Alternatives)
+	// Which four the cut actually touched, from the same calls that made it, for
+	// ImportTask's reason. `alternatives` is asked separately rather than compared
+	// with what went in, because BoundAlternatives answers a list either way and
+	// only AlternativesClamped — the predicate it decides on — knows whether the
+	// list it returned is a cut one.
+	if title != d.Title {
+		clamped = append(clamped, "title")
+	}
+	if decisionCut {
+		clamped = append(clamped, "decision")
+	}
+	if rationaleCut {
+		clamped = append(clamped, "rationale")
+	}
+	if AlternativesClamped(d.Alternatives) {
+		clamped = append(clamped, "alternatives")
+	}
 	if !apply {
-		return true, nil
+		return true, clamped, nil
 	}
 
 	if err := requireProject(ctx, s.db, "decision", d.ID, d.ProjectID); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// Superseded_by is a self-reference checked for the same reason blocked_by is
 	// on a task: a pointer to a decision this store does not hold can never
@@ -1255,9 +1301,9 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		var superseder int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.SupersededBy).Scan(&superseder); err != nil {
 			if err == sql.ErrNoRows {
-				return false, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", d.ID, RefusalArg("superseded_by", d.SupersededBy))
+				return false, nil, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", d.ID, RefusalArg("superseded_by", d.SupersededBy))
 			}
-			return false, fmt.Errorf("import decision %s: %w", d.ID, err)
+			return false, nil, fmt.Errorf("import decision %s: %w", d.ID, err)
 		}
 	}
 
@@ -1268,16 +1314,16 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	// and s.mu does not close the cross-process race.
 	tx, _, err := s.beginWrite(ctx, "import-decision")
 	if err != nil {
-		return false, fmt.Errorf("import decision %s: begin tx: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: begin tx: %w", d.ID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	var presentInTx int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&presentInTx); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import decision %s: re-check presence: %w", d.ID, err)
+			return false, nil, fmt.Errorf("import decision %s: re-check presence: %w", d.ID, err)
 		}
 	} else {
-		return false, nil
+		return false, nil, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO decisions (id, project_id, title, decision, alternatives, rationale,
@@ -1287,10 +1333,10 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 			COALESCE(NULLIF(?, ''), datetime('now')))
 	`, d.ID, d.ProjectID, title, decision, string(alts), rationale,
 		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt); err != nil {
-		return false, fmt.Errorf("import decision %s: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: %w", d.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("import decision %s: commit: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: commit: %w", d.ID, err)
 	}
-	return true, nil
+	return true, clamped, nil
 }

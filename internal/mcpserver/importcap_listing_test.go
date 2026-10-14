@@ -43,7 +43,7 @@ func importCapSession(t *testing.T) (*Server, *memory.Store, *mcp.ClientSession)
 func TestAnImportedOversizeTaskListsWithinTheResponseBudget(t *testing.T) {
 	_, store, session := importCapSession(t)
 	ctx := context.Background()
-	if _, err := store.ImportTask(ctx, memory.Task{
+	if _, _, err := store.ImportTask(ctx, memory.Task{
 		ID: "imp-task-0000000000000000", ProjectID: "abc123",
 		Title:       importedOversize(1, "title"),
 		Description: importedOversize(2, "description"),
@@ -88,7 +88,7 @@ func TestAnImportedOversizeDecisionListsWithinOneRowAndTheNotice(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		alternatives = append(alternatives, importedOversize(i, "alt"))
 	}
-	if _, err := store.ImportDecision(ctx, memory.Decision{
+	if _, _, err := store.ImportDecision(ctx, memory.Decision{
 		ID: "imp-dec-00000000000000000", ProjectID: "abc123",
 		Title:        importedOversize(6, "title"),
 		Decision:     importedOversize(7, "decision"),

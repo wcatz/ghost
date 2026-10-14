@@ -912,7 +912,7 @@ func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
 		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00",
 		CompletedAt: "2026-01-02 00:00:00",
 	}
-	created, err := store.ImportTask(ctx, task, true)
+	created, _, err := store.ImportTask(ctx, task, true)
 	if err != nil || !created {
 		t.Fatalf("ImportTask = %v, %v; want created", created, err)
 	}
@@ -931,7 +931,7 @@ func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
 		ID: "d2", ProjectID: "p1", Title: "newer", Decision: "d2", Rationale: "why2",
 		Status: "active", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
 	}
-	created, err = store.ImportDecision(ctx, dec, true)
+	created, _, err = store.ImportDecision(ctx, dec, true)
 	if err != nil || !created {
 		t.Fatalf("ImportDecision(d2) = %v, %v; want created", created, err)
 	}
@@ -940,13 +940,13 @@ func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
 		Rationale: "why", Status: "superseded", SupersededBy: "d2", Tags: []string{"x"},
 		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00",
 	}
-	created, err = store.ImportDecision(ctx, dec, true)
+	created, _, err = store.ImportDecision(ctx, dec, true)
 	if err != nil || !created {
 		t.Fatalf("ImportDecision = %v, %v; want created", created, err)
 	}
 	// A pointer to a decision the store does not hold names the field rather
 	// than surfacing a foreign-key failure.
-	if _, err := store.ImportDecision(ctx, Decision{
+	if _, _, err := store.ImportDecision(ctx, Decision{
 		ID: "d3", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r",
 		Status: "superseded", SupersededBy: "absent",
 	}, true); err == nil || !strings.Contains(err.Error(), "superseded_by") {
@@ -958,11 +958,11 @@ func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
 	}
 
 	// Re-importing reports a skip and changes nothing.
-	created, err = store.ImportTask(ctx, task, true)
+	created, _, err = store.ImportTask(ctx, task, true)
 	if err != nil || created {
 		t.Errorf("ImportTask of an existing id = %v, %v; want skipped", created, err)
 	}
-	created, err = store.ImportDecision(ctx, dec, true)
+	created, _, err = store.ImportDecision(ctx, dec, true)
 	if err != nil || created {
 		t.Errorf("ImportDecision of an existing id = %v, %v; want skipped", created, err)
 	}
@@ -1085,29 +1085,29 @@ func TestImportTaskAndDecisionRejectInvalidState(t *testing.T) {
 	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	if _, err := store.ImportTask(ctx, Task{
+	if _, _, err := store.ImportTask(ctx, Task{
 		ID: "t1", ProjectID: "p1", Title: "x", Status: "sideways", Priority: 2,
 	}, true); err == nil || !strings.Contains(err.Error(), "must be one of") {
 		t.Errorf("ImportTask with a bad status = %v, want an error listing the accepted values", err)
 	}
-	if _, err := store.ImportTask(ctx, Task{
+	if _, _, err := store.ImportTask(ctx, Task{
 		ID: "t1", ProjectID: "p1", Title: "x", Status: "pending", Priority: 99,
 	}, true); err == nil || !strings.Contains(err.Error(), "must be between") {
 		t.Errorf("ImportTask with a bad priority = %v, want an error naming the range", err)
 	}
-	if _, err := store.ImportDecision(ctx, Decision{
+	if _, _, err := store.ImportDecision(ctx, Decision{
 		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r", Status: "maybe",
 	}, true); err == nil || !strings.Contains(err.Error(), "must be one of") {
 		t.Errorf("ImportDecision with a bad status = %v, want an error listing the accepted values", err)
 	}
 	// A dry run refuses them too, so the preview cannot promise a write that
 	// would fail.
-	if _, err := store.ImportTask(ctx, Task{
+	if _, _, err := store.ImportTask(ctx, Task{
 		ID: "t1", ProjectID: "p1", Title: "x", Status: "sideways", Priority: 2,
 	}, false); err == nil {
 		t.Error("a dry run accepted a task with a bad status")
 	}
-	if _, err := store.ImportDecision(ctx, Decision{
+	if _, _, err := store.ImportDecision(ctx, Decision{
 		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r", Status: "maybe",
 	}, false); err == nil {
 		t.Error("a dry run accepted a decision with a bad status")
@@ -1116,14 +1116,14 @@ func TestImportTaskAndDecisionRejectInvalidState(t *testing.T) {
 	// than surfacing as a foreign-key failure from the INSERT. Only the apply
 	// path checks it: a dry run cannot know what the same run will have created,
 	// which is the caller's question (see ImportMemory's comment on apply=false).
-	if _, err := store.ImportTask(ctx, Task{
+	if _, _, err := store.ImportTask(ctx, Task{
 		ID: "t9", ProjectID: "absent", Title: "x", Status: "pending", Priority: 2,
 	}, true); err == nil {
 		t.Error("ImportTask accepted a task naming an absent project")
 	} else if !strings.Contains(err.Error(), "absent") {
 		t.Errorf("error = %v, want it to name the missing project", err)
 	}
-	if _, err := store.ImportDecision(ctx, Decision{
+	if _, _, err := store.ImportDecision(ctx, Decision{
 		ID: "d9", ProjectID: "absent", Title: "t", Decision: "d", Rationale: "r", Status: "active",
 	}, true); err == nil {
 		t.Error("ImportDecision accepted a decision naming an absent project")
