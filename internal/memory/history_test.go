@@ -1753,6 +1753,74 @@ func TestPurgeRedactsFoldedWordingCopiedOntoAnotherHistoryRow(t *testing.T) {
 	}
 }
 
+// TestPurgeKeepsAnotherMemoriesSnapshotWhoseContentIsTheFoldedWording: the
+// wording a FoldOnly fold discarded is redacted in another memory's
+// merged_content cell, but that reach must not widen the snapshot delete. The
+// content list also keys the snapshot delete, and a snapshot is the rollback
+// point for a whole project, so a live memory whose own content happens to
+// equal the purged memory's folded-in wording must keep its snapshot.
+func TestPurgeKeepsAnotherMemoriesSnapshotWhoseContentIsTheFoldedWording(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const folded = "the pool database rotates its access phrase on the first monday of each quarter"
+	m1, _, _, err := s.Upsert(ctx, testProject, "convention",
+		"a fact whose own text is not the folded wording", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert(m1): %v", err)
+	}
+	// m2's own content IS the folded wording, and it carries a snapshot of
+	// itself — the rollback point a purge of m1 must not touch.
+	m2, _, _, err := s.Upsert(ctx, testProject, "convention", folded, "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert(m2): %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memory_history SET merged_content = ? WHERE memory_id = ?`,
+		folded, m1); err != nil {
+		t.Fatalf("seed the folded wording on m1: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, memory_id, category, content, importance, source)
+		VALUES ('snap-m2', ?, ?, 'convention', ?, 0.7, 'mcp')`,
+		testProject, m2, folded); err != nil {
+		t.Fatalf("seed m2's snapshot: %v", err)
+	}
+	var seeded int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE memory_id = ?`, m2,
+	).Scan(&seeded); err != nil {
+		t.Fatalf("count m2's snapshots: %v", err)
+	}
+	if seeded != 1 {
+		t.Fatalf("%d snapshots for m2, want 1 — the fixture does not test the case", seeded)
+	}
+
+	if _, err := s.PurgeMemoryHistory(ctx, m1); err != nil {
+		t.Fatalf("PurgeMemoryHistory: %v", err)
+	}
+
+	var left int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE memory_id = ?`, m2,
+	).Scan(&left); err != nil {
+		t.Fatalf("count m2's snapshots after the purge: %v", err)
+	}
+	if left != 1 {
+		t.Errorf("the purge removed an unrelated memory's snapshot (%d left, want 1); the folded-in wording must not key the snapshot delete", left)
+	}
+	// The other memory's history cell is still redacted.
+	var leaked int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history WHERE merged_content = ?`, folded,
+	).Scan(&leaked); err != nil {
+		t.Fatalf("count the surviving folded wording: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the folded-in wording survives in %d history row(s)", leaked)
+	}
+}
+
 // countOccurrences reports how many rows in any table hold text, across the
 // tables that can hold a memory's text: the row itself, its history, and a
 // snapshot. It is the assertion a redaction needs and a per-table assertion does
