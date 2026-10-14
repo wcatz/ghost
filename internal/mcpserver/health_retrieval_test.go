@@ -18,8 +18,10 @@ package mcpserver
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -303,16 +305,19 @@ func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 
 // TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor: the report's two verdicts
 // that are not in any figure — one whose call fell outside the window or is gone,
-// one that names no call at all — have to be stated here too.
+// one that names no call at all — have to be stated here too, under the labels the
+// documents give them.
 //
 // An agent reading this block cannot see the store's tables, so a figure it cannot
 // reconcile is a figure it will report upstream. The ⚠ is right here even though the
 // report prints these as plain notes: this is a claim about the completeness of the
 // numbers, and the numbers are what a caller of this tool acts on. Both lines are
 // absent when there is nothing unattributed, which is what keeps a fresh store free
-// of the glyph (see TestHealthOnAStoreWithNoHistorySaysSo).
+// of the glyph (see TestHealthOnAStoreWithNoHistorySaysSo). And the two words are
+// the ones docs/mcp.md names, because a reader who greps for the documented label
+// has to find it in the block.
 func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
-	store, _ := testStoreWithPath(t)
+	store, dbPath := testStoreWithPath(t)
 	seedRetrievalHealth(t, store)
 	judgeRetrievalHealth(t, store, false)
 
@@ -328,9 +333,21 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("RecordRetrievalAudits: %v", err)
 	}
+	// The detached one is planted rather than written: #857's writer refuses a
+	// verdict naming a call that did not keep that memory, and the call cap is what
+	// leaves this shape on a real store.
+	plantRetrievalVerdict(t, dbPath,
+		`INSERT INTO retrieval_audit (project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
+		 VALUES (?, 999999, 's9', 'search', ?, 'ignored', '', '')`, "abc123", retrievalHealthMemory)
 
 	_, text := retrievalHealthServer(t, store)
 
+	if !strings.Contains(text, "detached verdict(s)") {
+		t.Errorf("ghost_health does not print the documented detached label:\n%s", text)
+	}
+	if !strings.Contains(text, "unattributed verdict(s)") {
+		t.Errorf("ghost_health does not print the documented unattributed label:\n%s", text)
+	}
 	if !strings.Contains(text, "name no call at all") {
 		t.Errorf("ghost_health does not name the unattributed verdict:\n%s", text)
 	}
@@ -347,6 +364,32 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	// And the note says so in words, not merely by printing a different number.
 	if !strings.Contains(text, "no call to be one of") {
 		t.Errorf("ghost_health does not say the unattributed verdict is out of the figures rather than lost:\n%s", text)
+	}
+	// The block and the document name the same two words, held together here so a
+	// later edit to one side cannot leave the other describing a line nothing prints.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read docs/mcp.md: %v", err)
+	}
+	for _, want := range []string{"**detached**", "**unattributed**"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("docs/mcp.md no longer names %s, which the health block prints", want)
+		}
+	}
+}
+
+// plantRetrievalVerdict writes a retrieval_audit row directly, for the shapes the
+// writer refuses: a verdict naming a call that did not keep that memory only
+// reaches a store when the call cap evicts the call under the verdict cap.
+func plantRetrievalVerdict(t *testing.T, dbPath, stmt string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(stmt, args...); err != nil {
+		t.Fatalf("plant the raw verdict: %v", err)
 	}
 }
 
