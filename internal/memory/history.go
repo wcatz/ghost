@@ -463,14 +463,14 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 //     redacted rather than their rows deleted: the event (which memory, when,
 //     which agent) is worth keeping, and the text is what the purge is for.
 //     The match set for that redaction includes this memory's OWN
-//     `merged_content`, not only its content columns: wording the memory folded
-//     into a different row is absent from every content column of this one, so a
-//     list drawn from those columns alone could never reach the copy a second row
-//     kept. It is gathered into a slice of its own rather than added to the
-//     content list, because that list also keys the snapshot delete — and a
-//     snapshot is the rollback point for a whole project, so folding this wording
-//     into it would delete an unrelated memory's snapshot whose content happens to
-//     equal the wording this one let go.
+//     `merged_content`, not only its content columns: wording a fold brought INTO
+//     this memory is absent from every content column of this one, so a list drawn
+//     from those columns alone could never reach the copy another row kept. It is
+//     gathered into a slice of its own rather than added to the content list,
+//     because that list also keys the snapshot delete — and a snapshot is the
+//     rollback point for a whole project, so folding this wording into it would
+//     delete an unrelated memory's snapshot whose content happens to equal the
+//     wording this one let go.
 //   - memory_provenance and memory_snapshot_evidence. The evidence records are
 //     deleted outright rather than kept as a record: they carry no text of the
 //     memory, but they name the agents, sessions and references that reported it,
@@ -508,12 +508,12 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("collect texts to purge: %w", err)
 	}
 
-	// The folded-in wording this memory discarded on another memory's merge row
-	// is absent from every content column gathered above, so it is collected
-	// separately. It is deliberately kept OUT of texts: texts also keys the
-	// snapshot delete below, and a snapshot is the rollback point for a whole
-	// project — folding this wording into that list would delete an unrelated
-	// memory's snapshot whose content merely equals the wording this one let go.
+	// The folded-in wording recorded on this memory's own merge rows is absent
+	// from every content column gathered above, so it is collected separately. It
+	// is deliberately kept OUT of texts: texts also keys the snapshot delete
+	// below, and a snapshot is the rollback point for a whole project — folding
+	// this wording into that list would delete an unrelated memory's snapshot
+	// whose content merely equals the wording this one let go.
 	foldedTexts, err := selectIDs(ctx, tx, `
 		SELECT merged_content FROM memory_history WHERE memory_id = ? AND merged_content IS NOT NULL`,
 		memoryID)
