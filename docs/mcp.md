@@ -269,6 +269,8 @@ Each row reports the numbers the ranking recorded (`fts_rank`, `vector_rank`, `v
 
 Clients that support MCP resource subscriptions can pin these resources to survive context compaction. Resource URIs accept the project name or the resolved project ID, depending on the client.
 
+A write notifies every subscribed resource whose rows it changes. `_global` is a project as well as the bucket behind `ghost://memories/global`, so a global-scope save — through `ghost_save_global`, or through `ghost_memory_save` with a `project_id` that resolves to `_global` — updates both that resource and `ghost://project/_global/context`.
+
 ## Prompts
 
 - `recall_project` — injects project context into a conversation.

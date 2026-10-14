@@ -2394,6 +2394,13 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "context")
+		// `_global` is one project AND the bucket behind ghost://memories/global,
+		// so a save that resolved there changes the rows that resource serves; a
+		// subscriber to it must hear too. The mirror of the ghost_save_global
+		// case, which pushes the context resource this branch already handles.
+		if args.ProjectID == memory.GlobalProjectID {
+			s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		}
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -3051,6 +3058,10 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		// `_global` is a project as well as a bucket: ghost://project/_global/context
+		// serves exactly these cross-project rows, so a subscriber to it must hear
+		// about this write, not only a subscriber to ghost://memories/global.
+		s.notifyProjectResource(ctx, memory.GlobalProjectID, "context")
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
