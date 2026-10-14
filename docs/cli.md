@@ -67,6 +67,8 @@ ghost mcp init --client all
 
 The operation is idempotent. If multiple supported clients are detected, Ghost configures all of them unless a target is specified. Plugin-managed Claude Code integrations are detected and left under plugin control.
 
+For Claude Code the registration is replaced in place: the existing entry is removed before the new one is added, so a registration step that fails after that removal puts the previous entry back from what `claude mcp get ghost` reported. The error then says which of the two happened — the previous registration was restored, or it was removed and could not be restored — because a failed repair that said nothing about it left every later Claude Code session with no ghost tools. A remove that itself failed is not rolled back (the entry is most likely still in place, and the error names the failed remove instead), and with no previous registration at all the error is the plain failed-`add-json` one. The re-run hint applies to either.
+
 ### `ghost mcp status`
 
 Checks one client integration:

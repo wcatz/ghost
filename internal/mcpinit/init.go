@@ -288,6 +288,9 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
 	currentOutput := string(out)
 
+	// removeErr is nil unless the stale registration's removal failed, and is
+	// read only by the rollback the add-json failure path runs.
+	var removeErr error
 	alreadyRegistered := err == nil && strings.Contains(currentOutput, "Command:")
 	correctPath := strings.Contains(currentOutput, ghostBin)
 
@@ -305,9 +308,13 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 		return nil
 	}
 
-	// Remove stale registration before re-adding.
+	// Remove stale registration before re-adding. Its result is kept: the remove
+	// is the one thing that takes the previous registration out, so whether it
+	// landed is what the rollback below has to know.
 	if alreadyRegistered {
-		_ = exec.Command(claudeBin, "mcp", "remove", "-s", "user", "ghost").Run()
+		if out, rerr := exec.Command(claudeBin, "mcp", "remove", "-s", "user", "ghost").CombinedOutput(); rerr != nil {
+			removeErr = fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), rerr)
+		}
 	}
 
 	// Register or update.
@@ -323,7 +330,11 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 
 	cmd := exec.Command(claudeBin, "mcp", "add-json", "-s", "user", "ghost", string(configJSON))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("claude mcp add-json: %s: %w", strings.TrimSpace(string(out)), err)
+		// A successful remove has already taken the previous registration out,
+		// so a failed add leaves the user with no ghost server at all until a
+		// re-run lands: put the old one back, or say that it is gone.
+		return rollbackRegistration(claudeBin, currentOutput, alreadyRegistered, removeErr,
+			fmt.Errorf("claude mcp add-json: %s: %w", strings.TrimSpace(string(out)), err))
 	}
 
 	if alreadyRegistered {
@@ -332,6 +343,88 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "  + registered ghost MCP server (command: %s)\n", ghostBin)
 	}
 	return nil
+}
+
+// rollbackRegistration answers a failed `claude mcp add-json` with the one fact
+// the reader needs: whether the registration Ghost deleted to make room for the
+// new one is back. A successful remove takes the previous entry out before the
+// add runs, so a refused add leaves every Claude Code session starting with no
+// ghost tools until a re-run succeeds, and a repair that ends in that state must
+// not read as a no-op. The entry is re-added from the `claude mcp get` output
+// the same run already read. Nothing is rolled back in four cases, and each says
+// which one it is rather than guessing: nothing was registered, where the error
+// is the one it always was; a remove that failed, because the previous
+// registration is then most likely still in place and re-adding it would
+// collide; a registration the get output cannot describe; and — reported, never
+// retried — a restore the client refuses, because a second attempt against the
+// refused write is the failure that just happened.
+func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, removeErr, base error) error {
+	switch {
+	case !hadPrevious:
+		// Nothing was taken out, so there is nothing to put back and the
+		// failure is the one it always was.
+		return base
+	case removeErr != nil:
+		// The remove is the only thing that takes the entry out, and it did not
+		// land: the registration is most likely still in place, and re-adding it
+		// would collide with itself.
+		return fmt.Errorf("%w (the previous registration could not be removed: %v — it is most likely still registered)", base, removeErr)
+	}
+	restored, ok := parseClaudeRegistration(previousOutput)
+	if !ok {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
+	}
+	configJSON, err := json.Marshal(restored)
+	if err != nil {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
+	}
+	if out, err := exec.Command(claudeBin, "mcp", "add-json", "-s", "user", "ghost", string(configJSON)).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored: %s)",
+			base, strings.TrimSpace(string(out)))
+	}
+	return fmt.Errorf("%w (the previous registration was restored)", base)
+}
+
+// parseClaudeRegistration reads the registration `claude mcp get` printed, into
+// the shape the add-json form takes:
+//
+//	ghost:
+//	  Scope: User
+//	  Type: stdio
+//	  Command: /path/to/ghost
+//	  Args: mcp
+//
+// It reports false when there is no Command line to put back, which is also the
+// shape registerMCP reads as "nothing registered": nothing to restore is not a
+// failure of the rollback.
+func parseClaudeRegistration(out string) (map[string]any, bool) {
+	cfg := map[string]any{}
+	var command string
+	var args []string
+	for _, line := range strings.Split(out, "\n") {
+		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(field) {
+		case "type":
+			if v := strings.TrimSpace(value); v != "" {
+				cfg["type"] = v
+			}
+		case "command":
+			command = strings.TrimSpace(value)
+		case "args":
+			args = append(args, strings.Fields(value)...)
+		}
+	}
+	if command == "" {
+		return nil, false
+	}
+	cfg["command"] = command
+	if len(args) > 0 {
+		cfg["args"] = args
+	}
+	return cfg, true
 }
 
 // ensurePermissions loads settings.json and adds missing ghost permissions.
