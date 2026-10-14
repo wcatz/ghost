@@ -1069,6 +1069,30 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if err := CheckImportedTask(t); err != nil {
 		return false, err
 	}
+	// What is left here, and belongs here, is everything that is a fact about this
+	// store or a TRANSFORMATION of the record — the presence check above and these
+	// three clamps, for the reason ImportMemory gives: a predicate cannot transform
+	// a record, and `ghost export` calls the same predicate precisely so it can be
+	// told what this build ACCEPTS rather than have it decide what it stores.
+	//
+	// The caps are the ones the task's own writers apply (#1226). Without them an
+	// artifact could store 100 KB of title, description and notes, and the row-
+	// rendering read tools would hand a single `ghost_task_list` row of about
+	// 200 KB back against a 16000-byte budget whose own rule — keep the first row
+	// whole rather than drop it — is only sound because a row is bounded by the
+	// caps its writer applies. The oversize text reached FTS, embeddings and every
+	// export from here too.
+	//
+	// They are clamps rather than refusals for the reason MaxTitleLen states: a
+	// refusal in CheckImportedTask would put the task outside every export as well
+	// as outside the import, and the stored text says what was lost anyway — the
+	// marker ClampContent appends is IN the row.
+	//
+	// Above the apply=false return below, so a dry run classifies and previews the
+	// apply run exactly, which is the same window the credential guard sits in.
+	title := TruncateUTF8(t.Title, MaxTitleLen)
+	description, _ := ClampContent(t.Description)
+	notes, _ := ClampContent(t.Notes)
 	if !apply {
 		return true, nil
 	}
@@ -1116,8 +1140,8 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 			COALESCE(NULLIF(?, ''), datetime('now')),
 			COALESCE(NULLIF(?, ''), datetime('now')),
 			NULLIF(?, ''))
-	`, t.ID, t.ProjectID, t.Title, t.Description, t.Status, t.Priority,
-		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, t.Notes,
+	`, t.ID, t.ProjectID, title, description, t.Status, t.Priority,
+		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, notes,
 		t.CreatedAt, t.UpdatedAt, t.CompletedAt); err != nil {
 		return false, fmt.Errorf("import task %s: %w", t.ID, err)
 	}
@@ -1203,6 +1227,20 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if err := CheckImportedDecision(d); err != nil {
 		return false, err
 	}
+	// The caps `ghost_decision_record` applies, for the reason ImportTask gives in
+	// full (#1226): every one of them bounds a row the row-rendering read tools
+	// show whole, and `ghost_decisions_list` renders a decision's title, decision,
+	// rationale and its WHOLE alternatives list as one row — so an artifact
+	// carrying 100 KB of each field, or 25 oversized alternatives, produced a
+	// single row of megabytes that no listing argument could narrow, against a
+	// 16000-byte budget.
+	//
+	// Clamps rather than refusals, for the reason MaxTitleLen states, and above the
+	// apply=false return below so a dry run previews the apply run exactly.
+	title := TruncateUTF8(d.Title, MaxTitleLen)
+	decision, _ := ClampContent(d.Decision)
+	rationale, _ := ClampContent(d.Rationale)
+	alternatives := BoundAlternatives(d.Alternatives)
 	if !apply {
 		return true, nil
 	}
@@ -1223,7 +1261,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		}
 	}
 
-	alts, _ := json.Marshal(d.Alternatives)
+	alts, _ := json.Marshal(alternatives)
 	tags, _ := json.Marshal(d.Tags)
 	// beginWrite rather than execGuardedWrite, for the reason ImportTask gives:
 	// the presence re-check has to be in the same transaction as the INSERT,
@@ -1247,7 +1285,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?,
 			COALESCE(NULLIF(?, ''), datetime('now')),
 			COALESCE(NULLIF(?, ''), datetime('now')))
-	`, d.ID, d.ProjectID, d.Title, d.Decision, string(alts), d.Rationale,
+	`, d.ID, d.ProjectID, title, decision, string(alts), rationale,
 		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import decision %s: %w", d.ID, err)
 	}
