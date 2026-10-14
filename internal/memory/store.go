@@ -7117,41 +7117,53 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 }
 
 // markReusedSuccessorSourceTx stamps reflection provenance on a REUSED row when
-// the emission absorbed a source beside it (#1283).
+// the emission absorbed a source into it (#1283), and reports whether it wrote.
 //
 // A reuse keeps the reused row's own provenance while the emission re-states
 // that row alone — the row has not been re-asserted by anybody, and overwriting
 // its source would relabel an agent save as consolidation output. The moment
-// ReplacesIDs names a second source, though, those rows are deleted into this
-// one: the reused row is the merge's successor, exactly as a fresh INSERT's row
-// is, and findDecisionCompanionsTx reads `source = 'reflection'` as one of the
-// arms that trust a carried `decision:<id>` link. Without this stamp a merge
-// that absorbed a decision companion left the link on a row the lookup
-// rejected, so SupersedeDecisionReport found nothing, answered a clean success,
-// and the reversed decision kept answering search and session start.
+// the pass folds another row into this one, though, the reused row is the
+// merge's successor, exactly as a fresh INSERT's row is, and
+// findDecisionCompanionsTx reads `source = 'reflection'` as one of the arms that
+// trust a carried `decision:<id>` link. Without this stamp a merge that absorbed
+// a decision companion left the link on a row the lookup rejected, so
+// SupersedeDecisionReport found nothing, answered a clean success, and the
+// reversed decision kept answering search and session start.
 //
-// source only: no content version is recorded and updated_at does not move,
-// because the row's recorded state is unchanged (#727) and source is not a
-// column memory_history carries. It runs outside the switch for all three reuse
-// branches, because the verbatim branch writes nothing at all.
-func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m Memory) error {
-	if !reuseAbsorbsOthers(id, m) {
-		return nil
+// Absorption means a row the pass CONSUMES, not merely one ReplacesIDs names:
+// an id no row holds, a manual or builtin row, a pinned row and a concurrently
+// edited row the pass keeps are all named by an emission but never folded into
+// the reused row, and relabelling it for them would announce a merge that did
+// not happen. consumed is the pass's delete set.
+//
+// The write is source only — updated_at does not move — but source IS a column
+// memory_history records, so the caller adds the id to its reflected set and
+// the pass files the version through the ordinary history append. The bool is
+// that answer: true when the UPDATE changed a row.
+func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m Memory, consumed map[string]bool) (bool, error) {
+	if !reuseAbsorbsConsumed(id, m, consumed) {
+		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE memories SET source = 'reflection' WHERE id = ? AND source <> 'reflection'`, id); err != nil {
-		return fmt.Errorf("stamp the reused memory's provenance: %w", err)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memories SET source = 'reflection' WHERE id = ? AND source <> 'reflection'`, id)
+	if err != nil {
+		return false, fmt.Errorf("stamp the reused memory's provenance: %w", err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count the reused memory's provenance stamp: %w", err)
+	}
+	return n > 0, nil
 }
 
-// reuseAbsorbsOthers reports whether the emission names a source other than the
-// reused row itself, which is what tells a consolidation successor from a row
-// restating itself. An empty entry is not a source, matching the discrimination
-// fillReusedClaimsTx makes when it gathers the absorbed sources.
-func reuseAbsorbsOthers(id string, m Memory) bool {
+// reuseAbsorbsConsumed reports whether the emission names a source other than
+// the reused row itself that this pass actually consumes, which is what tells a
+// consolidation successor from a row restating itself. An empty entry is not a
+// source, matching the discrimination fillReusedClaimsTx makes when it gathers
+// the absorbed sources.
+func reuseAbsorbsConsumed(id string, m Memory, consumed map[string]bool) bool {
 	for _, replaced := range m.ReplacesIDs {
-		if replaced != "" && replaced != id {
+		if replaced != "" && replaced != id && consumed[replaced] {
 			return true
 		}
 	}
@@ -7472,6 +7484,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the unclaimed candidates beside the refused claims, and the snapshot it
 	// took must then be offered for restore.
 	deleted = len(deleteIDs)
+	// consumed is the delete set as a lookup, so a reuse can tell whether the
+	// source it names is a row this pass actually folds into it. An id no row
+	// holds, a manual, builtin, pinned or retention-exempt row, and a
+	// concurrently edited row this pass keeps are all named by an emission but
+	// are NOT absorbed, so they must not relabel the row they would have been
+	// merged into (#1283).
+	consumed := make(map[string]bool, len(deleteIDs))
+	for _, id := range deleteIDs {
+		consumed[id] = true
+	}
 	// The emissions run BEFORE the delete below, which is a reordering with a
 	// reason: a rewrite or a merge carries its sources' evidence onto the row it
 	// becomes, and that copy has to READ those rows. The foreign key takes them
@@ -7489,7 +7511,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// happen in one place at the end: the ids of the fresh inserts are only known
 	// as they are made, and interleaving the two statements per row would triple
 	// the statement count for no gain. A verbatim re-emission leaves the list
-	// (#727) — it is not a write, so there is no version to record.
+	// (#727) — it wrote nothing, so there is no version to record — unless the
+	// provenance stamp below makes it a write after all.
 	var reflected []string
 	reused := 0
 	// successorOf maps the ids this pass consumed to the row that now holds
@@ -7532,8 +7555,12 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// hiding a real case.
 			// Two exceptions: reusePreservesAge (#623) below, and
 			// reuseChangesNothing (#727), which skips the write entirely.
+			//
+			// verbatim is that second branch, read once because the provenance
+			// stamp below decides whether it stays a write-free pass for this row.
+			verbatim := reuseChangesNothing(stored, m)
 			switch {
-			case reuseChangesNothing(stored, m):
+			case verbatim:
 				// A verbatim re-emission is not a write (#727). The row keeps
 				// its updated_at, and the pass records no version of it, because
 				// there is no new state to record. Measured on a real store, the
@@ -7580,14 +7607,21 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			// A reuse that absorbed another source is that source's consolidation
+			// A reuse that absorbed a source is that source's consolidation
 			// successor, so it carries the provenance the decision lookup trusts —
 			// the same source a fresh INSERT and the default reuse stamp. Its own
 			// statement for the same reason the tier raise is: the verbatim branch
 			// above wrote nothing at all, and that is the branch a merge of
 			// byte-identical text takes. See markReusedSuccessorSourceTx.
-			if err := markReusedSuccessorSourceTx(ctx, tx, id, m); err != nil {
+			stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
+			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
+			}
+			if stamped && verbatim {
+				// The stamp is this row's only write, so it is the version the
+				// pass records — the same event a content rewrite files. The
+				// other two branches already added the id above.
+				reflected = append(reflected, id)
 			}
 			// The other sources' support and claims, for the same reason and in the
 			// same place: a merge that kept one source's row deletes the rest into it,

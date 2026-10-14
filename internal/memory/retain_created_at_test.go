@@ -318,3 +318,95 @@ func TestReplaceNonManualReusePickIsDeterministic(t *testing.T) {
 		t.Errorf("created_at = %q, want the oldest row's %q", survivors[0].CreatedAt, oldest)
 	}
 }
+
+// A reuse that folds a consumed source into the reused row changes that row's
+// provenance, and source IS a column memory_history records, so the pass files
+// the version like any other write (#1283). Without it the change log and an
+// as_of read still report the row as the agent save it was, while the live row
+// has become the merge's successor.
+func TestAReusedRowAbsorbingAConsumedSourceRecordsAProvenanceVersion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the queue backend is redis lists"
+	reused, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", content, "mcp", 0.5, nil, UpsertOptions{})
+	if err != nil {
+		t.Fatalf("save the reused row: %v", err)
+	}
+	other, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "a stale note the merge folds in", "mcp", 0.5, nil, UpsertOptions{})
+	if err != nil {
+		t.Fatalf("save the other source: %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, reused, 10)
+	if err != nil {
+		t.Fatalf("MemoryHistory before the merge: %v", err)
+	}
+
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.5,
+		ReplacesIDs: []string{reused, other},
+	}}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if !rowExists(t, s, reused) || rowExists(t, s, other) {
+		t.Fatalf("the merge did not reuse the row and take the other source (reused live=%v, other live=%v)",
+			rowExists(t, s, reused), rowExists(t, s, other))
+	}
+
+	after, err := s.MemoryHistory(ctx, reused, 10)
+	if err != nil {
+		t.Fatalf("MemoryHistory after the merge: %v", err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("history versions = %d, want %d: the provenance change was not recorded",
+			len(after), len(before)+1)
+	}
+	// MemoryHistory returns oldest first.
+	newest := after[len(after)-1]
+	if newest.Source != "reflection" {
+		t.Errorf("the newest version's source = %q, want reflection: an as_of read after the merge still reports the agent save's provenance", newest.Source)
+	}
+	if newest.Phase != phaseReflect {
+		t.Errorf("the newest version's phase = %q, want %q", newest.Phase, phaseReflect)
+	}
+}
+
+// A reuse is relabelled only when it CONSUMES a named source (#1283): an id no
+// row holds, a manual row, and a row the pass keeps are all named by an emission
+// but are never folded into the reused row, so stamping reflection provenance on
+// it would announce a merge that did not happen.
+func TestAReuseIsNotRelabelledByANamedSourceItDoesNotConsume(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the staging cluster answers on port 8443"
+	save, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", content, "mcp", 0.5, nil, UpsertOptions{})
+	if err != nil {
+		t.Fatalf("save the row: %v", err)
+	}
+	manual, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "a hand-written note", "manual", 0.5, nil, UpsertOptions{})
+	if err != nil {
+		t.Fatalf("save the manual row: %v", err)
+	}
+
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.5,
+		ReplacesIDs: []string{save, "NOSUCHID", manual},
+	}}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if got := getOne(t, s, save); got.Source != "mcp" {
+		t.Errorf("source = %q, want mcp: neither a missing id nor a manual row is consumed by the merge, so the reused row was not made a successor", got.Source)
+	}
+	if !rowExists(t, s, manual) {
+		t.Error("the manual row was deleted")
+	}
+	hist, err := s.MemoryHistory(ctx, save, 10)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(hist) != 1 {
+		t.Errorf("history has %d version(s), want the save's own 1: a reuse that consumed nothing recorded a version", len(hist))
+	}
+}
