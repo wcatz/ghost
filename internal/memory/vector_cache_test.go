@@ -756,6 +756,61 @@ func TestVectorCacheHoldsNothingAboveItsBound(t *testing.T) {
 	}
 }
 
+// The bound's pre-check counts only the rows the cache would keep: the configured
+// identity's, at the query's width. A corpus that fits the bound must still be
+// cached when the table also holds rows of another vector space — the loader
+// files those as foreign pairs, and the uncached count already excludes them — so
+// counting the whole table made a corpus that fits look over the bound and sent
+// every search down the uncached path (#1257).
+func TestVectorCacheBoundCountsOnlyTheConfiguredSpace(t *testing.T) {
+	ctx := context.Background()
+	q := cacheVec(1)
+	// Four configured rows of eight float32s are 128 bytes of embeddings, under
+	// the cap below, so a working pre-check loads the corpus once and hits after.
+	const cap = 150
+	four := func(t *testing.T, s *Store) {
+		t.Helper()
+		for i := range 4 {
+			cacheMemory(t, s, cacheProj, fmt.Sprintf("configured %d", i), uint64(200+i), nil)
+		}
+	}
+
+	// Control: the same four rows and no rows of another identity.
+	control, _ := cacheStore(t)
+	four(t, control)
+	withCacheCap(t, cap)
+	for range 2 {
+		if _, err := control.SearchVector(ctx, cacheProj, q, 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if control.vcache.loads.Load() != 1 || control.vcache.hits.Load() != 1 {
+		t.Errorf("control: loads=%d hits=%d, want 1 and 1 (four configured rows fit the bound)",
+			control.vcache.loads.Load(), control.vcache.hits.Load())
+	}
+
+	// Three more rows embedded under another identity do not change what the cache
+	// keeps, so they must not change the bound's answer either.
+	s, _ := cacheStore(t)
+	four(t, s)
+	for i := range 3 {
+		id := cacheMemory(t, s, cacheProj, fmt.Sprintf("foreign %d", i), 0, nil)
+		if err := s.StoreEmbedding(ctx, id, cacheVec(uint64(300+i)), "other-model:8"); err != nil {
+			t.Fatalf("StoreEmbedding foreign: %v", err)
+		}
+	}
+	withCacheCap(t, cap)
+	for range 2 {
+		if _, err := s.SearchVector(ctx, cacheProj, q, 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.vcache.loads.Load() != 1 || s.vcache.hits.Load() != 1 {
+		t.Errorf("loads=%d hits=%d, want 1 and 1: rows of another vector space pushed a corpus that fits the bound past it",
+			s.vcache.loads.Load(), s.vcache.hits.Load())
+	}
+}
+
 // A copy that grew past the bound after the count was taken is used by the search
 // that read it and is not kept.
 func TestVectorCacheDoesNotKeepACopyOverItsBound(t *testing.T) {

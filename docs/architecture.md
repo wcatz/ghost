@@ -397,8 +397,11 @@ in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
 scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
-Above the bound it is never loaded for the cache — on a miss the row count at the
-query's width is checked first; a hit reads only the counter — and the search is the uncached path, whose pooled scratch the copy sizes from the row count before it starts ([#1036](#the-vector-scan)).
+Above the bound it is never loaded for the cache — on a miss the row count of the
+rows the cache would keep (the configured identity, at the query's width, the same
+filters the uncached copy's count applies) is checked first; a hit reads only the
+counter — and the search is the uncached path, whose pooled scratch the copy sizes
+from the row count before it starts ([#1036](#the-vector-scan)).
 A database without the counter (a schema older than v24
 opened read-only) is "do not cache", not an error.
 
