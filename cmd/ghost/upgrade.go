@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -341,7 +342,12 @@ func runUpgrade(args []string) {
 	// A new binary can invalidate wiring the old one installed (hook flags,
 	// embedded plugin sources). Surface stale integrations instead of letting
 	// them fail open invisibly on every fire.
-	mcpinit.ReportStaleIntegrations(os.Stdout)
+	//
+	// The check is run by the NEW binary, not by this process: it is still the
+	// old image, and the opencode-plugin and goose-package comparisons are
+	// byte-compares against the embedded sources, so anything the new release
+	// changed is exactly what a call from here cannot see (#1215).
+	reportStaleIntegrations(exe, upgradeStreams{out: os.Stdout, err: os.Stderr})
 
 	// The replacement above is what makes this list matter (#746): a running
 	// `ghost mcp` holds the inode of the binary it started from, so the file
@@ -356,6 +362,49 @@ func runUpgrade(args []string) {
 	// comparing against it would report nothing. That is also why the path is
 	// passed in rather than resolved again here.
 	mcpinit.ReportStaleServers(os.Stdout, exe)
+}
+
+// wiringCheckArgv is the command line the post-upgrade wiring check runs in
+// the binary that was just installed: the `ghost mcp wiring` subcommand, the
+// one entry point that judges existing client wiring against the sources
+// embedded in the image running it.
+var wiringCheckArgv = []string{"mcp", "wiring"}
+
+// spawnWiringCheck runs the integration-wiring check in the binary at exe and
+// wires the child's stdout to out. It is a var only so a test can stand in
+// for the child: the test runner's own binary is not the artifact under test,
+// and spawning it with a subcommand it does not implement would assert
+// nothing. Production never reassigns it.
+var spawnWiringCheck = func(exe string, out io.Writer) error {
+	cmd := exec.Command(exe, wiringCheckArgv...)
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// reportStaleIntegrations asks the binary at exe — the release this run just
+// installed — for the integration-wiring check, and streams what it prints to
+// the run's own output.
+//
+// The check runs in a CHILD rather than in this process because two of its
+// checks — the opencode lifecycle plugin and the goose plugin package —
+// byte-compare the installed wiring against the sources embedded in the image
+// that runs them, and this process is still the image the run STARTED as:
+// every comparison from here judges against what the OLD release rendered, so
+// drift the new release introduced is the one drift the report can never name
+// (#1215). exe is the new image on every platform — the Unix replace renames
+// over the path and the Windows one moves the old binary aside first — so the
+// child's comparisons are the new release's own, and a hook event a new
+// release adds is one the child knows to check.
+//
+// A child that could not be run is said so, with the command to run by hand.
+// Silence is the failure this whole path exists to prevent: an upgrade that
+// reports success while saying nothing about wiring it did not check is the
+// defect in the other direction.
+func reportStaleIntegrations(exe string, streams upgradeStreams) {
+	if err := spawnWiringCheck(exe, streams.out); err != nil {
+		_, _ = fmt.Fprintf(streams.err, "warning: the integration wiring check did not run (%v) — run `ghost mcp wiring` to check it yourself\n", err)
+	}
 }
 
 // performUpgrade is the command with its two dependencies injected: it looks the
