@@ -3617,6 +3617,17 @@ func (s *Server) registerTools() {
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
+		// The decision also changes ghost://project/<id>/context: its companion
+		// memory and its ## Recent Decisions entry both appear there, so a
+		// client that pinned the context resource at session start keeps the
+		// pre-decision block without this push (#1271). It sits AFTER the
+		// supersedes step above so the pushed update reflects the companion the
+		// step just retired. The global resource is the same write reaching a
+		// second surface, as ghost_save_global pushes for a _global row.
+		s.notifyProjectResource(ctx, args.ProjectID, "context")
+		if args.ProjectID == memory.GlobalProjectID {
+			s.notifyResourceUpdated(ctx, "ghost://memories/global")
+		}
 
 		// Notify the embedding worker of the companion memory, exactly as the
 		// three save tools do. RecordDecision writes a real memory row and
