@@ -1464,6 +1464,43 @@ func codexActionCommand(obj codexObject) (string, bool) {
 	return cmd, cmd != ""
 }
 
+// decodeCodexHooksConfig parses the parts of a hooks.json that both the merge
+// and the pre-flight validation must agree on: the document is a JSON object,
+// a "hooks" member is an object (an explicit null is refused), and each managed
+// event's value is an array. Sharing this decode is what keeps the pre-flight
+// honest — a document it accepts is a document the merge can act on — and keeps
+// both callers refusing the same shapes with the same parse errors.
+func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
+	if err := json.Unmarshal(existing, &top); err != nil {
+		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
+	}
+
+	events = map[string]json.RawMessage{}
+	if raw, ok := top["hooks"]; ok {
+		// An explicit null is structurally-invalid-but-present data, not
+		// "absent": json.Unmarshal decodes null into a nil map with no error,
+		// and the assignment in the merge would then panic on it. Refuse it the
+		// way the Claude settings path does, naming the file rather than
+		// treating the user's declaration as an empty object to fill in.
+		if isJSONNull(raw) {
+			return nil, nil, fmt.Errorf("hooks.json: hooks is null")
+		}
+		if err := json.Unmarshal(raw, &events); err != nil {
+			return nil, nil, fmt.Errorf("parse hooks.json hooks: %w", err)
+		}
+	}
+
+	for _, ev := range codexLifecycleEvents {
+		if raw, ok := events[ev.Key]; ok {
+			var rules []json.RawMessage
+			if err := json.Unmarshal(raw, &rules); err != nil {
+				return nil, nil, fmt.Errorf("parse hooks.json %s rules: %w", ev.Key, err)
+			}
+		}
+	}
+	return top, events, nil
+}
+
 // mergeCodexHooksConfig overlays ghost's lifecycle rules onto an existing
 // hooks.json: unknown top-level keys, the user's description, foreign events,
 // and every rule that is not ghost's own are preserved verbatim.
@@ -1482,24 +1519,9 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // rendered, so feeding the output back through this function is a byte-level
 // no-op for every accepted input and every path.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(existing, &top); err != nil {
-		return "", fmt.Errorf("parse hooks.json: %w", err)
-	}
-
-	events := map[string]json.RawMessage{}
-	if raw, ok := top["hooks"]; ok {
-		// An explicit null is structurally-invalid-but-present data, not
-		// "absent": json.Unmarshal decodes null into a nil map with no error,
-		// and the assignment below would then panic on it. Refuse it the way
-		// the Claude settings path does, naming the file rather than treating
-		// the user's declaration as an empty object to fill in.
-		if isJSONNull(raw) {
-			return "", fmt.Errorf("hooks.json: hooks is null")
-		}
-		if err := json.Unmarshal(raw, &events); err != nil {
-			return "", fmt.Errorf("parse hooks.json hooks: %w", err)
-		}
+	top, events, err := decodeCodexHooksConfig(existing)
+	if err != nil {
+		return "", err
 	}
 
 	for _, ev := range codexLifecycleEvents {
@@ -1656,7 +1678,17 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 	}
 
 	existing, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read hooks.json: %w", err)
+	}
+	// A blank file — 0 bytes, or only whitespace — carries nothing to merge, so
+	// it is written as if it were absent, the way installCodexMCP appends to a
+	// 0-byte config.toml (#1296). The read of a missing file yields nil, so
+	// that case and this one share the install path below.
+	if len(bytes.TrimSpace(existing)) == 0 {
+		existing = nil
+	}
+	if existing == nil {
 		if dryRun {
 			_, _ = fmt.Fprintf(w, "  ~ would install hooks.json (%s)\n", path)
 			return true, nil
@@ -1669,8 +1701,6 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 		}
 		_, _ = fmt.Fprintf(w, "  + installed hooks.json (%s)\n", path)
 		return true, nil
-	} else if err != nil {
-		return false, fmt.Errorf("read hooks.json: %w", err)
 	}
 
 	desired, err := mergeCodexHooksConfig(existing, ghostBin)
@@ -1764,6 +1794,37 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource stri
 	return false
 }
 
+// validateCodexHooksFile loads ~/.codex/hooks.json and validates every part of
+// it `ghost mcp init --client codex` parses, BEFORE step 3 registers the MCP
+// server in config.toml. An absent or blank file is valid: init writes the
+// canonical document into it, as it does for an absent or 0-byte config.toml.
+// A refusal names the file and carries the edit that clears it — repair it or
+// delete it — rather than the generic re-run hint, which a re-run cannot
+// satisfy: the file stays invalid until the user acts on it.
+func validateCodexHooksFile() error {
+	path, err := codexHooksPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read hooks.json: %w", err)
+	}
+	// A blank file — 0 bytes, or only whitespace — carries nothing to merge and
+	// installCodexHooks writes the canonical document over it, the way the
+	// config.toml merge appends to a 0-byte file. It is not a refusal.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	if _, _, err := decodeCodexHooksConfig(data); err != nil {
+		return fmt.Errorf("%w\n  Fix or delete %s, then re-run `ghost mcp init`", err, path)
+	}
+	return nil
+}
+
 // RunCodex installs Ghost's codex integration: the [mcp_servers.ghost] stdio
 // entry merged textually into ~/.codex/config.toml and SessionStart/Stop/
 // SessionEnd hooks merged into ~/.codex/hooks.json, both carrying the
@@ -1773,6 +1834,17 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource stri
 func RunCodex(w io.Writer, dryRun bool) error {
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
+	}
+
+	// Validate hooks.json before step 3 registers the server, the way Run
+	// validates Claude's settings.json before it registers anything: a file
+	// step 4 cannot wire would otherwise be discovered only after step 3 had
+	// registered the MCP server, leaving codex with a ghost server and no
+	// hooks. Refusing here registers nothing and leaves the file exactly as the
+	// user wrote it. No retryHint: the file stays invalid until it is repaired
+	// or deleted, so a re-run cannot fix it and the hint would misdirect.
+	if err := validateCodexHooksFile(); err != nil {
+		return err
 	}
 
 	// Step 1: Prerequisites — only the ghost binary is required; its resolved
