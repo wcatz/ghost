@@ -165,11 +165,12 @@ func (s *Store) finishGuardedWrite(ctx context.Context, op string, tx *sql.Tx, l
 // transaction of their own — an autocommit UPSERT, a bookkeeping UPDATE. Wrapping
 // one is not a behaviour change: SQLite already runs a lone statement in an
 // implicit transaction, so this commits exactly what the autocommit committed, at
-// the same granularity. That granularity is the property callers depend on, so it
-// is preserved deliberately: the two statements in StoreEmbedding stay in TWO
-// transactions and keep failing safe in both directions, and a sequence that
-// relied on its first statement being durable before the second ran still gets
-// that.
+// the same granularity. A caller that needs more than one statement in one
+// transaction opens it with beginWrite instead — StoreEmbedding does, because its
+// link-scan clear and its embedding upsert must not have a concurrent scan mark
+// commit between them (#1258) — and a sequence that relies on its first
+// statement being durable before the second runs still gets that under a
+// transaction of its own.
 //
 // op is the write-lock seam's name for this statement, so the measurement keeps
 // describing every write the store performs rather than only the ones that

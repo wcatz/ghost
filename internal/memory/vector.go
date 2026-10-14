@@ -40,18 +40,26 @@ func beforeHybridHydrate(ids []string) {
 // forever. Clearing the slot re-queues the memory so the linker compares it
 // again in the new space; the re-scan adds current-space edges alongside the
 // old ones rather than replacing them (only supersede invalidates edges, and
-// CreateLink keeps MAX(strength)). The delete runs
-// before the upsert only because it has to read the old model first; the
-// ordering fails safe in both directions, so no transaction SPANS the two
-// statements. Each is its own guarded write transaction (execGuardedWrite), and
-// that is what keeps the granularity: if the upsert then fails, the memory is
-// merely re-queued for a scan it did not need, which the linker repeats
-// idempotently. If the delete fails, this returns before touching the vector, so
-// the state is exactly what it was.
+// CreateLink keeps MAX(strength)). The delete reads the old model and the upsert
+// installs the new one in ONE guarded write transaction (#1258). Run as two, a
+// MarkLinkScanned for the retired vector could commit between them: the row
+// still held the retired bytes at that instant, so the mark's byte check passed,
+// the slot was re-armed after the clear, and the upsert then installed the new
+// model — leaving a slot computed in the retired space that
+// UnscannedEmbeddedMemoryIDs never re-queues. BEGIN IMMEDIATE takes the write
+// lock before either statement, so a concurrent mark is serialised: before this
+// transaction it is cleared by the DELETE, and after it is refused by the mark's
+// own byte check.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
 	blob := float32sToBytes(vec)
 
-	if _, err := s.execGuardedWrite(ctx, "retire-link-scan", `
+	tx, lock, err := s.beginWrite(ctx, "store-embedding")
+	if err != nil {
+		return fmt.Errorf("begin store embedding: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM link_scans
 		WHERE memory_id = ? AND EXISTS (
 			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND model <> ?
@@ -60,14 +68,18 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 		return fmt.Errorf("invalidate link scan: %w", err)
 	}
 
-	_, err := s.execGuardedWrite(ctx, "store-embedding", `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_embeddings (memory_id, embedding, model)
 		VALUES (?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model, created_at = datetime('now')
-	`, memoryID, blob, model)
-	if err != nil {
+	`, memoryID, blob, model); err != nil {
 		return fmt.Errorf("store embedding: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit store embedding: %w", err)
+	}
+	lock.reportHold("store-embedding", time.Now())
 	return nil
 }
 
