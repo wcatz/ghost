@@ -461,7 +461,7 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 			continue
 		}
 		if err != nil {
-			return 0, false, fmt.Errorf("read source_ref of %s: %w", id, err)
+			return 0, false, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
 		}
 		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
 	}

@@ -133,7 +133,7 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 	case 1:
 		return ids[0], nil
 	default:
-		return "", fmt.Errorf("ambiguous task id prefix %q matches multiple tasks — use more characters", idOrPrefix)
+		return "", fmt.Errorf("ambiguous task id prefix %s matches multiple tasks — use more characters", RefusalArg("task_id", idOrPrefix))
 	}
 }
 
@@ -191,7 +191,7 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) (bool, e
 		return false, fmt.Errorf("complete task: rows affected: %w", err)
 	}
 	if n == 0 {
-		return false, fmt.Errorf("complete task: task %s was deleted before the write landed", id)
+		return false, fmt.Errorf("complete task: task %s was deleted before the write landed", RefusalArg("task_id", id))
 	}
 	return clamped, nil
 }
@@ -323,7 +323,7 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, fmt.Errorf("update task: rows affected: %w", err)
 	}
 	if n == 0 {
-		return Task{}, fmt.Errorf("update task: task %s was deleted before the write landed", id)
+		return Task{}, fmt.Errorf("update task: task %s was deleted before the write landed", RefusalArg("task_id", id))
 	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, fmt.Errorf("update task: %w", err)

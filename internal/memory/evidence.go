@@ -158,7 +158,7 @@ func appendEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID, kind string, pr
 		nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID), nullIfEmpty(prov.SourceRef),
 		prov.Confidence,
 	); err != nil {
-		return fmt.Errorf("append %s evidence for %s: %w", kind, memoryID, err)
+		return fmt.Errorf("append %s evidence for %s: %w", kind, RefusalArg("memory_id", memoryID), err)
 	}
 	return nil
 }
@@ -374,7 +374,7 @@ func carryEvidenceTx(ctx context.Context, tx *sql.Tx, toMemoryID string, fromIDs
 		ORDER BY memory_id, rowid`,
 		args...,
 	); err != nil {
-		return fmt.Errorf("carry evidence onto %s: %w", toMemoryID, err)
+		return fmt.Errorf("carry evidence onto %s: %w", RefusalArg("memory_id", toMemoryID), err)
 	}
 	return nil
 }
@@ -501,7 +501,7 @@ func importEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, e Portab
 		nullIfEmpty(e.Agent), nullIfEmpty(e.SessionID), nullIfEmpty(e.SourceRef),
 		e.Confidence, boundStamp(e.ObservedAt), boundStamp(e.VerifiedAt),
 	); err != nil {
-		return fmt.Errorf("import evidence for %s: %w", memoryID, err)
+		return fmt.Errorf("import evidence for %s: %w", RefusalArg("memory_id", memoryID), err)
 	}
 	return nil
 }

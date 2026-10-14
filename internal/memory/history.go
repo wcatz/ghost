@@ -909,7 +909,7 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 		SET related_id = ?
 		WHERE memory_id = ? AND phase = ? AND related_id IS NULL
 	`, successorID, oldID, phaseDelete); err != nil {
-		return fmt.Errorf("record history successor for %s: %w", oldID, err)
+		return fmt.Errorf("record history successor for %s: %w", RefusalArg("memory_id", oldID), err)
 	}
 	return nil
 }
