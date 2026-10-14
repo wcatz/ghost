@@ -427,7 +427,7 @@ func TestEnsureStopHook(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost"); err != nil {
+	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost", false); err != nil {
 		t.Fatalf("ensureStopHook: %v", err)
 	}
 	if !sf.hasHook("Stop", "hook stop") {
@@ -436,7 +436,7 @@ func TestEnsureStopHook(t *testing.T) {
 
 	// Idempotent: second call reports already-configured, adds nothing.
 	out.Reset()
-	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost"); err != nil {
+	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost", false); err != nil {
 		t.Fatalf("ensureStopHook (second): %v", err)
 	}
 	if !strings.Contains(out.String(), "already configured") {
