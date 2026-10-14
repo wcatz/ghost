@@ -48,7 +48,7 @@ func TestImportTaskClampsTextToTheWriterCaps(t *testing.T) {
 		"description": bulkyField(2, "description"),
 		"notes":       bulkyField(3, "notes"),
 	}
-	if _, err := store.ImportTask(ctx, Task{
+	if _, _, err := store.ImportTask(ctx, Task{
 		ID: "t1", ProjectID: "p1",
 		Title:       fields["title"],
 		Description: fields["description"],
@@ -106,7 +106,7 @@ func TestImportDecisionClampsTextToTheWriterCaps(t *testing.T) {
 		"decision":  bulkyField(7, "decision"),
 		"rationale": bulkyField(8, "rationale"),
 	}
-	if _, err := store.ImportDecision(ctx, Decision{
+	if _, _, err := store.ImportDecision(ctx, Decision{
 		ID: "d1", ProjectID: "p1",
 		Title:        fields["title"],
 		Decision:     fields["decision"],
@@ -167,7 +167,7 @@ func TestImportTaskAndDecisionLeaveSubCapTextByteIdentical(t *testing.T) {
 		ID: "t1", ProjectID: "p1", Title: "ship it", Description: "a description",
 		Notes: "some notes", Status: "done", Priority: 2, CompletedAt: "2026-01-02 00:00:00",
 	}
-	if _, err := store.ImportTask(ctx, task, true); err != nil {
+	if _, _, err := store.ImportTask(ctx, task, true); err != nil {
 		t.Fatalf("ImportTask: %v", err)
 	}
 	gotTask, err := store.GetTask(ctx, "t1")
@@ -184,7 +184,7 @@ func TestImportTaskAndDecisionLeaveSubCapTextByteIdentical(t *testing.T) {
 		Alternatives: []string{"one", "two"}, Rationale: "because", Status: "active",
 		Tags: []string{"tag"},
 	}
-	if _, err := store.ImportDecision(ctx, dec, true); err != nil {
+	if _, _, err := store.ImportDecision(ctx, dec, true); err != nil {
 		t.Fatalf("ImportDecision: %v", err)
 	}
 	gotDec := findDecision(t, store, "d1")

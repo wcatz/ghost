@@ -61,17 +61,11 @@ const MaxAlternatives = 20
 // because an ordinary decision must round-trip unchanged — and anything that
 // needs bounding is answered with a fresh slice, so the artifact the caller
 // parsed still holds what it held.
+//
+// It asks AlternativesClamped rather than repeating the two bounds, so a caller
+// that has to REPORT a cut asks the same question the cut is made by.
 func BoundAlternatives(alternatives []string) []string {
-	over := len(alternatives) > MaxAlternatives
-	if !over {
-		for _, alt := range alternatives {
-			if len(alt) > MaxTitleLen {
-				over = true
-				break
-			}
-		}
-	}
-	if !over {
+	if !AlternativesClamped(alternatives) {
 		return alternatives
 	}
 	bounded := make([]string, 0, MaxAlternatives)
@@ -82,6 +76,29 @@ func BoundAlternatives(alternatives []string) []string {
 		bounded = append(bounded, TruncateUTF8(alt, MaxTitleLen))
 	}
 	return bounded
+}
+
+// AlternativesClamped reports whether BoundAlternatives would cut this list:
+// more than MaxAlternatives entries, or any entry past MaxTitleLen.
+//
+// It exists because a cut a caller cannot report is a cut nobody learns about.
+// BoundAlternatives answers with the list a decision STORES, and the stored row
+// says nothing about the entries past the twentieth or the tail of an oversized
+// one — no marker, as the title cap states — so the portable import has to know
+// whether a cut happened to put it on the record line. Answering that question
+// from the cap constants here would be the second copy of the rule that #1226
+// closed, and a rule that drifts is an import report that names a cut which did
+// not happen, or misses one that did.
+func AlternativesClamped(alternatives []string) bool {
+	if len(alternatives) > MaxAlternatives {
+		return true
+	}
+	for _, alt := range alternatives {
+		if len(alt) > MaxTitleLen {
+			return true
+		}
+	}
+	return false
 }
 
 // TruncationMarker returns the marker ClampContent appends to content it
