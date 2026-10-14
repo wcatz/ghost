@@ -1124,7 +1124,13 @@ func runLegConsensus(p *pipeline) {
 	for i := range p.rows {
 		c := p.rows[i]
 		bothLegs := c.FTSRank >= 0 && c.VectorRank >= 0
-		kept := bothLegs
+		// The same exemptions the cutoff and diversity stages apply. The top
+		// row is always kept, so this stage can never empty a query block and
+		// its removals never need an outcome reason: a block it would have
+		// emptied still carries its best row. A pin is a slot guarantee (#936)
+		// and a keyword-reserved row was admitted through the reservation, so
+		// cutting it would undo the reservation.
+		kept := i == 0 || c.Pinned || c.KeywordReserved || bothLegs
 		if !kept && c.FTSRank == -1 && c.VectorRank >= 0 && c.VectorRank <= maxSingleLegVectorRank {
 			kept = true
 		}
@@ -1820,7 +1826,7 @@ func (p *pipeline) removalBreakdown() string {
 	// response_fit is last because it runs last: it is a Run post-pass, not a
 	// stage, and counting it separately is what lets a reader tell a set the
 	// pipeline emptied from one the byte cap emptied.
-	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageCutoff, stageNoAnswer, stageBudget, stageResponseFit}
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageLegConsensus, stageCutoff, stageNoAnswer, stageBudget, stageResponseFit}
 	parts := make([]string, 0, len(order))
 	for _, stage := range order {
 		if n := p.droppedBy[stage]; n > 0 {

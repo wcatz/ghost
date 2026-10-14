@@ -31,22 +31,38 @@ func consensusQueryRequest() Request {
 
 func TestLegConsensusKeepsDualAndTopSingleLegs(t *testing.T) {
 	rows := []memory.Candidate{
-		legCandidate("dual", 3, 4, 1.0),
-		legCandidate("vecTop", -1, 1, 0.9),
-		legCandidate("vecDrop", -1, 5, 0.8),
-		legCandidate("ftsTop", 0, -1, 0.7),
-		legCandidate("ftsDrop", 5, -1, 0.6),
+		// The top-ranked row is always admitted even though one leg found it
+		// past the ceiling; the stage must never empty a query block.
+		legCandidate("topSingle", -1, 9, 1.0),
+		legCandidate("dual", 3, 4, 0.9),
+		legCandidate("vecTop", -1, 1, 0.8),
+		legCandidate("vecDrop", -1, 5, 0.7),
+		legCandidate("ftsTop", 0, -1, 0.6),
+		legCandidate("ftsDrop", 5, -1, 0.5),
 	}
+	pinned := legCandidate("pinned", -1, 7, 0.75)
+	pinned.Pinned = true
+	rows = append(rows, pinned)
+	reserved := legCandidate("reserved", 9, -1, 0.65)
+	reserved.KeywordReserved = true
+	rows = append(rows, reserved)
 	set := &memory.CandidateSet{Rows: rows, Legs: aliveLegs()}
 	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
-	if ids := itemIDs(res.Items); !eq(ids, []string{"dual", "vecTop", "ftsTop"}) {
-		t.Fatalf("items = %v, want dual/top single-leg rows admitted", ids)
+	if ids := itemIDs(res.Items); !eq(ids, []string{"topSingle", "dual", "vecTop", "ftsTop", "pinned", "reserved"}) {
+		t.Fatalf("items = %v, want the top row, dual rows, top single-leg rows and the pinned/reserved rows admitted", ids)
 	}
-	if d := traceDecision(res, "vecDrop", stageLegConsensus); d == nil || d.Reason != reasonLegConsensus {
-		t.Errorf("vecDrop should be dropped as single-leg non-top: %+v", d)
+	if d := traceDecision(res, "topSingle", stageLegConsensus); d != nil {
+		t.Errorf("the top-ranked row should never be dropped by the leg-consensus stage: %+v", d)
 	}
-	if d := traceDecision(res, "ftsDrop", stageLegConsensus); d == nil || d.Reason != reasonLegConsensus {
-		t.Errorf("ftsDrop should be dropped as single-leg non-top: %+v", d)
+	for _, id := range []string{"vecDrop", "ftsDrop"} {
+		if d := traceDecision(res, id, stageLegConsensus); d == nil || d.Reason != reasonLegConsensus {
+			t.Errorf("%s should be dropped as single-leg non-top: %+v", id, d)
+		}
+	}
+	for _, id := range []string{"pinned", "reserved"} {
+		if d := traceDecision(res, id, stageLegConsensus); d != nil {
+			t.Errorf("%s must not be dropped by the leg-consensus stage: %+v", id, d)
+		}
 	}
 }
 
@@ -77,6 +93,3 @@ func traceDecision(res Result, id, stage string) *Decision {
 	}
 	return nil
 }
-
-// stageTraceFor already exists? ensure helper name in tests
-var _ = stageTraceFor
