@@ -320,9 +320,11 @@ func liveDecisionSuccessor(ctx context.Context, q queryRower, projectID, decisio
 func decisionCompanionRef(decisionID string) string { return decisionRefPrefix + decisionID }
 
 // decisionRefSeparator separates the decision links a consolidation successor
-// records when it stands in for more than one decision. A decision id is hex, so
-// a comma cannot occur inside a link; a source_ref that is not a link list splits
-// into one token and is matched whole.
+// records when it stands in for more than one decision. A comma cannot occur
+// inside a link: RecordDecision mints hex ids, and CheckImportedDecision refuses
+// the separator in an imported id, which is the one writer that takes an id
+// verbatim. A source_ref that is not a link list splits into one token and is
+// matched whole.
 const decisionRefSeparator = ","
 
 // decisionRefsInSourceRef returns every decision link a stored source_ref names,

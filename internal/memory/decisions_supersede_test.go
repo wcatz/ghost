@@ -1047,3 +1047,30 @@ func TestWriterPathsRefuseADecisionTokenAnywhereInTheSourceRef(t *testing.T) {
 		}
 	}
 }
+
+// TestImportDecisionRefusesTheLinkSeparatorInItsID: a decision id is the tail of
+// its companion's `decision:<id>` link, and the lookup splits a source_ref on
+// decisionRefSeparator. RecordDecision mints hex ids, but an import writes the
+// artifact's id verbatim, so an id holding the separator would split its own link
+// into tokens that name no decision: the companion is never found, and a
+// supersede answers clean while the reversed decision keeps ranking. The id is
+// refused at the import check, so the premise holds on every writer.
+func TestImportDecisionRefusesTheLinkSeparatorInItsID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, testProject, "/tmp/sep", "sep"); err != nil {
+		t.Fatal(err)
+	}
+	bad := Decision{ID: "ab" + decisionRefSeparator + "cd", ProjectID: testProject, Title: "t", Decision: "d", Rationale: "r", Status: "active"}
+	if err := CheckImportedDecision(bad); err == nil {
+		t.Errorf("CheckImportedDecision accepted id %q, which splits its own companion link", bad.ID)
+	}
+	if _, err := s.ImportDecision(ctx, bad, true); err == nil {
+		t.Errorf("ImportDecision imported id %q, which splits its own companion link", bad.ID)
+	}
+	good := bad
+	good.ID = "abcd"
+	if _, err := s.ImportDecision(ctx, good, true); err != nil {
+		t.Errorf("ImportDecision refused an ordinary id: %v", err)
+	}
+}
