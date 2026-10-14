@@ -1501,7 +1501,10 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 // is repaired is re-encoded in the key order it was read in.
 func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
 	command := renderCodexHookAction(eventToken, ghostBin).Command
-	out := make([]json.RawMessage, 0, len(rules)+1)
+	// No +1: capacity arithmetic over an unbounded rule count reads as a
+	// possible size overflow to static analysis, and the append below runs
+	// for at most one event per merge.
+	out := make([]json.RawMessage, 0, len(rules))
 	wired := false
 	for _, rule := range rules {
 		obj, ok := decodeCodexObject(rule)
