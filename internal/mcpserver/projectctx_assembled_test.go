@@ -2034,3 +2034,60 @@ func TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories(t *tes
 		t.Errorf("after the (gated-out) import: count = %d, want 1 (no new rows)", got)
 	}
 }
+
+// TestProjectContextFirstContactImportNotifiesEmbeddingWorker is the
+// regression test for the first-contact Claude import's missing queue push:
+// `ghost_project_context` imports Claude auto-memory rows when the project
+// holds none, so those rows are memory writes and must queue the project for
+// embedding exactly as the four save tools queue their own. The store's
+// optional onSave callback is unwired in production, so the handler's own push
+// is the only notification the worker gets; without it the imported rows have
+// no vector until the worker's next sweep.
+func TestProjectContextFirstContactImportNotifiesEmbeddingWorker(t *testing.T) {
+	ctx := context.Background()
+	projPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	if err := store.EnsureProject(ctx, "importproj", projPath, "importproj"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The memory directory is derived from the process home, so the fixture
+	// points home at a temp dir and plants one clean file for the import.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	memDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memDir, "clean-note.md"), []byte("A plain project note with nothing sensitive in it."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, session := validityServerFor(t, store)
+	ch := make(chan string, 4)
+	srv.SetEmbedder(&mockEmbedder{}, ch)
+
+	answer := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "importproj"}))
+	if !strings.Contains(answer, "plain project note") {
+		t.Fatalf("the first-contact import did not store the row:\n%s", answer)
+	}
+
+	select {
+	case got := <-ch:
+		if got != "importproj" {
+			t.Errorf("projectCh notified with %q, want %q", got, "importproj")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first-contact import did not notify the embedding worker")
+	}
+}

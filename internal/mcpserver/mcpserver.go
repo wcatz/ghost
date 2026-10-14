@@ -2536,9 +2536,21 @@ func (s *Server) registerTools() {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							_, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							imported, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
 							refusedFiles = append(refusedFiles, refused...)
 							failedFiles = append(failedFiles, failed...)
+							// The imported rows are memory rows, so queue the
+							// project for embedding exactly as the save tools do.
+							// Only a run that wrote at least one row is queued, and
+							// the push is non-blocking like theirs. The store-level
+							// onSave hook is unwired in production, so this push is
+							// the worker's only notification.
+							if imported > 0 && s.projectCh != nil {
+								select {
+								case s.projectCh <- args.ProjectID:
+								default: // non-blocking
+								}
+							}
 							break
 						}
 					}
