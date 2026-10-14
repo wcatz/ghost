@@ -1029,30 +1029,23 @@ const (
 )
 
 // truncationWarning is the caller-facing half of the explicit-truncation
-// contract: whenever memory.ClampContent cut content at the cap, the
-// save/update response appends this line so the saving agent learns the
-// full text did NOT land and can act instead of believing it all stored.
-// what names the field that was cut and advice names the recovery step
-// for THAT writer — a task description must not be told to split into
+// contract for fields cut at memory.MaxContentLen: it wraps
+// truncationWarningAt with the content cap so the historical call sites
+// keep their (what, advice) shape.
+func truncationWarning(what, advice string) string {
+	return truncationWarningAt(what, memory.MaxContentLen, advice)
+}
+
+// truncationWarningAt is the caller-facing half of the explicit-truncation
+// contract: whenever a bounded field was cut, the save/update response
+// appends this line so the saving agent learns the full text did NOT land
+// and can act instead of believing it all stored. what names the field that
+// was cut, maxBytes the byte limit it was cut to, and advice the recovery
+// step for THAT writer — a task description must not be told to split into
 // memories, and a decision must not be told to split into tasks. The
-// stored half is the marker memory.ClampContent appends to the content
-// itself — truncation is visible on both sides.
-// truncationWarning keeps its historical (what, advice) shape callable while
-// also accepting a byte cap, so fields with a non-content cap (titles use
-// maxTitleLen, not memory.MaxContentLen) can name their own limit without a
-// second helper. Any int argument sets the cap; any string argument sets the
-// advice.
-func truncationWarning(what string, args ...any) string {
-	maxBytes := memory.MaxContentLen
-	advice := ""
-	for _, a := range args {
-		switch v := a.(type) {
-		case int:
-			maxBytes = v
-		case string:
-			advice = v
-		}
-	}
+// stored half is the marker where the writer appends one (content only);
+// titles carry no marker, so this warning is their only notice of loss.
+func truncationWarningAt(what string, maxBytes int, advice string) string {
 	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, maxBytes, advice)
 }
 
@@ -3157,7 +3150,7 @@ func (s *Server) registerTools() {
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
 		msg := fmt.Sprintf("Task created (id: %s)", id)
 		if titleTruncated {
-			msg += truncationWarning("task title", maxTitleLen, taskTruncationAdvice)
+			msg += truncationWarningAt("task title", maxTitleLen, taskTruncationAdvice)
 		}
 		if descTruncated {
 			msg += truncationWarning("task description", taskTruncationAdvice)
@@ -3633,7 +3626,7 @@ func (s *Server) registerTools() {
 			msg += " — " + notice
 		}
 		if titleTruncated {
-			msg += truncationWarning("decision title", maxTitleLen, decisionTruncationAdvice)
+			msg += truncationWarningAt("decision title", maxTitleLen, decisionTruncationAdvice)
 		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
