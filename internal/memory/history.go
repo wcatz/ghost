@@ -860,8 +860,10 @@ const purgedTextMarker = "[purged]"
 // lose. What it does reach is every copy of the text the database kept, so
 // nothing is left that a restore or a reader can bring back; see purgeHistoryTx.
 //
-// It names the memory by id alone; a caller acting for a project on a memory it
-// believes deleted uses PurgeDeletedMemoryHistoryInProject.
+// It names the memory by id alone and decides nothing about the row; a caller
+// that read the memory as deleted — ghost_memory_delete and `ghost history purge`
+// both do — uses PurgeDeletedMemoryHistoryInProject, which re-decides that inside
+// the purge.
 func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeOutcome, error) {
 	return s.purgeMemoryHistory(ctx, "", memoryID)
 }

@@ -605,7 +605,7 @@ func runHistory() {
 // one. Naming it is not a confirmation — nothing is erased either way — it is the
 // next command, and refusing without it would leave the operator to find the id in
 // a report again.
-func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) error {
+func purgeHistoryMemory(ctx context.Context, s historyPurgeStore, memoryID string) error {
 	// ONE read of the id set, and both decisions made from it: whether the argument
 	// is a whole id, and — if it is not — what to say about it. Reading it twice
 	// would mean two reads that could disagree, on a path whose whole job is to
@@ -649,14 +649,31 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 		}
 		return printPurgeReport(os.Stdout, outcome)
 	default:
-		// Already deleted. The row is not coming back and nothing asked for it to.
+		// Already deleted — as of the reads above, which were on the pool. A
+		// deleted row can come back (`ghost reflect --restore` reinstates it under
+		// its own id, and a promote can then move it to _global), so the purge
+		// re-decides "still deleted" and "still the tombstone's project" inside
+		// its own transaction and refuses otherwise, rather than erasing a live
+		// row's history under this "already deleted" line. The project is the one
+		// the newest entry names; MemoryHistory returns oldest first.
 		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
-		outcome, err := s.PurgeMemoryHistory(ctx, memoryID)
+		outcome, err := s.PurgeDeletedMemoryHistoryInProject(ctx, entries[len(entries)-1].ProjectID, memoryID)
 		if err != nil {
 			return err
 		}
 		return printPurgeReport(os.Stdout, outcome)
 	}
+}
+
+// historyPurgeStore is the part of *memory.Store purgeHistoryMemory uses. It is an
+// interface so a test can stand a second process between the command's reads on
+// the pool and its purge, which is the window the purge must decide inside.
+type historyPurgeStore interface {
+	AnyMemoryIDsByIDPrefix(ctx context.Context, prefix string) ([]string, error)
+	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	PurgeDeletedMemoryHistoryInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // printPurgeReport states what the purge reached and what it could not. It never
