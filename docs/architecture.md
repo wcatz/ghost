@@ -397,8 +397,11 @@ in (`TestCachedVectorSearchMatchesTheUncachedPath`,
 
 **Bounded.** The cache holds one copy, at most `vectorCacheMaxBytes` (32 MiB, the
 scratch pool's own bound) of embeddings, and drops it after ten idle minutes. Worst-case resident memory is about twice the bound (the cache plus the scratch pool), and racing misses can briefly hold two copies.
-Above the bound it is never loaded for the cache — on a miss the row count at the
-query's width is checked first; a hit reads only the counter — and the search is the uncached path, whose pooled scratch the copy sizes from the row count before it starts ([#1036](#the-vector-scan)).
+Above the bound it is never loaded for the cache — on a miss the row count of the
+rows the cache would keep (the configured identity, at the query's width, the same
+filters the uncached copy's count applies) is checked first; a hit reads only the
+counter — and the search is the uncached path, whose pooled scratch the copy sizes
+from the row count before it starts ([#1036](#the-vector-scan)).
 A database without the counter (a schema older than v24
 opened read-only) is "do not cache", not an error.
 
@@ -663,9 +666,9 @@ carries, and `RestoreSnapshot` brings a row back under the id it had.
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
 which asks `Store.Candidates` for the same legs, parameters and configured
-vector floor, and then applies the caller's category filter to the widened
-candidate set before the window closes. Retrieval is unchanged; what moved is
-which set the filter sees.
+vector floor, and then applies the caller's category, retention and scope
+filters to the widened candidate set before the window closes. Retrieval is
+unchanged; what moved is which set the filter sees.
 
 The main schema tables are:
 
