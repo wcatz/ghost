@@ -3621,6 +3621,20 @@ func (s *Server) registerTools() {
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
+
+		// Notify the embedding worker of the companion memory, exactly as the
+		// three save tools do. RecordDecision writes a real memory row and
+		// calls the store's optional onSave callback, but no production caller
+		// registers one, so without this push the row has no vector until the
+		// worker's next sweep and the vector leg, ghost_health's coverage and
+		// any reflect/supersede/resolve pass in that window cannot see it.
+		if s.projectCh != nil {
+			select {
+			case s.projectCh <- args.ProjectID:
+			default: // non-blocking
+			}
+		}
+
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
