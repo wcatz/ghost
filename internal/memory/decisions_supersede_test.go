@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -524,6 +526,97 @@ func TestSupersedeDecisionFindsARecategorisedCompanion(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A reflect successor that inherited the decision link is the companion now, and
+// the link arm has to find it. Both routes to such a row leave it holding the
+// link and a category that is not 'decision': an LLM merge that names a
+// non-decision row first inserts a fresh row with the link carried onto it, and
+// the SQLite tier's cross-category clustering rewrites the companion in place
+// onto the cluster head's category. Both write source 'reflection', which no
+// writer tool can set — the only writers are ReplaceNonManual itself, whose link
+// is inherited from the row it stands in for, and an import told to trust the
+// artifact's own provenance, which is a restore of the same shape. So the row is
+// found, the resolve guard then retires it or reports it in Declined, and the
+// supersede answer names it rather than coming back clean.
+func TestSupersedeDecisionFindsAReflectSuccessorThatInheritedTheLink(t *testing.T) {
+	ctx := context.Background()
+	// The routes, as the store produces them: insert mints the merged row the
+	// link is carried onto, reuse rewrites the companion in place onto the head's
+	// category. Both keep the link.
+	routes := []struct {
+		name   string
+		insert bool
+	}{
+		{name: "merge successor", insert: true},
+		{name: "reused companion", insert: false},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			s := testStore(t)
+			oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+			oldText, _ := decisionCompanionContent(
+				"Use Redis for the job queue", "Redis lists as the queue backend", "Already deployed for caching")
+			newText, _ := decisionCompanionContent(
+				"Reverse: use Postgres for the job queue", "SKIP LOCKED on Postgres", "Redis lost jobs on failover")
+			// The old companion's successor: category fact (the head's), source
+			// reflection, link intact. The route decides whether that is a fresh
+			// row or the companion rewritten in place.
+			oldContent := oldText
+			if route.insert {
+				oldContent = "Use Postgres for the job queue: SKIP LOCKED on Postgres, replacing the Redis lists approach"
+			}
+			if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+				{Category: "decision", Content: newText, Importance: 0.9, ReplacesIDs: []string{newMem}},
+				{Category: "fact", Content: oldContent, Importance: 0.9, ReplacesIDs: []string{oldMem}},
+			}, "", nil); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			successor := oldMem
+			if route.insert {
+				successor = memoryBySourceRef(t, s, oldDec)
+				if successor == "" {
+					t.Fatal("the merged successor did not inherit the decision link")
+				}
+			}
+			var category, source string
+			if err := s.db.QueryRow(
+				`SELECT category, source FROM memories WHERE id = ?`, successor).Scan(&category, &source); err != nil {
+				t.Fatalf("read successor: %v", err)
+			}
+			if category != "fact" || source != "reflection" {
+				t.Fatalf("the successor is %s/%s, want fact/reflection — the route no longer reproduces the finding", category, source)
+			}
+
+			got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+			if err != nil {
+				t.Fatalf("SupersedeDecisionReport: %v", err)
+			}
+			if len(got.Retired) != 1 || got.Retired[0] != successor {
+				t.Errorf("a reflect successor holding the link was not retired: %+v", got)
+			}
+			if !decisionMemoryResolved(t, s, successor) {
+				t.Error("the successor is still live: search and session start keep answering with the reversed decision")
+			}
+			if len(got.Retired) == 0 && len(got.Declined) == 0 && len(got.Ambiguous) == 0 {
+				t.Error("a supersede that left the successor live was answered as a clean success")
+			}
+		})
+	}
+}
+
+// memoryBySourceRef returns the live memory carrying the decision link, or "".
+func memoryBySourceRef(t *testing.T, s *Store, decisionID string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(
+		`SELECT id FROM memories WHERE source_ref = ?`, decisionCompanionRef(decisionID)).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		t.Fatalf("read linked memory: %v", err)
+	}
+	return id
 }
 
 // Old and new compose to the same text and the old companion is gone: the
