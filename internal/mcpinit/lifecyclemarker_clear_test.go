@@ -74,6 +74,31 @@ func TestACleanRunStillHealsTheOperandKeyedMarkerWithNoStore(t *testing.T) {
 	}
 }
 
+// seedLegacyMarker writes the pre-per-project shared marker file recording
+// `recorded`, returning its path. It is spelled out rather than derived so the
+// test keeps naming the file an older build left on disk.
+func seedLegacyMarker(t *testing.T, dataHome, recorded string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	b, err := json.Marshal(testMarker{
+		Project:      recorded,
+		PhasesFailed: []string{"reflect"},
+		Error:        "the old shared failure",
+		At:           time.Now().UTC().Format(time.RFC3339),
+		Version:      1,
+	})
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	path := filepath.Join(dataHome, "ghost", legacyMarkerFile)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+	return path
+}
+
 // TestALegacyMarkerKeyedOnTheProjectNameIsCleared is the second clearing defect
 // (#1268). The pre-per-project writer recorded the unresolved operand — often
 // the project's name — in the one shared lifecycle-last-failure.json, and the
@@ -82,32 +107,10 @@ func TestACleanRunStillHealsTheOperandKeyedMarkerWithNoStore(t *testing.T) {
 // kept saying consolidation was paused after it had recovered, and the retry
 // command it printed could not clear it either.
 func TestALegacyMarkerKeyedOnTheProjectNameIsCleared(t *testing.T) {
-	seedLegacy := func(t *testing.T, dataHome, recorded string) string {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-			t.Fatalf("mkdir ghost dir: %v", err)
-		}
-		b, err := json.Marshal(testMarker{
-			Project:      recorded,
-			PhasesFailed: []string{"reflect"},
-			Error:        "the old shared failure",
-			At:           time.Now().UTC().Format(time.RFC3339),
-			Version:      1,
-		})
-		if err != nil {
-			t.Fatalf("marshal marker: %v", err)
-		}
-		path := filepath.Join(dataHome, "ghost", legacyMarkerFile)
-		if err := os.WriteFile(path, b, 0o600); err != nil {
-			t.Fatalf("write legacy marker: %v", err)
-		}
-		return path
-	}
-
-	t.Run("the project's own name is healed", func(t *testing.T) {
+	t.Run("the stored name is healed", func(t *testing.T) {
 		dataHome := isolatedHome(t)
 		seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")
-		path := seedLegacy(t, dataHome, "Proj A")
+		path := seedLegacyMarker(t, dataHome, "Proj A")
 
 		if got := lifecycleFailureAlert("p1", "Proj A"); !strings.Contains(got, "the old shared failure") {
 			t.Fatalf("the legacy marker no longer alerts: %q", got)
@@ -120,10 +123,36 @@ func TestALegacyMarkerKeyedOnTheProjectNameIsCleared(t *testing.T) {
 		}
 	})
 
+	t.Run("the resolved id is healed", func(t *testing.T) {
+		dataHome := isolatedHome(t)
+		seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")
+		path := seedLegacyMarker(t, dataHome, "p1")
+
+		if err := FinishLifecycleRun("p1", 3, nil, ""); err != nil {
+			t.Fatalf("clean run: %v", err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("a clean run left the legacy marker recording the project's id (stat err = %v)", err)
+		}
+	})
+
+	t.Run("the operand as given is healed", func(t *testing.T) {
+		dataHome := isolatedHome(t)
+		seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")
+		path := seedLegacyMarker(t, dataHome, "/tmp/proj-a")
+
+		if err := FinishLifecycleRun("/tmp/proj-a", 3, nil, ""); err != nil {
+			t.Fatalf("clean run: %v", err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("a clean run left the legacy marker recording the operand as given (stat err = %v)", err)
+		}
+	})
+
 	t.Run("another project's name is left", func(t *testing.T) {
 		dataHome := isolatedHome(t)
 		seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")
-		path := seedLegacy(t, dataHome, "Proj B")
+		path := seedLegacyMarker(t, dataHome, "Proj B")
 
 		if err := FinishLifecycleRun("p1", 3, nil, ""); err != nil {
 			t.Fatalf("clean run: %v", err)
@@ -132,4 +161,45 @@ func TestALegacyMarkerKeyedOnTheProjectNameIsCleared(t *testing.T) {
 			t.Errorf("a clean run cleared a legacy marker naming another project: %v", err)
 		}
 	})
+}
+
+// TestAnAmbiguousLegacyMarkerSurvivesACleanRun is the legacy twin of the
+// per-project ambiguity defect (#1268). Two projects answer to "shared", and the
+// shared file records that bare string. A spelling match alone is not ownership:
+// the file may record the other project's failure, so a clean run for the
+// project that did not fail must leave it.
+func TestAnAmbiguousLegacyMarkerSurvivesACleanRun(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "first", "", "shared")
+	seedProject(t, dataHome, "second", "", "shared")
+	path := seedLegacyMarker(t, dataHome, "shared")
+
+	if err := FinishLifecycleRun("second", 3, nil, ""); err != nil {
+		t.Fatalf("clean run: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a clean run cleared a legacy marker naming two projects: %v", err)
+	}
+	if got := lifecycleFailureAlert("first", "shared"); !strings.Contains(got, "the old shared failure") {
+		t.Errorf("the failing project's session start lost its legacy alert: %q", got)
+	}
+}
+
+// TestALegacyMarkerNamingAnotherProjectsIDSurvivesACleanRun is the other half of
+// the spelling rule (#1268). A recorded value that happens to be project A's
+// NAME can also be project B's ID; matching the name and stopping there would
+// let A's clean run delete B's still-active failure. The value has to RESOLVE
+// back to the project being cleared, and here it resolves to another one.
+func TestALegacyMarkerNamingAnotherProjectsIDSurvivesACleanRun(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "aid", "/tmp/alpha", "bid")
+	seedProject(t, dataHome, "bid", "/tmp/beta", "other")
+	path := seedLegacyMarker(t, dataHome, "bid")
+
+	if err := FinishLifecycleRun("aid", 3, nil, ""); err != nil {
+		t.Fatalf("clean run: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a clean run cleared a legacy marker naming another project's id: %v", err)
+	}
 }

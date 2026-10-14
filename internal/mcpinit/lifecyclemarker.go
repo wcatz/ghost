@@ -240,11 +240,14 @@ func markerErrorField(text string) string {
 // memory.ErrAmbiguousProject — clears nothing at all (#1268): the name is
 // exactly what an unresolved write keyed its file on, so it may record either
 // project, and an owner that cannot be determined is not read as "not mine".
+// It returns before the legacy single-file check, so such an operand cannot
+// clear the shared file either.
 //
 // The legacy single-file marker is also removed when it names this project by
-// its id, its stored name, or the operand as given — an older build's record
-// carried the unresolved operand — so it does not keep alerting after the
-// project recovers; one naming a different project is left alone.
+// its resolved id, or by its stored name or the operand as given when that
+// spelling resolves back to this project — an older build's record carried the
+// unresolved operand — so it does not keep alerting after the project recovers;
+// one naming another project is left alone.
 func ClearLifecycleFailure(project string) error {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -300,12 +303,12 @@ func ClearLifecycleFailure(project string) error {
 	}
 	legacy := filepath.Join(dataDir, legacyMarkerFile)
 	// The pre-per-project writer recorded the unresolved operand — often the
-	// project's name or a path — in the one shared file, and the alert's own
-	// match test accepts a name, so a marker recording this project under any
-	// spelling is this run's to clear, and one naming another project is left.
-	// An unattributed marker is cleared only by a run that itself named
-	// nothing (#1268).
-	if m := readMarkerAtPath(legacy); m != nil && markerRecordsRun(m.Project, project, name, operand) {
+	// project's name or a path — in the one shared file, so a marker recording
+	// this project under any spelling is this run's to clear. A spelling that
+	// is not the resolved id must resolve back to this project first, because a
+	// name two projects share (or a name that is another project's id) records
+	// the same bare string (#1268).
+	if m := readMarkerAtPath(legacy); m != nil && markerRecordsRun(dataDir, m.Project, project, name, operand) {
 		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -314,18 +317,24 @@ func ClearLifecycleFailure(project string) error {
 }
 
 // markerRecordsRun reports whether a marker's recorded project is the project a
-// clean run is clearing. The run can be named three ways — the resolved id, the
-// project's stored name, and the operand as given — because the legacy shared
-// file predates the resolved id and so carries whichever the caller passed (a
-// name or a path as often as an id). An unattributed marker (recorded "") is
-// cleared only by a run that itself named nothing: an empty project matches no
-// other, and letting a real project clear it would be one project's success
-// erasing a record it cannot claim.
-func markerRecordsRun(recorded, id, name, operand string) bool {
-	if recorded == "" {
-		return id == "" && name == "" && operand == ""
+// clean run is clearing. A recorded value equal to the resolved id is this
+// project, full stop. A value equal to the project's stored name or to the
+// operand as given is only a spelling — the legacy shared file predates the
+// resolved id and carries whichever the caller passed, and a name two projects
+// share (or a name that is another project's id) records the same string — so
+// it counts only when that value RESOLVES back to this project. An unattributed
+// marker (recorded "") names no project: only the empty run clears it, and
+// letting a real project clear it would be one project's success erasing a
+// record it cannot claim.
+func markerRecordsRun(dataDir, recorded, id, name, operand string) bool {
+	if recorded == id {
+		return true
 	}
-	return recorded == id || recorded == name || recorded == operand
+	if recorded == "" || (recorded != name && recorded != operand) {
+		return false
+	}
+	resolved, _, err := resolveMarkerIdentity(dataDir, recorded)
+	return err == nil && resolved == id
 }
 
 // clearCheckedMarker removes the markers keyed on key — a name or operand that
