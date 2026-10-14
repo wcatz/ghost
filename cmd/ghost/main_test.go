@@ -77,6 +77,43 @@ func TestParseObsidianFlags(t *testing.T) {
 	})
 }
 
+// TestParseObsidianFlagsRefusesAnEmptyOut: an explicit empty --out is the
+// unset-variable spelling and is a refusal, never "no flag given". The parser
+// returned "" for it, and runObsidian reads "" as "use the default vault", so
+// `ghost obsidian export --out "$VAULT"` with VAULT unset wrote into the
+// default vault and exited 0. The default is the flag left off.
+func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"attached empty", []string{"--out="}},
+		{"separate empty", []string{"--out", ""}},
+		{"attached empty after a valid flag", []string{"--project=ghost", "--out="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, _, err := parseObsidianFlags(tc.args)
+			if err == nil {
+				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --out must be refused, not read as the default vault", tc.args, out)
+			}
+			if err.Error() != "--out requires a value" {
+				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--out requires a value")
+			}
+		})
+	}
+
+	// Positive controls: a value still parses in both spellings, and an absent
+	// --out is not an error and leaves out empty for the default to fill.
+	for _, args := range [][]string{{"--out", "/v"}, {"--out=/v"}} {
+		if out, _, _, err := parseObsidianFlags(args); err != nil || out != "/v" {
+			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want /v", args, out, err)
+		}
+	}
+	if out, _, _, err := parseObsidianFlags([]string{"--project=ghost"}); err != nil || out != "" {
+		t.Errorf("absent --out = %q (err %v), want empty and no error", out, err)
+	}
+}
+
 // TestParseMCPClient verifies --client parsing rejects a missing or empty
 // value (which previously silently fell back to Claude) and accepts both
 // "--client NAME" and "--client=NAME" forms.
@@ -2225,8 +2262,9 @@ func TestSupersedeReassessReport(t *testing.T) {
 }
 
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
-// resolve, --threshold exists in both value forms, defaulting to 0.80 when the
-// value does not parse, and --reassess is resolve's repair flag with the same
+// resolve, --threshold exists in both value forms, defaulting to 0.80 when it
+// is not typed and refused when its value is not a number in (0, 1] (see
+// supersede_threshold_test.go), and --reassess is resolve's repair flag with the same
 // meaning (#686): the edges are already in the graph, so --apply withdraws them
 // instead of writing new ones. The project repeats — flag then flag, operand
 // then flag, either order — are in TestScopeFlagParsersRefuseEmptyAndRepeated,
@@ -2248,7 +2286,6 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, 0.80},
 		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, false, 0.5},
 		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, false, 0.25},
-		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, false, 0.80},
 		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, 0.80},
 		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, 0.80},
 		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, 0.80},
@@ -2281,6 +2318,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"project empty equals value", []string{"--project="}, "--project requires a value"},
 		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
+		{"threshold bad value", []string{"myproj", "--threshold", "abc"}, `--threshold needs a cosine similarity in (0, 1], e.g. 0.85: got "abc"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)

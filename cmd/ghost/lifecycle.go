@@ -478,10 +478,10 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 			i++
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				return "", "", "", fmt.Errorf("unknown flag %q", args[i])
+				return "", "", "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 			}
 			if projectSet {
-				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+				return "", "", "", fmt.Errorf("unexpected extra argument %s", memory.RefusalArg("project", args[i]))
 			}
 			project, projectSet = args[i], true
 		}
@@ -1513,7 +1513,7 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, _, appliedByCategory, applied, err := applyReflection(
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
@@ -1595,35 +1595,8 @@ func runReflect() {
 	// Keying this on the project-memory count alone dropped both the summary
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
-	if applied && (promoted > 0 || len(keptMems) > 0 || len(keptProjectMems) > 0 || len(keptGlobalMems) > 0) {
-		// appliedSummary counts what the store reports landing in the project:
-		// the replace's own writes PLUS the candidates written back into it
-		// (the full folded set when promotion is off, the kept subset when it
-		// is on). Only the cross-project component still subtracts a drop
-		// count, and with promotion off every cross-project refusal counts as
-		// the global half's: the replace guards the folded list a second time
-		// and the store moves those refusals back to the half that produced the
-		// candidates, so one subtraction covers both guard passes.
-		summaryGlobalDropped := 0
-		if !parsed.promoteGlobals {
-			summaryGlobalDropped = droppedGlobal
-		}
-		// appliedSummary reports the REAL promoted count rather than the number
-		// of candidates, so a partial promotion does not print "3 promoted to
-		// global" one line after "Promoted 1/3".
-		summary := appliedSummary(appliedByCategory, keptGlobalMems, promoted, summaryGlobalDropped, parsed.promoteGlobals)
-		fmt.Printf("Applied: %s\n", summary)
-		// The follow-up names candidates that are actually in the project: a
-		// round whose cross-project candidates were all refused has nothing to
-		// inject into every project.
-		if !parsed.promoteGlobals && crossProjectKept(keptGlobalMems, summaryGlobalDropped) > 0 {
-			fmt.Println("(re-run with --promote-globals to inject them into every project)")
-		}
-		if len(projectForSummary) > 0 {
-			fmt.Println(restoreHint(promoted))
-		} else if promoted > 0 {
-			fmt.Println("(promoted globals must be removed from _global by hand; no project snapshot was created)")
-		}
+	if summary, wrote := writeAppliedReport(os.Stdout, applied, parsed.promoteGlobals, appliedByCategory,
+		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal, deleted); wrote {
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
@@ -1743,8 +1716,9 @@ type supersedePair struct{ source, target string }
 // value flags accept both "--flag value" and "--flag=value", exactly one
 // project is named (by --project or by a bare positional — two of them is a
 // command line whose scope is ambiguous, and last-one-wins would silently
-// answer for whichever project the last spelling named), a
-// non-numeric --threshold keeps the default, --reassess selects the repair
+// answer for whichever project the last spelling named), a --threshold
+// that is not a number in (0, 1] is refused (parseSupersedeThreshold),
+// --reassess selects the repair
 // pass over the edges already in the graph (issue #686), --withdraw names the
 // edges to remove outright, and any other flag is an unknown-flag error (which
 // the caller prints and exits on). The project may come from --project, which
@@ -1803,6 +1777,33 @@ func checkSupersedeConsensus(n int) error {
 		return fmt.Errorf("--consensus needs at least %d passes (1 would run the pass again and gate on nothing)", supersede.MinConsensus)
 	}
 	return nil
+}
+
+// parseSupersedeThreshold reads a --threshold value and refuses one that is not a
+// number in (0, 1]. The threshold is the minimum cosine similarity a neighbour
+// needs to become a candidate pair (supersede.SelectCandidates drops a neighbour
+// whose score is below it), and every candidate that survives the filters is a
+// billed classify call. Cosine lies in [-1, 1], so a threshold of 0 or below
+// admits every neighbour however unrelated, and one above 1 admits nothing: the
+// pass runs and proposes no pair. Neither is a value an operator means, and a
+// value that does not parse (a typo, a decimal comma) used to be dropped in
+// favour of the 0.80 default, so the pass ran at a threshold nobody typed.
+//
+// The check is written as "inside the range" rather than "outside it" so NaN,
+// which every comparison answers false for, is refused rather than admitted:
+// `score < NaN` is false, so a NaN threshold would filter nothing. It is applied
+// after the float32 conversion, so a value too small for float32 (1e-50 rounds
+// to 0) is judged by what the pass would actually compare against. One function
+// for both spellings, for the reason checkSupersedeConsensus gives. The operand
+// is echoed through memory.RefusalArg, as every refusal that repeats caller
+// text is.
+func parseSupersedeThreshold(raw string) (float32, error) {
+	v, err := strconv.ParseFloat(raw, 32)
+	t := float32(v)
+	if err != nil || !(t > 0 && t <= 1) {
+		return 0, fmt.Errorf("--threshold needs a cosine similarity in (0, 1], e.g. 0.85: got %s", memory.RefusalArg("threshold", raw))
+	}
+	return t, nil
 }
 
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, relation string, err error) {
@@ -1892,14 +1893,18 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = v
 			projectSeen = true
 		case args[i] == "--threshold" && i+1 < len(args):
-			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(args[i+1])
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 			i++
 		case strings.HasPrefix(args[i], "--threshold="):
-			if v, verr := strconv.ParseFloat(strings.TrimPrefix(args[i], "--threshold="), 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(strings.TrimPrefix(args[i], "--threshold="))
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 		case args[i] == "--source" && i+1 < len(args):
 			source = args[i+1]
 			i++
@@ -1915,7 +1920,7 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = args[i]
 			projectSeen = true
 		default:
-			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	if len(withdraw) > 0 && reassess {
@@ -2035,7 +2040,8 @@ Flags:
                       costs no classify call, and is never voted on. Refused with
                       --withdraw, which asks no model at all. In a dry run it tells
                       you what --apply would do.
-  --threshold float   Min cosine similarity for a candidate pair (default 0.80)
+  --threshold float   Min cosine similarity for a candidate pair, in (0, 1]
+                      (default 0.80). Anything else is refused.
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
                       (detected from the environment and process ancestry); an
@@ -3830,7 +3836,7 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			out.project = args[i]
 			projectSeen = true
 		default:
-			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
+			return resolveArgs{}, fmt.Errorf("unknown flag %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	// An empty POSITIONAL is the same missing operand in the third spelling, and
@@ -4080,7 +4086,7 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 	verb := "would mark resolved"
 	count := 0
 	for _, m := range res.Memories {
-		if m.AlreadyResolved || m.Pinned || m.ExemptCategory {
+		if m.AlreadyResolved || m.Pinned || m.ExemptCategory || m.PersistentTier {
 			continue
 		}
 		count++
@@ -4090,8 +4096,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 		count = res.Marked
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d declined\n",
-		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
+	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d persistent tier, %d declined\n",
+		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.PersistentTier, res.Declined)
 	for _, m := range res.Memories {
 		// The default is the CLAIM, not the absence of one, and that ordering is
 		// deliberate: a state this switch does not know about must fall through
@@ -4118,6 +4124,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 			marker = "pinned"
 		case m.ExemptCategory:
 			marker = "standing category"
+		case m.PersistentTier:
+			marker = "persistent tier"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}

@@ -2,8 +2,11 @@ package mcpinit
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +52,11 @@ const (
 	// marker (its project deleted, its config changed by hand) can never
 	// nag — or linger on disk — forever.
 	lifecycleMarkerMaxAge = 30 * 24 * time.Hour
+	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
+	// session-start removes before giving up on finding a current one: more
+	// than a project's candidate files (markerCandidates), so it never cuts a
+	// real read short.
+	lifecycleSelfCleanMaxPasses = 8
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
 	lifecycleMarkerErrorMaxBytes = 300
@@ -84,6 +92,11 @@ type lifecycleFailureMarker struct {
 	Error        string   `json:"error"`
 	At           string   `json:"at"` // RFC3339, UTC
 	Version      int      `json:"version"`
+
+	// path is the file this marker was read from (readMarkerAtPath), never
+	// stored. The self-clean removes it directly because a withheld project
+	// (markerProjectField) names no file.
+	path string
 }
 
 // WriteLifecycleFailure records a failed (or never-started) consolidation
@@ -104,8 +117,10 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 		return fmt.Errorf("locate data dir: %w", err)
 	}
 	resolved := resolveMarkerProject(dataDir, project)
+	recorded := resolved
 	if resolved == "" {
 		resolved = project
+		recorded = markerProjectField(project)
 	}
 	if resolved == "" {
 		return fmt.Errorf("cannot record lifecycle failure without a project")
@@ -115,14 +130,21 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	// the moment it was recorded. The alert still renders one line
 	// (lifecycleFailureAlert splits), so a multi-line marker costs the reader
 	// nothing and gives anyone opening the file the actual evidence.
+	//
+	// The cause is the failed phase's raw output tail — whatever the harness or
+	// the model printed last — so it is asked of the token guard before it is
+	// stored, and judged whole, before the storage cap below, so a value that
+	// cap would split is still recognised (markerErrorField). The caller's own
+	// head cut is the caller's to handle: phaseTail drops the partial line it
+	// leaves, so no prefix-less token fragment arrives here.
 	text := strings.TrimSpace(firstErr)
 	if text == "" {
 		text = "phase failed"
 	}
 	m := lifecycleFailureMarker{
-		Project:      resolved,
+		Project:      recorded,
 		PhasesFailed: append([]string(nil), phasesFailed...),
-		Error:        truncateUTF8(text, lifecycleMarkerDetailMaxBytes),
+		Error:        truncateUTF8(markerErrorField(text), lifecycleMarkerDetailMaxBytes),
 		At:           time.Now().UTC().Format(time.RFC3339),
 		Version:      lifecycleMarkerVersion,
 	}
@@ -155,13 +177,64 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	return nil
 }
 
-// ClearLifecycleFailure removes THIS project's marker. A missing marker is
-// success, not an error; the data dir is never created just to delete nothing.
+// markerProjectField is what the marker's project field records for an operand
+// the store could not resolve: the operand itself, unless it is credential
+// shaped, in which case the token guard's placeholder naming the format. The
+// file stays keyed on the raw operand's digest (projectMarkerFile), so two
+// token operands keep two markers and the same operand's clean run still
+// clears its own; only the field, which is read back and printed, loses the
+// value. Not empty: an empty project means an unattributed marker, which the
+// alert would show in every session under that session's own project.
+func markerProjectField(operand string) string {
+	refusal := memory.RejectSecret("project", operand)
+	if refusal == nil {
+		return operand
+	}
+	var detected *memory.SecretContentError
+	if errors.As(refusal, &detected) {
+		return "<project withheld: it holds a " + detected.Format + ">"
+	}
+	return "<project withheld: it holds a credential>"
+}
+
+// markerErrorField is the marker's error text as stored and as rendered: the
+// text itself, unless the token guard finds a credential in it, in which case
+// the guard's placeholder naming the format. The whole text is withheld rather
+// than the matching span, because the guard reports a format and not a
+// position; the full output is still in lifecycle.log for whoever has to
+// diagnose the run. Asked at write time, so the file never holds the value, and
+// again at render time, because a marker an older build wrote does.
+func markerErrorField(text string) string {
+	refusal := memory.RejectSecret("error", text)
+	if refusal == nil {
+		return text
+	}
+	var detected *memory.SecretContentError
+	if errors.As(refusal, &detected) {
+		return "<error withheld: it holds a " + detected.Format + ">"
+	}
+	return "<error withheld: it holds a credential>"
+}
+
+// ClearLifecycleFailure removes every marker recording THIS project. A missing
+// marker is success, not an error; the data dir is never created just to delete
+// nothing.
 //
 // Scoped deliberately. The old implementation removed the one shared file, so
 // project A succeeding after project B failed erased B's failure — the marker
 // recorded B's problem, and A's next clean run made it invisible (issue #540).
 // Success heals its own project and nothing else.
+//
+// "Its own" is more than the resolved id's file. A failure recorded while the
+// operand resolved to nothing is keyed on the operand as given, and a project
+// that later exists under that name with a different id (an imported one) never
+// resolves back to that key: a clean run by name re-resolves to the id, a clean
+// run by id never sees the name, and the alert kept saying consolidation was
+// paused after the project had recovered. So the files keyed on the operand and
+// on the project's name are cleared too, each only when it records this project
+// AND its key is not another project's id — the recorded project alone cannot
+// tell an unresolved "shared" from the project whose id IS "shared", since both
+// record the bare string (see clearCheckedMarker).
 //
 // The legacy single-file marker is also removed when it names this project, so
 // an older build's record does not keep alerting after the project recovers;
@@ -175,14 +248,37 @@ func ClearLifecycleFailure(project string) error {
 	// Clearing by the raw name a caller passed would never find a marker the
 	// writer stored under the resolved id — "success heals" would silently
 	// heal nothing.
+	operand := project
+	var name string
 	if project != "" {
-		if resolved := resolveMarkerProject(dataDir, project); resolved != "" {
-			project = resolved
+		if resolved, resolvedName := resolveMarkerIdentity(dataDir, project); resolved != "" {
+			project, name = resolved, resolvedName
 		}
 	}
 	if project != "" {
 		if err := os.Remove(filepath.Join(dataDir, projectMarkerFile(project))); err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		// The name an older build gave this project. Removed only when the file
+		// records THIS project: the old stem folded punctuation, so the same
+		// file may hold another project's failure ("my project" and
+		// "my_project" both keyed lifecycle-last-failure-my_project.json), and
+		// deleting it would be the very coupling the digest stem removes.
+		old := filepath.Join(dataDir, oldProjectMarkerFile(project))
+		if m := readMarkerAtPath(old); m != nil && m.Project == project {
+			if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		// The keys a failure recorded before the operand resolved may sit
+		// under: the operand as given and the project's stored name.
+		for _, key := range []string{operand, name} {
+			if key == "" || key == project {
+				continue
+			}
+			if err := clearCheckedMarker(dataDir, project, key); err != nil {
+				return err
+			}
 		}
 	}
 	legacy := filepath.Join(dataDir, legacyMarkerFile)
@@ -196,17 +292,85 @@ func ClearLifecycleFailure(project string) error {
 	return nil
 }
 
+// clearCheckedMarker removes the markers keyed on key — a name or operand that
+// is not projectID itself — when they record the project being cleared. key is
+// first asked of the store: when it is ANOTHER project's id, the file keyed on
+// it is that project's own marker, recording the same bare string an unresolved
+// write would, so it is left alone. The digest file is compared against what the
+// writer records for an unresolved operand (markerProjectField, so a withheld
+// operand still matches its own file); the old-stem file against the raw key,
+// because older builds never wrote the placeholder.
+func clearCheckedMarker(dataDir, projectID, key string) error {
+	if owner := resolveMarkerProject(dataDir, key); owner != "" && owner != projectID {
+		return nil
+	}
+	digest := filepath.Join(dataDir, projectMarkerFile(key))
+	if m := readMarkerAtPath(digest); m != nil && m.Project == markerProjectField(key) {
+		if err := os.Remove(digest); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	old := filepath.Join(dataDir, oldProjectMarkerFile(key))
+	if m := readMarkerAtPath(old); m != nil && m.Project == key {
+		if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // projectMarkerFile is the marker file name for one project inside
-// config.DataDir(). Sanitized because the project may be an unresolved name,
-// which the filesystem will not accept as-is; resolved ids are already safe.
+// config.DataDir(): the prefix and a digest of the project, never the project
+// itself. The project may be an unresolved --project operand holding anything
+// at all, and the stem has to be injective over it — the sanitized stem it
+// replaces folded every byte outside [A-Za-z0-9._-] onto "_", so "my project"
+// and "my_project" shared one file and one project's clean run erased the
+// other's still-active failure. A digest has no folding to collide on, is
+// lowercase hex (so a case-insensitive filesystem cannot merge "A" and "a"
+// either), is a fixed length, and keeps the operand out of the directory
+// listing entirely: whatever the operand is, the file name does not spell it.
+//
+// Markers written under the old stem are still read (oldProjectMarkerFile,
+// markerCandidates) and cleared, so an upgrade neither loses nor strands a
+// failure recorded before it.
 func projectMarkerFile(project string) string {
+	return lifecycleMarkerPrefix + "-" + markerStem(project) + ".json"
+}
+
+// LifecycleFailureMarkerFile is projectMarkerFile for callers outside the
+// package — the lifecycle command's tests, which must name the file the
+// writer really produces rather than spell a stem of their own (a stale
+// spelling would make an "is absent" assertion pass vacuously).
+func LifecycleFailureMarkerFile(project string) string {
+	return projectMarkerFile(project)
+}
+
+// markerStem is the first lifecycleMarkerStemBytes of the project's SHA-256,
+// hex-encoded. 128 bits makes an accidental collision between two projects'
+// markers a non-event, and the prefix-plus-"-" shape keeps the file inside
+// the lifecycle-last-failure-*.json glob the no-project read uses.
+func markerStem(project string) string {
+	sum := sha256.Sum256([]byte(project))
+	return hex.EncodeToString(sum[:lifecycleMarkerStemBytes])
+}
+
+// lifecycleMarkerStemBytes is how much of the digest names the file.
+const lifecycleMarkerStemBytes = 16
+
+// oldProjectMarkerFile is the name an older build gave a project's marker:
+// the sanitized stem. Never written now. It is NOT injective — a marker found
+// under it may belong to another project whose name folded onto the same
+// stem — so every reader and clearer of it checks the recorded project.
+func oldProjectMarkerFile(project string) string {
 	return lifecycleMarkerPrefix + "-" + sanitizeMarkerProject(project) + ".json"
 }
 
-// sanitizeMarkerProject maps a project id or name onto a file-name-safe stem.
-// Anything outside the common set becomes "_" rather than being dropped, so
-// two names differing only in punctuation cannot collapse onto each other and
-// silently share a marker. Capped only against absurd lengths.
+// sanitizeMarkerProject maps an id onto a file-name-safe stem. Anything
+// outside the common set becomes "_" rather than being dropped, and the
+// result is capped against absurd lengths. It is NOT injective: "my project"
+// and "my_project" both map to "my_project", which is why the lifecycle
+// failure marker no longer keys on it (see projectMarkerFile) and only reads
+// its old names through oldProjectMarkerFile.
 func sanitizeMarkerProject(project string) string {
 	var b strings.Builder
 	for _, r := range project {
@@ -267,8 +431,16 @@ func FinishLifecycleRun(project string, phasesRan int, failedPhases []string, fi
 // resolveMarkerProject best-effort resolves project (name/id/path) to the
 // store's project ID, returning "" when no store exists or nothing matches.
 func resolveMarkerProject(dataDir, project string) string {
+	id, _ := resolveMarkerIdentity(dataDir, project)
+	return id
+}
+
+// resolveMarkerIdentity is resolveMarkerProject that also returns the project's
+// stored name, which a clean run needs to find a marker keyed on the name before
+// the project existed. Both are "" when no store exists or nothing matches.
+func resolveMarkerIdentity(dataDir, project string) (id, name string) {
 	if project == "" {
-		return ""
+		return "", ""
 	}
 	// There is deliberately no data-dir check here. Every marker path resolves
 	// its directory through config.DataDirPath, which is where the
@@ -278,14 +450,14 @@ func resolveMarkerProject(dataDir, project string) string {
 	// a fallback that writes the raw name (see WriteLifecycleFailure).
 	db, err := sql.Open("sqlite", roDSN(filepath.Join(dataDir, "ghost.db")))
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer db.Close() //nolint:errcheck
-	id, _, err := memory.NewStore(db, nil).ResolveProject(context.Background(), project)
+	id, name, err = memory.NewStore(db, nil).ResolveProject(context.Background(), project)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return id
+	return id, name
 }
 
 // readLifecycleFailure loads the marker, returning nil when there is none,
@@ -307,6 +479,7 @@ func readMarkerAtPath(path string) *lifecycleFailureMarker {
 	if _, err := time.Parse(time.RFC3339, m.At); err != nil {
 		return nil
 	}
+	m.path = path
 	return &m
 }
 
@@ -328,10 +501,19 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		return newestMarker(filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
 			filepath.Join(dataDir, legacyMarkerFile))
 	}
-	for _, name := range markerCandidates(projectID, projectName) {
-		if m := readMarkerAtPath(filepath.Join(dataDir, name)); m != nil {
-			return m
+	for _, c := range markerCandidates(projectID, projectName) {
+		m := readMarkerAtPath(filepath.Join(dataDir, c.name))
+		if m == nil {
+			continue
 		}
+		// An old-stem file may hold another project's failure (the old stem
+		// folded punctuation). Passing over it, rather than returning it for
+		// the alert to suppress, lets this project's own legacy marker after
+		// it still be found.
+		if c.checkProject && m.Project != "" && m.Project != projectID && m.Project != projectName {
+			continue
+		}
+		return m
 	}
 	return nil
 }
@@ -362,24 +544,40 @@ func newestMarker(patterns ...string) *lifecycleFailureMarker {
 	return newest
 }
 
+// markerCandidate is one file readLifecycleFailure tries. checkProject marks a
+// name that is not injective over projects, whose marker counts only when it
+// records the session's own project.
+type markerCandidate struct {
+	name         string
+	checkProject bool
+}
+
 // markerCandidates is the lookup order: the resolved id, the display name (a
-// marker written when the id could not be resolved keys on the name), then the
-// legacy shared file. Duplicates collapse so a session whose id and name match
-// reads the same file twice.
-func markerCandidates(ids ...string) []string {
-	out := make([]string, 0, len(ids)+1)
-	seen := make(map[string]bool, len(ids)+1)
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		f := projectMarkerFile(id)
-		if !seen[f] {
-			seen[f] = true
-			out = append(out, f)
+// marker written when the id could not be resolved keys on the name), then
+// the same two under the old sanitized stem an older build wrote, then the
+// legacy shared file. Duplicates collapse so a session whose id and name
+// match does not read the same file twice.
+func markerCandidates(ids ...string) []markerCandidate {
+	out := make([]markerCandidate, 0, 2*len(ids)+1)
+	seen := make(map[string]bool, 2*len(ids)+1)
+	add := func(name string, check bool) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, markerCandidate{name: name, checkProject: check})
 		}
 	}
-	return append(out, legacyMarkerFile)
+	for _, id := range ids {
+		if id != "" {
+			add(projectMarkerFile(id), false)
+		}
+	}
+	for _, id := range ids {
+		if id != "" {
+			add(oldProjectMarkerFile(id), true)
+		}
+	}
+	add(legacyMarkerFile, false)
+	return out
 }
 
 // lifecycleFailureAlert renders the one-line session-start alert for the
@@ -388,8 +586,9 @@ func markerCandidates(ids ...string) []string {
 // Print rules (each pinned by a test):
 //   - no marker, or a marker that cannot be parsed/aged: no output;
 //   - marker older than lifecycleAlertMaxAge (14d): no output, file kept;
-//   - marker older than lifecycleMarkerMaxAge (30d): no output, file DELETED
-//     (self-clean);
+//   - marker older than lifecycleMarkerMaxAge (30d): that file DELETED
+//     (self-clean), and only that file — the next candidate is then read and
+//     judged by these same rules, so a current marker behind it still alerts;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -403,21 +602,44 @@ func markerCandidates(ids ...string) []string {
 // project is a raw `--project` operand the store could not resolve, so it is
 // RENDERED rather than interpolated — see renderMarkerProject. The alert never
 // includes paths — only the project identifier and the first (≤300-byte) line
-// of the recorded error.
+// of the recorded error, withheld by the token guard or framed as data — see
+// renderMarkerError.
 func lifecycleFailureAlert(projectID, projectName string) string {
-	m := readLifecycleFailure(projectID, projectName)
+	var (
+		m   *lifecycleFailureMarker
+		at  time.Time
+		age time.Duration
+	)
+	// Each pass either returns or removes the expired file it read, so the
+	// loop ends when the candidates run out; the bound is only a backstop.
+	for range lifecycleSelfCleanMaxPasses {
+		m = readLifecycleFailure(projectID, projectName)
+		if m == nil {
+			return ""
+		}
+		var err error
+		at, err = time.Parse(time.RFC3339, m.At)
+		if err != nil {
+			return ""
+		}
+		age = time.Since(at)
+		if age <= lifecycleMarkerMaxAge {
+			break
+		}
+		// Remove the expired file that was read, and only that file. Not
+		// ClearLifecycleFailure: that is a clean run's clear, which removes
+		// every marker recording the project, and from here it would delete a
+		// CURRENT failure keyed on the project's name along with a stale one
+		// keyed on its id. A withheld project names no file either, which is
+		// the other reason the path is used. It came from config.DataDirPath
+		// through readLifecycleFailure. The next pass reads what is left, so a
+		// current marker behind the expired one is still shown.
+		if m.path == "" || os.Remove(m.path) != nil {
+			return ""
+		}
+		m = nil
+	}
 	if m == nil {
-		return ""
-	}
-	at, err := time.Parse(time.RFC3339, m.At)
-	if err != nil {
-		return ""
-	}
-	age := time.Since(at)
-	if age > lifecycleMarkerMaxAge {
-		// Clear the marker that was actually read, keyed by its own recorded
-		// project — never a blanket removal that could touch another's.
-		_ = ClearLifecycleFailure(m.Project)
 		return ""
 	}
 	if age > lifecycleAlertMaxAge {
@@ -436,11 +658,24 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		return ""
 	}
 	p = renderMarkerProject(p)
-	errLine := strings.SplitN(m.Error, "\n", 2)[0]
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
-		truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes), p)
+		renderMarkerError(m.Error), p)
+}
+
+// renderMarkerError renders the marker's error for the alert. The error is the
+// failed phase's output tail, so it is text a harness or a model wrote, printed
+// at the top of every session start for the marker's lifetime: it goes through
+// the token guard again (markerErrorField — the file may predate the write-side
+// guard), the whole error rather than the line shown, so a credential the line
+// only begins is still caught; then its first line is capped and framed as
+// «...» data (quoteData), so instruction-like output reads as quoted text
+// rather than as Ghost's own words. The cap applies before the frame, so the
+// closing delimiter is never cut.
+func renderMarkerError(text string) string {
+	errLine := strings.SplitN(markerErrorField(text), "\n", 2)[0]
+	return quoteData(truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes))
 }
 
 // renderMarkerProject renders the marker's project for the alert, and it is two

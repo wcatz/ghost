@@ -129,6 +129,27 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 				assertNoRefusalEcho(t, out, v)
 			})
 		}
+		for tool, extra := range map[string]map[string]any{
+			"ghost_task_complete": {},
+			"ghost_task_update":   {"priority": 1},
+		} {
+			t.Run("task_id "+tool+"/"+label, func(t *testing.T) {
+				_, session, _ := echoLogSession(t)
+				callTool(t, session, "ghost_task_create", map[string]any{"project_id": "p", "title": "seed task"})
+				args := map[string]any{"task_id": v}
+				for k, x := range extra {
+					args[k] = x
+				}
+				out := callToolErr(t, session, tool, args)
+				if !strings.Contains(out, "task not found") {
+					t.Fatalf("%s did not reach its not-found refusal: %.200s", tool, out)
+				}
+				if strings.Count(out, "task not found") != 1 {
+					t.Errorf("%s says task not found more than once: %.200s", tool, out)
+				}
+				assertNoRefusalEcho(t, out, v)
+			})
+		}
 		t.Run("memory_id purge/"+label, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
 			callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
@@ -150,6 +171,87 @@ func TestStoreBackedRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
 			out := callToolErr(t, session, "ghost_memory_delete", map[string]any{"project_id": "p", "memory_id": v, "purge_history": true})
 			if !strings.Contains(out, "cannot reach") {
 				t.Fatalf("purge did not reach the no-history-store refusal: %.200s", out)
+			}
+			assertNoRefusalEcho(t, out, v)
+		})
+		// A link or mark ref that matches no memory: the refusal fires before the
+		// ref is known to name anything, so it is caller text like any argument.
+		for _, tc := range []struct {
+			name string
+			tool string
+			args func(seed string) map[string]any
+		}{
+			{"target_id", "ghost_link_withdraw", func(seed string) map[string]any {
+				return map[string]any{"project_id": "p", "source_id": seed, "target_id": v}
+			}},
+			{"source_id", "ghost_link_withdraw", func(seed string) map[string]any {
+				return map[string]any{"project_id": "p", "source_id": v, "target_id": seed}
+			}},
+			{"memory_ids", "ghost_resolve_mark", func(string) map[string]any {
+				return map[string]any{"project_id": "p", "memory_ids": []any{v}}
+			}},
+		} {
+			t.Run(tc.name+"/"+label, func(t *testing.T) {
+				db, session, _ := echoLogSession(t)
+				callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
+				var seed string
+				if err := db.QueryRow(`SELECT id FROM memories WHERE project_id = 'p' LIMIT 1`).Scan(&seed); err != nil {
+					t.Fatal(err)
+				}
+				out := callToolErr(t, session, tc.tool, tc.args(seed))
+				if !strings.Contains(out, "has an id starting with") {
+					t.Fatalf("%s did not reach its no-match refusal: %.200s", tc.tool, out)
+				}
+				assertNoRefusalEcho(t, out, v)
+			})
+		}
+		// A tag the shape check refuses (it holds a backtick) is named in that
+		// refusal, which runs before the token guard sees the tag, so the shape
+		// refusal is the one that has to withhold it. The oversized value is cut
+		// to the tag bound before the check, and the refusal still must not repeat
+		// what was cut from it.
+		for _, tc := range []struct {
+			tool string
+			args func(seed string, tags []any) map[string]any
+		}{
+			{"ghost_memory_save", func(_ string, tags []any) map[string]any {
+				return map[string]any{"project_id": "p", "content": "a fact worth keeping", "tags": tags}
+			}},
+			{"ghost_save_global", func(_ string, tags []any) map[string]any {
+				return map[string]any{"content": "a fact worth keeping", "tags": tags}
+			}},
+			{"ghost_memory_update", func(seed string, tags []any) map[string]any {
+				return map[string]any{"project_id": "p", "memory_id": seed, "tags": tags}
+			}},
+			{"ghost_decision_record", func(_ string, tags []any) map[string]any {
+				return map[string]any{"project_id": "p", "title": "a decision", "decision": "we chose", "rationale": "because", "tags": tags}
+			}},
+		} {
+			t.Run("tag shape "+tc.tool+"/"+label, func(t *testing.T) {
+				db, session, _ := echoLogSession(t)
+				callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
+				var seed string
+				if err := db.QueryRow(`SELECT id FROM memories WHERE project_id = 'p' LIMIT 1`).Scan(&seed); err != nil {
+					t.Fatal(err)
+				}
+				tag := "`" + v
+				out := callToolErr(t, session, tc.tool, tc.args(seed, []any{"ordinary", tag}))
+				if !strings.Contains(out, "tag 1") || !strings.Contains(out, "must hold no backtick") {
+					t.Fatalf("%s did not reach the tag-shape refusal: %.200s", tc.tool, out)
+				}
+				assertNoRefusalEcho(t, out, tag)
+			})
+		}
+		t.Run("flag kind/"+label, func(t *testing.T) {
+			db, session, _ := echoLogSession(t)
+			callTool(t, session, "ghost_memory_save", map[string]any{"project_id": "p", "content": "seed fact for the project"})
+			var seed string
+			if err := db.QueryRow(`SELECT id FROM memories WHERE project_id = 'p' LIMIT 1`).Scan(&seed); err != nil {
+				t.Fatal(err)
+			}
+			out := callToolErr(t, session, "ghost_memory_flag", map[string]any{"project_id": "p", "memory_id": seed, "kind": v, "reason": "r"})
+			if !strings.Contains(out, "kind must be") {
+				t.Fatalf("ghost_memory_flag did not reach the kind refusal: %.200s", out)
 			}
 			assertNoRefusalEcho(t, out, v)
 		})

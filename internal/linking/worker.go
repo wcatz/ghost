@@ -20,7 +20,7 @@ type linkStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
-	MarkLinkScanned(ctx context.Context, memoryID string) error
+	MarkLinkScanned(ctx context.Context, memoryID string, scanned []float32) error
 }
 
 // Worker periodically links embedded memories to their nearest neighbors.
@@ -166,7 +166,10 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		if failed {
 			continue
 		}
-		if err := w.store.MarkLinkScanned(ctx, id); err != nil {
+		// vec, not a fresh read: the store records the scan only while the
+		// vector this pass compared is still the memory's embedding, so an
+		// edit that landed mid-scan leaves the memory queued for its new text.
+		if err := w.store.MarkLinkScanned(ctx, id, vec); err != nil {
 			w.logger.Error("linking: mark scanned", "error", err, "memory_id", id)
 		}
 	}

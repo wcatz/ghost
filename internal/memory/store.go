@@ -3343,6 +3343,10 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
 // row a rewrite becomes — a COPY of a value this database already bounded, not new
 // caller text, and filtering there deletes the stored row rather than refusing one.
+// The one part of that value a merge COMPOSES rather than copies — the decision
+// links it stands for, appended to the copied reference — is held to the bound by
+// boundedDecisionRefs, and a merge whose links alone would not fit is dropped
+// before it writes (decisionLinksOverflowTx).
 // `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
 // since the renderer cannot assume its input came from a writer that enforces the
 // cap. A new statement that writes the column has to call boundedSourceRef — the
@@ -5565,6 +5569,14 @@ type DeleteOptions struct {
 	// `ghost backup` (VACUUM INTO) is a copy without them. See the
 	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
+	// ProjectID, when set, scopes the delete to the memory's owning project: a
+	// row that is not in that project is refused with "not found in project"
+	// and nothing is written — no tombstone, no purge. The check is a read
+	// inside the delete's own write transaction, before either of those, so a
+	// row another handle promoted to _global after the caller's own ownership
+	// read cannot be deleted or purged by a project-scoped call (#1154). Empty
+	// is the operator path that names a row by id alone (`ghost history purge`).
+	ProjectID string
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
@@ -5593,6 +5605,16 @@ func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error
 	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
 }
 
+// DeletePurgeInProject is DeletePurge scoped to the memory's owning project, the
+// way DeleteOptions.ProjectID scopes a delete: a row outside projectID is refused
+// inside the write and nothing is purged.
+func (s *Store) DeletePurgeInProject(ctx context.Context, projectID, id string) (PurgeOutcome, error) {
+	if projectID == "" {
+		return PurgeOutcome{}, fmt.Errorf("delete purge: project_id is required")
+	}
+	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true, ProjectID: projectID})
+}
+
 func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts DeleteOptions) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5603,6 +5625,23 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 		return out, fmt.Errorf("begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if opts.ProjectID != "" {
+		// The ownership read is in the write, ahead of the tombstone and the
+		// purge, because it is what decides them: read on the pool before the
+		// transaction, it left a window in which another handle could move the
+		// row to _global and this call would delete it anyway (#1154). A missing
+		// row falls through to the DELETE, which reports it in its own words.
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, id).Scan(&owner)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return out, fmt.Errorf("lookup memory: %w", err)
+		}
+		if err == nil && owner != opts.ProjectID {
+			return out, fmt.Errorf("memory %s not found in project %s",
+				RefusalArg("memory_id", id), RefusalArg("project_id", opts.ProjectID))
+		}
+	}
 
 	if !opts.PurgeHistory {
 		// Before the DELETE, because afterwards there is nothing left to read. A
@@ -5637,7 +5676,7 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return out, fmt.Errorf("memory not found: %s", id)
+		return out, fmt.Errorf("memory not found: %s", RefusalArg("memory_id", id))
 	}
 	// After the DELETE, so the row is gone from the content table the rebuild
 	// reads: the index still carries the deleted row's tokens in segments the
@@ -5790,7 +5829,8 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
 	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("memory %s not found in project %s", id, projectID)
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	if err != nil {
 		return fmt.Errorf("lookup memory: %w", err)
@@ -6011,7 +6051,8 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 		return fmt.Errorf("promote memory rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found in project %s", id, projectID)
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_history SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
@@ -6104,7 +6145,25 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 // columns a version records, and the row that does change (pinned) is one the
 // history table does not carry — the same rule Touch and the resolve KEEP cache
 // already follow.
+//
+// It names the row by id alone; a caller acting for a project uses
+// TogglePinInProject, which refuses a row outside it.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
+	return s.togglePin(ctx, "", id, pinned)
+}
+
+// TogglePinInProject is TogglePin scoped the way PromoteToGlobal is: the UPDATE
+// matches (id, project_id), so a row that is not in projectID — including one
+// another handle promoted to _global after the caller's own ownership read
+// (#1154) — is refused as "not found in project" and left as it was.
+func (s *Store) TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error {
+	if projectID == "" {
+		return fmt.Errorf("toggle pin: project_id is required")
+	}
+	return s.togglePin(ctx, projectID, id, pinned)
+}
+
+func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -6117,8 +6176,8 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	// the comment above has to be able to see that one column is missing rather
 	// than infer it.
 	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
-		UPDATE memories SET pinned = ? WHERE id = ?
-	`, pinnedInt, id)
+		UPDATE memories SET pinned = ? WHERE id = ? AND (? = '' OR project_id = ?)
+	`, pinnedInt, id, projectID, projectID)
 	if err != nil {
 		return fmt.Errorf("toggle pin: %w", err)
 	}
@@ -6127,7 +6186,11 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 		return fmt.Errorf("toggle pin rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found", id)
+		if projectID == "" {
+			return fmt.Errorf("memory %s not found", RefusalArg("memory_id", id))
+		}
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
 	}
 	return nil
 }
@@ -6305,6 +6368,33 @@ func (g *fedGuard) drop(m Memory) bool {
 		}
 	}
 	return true
+}
+
+// emissionClaimIDs is every candidate an emission could write over: the sources
+// it names and any stored row carrying the text it emits (the row a reuse would
+// take).
+func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
+	ids := append([]string(nil), m.ReplacesIDs...)
+	for _, c := range candidates {
+		if c.content == m.Content {
+			ids = append(ids, c.id)
+		}
+	}
+	return ids
+}
+
+// keepEmissionClaims marks every candidate an emission that is not written would
+// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim.
+func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) {
+	named := make(map[string]bool, len(m.ReplacesIDs))
+	for _, id := range m.ReplacesIDs {
+		named[id] = true
+	}
+	for _, c := range candidates {
+		if named[c.id] || c.content == m.Content {
+			concurrent[c.id] = true
+		}
+	}
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -6602,10 +6692,13 @@ type rowClaims struct {
 // filling them independently composes a pair no row ever asserted, and deciding
 // per source lets a single-boundary row lock the unit and lose a later source's
 // complementary end — a loss that depends on the order the consolidator named. See
-// the resolution below for the order of preference. verified_at, confidence, agent,
-// session_id and source_ref remain first-source-wins: each is one value with no
-// partner to disagree with, and a half-window problem cannot arise for any of
-// them. verified_at is a single value by that same reasoning AND is read by the
+// the resolution below for the order of preference. verified_at, confidence, agent
+// and session_id remain first-source-wins: each is one value with no partner to
+// disagree with, and a half-window problem cannot arise for any of them. source_ref
+// is one value EXCEPT for a decision link, which is a LIST: a merge that folds
+// several decision companions stands in for every one of them, so those links are
+// gathered and joined rather than truncated to the first, and the decision lookup
+// reads the whole list. verified_at is a single value by that same reasoning AND is read by the
 // same reader as the two boundaries, so it is judged by readability too rather
 // than for pairing alone. A maintainer reading this paragraph must not
 // reimplement the window the per-value way — that is the bug, and the resolution
@@ -6632,6 +6725,7 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	// set has been seen — deciding per source is the bug this shape exists to fix.
 	var completeWindow, firstHalfWindow Validity
 	var haveComplete, haveHalf bool
+	var decisionRefs []string
 	for _, id := range m.ReplacesIDs {
 		if id == "" {
 			continue
@@ -6694,7 +6788,25 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if claims.sourceRef == "" {
 			claims.sourceRef = sourceRef.String
 		}
+		// A decision link is gathered as a list, not a single value: a merge that
+		// folds two decision companions stands in for BOTH decisions, and carrying
+		// only the first link is what let supersede silently miss the second while
+		// wrongly retiring the row when the first was superseded.
+		decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
 	}
+	// A successor records every decision link it stands for, so no decision is
+	// left without its companion and none is retired on the strength of a link
+	// that names a different decision. The links EXTEND the value chosen above —
+	// the emission's own, else the first source's — rather than replacing it, so
+	// that value's precedence survives and a lone link behind a non-decision first
+	// source is not dropped. boundedDecisionRefs holds the result to
+	// MaxSourceRefLen; ReplaceNonManual has already dropped a merge whose links
+	// alone would not fit.
+	ref, err := boundedDecisionRefs(claims.sourceRef, decisionRefs)
+	if err != nil {
+		return rowClaims{}, err
+	}
+	claims.sourceRef = ref
 	// The window is inherited AS A UNIT, from one source or from none — never half
 	// from one row and half from another.
 	//
@@ -6875,6 +6987,84 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memories SET retention = ?, expires_at = NULL WHERE id = ?`, merged, id); err != nil {
 		return fmt.Errorf("raise the reused memory's retention: %w", err)
+	}
+	return nil
+}
+
+// fillReusedClaimsTx gives a REUSED row the claims of the OTHER sources an
+// emission merged into it, filling only what the row left unset.
+//
+// It is the reuse-branch half of inheritedClaims, for the reason
+// raiseReusedRetentionTx is the reuse-branch half of inheritedRetention: when
+// ReplacesIDs names a source beside the reused row, that source is deleted into
+// this row, and its window, verification, confidence and provenance strings went
+// with it — a decision companion's `decision:<id>` link among them — while the
+// fresh INSERT path keeps every one. The reused row is the FIRST source: its own
+// value wins, and an absorbed source supplies a value only where the row has none,
+// in ReplacesIDs order, by inheritedClaims' own rules — except that the decision
+// links the absorbed sources carried are APPENDED to the row's own source_ref,
+// since a link is a list and keeping only the row's value drops a decision.
+//
+// The window is still a unit. It is filled only when the reused row states
+// neither boundary; a row holding one boundary keeps exactly that half, because
+// completing it from another row composes a pair no row asserted. The emission's
+// own columns play no part, as on the reuse UPDATEs above, which never wrote them.
+//
+// No updated_at and no history row: memory_history records none of these
+// columns, and the evidence that backs them is carried by the caller in the same
+// transaction (carryEvidenceTx), so a filled verified_at stands beside the record
+// that claims it, as on the fresh INSERT.
+func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory) error {
+	others := make([]string, 0, len(m.ReplacesIDs))
+	for _, replaced := range m.ReplacesIDs {
+		if replaced != "" && replaced != id {
+			others = append(others, replaced)
+		}
+	}
+	if len(others) == 0 {
+		return nil
+	}
+	claims, err := inheritedClaims(ctx, tx, projectID, Memory{ReplacesIDs: others})
+	if err != nil {
+		return err
+	}
+	if claims == (rowClaims{}) {
+		return nil
+	}
+	// source_ref is resolved here rather than by a COALESCE, because a decision
+	// link is a LIST: the reused row's own reference wins, but the decision links
+	// the absorbed sources carried are appended to it, exactly as on the fresh
+	// INSERT. A COALESCE kept the row's own value whole and threw the gathered
+	// links away, so an absorbed decision lost its only companion. A row with no
+	// reference of its own takes the inherited value, as before.
+	sourceRef := claims.sourceRef
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, id).Scan(&own); err != nil {
+		return fmt.Errorf("read the reused memory's source_ref: %w", err)
+	}
+	if own.String != "" {
+		if sourceRef, err = boundedDecisionRefs(own.String, decisionRefsInSourceRef(claims.sourceRef)); err != nil {
+			return err
+		}
+	}
+	// SQLite evaluates every SET expression against the row as it was, so the
+	// valid_until CASE reads the ORIGINAL valid_from and the window moves together.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories SET
+			valid_from  = CASE WHEN NULLIF(valid_from, '') IS NULL AND NULLIF(valid_until, '') IS NULL
+			                   THEN COALESCE(?, valid_from) ELSE valid_from END,
+			valid_until = CASE WHEN NULLIF(valid_from, '') IS NULL AND NULLIF(valid_until, '') IS NULL
+			                   THEN COALESCE(?, valid_until) ELSE valid_until END,
+			verified_at = COALESCE(NULLIF(verified_at, ''), ?, verified_at),
+			confidence  = COALESCE(confidence, ?),
+			agent       = COALESCE(NULLIF(agent, ''), ?, agent),
+			session_id  = COALESCE(NULLIF(session_id, ''), ?, session_id),
+			source_ref  = COALESCE(?, source_ref)
+		WHERE id = ?`,
+		nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
+		claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
+		nullIfEmpty(sourceRef), id); err != nil {
+		return fmt.Errorf("fill the reused memory's claims: %w", err)
 	}
 	return nil
 }
@@ -7083,6 +7273,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	dropEmission := make([]bool, len(memories))
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+		// A merge whose decision links alone would not fit in a source_ref is not
+		// written: truncating the list is the silent supersede miss, and failing
+		// the pass would re-propose the same merge forever. Its sources and any
+		// row carrying its text are kept, as a refused claim's are.
+		if !dropEmission[i] {
+			over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
+			if err != nil {
+				return nil, 0, 0, nil, err
+			}
+			if over {
+				dropEmission[i] = true
+				keepEmissionClaims(candidates, concurrent, m)
+			}
+		}
 		// A refusal about a FOLDED cross-project candidate belongs to the half
 		// that produced it, not to the project replace that happens to evaluate
 		// it: ApplyReflection subtracted both halves' drops from different
@@ -7256,6 +7460,18 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
 				return nil, 0, 0, nil, err
 			}
+			// The other sources' support and claims, for the same reason and in the
+			// same place: a merge that kept one source's row deletes the rest into it,
+			// and the cascade takes their evidence the moment the delete below runs.
+			// The fresh INSERT carries both and FoldRows carries the evidence; a
+			// reuse that names no other source carries nothing, because the row's
+			// own evidence never left it. See fillReusedClaimsTx.
+			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
+				return nil, 0, 0, nil, err
+			}
+			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m); err != nil {
+				return nil, 0, 0, nil, err
+			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
 				successorOf[replaced] = id
@@ -7319,10 +7535,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// unattended over the whole corpus, silently forgetting the whole corpus's
 		// support.
 		//
-		// The reuse branch above needs none of this: it updates a row in place, so
-		// that row's evidence never left it. And an emission with no ReplacesIDs
-		// carries nothing, because a brand-new memory has no inherited support and
-		// "none" is the answer.
+		// The reuse branch above carries only for the OTHER sources it names: the
+		// reused row is updated in place, so its own evidence never left it, but the
+		// rows merged into it are deleted like any other source. And an emission
+		// with no ReplacesIDs carries nothing, because a brand-new memory has no
+		// inherited support and "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
 			return nil, 0, 0, nil, err
 		}
@@ -7397,13 +7614,26 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
 	// Find the latest snapshot. Order by snapshot_id (embeds UnixNano), not
 	// created_at (second-precision, so same-second snapshots order
 	// arbitrarily). Older Unix()-suffixed IDs sort before newer
 	// UnixNano()-suffixed ones because the shorter numeric suffix is a prefix
 	// of the longer, so mixed-vintage databases still order correctly.
+	//
+	// The read runs inside the write transaction, after BEGIN IMMEDIATE took
+	// the lock (#1190). Read on the pool first, a reflection another process
+	// committed while this restore waited for the lock was serialised before
+	// the restore and still skipped by it: the restore applied the older
+	// snapshot, and a memory the newer reflection consumed — not in the older
+	// snapshot — stayed deleted while the command reported success.
 	var snapshotID string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT snapshot_id FROM memory_snapshots
 		WHERE project_id = ?
 		ORDER BY snapshot_id DESC
@@ -7415,12 +7645,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("find snapshot: %w", err)
 	}
-
-	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
-	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
 
 	// Remove what the replace created — and only that.
 	//
@@ -7651,7 +7875,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// The evidence of the rows that were genuinely GONE, from the snapshot that
 	// carried it. Only the reinserted half needs it: a row restored IN PLACE was
 	// never deleted, so its evidence was never in danger, and copying it would
-	// double its records on every repeated restore.
+	// double its records on every repeated restore. What an in-place row DID gain
+	// is the copies a merge carried onto it from the rows coming back here, and
+	// those go (uncarryRestoredSourcesTx), so each restored record exists once.
 	//
 	// The copy replaces rather than appends, and it is scoped to the ids the
 	// INSERT above just created — so it cannot touch a row that came back earlier
@@ -7663,6 +7889,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// restore and the row comes back with none. That is the truth — this database
 	// never recorded the support of a row it could not name — and the alternative
 	// would be inventing it.
+	if err := uncarryRestoredSourcesTx(ctx, tx, snapshotID); err != nil {
+		return 0, err
+	}
 	if len(reinserted) > 0 {
 		if err := restoreSnapshotEvidenceTx(ctx, tx, snapshotID, reinserted); err != nil {
 			return 0, err

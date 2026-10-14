@@ -225,8 +225,21 @@ func manifestOpenError(path string, err error) error {
 // file is reported as fs.ErrNotExist so a caller can tell "there is no manifest"
 // from "the manifest is unreadable" — the first is an expected state a pre-
 // migration copy is always in, and the second is damage.
+//
+// A symlink is followed, and its target must be a regular file. The target is
+// stat'ed BEFORE it is opened and anything else — a FIFO, a device, a socket, a
+// directory — is refused unopened: opening a FIFO for reading blocks until a
+// writer appears, so a read-first check would hang `ghost backup verify` on a
+// sidecar that is sitting right there.
 func ReadBackupManifest(path string) (BackupManifest, error) {
 	var m BackupManifest
+	info, err := os.Stat(path)
+	if err != nil {
+		return BackupManifest{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return BackupManifest{}, fmt.Errorf("the manifest at %s is not a regular file (%s)", path, info.Mode().Type())
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return BackupManifest{}, err
@@ -237,7 +250,32 @@ func ReadBackupManifest(path string) (BackupManifest, error) {
 	if m.ManifestVersion != ManifestVersion {
 		return BackupManifest{}, fmt.Errorf("the manifest at %s is format v%d, and this Ghost reads v%d", path, m.ManifestVersion, ManifestVersion)
 	}
+	// The sidecar arrives with the copy being judged, so it is untrusted input,
+	// and sha256 is the one string field of it that verify prints. A value that
+	// is not a digest is damage, refused here like any other unreadable manifest
+	// and named through RefusalArg, so a control byte in it — ESC [1F moving the
+	// cursor back onto the headline, a newline starting a forged line — can
+	// never reach the reader's terminal as itself.
+	if !isSHA256Hex(m.SHA256) {
+		return BackupManifest{}, fmt.Errorf("the manifest at %s is not readable as a manifest: its sha256 is not 64 lowercase hex digits: %s",
+			path, RefusalArg("sha256", m.SHA256))
+	}
 	return m, nil
+}
+
+// isSHA256Hex reports whether s is what FileSHA256 writes: exactly 64 lowercase
+// hex digits.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // VerifyState is one check's verdict.
@@ -369,7 +407,10 @@ func (r VerifyReport) Failed() []string {
 // cannot read — a different claim, and the wrong one to hand someone deciding
 // whether to keep looking. A run that could not finish at all (the file would
 // not open, or a table was missing) still returns the checks that did run, and
-// leaves CountsRead false so nothing prints a row count nobody read.
+// leaves CountsRead false so nothing prints a row count nobody read. The schema
+// version and the row counts are read separately, and a read that fails is
+// reported as a skipped row naming it rather than ending the run: a table that
+// lost those two rows would read like a build that only has two checks.
 //
 // A missing manifest is not a failure. The copy a user restores from after a bad
 // upgrade is written by the migration path, which writes no manifest, so
@@ -441,22 +482,37 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	defer db.Close() //nolint:errcheck
 
 	rep.add(checkIntegrity(ctx, db, path))
+
+	// The two reads below are independent, and each one's failure is reported
+	// rather than allowed to stop the run. A check that could not run still gets
+	// its row — a report that silently lost the `schema version` and `row counts`
+	// lines would read like a build that only has two checks, and an operator
+	// deciding whether to keep a damaged copy needs to know which questions were
+	// asked. The run still fails, because a file nobody could finish reading
+	// is not a file this build can vouch for.
+	var readErr error
 	version, err := DBUserVersion(db)
 	if err != nil {
-		return rep, fmt.Errorf("read the schema version of %s: %w", path, err)
+		rep.add(checkSchemaVersionUnreadable(err))
+		readErr = fmt.Errorf("read the schema version of %s: %w", path, err)
+	} else {
+		rep.SchemaVersion = version
+		rep.add(checkSchemaVersion(version, manifest, rep.HasManifest))
 	}
-	rep.SchemaVersion = version
-	rep.add(checkSchemaVersion(version, manifest, rep.HasManifest))
 	counts, err := CountRows(ctx, db)
 	if err != nil {
 		// CountsRead stays false, and Counts stays at its zero value: nothing was
 		// read, and a caller that printed them would be reporting an empty file
 		// rather than an unmeasured one.
-		return rep, err
+		rep.add(checkCountsUnreadable(err))
+		if readErr == nil {
+			readErr = err
+		}
+	} else {
+		rep.Counts, rep.CountsRead = counts, true
+		rep.add(checkCounts(counts, manifest, rep.HasManifest))
 	}
-	rep.Counts, rep.CountsRead = counts, true
-	rep.add(checkCounts(counts, manifest, rep.HasManifest))
-	return rep, nil
+	return rep, readErr
 }
 
 // add appends a check and folds a failure into Problems, so a caller cannot
@@ -602,6 +658,32 @@ func checkSchemaVersion(version int, m BackupManifest, hasManifest bool) VerifyC
 	return c
 }
 
+// checkSchemaVersionUnreadable is the schema version check for a run that could
+// not read the version at all. The row is kept rather than dropped: the report
+// has one line per check whether it ran or not, and a file whose table lost the
+// schema version row would read like a report that only has three checks. It
+// reports skipped and not failed, because a check that did not run is not a
+// verdict about the file — the run's error is what makes the report refuse it.
+func checkSchemaVersionUnreadable(err error) VerifyCheck {
+	return VerifyCheck{
+		Name:   "schema version",
+		State:  VerifySkipped,
+		Detail: fmt.Sprintf("could not read the file's schema version: %v", err),
+	}
+}
+
+// checkCountsUnreadable is checkCounts' counterpart for a file whose rows cannot
+// be counted. A restore of this file would hold rows nobody has read, so the row
+// says which read failed instead of printing the zero count — and it is skipped
+// rather than failed, for the reason checkSchemaVersionUnreadable gives.
+func checkCountsUnreadable(err error) VerifyCheck {
+	return VerifyCheck{
+		Name:   "row counts",
+		State:  VerifySkipped,
+		Detail: fmt.Sprintf("could not count the file's rows: %v", err),
+	}
+}
+
 // checkCounts compares what the file holds to what the manifest recorded. Both
 // numbers come from the file — the manifest's is a claim, this is the reading —
 // and they are read from the same query CountRows backs, so a count that moves
@@ -649,6 +731,13 @@ func checkHash(path string, m BackupManifest, hasManifest bool, size int64) Veri
 	if err != nil {
 		c.State = VerifyFailed
 		c.Detail = fmt.Sprintf("could not hash the file: %v", err)
+		return c
+	}
+	if !isSHA256Hex(m.SHA256) {
+		// ReadBackupManifest already refuses this; checkHash takes any
+		// BackupManifest, so it does not print one it has not validated.
+		c.State = VerifyFailed
+		c.Detail = "the manifest's sha256 is not 64 lowercase hex digits: " + RefusalArg("sha256", m.SHA256)
 		return c
 	}
 	if sum != m.SHA256 {

@@ -89,6 +89,9 @@ type MemoryStore interface {
 	// Access tracking
 	Touch(ctx context.Context, ids []string) error
 	TogglePin(ctx context.Context, id string, pinned bool) error
+	// TogglePinInProject is TogglePin scoped to projectID: a row outside it is
+	// refused inside the write, not pinned.
+	TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error
 
 	// Reflection
 	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, int, int, map[string]int, error)
@@ -98,7 +101,9 @@ type MemoryStore interface {
 	CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error)
 	GetTask(ctx context.Context, taskID string) (memory.Task, error)
 	ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error)
-	CompleteTask(ctx context.Context, taskID, notes string) error
+	// CompleteTask returns whether the note was cut at MaxContentLen, which is
+	// what the tool answer reports; the same cap the portable importer applies.
+	CompleteTask(ctx context.Context, taskID, notes string) (notesClamped bool, err error)
 	UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (memory.Task, error)
 
 	// Decisions. companionClamped reports that the composed companion-memory
@@ -109,6 +114,9 @@ type MemoryStore interface {
 	// the project with the same title (trimmed, case-insensitive), or "".
 	FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
+	// LiveDecisionSuccessor returns the id of the still-live decision that
+	// superseded decisionID, or "" when it has none.
+	LiveDecisionSuccessor(ctx context.Context, projectID, decisionID string) (string, error)
 	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
 	// decision's companion memory (retired, or left live because it is pinned).
 	SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (memory.DecisionRetirement, error)
