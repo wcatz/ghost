@@ -368,18 +368,24 @@ func joinDecisionRefs(refs []string) string {
 	return strings.Join(out, decisionRefSeparator)
 }
 
-// decisionRefPrefix is the source_ref namespace only RecordDecision writes. The
-// writer tools (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
+// decisionRefPrefix is the source_ref namespace only RecordDecision (and the
+// consolidation successor that inherits its link) writes. The writer tools
+// (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
 // checkReservedSourceRef, so a caller cannot stamp an unrelated memory with a
 // decision's link; ImportMemory does not refuse it, because a restore must keep
-// the link, and the lookup's category and uniqueness checks cover that door.
+// the link — a merged successor's mixed value such as "docs/x.md,decision:<id>"
+// included — and the lookup's category and uniqueness checks cover that door.
 const decisionRefPrefix = "decision:"
 
-// checkReservedSourceRef refuses a caller-supplied source_ref in the reserved
-// decision namespace.
+// checkReservedSourceRef refuses a caller-supplied source_ref that carries a
+// decision link ANYWHERE the lookup would read one. The guard asks the reader
+// itself (decisionRefsInSourceRef) rather than restating its rule, because the
+// two drifting apart is the hole: a guard that refused only a leading prefix let
+// "runbook.md,decision:<id>" through, and the token reader then took that row
+// for the decision's companion.
 func checkReservedSourceRef(ref string) error {
-	if strings.HasPrefix(ref, decisionRefPrefix) {
-		return fmt.Errorf("source_ref %q is reserved: the %q prefix links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
+	if len(decisionRefsInSourceRef(ref)) > 0 {
+		return fmt.Errorf("source_ref %q is reserved: a %q entry links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
 	}
 	return nil
 }

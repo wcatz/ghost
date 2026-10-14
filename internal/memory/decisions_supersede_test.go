@@ -1014,3 +1014,36 @@ func TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions(t *testing
 		})
 	}
 }
+
+// TestWriterPathsRefuseADecisionTokenAnywhereInTheSourceRef: the decision lookup
+// reads a source_ref as a comma-separated list and takes any token carrying the
+// decision prefix as a link, so the writer guard refuses that token wherever the
+// reader would accept one — not only as a leading prefix. Otherwise a caller
+// saving "runbook.md,decision:<id>" in the decision category becomes a claimed
+// companion of that decision, retired when it is superseded.
+func TestWriterPathsRefuseADecisionTokenAnywhereInTheSourceRef(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, ref := range []string{"runbook.md,decision:abc", "a,b,decision:abc", "docs/x.md,decision:"} {
+		_, _, _, err := s.UpsertWithOptions(ctx, testProject, "decision", "forged link "+ref, "manual", 0.5, nil,
+			UpsertOptions{Provenance: Provenance{SourceRef: ref}})
+		if err == nil {
+			t.Errorf("UpsertWithOptions accepted %q, a source_ref the decision lookup reads as a link", ref)
+		}
+		id, err := s.Create(ctx, testProject, Memory{Category: "decision", Content: "plain " + ref, Source: "manual", Importance: 0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{Provenance: Provenance{SourceRef: ref}}); err == nil {
+			t.Errorf("UpdateMemoryWithOptions accepted %q, a source_ref the decision lookup reads as a link", ref)
+		}
+	}
+	// A reference that only MENTIONS the word, in a token the reader does not take
+	// as a link, is an ordinary reference and stays accepted.
+	for _, ref := range []string{"docs/decision:abc.md", "runbook.md, decision:abc"} {
+		if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "ordinary ref "+ref, "manual", 0.5, nil,
+			UpsertOptions{Provenance: Provenance{SourceRef: ref}}); err != nil {
+			t.Errorf("UpsertWithOptions refused %q, which the decision lookup does not read as a link: %v", ref, err)
+		}
+	}
+}

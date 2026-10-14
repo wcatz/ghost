@@ -70,3 +70,32 @@ func TestDecisionRecordAnswerWarnsWhenTheOldMemoryIsAmbiguous(t *testing.T) {
 		t.Errorf("no ambiguity warning in the answer:\n%s", out)
 	}
 }
+
+// A decision token anywhere in the reference is refused by every writer tool,
+// because the decision lookup reads every comma-separated token.
+func TestWriterToolsRefuseAnEmbeddedDecisionRef(t *testing.T) {
+	_, _, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	const ref = "runbook.md,decision:abc"
+	for _, tool := range []string{"ghost_memory_save", "ghost_save_global"} {
+		args := map[string]any{"content": "an unrelated memory via " + tool, "category": "decision", "source_ref": ref}
+		if tool == "ghost_memory_save" {
+			args["project_id"] = "abc123"
+		}
+		if res := callTool(t, session, tool, args); !res.IsError {
+			t.Errorf("%s accepted %q: %s", tool, ref, resultText(res))
+		}
+	}
+	saved := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "abc123", "content": "a plain memory", "category": "decision",
+	})
+	if saved.IsError {
+		t.Fatal(resultText(saved))
+	}
+	id := labeledID(t, resultText(saved), "(id: ")
+	if res := callTool(t, session, "ghost_memory_update", map[string]any{
+		"project_id": "abc123", "memory_id": id, "source_ref": ref,
+	}); !res.IsError {
+		t.Errorf("ghost_memory_update accepted %q: %s", ref, resultText(res))
+	}
+}
