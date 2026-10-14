@@ -1547,8 +1547,14 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
 		return "", fmt.Errorf("promote failed: %w", err)
 	}
-	s.notifyProjectResource(ctx, resolvedProjectID, "context")
-	s.notifyResourceUpdated(ctx, "ghost://memories/global")
+	// A promotion moves the row between two projects rather than editing it in
+	// place: it leaves the source project's context and joins `_global`, where it
+	// is served by BOTH ghost://project/_global/context and
+	// ghost://memories/global. So this pushes two rows' worth of resources, not
+	// one — the source project's context, and every resource the destination
+	// project's rows reach.
+	s.notifyMemoryRow(ctx, resolvedProjectID)
+	s.notifyMemoryRow(ctx, memory.GlobalProjectID)
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
 }
 
@@ -1633,6 +1639,9 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// other mutating handler in this file pushes that update after its write, and
 	// this was the only write path that did not — a client subscribed to the
 	// resource would keep serving a ranking the withdrawal just invalidated.
+	// The rows live in resolvedProjectID, so when that is `_global` the same
+	// withdrawal reaches ghost://memories/global too, and the shared helper pushes
+	// both rather than leaving the bucket stale.
 	//
 	// ABOVE the follow-up block, and driven by `res.Withdrawn` alone, so it cannot
 	// be coupled to whether there is a repair to print. It used to sit at the very
@@ -1641,7 +1650,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// no repairable target) — so a 'causes' withdrawal would have gone unnotified
 	// while reporting success.
 	if res.Withdrawn > 0 {
-		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+		s.notifyMemoryRow(ctx, resolvedProjectID)
 	}
 	groups := supersede.RepairableTargets(res.Links)
 	if len(groups) == 0 {
@@ -1893,9 +1902,14 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 	// The context resource carries the ranked surface this call just changed, so
 	// a client subscribed to it would otherwise keep serving a ranking with
 	// memories the agent has buried still in it. Every other mutating handler in
-	// this file pushes that update after its write.
+	// this file pushes that update after its write, and the shared helper adds
+	// ghost://memories/global when the marked rows live in `_global` — which the
+	// store refuses to mark, so in practice this mark only ever reaches the
+	// context resource, but the call site states the rule rather than re-deriving
+	// it. The resolve writer that CAN reach `_global` is the pass behind
+	// ghost_resolve apply, which the helper also covers.
 	if res.Marked > 0 {
-		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+		s.notifyMemoryRow(ctx, resolvedProjectID)
 	}
 	return sb.String(), nil
 }
@@ -1998,7 +2012,9 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	if err != nil {
 		return nil, nil, fmt.Errorf("purge failed: %w", err)
 	}
-	s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	// The tombstone lives under resolvedProjectID, so when that is `_global` the
+	// purge reaches ghost://memories/global as well as the context resource.
+	s.notifyMemoryRow(ctx, resolvedProjectID)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 			fmt.Sprintf("Memory %s was already deleted; its %d recorded version(s) of text and the "+
@@ -2861,7 +2877,7 @@ func (s *Server) registerTools() {
 				if err != nil {
 					return nil, nil, fmt.Errorf("delete failed: %w", err)
 				}
-				s.notifyProjectResource(ctx, resolvedProjectID, "context")
+				s.notifyMemoryRow(ctx, resolvedProjectID)
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 						fmt.Sprintf("Memory %s was deleted, and its recorded history and any reflection "+
@@ -2871,7 +2887,7 @@ func (s *Server) registerTools() {
 			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
 				return nil, nil, fmt.Errorf("delete failed: %w", err)
 			}
-			s.notifyProjectResource(ctx, resolvedProjectID, "context")
+			s.notifyMemoryRow(ctx, resolvedProjectID)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
 					"This store does not report whether the write-ahead log was truncated, so treat the "+
@@ -2885,7 +2901,7 @@ func (s *Server) registerTools() {
 		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
-		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+		s.notifyMemoryRow(ctx, resolvedProjectID)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
 		}, nil, nil
@@ -3249,7 +3265,11 @@ func (s *Server) registerTools() {
 		if args.Apply {
 			verb = "resolved"
 			count = res.Resolved
-			s.notifyProjectResource(ctx, projectID, "context")
+			// The pass stamps resolved_at on rows in projectID, and `_global` is a
+			// valid value here: it holds the promoted rows every project injects,
+			// which ghost://memories/global serves, so the shared helper pushes
+			// that bucket too when the pass ran over `_global`.
+			s.notifyMemoryRow(ctx, projectID)
 		}
 		var sb strings.Builder
 		// The veto count is reported so a caller can tell a pass that asked
@@ -3637,12 +3657,11 @@ func (s *Server) registerTools() {
 		// client that pinned the context resource at session start keeps the
 		// pre-decision block without this push (#1271). It sits AFTER the
 		// supersedes step above so the pushed update reflects the companion the
-		// step just retired. The global resource is the same write reaching a
-		// second surface, as ghost_save_global pushes for a _global row.
-		s.notifyProjectResource(ctx, args.ProjectID, "context")
-		if args.ProjectID == memory.GlobalProjectID {
-			s.notifyResourceUpdated(ctx, "ghost://memories/global")
-		}
+		// step just retired, and it goes through the shared helper so a decision
+		// recorded under `_global` reaches ghost://memories/global the same way
+		// ghost_save_global's own write does, rather than through an inline copy
+		// of that rule.
+		s.notifyMemoryRow(ctx, args.ProjectID)
 
 		// Notify the embedding worker of the companion memory, exactly as the
 		// three save tools do. RecordDecision writes a real memory row and

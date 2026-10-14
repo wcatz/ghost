@@ -148,12 +148,12 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 	if detached, unattributed := merged.AttributionTotals(); detached > 0 || unattributed > 0 {
 		if detached > 0 {
 			fmt.Fprintf(sb,
-				"  ⚠ %d verdict(s) were not counted: their call is outside the report's window, or the store no longer holds it\n",
+				"  ⚠ %d detached verdict(s) were not counted: their call is outside the report's window, or the store no longer holds it\n",
 				detached)
 		}
 		if unattributed > 0 {
 			fmt.Fprintf(sb,
-				"  ⚠ %d verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
+				"  ⚠ %d unattributed verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
 				unattributed)
 		}
 	}

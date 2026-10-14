@@ -168,7 +168,11 @@ func TestContradictsMarkerNeedsBothSidesRendered(t *testing.T) {
 func TestContradictsMarkerSurvivesResponseFit(t *testing.T) {
 	a := candidate("A1", "proj", "fact", "database configuration A1", 0.9)
 	b := candidate("B1", "proj", "fact", "database configuration B1", 0.8)
-	c := candidate("C1", "proj", "fact", "database configuration C1 an unrelated longer line", 0.7)
+	// C1 is the row the cap drops and is deliberately LARGE: the trim's cut
+	// notice is counted against the cap, so dropping only a short last row would
+	// not free room for the notice and a second row would go.
+	c := candidate("C1", "proj", "fact", "database configuration C1 an unrelated longer line "+
+		strings.Repeat("trailing detail ", 20), 0.7)
 	set := setOf(a, b, c)
 	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
 	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
