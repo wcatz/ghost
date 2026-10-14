@@ -1245,10 +1245,12 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
-	// record does not have.
-	isCreate := r.Action == portable.ActionCreate && r.Type == portable.TypeMemory
+	// record does not have — so the two provenance arms are gated on the type
+	// rather than on the action alone.
+	isCreate := r.Action == portable.ActionCreate
+	isMemory := r.Type == portable.TypeMemory
 	switch {
-	case isCreate && r.Downgraded:
+	case isCreate && isMemory && r.Downgraded:
 		// The provenance rewrite is the one thing about the record that is not
 		// visible afterwards: the stored source is the downgraded one, so the
 		// artifact's own value is gone from the store entirely. It is said here
@@ -1256,11 +1258,16 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// a keep-forever tier a file planted is one no pass can take back — so
 		// the line names both.
 		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
-	case isCreate && r.Clamped:
+	case isCreate && len(r.Clamped) > 0:
 		// A clamp is the other thing a reader cannot see in the file afterwards,
-		// because the stored text is the cut version.
-		detail = strings.TrimSpace(detail) + " …(truncated at the content cap)"
-	case isCreate:
+		// because the stored text is the cut version — and for a title, or for
+		// the alternatives past the twentieth, the row carries no marker at all,
+		// so the report is the only place the loss can be said (#1232). It names
+		// the fields, never their text: a clamp report is read by whoever holds
+		// the artifact, and the cut field may be the one carrying a value that
+		// must not be echoed back.
+		detail = strings.TrimSpace(detail) + " …(truncated at the cap: " + strings.Join(r.Clamped, ", ") + ")"
+	case isCreate && isMemory:
 		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
 	}
 	switch {

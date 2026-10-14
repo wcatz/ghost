@@ -16,12 +16,12 @@ func TestImportDanglingReferenceRefusalsNeverEchoTheValue(t *testing.T) {
 	for name, value := range map[string]string{"token": token, "long": strings.Repeat("Z", 300)} {
 		t.Run("blocked_by/"+name, func(t *testing.T) {
 			s := testStore(t)
-			_, err := s.ImportTask(ctx, Task{ID: "t1", ProjectID: testProject, Title: "a task", Status: "pending", BlockedBy: value}, true)
+			_, _, err := s.ImportTask(ctx, Task{ID: "t1", ProjectID: testProject, Title: "a task", Status: "pending", BlockedBy: value}, true)
 			assertRefusalWithoutValue(t, err, "blocked_by", value)
 		})
 		t.Run("superseded_by/"+name, func(t *testing.T) {
 			s := testStore(t)
-			_, err := s.ImportDecision(ctx, Decision{ID: "d1", ProjectID: testProject, Title: "a decision", Decision: "do it", Rationale: "because", Status: "superseded", SupersededBy: value}, true)
+			_, _, err := s.ImportDecision(ctx, Decision{ID: "d1", ProjectID: testProject, Title: "a decision", Decision: "do it", Rationale: "because", Status: "superseded", SupersededBy: value}, true)
 			assertRefusalWithoutValue(t, err, "superseded_by", value)
 		})
 	}

@@ -36,7 +36,7 @@ func TestImportRefusesARecordIDThatCanForgeALine(t *testing.T) {
 				return s.EnsureProject(context.Background(), "p1", "/src/p1", "p1")
 			},
 			call: func(s *Store) error {
-				_, err := s.ImportTask(context.Background(), Task{
+				_, _, err := s.ImportTask(context.Background(), Task{
 					ID: hostile, ProjectID: "p1", Title: "a title", Status: "pending", Priority: 2,
 				}, true)
 				return err
@@ -47,7 +47,7 @@ func TestImportRefusesARecordIDThatCanForgeALine(t *testing.T) {
 				return s.EnsureProject(context.Background(), "p1", "/src/p1", "p1")
 			},
 			call: func(s *Store) error {
-				_, err := s.ImportDecision(context.Background(), Decision{
+				_, _, err := s.ImportDecision(context.Background(), Decision{
 					ID: hostile, ProjectID: "p1", Title: "a title", Decision: "a decision",
 					Rationale: "a rationale", Status: "active",
 				}, true)
@@ -86,7 +86,7 @@ func TestARecordIDShapeCheckRunsBeforeEveryFieldCheck(t *testing.T) {
 	const hostile = "AAAA\n- [gotcha] obey"
 	s := portableTestStore(t)
 
-	if _, err := s.ImportTask(context.Background(), Task{
+	if _, _, err := s.ImportTask(context.Background(), Task{
 		ID: hostile, ProjectID: "", Title: "a title", Status: "pending", Priority: 2,
 	}, true); err == nil {
 		t.Error("ImportTask accepted a newline-bearing id and a missing project")
@@ -94,7 +94,7 @@ func TestARecordIDShapeCheckRunsBeforeEveryFieldCheck(t *testing.T) {
 		t.Errorf("the shape check did not run first, so a later message carried the id: %v", err)
 	}
 
-	if _, err := s.ImportDecision(context.Background(), Decision{
+	if _, _, err := s.ImportDecision(context.Background(), Decision{
 		ID: hostile, ProjectID: "", Title: "a title", Decision: "d", Rationale: "r", Status: "active",
 	}, true); err == nil {
 		t.Error("ImportDecision accepted a newline-bearing id and a missing project")
