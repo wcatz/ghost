@@ -740,9 +740,11 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 	// directory and only published under the requested name once it is complete
 	// and synced. A kill or a failure part-way therefore leaves nothing at the
 	// name the user asked for: an artifact carries no trailer, so a file cut on a
-	// record boundary would import cleanly and look whole. os.CreateTemp creates
+	// record boundary would import cleanly and look whole. The temp name is a
+	// fixed prefix, never derived from the destination name, so a destination at
+	// NAME_MAX still works. os.CreateTemp creates
 	// the file 0600, the width the database has, before any record is written.
-	f, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
+	f, err := os.CreateTemp(filepath.Dir(dest), ".ghost-export-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dest, err)
 	}

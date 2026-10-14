@@ -192,3 +192,24 @@ func TestExportCopyFallbackPublishesSameBytes(t *testing.T) {
 		t.Fatalf("stray files: %v", names)
 	}
 }
+
+// A destination basename at NAME_MAX is legal and worked before the temp file
+// existed, so the temp name must not grow with the destination name.
+func TestExportLongDestinationNameStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	name := strings.Repeat("a", 255-len(".jsonl")) + ".jsonl"
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'kept', 'mcp', datetime('now'), datetime('now'))`, "m-good")
+	path := filepath.Join(dir, name)
+	var s, w strings.Builder
+	if err := runExportCore(context.Background(), store, &s, &w, path, ""); err != nil {
+		if strings.Contains(err.Error(), "too long") {
+			t.Fatalf("a legal %d-byte name failed: %v", len(name), err)
+		}
+		t.Skipf("filesystem refuses the name itself: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}
