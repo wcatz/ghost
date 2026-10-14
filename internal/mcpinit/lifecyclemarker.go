@@ -236,9 +236,15 @@ func markerErrorField(text string) string {
 // tell an unresolved "shared" from the project whose id IS "shared", since both
 // record the bare string (see clearCheckedMarker).
 //
-// The legacy single-file marker is also removed when it names this project, so
-// an older build's record does not keep alerting after the project recovers;
-// one belonging to a different project is left alone.
+// A reference that does not resolve CLEANLY — one two projects share, which is
+// memory.ErrAmbiguousProject — clears nothing at all (#1268): the name is
+// exactly what an unresolved write keyed its file on, so it may record either
+// project, and an owner that cannot be determined is not read as "not mine".
+//
+// The legacy single-file marker is also removed when it names this project by
+// its id, its stored name, or the operand as given — an older build's record
+// carried the unresolved operand — so it does not keep alerting after the
+// project recovers; one naming a different project is left alone.
 func ClearLifecycleFailure(project string) error {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -251,7 +257,17 @@ func ClearLifecycleFailure(project string) error {
 	operand := project
 	var name string
 	if project != "" {
-		if resolved, resolvedName := resolveMarkerIdentity(dataDir, project); resolved != "" {
+		resolved, resolvedName, err := resolveMarkerIdentity(dataDir, project)
+		if err != nil {
+			// The reference matched more than one project (or the store could
+			// not be read), so it names no single project and every marker
+			// keyed on it — the digest file for the operand itself included —
+			// may record another project's failure. An owner that cannot be
+			// determined is not read as "not mine" (#1268): success clears
+			// nothing rather than guessing.
+			return nil
+		}
+		if resolved != "" {
 			project, name = resolved, resolvedName
 		}
 	}
@@ -282,9 +298,13 @@ func ClearLifecycleFailure(project string) error {
 		}
 	}
 	legacy := filepath.Join(dataDir, legacyMarkerFile)
-	// Compared with no emptiness guard: an unattributed legacy marker
-	// (Project == "") must still self-clean when told to clear "".
-	if m := readMarkerAtPath(legacy); m != nil && m.Project == project {
+	// The pre-per-project writer recorded the unresolved operand — often the
+	// project's name or a path — in the one shared file, and the alert's own
+	// match test accepts a name, so a marker recording this project under any
+	// spelling is this run's to clear, and one naming another project is left.
+	// An unattributed marker is cleared only by a run that itself named
+	// nothing (#1268).
+	if m := readMarkerAtPath(legacy); m != nil && markerRecordsRun(m.Project, project, name, operand) {
 		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -292,16 +312,41 @@ func ClearLifecycleFailure(project string) error {
 	return nil
 }
 
+// markerRecordsRun reports whether a marker's recorded project is the project a
+// clean run is clearing. The run can be named three ways — the resolved id, the
+// project's stored name, and the operand as given — because the legacy shared
+// file predates the resolved id and so carries whichever the caller passed (a
+// name or a path as often as an id). An unattributed marker (recorded "") is
+// cleared only by a run that itself named nothing: an empty project matches no
+// other, and letting a real project clear it would be one project's success
+// erasing a record it cannot claim.
+func markerRecordsRun(recorded, id, name, operand string) bool {
+	if recorded == "" {
+		return id == "" && name == "" && operand == ""
+	}
+	return recorded == id || recorded == name || recorded == operand
+}
+
 // clearCheckedMarker removes the markers keyed on key — a name or operand that
 // is not projectID itself — when they record the project being cleared. key is
 // first asked of the store: when it is ANOTHER project's id, the file keyed on
 // it is that project's own marker, recording the same bare string an unresolved
-// write would, so it is left alone. The digest file is compared against what the
-// writer records for an unresolved operand (markerProjectField, so a withheld
-// operand still matches its own file); the old-stem file against the raw key,
-// because older builds never wrote the placeholder.
+// write would, so it is left alone. A key the store cannot resolve CLEANLY — a
+// name two projects share — is left for the same reason: the recorded project
+// alone cannot say which of them it is (#1268). The digest file is compared
+// against what the writer records for an unresolved operand (markerProjectField,
+// so a withheld operand still matches its own file); the old-stem file against
+// the raw key, because older builds never wrote the placeholder.
 func clearCheckedMarker(dataDir, projectID, key string) error {
-	if owner := resolveMarkerProject(dataDir, key); owner != "" && owner != projectID {
+	owner, _, err := resolveMarkerIdentity(dataDir, key)
+	if err != nil {
+		// The key did not resolve cleanly: it matched more than one project,
+		// and a name two projects share is exactly the key an unresolved write
+		// lands on. Ownership cannot be determined, so it is not read as "not
+		// mine": the file is left for whoever it records (#1268).
+		return nil
+	}
+	if owner != "" && owner != projectID {
 		return nil
 	}
 	digest := filepath.Join(dataDir, projectMarkerFile(key))
@@ -429,18 +474,23 @@ func FinishLifecycleRun(project string, phasesRan int, failedPhases []string, fi
 }
 
 // resolveMarkerProject best-effort resolves project (name/id/path) to the
-// store's project ID, returning "" when no store exists or nothing matches.
+// store's project ID, returning "" when no store exists, nothing matches, or
+// the reference is ambiguous.
 func resolveMarkerProject(dataDir, project string) string {
-	id, _ := resolveMarkerIdentity(dataDir, project)
+	id, _, _ := resolveMarkerIdentity(dataDir, project)
 	return id
 }
 
 // resolveMarkerIdentity is resolveMarkerProject that also returns the project's
-// stored name, which a clean run needs to find a marker keyed on the name before
-// the project existed. Both are "" when no store exists or nothing matches.
-func resolveMarkerIdentity(dataDir, project string) (id, name string) {
+// stored name, which a clean run needs to find a marker keyed on the name
+// before the project existed, and the resolution's error. The error is the
+// difference between "no project answers to this" and "more than one does"
+// (memory.ErrAmbiguousProject), and a caller deciding ownership must not read
+// the second as the first: a name two projects share is what an unresolved
+// write keyed its file on (#1268).
+func resolveMarkerIdentity(dataDir, project string) (id, name string, err error) {
 	if project == "" {
-		return "", ""
+		return "", "", nil
 	}
 	// There is deliberately no data-dir check here. Every marker path resolves
 	// its directory through config.DataDirPath, which is where the
@@ -450,14 +500,14 @@ func resolveMarkerIdentity(dataDir, project string) (id, name string) {
 	// a fallback that writes the raw name (see WriteLifecycleFailure).
 	db, err := sql.Open("sqlite", roDSN(filepath.Join(dataDir, "ghost.db")))
 	if err != nil {
-		return "", ""
+		return "", "", err
 	}
 	defer db.Close() //nolint:errcheck
 	id, name, err = memory.NewStore(db, nil).ResolveProject(context.Background(), project)
 	if err != nil {
-		return "", ""
+		return "", "", err
 	}
-	return id, name
+	return id, name, nil
 }
 
 // readLifecycleFailure loads the marker, returning nil when there is none,
