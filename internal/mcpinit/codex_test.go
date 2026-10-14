@@ -2129,6 +2129,104 @@ func TestRunCodex_NullHooksIsRefused(t *testing.T) {
 	}
 }
 
+// TestRunCodex_BlankHooksJSONWritten pins #1296: a 0-byte or whitespace-only
+// hooks.json carries nothing to merge, so it is treated as absent and written
+// as the canonical document in one run, the way a 0-byte config.toml is
+// appended to. Refusing it instead would leave every re-run refusing the same
+// file until the user deleted it.
+func TestRunCodex_BlankHooksJSONWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed string
+	}{
+		{"empty", ""},
+		{"whitespace", "  \n\t\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			path := codexHooksJSON(home)
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex over a blank hooks.json must succeed, got: %v", err)
+			}
+			if !strings.Contains(out.String(), "+ installed hooks.json") {
+				t.Errorf("a blank hooks.json must be reported as installed, got:\n%s", out.String())
+			}
+
+			ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := renderCodexHooksConfig(ghostBin); string(data) != want {
+				t.Errorf("a blank hooks.json must be written as the canonical document:\ngot:\n%s\nwant:\n%s", data, want)
+			}
+
+			// Idempotent: a second run over the canonical document writes
+			// nothing and reports it as already wired.
+			var second bytes.Buffer
+			if err := RunCodex(&second, false); err != nil {
+				t.Fatalf("second RunCodex: %v", err)
+			}
+			if !strings.Contains(second.String(), "✓ hooks already wired") {
+				t.Errorf("a second run must be a no-op, got:\n%s", second.String())
+			}
+		})
+	}
+}
+
+// TestRunCodex_RefusesMalformedHooksBeforeRegistering pins #1296's other half:
+// a hooks.json that is present but structurally invalid is refused BEFORE step
+// 3 registers the MCP server in config.toml, with the file named and the edit
+// that clears it — never the generic re-run hint, which a re-run cannot
+// satisfy while the file stays invalid. The file is left exactly as written
+// and no config.toml is created, so a refused install wires nothing.
+func TestRunCodex_RefusesMalformedHooksBeforeRegistering(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = `{"hooks":`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := RunCodex(&out, false)
+	if err == nil {
+		t.Fatalf("a malformed hooks.json must be refused; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Fix or delete") {
+		t.Errorf("refusal must name the edit that clears it, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "to retry") {
+		t.Errorf("refusal must not carry the generic re-run hint, got: %v", err)
+	}
+	// Nothing half installed: the refusal lands before step 3, so config.toml
+	// must not have been created.
+	if _, statErr := os.Stat(codexConfigToml(home)); !os.IsNotExist(statErr) {
+		t.Errorf("a refused hooks.json must leave config.toml unregistered (stat err %v)", statErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused file must be left untouched, got:\n%s", got)
+	}
+}
+
 func TestRunCodex_DryRunWritesNothing(t *testing.T) {
 	home, xdg := setupCodexTestEnv(t)
 
