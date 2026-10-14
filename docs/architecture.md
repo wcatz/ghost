@@ -339,7 +339,7 @@ is still the corpus.
 
 **The signal is in the database.** Schema v24 adds `vector_epoch`, a one-row
 counter (created by its first bump, read as 0 until then) that triggers bump in the writing transaction, on exactly the writes that
-change what the vector query (`vectorScanColumns`) returns:
+change what the vector query (`vectorScanColumns`) returns (schema v25 adds the validity arm below):
 
 | Trigger | Fires on |
 |---|---|
@@ -349,6 +349,7 @@ change what the vector query (`vectorScanColumns`) returns:
 | `vector_epoch_mem_au` | UPDATE OF `resolved_at`, `scope`, `project_id` on `memories` that changes one of them |
 | `vector_epoch_mem_ad` | DELETE on `memories` (which covers a delete that did not cascade, e.g. under `foreign_keys=OFF`) |
 | `vector_epoch_mem_ai` | INSERT on `memories` whose id already has an embedding row (an orphan from a delete under `foreign_keys=OFF`) |
+| `vector_epoch_mem_validity_au` | UPDATE OF `valid_from`, `valid_until` on `memories` that changes one of them (schema v25) |
 
 Everything else a memory carries (access count, `last_accessed`, tags,
 importance, content, `pinned`), and every other table (retrieval records, links,
@@ -367,7 +368,8 @@ trigger's `WHEN` names `memories.scope`, which a pre-v12 database lacks, so a
 trigger created that early breaks the legacy steps that alter `memories`. It is
 created right after `initSQL` for a fresh database, by `migrateV24` for an
 upgraded one, and by `ensurePostMigrationIndexes` (all `IF NOT EXISTS`) for a
-current one. A later migration that rebuilds `memories` or `memory_embeddings`
+current one; the validity arm rides that same DDL on a fresh or current store and
+is delivered to a pre-v25 one by `migrateV25`. A later migration that rebuilds `memories` or `memory_embeddings`
 drops these triggers with the table and must recreate them.
 
 **A hit is exact.** A search reads the counter under the store's read lock, on
