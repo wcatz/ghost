@@ -926,7 +926,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// `CountMemories`, which has no `resolved_at` predicate, still counts
 		// them) with the never-saved census, which is false.
 		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-			return note, nil
+			return note + s.skippedImportNote(skippedFiles), nil
 		}
 		// `_global` is not a project, and the switch below asks whether a PROJECT
 		// is registered — so for that id the census is false in the same way, and
@@ -942,9 +942,9 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		// in the first place.
 		if projectID == memory.GlobalProjectID {
 			if note := projectContextEmptyNote(memories); note != "" {
-				return note, nil
+				return note + s.skippedImportNote(skippedFiles), nil
 			}
-			return "No memories found among the cross-project rows.", nil
+			return "No memories found among the cross-project rows." + s.skippedImportNote(skippedFiles), nil
 		}
 		exists, existsErr := s.projectExists(ctx, projectID)
 		switch {
@@ -960,24 +960,13 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		}
 		// A sentence about the store is not a large answer and has no rows to cut,
 		// so it is not fitted to the budget.
-		return text, nil
+		return text + s.skippedImportNote(skippedFiles), nil
 	}
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-		// A block made entirely of cross-project rows is not this project's
-		// context, and it is only visible from OUTSIDE the empty gate: with
-		// `IncludeGlobal` the section is populated by `_global` whenever the
-		// store holds any, so this case never reached an empty block. Appended
-		// rather than substituted, because there IS an answer above — the
-		// cross-project rows are wanted, they are simply not this project's.
-		//
-		// The other shape that reaches only this branch is a block made of the
-		// sections rendered OUTSIDE the assembler, with an empty memory read
-		// behind it: `## Learned Context` above is exactly that, and for a
-		// project reflection has summarised it means the summary's own source
-		// rows were withheld (#788). The function picks the sentence by the
-		// verdict, so this call site does not ask what kind of non-empty block
-		// it is holding.
 		parts = append(parts, responsePart{text: "\n\n" + note})
+	}
+	if sn := s.skippedImportNote(skippedFiles); sn != "" {
+		parts = append(parts, responsePart{text: sn})
 	}
 
 	if len(skippedFiles) > 0 {
@@ -1030,6 +1019,13 @@ func newMeasuredServer(store provider.MemoryStore, now time.Time) *Server {
 		searchMaxBytes: searchResponseMaxBytes,
 		clock:          func() time.Time { return now },
 	}
+}
+
+func (s *Server) skippedImportNote(skippedFiles []string) string {
+	if len(skippedFiles) == 0 {
+		return ""
+	}
+	return "\n\nClaude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
 }
 
 func renderSkippedImportFiles(skipped []string) string {
