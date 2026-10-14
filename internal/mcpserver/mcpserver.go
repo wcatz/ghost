@@ -1225,6 +1225,21 @@ func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix st
 	}
 }
 
+// notifyMemoryRow pushes a resources/updated notification for every resource
+// whose read a memory row in projectID changes. `_global` is one project AND the
+// bucket behind ghost://memories/global, so the same rows are served by both
+// ghost://project/_global/context and ghost://memories/global; a writer whose row
+// lives there must notify BOTH, or a subscriber to one keeps a stale list or
+// block. The writers that write an ordinary memory row call this after a
+// successful write, so the rule lives in one place rather than in a per-handler
+// check the next writer can miss (#1274, #1281).
+func (s *Server) notifyMemoryRow(ctx context.Context, projectID string) {
+	s.notifyProjectResource(ctx, projectID, "context")
+	if projectID == memory.GlobalProjectID {
+		s.notifyResourceUpdated(ctx, "ghost://memories/global")
+	}
+}
+
 // SetEmbedder configures optional vector embedding for hybrid search.
 func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 	s.embedder = e
@@ -1458,7 +1473,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	}); err != nil {
 		return "", fmt.Errorf("update failed: %w", err)
 	}
-	s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	s.notifyMemoryRow(ctx, resolvedProjectID)
 
 	// A content change dropped the embedding — nudge the worker to re-embed.
 	if content != nil && s.projectCh != nil {
@@ -2393,14 +2408,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
-		s.notifyProjectResource(ctx, args.ProjectID, "context")
-		// `_global` is one project AND the bucket behind ghost://memories/global,
-		// so a save that resolved there changes the rows that resource serves; a
-		// subscriber to it must hear too. The mirror of the ghost_save_global
-		// case, which pushes the context resource this branch already handles.
-		if args.ProjectID == memory.GlobalProjectID {
-			s.notifyResourceUpdated(ctx, "ghost://memories/global")
-		}
+		s.notifyMemoryRow(ctx, args.ProjectID)
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -3057,11 +3065,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
-		s.notifyResourceUpdated(ctx, "ghost://memories/global")
-		// `_global` is a project as well as a bucket: ghost://project/_global/context
-		// serves exactly these cross-project rows, so a subscriber to it must hear
-		// about this write, not only a subscriber to ghost://memories/global.
-		s.notifyProjectResource(ctx, memory.GlobalProjectID, "context")
+		s.notifyMemoryRow(ctx, memory.GlobalProjectID)
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -4101,7 +4105,7 @@ func (s *Server) registerTools() {
 		if err := s.store.TogglePinInProject(ctx, resolvedProjectID, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
-		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+		s.notifyMemoryRow(ctx, resolvedProjectID)
 		action := "pinned"
 		if !args.Pinned {
 			action = "unpinned"
