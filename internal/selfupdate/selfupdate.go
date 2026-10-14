@@ -644,11 +644,17 @@ func resolveSymlinks(path string) (string, error) {
 	}
 }
 
+// dirOf reports the directory holding path, with filepath.Dir's exact
+// semantics. A hand-rolled separator scan got a path directly under a
+// filesystem root wrong: it returned "" for "/ghost" (and "C:" for
+// "C:\ghost.exe"), where the parent is the root itself. A relative result
+// breaks resolveSymlinks' guarantee that every path it returns is absolute,
+// and makes Replace stage its temp file in os.TempDir() rather than beside the
+// target — the rename then fails with EXDEV when the two are on different
+// filesystems.
+//
+// It also treated a backslash as a separator on every platform, which on Unix
+// truncates a perfectly valid filename that contains one.
 func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			return path[:i]
-		}
-	}
-	return "."
+	return filepath.Dir(path)
 }
