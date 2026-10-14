@@ -222,6 +222,110 @@ func TestRunStop_NeverSweepsForeignPaths(t *testing.T) {
 	}
 }
 
+// unsetEnvForTest removes key from the environment for the rest of the test and
+// restores it afterwards. Unlike t.Setenv(key, "") it models a runtime that does
+// not see the variable at all.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	if old, ok := os.LookupEnv(key); ok {
+		t.Setenv(key, old)
+		_ = os.Unsetenv(key)
+	}
+}
+
+// sweepableGhostDir materialises an opencode-materialized transcript under a
+// fresh `ghost-*` directory inside base and returns that directory. base stands
+// in for the temp directory the test wants the hook to recognise as the host's.
+func sweepableGhostDir(t *testing.T, base, name string) string {
+	t.Helper()
+	dir := filepath.Join(base, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create ghost session dir: %v", err)
+	}
+	path := filepath.Join(dir, "messages.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{lineUser, ocLineBashTool()}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	return dir
+}
+
+// sweepViaStopHook drives one opencode stop through the hook for transcriptPath,
+// which is how the sweep runs in production (the deferred cleanup).
+func sweepViaStopHook(t *testing.T, transcriptPath string) {
+	t.Helper()
+	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
+		fmt.Sprintf(`{"session_id":"oc-sweep","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, transcriptPath))
+	var out bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
+}
+
+// TestRunStop_SweepsGhostDirDespiteATrailingSeparator pins the first runtime
+// divergence: Go reports the temp variable verbatim while the plugin's runtime
+// strips one trailing separator, so a raw comparison saw two spellings of the
+// same directory as different and left the session directory behind.
+func TestRunStop_SweepsGhostDirDespiteATrailingSeparator(t *testing.T) {
+	isolatedHome(t)
+	base := filepath.Join(t.TempDir(), "hosttmp")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatalf("create host temp dir: %v", err)
+	}
+	unsetEnvForTest(t, "TMP")
+	unsetEnvForTest(t, "TEMP")
+	t.Setenv("TMPDIR", base+string(filepath.Separator))
+
+	dir := sweepableGhostDir(t, base, "ghost-trailing")
+	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("ghost session dir survived a trailing separator in the temp variable: %v", err)
+	}
+}
+
+// TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar pins the second
+// divergence: with TMPDIR unset the plugin's runtime falls back to TMP or TEMP
+// while os.TempDir reads only the system default, so a directory created under
+// the host's fall-back was never recognised as being inside a temp directory.
+func TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar(t *testing.T) {
+	for _, key := range []string{"TMP", "TEMP"} {
+		t.Run(key, func(t *testing.T) {
+			isolatedHome(t)
+			base := filepath.Join(t.TempDir(), "hosttmp")
+			if err := os.MkdirAll(base, 0o700); err != nil {
+				t.Fatalf("create host temp dir: %v", err)
+			}
+			unsetEnvForTest(t, "TMPDIR")
+			unsetEnvForTest(t, "TMP")
+			unsetEnvForTest(t, "TEMP")
+			t.Setenv(key, base)
+
+			dir := sweepableGhostDir(t, base, "ghost-fallback")
+			sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("ghost session dir under the host's %s survived: %v", key, err)
+			}
+		})
+	}
+}
+
+// TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase keeps the widened
+// candidate set honest: a `ghost-*` directory whose parent is not a temp base is
+// left in place, so accepting more bases did not turn the sweep into one that
+// removes any directory named like the plugin's.
+func TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase(t *testing.T) {
+	isolatedHome(t)
+	parent := filepath.Join(t.TempDir(), "notatemp")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("create parent dir: %v", err)
+	}
+	dir := sweepableGhostDir(t, parent, "ghost-elsewhere")
+	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("a ghost dir outside every temp base must survive: %v", err)
+	}
+}
+
 // TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
 // stop_hook_active suppresses a repeat stop entirely, but session-end fires
 // once per real session end, so its lifecycle spawns run regardless of any

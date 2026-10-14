@@ -234,8 +234,17 @@ var auditSidecarDir = os.TempDir
 // runs in its (possibly exiting) host process, a host that quits before the
 // detached hook finishes — or exits right after spawning — would otherwise
 // leak transcript dirs forever (`opencode run` does exactly this). Guarded
-// twice: only adapter-materialized formats are considered, and only paths
-// directly inside <os.TempDir()>/ghost-*/ are ever removed.
+// twice: only adapter-materialized formats are considered, and only a
+// `ghost-*` directory directly inside a temp base the host could have used is
+// ever removed.
+//
+// The base is a SET rather than one path because the plugin's runtime and this
+// hook do not resolve the temp directory the same way — the plugin strips a
+// trailing separator Go keeps verbatim, and its fall-back order over TMPDIR,
+// TMP and TEMP differs from os.TempDir's on both POSIX and Windows — so a
+// comparison against os.TempDir() alone left the directory behind whenever the
+// two disagreed. insideAHostTempDir normalises both sides, so the sweep does
+// not depend on the two agreeing.
 func cleanupTransientTranscript(p hostevent.Payload) {
 	if p.Contract == nil || p.TranscriptPath == "" {
 		return
@@ -246,10 +255,52 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 		return
 	}
 	dir := filepath.Dir(p.TranscriptPath)
-	if !strings.HasPrefix(filepath.Base(dir), "ghost-") || filepath.Dir(dir) != os.TempDir() {
+	if !strings.HasPrefix(filepath.Base(dir), "ghost-") || !insideAHostTempDir(filepath.Dir(dir)) {
 		return
 	}
 	_ = os.RemoveAll(dir)
+}
+
+// hostTempDirCandidates lists every base a host runtime might have reported for
+// the temp directory it created a `ghost-*` session directory in. Go's
+// os.TempDir reads TMPDIR alone on POSIX and GetTempPath's TMP-then-TEMP on
+// Windows, while Node's os.tmpdir falls back TMPDIR then TMP then TEMP, so no
+// single variable is shared. os.TempDir() is always first because it is the
+// resolved default when none of the variables is set.
+func hostTempDirCandidates() []string {
+	candidates := []string{os.TempDir()}
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		if v := os.Getenv(key); v != "" {
+			candidates = append(candidates, v)
+		}
+	}
+	return candidates
+}
+
+// insideAHostTempDir reports whether dir is one of the temp bases a host
+// runtime could have created its `ghost-*` session directory in, comparing
+// normalised paths so a trailing separator cannot make two spellings of the
+// same directory disagree. Windows compares case-insensitively because its
+// filesystem does; the other platforms do not, so a differently-cased
+// directory there is a genuinely different one.
+func insideAHostTempDir(dir string) bool {
+	for _, base := range hostTempDirCandidates() {
+		if sameDir(dir, base) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameDir reports whether two paths name the same directory. filepath.Clean
+// folds the trailing separator Go keeps verbatim from a variable and the host
+// runtime strips.
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // safeProjectIDComponent reports whether id can be embedded in a filename
