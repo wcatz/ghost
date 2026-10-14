@@ -625,7 +625,11 @@ row that is not being written. Before the messages, because every field check is
 prefixed with the id, and a refusal that carried the payload would be the forgery
 it exists to stop. The one message between the two checks therefore names no id at
 all. The refusal never echoes the value, so the `ghost import` report cannot be
-forged by the record it is refusing. The rejection is per-record and named by
+forged by the record it is refusing. A store failure the import WRAPS after the
+shape check — `import project <id>: …`, `import memory <id>: …` and their task
+and decision siblings — renders that id through `memory.RefusalArg` as well: the
+shape check lets a token-shaped id through, so the failure the record caused must
+not be the sentence that repeats it. The rejection is per-record and named by
 artifact line number, so one damaged line does not abandon a file that may hold ten
 thousand good ones, and a dry run classifies the file exactly as the apply run it
 previews. The same parity holds for an id the artifact repeats: the plan tracks the

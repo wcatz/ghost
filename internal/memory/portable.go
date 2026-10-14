@@ -447,15 +447,15 @@ func (s *Store) projectCollision(ctx context.Context, q Queryer, p PortableProje
 			          WHERE repo_remote = ? AND repo_remote <> '' AND id != ? LIMIT 1), '')
 	`, p.Path, p.ID, remote, p.ID).Scan(&byPath, &foundRemote)
 	if err != nil {
-		return fmt.Errorf("import project %s: %w", p.ID, err)
+		return fmt.Errorf("import project %s: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 	}
 	switch {
 	case byPath != "":
 		return fmt.Errorf("project %s cannot be imported: this Ghost already records %s as project %s — import into that project, or merge it with `ghost project merge`",
-			p.ID, p.Path, byPath)
+			RefusalArg(ProjectIdentifierLabel, p.ID), p.Path, RefusalArg(ProjectIdentifierLabel, byPath))
 	case foundRemote != "":
 		return fmt.Errorf("project %s cannot be imported: this Ghost already records repository %s as project %s — import into that project, or merge it with `ghost project merge`",
-			p.ID, remote, foundRemote)
+			RefusalArg(ProjectIdentifierLabel, p.ID), remote, RefusalArg(ProjectIdentifierLabel, foundRemote))
 	}
 	return nil
 }
@@ -509,10 +509,10 @@ func requireProject(ctx context.Context, db *sql.DB, kind, id, projectID string)
 	var present int
 	err := db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, projectID).Scan(&present)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("%s %s: project %s not found", kind, id, RefusalArg("project_id", projectID))
+		return fmt.Errorf("%s %s: project %s not found", kind, RefusalArg(kind+"_id", id), RefusalArg("project_id", projectID))
 	}
 	if err != nil {
-		return fmt.Errorf("%s %s: lookup project %s: %w", kind, id, RefusalArg("project_id", projectID), err)
+		return fmt.Errorf("%s %s: lookup project %s: %w", kind, RefusalArg(kind+"_id", id), RefusalArg("project_id", projectID), err)
 	}
 	return nil
 }
@@ -667,13 +667,13 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// apply into a wholesale rejection of the artifact's contents.
 	tx, _, err := s.beginWrite(ctx, "import-project")
 	if err != nil {
-		return false, fmt.Errorf("import project %s: begin tx: %w", p.ID, err)
+		return false, fmt.Errorf("import project %s: begin tx: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	var presentInTx int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&presentInTx); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import project %s: re-check presence: %w", p.ID, err)
+			return false, fmt.Errorf("import project %s: re-check presence: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 		}
 	} else {
 		return false, nil
@@ -695,7 +695,7 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 		VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')),
 		                   COALESCE(NULLIF(?, ''), datetime('now')))
 	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt); err != nil {
-		return false, fmt.Errorf("import project %s: %w", p.ID, err)
+		return false, fmt.Errorf("import project %s: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 	}
 	// The project's ghost_state row, in the SAME transaction as the projects
 	// insert and for the same reason the other two creation routes write it
@@ -706,10 +706,10 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// re-import of an id the store already holds a skip either way, though the
 	// presence re-check above already returned for that case.
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, p.ID); err != nil {
-		return false, fmt.Errorf("import project %s: state row: %w", p.ID, err)
+		return false, fmt.Errorf("import project %s: state row: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("import project %s: commit: %w", p.ID, err)
+		return false, fmt.Errorf("import project %s: commit: %w", RefusalArg(ProjectIdentifierLabel, p.ID), err)
 	}
 	return true, nil
 }
@@ -875,9 +875,9 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 			"import memory %s: that id has recorded history from a memory that was deleted here, "+
 				"and importing would splice two memories' histories under one id — "+
 				"purge it first with `ghost history purge %s`, or give the record a new id in the artifact",
-			m.ID, m.ID)
+			RefusalArg("memory_id", m.ID), RefusalArg("memory_id", m.ID))
 	} else if err != sql.ErrNoRows {
-		return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
+		return false, false, false, fmt.Errorf("import memory %s: %w", RefusalArg("memory_id", m.ID), err)
 	}
 
 	if !apply {
@@ -917,7 +917,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// the audit has to be able to tell those rows apart from Ghost's own saves.
 	tx, _, err := s.beginWrite(ctx, "import")
 	if err != nil {
-		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", m.ID, err)
+		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", RefusalArg("memory_id", m.ID), err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	// Re-check presence INSIDE the write transaction. The pre-check above is
@@ -953,7 +953,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID), nullIfEmpty(m.SourceRef),
 		m.Confidence, scopeJSON(m.Scope), retention, expires)
 	if err != nil {
-		return false, false, downgraded, fmt.Errorf("import memory %s: %w", m.ID, err)
+		return false, false, downgraded, fmt.Errorf("import memory %s: %w", RefusalArg("memory_id", m.ID), err)
 	}
 	if err := appendHistoryTx(ctx, tx, m.ID, phaseImport, Provenance{
 		Agent:     m.Agent,
@@ -1008,7 +1008,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		return false, false, downgraded, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, false, downgraded, fmt.Errorf("import memory %s: commit: %w", m.ID, err)
+		return false, false, downgraded, fmt.Errorf("import memory %s: commit: %w", RefusalArg("memory_id", m.ID), err)
 	}
 	if s.onSave != nil {
 		// The embedding worker is told there is something new to vectorize. A
@@ -1131,9 +1131,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		var blocker int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.BlockedBy).Scan(&blocker); err != nil {
 			if err == sql.ErrNoRows {
-				return false, nil, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", t.ID, RefusalArg("blocked_by", t.BlockedBy))
+				return false, nil, fmt.Errorf("task %s: blocked_by names task %s, which is not in this store", RefusalArg("task_id", t.ID), RefusalArg("blocked_by", t.BlockedBy))
 			}
-			return false, nil, fmt.Errorf("import task %s: %w", t.ID, err)
+			return false, nil, fmt.Errorf("import task %s: %w", RefusalArg("task_id", t.ID), err)
 		}
 	}
 
@@ -1145,13 +1145,13 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	// lock, so the re-check inside it is the atomic half of the check-then-write.
 	tx, _, err := s.beginWrite(ctx, "import-task")
 	if err != nil {
-		return false, nil, fmt.Errorf("import task %s: begin tx: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: begin tx: %w", RefusalArg("task_id", t.ID), err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	var presentInTx int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&presentInTx); err != nil {
 		if err != sql.ErrNoRows {
-			return false, nil, fmt.Errorf("import task %s: re-check presence: %w", t.ID, err)
+			return false, nil, fmt.Errorf("import task %s: re-check presence: %w", RefusalArg("task_id", t.ID), err)
 		}
 	} else {
 		return false, nil, nil
@@ -1166,10 +1166,10 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	`, t.ID, t.ProjectID, title, description, t.Status, t.Priority,
 		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, notes,
 		t.CreatedAt, t.UpdatedAt, t.CompletedAt); err != nil {
-		return false, nil, fmt.Errorf("import task %s: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: %w", RefusalArg("task_id", t.ID), err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, nil, fmt.Errorf("import task %s: commit: %w", t.ID, err)
+		return false, nil, fmt.Errorf("import task %s: commit: %w", RefusalArg("task_id", t.ID), err)
 	}
 	return true, clamped, nil
 }
@@ -1301,9 +1301,9 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		var superseder int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.SupersededBy).Scan(&superseder); err != nil {
 			if err == sql.ErrNoRows {
-				return false, nil, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", d.ID, RefusalArg("superseded_by", d.SupersededBy))
+				return false, nil, fmt.Errorf("decision %s: superseded_by names decision %s, which is not in this store", RefusalArg("decision_id", d.ID), RefusalArg("superseded_by", d.SupersededBy))
 			}
-			return false, nil, fmt.Errorf("import decision %s: %w", d.ID, err)
+			return false, nil, fmt.Errorf("import decision %s: %w", RefusalArg("decision_id", d.ID), err)
 		}
 	}
 
@@ -1314,13 +1314,13 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	// and s.mu does not close the cross-process race.
 	tx, _, err := s.beginWrite(ctx, "import-decision")
 	if err != nil {
-		return false, nil, fmt.Errorf("import decision %s: begin tx: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: begin tx: %w", RefusalArg("decision_id", d.ID), err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	var presentInTx int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&presentInTx); err != nil {
 		if err != sql.ErrNoRows {
-			return false, nil, fmt.Errorf("import decision %s: re-check presence: %w", d.ID, err)
+			return false, nil, fmt.Errorf("import decision %s: re-check presence: %w", RefusalArg("decision_id", d.ID), err)
 		}
 	} else {
 		return false, nil, nil
@@ -1333,10 +1333,10 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 			COALESCE(NULLIF(?, ''), datetime('now')))
 	`, d.ID, d.ProjectID, title, decision, string(alts), rationale,
 		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt); err != nil {
-		return false, nil, fmt.Errorf("import decision %s: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: %w", RefusalArg("decision_id", d.ID), err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, nil, fmt.Errorf("import decision %s: commit: %w", d.ID, err)
+		return false, nil, fmt.Errorf("import decision %s: commit: %w", RefusalArg("decision_id", d.ID), err)
 	}
 	return true, clamped, nil
 }

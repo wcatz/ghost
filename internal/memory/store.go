@@ -521,7 +521,10 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 	var path string
 	err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = ?`, id).Scan(&path)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("project %s not found", id)
+		// `id` can be a caller's project operand (a CLI flag or a tool argument)
+		// or an id an artifact wrote verbatim, so the refusal renders it rather
+		// than repeating it.
+		return "", fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	if err != nil {
 		return "", fmt.Errorf("get project path: %w", err)
@@ -1001,7 +1004,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return id, true, nil
 	}
 	if existingRemote != "" {
-		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
+		return "", true, fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 	}
 
 	// The repository found in a directory is that directory's own, so the
@@ -1445,7 +1448,7 @@ func (s *Store) bindRepoRemoteIfUnsetTx(ctx context.Context, tx *sql.Tx, id, rep
 		return err
 	}
 	if updated != 1 {
-		return fmt.Errorf("project %q repository changed concurrently", id)
+		return fmt.Errorf("project %s repository changed concurrently", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	return nil
 }
@@ -1459,7 +1462,7 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 	}
 	if existingErr == nil {
 		if existingRemote != "" && existingRemote != repoRemote {
-			return "", fmt.Errorf("project %q belongs to a different repository", id)
+			return "", fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 		}
 		if existingRemote == "" {
 			if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
@@ -1482,10 +1485,10 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 		}
 		if err == nil {
 			if ownerID == "_global" {
-				return "", fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", id, ownerID)
+				return "", fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, id), RefusalArg(ProjectIdentifierLabel, ownerID))
 			}
 			if ownerRemote != "" && ownerRemote != repoRemote {
-				return "", fmt.Errorf("project %q belongs to a different repository", ownerID)
+				return "", fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, ownerID))
 			}
 			if ownerRemote == "" {
 				if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, ownerID, repoRemote); err != nil {
@@ -1537,7 +1540,7 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 	}
 	if existingRemote != "" {
 		if existingRemote != repoRemote {
-			return fmt.Errorf("project %q belongs to a different repository", existingID)
+			return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, existingID))
 		}
 		return nil
 	}
@@ -1555,8 +1558,8 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 	var holder string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT id FROM projects WHERE repo_remote = ? AND id != ?`+clause+` ORDER BY id`, args...).Scan(&holder); err == nil {
-		return fmt.Errorf("%w: repository %q is already recorded on project %q, so it cannot also be bound to %q",
-			ErrAmbiguousProject, repoRemote, holder, existingID)
+		return fmt.Errorf("%w: repository %q is already recorded on project %s, so it cannot also be bound to %s",
+			ErrAmbiguousProject, repoRemote, RefusalArg(ProjectIdentifierLabel, holder), RefusalArg(ProjectIdentifierLabel, existingID))
 	} else if err != sql.ErrNoRows {
 		return fmt.Errorf("check repository identity before binding: %w", err)
 	}
@@ -1573,7 +1576,7 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 		return fmt.Errorf("check merge target repository: %w", err)
 	}
 	if updated != 1 {
-		return fmt.Errorf("project %q repository changed concurrently", existingID)
+		return fmt.Errorf("project %s repository changed concurrently", RefusalArg(ProjectIdentifierLabel, existingID))
 	}
 	return nil
 }
@@ -1623,7 +1626,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 			return fmt.Errorf("check project repository: %w", incomingErr)
 		}
 		if incomingRemote != "" && incomingRemote != repoRemote {
-			return fmt.Errorf("project %q belongs to a different repository", id)
+			return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 		}
 
 		var existingID string
@@ -1771,7 +1774,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 // session's context.
 func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1839,7 +1842,7 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 	// would delete it. The guard lives in the shared primitive so every caller
 	// inherits it — the public wrapper, this merge, and migrateV15.
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("%w: refusing to merge the _global project (old=%q new=%q)", ErrAmbiguousProject, oldID, newID)
+		return fmt.Errorf("%w: refusing to merge the _global project (old=%s new=%s)", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	for _, stmt := range projectMergeStatements {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -1985,7 +1988,7 @@ func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, n
 		return nil
 	}
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	// Validate the outgoing row's recorded identity first: it must not claim a
 	// DIFFERENT repository, or the merge would silently move that project's
@@ -2020,7 +2023,7 @@ func validateMergeRepoTx(ctx context.Context, tx *sql.Tx, oldID, repoRemote stri
 		return fmt.Errorf("read merge source repository: %w", err)
 	}
 	if existingRemote != "" && existingRemote != repoRemote {
-		return fmt.Errorf("project %q belongs to a different repository", oldID)
+		return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, oldID))
 	}
 	return nil
 }
@@ -2030,7 +2033,7 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		return nil
 	}
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 
 	// Reassign all child records from old project to new.
@@ -2371,7 +2374,7 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 		return fmt.Errorf("delete project rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("project %q was already deleted", id)
+		return fmt.Errorf("project %s was already deleted", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	return nil
 }
@@ -4383,7 +4386,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				return "", "", 0, fmt.Errorf("strengthen memory rows: %w", affectedErr)
 			}
 			if affected == 0 {
-				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", existingID)
+				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", RefusalArg("memory_id", existingID))
 			}
 			// The fold is a write to the target — it raises its importance and
 			// access count — so it gets its own history entry, attributed to the
@@ -5507,7 +5510,7 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 			`UPDATE memories SET resolve_kept_hash = ? WHERE id = ? AND project_id = ?`,
 			hash, id, projectID,
 		); err != nil {
-			return fmt.Errorf("mark resolve kept %s: %w", id, err)
+			return fmt.Errorf("mark resolve kept %s: %w", RefusalArg("memory_id", id), err)
 		}
 	}
 	return tx.Commit()
@@ -5582,7 +5585,7 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 				older_hash = excluded.older_hash,
 				checked_at = datetime('now')
 		`, key[0], key[1], projectID, check.NewerHash, check.OlderHash); err != nil {
-			return fmt.Errorf("mark supersede neither %s->%s: %w", key[0], key[1], err)
+			return fmt.Errorf("mark supersede neither %s->%s: %w", RefusalArg("memory_id", key[0]), RefusalArg("memory_id", key[1]), err)
 		}
 	}
 	return tx.Commit()
@@ -6791,7 +6794,7 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 			continue
 		}
 		if err != nil {
-			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
+			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", RefusalArg("memory_id", id), err)
 		}
 		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
 		// See the resolution after the loop for why, and for what a candidate is
@@ -6967,7 +6970,7 @@ func sourceRetentionTx(ctx context.Context, tx *sql.Tx, projectID string, ids []
 			continue
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("read replaced memory %s retention: %w", id, err)
+			return "", false, fmt.Errorf("read replaced memory %s retention: %w", RefusalArg("memory_id", id), err)
 		}
 		if !found {
 			tier, found = current, true
@@ -7718,7 +7721,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		LIMIT 1
 	`, projectID).Scan(&snapshotID)
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("no snapshots found for project %s", projectID)
+		return 0, fmt.Errorf("no snapshots found for project %s", RefusalArg(ProjectIdentifierLabel, projectID))
 	}
 	if err != nil {
 		return 0, fmt.Errorf("find snapshot: %w", err)
