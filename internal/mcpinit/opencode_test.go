@@ -197,7 +197,7 @@ func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 	if string(data) != want {
 		t.Error("installed plugin should match the rendered embedded source (binary path baked)")
 	}
-	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = "`+stubPath(filepath.Join(home, "bin"), "ghost")+`"`) {
+	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = `+jsStringLiteral(stubPath(filepath.Join(home, "bin"), "ghost"))) {
 		t.Error("plugin default must be the resolved absolute binary path")
 	}
 
