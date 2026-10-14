@@ -165,6 +165,13 @@ type DecisionRetirement struct {
 	// composed text more than one memory carries) when no single one could be
 	// chosen. Nothing was retired for them and they still rank.
 	Ambiguous []string
+	// Shared are live memory ids that carry the old decision's link TOGETHER
+	// with another decision's: a consolidation folded several decision
+	// companions into one successor. Such a row is not an extra claimant and is
+	// never retired, because withholding it would withhold the other decision it
+	// still states; it keeps ranking, so the reversed text is still returned
+	// until the row is split or every decision it holds is superseded.
+	Shared []string
 }
 
 // SupersedeDecision marks oldID as superseded by newID within one project and
@@ -408,7 +415,7 @@ func checkReservedSourceRef(ref string) error {
 // exactly one decisions row in the project composing to it. Two decisions with
 // identical text, or an edited memory, match nothing rather than the wrong row:
 // a stale decision left live is recoverable, a wrong memory retired is not.
-func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous []string, err error) {
+func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous, shared []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
 	// memory, one with source 'decision_log', or one with source 'reflection'.
@@ -457,7 +464,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		ORDER BY rowid
 	`, projectID, GlobalProjectID, "%"+want+"%")
 	if err != nil {
-		return nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	var linked []linkRow
 	for rows0.Next() {
@@ -465,7 +472,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		var ref string
 		if err := rows0.Scan(&r.id, &r.source, &ref, &r.live); err != nil {
 			_ = rows0.Close()
-			return nil, nil, fmt.Errorf("scan linked companion: %w", err)
+			return nil, nil, nil, fmt.Errorf("scan linked companion: %w", err)
 		}
 		if !sourceRefNamesDecision(ref, decisionID) {
 			continue
@@ -475,76 +482,84 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if err := rows0.Err(); err != nil {
 		_ = rows0.Close()
-		return nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	_ = rows0.Close()
-	if len(linked) == 1 {
-		r := linked[0]
-		if r.live && r.multi {
-			return nil, []string{r.id}, nil
-		}
-		if r.live {
-			return []string{r.id}, nil, nil
-		}
-		return nil, nil, nil
+	if len(linked) == 0 {
+		return findUnlinkedDecisionCompanionTx(ctx, tx, projectID, decisionID)
 	}
-	if len(linked) > 1 {
-		// A live row that stands for more than one decision is not this decision's
-		// clean companion: retiring it would withhold whatever other decision it
-		// still states. Report every live claimant and leave them standing, ahead
-		// of the decision_log preference, which would otherwise pick such a row.
-		for _, r := range linked {
-			if r.live && r.multi {
-				for _, rr := range linked {
-					if rr.live {
-						ambiguous = append(ambiguous, rr.id)
-					}
-				}
-				return nil, ambiguous, nil
+	// A live row that stands for more than one decision is not this decision's
+	// clean companion: retiring it would withhold whatever other decision it
+	// still states. It is reported on its own (shared), never retired and never
+	// counted as a competing claimant — it is not an extra, so the ambiguity
+	// answer's remedy of deleting the extras would destroy a live decision. The
+	// rows that carry this decision's link ALONE are then judged by the rules
+	// below exactly as if the shared rows were absent, so a decision_log
+	// preference can never pick a shared row.
+	var single []linkRow
+	for _, r := range linked {
+		if r.multi {
+			if r.live {
+				shared = append(shared, r.id)
 			}
+			continue
 		}
+		single = append(single, r)
+	}
+	if len(single) == 1 {
+		if single[0].live {
+			return []string{single[0].id}, nil, shared, nil
+		}
+		return nil, nil, shared, nil
+	}
+	if len(single) > 1 {
 		var logged []linkRow
-		for _, r := range linked {
+		for _, r := range single {
 			if r.source == "decision_log" {
 				logged = append(logged, r)
 			}
 		}
 		if len(logged) == 1 {
 			if logged[0].live {
-				return []string{logged[0].id}, nil, nil
+				return []string{logged[0].id}, nil, shared, nil
 			}
-			return nil, nil, nil
+			return nil, nil, shared, nil
 		}
-		for _, r := range linked {
+		for _, r := range single {
 			if r.live {
 				ambiguous = append(ambiguous, r.id)
 			}
 		}
-		return nil, ambiguous, nil
 	}
+	return nil, ambiguous, shared, nil
+}
 
+// findUnlinkedDecisionCompanionTx is the composed-text fallback of
+// findDecisionCompanionsTx, for a decision with no linked companion at all. It
+// never returns a shared row: a text match carries no decision identity.
+func findUnlinkedDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous, shared []string, err error) {
 	var title, decision, rationale string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
 		decisionID, projectID).Scan(&title, &decision, &rationale); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("read decision: %w", err)
+		return nil, nil, nil, fmt.Errorf("read decision: %w", err)
 	}
 	content, _ := decisionCompanionContent(title, decision, rationale)
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT title, decision, rationale FROM decisions WHERE project_id = ?`, projectID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	same := 0
 	for rows.Next() {
 		var t, d, r string
 		if err := rows.Scan(&t, &d, &r); err != nil {
 			_ = rows.Close()
-			return nil, nil, fmt.Errorf("scan project decision: %w", err)
+			return nil, nil, nil, fmt.Errorf("scan project decision: %w", err)
 		}
 		if c, _ := decisionCompanionContent(t, d, r); c == content {
 			same++
@@ -552,7 +567,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	_ = rows.Close()
 
@@ -563,15 +578,15 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		  AND resolved_at IS NULL
 	`, projectID, content)
 	if err != nil {
-		return nil, nil, fmt.Errorf("find unlinked companion: %w", err)
+		return nil, nil, nil, fmt.Errorf("find unlinked companion: %w", err)
 	}
 	if same == 1 && len(unlinked) == 1 {
-		return unlinked, nil, nil
+		return unlinked, nil, nil, nil
 	}
 	if len(unlinked) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return nil, unlinked, nil
+	return nil, unlinked, nil, nil
 }
 
 // retireDecisionCompanionTx retires the companion memory of a decision that has
@@ -603,15 +618,16 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 // the same pair finds nothing to stamp and writes no second history row.
 func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
-	candidates, ambiguous, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
+	candidates, ambiguous, shared, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
 	if err != nil {
 		return out, err
 	}
 	out.Ambiguous = ambiguous
+	out.Shared = shared
 	// The replacement's companion names the reason. One with no companion (an
 	// imported decision) leaves the reason unstated rather than naming an id
 	// that is not a memory.
-	newCompanions, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
+	newCompanions, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
 	if err != nil {
 		return out, err
 	}

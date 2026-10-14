@@ -99,3 +99,45 @@ func TestWriterToolsRefuseAnEmbeddedDecisionRef(t *testing.T) {
 		t.Errorf("ghost_memory_update accepted %q: %s", ref, resultText(res))
 	}
 }
+
+// A merged memory that holds the reversed decision together with another one is
+// not an extra claimant. The answer still reports a partial failure (the reversed
+// text keeps ranking), but it must not tell the agent to delete that memory: it
+// is the only memory of a decision that is still live.
+func TestDecisionRecordAnswerReportsASharedSuccessorWithoutDeleteAdvice(t *testing.T) {
+	db, _, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	record := func(title string) (string, string) {
+		res := callTool(t, session, "ghost_decision_record", map[string]any{
+			"project_id": "abc123", "title": title, "decision": title + " decision", "rationale": title + " rationale",
+		})
+		if res.IsError {
+			t.Fatal(resultText(res))
+		}
+		return labeledID(t, resultText(res), "decision_id: "), labeledID(t, resultText(res), "memory_id: ")
+	}
+	aDec, aMem := record("backend")
+	bDec, bMem := record("retries")
+	// What a consolidation leaves behind after folding both companions: one
+	// reflection row carrying both links, and neither original.
+	if _, err := db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ? WHERE id = ?`,
+		"decision:"+aDec+",decision:"+bDec, aMem); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM memories WHERE id = ?`, bMem); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "abc123", "title": "backend v2", "decision": "use SQS", "rationale": "managed", "supersedes": aDec,
+	})
+	out := resultText(res)
+	if !res.IsError {
+		t.Errorf("a shared successor left live was reported as a plain success:\n%s", out)
+	}
+	if !strings.Contains(out, aMem) {
+		t.Errorf("the answer does not name the shared memory %s:\n%s", aMem, out)
+	}
+	if strings.Contains(out, "delete") || strings.Contains(out, "more than one memory claims it") {
+		t.Errorf("the answer treats the shared memory as an extra claimant and advises deleting it:\n%s", out)
+	}
+}

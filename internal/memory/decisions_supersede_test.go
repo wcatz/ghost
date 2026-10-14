@@ -1004,8 +1004,13 @@ func TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions(t *testing
 				if len(got.Retired) != 0 {
 					t.Errorf("superseding %s retired %v; the successor still states a live decision", oldDec, got.Retired)
 				}
-				if len(got.Ambiguous) != 1 || got.Ambiguous[0] != successor {
-					t.Errorf("superseding %s ambiguous = %v, want the multi-decision successor %s", oldDec, got.Ambiguous, successor)
+				if len(got.Shared) != 1 || got.Shared[0] != successor {
+					t.Errorf("superseding %s shared = %v, want the multi-decision successor %s", oldDec, got.Shared, successor)
+				}
+				// It is not a competing claimant: the ambiguity channel's remedy is to
+				// delete the extras, and this row is the only memory of a live decision.
+				if len(got.Ambiguous) != 0 {
+					t.Errorf("superseding %s reported the shared successor as ambiguous %v", oldDec, got.Ambiguous)
 				}
 				if decisionMemoryResolved(t, s, successor) {
 					t.Errorf("superseding %s withheld the successor; the other decision's text went with it", oldDec)
@@ -1072,5 +1077,49 @@ func TestImportDecisionRefusesTheLinkSeparatorInItsID(t *testing.T) {
 	good.ID = "abcd"
 	if _, err := s.ImportDecision(ctx, good, true); err != nil {
 		t.Errorf("ImportDecision refused an ordinary id: %v", err)
+	}
+}
+
+// TestSupersedeDecisionRetiresTheSoleCompanionBesideASharedSuccessor: a row
+// standing for more than one decision is reported as shared and left live, and
+// it does not turn the decision's own single-link companion into an ambiguous
+// claimant — that companion states only the reversed decision, so it is retired
+// as it would be with no shared row beside it.
+func TestSupersedeDecisionRetiresTheSoleCompanionBesideASharedSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, _, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dDec, _, _, err := s.RecordDecision(ctx, testProject, "Queue backend v2", "use SQS", "managed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shared string
+	if err := s.db.QueryRow(`INSERT INTO memories (project_id, category, content, source, importance, source_ref)
+		VALUES (?, 'decision', 'Postgres queue, 5 retries', 'reflection', 0.9, ?) RETURNING id`,
+		testProject, decisionCompanionRef(aDec)+decisionRefSeparator+decisionCompanionRef(bDec)).Scan(&shared); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, aDec, dDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != aMem {
+		t.Errorf("retired = %v, want the decision's own companion %s", got.Retired, aMem)
+	}
+	if len(got.Shared) != 1 || got.Shared[0] != shared {
+		t.Errorf("shared = %v, want %s", got.Shared, shared)
+	}
+	if len(got.Ambiguous) != 0 {
+		t.Errorf("ambiguous = %v, want none", got.Ambiguous)
+	}
+	if decisionMemoryResolved(t, s, shared) {
+		t.Error("the shared successor was withheld; it still states the other decision")
 	}
 }
