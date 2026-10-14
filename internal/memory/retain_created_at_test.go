@@ -337,6 +337,10 @@ func TestAReusedRowAbsorbingAConsumedSourceRecordsAProvenanceVersion(t *testing.
 	if err != nil {
 		t.Fatalf("save the other source: %v", err)
 	}
+	// Backdate the stamp so the provenance write is observable: the save and the
+	// merge otherwise share a clock second, and a move to `datetime('now')` would
+	// read as unmoved.
+	setUpdatedAt(t, s, reused, "2020-01-01 00:00:00")
 	before, err := s.MemoryHistory(ctx, reused, 10)
 	if err != nil {
 		t.Fatalf("MemoryHistory before the merge: %v", err)
@@ -351,6 +355,15 @@ func TestAReusedRowAbsorbingAConsumedSourceRecordsAProvenanceVersion(t *testing.
 	if !rowExists(t, s, reused) || rowExists(t, s, other) {
 		t.Fatalf("the merge did not reuse the row and take the other source (reused live=%v, other live=%v)",
 			rowExists(t, s, reused), rowExists(t, s, other))
+	}
+
+	// The stamp moves the live row's updated_at in the same statement that files
+	// the version, because every writer of the reflect phase must
+	// (stampMovingPhases, history_compact.go): a reflect version whose writer left
+	// the column alone would make the phase an unreliable witness for the anchor.
+	updated := readUpdatedAt(t, s, reused)
+	if updated == "2020-01-01 00:00:00" {
+		t.Error("the reused row's updated_at is still the backdated value: the provenance stamp filed a version without moving the stamp column")
 	}
 
 	after, err := s.MemoryHistory(ctx, reused, 10)
@@ -368,6 +381,10 @@ func TestAReusedRowAbsorbingAConsumedSourceRecordsAProvenanceVersion(t *testing.
 	}
 	if newest.Phase != phaseReflect {
 		t.Errorf("the newest version's phase = %q, want %q", newest.Phase, phaseReflect)
+	}
+	if newest.RecordedAt != updated {
+		t.Errorf("the stamp version's recorded_at = %q, the row's updated_at = %q: a version filed by a stamp-moving writer must carry the time that writer moved the column to",
+			newest.RecordedAt, updated)
 	}
 }
 

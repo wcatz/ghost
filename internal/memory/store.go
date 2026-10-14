@@ -7136,16 +7136,21 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 // the reused row, and relabelling it for them would announce a merge that did
 // not happen. consumed is the pass's delete set.
 //
-// The write is source only — updated_at does not move — but source IS a column
-// memory_history records, so the caller adds the id to its reflected set and
-// the pass files the version through the ordinary history append. The bool is
-// that answer: true when the UPDATE changed a row.
+// The write sets `source` and moves `updated_at` in the SAME statement. The
+// stamp is a real provenance change, and every writer of the reflect phase must
+// move the live row's stamp in the statement that files its version — a reflect
+// version whose writer left the stamp alone would make the phase an unreliable
+// witness for the `--fix-updated-at` anchor (see stampMovingPhases in
+// history_compact.go). Because it moves the column, the caller appends the id to
+// its reflected set and the pass files the version through the ordinary history
+// append. `created_at` is not touched, so a self-restating row keeps its age.
+// The bool is true when the UPDATE changed a row.
 func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m Memory, consumed map[string]bool) (bool, error) {
 	if !reuseAbsorbsConsumed(id, m, consumed) {
 		return false, nil
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE memories SET source = 'reflection' WHERE id = ? AND source <> 'reflection'`, id)
+		`UPDATE memories SET source = 'reflection', updated_at = datetime('now') WHERE id = ? AND source <> 'reflection'`, id)
 	if err != nil {
 		return false, fmt.Errorf("stamp the reused memory's provenance: %w", err)
 	}
