@@ -663,9 +663,9 @@ carries, and `RestoreSnapshot` brings a row back under the id it had.
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
 which asks `Store.Candidates` for the same legs, parameters and configured
-vector floor, and then applies the caller's category filter to the widened
-candidate set before the window closes. Retrieval is unchanged; what moved is
-which set the filter sees.
+vector floor, and then applies the caller's category, retention and scope
+filters to the widened candidate set before the window closes. Retrieval is
+unchanged; what moved is which set the filter sees.
 
 The main schema tables are:
 
