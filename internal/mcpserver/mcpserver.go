@@ -4412,7 +4412,7 @@ func (s *Server) registerResources() {
 		for _, status := range []string{"active", "blocked", "pending"} {
 			tasks, err := s.store.ListTasks(ctx, projectID, status, 15)
 			if err != nil {
-				return nil, fmt.Errorf("list tasks for %q: %w", projectID, err)
+				return nil, fmt.Errorf("list tasks for %s: %w", memory.RefusalArg("project_id", projectID), err)
 			}
 			for _, t := range tasks {
 				// The explainer goes in with the first row and only there: this is
