@@ -288,6 +288,41 @@ and best-effort: it never signals a process, and on a platform that cannot
 answer it prints nothing rather than claiming none are stale.
 `
 
+// mcpWiringUsage is the help for `ghost mcp wiring`: stdout for -h/--help
+// (see handleHelp), so a help request never runs the check.
+const mcpWiringUsage = `Usage: ghost mcp wiring
+
+Checks every MCP client's wiring against the sources embedded in THIS binary:
+the Claude Code hook contract, the opencode lifecycle plugin, codex's hooks
+and MCP entry, and the goose plugin package. Read-only — no store, no
+network, nothing written — and silent when everything is current. Each
+finding names the ghost mcp init command that repairs it.
+
+ghost upgrade runs this check itself right after it installs a release, and
+runs it in the NEW binary: the embedded-source comparisons can only judge
+drift against the image that runs them, so a check run by the binary that was
+just replaced could never see what the new release changed.
+`
+
+// runMCPWiring checks every MCP client's wiring against this binary's
+// embedded sources.
+//
+// This is what `ghost upgrade` execs in the binary it has just installed
+// (#1215). Two of the report's checks — the opencode lifecycle plugin and the
+// goose plugin package — byte-compare the installed wiring against the
+// sources embedded in the image that runs them, so the check is only as good
+// as the image running it: run from the process that performed the upgrade it
+// would compare against what the OLD release rendered and never see drift
+// the new one introduced. Running it here, in the new image, is what makes
+// the comparison the new release's own — and a hook event a new release adds
+// is one this image knows to check.
+//
+// Best-effort and read-only: findings are advice, so the command reports what
+// it found and exits 0 whatever it found.
+func runMCPWiring() {
+	mcpinit.ReportStaleIntegrations(os.Stdout)
+}
+
 // runMCPStatus checks the health of the Ghost ↔ MCP client integration.
 // Defaults to Claude Code; --client opencode reports opencode-specific checks.
 func runMCPStatus() {

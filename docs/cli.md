@@ -167,6 +167,18 @@ every save, to save those milliseconds on a status line. The same read, and the 
 warning sentences, appear in the `ghost_health` MCP tool, so a terminal and an agent
 looking at one store are told the same thing about it.
 
+### `ghost mcp wiring`
+
+Checks every MCP client's wiring against the sources embedded in **this** binary, in one pass:
+
+```bash
+ghost mcp wiring
+```
+
+It is read-only — no store, no network, nothing written — and **silent** when every client it finds is current, so a report means something to read. Each finding names the `ghost mcp init` command that repairs it. The checks are the same ones the end of `ghost mcp status` prints, but here they are all four clients at once and against this binary's own embedded plugin sources rather than one client's full health report.
+
+The distinction matters because two of the checks — the opencode lifecycle plugin and the goose plugin package — byte-compare the installed files against the sources embedded in **the image running the check**. Run from a binary other than the one that installed the wiring, and the comparison is against the wrong sources: this is why [`ghost upgrade`](#ghost-upgrade) runs the check in the release it just installed rather than in the process that performed the upgrade.
+
 ## Hooks
 
 ```bash
@@ -1624,6 +1636,8 @@ Neither flag re-installs the release you already have: being on the latest versi
 **Replacing a running binary on Windows.** Windows holds a running executable's image open, so a new binary cannot be renamed over it. The old one is renamed to `<binary>.old` first — which Windows does allow — and the new one takes the path it vacates. If the second step fails, the old binary is moved back, so a failed upgrade cannot leave an install with no binary. The `.old` file is this process's own image and cannot be deleted until the process exits, so it stays until the next upgrade reuses the name; delete it once no `ghost` is running. Unix renames over the target atomically and leaves nothing behind.
 
 **When a write does not finish.** The replacement is staged in a temporary file beside the binary and renamed into place, so the install path only ever holds one whole binary. A write that is interrupted, a digest that does not agree, or a disk that fills all fail against the staging file: the installed binary comes out of them byte for byte unchanged and the partial file is removed, so a failed upgrade is a failed upgrade and never a half-installed ghost.
+
+**After the swap.** The release that was just installed is asked to run its own client-wiring check ([`ghost mcp wiring`](#ghost-mcp-wiring)) and what it prints is passed through. It runs in the **new** binary rather than in the process that performed the upgrade, and that is load-bearing: the opencode-plugin and goose-package checks byte-compare installed wiring against the plugin sources embedded in the image running them, and the upgrading process is still the release that was just replaced — a check run there would judge the new release's wiring against the old release's sources and call everything current. A child that cannot be run says so, naming the command to run by hand, rather than passing the check over in silence.
 
 ### `ghost version`
 
