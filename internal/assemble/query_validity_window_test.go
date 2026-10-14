@@ -204,6 +204,35 @@ func TestAQueryWhoseOnlyMatchRetiredStaysAllInvalid(t *testing.T) {
 	}
 }
 
+// TestAQueryWhoseOnlyMatchRetiredOutranksALegThatNeverRan is the shipped-condition
+// half of the same rule, and the half the test above cannot reach: it builds its
+// request with CondFTSOnly, so its vector leg is not applicable. ghost_memory_search
+// always asks for a hybrid search, which on a machine with no embedder leaves the
+// vector leg applicable and never attempted — and the empty reason used to name
+// that leg (`vector_backend_unavailable`) instead of the row the keyword leg found
+// and withheld. A fact about the STORE outranks a fact about the MACHINE, exactly
+// as a stage removal does on the passive path; the leg state stays on the machine
+// line, so nothing about the missing embedder is lost.
+func TestAQueryWhoseOnlyMatchRetiredOutranksALegThatNeverRan(t *testing.T) {
+	set := setOf()
+	set.ValidityExcluded = 1
+	set.Legs = map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: true, CoverageComplete: true},
+		"vector": {Applicable: true, Attempted: false},
+	}
+
+	res := run(t, &fakeRetriever{set: set}, hybridRequest())
+
+	if res.Outcome != OutcomeEmpty || res.Reason != reasonAllInvalid {
+		t.Fatalf("outcome/reason = %q/%q, want empty/all_invalid: the query matched a row that was "+
+			"withheld as out of date, which is not the same fact as a leg that never ran",
+			res.Outcome, res.Reason)
+	}
+	if !strings.Contains(res.Machine, "legs=fts:ok,vector:not_run") {
+		t.Errorf("machine line = %q, want the leg state kept on it", res.Machine)
+	}
+}
+
 // TestAQueryWithNoMatchAtAllStaysNoCandidates is the control for the reason
 // above, and the reason it is not simply "every empty says all_invalid": a
 // query that matched nothing has withheld nothing, and the leg's count is what

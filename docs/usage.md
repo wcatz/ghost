@@ -123,7 +123,9 @@ axes that decide eligibility:
   candidate at all, so the payload has no row for it — but a query whose matches
   all retired is still answered `empty reason=all_invalid` ("withheld as out of
   date"), not `no_candidates`, because each leg reports how many it withheld
-  (keyword, semantic-only and hybrid alike).
+  (keyword, semantic-only and hybrid alike) — including on a machine with no
+  embedder, where the reason stays `all_invalid` and the vector leg's `not_run`
+  state is reported on the machine line instead.
   `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
