@@ -540,6 +540,7 @@ func TestRenderedOpencodePluginPathIsAJSLiteral(t *testing.T) {
 			t.Fatalf("%q: rendered plugin has no %q line", p, prefix)
 		}
 		line, _, _ := strings.Cut(rest, "\n")
+		line = strings.TrimSuffix(line, "\r") // a CRLF checkout ends the line with \r\n
 		var got string
 		if err := json.Unmarshal([]byte(line), &got); err != nil {
 			t.Errorf("%q: rendered constant %q is not a string literal: %v", p, line, err)
@@ -552,7 +553,9 @@ func TestRenderedOpencodePluginPathIsAJSLiteral(t *testing.T) {
 			t.Errorf("%q: placeholder left in rendered plugin", p)
 		}
 	}
-	if got := renderOpencodeGhostPlugin("/usr/local/bin/ghost"); !strings.Contains(got, prefix+`"/usr/local/bin/ghost"`+"\n") {
-		t.Errorf("ordinary path is not rendered as the plain quoted string")
+	_, rest, _ := strings.Cut(renderOpencodeGhostPlugin("/usr/local/bin/ghost"), prefix)
+	line, _, _ := strings.Cut(rest, "\n")
+	if strings.TrimSuffix(line, "\r") != `"/usr/local/bin/ghost"` {
+		t.Errorf("ordinary path is not rendered as the plain quoted string: %q", line)
 	}
 }
