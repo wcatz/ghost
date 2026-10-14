@@ -11,16 +11,17 @@ import (
 	"testing"
 )
 
-// staleGhostCommand is the command path the fake claude reports as already
-// registered under the name "ghost". It is a path this build is replacing (the
-// stale-binary case), and it is the registration a failed add-json must put
-// back. The token doubles as the marker the fake recognises in an add-json
-// argument, so the new registration and the restore are told apart without the
-// fake knowing anything about the caller's paths.
+// staleGhostCommand is the command path the previous registration reports and a
+// rollback re-adds. It is a path this build is replacing (the stale-binary case),
+// and it carries a token no path of this build's own install can hold — which is
+// how a test tells a re-add of the PREVIOUS registration from a re-add of the
+// one that just failed.
 const staleGhostCommand = "/usr/local/bin/ghost-old/ghost"
 
-// staleMarker is the substring both the POSIX and the Windows fake match on.
-// It appears in staleGhostCommand and in the JSON that re-adds it.
+// staleMarker is that token. The POSIX fake routes the two add-json calls on it;
+// the Windows fake routes them by order and the assertion on what it recorded
+// does the same job, because cmd refuses to parse a conditional whose expansion
+// carries the JSON a re-add passes.
 const staleMarker = "ghost-old"
 
 // addJSONRefusal is the failure the fake `claude mcp add-json` answers with, in
@@ -45,25 +46,40 @@ type claudeFake struct {
 // writeFakeClaude installs a fake `claude` that answers `mcp get ghost` with
 // the registration in get.out and answers remove/add-json per f, recording the
 // argv of every add-json it accepts in adds and of every remove it accepts in
-// removed. Both scripts are flat: no branch is nested inside another, because
-// that is the shape the Windows one has to survive. The restore is told from the
-// new registration by the previous command's path in the argv — the marker —
-// which is the only difference between the two add-json calls a rollback makes.
-// Every accepted add is recorded either way, because a registration with no
-// command to mark (an http entry) is restored through the same call.
+// removed. An add-json the fake refuses records nothing, so a case that must not
+// roll back is pinned by the absence of either file.
+//
+// Both scripts are FLAT — no branch nested inside another — and neither expands
+// the add-json argv into a conditional: cmd.exe refuses to parse an `if` whose
+// expansion contains the JSON a re-add passes (quotes that unbalance the line,
+// which is what made the first attempt's nested check silently never fire). The
+// fake tells the two add-json calls apart by ORDER, and each test still pins
+// WHICH config came back by what it recorded: `TestRegisterMCPRestoresThe-
+// PreviousRegistrationOnAddFailure` is the one that catches a rollback that
+// re-adds the new registration instead of the previous one.
 func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 	t.Helper()
 	name := "claude"
 	var script string
 	if runtime.GOOS == "windows" {
 		name += ".bat"
+		// FLAT, and NO argv ever lands inside a conditional. Two rules, both
+		// learned by breaking CI: cmd refuses to parse an `if` whose expansion
+		// contains the JSON's quotes (which is why the nested `if exist` of the
+		// first attempt never fired), and only top-level `if exist` is reliable
+		// there. The fake therefore tells the two add-json calls apart by order
+		// — the first is the new registration to refuse, the second is the
+		// rollback — and the tests still pin WHICH config came back by what the
+		// fake recorded.
 		script = "@echo off\r\n" +
 			">>\"" + dir + "\\calls\" echo %*\r\n" +
 			"if \"%1\"==\"mcp\" if \"%2\"==\"get\" goto do_get\r\n" +
 			"if \"%1\"==\"mcp\" if \"%2\"==\"remove\" goto do_remove\r\n" +
-			"set \"line=%*\"\r\n" +
-			"if not \"%line:" + staleMarker + "=%\"==\"%line%\" goto do_add\r\n" +
-			"goto do_restore\r\n" +
+			"if exist \"" + dir + "\\did-add\" goto do_restore\r\n" +
+			">>\"" + dir + "\\did-add\" echo go\r\n" +
+			failLine(f.addFails, addJSONRefusal) +
+			">>\"" + dir + "\\adds\" echo %*\r\n" +
+			"exit /b 0\r\n" +
 			":do_get\r\n" +
 			"type \"" + dir + "\\get.out\"\r\n" +
 			"exit /b 0\r\n" +
@@ -73,11 +89,7 @@ func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 			"exit /b 0\r\n" +
 			":do_restore\r\n" +
 			failLine(f.restoreFails, addJSONRefusal) +
-			"goto do_record\r\n" +
-			":do_add\r\n" +
-			failLine(f.addFails, addJSONRefusal) +
-			":do_record\r\n" +
-			">>\"" + dir + "\\adds\" echo %line%\r\n" +
+			">>\"" + dir + "\\adds\" echo %*\r\n" +
 			"exit /b 0\r\n"
 	} else {
 		script = "#!/bin/sh\n" +
