@@ -1303,7 +1303,7 @@ func TestMergeDecisionLinksStayWithinTheSourceRefBound(t *testing.T) {
 			t.Fatalf("ReplaceNonManual failed the whole pass over one oversized merge: %v", err)
 		}
 		if dropped.Overflow != 1 {
-			t.Errorf("dropped = %d, want the oversized merge dropped", dropped)
+			t.Errorf("dropped.Overflow = %d, want the oversized merge dropped", dropped.Overflow)
 		}
 		for _, mem := range mems {
 			var n int
