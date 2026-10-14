@@ -2,6 +2,8 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,9 +44,13 @@ type claudeFake struct {
 
 // writeFakeClaude installs a fake `claude` that answers `mcp get ghost` with
 // the registration in get.out and answers remove/add-json per f, recording the
-// argv of an add-json that names the stale command in restored and of a remove
-// the fake accepted in removed. Both scripts are flat: no branch is nested
-// inside another, because that is the shape the Windows one has to survive.
+// argv of every add-json it accepts in adds and of every remove it accepts in
+// removed. Both scripts are flat: no branch is nested inside another, because
+// that is the shape the Windows one has to survive. The restore is told from the
+// new registration by the previous command's path in the argv — the marker —
+// which is the only difference between the two add-json calls a rollback makes.
+// Every accepted add is recorded either way, because a registration with no
+// command to mark (an http entry) is restored through the same call.
 func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 	t.Helper()
 	name := "claude"
@@ -56,8 +62,8 @@ func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 			"if \"%1\"==\"mcp\" if \"%2\"==\"get\" goto do_get\r\n" +
 			"if \"%1\"==\"mcp\" if \"%2\"==\"remove\" goto do_remove\r\n" +
 			"set \"line=%*\"\r\n" +
-			"if not \"%line:" + staleMarker + "=%\"==\"%line%\" goto do_restore\r\n" +
-			"goto do_add\r\n" +
+			"if not \"%line:" + staleMarker + "=%\"==\"%line%\" goto do_add\r\n" +
+			"goto do_restore\r\n" +
 			":do_get\r\n" +
 			"type \"" + dir + "\\get.out\"\r\n" +
 			"exit /b 0\r\n" +
@@ -67,10 +73,11 @@ func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 			"exit /b 0\r\n" +
 			":do_restore\r\n" +
 			failLine(f.restoreFails, addJSONRefusal) +
-			">>\"" + dir + "\\restored\" echo %line%\r\n" +
-			"exit /b 0\r\n" +
+			"goto do_record\r\n" +
 			":do_add\r\n" +
 			failLine(f.addFails, addJSONRefusal) +
+			":do_record\r\n" +
+			">>\"" + dir + "\\adds\" echo %line%\r\n" +
 			"exit /b 0\r\n"
 	} else {
 		script = "#!/bin/sh\n" +
@@ -87,11 +94,12 @@ func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 			"case \"$*\" in\n" +
 			"*" + staleMarker + "*)\n" +
 			failLine(f.restoreFails, addJSONRefusal) +
-			"  printf '%s\\n' \"$*\" >> '" + dir + "/restored'\n" +
-			"  exit 0\n" +
+			"  ;;\n" +
+			"*)\n" +
+			failLine(f.addFails, addJSONRefusal) +
 			"  ;;\n" +
 			"esac\n" +
-			failLine(f.addFails, addJSONRefusal) +
+			"printf '%s\\n' \"$*\" >> '" + dir + "/adds'\n" +
 			"exit 0\n"
 	}
 	path := filepath.Join(dir, name)
@@ -155,7 +163,7 @@ func TestRegisterMCPRestoresThePreviousRegistrationOnAddFailure(t *testing.T) {
 		t.Fatal("a refused add-json must still fail the run")
 	}
 
-	restored, readErr := os.ReadFile(filepath.Join(dir, "restored"))
+	restored, readErr := os.ReadFile(filepath.Join(dir, "adds"))
 	if readErr != nil {
 		t.Fatalf("the rollback must re-add the previous registration: %v", readErr)
 	}
@@ -190,7 +198,7 @@ func TestRegisterMCPNamesTheRegistrationRemovedWhenRestoreFails(t *testing.T) {
 	if strings.Contains(err.Error(), "registration was restored") {
 		t.Errorf("a failed rollback must not claim a restore, got %q", err.Error())
 	}
-	requireMissing(t, dir, "restored")
+	requireMissing(t, dir, "adds")
 }
 
 // TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace pins the case
@@ -213,7 +221,139 @@ func TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace(t *testing.
 	if !strings.Contains(err.Error(), "still registered") {
 		t.Errorf("the error must say the registration most likely survived, got %q", err.Error())
 	}
-	requireMissing(t, dir, "restored")
+	requireMissing(t, dir, "adds")
+}
+
+// rollbackBase is the error a refused add-json raises, for the tests that call
+// the rollback directly rather than through registerMCP.
+func rollbackBase() error {
+	return errors.New("claude mcp add-json: " + addJSONRefusal + ": exit status 1")
+}
+
+// lastRestoredConfig reads back the config the fake was asked to re-add, so a
+// test can assert the re-add carries what it claims rather than only what the
+// error text says about it.
+func lastRestoredConfig(t *testing.T, dir string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "adds"))
+	if err != nil {
+		t.Fatalf("the rollback must re-add the previous registration: %v", err)
+	}
+	const marker = "mcp add-json -s user ghost "
+	at := strings.Index(string(raw), marker)
+	if at < 0 {
+		t.Fatalf("the fake recorded %q, want an add-json", raw)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw)[at+len(marker):])), &cfg); err != nil {
+		t.Fatalf("the re-add must be a JSON config, got %q: %v", raw, err)
+	}
+	return cfg
+}
+
+// TestRollbackRegistrationNamesWhatTheReAddDidNotCarry is the #1216 honesty
+// clause: the registration is rebuilt from `claude mcp get`'s rendering, so a
+// bare environment block and an argument holding a space cannot both come
+// across, and the error has to say so instead of claiming a restore that lost
+// them. A reader who is told "restored" over a dropped variable re-runs nothing.
+func TestRollbackRegistrationNamesWhatTheReAddDidNotCarry(t *testing.T) {
+	dir := t.TempDir()
+	claude := writeFakeClaude(t, dir, claudeFake{})
+	previous := "ghost:\n  Scope: User\n  Type: stdio\n" +
+		"  Command: " + staleGhostCommand + "\n" +
+		"  Args: mcp --flag with space\n" +
+		"  Environment: GHOST_TOKEN=abc123\n"
+	writeRegistration(t, dir, previous)
+
+	err := rollbackRegistration(claude, previous, true, nil, rollbackBase())
+	if err == nil {
+		t.Fatal("the rollback must still fail the run")
+	}
+	if !strings.Contains(err.Error(), "re-added without") {
+		t.Errorf("the error must say the re-add was partial, got %q", err.Error())
+	}
+	for _, want := range []string{"its environment", "its arguments"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error must name %s as not carried, got %q", want, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "registration was restored") {
+		t.Errorf("a partial re-add must not claim a restore, got %q", err.Error())
+	}
+	// Best effort still lands: the command comes back even though the rest does not.
+	cfg := lastRestoredConfig(t, dir)
+	if cfg["command"] != staleGhostCommand {
+		t.Errorf("the re-add must carry the previous command, got %q", cfg["command"])
+	}
+}
+
+// TestRollbackRegistrationRestoresAnHTTPEntry is the http case: an http
+// registration prints no Command line, so the old parser read it as "nothing
+// registered" and reported the user's entry as unrestorable when the rollback
+// could have put it back. A URL, headers in JSON and a spaced argument in a
+// JSON array all come across, so the error can claim a restore.
+func TestRollbackRegistrationRestoresAnHTTPEntry(t *testing.T) {
+	dir := t.TempDir()
+	claude := writeFakeClaude(t, dir, claudeFake{})
+	previous := "ghost:\n  Scope: User\n  Type: http\n" +
+		"  URL: https://example.com/mcp\n" +
+		"  Headers: {\"Authorization\": \"Bearer token\"}\n"
+	writeRegistration(t, dir, previous)
+
+	err := rollbackRegistration(claude, previous, true, nil, rollbackBase())
+	if err == nil {
+		t.Fatal("the rollback must still fail the run")
+	}
+	if !strings.Contains(err.Error(), "the previous registration was restored") {
+		t.Errorf("an http entry with its URL and headers carried must claim a restore, got %q", err.Error())
+	}
+	cfg := lastRestoredConfig(t, dir)
+	if cfg["url"] != "https://example.com/mcp" {
+		t.Errorf("the re-add must carry the URL, got %q", cfg["url"])
+	}
+	headers, ok := cfg["headers"].(map[string]any)
+	if !ok || headers["Authorization"] != "Bearer token" {
+		t.Errorf("the re-add must carry the headers, got %q", cfg["headers"])
+	}
+}
+
+// TestRollbackRegistrationCarriesTheEnvironmentAndSpacedArgument rounds the pair
+// out: when the rendering CAN carry them — an environment block as a JSON object
+// and arguments as a JSON array — nothing is dropped and a spaced argument
+// survives whole. Without it, "nothing was dropped" would only ever mean
+// "nothing was printed".
+func TestRollbackRegistrationCarriesTheEnvironmentAndSpacedArgument(t *testing.T) {
+	dir := t.TempDir()
+	claude := writeFakeClaude(t, dir, claudeFake{})
+	previous := "ghost:\n  Scope: User\n  Type: stdio\n" +
+		"  Command: " + staleGhostCommand + "\n" +
+		"  Args: [\"mcp\", \"--flag with space\"]\n" +
+		"  Environment: {\"GHOST_TOKEN\": \"abc123\"}\n"
+	writeRegistration(t, dir, previous)
+
+	err := rollbackRegistration(claude, previous, true, nil, rollbackBase())
+	if err == nil {
+		t.Fatal("the rollback must still fail the run")
+	}
+	if !strings.Contains(err.Error(), "the previous registration was restored") {
+		t.Errorf("a re-add that carried everything must claim a restore, got %q", err.Error())
+	}
+	cfg := lastRestoredConfig(t, dir)
+	args, ok := cfg["args"].([]any)
+	if !ok || len(args) != 2 || args[1] != "--flag with space" {
+		t.Fatalf("the re-add must carry the argument whole, got %q", cfg["args"])
+	}
+	if env, ok := cfg["env"].(map[string]any); !ok || env["GHOST_TOKEN"] != "abc123" {
+		t.Errorf("the re-add must carry the environment, got %q", cfg["env"])
+	}
+}
+
+// writeRegistration is the `claude mcp get ghost` output a rollback reads back.
+func writeRegistration(t *testing.T, dir, text string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "get.out"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestRegisterMCPWithoutAPreviousRegistrationReportsNoRollback holds the other
@@ -235,6 +375,6 @@ func TestRegisterMCPWithoutAPreviousRegistrationReportsNoRollback(t *testing.T) 
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
-	requireMissing(t, dir, "restored")
+	requireMissing(t, dir, "adds")
 	requireMissing(t, dir, "removed")
 }

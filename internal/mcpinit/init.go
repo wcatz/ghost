@@ -346,8 +346,8 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 }
 
 // rollbackRegistration answers a failed `claude mcp add-json` with the one fact
-// the reader needs: whether the registration Ghost deleted to make room for the
-// new one is back. A successful remove takes the previous entry out before the
+// the reader needs: what became of the registration Ghost deleted to make room
+// for the new one. A successful remove takes the previous entry out before the
 // add runs, so a refused add leaves every Claude Code session starting with no
 // ghost tools until a re-run succeeds, and a repair that ends in that state must
 // not read as a no-op. The entry is re-added from the `claude mcp get` output
@@ -358,6 +358,13 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 // collide; a registration the get output cannot describe; and — reported, never
 // retried — a restore the client refuses, because a second attempt against the
 // refused write is the failure that just happened.
+//
+// The get output is a human rendering and not the JSON add-json takes, so a
+// re-add built from it is a reconstruction: it claims a RESTORE only when every
+// line the output carried came across, and when something could not it says what
+// (an environment block, a URL, headers, arguments whose boundaries the
+// rendering cannot fix) and that the user should re-run or re-add it. A restore
+// that silently lost a variable reads as clean and is not.
 func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, removeErr, base error) error {
 	switch {
 	case !hadPrevious:
@@ -370,11 +377,11 @@ func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, re
 		// would collide with itself.
 		return fmt.Errorf("%w (the previous registration could not be removed: %v — it is most likely still registered)", base, removeErr)
 	}
-	restored, ok := parseClaudeRegistration(previousOutput)
+	previous, ok := parseClaudeRegistration(previousOutput)
 	if !ok {
 		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
 	}
-	configJSON, err := json.Marshal(restored)
+	configJSON, err := json.Marshal(previous.config)
 	if err != nil {
 		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
 	}
@@ -382,7 +389,22 @@ func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, re
 		return fmt.Errorf("%w (the previous registration was removed and could not be restored: %s)",
 			base, strings.TrimSpace(string(out)))
 	}
+	if len(previous.dropped) > 0 {
+		return fmt.Errorf("%w (the previous registration was re-added without %s — re-run ghost mcp init or re-add them)",
+			base, joinNames(previous.dropped))
+	}
 	return fmt.Errorf("%w (the previous registration was restored)", base)
+}
+
+// joinNames renders a list as prose: "a", "a and b", "a, b and c".
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // parseClaudeRegistration reads the registration `claude mcp get` printed, into
@@ -393,38 +415,123 @@ func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, re
 //	  Type: stdio
 //	  Command: /path/to/ghost
 //	  Args: mcp
+//	  Environment: {"GHOST_TOKEN": "..."}
+//	  URL: https://example.com/mcp
+//	  Headers: {"Authorization": "Bearer ..."}
 //
-// It reports false when there is no Command line to put back, which is also the
-// shape registerMCP reads as "nothing registered": nothing to restore is not a
-// failure of the rollback.
-func parseClaudeRegistration(out string) (map[string]any, bool) {
-	cfg := map[string]any{}
-	var command string
-	var args []string
+// The get output is a rendering and not the JSON add-json takes, so a line is
+// carried only where it can be carried WITHOUT guessing: a JSON array is the args
+// verbatim (so an argument holding a space survives), a JSON object is the
+// environment, the url or the headers verbatim, and a bare single token is that
+// one argument. Several bare tokens are split on whitespace AND named as
+// dropped, because one argument holding a space and two arguments print
+// identically there. Scope is the registration's location rather than server
+// config and is ignored; any other field the output carries is named as dropped.
+// dropped is the list of those, so a message can name what a re-add left behind.
+//
+// The registration is restorable when it describes a command OR a url: an http
+// entry prints no Command line, and reading that as "nothing registered" sent a
+// user whose entry had been removed away from the rollback that would have put
+// it back.
+func parseClaudeRegistration(out string) (claudeRegistration, bool) {
+	var previous claudeRegistration
+	previous.config = map[string]any{}
+	var command, args string
+	var argsSet bool
 	for _, line := range strings.Split(out, "\n") {
 		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
 		if !ok {
 			continue
 		}
-		switch strings.ToLower(field) {
+		field = strings.ToLower(strings.TrimSpace(field))
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		switch field {
+		case "scope":
+			// Where the registration lives, not what it runs.
 		case "type":
-			if v := strings.TrimSpace(value); v != "" {
-				cfg["type"] = v
-			}
+			previous.config["type"] = value
 		case "command":
-			command = strings.TrimSpace(value)
+			command = value
+		case "url":
+			previous.config["url"] = value
 		case "args":
-			args = append(args, strings.Fields(value)...)
+			args, argsSet = value, true
+		case "env", "environment":
+			if obj, ok := parseJSONObject(value); ok {
+				previous.config["env"] = obj
+			} else {
+				previous.dropped = append(previous.dropped, "its environment")
+			}
+		case "headers":
+			if obj, ok := parseJSONObject(value); ok {
+				previous.config["headers"] = obj
+			} else {
+				previous.dropped = append(previous.dropped, "its headers")
+			}
+		default:
+			previous.dropped = append(previous.dropped, "its "+field+" setting")
 		}
 	}
-	if command == "" {
+	if command != "" {
+		previous.config["command"] = command
+	}
+	if argsSet {
+		// A split the rendering cannot justify is still the best guess, so the
+		// args are carried either way and only the CLAIM is qualified.
+		parsed, exact := parseArgsLine(args)
+		if len(parsed) > 0 {
+			previous.config["args"] = parsed
+		}
+		if !exact {
+			previous.dropped = append(previous.dropped, "its arguments")
+		}
+	}
+	_, hasCommand := previous.config["command"]
+	_, hasURL := previous.config["url"]
+	return previous, hasCommand || hasURL
+}
+
+// claudeRegistration is one registration read back off `claude mcp get`, in the
+// shape add-json takes, with the parts of it the re-add does not carry.
+type claudeRegistration struct {
+	config  map[string]any
+	dropped []string
+}
+
+// parseArgsLine reads the rendered `Args:` line. A JSON array is carried
+// verbatim and a single bare token is that one argument, both exact; several
+// bare tokens are split on whitespace and reported as not exact, because the
+// rendering cannot say whether it was one argument holding a space or two.
+func parseArgsLine(value string) ([]string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, true
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var args []string
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			return nil, false
+		}
+		return args, true
+	}
+	if !strings.ContainsAny(trimmed, " \t") {
+		return []string{trimmed}, true
+	}
+	return strings.Fields(trimmed), false
+}
+
+// parseJSONObject reads a rendered field that carries a JSON object, reporting
+// false when the rendering is not one — which is what names the field as
+// dropped rather than inventing a value for it.
+func parseJSONObject(value string) (map[string]any, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(value), &obj); err != nil || obj == nil {
 		return nil, false
 	}
-	cfg["command"] = command
-	if len(args) > 0 {
-		cfg["args"] = args
-	}
-	return cfg, true
+	return obj, true
 }
 
 // ensurePermissions loads settings.json and adds missing ghost permissions.
