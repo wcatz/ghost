@@ -34,7 +34,7 @@ const CONTRACT_VERSION = 1
 // at install time. Desktop launchers often run opencode with a narrower PATH
 // than the shell that ran `ghost mcp init`, so the default must not rely on
 // lookup; GHOST_BIN remains the higher-priority override for hermetic setups.
-const GHOST_BIN_DEFAULT = "__GHOST_BIN__"
+const GHOST_BIN_DEFAULT = __GHOST_BIN__
 
 // Once a modern session.status event has been observed, legacy session.idle
 // events are ignored — versions emitting both would otherwise double-fire.

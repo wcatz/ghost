@@ -26,7 +26,8 @@ import (
 var opencodeGhostPluginTS string
 
 // ghostBinPlaceholder in the embedded plugin is replaced with the resolved
-// absolute binary path at install time: desktop launchers may run opencode
+// absolute binary path, rendered as a complete JS string literal (quotes
+// included, see jsStringLiteral), at install time: desktop launchers may run opencode
 // with a narrower PATH than the shell that ran init, so the default cannot
 // rely on lookup. GHOST_BIN stays the runtime override.
 const ghostBinPlaceholder = "__GHOST_BIN__"
@@ -34,7 +35,22 @@ const ghostBinPlaceholder = "__GHOST_BIN__"
 // renderOpencodeGhostPlugin returns the plugin source as it must exist on
 // disk for this machine.
 func renderOpencodeGhostPlugin(ghostBin string) string {
-	return strings.ReplaceAll(opencodeGhostPluginTS, ghostBinPlaceholder, ghostBin)
+	return strings.ReplaceAll(opencodeGhostPluginTS, ghostBinPlaceholder, jsStringLiteral(ghostBin))
+}
+
+// jsStringLiteral renders s as a double-quoted JS string literal. JSON string
+// syntax is a subset of JS's: quotes, backslashes and control characters are
+// escaped, and U+2028/U+2029 (which Go's encoder escapes) cannot end the
+// literal. HTML escaping is off so an ordinary path renders unchanged.
+func jsStringLiteral(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		// Encoding a string cannot fail; refuse to emit a half literal.
+		return `""`
+	}
+	return strings.TrimSuffix(buf.String(), "\n")
 }
 
 // RunOpencode installs Ghost's opencode integration: one lifecycle plugin
