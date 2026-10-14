@@ -3683,6 +3683,25 @@ type UpsertOptions struct {
 	// memory's durable tier to its own would be scheduling that memory for
 	// deletion on the strength of a near-duplicate.
 	Retention string
+
+	// SkipExactContent makes the save write nothing when the project already
+	// holds a row whose content is byte-identical to the incoming text. The
+	// skip is reported as an empty id with duplicateOf naming the row that
+	// was found; every save that writes returns a non-empty id, so the two
+	// cannot be confused. Anything else — including a near-duplicate — takes
+	// the ordinary path: folded and linked, or inserted.
+	//
+	// It is the first step inside the write transaction, not a read the
+	// caller makes beforehand, because it is a read whose answer decides
+	// whether a write happens. Read on the pool, the window between the read
+	// and the write belongs to any other handle: two first-contact Claude
+	// imports both read an empty project and both stored every file, each one
+	// twice. Inside the transaction (BEGIN IMMEDIATE, so the write lock is
+	// held from before the lookup), the second writer waits and then finds the
+	// first one's row. Only the Claude auto-memory import sets it; the lookup
+	// is scoped to the project and ignores category, scope and resolved
+	// state, which is the same set the import's pre-read (GetAll) covers.
+	SkipExactContent bool
 }
 
 // mergeRetention resolves a fold's two tiers into the one the surviving row
@@ -3921,10 +3940,14 @@ type applyViewContextKey struct{}
 
 // applyView is shared state between the two halves of one apply. The replace
 // fills crossProjectDropped; ApplyReflection reads it after the replace returns.
+// crossProjectDropped is an EmissionDrops rather than a count for the reason the
+// two halves' drop counts are: a refusal is moved between halves with its REASON
+// attached, so the caller's report of "a row changed underneath" and of an
+// overflowing merge stay correct after the move.
 type applyView struct {
 	concurrent          map[string]bool
 	crossProjectFrom    int
-	crossProjectDropped int
+	crossProjectDropped EmissionDrops
 }
 
 func withApplyView(ctx context.Context, view *applyView) context.Context {
@@ -4030,6 +4053,23 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	}
 
 	var existingID string
+
+	// The exact-content skip, when the caller asked for it, comes before the
+	// duplicate lookups and inside the same transaction as them and as the
+	// writes they decide on (see UpsertOptions.SkipExactContent). A hit returns
+	// with nothing written: the deferred Rollback ends the transaction, and no
+	// history, evidence or onSave follows, because there is no new row.
+	if opts.SkipExactContent {
+		var present string
+		switch qerr := db.QueryRowContext(ctx, `
+			SELECT id FROM memories WHERE project_id = ? AND content = ? LIMIT 1
+		`, projectID, content).Scan(&present); {
+		case qerr == nil:
+			return "", present, 0, nil
+		case !errors.Is(qerr, sql.ErrNoRows):
+			return "", "", 0, fmt.Errorf("look up exact content: %w", qerr)
+		}
+	}
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
 	// the first 30 words retrieves merge candidates cheaply. Stage 2
@@ -6384,17 +6424,24 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 }
 
 // keepEmissionClaims marks every candidate an emission that is not written would
-// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim.
-func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) {
+// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim,
+// and returns the ids it marked so the caller can tell WHICH refusal kept which
+// row. The overflow drop needs that distinction (#1228): its claims are kept
+// alive so nothing is lost, but no later run can act on them, so they must not
+// be reported as survivors a later round has to merge.
+func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) []string {
 	named := make(map[string]bool, len(m.ReplacesIDs))
 	for _, id := range m.ReplacesIDs {
 		named[id] = true
 	}
+	var kept []string
 	for _, c := range candidates {
 		if named[c.id] || c.content == m.Content {
 			concurrent[c.id] = true
+			kept = append(kept, c.id)
 		}
 	}
+	return kept
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -7200,10 +7247,17 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 // longer exists, so there is nothing to preserve — but the caller must still know
 // the round wrote nothing, or it will print "Applied" and record a skip
 // fingerprint over a project the consolidator's answer never landed in. Either
-// value non-zero means the next run has to revisit the corpus.
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped, deleted int, appliedByCategory map[string]int, err error) {
+// value non-zero means the next run has to revisit the corpus. dropped counts
+// the refused emissions BY REASON (EmissionDrops): the corpus guard's, whose
+// claimed row is still live and still needs consolidating, and the overflowing
+// merges, whose decision links do not fit in a source_ref and which no later run
+// can write either. The distinction is the caller's, not decoration: the first
+// has to suppress the skip fingerprint so the next run re-merges the survivor,
+// and the second must not, because it would re-propose the same merge on every
+// run forever (#1228).
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped EmissionDrops, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
-		return nil, 0, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+		return nil, EmissionDrops{}, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -7217,7 +7271,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var lock writeLock
 	if ownTx {
 		if tx, lock, err = s.beginWrite(ctx, "replace"); err != nil {
-			return nil, 0, 0, nil, fmt.Errorf("begin tx: %w", err)
+			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
 	}
@@ -7233,7 +7287,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// through"). See issue #318.
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, 0, nil, err
+		return nil, EmissionDrops{}, 0, nil, err
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -7245,7 +7299,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the consolidation round trip are kept in place for the same reason.
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, 0, nil, err
+		return nil, EmissionDrops{}, 0, nil, err
 	}
 	// Seed the concurrent window from the shared view when this replace is one
 	// half of an ApplyReflection: the global half's guard has already marked
@@ -7259,7 +7313,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
-		return nil, 0, 0, nil, err
+		return nil, EmissionDrops{}, 0, nil, err
 	}
 
 	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
@@ -7271,20 +7325,37 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// behaviour above exactly.
 	guard := newFedGuard(candidates, fed, concurrent)
 	dropEmission := make([]bool, len(memories))
+	overflowed := make([]bool, len(memories))
+	overflowLinks := make([]int, len(memories))
+	// The rows the round trip itself found moved, captured before the drop loop
+	// marks any refused emission's sources. A source an OVERFLOW drop kept is
+	// still a source that needs merging when it also changed underneath the
+	// pass, so the two sets cannot be conflated.
+	moved := make(map[string]bool, len(concurrent))
+	for id := range concurrent {
+		moved[id] = true
+	}
+	overflowKept := make(map[string]bool)
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
 		// A merge whose decision links alone would not fit in a source_ref is not
 		// written: truncating the list is the silent supersede miss, and failing
 		// the pass would re-propose the same merge forever. Its sources and any
-		// row carrying its text are kept, as a refused claim's are.
+		// row carrying its text are kept, as a refused claim's are — but unlike a
+		// void claim, re-running would refuse this merge again for the same
+		// reason, so those keeps are not survivors a later round can act on.
 		if !dropEmission[i] {
-			over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
+			links, over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
 			if err != nil {
-				return nil, 0, 0, nil, err
+				return nil, EmissionDrops{}, 0, nil, err
 			}
 			if over {
 				dropEmission[i] = true
-				keepEmissionClaims(candidates, concurrent, m)
+				overflowed[i] = true
+				overflowLinks[i] = links
+				for _, id := range keepEmissionClaims(candidates, concurrent, m) {
+					overflowKept[id] = true
+				}
 			}
 		}
 		// A refusal about a FOLDED cross-project candidate belongs to the half
@@ -7294,19 +7365,26 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// that was refused is a line that contradicts the applied total beside
 		// it. Only meaningful while this replace is one half of an apply.
 		if dropEmission[i] && shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
-			view.crossProjectDropped++
+			view.crossProjectDropped.record(overflowed[i], overflowLinks[i])
 		}
 	}
-	for _, d := range dropEmission {
+	for i, d := range dropEmission {
 		if d {
-			dropped++
+			dropped.record(overflowed[i], overflowLinks[i])
 		}
 	}
 
 	// Report the survivors so the caller can avoid recording a skip
-	// fingerprint that would absorb them into the next no-op gate.
+	// fingerprint that would absorb them into the next no-op gate. A row held
+	// alive only by an overflow drop is excluded: nothing can be merged out of
+	// it (the merge that would have does not fit), so calling it a survivor
+	// asked the caller to hold the project open forever for a refusal that
+	// resolves itself no sooner (#1228).
 	preserved = make([]string, 0, len(concurrent))
 	for id := range concurrent {
+		if overflowKept[id] && !moved[id] {
+			continue
+		}
 		preserved = append(preserved, id)
 	}
 
@@ -7434,7 +7512,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, 0, 0, nil, fmt.Errorf("update retained memory: %w", err)
+					return nil, EmissionDrops{}, 0, nil, fmt.Errorf("update retained memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			default:
@@ -7445,7 +7523,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					    created_at = datetime('now'), updated_at = datetime('now')
 					WHERE id = ?
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-					return nil, 0, 0, nil, fmt.Errorf("update reused memory: %w", err)
+					return nil, EmissionDrops{}, 0, nil, fmt.Errorf("update reused memory: %w", err)
 				}
 				reflected = append(reflected, id)
 			}
@@ -7458,7 +7536,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
-				return nil, 0, 0, nil, err
+				return nil, EmissionDrops{}, 0, nil, err
 			}
 			// The other sources' support and claims, for the same reason and in the
 			// same place: a merge that kept one source's row deletes the rest into it,
@@ -7467,10 +7545,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// reuse that names no other source carries nothing, because the row's
 			// own evidence never left it. See fillReusedClaimsTx.
 			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
-				return nil, 0, 0, nil, err
+				return nil, EmissionDrops{}, 0, nil, err
 			}
 			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m); err != nil {
-				return nil, 0, 0, nil, err
+				return nil, EmissionDrops{}, 0, nil, err
 			}
 			reused++
 			for _, replaced := range m.ReplacesIDs {
@@ -7497,7 +7575,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// runs before it: the same reordering the carry already depends on.
 		claims, err := inheritedClaims(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, 0, 0, nil, err
+			return nil, EmissionDrops{}, 0, nil, err
 		}
 		// The tier, from the same rows and for the same reason: the successor
 		// stands in for the memories this pass is about to delete, so it inherits
@@ -7510,7 +7588,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// reordering: the delete below is what takes the sources.
 		tier, err := inheritedRetention(ctx, tx, projectID, m)
 		if err != nil {
-			return nil, 0, 0, nil, err
+			return nil, EmissionDrops{}, 0, nil, err
 		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
@@ -7526,7 +7604,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
-			return nil, 0, 0, nil, fmt.Errorf("insert memory: %w", err)
+			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that
 		// now holds the text. Without it a rewrite or a merge mints an id whose
@@ -7541,7 +7619,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// with no ReplacesIDs carries nothing, because a brand-new memory has no
 		// inherited support and "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
-			return nil, 0, 0, nil, err
+			return nil, EmissionDrops{}, 0, nil, err
 		}
 		reflected = append(reflected, newID)
 		for _, replaced := range m.ReplacesIDs {
@@ -7556,16 +7634,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// a real concern rather than a theoretical one: one applied reflect can
 		// drop and rewrite the whole non-manual corpus at once.
 		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
-			return nil, 0, 0, nil, err
+			return nil, EmissionDrops{}, 0, nil, err
 		}
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
-			return nil, 0, 0, nil, fmt.Errorf("prepare delete replaced memory: %w", err)
+			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("prepare delete replaced memory: %w", err)
 		}
 		for _, id := range deleteIDs {
 			if _, err := stmt.ExecContext(ctx, id); err != nil {
 				stmt.Close() //nolint:errcheck
-				return nil, 0, 0, nil, fmt.Errorf("delete replaced memory: %w", err)
+				return nil, EmissionDrops{}, 0, nil, fmt.Errorf("delete replaced memory: %w", err)
 			}
 		}
 		stmt.Close() //nolint:errcheck
@@ -7577,7 +7655,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
 	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
-		return nil, 0, 0, nil, err
+		return nil, EmissionDrops{}, 0, nil, err
 	}
 	// Now that every emission's final id is known, close the chain: each consumed
 	// row's delete row names the row that replaced it. Without this a rewrite or a
@@ -7585,7 +7663,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// different id and nothing says so.
 	for oldID, newID := range successorOf {
 		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
-			return nil, 0, 0, nil, err
+			return nil, EmissionDrops{}, 0, nil, err
 		}
 	}
 
@@ -7601,7 +7679,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
-			return nil, 0, 0, nil, fmt.Errorf("commit replace: %w", err)
+			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("commit replace: %w", err)
 		}
 		lock.reportHold("replace", time.Now())
 	}

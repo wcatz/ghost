@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -73,11 +74,33 @@ func TestCredentialIsDroppedAfterTheGuardAuditNotBefore(t *testing.T) {
 	}
 }
 
+// captureStderr returns everything a run wrote to EITHER stream, because a
+// guarantee about "the report" has to cover both (the proposal listing and the
+// "Applied" summary are stdout; the drop and signature notes are stderr).
+//
+// The two writers are serialised on the way into one buffer. captureOutput runs
+// one io.Copy per stream in its own goroutine, so handing both the same
+// strings.Builder is a data race on it the moment both streams carry bytes —
+// which a full `ghost reflect` run always does, and which a single-stream call
+// like the credential test's never did, so the race stayed invisible until one.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	var out strings.Builder
-	captureOutput(t, &out, &out, fn)
+	w := &serialWriter{w: &out}
+	captureOutput(t, w, w, fn)
 	return out.String()
+}
+
+// serialWriter is the one writer both capture goroutines may share.
+type serialWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *serialWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // captureOutput runs fn with both standard streams redirected into w, so a test

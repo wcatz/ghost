@@ -360,6 +360,14 @@ func sourceRefNamesDecision(ref, decisionID string) bool {
 // joinDecisionRefs renders the links of a successor that stands for more than one
 // decision, in the order they were gathered, with repeats removed.
 func joinDecisionRefs(refs []string) string {
+	return strings.Join(dedupeDecisionRefs(refs), decisionRefSeparator)
+}
+
+// dedupeDecisionRefs is joinDecisionRefs' own list: every distinct non-empty
+// link, in the order first seen. joinDecisionRefs renders it, and the overflow
+// check counts it, so the number of links a merge stands for and the bytes its
+// joined value takes are computed from ONE list.
+func dedupeDecisionRefs(refs []string) []string {
 	seen := make(map[string]bool, len(refs))
 	out := make([]string, 0, len(refs))
 	for _, ref := range refs {
@@ -369,7 +377,7 @@ func joinDecisionRefs(refs []string) string {
 		seen[ref] = true
 		out = append(out, ref)
 	}
-	return strings.Join(out, decisionRefSeparator)
+	return out
 }
 
 // extendDecisionRefs appends to base every link in refs that base does not
@@ -433,12 +441,15 @@ func boundedDecisionRefs(base string, refs []string) (string, error) {
 	return "", errDecisionRefsOverflow
 }
 
-// decisionLinksOverflowTx reports whether the decision links carried by the rows
-// ids name would, joined, exceed MaxSourceRefLen — the one case boundedDecisionRefs
-// refuses. ReplaceNonManual asks it per emission before anything is written, so
-// such a merge is dropped and its sources kept instead of failing the whole pass
-// (which reflect would then re-propose on every run).
-func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (bool, error) {
+// decisionLinksOverflowTx reports how many distinct decision links the rows ids
+// name and whether their joined value would exceed MaxSourceRefLen — the one
+// case boundedDecisionRefs refuses. ReplaceNonManual asks it per emission before
+// anything is written, so such a merge is dropped and its sources kept instead
+// of failing the whole pass (which reflect would then re-propose on every run).
+// The LINK COUNT is returned beside the verdict because the caller reports the
+// drop as its own reason, and "how many decision links, and the bound" is what
+// tells an operator how far over the merge was.
+func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (links int, over bool, err error) {
 	var refs []string
 	for _, id := range ids {
 		if id == "" {
@@ -450,11 +461,12 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 			continue
 		}
 		if err != nil {
-			return false, fmt.Errorf("read source_ref of %s: %w", id, err)
+			return 0, false, fmt.Errorf("read source_ref of %s: %w", id, err)
 		}
 		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
 	}
-	return len(joinDecisionRefs(refs)) > MaxSourceRefLen, nil
+	unique := dedupeDecisionRefs(refs)
+	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen, nil
 }
 
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the
@@ -472,9 +484,15 @@ const decisionRefPrefix = "decision:"
 // two drifting apart is the hole: a guard that refused only a leading prefix let
 // "runbook.md,decision:<id>" through, and the token reader then took that row
 // for the decision's companion.
+//
+// The refusal names what the caller can DO, because the value it refuses is one
+// Ghost itself wrote: a merged successor's source_ref is an ordinary reference
+// extended by the decision links it stands for, so a ghost_memory_update that
+// reads such a row and hands its own value back is refused. Saying only "use a
+// path, commit or URL" leaves that caller with no way to keep the links (#1228).
 func checkReservedSourceRef(ref string) error {
 	if len(decisionRefsInSourceRef(ref)) > 0 {
-		return fmt.Errorf("source_ref %q is reserved: a %q entry links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
+		return fmt.Errorf("source_ref %q is reserved: a %q entry links a decision to its companion memory and is managed by Ghost — omit source_ref to keep the links this row already has, or use a path, commit or URL", ref, decisionRefPrefix)
 	}
 	return nil
 }

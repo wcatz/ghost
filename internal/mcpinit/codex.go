@@ -1465,6 +1465,14 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 
 	events := map[string]json.RawMessage{}
 	if raw, ok := top["hooks"]; ok {
+		// An explicit null is structurally-invalid-but-present data, not
+		// "absent": json.Unmarshal decodes null into a nil map with no error,
+		// and the assignment below would then panic on it. Refuse it the way
+		// the Claude settings path does, naming the file rather than treating
+		// the user's declaration as an empty object to fill in.
+		if isJSONNull(raw) {
+			return "", fmt.Errorf("hooks.json: hooks is null")
+		}
 		if err := json.Unmarshal(raw, &events); err != nil {
 			return "", fmt.Errorf("parse hooks.json hooks: %w", err)
 		}

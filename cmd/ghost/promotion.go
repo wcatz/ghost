@@ -19,7 +19,7 @@ import (
 // recovery behind one call makes their ordering testable and lets the store
 // commit them atomically.
 type reflectionApplier interface {
-	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error)
+	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, err error)
 }
 
 // applyReflection converts reflection proposals to store rows and always
@@ -63,9 +63,13 @@ type reflectionApplier interface {
 // proposal and one credential — reported 2 written when 1 was. `projectDropped`
 // and `globalDropped` come back from the store and close the same gap on the
 // OTHER drop path (the corpus guard): they are the emissions the store refused,
-// per half, so the summary can subtract only what each of its components counts
-// and can tell a round that wrote nothing from one that did.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, applied bool, err error) {
+// per half, BY REASON, so the summary can subtract only what each of its
+// components counts and can tell a round that wrote nothing from one that did.
+// The reason split is not decoration either: a drop whose claimed row still
+// stands has to keep the skip fingerprint unrecorded, and a merge dropped
+// because its decision links do not fit in a source_ref would be re-proposed on
+// every run if it did the same (#1228).
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, applied bool, err error) {
 	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
 	//
 	// The order is load-bearing and it was the other way round here first.
@@ -103,11 +107,11 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return keptProject, keptGlobal, nil, 0, nil, 0, 0, 0, nil, false, nil
+		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, false, nil
 	}
 	preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals, fed)
 	if err != nil {
-		return keptProject, keptGlobal, nil, 0, nil, 0, 0, 0, nil, false, err
+		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, false, err
 	}
 	// Two things have to be true for a carried-forward row to be gone, and this
 	// note says only what holds. A proposal dropped for holding a credential is
@@ -138,7 +142,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	// still changed the corpus: the latter took a snapshot the operator can
 	// restore, so it is a replace and must be reported as one.
 	applied = true
-	if projectDropped+globalDropped == len(projectRows)+len(globalRows) && deleted == 0 {
+	if projectDropped.Total()+globalDropped.Total() == len(projectRows)+len(globalRows) && deleted == 0 {
 		applied = false
 	}
 	return keptProject, keptCrossProject, preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, applied, nil
