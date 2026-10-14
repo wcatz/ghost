@@ -1031,16 +1031,24 @@ const (
 )
 
 // truncationWarning is the caller-facing half of the explicit-truncation
-// contract: whenever memory.ClampContent cut content at the cap, the
-// save/update response appends this line so the saving agent learns the
-// full text did NOT land and can act instead of believing it all stored.
-// what names the field that was cut and advice names the recovery step
-// for THAT writer — a task description must not be told to split into
-// memories, and a decision must not be told to split into tasks. The
-// stored half is the marker memory.ClampContent appends to the content
-// itself — truncation is visible on both sides.
+// contract for fields cut at memory.MaxContentLen: it wraps
+// truncationWarningAt with the content cap so the historical call sites
+// keep their (what, advice) shape.
 func truncationWarning(what, advice string) string {
-	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, memory.MaxContentLen, advice)
+	return truncationWarningAt(what, memory.MaxContentLen, advice)
+}
+
+// truncationWarningAt is the caller-facing half of the explicit-truncation
+// contract: whenever a bounded field was cut, the save/update response
+// appends this line so the saving agent learns the full text did NOT land
+// and can act instead of believing it all stored. what names the field that
+// was cut, maxBytes the byte limit it was cut to, and advice the recovery
+// step for THAT writer — a task description must not be told to split into
+// memories, and a decision must not be told to split into tasks. The
+// stored half is the marker where the writer appends one (content only);
+// titles carry no marker, so this warning is their only notice of loss.
+func truncationWarningAt(what string, maxBytes int, advice string) string {
+	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, maxBytes, advice)
 }
 
 // Recovery advice per writer kind, kept as named constants so each call
@@ -3115,6 +3123,7 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("title", args.Title); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var descTruncated bool
 		args.Description, descTruncated = memory.ClampContent(args.Description)
@@ -3147,6 +3156,9 @@ func (s *Server) registerTools() {
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
 		msg := fmt.Sprintf("Task created (id: %s)", id)
+		if titleTruncated {
+			msg += truncationWarningAt("task title", maxTitleLen, taskTruncationAdvice)
+		}
 		if descTruncated {
 			msg += truncationWarning("task description", taskTruncationAdvice)
 		}
@@ -3450,6 +3462,7 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
 		args.Decision, decisionTruncated = memory.ClampContent(args.Decision)
@@ -3458,6 +3471,11 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
+		// Track whether the caller's list exceeds the stored bound, so the cut is
+		// reported instead of only being applied silently. memory.AlternativesClamped
+		// asks the same bound memory.BoundAlternatives applies, through the same
+		// call, so the two cannot disagree about whether a cut happened.
+		alternativesWereClamped := memory.AlternativesClamped(alternatives)
 		// memory.BoundAlternatives is the same bound the portable import applies,
 		// through the same call, so a decision's list is capped identically whichever
 		// route wrote it.
@@ -3614,6 +3632,9 @@ func (s *Server) registerTools() {
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
 		}
+		if titleTruncated {
+			msg += truncationWarningAt("decision title", maxTitleLen, decisionTruncationAdvice)
+		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
 			switch {
@@ -3630,6 +3651,9 @@ func (s *Server) registerTools() {
 			// already tells the caller to shorten, and the marker still
 			// names the composition cut in the stored row.
 			msg += truncationWarning("decision companion memory", memoryTruncationAdvice)
+		}
+		if alternativesWereClamped {
+			msg += fmt.Sprintf(" — WARNING: decision alternatives were truncated to %d entries or %d bytes per entry; the stored list is incomplete — shorten it, or move detail into the decision's rationale context.", memory.MaxAlternatives, memory.MaxTitleLen)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -4419,7 +4443,7 @@ func (s *Server) registerResources() {
 		for _, status := range []string{"active", "blocked", "pending"} {
 			tasks, err := s.store.ListTasks(ctx, projectID, status, 15)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("list tasks for %s: %w", memory.RefusalArg("project_id", projectID), err)
 			}
 			for _, t := range tasks {
 				// The explainer goes in with the first row and only there: this is
