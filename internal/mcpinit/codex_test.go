@@ -1884,6 +1884,92 @@ func TestMergeCodexHooksRecognizesAWindowsBatchShim(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksFixedPointForAnyBinaryName is #1249's regression: the
+// merge recognised its own earlier output only when the baked binary's
+// basename was "ghost", so any other name — /g, a renamed .exe, a differently
+// named .bat/.cmd shim — was not recognised as existing, the install's
+// byte-compare never saw existing == desired, and every pass appended another
+// identical rule to each event. Recognition now compares against the path
+// being rendered as well, so feeding the output back is a byte-level no-op
+// for every accepted input and every path.
+func TestMergeCodexHooksFixedPointForAnyBinaryName(t *testing.T) {
+	bins := []string{"/g", "/opt/my tools/ghost-cli", `C:\Tools\ghostx.exe`, "/usr/local/bin/ghostx.bat"}
+	for _, bin := range bins {
+		t.Run(bin, func(t *testing.T) {
+			rendered := renderCodexHooksConfig(bin)
+			mixed := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[` +
+				`{"type":"command","command":` + jsonString(shellQuote("/usr/local/bin/ghost")+" hook session-start --source codex") + `},` +
+				`{"type":"command","command":` + jsonString("/usr/local/bin/notify-start") +
+				`}]}]}}`
+			inputs := []string{`{}`, `{"hooks": {}}`, rendered, mixed}
+			var firstMixed string
+			for _, input := range inputs {
+				first, err := mergeCodexHooksConfig([]byte(input), bin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig(%s): %v", input, err)
+				}
+				second, err := mergeCodexHooksConfig([]byte(first), bin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+				}
+				if second != first {
+					t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(second)-len(first), first, second)
+				}
+				third, err := mergeCodexHooksConfig([]byte(second), bin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig (third pass): %v", err)
+				}
+				if third != first {
+					t.Errorf("pass 3 diverged by %+d bytes:\nfirst:\n%s\nthird:\n%s", len(third)-len(first), first, third)
+				}
+				if input == mixed {
+					firstMixed = first
+				}
+
+				// Ghost fires exactly once per event, at the path this run bakes.
+				for _, event := range []struct{ key, token string }{
+					{"SessionStart", "session-start"},
+					{"Stop", "stop"},
+					{"SessionEnd", "session-end"},
+				} {
+					want := shellQuote(bin) + " hook " + event.token + " --source codex"
+					fired := 0
+					for _, rule := range codexMergedEvent(t, []byte(first), event.key) {
+						for _, cmd := range codexRuleCommands(rule) {
+							if cmd == want {
+								fired++
+							}
+						}
+					}
+					if fired != 1 {
+						t.Errorf("%s: ghost must fire exactly once, got %d actions equal to %q:\n%s", event.key, fired, want, first)
+					}
+				}
+			}
+
+			// The mixed rule keeps what is the user's: its matcher, its own
+			// action, and the stale ghost-named path repaired in place.
+			rules := codexMergedEvent(t, []byte(firstMixed), "SessionStart")
+			if len(rules) != 1 {
+				t.Fatalf("the user's rule must survive, got %d rules:\n%s", len(rules), firstMixed)
+			}
+			if rules[0].Matcher != "startup" {
+				t.Errorf("the rule's matcher must survive, got %q", rules[0].Matcher)
+			}
+			cmds := codexRuleCommands(rules[0])
+			if len(cmds) != 2 {
+				t.Fatalf("the user's action must survive beside ghost's, got %v", cmds)
+			}
+			if cmds[1] != "/usr/local/bin/notify-start" {
+				t.Errorf("user action was rewritten, got %q", cmds[1])
+			}
+			if want := shellQuote(bin) + " hook session-start --source codex"; cmds[0] != want {
+				t.Errorf("the stale ghost-named action should be repaired to the baked path, got %q, want %q", cmds[0], want)
+			}
+		})
+	}
+}
+
 // TestMergeCodexHooksRepairsGhostsOwnActionFields pins the whole-action repair.
 // Rewriting only ghost's command left a stale budget on the action itself:
 // a hand-edited or pre-#1217 `"timeout":1` on the SessionEnd action is not the
