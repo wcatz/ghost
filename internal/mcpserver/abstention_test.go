@@ -362,6 +362,17 @@ func TestTheSearchResponseStaysInsideItsByteCap(t *testing.T) {
 	if !strings.Contains(out, "admitted=") {
 		t.Errorf("the verdict line does not report how many rows were admitted:\n%s", tail(out, 300))
 	}
+	// A trimmed search ends with the same cut notice the five listing tools
+	// render, naming how many whole rows went and how to see the rest. The
+	// machine line's admitted= is a trace of the cut, not the disclosure: an
+	// agent reading the answer has to be told a row it cannot see exists.
+	if cut := cutCount(t, out); cut < 1 {
+		t.Errorf("no cut notice on a trimmed search (cut=%d): the listing tools name the rows they "+
+			"withheld, and this answer must too:\n%s", cut, tail(out, 400))
+	}
+	if !strings.Contains(out, "narrow the query to see the rest") {
+		t.Errorf("the cut notice does not say how to see the rest:\n%s", tail(out, 400))
+	}
 	// And the fixture has to be big enough that the assertion above is a real
 	// test: an uncapped answer over this corpus is several times the cap.
 	if got := countItemLines(out); got < 10 {
