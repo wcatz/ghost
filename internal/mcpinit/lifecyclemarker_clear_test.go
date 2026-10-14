@@ -44,6 +44,36 @@ func TestACleanRunLeavesAMarkerKeyedOnAnAmbiguousName(t *testing.T) {
 	}
 }
 
+// TestACleanRunStillHealsTheOperandKeyedMarkerWithNoStore guards the edge the
+// ambiguity fix must not swallow (#1268). A data directory whose store cannot be
+// read is the WRITER's own fallback — WriteLifecycleFailure keys the marker on
+// the operand because nothing resolved it — so the matching clean run has to
+// clear that file. Only an ambiguous reference is a key that cannot be
+// attributed; a resolution error of any other kind leaves no other project
+// claiming the key, and reading it as ambiguous would strand the marker until
+// the 30-day self-clean.
+func TestACleanRunStillHealsTheOperandKeyedMarkerWithNoStore(t *testing.T) {
+	dataHome := isolatedHome(t)
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	// No ghost.db, so every resolve fails exactly as it did for the write.
+	if err := WriteLifecycleFailure("proj-x", []string{"reflect"}, "the storeless failure"); err != nil {
+		t.Fatalf("record the failure: %v", err)
+	}
+	path := filepath.Join(dataHome, "ghost", projectMarkerFile("proj-x"))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the storeless failure was not written under its operand: %v", err)
+	}
+
+	if err := FinishLifecycleRun("proj-x", 3, nil, ""); err != nil {
+		t.Fatalf("clean run: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a clean run left the operand-keyed marker it wrote storelessly: %v", err)
+	}
+}
+
 // TestALegacyMarkerKeyedOnTheProjectNameIsCleared is the second clearing defect
 // (#1268). The pre-per-project writer recorded the unresolved operand — often
 // the project's name — in the one shared lifecycle-last-failure.json, and the

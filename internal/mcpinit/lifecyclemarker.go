@@ -257,14 +257,15 @@ func ClearLifecycleFailure(project string) error {
 	operand := project
 	var name string
 	if project != "" {
-		resolved, resolvedName, err := resolveMarkerIdentity(dataDir, project)
-		if err != nil {
-			// The reference matched more than one project (or the store could
-			// not be read), so it names no single project and every marker
-			// keyed on it — the digest file for the operand itself included —
-			// may record another project's failure. An owner that cannot be
-			// determined is not read as "not mine" (#1268): success clears
-			// nothing rather than guessing.
+		resolved, resolvedName, resolveErr := resolveMarkerIdentity(dataDir, project)
+		if errors.Is(resolveErr, memory.ErrAmbiguousProject) {
+			// The reference matched more than one project, so it names no
+			// single project and every marker keyed on it — the digest file for
+			// the operand itself included — may record another project's
+			// failure. An owner that cannot be determined is not read as "not
+			// mine" (#1268): success clears nothing rather than guessing. Any
+			// OTHER error is the store-less situation the writer's own fallback
+			// handles, so the operand stays the key and its marker is cleared.
 			return nil
 		}
 		if resolved != "" {
@@ -339,11 +340,13 @@ func markerRecordsRun(recorded, id, name, operand string) bool {
 // the raw key, because older builds never wrote the placeholder.
 func clearCheckedMarker(dataDir, projectID, key string) error {
 	owner, _, err := resolveMarkerIdentity(dataDir, key)
-	if err != nil {
-		// The key did not resolve cleanly: it matched more than one project,
-		// and a name two projects share is exactly the key an unresolved write
-		// lands on. Ownership cannot be determined, so it is not read as "not
-		// mine": the file is left for whoever it records (#1268).
+	if errors.Is(err, memory.ErrAmbiguousProject) {
+		// The key matched more than one project, and a name two projects share
+		// is exactly the key an unresolved write lands on. Ownership cannot be
+		// determined, so it is not read as "not mine": the file is left for
+		// whoever it records (#1268). Other errors — a store-less or unreadable
+		// data dir — leave owner "" and fall through, because no other project
+		// claims the key either.
 		return nil
 	}
 	if owner != "" && owner != projectID {
