@@ -462,6 +462,10 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 //     can sit on a history row that names a different memory. Those cells are
 //     redacted rather than their rows deleted: the event (which memory, when,
 //     which agent) is worth keeping, and the text is what the purge is for.
+//     The matching texts therefore include this memory's OWN `merged_content`,
+//     not only its content columns: wording the memory folded into a different
+//     row is absent from every content column of this one, so a list drawn from
+//     those columns alone could never reach the copy a second row kept.
 //   - memory_provenance and memory_snapshot_evidence. The evidence records are
 //     deleted outright rather than kept as a record: they carry no text of the
 //     memory, but they name the agents, sessions and references that reported it,
@@ -491,10 +495,12 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	texts, err := selectIDs(ctx, tx, `
 		SELECT content FROM memory_history WHERE memory_id = ? AND content IS NOT NULL
 		UNION
+		SELECT merged_content FROM memory_history WHERE memory_id = ? AND merged_content IS NOT NULL
+		UNION
 		SELECT content FROM memories WHERE id = ?
 		UNION
 		SELECT content FROM memory_snapshots WHERE memory_id = ?`,
-		memoryID, memoryID, memoryID)
+		memoryID, memoryID, memoryID, memoryID)
 	if err != nil {
 		return 0, fmt.Errorf("collect texts to purge: %w", err)
 	}
