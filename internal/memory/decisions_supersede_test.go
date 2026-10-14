@@ -1083,12 +1083,12 @@ func TestImportDecisionRefusesTheLinkSeparatorInItsID(t *testing.T) {
 	if err := CheckImportedDecision(bad); err == nil {
 		t.Errorf("CheckImportedDecision accepted id %q, which splits its own companion link", bad.ID)
 	}
-	if _, err := s.ImportDecision(ctx, bad, true); err == nil {
+	if _, _, err := s.ImportDecision(ctx, bad, true); err == nil {
 		t.Errorf("ImportDecision imported id %q, which splits its own companion link", bad.ID)
 	}
 	good := bad
 	good.ID = "abcd"
-	if _, err := s.ImportDecision(ctx, good, true); err != nil {
+	if _, _, err := s.ImportDecision(ctx, good, true); err != nil {
 		t.Errorf("ImportDecision refused an ordinary id: %v", err)
 	}
 }
