@@ -21,14 +21,14 @@ type fakeReflectionApplier struct {
 	resultPreserved       []string
 	resultPromoted        int
 	resultKept            []memory.Memory
-	resultProjectDropped  int
-	resultGlobalDropped   int
+	resultProjectDropped  memory.EmissionDrops
+	resultGlobalDropped   memory.EmissionDrops
 	resultDeleted         int
 	resultAppliedCategory map[string]int
 	err                   error
 }
 
-func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool, _ []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped, deleted int, appliedByCategory map[string]int, err error) {
+func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool, _ []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, err error) {
 	f.calls++
 	f.projectMems = append([]memory.Memory(nil), projectMems...)
 	f.globalMems = append([]memory.Memory(nil), globalMems...)
@@ -325,7 +325,7 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 // the summary can subtract only what each component counts.
 func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	t.Run("every emission refused is applied=false", func(t *testing.T) {
-		f := &fakeReflectionApplier{resultProjectDropped: 2}
+		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 2}}
 		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
@@ -334,8 +334,8 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 		if applied {
 			t.Error("applied = true, want false: the store refused every emission, so nothing was written")
 		}
-		if projectDropped != 2 || globalDropped != 0 {
-			t.Errorf("drops = %d/%d, want 2/0 to travel to the summary", projectDropped, globalDropped)
+		if projectDropped.Changed != 2 || globalDropped.Changed != 0 {
+			t.Errorf("drops = %d/%d, want 2/0 to travel to the summary", projectDropped.Changed, globalDropped.Changed)
 		}
 		if len(keptProject) != 2 {
 			t.Errorf("keptProject = %d rows, want 2: the reporting set is still the caller's post-credential-drop set", len(keptProject))
@@ -346,7 +346,7 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	})
 
 	t.Run("a partial refusal stays applied with the count", func(t *testing.T) {
-		f := &fakeReflectionApplier{resultProjectDropped: 1}
+		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 1}}
 		_, _, preserved, promoted, kept, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
@@ -355,8 +355,8 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 		if !applied {
 			t.Error("applied = false, want true: one of two emissions was written, so the round did write")
 		}
-		if projectDropped != 1 || globalDropped != 0 {
-			t.Errorf("drops = %d/%d, want 1/0", projectDropped, globalDropped)
+		if projectDropped.Changed != 1 || globalDropped.Changed != 0 {
+			t.Errorf("drops = %d/%d, want 1/0", projectDropped.Changed, globalDropped.Changed)
 		}
 		if preserved != nil || promoted != 0 || len(kept) != 0 {
 			t.Errorf("result = (%v, %d, %d), want (nil, 0, 0)", preserved, promoted, len(kept))
@@ -364,7 +364,7 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	})
 
 	t.Run("an all-dropped global half alone is applied=false", func(t *testing.T) {
-		f := &fakeReflectionApplier{resultGlobalDropped: 1}
+		f := &fakeReflectionApplier{resultGlobalDropped: memory.EmissionDrops{Changed: 1}}
 		_, _, _, _, _, projectDropped, globalDropped, _, _, applied, err := applyReflection(
 			context.Background(), f, "p1", nil, globals("g"), "", true, nil, nil)
 		if err != nil {
@@ -373,8 +373,8 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 		if applied {
 			t.Error("applied = true, want false: the only emission was a global candidate the store refused")
 		}
-		if projectDropped != 0 || globalDropped != 1 {
-			t.Errorf("drops = %d/%d, want 0/1", projectDropped, globalDropped)
+		if projectDropped.Changed != 0 || globalDropped.Changed != 1 {
+			t.Errorf("drops = %d/%d, want 0/1", projectDropped.Changed, globalDropped.Changed)
 		}
 	})
 
@@ -386,7 +386,7 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	// memories consolidated" with the restore hint, never "nothing was written
 	// this round".
 	t.Run("an all-dropped round that still deletes rows is applied with the delete count", func(t *testing.T) {
-		f := &fakeReflectionApplier{resultProjectDropped: 2, resultDeleted: 1}
+		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 2}, resultDeleted: 1}
 		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, deleted, appliedByCategory, applied, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
@@ -395,8 +395,8 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 		if !applied {
 			t.Error("applied = false, want true: the store deleted an unclaimed candidate, so the round changed the corpus and its snapshot must be offered for restore")
 		}
-		if projectDropped != 2 || globalDropped != 0 {
-			t.Errorf("drops = %d/%d, want 2/0: the refusal is still reported", projectDropped, globalDropped)
+		if projectDropped.Changed != 2 || globalDropped.Changed != 0 {
+			t.Errorf("drops = %d/%d, want 2/0: the refusal is still reported", projectDropped.Changed, globalDropped.Changed)
 		}
 		if deleted != 1 {
 			t.Errorf("deleted = %d, want 1: the number of rows the replace removed must travel to the caller", deleted)
@@ -483,8 +483,8 @@ func TestApplyReflectionAllDroppedWithOmittedRowReportsReplaceAndRestore(t *test
 	if !applied {
 		t.Error("applied = false, want true: the replace deleted the omitted row, so the round changed the corpus and its snapshot must be offered for restore")
 	}
-	if projectDropped != 1 || globalDropped != 0 {
-		t.Errorf("drops = %d/%d, want 1/0: only the claimed emission was refused", projectDropped, globalDropped)
+	if projectDropped.Changed != 1 || globalDropped.Changed != 0 {
+		t.Errorf("drops = %d/%d, want 1/0: only the claimed emission was refused", projectDropped.Changed, globalDropped.Changed)
 	}
 	if deleted != 1 {
 		t.Errorf("deleted = %d, want 1: the omitted row is the one stored row nothing claimed", deleted)
@@ -574,7 +574,7 @@ func TestWriteAppliedReportStatesRemovedRowsOfAllRefusedRound(t *testing.T) {
 	}
 
 	var out strings.Builder
-	_, wrote := writeAppliedReport(&out, applied, false, byCategory, keptProject, keptGlobal, keptMems, projectMems, promoted, globalDropped, deleted)
+	_, wrote := writeAppliedReport(&out, applied, false, byCategory, keptProject, keptGlobal, keptMems, projectMems, promoted, globalDropped.Total(), deleted)
 	if !wrote {
 		t.Fatal("wrote = false, want the Applied branch to print")
 	}

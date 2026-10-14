@@ -225,11 +225,11 @@ func TestApplyReflectionCountsGlobalDrops(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyReflection: %v", err)
 		}
-		if projectDropped != 0 {
-			t.Errorf("projectDropped = %d, want 0: the clean project emission was refused", projectDropped)
+		if projectDropped.Changed != 0 {
+			t.Errorf("projectDropped.Changed = %d, want 0: the clean project emission was refused", projectDropped.Changed)
 		}
-		if globalDropped != 1 {
-			t.Errorf("globalDropped = %d, want 1: the global emission claiming the deleted row was refused but not reported", globalDropped)
+		if globalDropped.Changed != 1 {
+			t.Errorf("globalDropped.Changed = %d, want 1: the global emission claiming the deleted row was refused but not reported", globalDropped.Changed)
 		}
 		if promoted != 0 || len(kept) != 0 {
 			t.Errorf("promoted/kept = %d/%d, want 0/0: the dropped candidate must not reach _global or the recovery path", promoted, len(kept))
@@ -261,11 +261,11 @@ func TestApplyReflectionCountsGlobalDrops(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyReflection: %v", err)
 		}
-		if globalDropped != 1 {
-			t.Errorf("globalDropped = %d, want 1: the global candidate claiming the deleted row was refused", globalDropped)
+		if globalDropped.Changed != 1 {
+			t.Errorf("globalDropped.Changed = %d, want 1: the global candidate claiming the deleted row was refused", globalDropped.Changed)
 		}
-		if projectDropped != 0 {
-			t.Errorf("projectDropped = %d, want 0: the refusal belongs to the global half, not the folded project list", projectDropped)
+		if projectDropped.Changed != 0 {
+			t.Errorf("projectDropped.Changed = %d, want 0: the refusal belongs to the global half, not the folded project list", projectDropped.Changed)
 		}
 		if promoted != 0 || len(kept) != 0 {
 			t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(kept))
@@ -426,11 +426,11 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyReflection: %v", err)
 		}
-		if globalDropped != 1 {
-			t.Errorf("globalDropped = %d, want 1: the merge claiming the edited A was not refused", globalDropped)
+		if globalDropped.Changed != 1 {
+			t.Errorf("globalDropped.Changed = %d, want 1: the merge claiming the edited A was not refused", globalDropped.Changed)
 		}
-		if projectDropped != 0 {
-			t.Errorf("projectDropped = %d, want 0: the refusal belongs to the global half", projectDropped)
+		if projectDropped.Changed != 0 {
+			t.Errorf("projectDropped.Changed = %d, want 0: the refusal belongs to the global half", projectDropped.Changed)
 		}
 		if promoted != 0 || len(kept) != 0 {
 			t.Errorf("promoted/kept = %d/%d, want 0/0", promoted, len(kept))
@@ -502,14 +502,14 @@ func TestApplyReflectionGuardsTheGlobalHalf(t *testing.T) {
 		// when the fold happened) and was refused only inside the replace, after
 		// the refused merge marked X concurrent. It is still a cross-project
 		// candidate's refusal, so the global half owns it.
-		if globalDropped != 1 {
-			t.Errorf("globalDropped = %d, want 1: the folded candidate the replace refused belongs to the half that produced it", globalDropped)
+		if globalDropped.Changed != 1 {
+			t.Errorf("globalDropped.Changed = %d, want 1: the folded candidate the replace refused belongs to the half that produced it", globalDropped.Changed)
 		}
-		if projectDropped != 1 {
-			t.Errorf("projectDropped = %d, want 1: only the project half's own merge was refused", projectDropped)
+		if projectDropped.Changed != 1 {
+			t.Errorf("projectDropped.Changed = %d, want 1: only the project half's own merge was refused", projectDropped.Changed)
 		}
-		if projectDropped+globalDropped != 2 {
-			t.Errorf("dropped total = %d, want 2: re-attribution moves a refusal between halves, it does not create one", projectDropped+globalDropped)
+		if projectDropped.Total()+globalDropped.Total() != 2 {
+			t.Errorf("dropped total = %d, want 2: re-attribution moves a refusal between halves, it does not create one", projectDropped.Total()+globalDropped.Total())
 		}
 		if len(appliedByCategory) != 0 {
 			t.Errorf("appliedByCategory = %v, want empty: every emission was refused", appliedByCategory)
@@ -729,8 +729,8 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
-		if dropped != 1 {
-			t.Errorf("dropped = %d, want 1: the emission claiming a deleted row was refused but not reported", dropped)
+		if dropped.Changed != 1 {
+			t.Errorf("dropped.Changed = %d, want 1: the emission claiming a deleted row was refused but not reported", dropped.Changed)
 		}
 		if len(preserved) != 0 {
 			t.Errorf("preserved = %v, want empty: the row is gone, so nothing was preserved — the drop itself is the signal", preserved)
@@ -759,8 +759,8 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
-		if dropped != 1 {
-			t.Errorf("dropped = %d, want 1: the re-emission was refused", dropped)
+		if dropped.Changed != 1 {
+			t.Errorf("dropped.Changed = %d, want 1: the re-emission was refused", dropped.Changed)
 		}
 		if len(preserved) != 1 || preserved[0] != aID {
 			t.Errorf("preserved = %v, want [%s]: the edited row must be reported so the caller skips the fingerprint", preserved, aID)
@@ -793,8 +793,8 @@ func TestReplaceNonManualCountsDroppedEmissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
-		if dropped != 1 {
-			t.Errorf("dropped = %d, want 1: only the emission claiming the deleted row was refused", dropped)
+		if dropped.Changed != 1 {
+			t.Errorf("dropped.Changed = %d, want 1: only the emission claiming the deleted row was refused", dropped.Changed)
 		}
 		if len(preserved) != 0 {
 			t.Errorf("preserved = %v, want empty", preserved)
@@ -851,8 +851,8 @@ func TestReplaceNonManualReportsDeletesAndLandedCategories(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
-		if dropped != 1 {
-			t.Errorf("dropped = %d, want 1: the only emission was refused", dropped)
+		if dropped.Changed != 1 {
+			t.Errorf("dropped.Changed = %d, want 1: the only emission was refused", dropped.Changed)
 		}
 		if deleted != 1 {
 			t.Errorf("deleted = %d, want 1: the omitted row is the one stored row nothing claimed", deleted)
@@ -901,8 +901,8 @@ func TestReplaceNonManualReportsDeletesAndLandedCategories(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
-		if dropped != 0 {
-			t.Errorf("dropped = %d, want 0: both emissions claim live rows", dropped)
+		if dropped.Total() != 0 {
+			t.Errorf("dropped.Total() = %d, want 0: both emissions claim live rows", dropped.Total())
 		}
 		if deleted != 1 {
 			t.Errorf("deleted = %d, want 1", deleted)

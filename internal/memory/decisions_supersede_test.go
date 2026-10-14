@@ -865,6 +865,33 @@ func TestWriterPathsRefuseTheReservedDecisionRef(t *testing.T) {
 	}
 }
 
+// TestTheReservedRefRefusalSaysTheLinkIsGhostsToManage is the #1228 follow-up on
+// #1213's token reader: a guard that refuses a decision link ANYWHERE in a
+// caller's source_ref also refuses the value Ghost itself wrote on a merged
+// successor, because a caller that reads a merged row and hands its own mixed
+// value (a path, then the link) back to ghost_memory_update gets a refusal it
+// cannot act on. The refusal has to say the link is Ghost's to manage and that
+// omitting source_ref keeps it.
+func TestTheReservedRefRefusalSaysTheLinkIsGhostsToManage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "plain", Source: "manual", Importance: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{
+		Provenance: Provenance{SourceRef: "docs/runbook.md,decision:abc"},
+	})
+	if err == nil {
+		t.Fatal("UpdateMemoryWithOptions accepted a decision link behind an ordinary path")
+	}
+	for _, want := range []string{"docs/runbook.md,decision:abc", "omit source_ref"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+}
+
 // TestSupersedeDecisionRefusesToDropALiveSuccessor is #1144 at the store: A was
 // replaced by B and B is still live, so a supersede of A by C would overwrite
 // the only record that B replaced A. It is refused inside the transaction, so a
@@ -1275,8 +1302,8 @@ func TestMergeDecisionLinksStayWithinTheSourceRefBound(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReplaceNonManual failed the whole pass over one oversized merge: %v", err)
 		}
-		if dropped != 1 {
-			t.Errorf("dropped = %d, want the oversized merge dropped", dropped)
+		if dropped.Overflow != 1 {
+			t.Errorf("dropped.Overflow = %d, want the oversized merge dropped", dropped.Overflow)
 		}
 		for _, mem := range mems {
 			var n int
@@ -1289,6 +1316,81 @@ func TestMergeDecisionLinksStayWithinTheSourceRefBound(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestAnOverflowingMergeIsReportedAsItsOwnDropReason is #1228 at the store: an
+// emission dropped because the decision links it stands for do not fit in a
+// source_ref is not the same event as one the corpus guard refused, and the
+// caller has to be able to tell them apart — one is a claim on a row that moved
+// (a later run must revisit it), the other is a property of the corpus as it
+// stands (every later run would refuse the same merge). Before this, both were
+// one integer, so the reflect note described the overflow drop as a claim on a
+// row that had changed underneath it and suppressed the skip fingerprint, and
+// the same merge was re-proposed and dropped on every run.
+func TestAnOverflowingMergeIsReportedAsItsOwnDropReason(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	var mems []string
+	for i := 0; i < 13; i++ {
+		_, mem, _, err := s.RecordDecision(ctx, testProject, fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mems = append(mems, mem)
+	}
+	// A row the corpus guard would refuse, dropped beside the overflowing merge,
+	// so the two reasons cannot be conflated by a count that happens to be 1.
+	other, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "an untouched note", Source: "mcp", Importance: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setAgesDaysAgo(t, s, other, 2)
+
+	fed := corpusRows(t, s, append(append([]string{}, mems...), other)...)
+	emitted := []Memory{
+		{Category: "decision", Content: "Thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems},
+		{Category: "fact", Content: "an untouched note", Importance: 0.5},
+	}
+	if err := s.Delete(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Overflow != 1 {
+		t.Errorf("Overflow = %d, want 1: the merge whose links do not fit is its own reason", dropped.Overflow)
+	}
+	if dropped.Changed != 1 {
+		t.Errorf("Changed = %d, want 1: the keep claiming the deleted row is still the corpus guard's", dropped.Changed)
+	}
+	if dropped.Total() != 2 {
+		t.Errorf("Total = %d, want 2 emissions refused", dropped.Total())
+	}
+	if dropped.OverflowLinks != 13 {
+		t.Errorf("OverflowLinks = %d, want the 13 decision links the merge stood for", dropped.OverflowLinks)
+	}
+	// The thirteen kept alive by the overflow drop are not reported as
+	// survivors: a survivor is a row a later run still has to merge, and this
+	// merge cannot be written at all. Reporting them is what held the project
+	// open, re-proposing and dropping the same merge on every round.
+	for _, mem := range mems {
+		for _, id := range preserved {
+			if id == mem {
+				t.Errorf("companion %s is reported as preserved, so the caller will not record a skip fingerprint for it", mem)
+			}
+		}
+	}
+	for _, mem := range mems {
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE id = ? AND resolved_at IS NULL`, mem).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("companion %s was not kept live by the overflow drop", mem)
+		}
+	}
 }
 
 // TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink: when the merge's

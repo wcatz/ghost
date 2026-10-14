@@ -94,7 +94,7 @@ type MemoryStore interface {
 	TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error
 
 	// Reflection
-	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, int, int, map[string]int, error)
+	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, memory.EmissionDrops, int, map[string]int, error)
 	CurrentTimestamp(ctx context.Context) (string, error)
 
 	// Tasks
