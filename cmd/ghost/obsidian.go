@@ -52,9 +52,13 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 	// outSeen and intervalSeen count the same way, for the reasons the paragraph
 	// above gives. The empty-value check is asked AFTER the duplicate, so
 	// `--out /v --out=` is "given twice" naming both, rather than a complaint
-	// about a value the reader could not have meant. Both values reach the
-	// sentence through memory.RefusalArg (#839): a vault path can carry a
-	// token-shaped string, and a refusal reaches the terminal and the log.
+	// about a value the reader could not have meant (the same holds for
+	// `--interval`). Both values reach the sentence through memory.RefusalArg
+	// (#839): a vault path can carry a token-shaped string, and a refusal
+	// reaches the terminal and the log. An EMPTY --out or --interval is its own
+	// refusal — a blank the command line named is the unset-variable spelling,
+	// not "no flag given", and taking it as the latter wrote into the default
+	// vault (#1129) or polled at the default cadence with nothing said.
 	outSeen, intervalSeen := false, false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -89,6 +93,9 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 					return "", "", "", fmt.Errorf("--interval was given twice (%s and %s)",
 						memory.RefusalArg("interval", interval), memory.RefusalArg("interval", args[i]))
 				}
+				if args[i] == "" {
+					return "", "", "", errors.New("--interval requires a value")
+				}
 				interval = args[i]
 				intervalSeen = true
 			}
@@ -117,6 +124,9 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			if intervalSeen {
 				return "", "", "", fmt.Errorf("--interval was given twice (%s and %s)",
 					memory.RefusalArg("interval", interval), memory.RefusalArg("interval", v))
+			}
+			if v == "" {
+				return "", "", "", errors.New("--interval requires a value")
 			}
 			interval = v
 			intervalSeen = true
