@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -972,8 +973,8 @@ func TestReportCountsAVerdictOnlyWhenItsCallIsCounted(t *testing.T) {
 		t.Errorf("Detached = %d, want 1 — the dropped verdict is counted and named, not lost in silence", search.Detached)
 	}
 	out := rep.String()
-	if !strings.Contains(out, "1 verdict(s) were not counted") {
-		t.Errorf("the report does not say a verdict was left out:\n%s", out)
+	if !strings.Contains(out, "1 detached verdict(s) were not counted") {
+		t.Errorf("the report does not say a verdict was left out, by the documented label:\n%s", out)
 	}
 	// A source whose only rows are outside the window is a no-rows source, and the
 	// detached verdict must not turn it into a source with figures.
@@ -1064,6 +1065,62 @@ func TestReportCountsAVerdictThatNamesNoCallAndSaysSo(t *testing.T) {
 	// omission as a lost row.
 	if !strings.Contains(out, "no call to be one of") {
 		t.Errorf("the note does not say the unattributed verdict is out of the figures rather than lost:\n%s", out)
+	}
+}
+
+// TestTheReportPrintsTheLabelsTheDocumentsName: docs/cli.md and
+// docs/invariants.md call a verdict whose call this report does not count
+// **detached**, and one that names no call at all **unattributed**. The rendered
+// lines have to carry those words, because a reader who greps the output for the
+// label the documents supply is looking for exactly them.
+//
+// Both verdicts are in the fixture at once, so the two lines are asserted side by
+// side and neither can be satisfied by the other's word.
+func TestTheReportPrintsTheLabelsTheDocumentsName(t *testing.T) {
+	store, projectID, dbPath := reportStore(t)
+	_ = recordCall(t, store, projectID, "search", "USEDID")
+	if _, err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "IGNID",
+		Outcome: string(OutcomeIgnored), RecordRowID: 0,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+	// The detached verdict cannot come from this build's writer (#857 refuses a
+	// verdict naming a call that did not keep that memory), so it is planted, the
+	// shape the call cap leaves when a call is evicted under the verdict cap.
+	plantRawVerdict(t, dbPath,
+		`INSERT INTO retrieval_audit (project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
+		 VALUES (?, 999999, 's1', 'search', 'USEDID', 'ignored', '', '')`, projectID)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	out := rep.String()
+	for _, want := range []string{"detached verdict(s)", "unattributed verdict(s)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not print the documented label %q:\n%s", want, out)
+		}
+	}
+
+	// The other direction: the documents the labels come from still name them, so a
+	// later edit to one side cannot leave the other describing a word nothing prints.
+	for _, doc := range []struct {
+		path string
+		want []string
+	}{
+		{"cli.md", []string{"**detached**"}},
+		{"invariants.md", []string{"**detached**", "**unattributed**"}},
+	} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "docs", doc.path))
+		if err != nil {
+			t.Fatalf("read docs/%s: %v", doc.path, err)
+		}
+		for _, want := range doc.want {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("docs/%s no longer names %s, which the report prints", doc.path, want)
+			}
+		}
 	}
 }
 
