@@ -91,7 +91,11 @@ func TestTransferCommandsAreRegisteredForHelp(t *testing.T) {
 }
 
 func TestParseExportArgs(t *testing.T) {
-	opts, err := parseExportArgs([]string{"--project", "ghost", "--out", "/tmp/x.jsonl", "--out=-"})
+	// One destination per command line. This row used to pass two --out flags and
+	// assert the last one won, which was the last-one-wins rule #1227 replaced: a
+	// repeated destination is a refusal now, and its own table lives in
+	// TestRepeatedDestinationIsRefusedByEveryParser.
+	opts, err := parseExportArgs([]string{"--project", "ghost", "--out=-"})
 	if err != nil {
 		t.Fatalf("parseExportArgs: %v", err)
 	}

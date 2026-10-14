@@ -192,8 +192,23 @@ type (
 // spellings are refused, as --project is in export, and the default is the flag
 // left off. (VACUUM INTO's O_EXCL means nothing is destroyed either way; the
 // artifact simply lands where the caller did not name.)
+//
+// A REPEATED --out is refused, by occurrence count and before the empty check,
+// naming both values as `ghost context` does for --cwd: nothing is overwritten
+// (VACUUM INTO's O_EXCL refuses an existing path), but `ghost backup --out
+// intended.db --out actual.db` used to snapshot into actual.db, report it, and
+// exit 0 — on the commands people write into a && chain, where the flag
+// arrives from an argument list the operator did not type this time.
 func parseBackupArgs(args []string) (backupOptions, error) {
 	var opts backupOptions
+	// outSeen counts OCCURRENCES of --out rather than testing opts.Out for
+	// emptiness, because that test cannot see `--out A --out=`: the second value
+	// is empty, so a value test reads the first as unset and keeps it, answering
+	// a command line that named two destinations with one. The duplicate is asked
+	// FIRST, as it is in every scope parser here, and both values reach the
+	// sentence through memory.RefusalArg so a credential-shaped path is withheld
+	// rather than printed (#839).
+	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -202,16 +217,26 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", args[i]))
+			}
 			if args[i] == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = args[i]
+			outSeen = true
 		case strings.HasPrefix(arg, "--out="):
 			v := strings.TrimPrefix(arg, "--out=")
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", v))
+			}
 			if v == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = v
+			outSeen = true
 		default:
 			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
@@ -240,13 +265,15 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 // parseExportArgs parses `ghost export`. Both --flag value and --flag=value are
 // accepted, matching the obsidian command's spelling.
 //
-// --out is last-one-wins: it names a destination, and a second one is an operator
-// overriding their own earlier flag rather than a second copy of the same scope.
-// An explicit EMPTY --out is still refused, and is the one thing last-one-wins
-// cannot answer: `--out=` is a script with an unset variable, and reading it as
-// "no flag given" wrote the artifact to the timestamped default path instead of
-// the destination the command line appeared to name. The refusal names the flag
-// in both spellings, and the default is the flag left off.
+// --out names a DESTINATION, and a second one is a refusal rather than an
+// override: `ghost export --out intended.jsonl --out actual.jsonl` wrote the
+// artifact to actual.jsonl, reported it and exited 0, and an export is a file
+// handed to someone else — a destination the reader did not intend is a copy
+// under the wrong name, not a preference between two spellings of one. An
+// explicit EMPTY --out is refused too: `--out=` is a script with an unset
+// variable, and reading it as "no flag given" wrote the artifact to the
+// timestamped default path instead of the destination the command line appeared
+// to name. Both refusals name the flag, and the default is the flag left off.
 //
 // --project is the opposite case and refuses a second value, because it is a SCOPE:
 // runExportCore reads an empty projectFilter as every project, so a second --project
@@ -264,6 +291,12 @@ func parseExportArgs(args []string) (exportOptions, error) {
 	// values stop at the first one, because with no first value there is no scope in
 	// the command line to be a duplicate of.
 	projectSeen := false
+	// outSeen counts OCCURRENCES of --out for the same reason, and for the harm
+	// the paragraph above states: an artifact that lands at a name the command
+	// line named twice. The duplicate is asked before the empty value, so
+	// `--out A --out=` is "given twice" and not "requires a value", and both
+	// values reach the sentence through memory.RefusalArg (#839).
+	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -272,16 +305,26 @@ func parseExportArgs(args []string) (exportOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", args[i]))
+			}
 			if args[i] == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = args[i]
+			outSeen = true
 		case strings.HasPrefix(arg, "--out="):
 			v := strings.TrimPrefix(arg, "--out=")
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", v))
+			}
 			if v == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = v
+			outSeen = true
 		case arg == "--project":
 			if i+1 >= len(args) {
 				return opts, errors.New("--project requires a value")
@@ -1202,10 +1245,12 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
-	// record does not have.
-	isCreate := r.Action == portable.ActionCreate && r.Type == portable.TypeMemory
+	// record does not have — so the two provenance arms are gated on the type
+	// rather than on the action alone.
+	isCreate := r.Action == portable.ActionCreate
+	isMemory := r.Type == portable.TypeMemory
 	switch {
-	case isCreate && r.Downgraded:
+	case isCreate && isMemory && r.Downgraded:
 		// The provenance rewrite is the one thing about the record that is not
 		// visible afterwards: the stored source is the downgraded one, so the
 		// artifact's own value is gone from the store entirely. It is said here
@@ -1213,11 +1258,16 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// a keep-forever tier a file planted is one no pass can take back — so
 		// the line names both.
 		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
-	case isCreate && r.Clamped:
+	case isCreate && len(r.Clamped) > 0:
 		// A clamp is the other thing a reader cannot see in the file afterwards,
-		// because the stored text is the cut version.
-		detail = strings.TrimSpace(detail) + " …(truncated at the content cap)"
-	case isCreate:
+		// because the stored text is the cut version — and for a title, or for
+		// the alternatives past the twentieth, the row carries no marker at all,
+		// so the report is the only place the loss can be said (#1232). It names
+		// the fields, never their text: a clamp report is read by whoever holds
+		// the artifact, and the cut field may be the one carrying a value that
+		// must not be echoed back.
+		detail = strings.TrimSpace(detail) + " …(truncated at the cap: " + strings.Join(r.Clamped, ", ") + ")"
+	case isCreate && isMemory:
 		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
 	}
 	switch {

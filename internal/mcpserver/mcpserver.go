@@ -1014,11 +1014,13 @@ const searchResponseMaxBytes = 2 * memory.MaxContentLen
 // content cap itself lives in memory.MaxContentLen — one named constant
 // shared by every writer (MCP tools, reflection proposals, imports) — and
 // memory.ClampContent both enforces it and appends the explicit truncation
-// marker. These remain MCP-local: titles and list items have their own,
-// smaller display-oriented budgets.
+// marker. The title cap and the alternatives bound are shared the same way, in
+// memory.MaxTitleLen and memory.BoundAlternatives, because the portable importers
+// are writers of those fields too and a second copy of the number here is how an
+// imported row stops being what this package stores (#1226). What stays here is
+// the response-side budget, which is about an ANSWER rather than a stored value.
 const (
-	maxTitleLen     = 300
-	maxAlternatives = 20
+	maxTitleLen = memory.MaxTitleLen
 
 	// globalMemoriesLimit bounds the ghost://memories/global resource. Shared by
 	// the resource Description and its handler so the advertised count and the
@@ -1281,10 +1283,10 @@ type updateArgs struct {
 }
 
 // taskCompleteArgs are ghost_task_complete's arguments: the task to complete and
-// the note to file under it. The note is the one task field with no length cap,
-// which is where "here is the value that fixed it" gets written, and it is
-// rendered straight into the next session's context — see
-// Store.CompleteTask, which guards it as a credential.
+// the note to file under it. The note is guarded as a credential on its
+// UNCLAMPED text and then capped at MaxContentLen by Store.CompleteTask — the
+// same cap ImportTask applies to a restored note — and the answer warns when
+// the cap cut it. See Store.CompleteTask.
 type taskCompleteArgs struct {
 	TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
 	Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
@@ -3391,12 +3393,17 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
+		notesClamped, err := s.store.CompleteTask(ctx, args.TaskID, args.Notes)
+		if err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)
 		}
 		s.notifyProjectResource(ctx, task.ProjectID, "tasks")
+		msg := "Task completed."
+		if notesClamped {
+			msg += truncationWarning("task notes", taskTruncationAdvice)
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Task completed."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 
@@ -3444,12 +3451,10 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(alternatives) > maxAlternatives {
-			alternatives = alternatives[:maxAlternatives]
-		}
-		for i, alt := range alternatives {
-			alternatives[i] = truncateUTF8(alt, maxTitleLen)
-		}
+		// memory.BoundAlternatives is the same bound the portable import applies,
+		// through the same call, so a decision's list is capped identically whichever
+		// route wrote it.
+		alternatives = memory.BoundAlternatives(alternatives)
 		if alternatives == nil {
 			alternatives = []string{}
 		}

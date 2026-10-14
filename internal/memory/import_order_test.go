@@ -69,7 +69,7 @@ func TestAnIDAlreadyInTheStoreStaysASkip(t *testing.T) {
 			t.Fatalf("fixture: %v", err)
 		}
 		plantRawTask(t, s, "AAAA BBBB", "p1", "an original title")
-		created, err := s.ImportTask(context.Background(), Task{
+		created, _, err := s.ImportTask(context.Background(), Task{
 			ID: "AAAA BBBB", ProjectID: "p1", Title: "a different title", Status: "pending", Priority: 2,
 		}, true)
 		if err != nil {
@@ -86,7 +86,7 @@ func TestAnIDAlreadyInTheStoreStaysASkip(t *testing.T) {
 			t.Fatalf("fixture: %v", err)
 		}
 		plantRawDecision(t, s, "AAAA BBBB", "p1", "an original title", "d", "r")
-		created, err := s.ImportDecision(context.Background(), Decision{
+		created, _, err := s.ImportDecision(context.Background(), Decision{
 			ID: "AAAA BBBB", ProjectID: "p1", Title: "a different title", Decision: "d", Rationale: "r", Status: "active",
 		}, true)
 		if err != nil {
@@ -140,13 +140,13 @@ func TestTheShapeCheckStillPrecedesEveryMessageThatNamesTheID(t *testing.T) {
 			return err
 		},
 		"task, no project": func() error {
-			_, err := s.ImportTask(context.Background(), Task{
+			_, _, err := s.ImportTask(context.Background(), Task{
 				ID: hostile, ProjectID: "", Title: "a title", Status: "pending", Priority: 2,
 			}, true)
 			return err
 		},
 		"decision, no project": func() error {
-			_, err := s.ImportDecision(context.Background(), Decision{
+			_, _, err := s.ImportDecision(context.Background(), Decision{
 				ID: hostile, ProjectID: "", Title: "a title", Decision: "d", Rationale: "r", Status: "active",
 			}, true)
 			return err
@@ -230,7 +230,7 @@ func TestALongPathShapedProjectIDStillImports(t *testing.T) {
 			}, ImportOptions{Apply: true}); err != nil {
 				t.Errorf("a memory under a long path-shaped project id was rejected: %v", err)
 			}
-			if _, err := s.ImportTask(context.Background(), Task{
+			if _, _, err := s.ImportTask(context.Background(), Task{
 				ID: "t1", ProjectID: id, Title: "a title", Status: "pending", Priority: 2,
 			}, true); err != nil {
 				t.Errorf("a task under a long path-shaped project id was rejected: %v", err)

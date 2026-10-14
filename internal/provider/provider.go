@@ -101,7 +101,9 @@ type MemoryStore interface {
 	CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error)
 	GetTask(ctx context.Context, taskID string) (memory.Task, error)
 	ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error)
-	CompleteTask(ctx context.Context, taskID, notes string) error
+	// CompleteTask returns whether the note was cut at MaxContentLen, which is
+	// what the tool answer reports; the same cap the portable importer applies.
+	CompleteTask(ctx context.Context, taskID, notes string) (notesClamped bool, err error)
 	UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (memory.Task, error)
 
 	// Decisions. companionClamped reports that the composed companion-memory

@@ -50,10 +50,16 @@ type RecordResult struct {
 	// prefix, a task or decision title, a project's name — so a report line
 	// identifies the record without the reader having to look up its id.
 	Detail string
-	// Clamped reports that content was cut at MaxContentLen on the way in. It
-	// is set for a create, including a dry run's, because the cut is what the
-	// user needs to know about before applying.
-	Clamped bool
+	// Clamped names the fields whose text a cap cut on the way in, in the
+	// record's own field order — `content` for a memory, and for a task or a
+	// decision any of title, description, notes, decision, rationale and
+	// alternatives. Empty is the ordinary case, and a cut the reader cannot see
+	// in the artifact afterwards is the reason the names are here rather than a
+	// flag: ClampContent's marker is in a stored body, but a cut title and the
+	// alternatives dropped past the twentieth leave nothing behind at all. It is
+	// set for a create, including a dry run's, because the cut is what the user
+	// needs to know about before applying (#1232).
+	Clamped []string
 	// Downgraded reports that the memory's own source, pin state and retention
 	// tier were replaced, because the run was not told to trust the artifact's
 	// provenance (see memory.ImportOptions.TrustProvenance). It is set for a dry
@@ -396,11 +402,11 @@ type step struct {
 
 // outcome is what running one step produced. A struct rather than a tuple
 // because a step's result has grown past what a return line can carry legibly:
-// what happened, whether the content was cut, and whether the memory's
-// provenance was downgraded on the way in.
+// what happened, which fields a cap cut, and whether the memory's provenance
+// was downgraded on the way in.
 type outcome struct {
 	action     Action
-	clamped    bool
+	clamped    []string
 	downgraded bool
 	droppedRef string
 	dropReason DropReason
@@ -534,7 +540,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				return outcome{action: actionFor(created), clamped: clamped, downgraded: downgraded}
+				return outcome{action: actionFor(created), clamped: contentClamped(clamped), downgraded: downgraded}
 			}})
 	}
 	// Which of the artifact's tasks and decisions have landed — been created, or
@@ -577,7 +583,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 						task.BlockedBy, dropped = dropped, ""
 					}
 				}
-				created, err := s.ImportTask(ctx, task, opts.Apply)
+				created, clamped, err := s.ImportTask(ctx, task, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
@@ -587,7 +593,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				} else {
 					dropped = ""
 				}
-				return outcome{action: actionFor(created), droppedRef: dropped, dropReason: reason}
+				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
 	for _, p := range orderDecisions(decisions) {
@@ -609,7 +615,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 						decision.SupersededBy, dropped = dropped, ""
 					}
 				}
-				created, err := s.ImportDecision(ctx, decision, opts.Apply)
+				created, clamped, err := s.ImportDecision(ctx, decision, opts.Apply)
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
@@ -619,7 +625,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				} else {
 					dropped = ""
 				}
-				return outcome{action: actionFor(created), droppedRef: dropped, dropReason: reason}
+				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
 	return steps, nil
@@ -741,6 +747,21 @@ func actionFor(created bool) Action {
 		return ActionCreate
 	}
 	return ActionSkip
+}
+
+// contentClamped turns ImportMemory's cut flag into the field names
+// RecordResult carries, so one report line speaks for a memory and a task alike.
+//
+// A memory has exactly one clampable field, so this is a translation rather than a
+// rule: it is here because the store answers the question its own way — a
+// boolean, since it has one field to answer about — and the report has to name
+// the field for every record type, not just the one whose importer could spare
+// the names. A memory that was cut names `content`; one that was not names none.
+func contentClamped(cut bool) []string {
+	if cut {
+		return []string{"content"}
+	}
+	return nil
 }
 
 // createdIDs is the set of record ids this run has already created, per record

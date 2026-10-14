@@ -288,6 +288,9 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
 	currentOutput := string(out)
 
+	// removeErr is nil unless the stale registration's removal failed, and is
+	// read only by the rollback the add-json failure path runs.
+	var removeErr error
 	alreadyRegistered := err == nil && strings.Contains(currentOutput, "Command:")
 	correctPath := strings.Contains(currentOutput, ghostBin)
 
@@ -305,9 +308,13 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 		return nil
 	}
 
-	// Remove stale registration before re-adding.
+	// Remove stale registration before re-adding. Its result is kept: the remove
+	// is the one thing that takes the previous registration out, so whether it
+	// landed is what the rollback below has to know.
 	if alreadyRegistered {
-		_ = exec.Command(claudeBin, "mcp", "remove", "-s", "user", "ghost").Run()
+		if out, rerr := exec.Command(claudeBin, "mcp", "remove", "-s", "user", "ghost").CombinedOutput(); rerr != nil {
+			removeErr = fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), rerr)
+		}
 	}
 
 	// Register or update.
@@ -323,7 +330,11 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 
 	cmd := exec.Command(claudeBin, "mcp", "add-json", "-s", "user", "ghost", string(configJSON))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("claude mcp add-json: %s: %w", strings.TrimSpace(string(out)), err)
+		// A successful remove has already taken the previous registration out,
+		// so a failed add leaves the user with no ghost server at all until a
+		// re-run lands: put the old one back, or say that it is gone.
+		return rollbackRegistration(claudeBin, currentOutput, alreadyRegistered, removeErr,
+			fmt.Errorf("claude mcp add-json: %s: %w", strings.TrimSpace(string(out)), err))
 	}
 
 	if alreadyRegistered {
@@ -332,6 +343,195 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "  + registered ghost MCP server (command: %s)\n", ghostBin)
 	}
 	return nil
+}
+
+// rollbackRegistration answers a failed `claude mcp add-json` with the one fact
+// the reader needs: what became of the registration Ghost deleted to make room
+// for the new one. A successful remove takes the previous entry out before the
+// add runs, so a refused add leaves every Claude Code session starting with no
+// ghost tools until a re-run succeeds, and a repair that ends in that state must
+// not read as a no-op. The entry is re-added from the `claude mcp get` output
+// the same run already read. Nothing is rolled back in four cases, and each says
+// which one it is rather than guessing: nothing was registered, where the error
+// is the one it always was; a remove that failed, because the previous
+// registration is then most likely still in place and re-adding it would
+// collide; a registration the get output cannot describe; and — reported, never
+// retried — a restore the client refuses, because a second attempt against the
+// refused write is the failure that just happened.
+//
+// The get output is a human rendering and not the JSON add-json takes, so a
+// re-add built from it is a reconstruction: it claims a RESTORE only when every
+// line the output carried came across, and when something could not it says what
+// (an environment block, a URL, headers, arguments whose boundaries the
+// rendering cannot fix) and that the user should re-run or re-add it. A restore
+// that silently lost a variable reads as clean and is not.
+func rollbackRegistration(claudeBin, previousOutput string, hadPrevious bool, removeErr, base error) error {
+	switch {
+	case !hadPrevious:
+		// Nothing was taken out, so there is nothing to put back and the
+		// failure is the one it always was.
+		return base
+	case removeErr != nil:
+		// The remove is the only thing that takes the entry out, and it did not
+		// land: the registration is most likely still in place, and re-adding it
+		// would collide with itself.
+		return fmt.Errorf("%w (the previous registration could not be removed: %v — it is most likely still registered)", base, removeErr)
+	}
+	previous, ok := parseClaudeRegistration(previousOutput)
+	if !ok {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
+	}
+	configJSON, err := json.Marshal(previous.config)
+	if err != nil {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored)", base)
+	}
+	if out, err := exec.Command(claudeBin, "mcp", "add-json", "-s", "user", "ghost", string(configJSON)).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (the previous registration was removed and could not be restored: %s)",
+			base, strings.TrimSpace(string(out)))
+	}
+	if len(previous.dropped) > 0 {
+		return fmt.Errorf("%w (the previous registration was re-added without %s — re-run ghost mcp init or re-add them)",
+			base, joinNames(previous.dropped))
+	}
+	return fmt.Errorf("%w (the previous registration was restored)", base)
+}
+
+// joinNames renders a list as prose: "a", "a and b", "a, b and c".
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+// parseClaudeRegistration reads the registration `claude mcp get` printed, into
+// the shape the add-json form takes:
+//
+//	ghost:
+//	  Scope: User
+//	  Type: stdio
+//	  Command: /path/to/ghost
+//	  Args: mcp
+//	  Environment: {"GHOST_TOKEN": "..."}
+//	  URL: https://example.com/mcp
+//	  Headers: {"Authorization": "Bearer ..."}
+//
+// The get output is a rendering and not the JSON add-json takes, so a line is
+// carried only where it can be carried WITHOUT guessing: a JSON array is the args
+// verbatim (so an argument holding a space survives), a JSON object is the
+// environment, the url or the headers verbatim, and a bare single token is that
+// one argument. Several bare tokens are split on whitespace AND named as
+// dropped, because one argument holding a space and two arguments print
+// identically there. Scope is the registration's location rather than server
+// config and is ignored; any other field the output carries is named as dropped.
+// dropped is the list of those, so a message can name what a re-add left behind.
+//
+// The registration is restorable when it describes a command OR a url: an http
+// entry prints no Command line, and reading that as "nothing registered" sent a
+// user whose entry had been removed away from the rollback that would have put
+// it back.
+func parseClaudeRegistration(out string) (claudeRegistration, bool) {
+	var previous claudeRegistration
+	previous.config = map[string]any{}
+	var command, args string
+	var argsSet bool
+	for _, line := range strings.Split(out, "\n") {
+		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		field = strings.ToLower(strings.TrimSpace(field))
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		switch field {
+		case "scope":
+			// Where the registration lives, not what it runs.
+		case "type":
+			previous.config["type"] = value
+		case "command":
+			command = value
+		case "url":
+			previous.config["url"] = value
+		case "args":
+			args, argsSet = value, true
+		case "env", "environment":
+			if obj, ok := parseJSONObject(value); ok {
+				previous.config["env"] = obj
+			} else {
+				previous.dropped = append(previous.dropped, "its environment")
+			}
+		case "headers":
+			if obj, ok := parseJSONObject(value); ok {
+				previous.config["headers"] = obj
+			} else {
+				previous.dropped = append(previous.dropped, "its headers")
+			}
+		default:
+			previous.dropped = append(previous.dropped, "its "+field+" setting")
+		}
+	}
+	if command != "" {
+		previous.config["command"] = command
+	}
+	if argsSet {
+		// A split the rendering cannot justify is still the best guess, so the
+		// args are carried either way and only the CLAIM is qualified.
+		parsed, exact := parseArgsLine(args)
+		if len(parsed) > 0 {
+			previous.config["args"] = parsed
+		}
+		if !exact {
+			previous.dropped = append(previous.dropped, "its arguments")
+		}
+	}
+	_, hasCommand := previous.config["command"]
+	_, hasURL := previous.config["url"]
+	return previous, hasCommand || hasURL
+}
+
+// claudeRegistration is one registration read back off `claude mcp get`, in the
+// shape add-json takes, with the parts of it the re-add does not carry.
+type claudeRegistration struct {
+	config  map[string]any
+	dropped []string
+}
+
+// parseArgsLine reads the rendered `Args:` line. A JSON array is carried
+// verbatim and a single bare token is that one argument, both exact; several
+// bare tokens are split on whitespace and reported as not exact, because the
+// rendering cannot say whether it was one argument holding a space or two.
+func parseArgsLine(value string) ([]string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, true
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var args []string
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			return nil, false
+		}
+		return args, true
+	}
+	if !strings.ContainsAny(trimmed, " \t") {
+		return []string{trimmed}, true
+	}
+	return strings.Fields(trimmed), false
+}
+
+// parseJSONObject reads a rendered field that carries a JSON object, reporting
+// false when the rendering is not one — which is what names the field as
+// dropped rather than inventing a value for it.
+func parseJSONObject(value string) (map[string]any, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(value), &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
 }
 
 // ensurePermissions loads settings.json and adds missing ghost permissions.
@@ -457,11 +657,11 @@ func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCm
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
-// (basename "ghost"/"ghost.exe", case-insensitive) at a different path than
-// desiredCmd, with the same trailing arguments — the #273 case where an
-// upgrade moved the binary and left the hook pointing at the old location.
-// Hand-edited wrapper commands (whose leading token isn't a ghost binary) are
-// left untouched.
+// (basename "ghost" under the launcher extensions, case-insensitive) at a
+// different path than desiredCmd, with the same trailing arguments — the #273
+// case where an upgrade moved the binary and left the hook pointing at the old
+// location. Hand-edited wrapper commands (whose leading token isn't a ghost
+// binary) are left untouched.
 func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 	existingBin, existingRest, ok := splitHookCommand(existingCmd)
 	if !ok || !isGhostBinaryName(existingBin) {
@@ -474,12 +674,16 @@ func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 	return existingBin != desiredBin && existingRest == desiredRest
 }
 
-// isGhostBinaryName reports whether path's basename is "ghost" or
-// "ghost.exe" (case-insensitive).
+// isGhostBinaryName reports whether path's basename is "ghost" under any of
+// the extensions a launcher gives it: the native ".exe", or the ".bat"/".cmd"
+// batch shim an install may place on PATH instead. The comparison is
+// case-insensitive, and a Windows path is recognised on any host (the
+// basename split handles both separators).
 func isGhostBinaryName(path string) bool {
-	base := hookCommandBase(path)
-	base = strings.ToLower(base)
-	base = strings.TrimSuffix(base, ".exe")
+	base := strings.ToLower(hookCommandBase(path))
+	for _, ext := range []string{".exe", ".bat", ".cmd"} {
+		base = strings.TrimSuffix(base, ext)
+	}
 	return base == "ghost"
 }
 
