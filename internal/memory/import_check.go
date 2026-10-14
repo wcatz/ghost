@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 )
 
@@ -373,6 +374,17 @@ func CheckImportedDecision(d Decision) error {
 	}
 	if err := CheckImportedID(d.ID); err != nil {
 		return err
+	}
+	// A decision id is also the tail of its companion's `decision:<id>` link, and
+	// the lookup splits a source_ref on decisionRefSeparator. RecordDecision mints
+	// hex ids, but an import writes this one verbatim, so an id holding the
+	// separator would split its own link into tokens that name no decision: the
+	// companion is never found and a supersede answers clean while the reversed
+	// decision keeps ranking. The other characters a LIKE treats specially (% and
+	// _) only widen the lookup's candidate set, which the exact token check then
+	// narrows, so the separator is the one character that breaks a link.
+	if strings.Contains(d.ID, decisionRefSeparator) {
+		return fmt.Errorf("decision id must not contain %q — it separates the decision links a memory carries, so an id holding it names no decision. Give the decision a new id in the artifact", decisionRefSeparator)
 	}
 	if d.ProjectID == "" {
 		return fmt.Errorf("project_id is required")
