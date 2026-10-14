@@ -995,27 +995,39 @@ func TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions(t *testing
 				t.Fatalf("the merge successor's link %q does not name both decisions", ref)
 			}
 
-			// Superseding either folded decision must report the successor
-			// rather than retire it or answer clean.
-			for _, oldDec := range []string{firstDec, secondDec} {
-				got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, replacementDec)
-				if err != nil {
-					t.Fatalf("SupersedeDecisionReport(%s): %v", oldDec, err)
-				}
-				if len(got.Retired) != 0 {
-					t.Errorf("superseding %s retired %v; the successor still states a live decision", oldDec, got.Retired)
-				}
-				if len(got.Shared) != 1 || got.Shared[0] != successor {
-					t.Errorf("superseding %s shared = %v, want the multi-decision successor %s", oldDec, got.Shared, successor)
-				}
-				// It is not a competing claimant: the ambiguity channel's remedy is to
-				// delete the extras, and this row is the only memory of a live decision.
-				if len(got.Ambiguous) != 0 {
-					t.Errorf("superseding %s reported the shared successor as ambiguous %v", oldDec, got.Ambiguous)
-				}
-				if decisionMemoryResolved(t, s, successor) {
-					t.Errorf("superseding %s withheld the successor; the other decision's text went with it", oldDec)
-				}
+			// Superseding the first folded decision must report the successor
+			// rather than retire it or answer clean: it still states the second.
+			got, err := s.SupersedeDecisionReport(ctx, testProject, firstDec, replacementDec)
+			if err != nil {
+				t.Fatalf("SupersedeDecisionReport(%s): %v", firstDec, err)
+			}
+			if len(got.Retired) != 0 {
+				t.Errorf("superseding %s retired %v; the successor still states a live decision", firstDec, got.Retired)
+			}
+			if len(got.Shared) != 1 || got.Shared[0] != successor {
+				t.Errorf("superseding %s shared = %v, want the multi-decision successor %s", firstDec, got.Shared, successor)
+			}
+			// It is not a competing claimant: the ambiguity channel's remedy is to
+			// delete the extras, and this row is the only memory of a live decision.
+			if len(got.Ambiguous) != 0 {
+				t.Errorf("superseding %s reported the shared successor as ambiguous %v", firstDec, got.Ambiguous)
+			}
+			if decisionMemoryResolved(t, s, successor) {
+				t.Errorf("superseding %s withheld the successor; the other decision's text went with it", firstDec)
+			}
+
+			// Once the second is superseded too, every decision the successor holds
+			// is reversed: it states nothing live, so it is retired like a sole
+			// companion instead of being reported as shared forever.
+			got, err = s.SupersedeDecisionReport(ctx, testProject, secondDec, replacementDec)
+			if err != nil {
+				t.Fatalf("SupersedeDecisionReport(%s): %v", secondDec, err)
+			}
+			if len(got.Retired) != 1 || got.Retired[0] != successor {
+				t.Errorf("superseding the last decision the successor holds: retired = %v, want %s", got.Retired, successor)
+			}
+			if len(got.Shared) != 0 || len(got.Ambiguous) != 0 {
+				t.Errorf("superseding the last decision the successor holds: shared = %v, ambiguous = %v, want none", got.Shared, got.Ambiguous)
 			}
 		})
 	}

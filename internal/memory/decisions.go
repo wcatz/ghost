@@ -166,11 +166,12 @@ type DecisionRetirement struct {
 	// chosen. Nothing was retired for them and they still rank.
 	Ambiguous []string
 	// Shared are live memory ids that carry the old decision's link TOGETHER
-	// with another decision's: a consolidation folded several decision
-	// companions into one successor. Such a row is not an extra claimant and is
-	// never retired, because withholding it would withhold the other decision it
-	// still states; it keeps ranking, so the reversed text is still returned
-	// until the row is split or every decision it holds is superseded.
+	// with the link of another decision that is not superseded: a consolidation
+	// folded several decision companions into one successor. Such a row is not an
+	// extra claimant and is not retired, because withholding it would withhold the
+	// other decision it still states; it keeps ranking, so the reversed text is
+	// still returned until its text is rewritten or every decision it holds is
+	// superseded, at which point the last supersede retires it.
 	Shared []string
 }
 
@@ -527,6 +528,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	type linkRow struct {
 		id     string
 		source string
+		ref    string
 		live   bool
 		multi  bool
 	}
@@ -557,7 +559,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		if !sourceRefNamesDecision(ref, decisionID) {
 			continue
 		}
-		r.multi = len(decisionRefsInSourceRef(ref)) > 1
+		r.ref = ref
 		linked = append(linked, r)
 	}
 	if err := rows0.Err(); err != nil {
@@ -565,12 +567,23 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		return nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	_ = rows0.Close()
+	// A row is shared only while another decision it links is NOT reversed: once
+	// every other decision it holds is superseded it states nothing live, and it is
+	// judged as this decision's own companion — otherwise it would be reported as
+	// shared on every supersede and never retired. Read after the cursor is closed.
+	for i := range linked {
+		multi, err := linksAnotherUnsupersededDecisionTx(ctx, tx, linked[i].ref, decisionID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		linked[i].multi = multi
+	}
 	if len(linked) == 0 {
 		return findUnlinkedDecisionCompanionTx(ctx, tx, projectID, decisionID)
 	}
-	// A live row that stands for more than one decision is not this decision's
-	// clean companion: retiring it would withhold whatever other decision it
-	// still states. It is reported on its own (shared), never retired and never
+	// A live row that stands for more than one decision — another of which is not
+	// yet superseded — is not this decision's clean companion: retiring it would
+	// withhold whatever other decision it still states. It is reported on its own (shared), never retired and never
 	// counted as a competing claimant — it is not an extra, so the ambiguity
 	// answer's remedy of deleting the extras would destroy a live decision. The
 	// rows that carry this decision's link ALONE are then judged by the rules
@@ -612,6 +625,32 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		}
 	}
 	return nil, ambiguous, shared, nil
+}
+
+// linksAnotherUnsupersededDecisionTx reports whether ref links a decision other
+// than decisionID that is not superseded. A link to a decision this store does
+// not hold counts as not superseded: nothing says it was reversed, and retiring a
+// row on that absence would withhold a statement nobody withdrew.
+func linksAnotherUnsupersededDecisionTx(ctx context.Context, tx *sql.Tx, ref, decisionID string) (bool, error) {
+	want := decisionCompanionRef(decisionID)
+	for _, link := range decisionRefsInSourceRef(ref) {
+		if link == want {
+			continue
+		}
+		var status string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM decisions WHERE id = ?`,
+			strings.TrimPrefix(link, decisionRefPrefix)).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("read linked decision status: %w", err)
+		}
+		if status != "superseded" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // findUnlinkedDecisionCompanionTx is the composed-text fallback of
