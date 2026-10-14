@@ -87,6 +87,14 @@ func loadSettings(path string) (*settingsFile, error) {
 	if err := json.Unmarshal(data, &s.raw); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// A document that is the JSON literal null decodes into a nil map with no
+	// error — an empty object leaves the map above in place, so nil means null
+	// and nothing else. Refuse it by name rather than hand back a settingsFile
+	// whose raw map is nil: the first addPermissions write would panic on
+	// assignment to that nil map, mid-way through init's ten steps.
+	if s.raw == nil {
+		return nil, fmt.Errorf("%s is null", filepath.Base(path))
+	}
 	return s, nil
 }
 
@@ -318,6 +326,13 @@ func (s *settingsFile) getPermissions() ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
+	// An explicit null is present-but-structurally-invalid, not "absent": it
+	// decodes into a nil map with no error, and addPermissions would then panic
+	// assigning into that nil map. Unlike the hooks site, nothing here may fill
+	// the user's declaration in as an empty object, so refuse it by name.
+	if isJSONNull(permsRaw) {
+		return nil, fmt.Errorf("%s: permissions is null", filepath.Base(s.path))
+	}
 	var perms struct {
 		Allow []string `json:"allow"`
 	}
@@ -352,13 +367,17 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Rebuild the permissions object, preserving other fields.
+	// Rebuild the permissions object, preserving other fields. The nil guard
+	// mirrors addHook's: a null value decodes into a nil map with no error, and
+	// getPermissions refuses it, but the assignment below must not be able to
+	// panic if this is ever reached another way.
 	var permsMap map[string]json.RawMessage
 	if raw, ok := s.raw["permissions"]; ok {
 		if err := json.Unmarshal(raw, &permsMap); err != nil {
 			permsMap = make(map[string]json.RawMessage)
 		}
-	} else {
+	}
+	if permsMap == nil {
 		permsMap = make(map[string]json.RawMessage)
 	}
 
