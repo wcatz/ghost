@@ -94,6 +94,9 @@ const (
 	// empty result. The retrieval record carries it as a dropped verdict, the
 	// trace as a decision, and explain as an excluded row's reason sentence.
 	reasonRelevanceCutoff = "relevance_cutoff"
+	// reasonLegConsensus is the per-row reason for the query-mode stage that
+	// admits a single-leg row only when its leg ranks it near the top (#1251).
+	reasonLegConsensus = "leg_consensus"
 	// reasonNothingClearedBar is the no-answer step's reason (#955), both as a
 	// per-row reason and as the outcome reason of a block it emptied: the best
 	// vector cosine in the block was below context.no_answer_cosine, so the
