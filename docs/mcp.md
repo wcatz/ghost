@@ -7,7 +7,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Group | Tool | Purpose |
 |---|---|---|
 | Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened. `pin: true` exempts it from consolidation and guarantees it a slot on every passive context surface in the same call, and `retention` sets its tier |
-| Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors; filterable by category and retention tier. A category outside the eight is refused with the allowed list, and a project Ghost has never registered is refused as `project "…" not found` (as `ghost_task_list` refuses it) rather than searched as `_global` alone, on the `explain` and `as_of` paths too |
+| Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors; filterable by category, retention tier and scope. A category outside the eight is refused with the allowed list, and a project Ghost has never registered is refused as `project "…" not found` (as `ghost_task_list` refuses it) rather than searched as `_global` alone, on the `explain` and `as_of` paths too |
 | Memory | `ghost_search_all` | Search across all projects |
 | Memory | `ghost_memories_list` | Browse memories, optionally by category and retention tier; a category or tier outside the vocabulary is refused before the project is looked up |
 | Memory | `ghost_memory_update` | Update memory content or metadata |
