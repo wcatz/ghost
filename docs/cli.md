@@ -67,6 +67,8 @@ ghost mcp init --client all
 
 The operation is idempotent. If multiple supported clients are detected, Ghost configures all of them unless a target is specified. Plugin-managed Claude Code integrations are detected and left under plugin control.
 
+For codex, the hooks merge owns ghost's own hook action rather than the rule it sits in: a rule you wrote that runs ghost beside your own command is repaired in place — your other actions, the rule's matcher and any per-action fields survive — and a rule running some other ghost subcommand is left untouched. Ghost keeps exactly one hook action per event, so it is added only where it is missing.
+
 ### `ghost mcp status`
 
 Checks one client integration:
