@@ -1015,8 +1015,23 @@ const (
 // memories, and a decision must not be told to split into tasks. The
 // stored half is the marker memory.ClampContent appends to the content
 // itself — truncation is visible on both sides.
-func truncationWarning(what, advice string) string {
-	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, memory.MaxContentLen, advice)
+// truncationWarning keeps its historical (what, advice) shape callable while
+// also accepting a byte cap, so fields with a non-content cap (titles use
+// maxTitleLen, not memory.MaxContentLen) can name their own limit without a
+// second helper. Any int argument sets the cap; any string argument sets the
+// advice.
+func truncationWarning(what string, args ...any) string {
+	maxBytes := memory.MaxContentLen
+	advice := ""
+	for _, a := range args {
+		switch v := a.(type) {
+		case int:
+			maxBytes = v
+		case string:
+			advice = v
+		}
+	}
+	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, maxBytes, advice)
 }
 
 // Recovery advice per writer kind, kept as named constants so each call
@@ -3052,6 +3067,7 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("title", args.Title); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var descTruncated bool
 		args.Description, descTruncated = memory.ClampContent(args.Description)
@@ -3084,6 +3100,9 @@ func (s *Server) registerTools() {
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
 		msg := fmt.Sprintf("Task created (id: %s)", id)
+		if titleTruncated {
+			msg += truncationWarning("task title", maxTitleLen, taskTruncationAdvice)
+		}
 		if descTruncated {
 			msg += truncationWarning("task description", taskTruncationAdvice)
 		}
@@ -3376,18 +3395,26 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
 		args.Decision, decisionTruncated = memory.ClampContent(args.Decision)
 		args.Rationale, rationaleTruncated = memory.ClampContent(args.Rationale)
+		originalAltCount := 0
 		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(alternatives) > maxAlternatives {
+		originalAltCount = len(alternatives)
+		alternativesCountTruncated := originalAltCount > maxAlternatives
+		if alternativesCountTruncated {
 			alternatives = alternatives[:maxAlternatives]
 		}
+		alternativeEntryTruncated := false
 		for i, alt := range alternatives {
+			if len(alt) > maxTitleLen {
+				alternativeEntryTruncated = true
+			}
 			alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
 		if alternatives == nil {
@@ -3502,6 +3529,9 @@ func (s *Server) registerTools() {
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
 		}
+		if titleTruncated {
+			msg += truncationWarning("decision title", maxTitleLen, decisionTruncationAdvice)
+		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
 			switch {
@@ -3518,6 +3548,12 @@ func (s *Server) registerTools() {
 			// already tells the caller to shorten, and the marker still
 			// names the composition cut in the stored row.
 			msg += truncationWarning("decision companion memory", memoryTruncationAdvice)
+		}
+		if alternativesCountTruncated {
+			msg += fmt.Sprintf(" — WARNING: decision alternatives were truncated to %d entries; the stored list is incomplete — shorten it, or move detail into the decision's rationale context.", maxAlternatives)
+		}
+		if alternativeEntryTruncated {
+			msg += truncationWarning("decision alternative", maxTitleLen, decisionTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
