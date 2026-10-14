@@ -67,6 +67,8 @@ ghost mcp init --client all
 
 The operation is idempotent. If multiple supported clients are detected, Ghost configures all of them unless a target is specified. Plugin-managed Claude Code integrations are detected and left under plugin control.
 
+For codex, the hooks merge owns ghost's own hook action rather than the rule it sits in: a rule you wrote that runs ghost beside your own command is repaired in place — your other actions, the rule's matcher and any per-action fields survive — and a rule running some other ghost subcommand is left untouched. Ghost keeps exactly one hook action per event, so it is added only where it is missing.
+
 ### `ghost mcp status`
 
 Checks one client integration:
@@ -649,7 +651,7 @@ ghost obsidian export --project myproject --out ~/Documents/GhostVault
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. An EMPTY value is refused (`--out requires a value`, exit 1) rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
+| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir` or `~/Documents/GhostVault`. An EMPTY value is refused (`--out requires a value`, exit 1) rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. Giving `--out` **twice** is refused too, naming both values (`--out was given twice ("A" and "B")`, exit 1) rather than mirroring into the last one. |
 | `--project <name>` | Mirror one project plus global records, matched by id or name **exactly**, under the same rule as `ghost export --project`. An exact id is matched **first** and selects exactly one project, even when another project's name is the same string. A name that **more than one** project carries is refused, naming every id it matched, because a project's name is not unique and mirroring all of them would mix projects the caller never named into one vault run. A filter that matches nothing is an error. Either refusal happens before the vault is touched: the directory is not created, marked or written. |
 
 ### `ghost obsidian sync`
@@ -662,9 +664,9 @@ ghost obsidian sync --interval 30s
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`. |
+| `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`, and so is a repeated `--out` (`--out was given twice ("A" and "B")`, exit 1). |
 | `--project <name>` | Mirror one project plus global records, matched as for `export`: an exact id first, and a name more than one project carries is refused. A refused filter fails every pass (logged, retried on the next tick) and never writes the vault. |
-| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. |
+| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`. A repeated `--interval` is refused, naming both values (`--interval was given twice ("5m" and "9m")`, exit 1) rather than polling on the last one: the cadence in effect would not be the one the command line spelled twice, and the run says nothing about which it chose. |
 
 The sync opens the database read-only and is safe alongside a live MCP server. Press `Ctrl-C` to stop it.
 
@@ -683,7 +685,7 @@ ghost backup --out ~/backups/ghost.db.snapshot
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. An EMPTY value is refused rather than read as the default — `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
+| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. An EMPTY value is refused rather than read as the default — `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. Giving `--out` **twice** is refused too, naming both values (`--out was given twice ("a.db" and "b.db")`, exit 1) rather than writing to the last one: the snapshot would land at a name the command line named twice and the run would still exit 0. |
 
 The snapshot is taken with SQLite's `VACUUM INTO`, which reads one consistent snapshot of a live WAL database. Copying the file by hand cannot: copying `ghost.db` without its `-wal` loses whatever the write-ahead log held, and copying both while a write lands can capture a torn state. The write lock is held for the length of the vacuum and no longer.
 
@@ -816,7 +818,7 @@ ghost export --out - | head -3
 | Flag | Meaning |
 |---|---|
 | `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. A filter that matches **more than one** project is refused too, naming every id it matched: a project's name is not unique (only `path` and `repo_remote` carry unique indexes), so exporting all of them would silently capture a project the caller never named into an artifact handed to someone else. An exact id is matched **first** and always selects exactly one project, even when another project's name is the same string. Default: every project. An EMPTY value is refused rather than read as the default — `--project=` is an unset variable, and the way to export everything is to leave the flag off. |
-| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. An EMPTY value is refused rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. |
+| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. An EMPTY value is refused rather than read as the default: `--out=` is a script with an unset variable, and the way to the default is to leave the flag off. Giving `--out` **twice** is refused, naming both values (`--out was given twice ("a.jsonl" and "b.jsonl")`, exit 1) rather than writing to the last one: an export is a file handed to someone else, so a destination the reader did not mean is a copy under the wrong name. |
 
 The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
 
@@ -991,6 +993,16 @@ Rules the import follows:
 - **A record whose id already exists is skipped, never overwritten.** The artifact is the older of the two copies by construction, so overwriting would restore stale data over live data. This also makes re-running an import always safe, which is how you repair a run that rejected a record. The rule holds **within one artifact** as well as against the store: an id repeated on two lines is a create and a skip, and a dry run reports it that way rather than previewing a create the apply will turn into a skip.
 - **A file whose schema version this build does not read is refused outright**, in either direction. Reading a newer one would insert records whose fields this build interprets by guesswork.
 - **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source, the retention tier and importance are all checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
+- **A task's and a decision's text gets the same treatment, through the same caps their own writers apply.** A task's title is cut at `MaxTitleLen` (300) and its description and notes at `MaxContentLen` with the same marker; a decision's title and each entry of its `alternatives` list are cut at `MaxTitleLen`, its `decision` and `rationale` at `MaxContentLen` with the marker, and the list is kept to its first `MaxAlternatives` (20) entries in artifact order. These are the caps `ghost_task_create`, `ghost_decision_record` and `ghost_task_complete` apply, so a record restored through an artifact is stored exactly as a save of the same text would store it — which is what every row-rendering read tool assumes when it fits a whole row to its 16,000-byte response budget. An oversize artifact field used to import verbatim and produce a single `ghost_task_list` row of about 200 KB, or a `ghost_decisions_list` row of megabytes, that no `limit` could narrow. The cut is a cut rather than a refusal, and the row carries the marker naming what was lost; a tag list is still carried byte for byte, both directions, whatever its length.
+- **The per-record line names every field a cap cut, in the dry run and in the apply.** A body field's own marker is in the stored value, but a title's cut appends nothing and the alternatives past the twentieth are not in the row at all — so for those the report is the only place the loss can be said, and it says it before the write rather than leaving the reader to discover it afterwards:
+
+  ```text
+    create  task:     line 3  "a task title …(truncated at the cap: title)" (tb1)
+    create  decision: line 4  "a decision …(truncated at the cap: alternatives)" (dc1)
+    create  task:     line 5  "a task title …(truncated at the cap: description, notes)" (tb2)
+  ```
+
+  The fields are named, never their text: a cut field may be the one holding a value that should not reach a terminal or a pasted log, which is why every refusal here names a field too. A record that was skipped or rejected names nothing, because no row was written.
 - **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is honoured when the record it names is in the same artifact and is applied first, or is already in the destination store. Otherwise it is dropped and the dependent record still imports, without the pointer, and its report line names the drop and says why: the record it names is in neither the artifact nor the store (`(blocked_by tb1 dropped: not in this artifact or this store)`), the pointer is part of a cycle (`(blocked_by tb1 dropped: part of a cycle)` — a record that only points into a cycle keeps its pointer), or the artifact contains that record but this run rejects it (`(blocked_by tb1 dropped: that task was rejected)`). The dry run makes the same drop the apply does, so the preview and the run agree about the dependent record.
 - **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
 - **A line that will not parse is rejected on its own.** A truncated, badly merged or hand-edited artifact still imports every record around the damage, and the bad line is reported with its line number. This is what the line-per-record shape buys: a file-level refusal is reserved for the problems that are not one line's — a missing or unreadable schema version, a second header, an unknown record type — where applying part of the file would mean importing data whose meaning is a guess.

@@ -24,8 +24,13 @@ import (
 // silently falling back to defaults (a misspelled --intervl would otherwise
 // leave the user believing a cadence that isn't in effect).
 //
-// --out and --interval are destinations and cadences, so they stay
-// last-one-wins: a second one is an operator overriding their own earlier flag.
+// --out and --interval are a DESTINATION and a CADENCE, and a second one is a
+// refusal rather than an override: `ghost obsidian export --out A --out B`
+// mirrored into B and exited 0, and `--interval 5m --interval 9m` polls on 9m
+// with nothing said — the mirror writing a whole project's worth of Markdown
+// into a vault directory the operator did not name is not a preference between
+// two spellings of one destination. The refusal names both values as `ghost
+// context` does for --cwd.
 // --project is a SCOPE and refuses a second value and an empty one, with the
 // same two sentences every other scope-taking parser uses, because the harm it
 // prevents is wider than export's: an empty project is not a narrower mirror,
@@ -44,6 +49,13 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 	// and two empty values stop at the first one, since with no first value there
 	// is no scope in the command line to be a duplicate of.
 	projectSeen := false
+	// outSeen and intervalSeen count the same way, for the reasons the paragraph
+	// above gives. The empty-value check is asked AFTER the duplicate, so
+	// `--out /v --out=` is "given twice" naming both, rather than a complaint
+	// about a value the reader could not have meant. Both values reach the
+	// sentence through memory.RefusalArg (#839): a vault path can carry a
+	// token-shaped string, and a refusal reaches the terminal and the log.
+	outSeen, intervalSeen := false, false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -54,10 +66,15 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			i++
 			switch arg {
 			case "--out":
+				if outSeen {
+					return "", "", "", fmt.Errorf("--out was given twice (%s and %s)",
+						memory.RefusalArg("out", out), memory.RefusalArg("out", args[i]))
+				}
 				if args[i] == "" {
 					return "", "", "", errors.New("--out requires a value")
 				}
 				out = args[i]
+				outSeen = true
 			case "--project":
 				if projectSeen {
 					return "", "", "", errors.New("expected exactly one project")
@@ -68,13 +85,24 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 				project = args[i]
 				projectSeen = true
 			case "--interval":
+				if intervalSeen {
+					return "", "", "", fmt.Errorf("--interval was given twice (%s and %s)",
+						memory.RefusalArg("interval", interval), memory.RefusalArg("interval", args[i]))
+				}
 				interval = args[i]
+				intervalSeen = true
 			}
 		case strings.HasPrefix(arg, "--out="):
-			out = strings.TrimPrefix(arg, "--out=")
-			if out == "" {
+			v := strings.TrimPrefix(arg, "--out=")
+			if outSeen {
+				return "", "", "", fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", out), memory.RefusalArg("out", v))
+			}
+			if v == "" {
 				return "", "", "", errors.New("--out requires a value")
 			}
+			out = v
+			outSeen = true
 		case strings.HasPrefix(arg, "--project="):
 			if projectSeen {
 				return "", "", "", errors.New("expected exactly one project")
@@ -85,7 +113,13 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 			}
 			projectSeen = true
 		case strings.HasPrefix(arg, "--interval="):
-			interval = strings.TrimPrefix(arg, "--interval=")
+			v := strings.TrimPrefix(arg, "--interval=")
+			if intervalSeen {
+				return "", "", "", fmt.Errorf("--interval was given twice (%s and %s)",
+					memory.RefusalArg("interval", interval), memory.RefusalArg("interval", v))
+			}
+			interval = v
+			intervalSeen = true
 		default:
 			return "", "", "", fmt.Errorf("unknown or malformed flag %q", arg)
 		}
