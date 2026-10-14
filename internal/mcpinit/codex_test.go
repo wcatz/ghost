@@ -1680,8 +1680,8 @@ func TestAuditCodexMixedRuleKeepsUserAction(t *testing.T) {
   "hooks": {
     "SessionStart": [
       {"matcher":"startup","hooks":[
-        {"type":"command","command":"` + shellQuote("/old/ghost") + ` hook session-start --source codex"},
-        {"type":"command","command":"` + userAction + `"}
+        {"type":"command","command":` + jsonString(shellQuote("/old/ghost")+" hook session-start --source codex") + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
       ]}
     ]
   }
@@ -1728,8 +1728,8 @@ func TestAuditCodexMixedRuleCurrentPath(t *testing.T) {
   "hooks": {
     "SessionStart": [
       {"matcher":"startup","hooks":[
-        {"type":"command","command":"` + current + `"},
-        {"type":"command","command":"` + userAction + `"}
+        {"type":"command","command":` + jsonString(current) + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
       ]}
     ]
   }
@@ -1802,10 +1802,10 @@ func TestMergeCodexHooksFiresGhostOncePerEvent(t *testing.T) {
 	seed := []byte(`{
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "` + shellQuote("/new/ghost") + ` hook session-start --source codex"}]},
+      {"hooks": [{"type": "command", "command": ` + jsonString(shellQuote("/new/ghost")+" hook session-start --source codex") + `}]},
       {"matcher":"startup","hooks":[
-        {"type":"command","command":"` + shellQuote("/old/ghost") + ` hook session-start --source codex"},
-        {"type":"command","command":"` + userAction + `"}
+        {"type":"command","command":` + jsonString(shellQuote("/old/ghost")+" hook session-start --source codex") + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
       ]}
     ]
   }
@@ -1841,6 +1841,46 @@ func TestMergeCodexHooksFiresGhostOncePerEvent(t *testing.T) {
 	}
 	if seen != 0 {
 		t.Errorf("no user action outside the user's own rule should be carried, got %d", seen)
+	}
+}
+
+// TestMergeCodexHooksRecognizesAWindowsBatchShim pins the launcher form the
+// other tests never reach: on Windows a ghost command can resolve to a
+// "ghost.bat"/"ghost.cmd" shim rather than the native ".exe", and the merge
+// must still treat that action as ghost's own. Missing it makes every re-run
+// append a second rule, so hooks.json never reaches a fixed point — the
+// failure the idempotence test sees only on a Windows runner.
+func TestMergeCodexHooksRecognizesAWindowsBatchShim(t *testing.T) {
+	const userAction = "C:\\Tools\\notify.exe"
+	shim := "\"C:\\Tools\\ghost.bat\" hook session-start --source codex"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"matcher":"startup","hooks":[
+        {"type":"command","command":` + jsonString(shim) + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 1 {
+		t.Fatalf("a recognised shim must not gain a second rule, got %d:\n%s", len(rules), got)
+	}
+	cmds := codexRuleCommands(rules[0])
+	if len(cmds) != 2 {
+		t.Fatalf("the user's action must survive beside the repaired shim, got %v", cmds)
+	}
+	if want := shellQuote("/new/ghost") + " hook session-start --source codex"; cmds[0] != want {
+		t.Errorf("the shim action should be repaired in place, got %q, want %q", cmds[0], want)
+	}
+	if cmds[1] != userAction {
+		t.Errorf("user action %s was deleted", userAction)
 	}
 }
 
