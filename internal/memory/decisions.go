@@ -353,13 +353,7 @@ func decisionRefsInSourceRef(ref string) []string {
 
 // sourceRefNamesDecision reports whether ref links decisionID.
 func sourceRefNamesDecision(ref, decisionID string) bool {
-	want := decisionCompanionRef(decisionID)
-	for _, part := range strings.Split(ref, decisionRefSeparator) {
-		if part == want {
-			return true
-		}
-	}
-	return false
+	return sourceRefCarriesToken(ref, decisionCompanionRef(decisionID))
 }
 
 // joinDecisionRefs renders the links of a successor that stands for more than one
@@ -375,6 +369,89 @@ func joinDecisionRefs(refs []string) string {
 		out = append(out, ref)
 	}
 	return strings.Join(out, decisionRefSeparator)
+}
+
+// extendDecisionRefs appends to base every link in refs that base does not
+// already carry as a token, in order. A consolidation successor's source_ref is
+// the value the ordinary rules chose — the emission's own, else the first
+// source's — EXTENDED by the decision links it stands for, never replaced by
+// them: replacing discarded the emission's stated value and any ordinary
+// reference, and keeping only a single link dropped a lone link behind a
+// non-decision first source, so the decision lost its companion.
+func extendDecisionRefs(base string, refs []string) string {
+	out := base
+	for _, ref := range refs {
+		if ref == "" || sourceRefCarriesToken(out, ref) {
+			continue
+		}
+		if out == "" {
+			out = ref
+			continue
+		}
+		out += decisionRefSeparator + ref
+	}
+	return out
+}
+
+// sourceRefCarriesToken reports whether ref holds token as one of its
+// separator-delimited parts — the reader's own matching rule.
+func sourceRefCarriesToken(ref, token string) bool {
+	for _, part := range strings.Split(ref, decisionRefSeparator) {
+		if part == token {
+			return true
+		}
+	}
+	return false
+}
+
+// errDecisionRefsOverflow is a merge whose decision links alone do not fit in
+// MaxSourceRefLen. ReplaceNonManual drops such an emission before it writes
+// anything (decisionLinksOverflowTx), so its sources stay live, each still the
+// companion of its decision; this error is what a writer that skipped that check
+// would meet rather than a silently truncated link list.
+var errDecisionRefsOverflow = errors.New("the decision links this merge stands for do not fit in a source_ref")
+
+// boundedDecisionRefs is extendDecisionRefs held to MaxSourceRefLen. The joined
+// value is composed here, not copied from a row a writer already bounded, so the
+// bound is applied here: a value over it would not re-import (CheckImportedMemory
+// bounds source_ref). When the base no longer fits beside the links it gives way
+// to them — a lost link is the silent supersede miss, a lost path is not — and
+// when the links alone do not fit, the merge is refused rather than truncated.
+func boundedDecisionRefs(base string, refs []string) (string, error) {
+	if len(refs) == 0 {
+		return base, nil
+	}
+	if out := extendDecisionRefs(base, refs); len(out) <= MaxSourceRefLen {
+		return out, nil
+	}
+	if out := joinDecisionRefs(refs); len(out) <= MaxSourceRefLen {
+		return out, nil
+	}
+	return "", errDecisionRefsOverflow
+}
+
+// decisionLinksOverflowTx reports whether the decision links carried by the rows
+// ids name would, joined, exceed MaxSourceRefLen — the one case boundedDecisionRefs
+// refuses. ReplaceNonManual asks it per emission before anything is written, so
+// such a merge is dropped and its sources kept instead of failing the whole pass
+// (which reflect would then re-propose on every run).
+func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (bool, error) {
+	var refs []string
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		var ref sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`, id, projectID).Scan(&ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("read source_ref of %s: %w", id, err)
+		}
+		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+	}
+	return len(joinDecisionRefs(refs)) > MaxSourceRefLen, nil
 }
 
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the

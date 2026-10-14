@@ -3343,6 +3343,10 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
 // row a rewrite becomes — a COPY of a value this database already bounded, not new
 // caller text, and filtering there deletes the stored row rather than refusing one.
+// The one part of that value a merge COMPOSES rather than copies — the decision
+// links it stands for, appended to the copied reference — is held to the bound by
+// boundedDecisionRefs, and a merge whose links alone would not fit is dropped
+// before it writes (decisionLinksOverflowTx).
 // `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
 // since the renderer cannot assume its input came from a writer that enforces the
 // cap. A new statement that writes the column has to call boundedSourceRef — the
@@ -6366,6 +6370,33 @@ func (g *fedGuard) drop(m Memory) bool {
 	return true
 }
 
+// emissionClaimIDs is every candidate an emission could write over: the sources
+// it names and any stored row carrying the text it emits (the row a reuse would
+// take).
+func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
+	ids := append([]string(nil), m.ReplacesIDs...)
+	for _, c := range candidates {
+		if c.content == m.Content {
+			ids = append(ids, c.id)
+		}
+	}
+	return ids
+}
+
+// keepEmissionClaims marks every candidate an emission that is not written would
+// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim.
+func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) {
+	named := make(map[string]bool, len(m.ReplacesIDs))
+	for _, id := range m.ReplacesIDs {
+		named[id] = true
+	}
+	for _, c := range candidates {
+		if named[c.id] || c.content == m.Content {
+			concurrent[c.id] = true
+		}
+	}
+}
+
 // reusePreservesAge reports whether a reused row is unchanged by this replace
 // — the consolidator re-emitted the stored text byte-identically, in the same
 // category — and must therefore keep its created_at, source and provenance
@@ -6763,13 +6794,19 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		// wrongly retiring the row when the first was superseded.
 		decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
 	}
-	// A successor standing in for more than one decision records every link it
-	// carries, so no decision is left without its companion and none is retired on
-	// the strength of a link that names a different decision. A single link keeps
-	// the first-source-wins rule above unchanged.
-	if len(decisionRefs) > 1 {
-		claims.sourceRef = joinDecisionRefs(decisionRefs)
+	// A successor records every decision link it stands for, so no decision is
+	// left without its companion and none is retired on the strength of a link
+	// that names a different decision. The links EXTEND the value chosen above —
+	// the emission's own, else the first source's — rather than replacing it, so
+	// that value's precedence survives and a lone link behind a non-decision first
+	// source is not dropped. boundedDecisionRefs holds the result to
+	// MaxSourceRefLen; ReplaceNonManual has already dropped a merge whose links
+	// alone would not fit.
+	ref, err := boundedDecisionRefs(claims.sourceRef, decisionRefs)
+	if err != nil {
+		return rowClaims{}, err
 	}
+	claims.sourceRef = ref
 	// The window is inherited AS A UNIT, from one source or from none — never half
 	// from one row and half from another.
 	//
@@ -7218,6 +7255,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	dropEmission := make([]bool, len(memories))
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+		// A merge whose decision links alone would not fit in a source_ref is not
+		// written: truncating the list is the silent supersede miss, and failing
+		// the pass would re-propose the same merge forever. Its sources and any
+		// row carrying its text are kept, as a refused claim's are.
+		if !dropEmission[i] {
+			over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
+			if err != nil {
+				return nil, 0, 0, nil, err
+			}
+			if over {
+				dropEmission[i] = true
+				keepEmissionClaims(candidates, concurrent, m)
+			}
+		}
 		// A refusal about a FOLDED cross-project candidate belongs to the half
 		// that produced it, not to the project replace that happens to evaluate
 		// it: ApplyReflection subtracted both halves' drops from different
