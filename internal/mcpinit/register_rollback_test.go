@@ -28,13 +28,24 @@ const addJSONRefusal = "Error: could not write the claude user config"
 // removeJSONRefusal is the failure the fake `claude mcp remove` answers with.
 const removeJSONRefusal = "Error: could not remove the claude MCP server"
 
+// claudeFake says which of the three commands the fake claude refuses. The
+// choices are BAKED INTO the script rather than read from marker files at run
+// time: a nested `if exist` inside a batch block does not fire on Windows while
+// the same check at the top level does, so the earlier marker-file fake refused
+// an add-json it was meant to let through and the rollback tests passed or
+// failed for the wrong reason there.
+type claudeFake struct {
+	removeFails  bool // `mcp remove` exits non-zero
+	addFails     bool // an add-json that does NOT name the previous command exits non-zero
+	restoreFails bool // an add-json that DOES name the previous command exits non-zero
+}
+
 // writeFakeClaude installs a fake `claude` that answers `mcp get ghost` with
-// the registration in get.out, records every invocation's argv in calls, fails
-// a remove while fail-remove exists, fails an add-json while fail-add exists, and
-// fails one naming the stale command while fail-restore exists. The markers are
-// files the test creates in the same directory, so the fake carries no knowledge
-// of the test's expectations beyond them.
-func writeFakeClaude(t *testing.T, dir string) string {
+// the registration in get.out and answers remove/add-json per f, recording the
+// argv of an add-json that names the stale command in restored and of a remove
+// the fake accepted in removed. Both scripts are flat: no branch is nested
+// inside another, because that is the shape the Windows one has to survive.
+func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 	t.Helper()
 	name := "claude"
 	var script string
@@ -42,31 +53,24 @@ func writeFakeClaude(t *testing.T, dir string) string {
 		name += ".bat"
 		script = "@echo off\r\n" +
 			">>\"" + dir + "\\calls\" echo %*\r\n" +
-			"if \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n" +
-			"  type \"" + dir + "\\get.out\"\r\n" +
-			"  exit /b 0\r\n" +
-			")\r\n" +
-			"if \"%1\"==\"mcp\" if \"%2\"==\"remove\" (\r\n" +
-			"  if exist \"" + dir + "\\fail-remove\" (\r\n" +
-			"    echo " + removeJSONRefusal + " 1>&2\r\n" +
-			"    exit /b 1\r\n" +
-			"  )\r\n" +
-			"  >>\"" + dir + "\\removed\" echo ok\r\n" +
-			"  exit /b 0\r\n" +
-			")\r\n" +
-			"set line=%*\r\n" +
-			"if not \"%line:" + staleMarker + "=%\"==\"%line%\" (\r\n" +
-			"  if exist \"" + dir + "\\fail-restore\" (\r\n" +
-			"    echo " + addJSONRefusal + " 1>&2\r\n" +
-			"    exit /b 1\r\n" +
-			"  )\r\n" +
-			"  >>\"" + dir + "\\restored\" echo %line%\r\n" +
-			"  exit /b 0\r\n" +
-			")\r\n" +
-			"if exist \"" + dir + "\\fail-add\" (\r\n" +
-			"  echo " + addJSONRefusal + " 1>&2\r\n" +
-			"  exit /b 1\r\n" +
-			")\r\n" +
+			"if \"%1\"==\"mcp\" if \"%2\"==\"get\" goto do_get\r\n" +
+			"if \"%1\"==\"mcp\" if \"%2\"==\"remove\" goto do_remove\r\n" +
+			"set \"line=%*\"\r\n" +
+			"if not \"%line:" + staleMarker + "=%\"==\"%line%\" goto do_restore\r\n" +
+			"goto do_add\r\n" +
+			":do_get\r\n" +
+			"type \"" + dir + "\\get.out\"\r\n" +
+			"exit /b 0\r\n" +
+			":do_remove\r\n" +
+			failLine(f.removeFails, removeJSONRefusal) +
+			">>\"" + dir + "\\removed\" echo ok\r\n" +
+			"exit /b 0\r\n" +
+			":do_restore\r\n" +
+			failLine(f.restoreFails, addJSONRefusal) +
+			">>\"" + dir + "\\restored\" echo %line%\r\n" +
+			"exit /b 0\r\n" +
+			":do_add\r\n" +
+			failLine(f.addFails, addJSONRefusal) +
 			"exit /b 0\r\n"
 	} else {
 		script = "#!/bin/sh\n" +
@@ -76,27 +80,18 @@ func writeFakeClaude(t *testing.T, dir string) string {
 			"  exit 0\n" +
 			"fi\n" +
 			"if [ \"$1\" = mcp ] && [ \"$2\" = remove ]; then\n" +
-			"  if [ -f '" + dir + "/fail-remove' ]; then\n" +
-			"    echo '" + removeJSONRefusal + "' >&2\n" +
-			"    exit 1\n" +
-			"  fi\n" +
+			failLine(f.removeFails, removeJSONRefusal) +
 			"  echo ok >> '" + dir + "/removed'\n" +
 			"  exit 0\n" +
 			"fi\n" +
 			"case \"$*\" in\n" +
 			"*" + staleMarker + "*)\n" +
-			"  if [ -f '" + dir + "/fail-restore' ]; then\n" +
-			"    echo '" + addJSONRefusal + "' >&2\n" +
-			"    exit 1\n" +
-			"  fi\n" +
+			failLine(f.restoreFails, addJSONRefusal) +
 			"  printf '%s\\n' \"$*\" >> '" + dir + "/restored'\n" +
 			"  exit 0\n" +
 			"  ;;\n" +
 			"esac\n" +
-			"if [ -f '" + dir + "/fail-add' ]; then\n" +
-			"  echo '" + addJSONRefusal + "' >&2\n" +
-			"  exit 1\n" +
-			"fi\n" +
+			failLine(f.addFails, addJSONRefusal) +
 			"exit 0\n"
 	}
 	path := filepath.Join(dir, name)
@@ -104,6 +99,22 @@ func writeFakeClaude(t *testing.T, dir string) string {
 		t.Fatalf("write the fake claude: %v", err)
 	}
 	return path
+}
+
+// failLine renders the refusal the current script needs, or nothing when that
+// command is accepted. It emits a WHOLE command (echo plus exit, or the POSIX
+// pair) so the caller never has to nest or conditionally split a block around
+// it — the Windows form uses `&` rather than parentheses for exactly that
+// reason.
+func failLine(fails bool, message string) string {
+	if !fails {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return "echo " + message + " 1>&2 & exit /b 1\r\n"
+	}
+	return "  echo '" + message + "' >&2\n" +
+		"  exit 1\n"
 }
 
 // writeRegistrationText writes the `claude mcp get ghost` output for a stale
@@ -120,10 +131,12 @@ func writeRegistrationText(t *testing.T, dir string) {
 	}
 }
 
-func marker(t *testing.T, dir, name string) {
+// requireMissing fails the test when the fake recorded the named action, which
+// is how a case that must not roll back is pinned.
+func requireMissing(t *testing.T, dir, name string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
-		t.Fatalf("write marker %s: %v", name, err)
+	if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
+		t.Errorf("the fake should not have recorded %s, got %q", name, b)
 	}
 }
 
@@ -133,9 +146,8 @@ func marker(t *testing.T, dir, name string) {
 // Claude Code session with no ghost tools until a re-run succeeds.
 func TestRegisterMCPRestoresThePreviousRegistrationOnAddFailure(t *testing.T) {
 	dir := t.TempDir()
-	claude := writeFakeClaude(t, dir)
+	claude := writeFakeClaude(t, dir, claudeFake{addFails: true})
 	writeRegistrationText(t, dir)
-	marker(t, dir, "fail-add")
 
 	var out bytes.Buffer
 	err := registerMCP(&out, filepath.Join(dir, "bin", "ghost"), claude, false)
@@ -164,10 +176,8 @@ func TestRegisterMCPRestoresThePreviousRegistrationOnAddFailure(t *testing.T) {
 // re-run is not cosmetic.
 func TestRegisterMCPNamesTheRegistrationRemovedWhenRestoreFails(t *testing.T) {
 	dir := t.TempDir()
-	claude := writeFakeClaude(t, dir)
+	claude := writeFakeClaude(t, dir, claudeFake{addFails: true, restoreFails: true})
 	writeRegistrationText(t, dir)
-	marker(t, dir, "fail-add")
-	marker(t, dir, "fail-restore")
 
 	var out bytes.Buffer
 	err := registerMCP(&out, filepath.Join(dir, "bin", "ghost"), claude, false)
@@ -180,6 +190,7 @@ func TestRegisterMCPNamesTheRegistrationRemovedWhenRestoreFails(t *testing.T) {
 	if strings.Contains(err.Error(), "registration was restored") {
 		t.Errorf("a failed rollback must not claim a restore, got %q", err.Error())
 	}
+	requireMissing(t, dir, "restored")
 }
 
 // TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace pins the case
@@ -188,10 +199,8 @@ func TestRegisterMCPNamesTheRegistrationRemovedWhenRestoreFails(t *testing.T) {
 // the error must say the registration most likely survived instead.
 func TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace(t *testing.T) {
 	dir := t.TempDir()
-	claude := writeFakeClaude(t, dir)
+	claude := writeFakeClaude(t, dir, claudeFake{removeFails: true, addFails: true})
 	writeRegistrationText(t, dir)
-	marker(t, dir, "fail-add")
-	marker(t, dir, "fail-remove")
 
 	var out bytes.Buffer
 	err := registerMCP(&out, filepath.Join(dir, "bin", "ghost"), claude, false)
@@ -204,9 +213,7 @@ func TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace(t *testing.
 	if !strings.Contains(err.Error(), "still registered") {
 		t.Errorf("the error must say the registration most likely survived, got %q", err.Error())
 	}
-	if _, readErr := os.ReadFile(filepath.Join(dir, "restored")); readErr == nil {
-		t.Error("a registration the remove left in place must not be re-added")
-	}
+	requireMissing(t, dir, "restored")
 }
 
 // TestRegisterMCPWithoutAPreviousRegistrationReportsNoRollback holds the other
@@ -214,11 +221,10 @@ func TestRegisterMCPDoesNotRollBackARegistrationTheRemoveLeftInPlace(t *testing.
 // the one it always was and the fake sees a single add-json.
 func TestRegisterMCPWithoutAPreviousRegistrationReportsNoRollback(t *testing.T) {
 	dir := t.TempDir()
-	claude := writeFakeClaude(t, dir)
+	claude := writeFakeClaude(t, dir, claudeFake{addFails: true})
 	if err := os.WriteFile(filepath.Join(dir, "get.out"), []byte("No MCP server found with name: ghost\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	marker(t, dir, "fail-add")
 
 	var out bytes.Buffer
 	err := registerMCP(&out, filepath.Join(dir, "bin", "ghost"), claude, false)
@@ -229,8 +235,6 @@ func TestRegisterMCPWithoutAPreviousRegistrationReportsNoRollback(t *testing.T) 
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
-	calls, readErr := os.ReadFile(filepath.Join(dir, "restored"))
-	if readErr == nil {
-		t.Errorf("nothing was registered, so there is nothing to restore, got %q", calls)
-	}
+	requireMissing(t, dir, "restored")
+	requireMissing(t, dir, "removed")
 }
