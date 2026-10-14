@@ -595,18 +595,25 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 	if isJSONNull(eventRaw) {
 		return false, fmt.Errorf("hooks[%s] is null", event)
 	}
-	var entries []hookEntry
+	// Decode only as far as the command strings: every entry and every hook
+	// action stays a raw object, so the fields hookEntry/hookAction do not
+	// model (timeout, async, a non-command hook's own payload field, keys
+	// the host adds later) and every entry that holds no match are written
+	// back exactly as they were. Same policy as mergeCodexHooksConfig.
+	var entries []json.RawMessage
 	if err := json.Unmarshal(eventRaw, &entries); err != nil {
 		return false, fmt.Errorf("parse %s hooks: %w", event, err)
 	}
 
 	found := false
-	for i := range entries {
-		for j := range entries[i].Hooks {
-			if entries[i].Hooks[j].Command == oldCmd {
-				entries[i].Hooks[j].Command = newCmd
-				found = true
-			}
+	for i, entryRaw := range entries {
+		rewritten, changed, err := replaceEntryCommand(entryRaw, oldCmd, newCmd)
+		if err != nil {
+			return false, fmt.Errorf("rewrite %s hook: %w", event, err)
+		}
+		if changed {
+			entries[i] = rewritten
+			found = true
 		}
 	}
 	if !found {
@@ -627,6 +634,52 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 	return true, nil
 }
 
+// replaceEntryCommand rewrites, inside one raw hooks[event] entry, every hook
+// action whose "command" is exactly oldCmd to newCmd. Only that one string is
+// replaced: the entry's other keys and the action's other keys are kept, and
+// an entry or action that is not an object, has no "hooks" array or carries no
+// string "command" is left untouched rather than reshaped. changed is false
+// (and out is nil) when nothing in the entry matched.
+func replaceEntryCommand(entryRaw json.RawMessage, oldCmd, newCmd string) (out json.RawMessage, changed bool, err error) {
+	var entry map[string]json.RawMessage
+	if json.Unmarshal(entryRaw, &entry) != nil || entry == nil {
+		return nil, false, nil
+	}
+	var actions []json.RawMessage
+	if json.Unmarshal(entry["hooks"], &actions) != nil {
+		return nil, false, nil
+	}
+	for j, actionRaw := range actions {
+		var action map[string]json.RawMessage
+		if json.Unmarshal(actionRaw, &action) != nil || action == nil {
+			continue
+		}
+		var cmd string
+		if json.Unmarshal(action["command"], &cmd) != nil || cmd != oldCmd {
+			continue
+		}
+		cmdJSON, err := json.Marshal(newCmd)
+		if err != nil {
+			return nil, false, err
+		}
+		action["command"] = cmdJSON
+		if actions[j], err = json.Marshal(action); err != nil {
+			return nil, false, err
+		}
+		changed = true
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	if entry["hooks"], err = json.Marshal(actions); err != nil {
+		return nil, false, err
+	}
+	if out, err = json.Marshal(entry); err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
 // addHook adds a hook entry for the given event. Does not clobber existing hooks.
 func (s *settingsFile) addHook(event string, entry hookEntry) error {
 	var hooks map[string]json.RawMessage
@@ -639,15 +692,20 @@ func (s *settingsFile) addHook(event string, entry hookEntry) error {
 		hooks = make(map[string]json.RawMessage)
 	}
 
-	// Get existing entries for this event.
-	var entries []hookEntry
+	// Get existing entries for this event. They stay raw, so a user entry is
+	// carried over whole — every key, not just the ones hookEntry models.
+	var entries []json.RawMessage
 	if raw, ok := hooks[event]; ok {
 		if err := json.Unmarshal(raw, &entries); err != nil {
 			return fmt.Errorf("parse existing %s hooks: %w", event, err)
 		}
 	}
 
-	entries = append(entries, entry)
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	entries = append(entries, entryJSON)
 
 	entriesJSON, err := json.Marshal(entries)
 	if err != nil {

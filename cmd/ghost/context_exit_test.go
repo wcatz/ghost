@@ -34,6 +34,19 @@ func TestContextArgumentRefusalsExitOne(t *testing.T) {
 		{"audit non-duration since", []string{"context", "--audit", "--since", "7d"}},
 		{"audit combined with as-of", []string{"context", "--audit", "--as-of", "2026-01-01T00:00:00Z"}},
 		{"as-of not an RFC 3339 instant", []string{"context", "--as-of", "bogus"}},
+		// Plain mode (no --audit) used to drop every one of these and render a
+		// live block with exit 0 (#1195).
+		{"plain unknown flag", []string{"context", "--bogus"}},
+		{"plain unknown flag equals form", []string{"context", "--json=true"}},
+		{"plain stray positional", []string{"context", "somewhere"}},
+		{"plain project", []string{"context", "--project", "ghost"}},
+		{"plain project equals form", []string{"context", "--project=ghost"}},
+		{"plain since", []string{"context", "--since", "1h"}},
+		{"plain since equals form", []string{"context", "--since=1h"}},
+		{"plain cwd with no value", []string{"context", "--cwd"}},
+		{"plain cwd twice", []string{"context", "--cwd", "/a", "--cwd=/b"}},
+		{"plain as-of twice", []string{"context", "--as-of", "2026-01-01T00:00:00Z", "--as-of=2026-02-01T00:00:00Z"}},
+		{"plain as-of with no value", []string{"context", "--as-of"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			roots := isolatedHelpFS(t)
@@ -66,5 +79,62 @@ func TestContextArgumentRefusalsExitOne(t *testing.T) {
 			}
 			assertNoFiles(t, roots)
 		})
+	}
+}
+
+// TestContextArgumentRefusalsGuardEchoedValue: a `ghost context` refusal that
+// names the caller's argument renders it through memory.RefusalArg, like
+// --project does. A token-shaped value is withheld and a value longer than the
+// 256 bytes a refusal repeats is not echoed back; the exit code stays 1. The
+// parser errors time.ParseDuration and time.Parse return quote the input
+// themselves, so the refusals must not wrap them either.
+func TestContextArgumentRefusalsGuardEchoedValue(t *testing.T) {
+	const key = "sk-ant-api03-Zz09XxYyWwVvUuTtSsRrQqPpOoNnMmLlKkJj01"
+	long := strings.Repeat("x", 1000)
+	for _, tc := range []struct {
+		name string
+		argv func(v string) []string
+	}{
+		{"since", func(v string) []string { return []string{"context", "--audit", "--since", v} }},
+		{"since equals form", func(v string) []string { return []string{"context", "--audit", "--since=" + v} }},
+		{"duplicate since", func(v string) []string { return []string{"context", "--audit", "--since", "24h", "--since", v} }},
+		{"unknown flag", func(v string) []string { return []string{"context", "--audit", "--" + v} }},
+		{"stray positional", func(v string) []string { return []string{"context", "--audit", v} }},
+		{"as-of", func(v string) []string { return []string{"context", "--as-of", v} }},
+		{"plain unknown flag", func(v string) []string { return []string{"context", "--" + v} }},
+		{"plain stray positional", func(v string) []string { return []string{"context", v} }},
+		{"plain project", func(v string) []string { return []string{"context", "--project", v} }},
+		{"plain duplicate cwd", func(v string) []string { return []string{"context", "--cwd", "/a", "--cwd", v} }},
+	} {
+		for _, val := range []struct{ name, v, needle string }{
+			{"token", key, "sk-ant-api03"},
+			{"oversized", long, "xxxxxxxxxx"},
+		} {
+			t.Run(tc.name+" "+val.name, func(t *testing.T) {
+				roots := isolatedHelpFS(t)
+				resetDetectRemote(t)
+				origArgs := os.Args
+				os.Args = append([]string{origArgs[0]}, tc.argv(val.v)...)
+				defer func() { os.Args = origArgs }()
+
+				var code int
+				_, stderr := captureStreams(t, func() {
+					code = runCLI(os.Args[1:], dispatchCommand)
+				})
+				if code != 1 {
+					t.Errorf("exit code = %d, want 1", code)
+				}
+				if stderr == "" || !strings.HasPrefix(stderr, "ghost context") {
+					t.Fatalf("stderr = %q, want a refusal naming the command", stderr)
+				}
+				if strings.Contains(stderr, val.needle) {
+					t.Errorf("stderr echoes the caller's value: %q", stderr)
+				}
+				if len(stderr) > 600 {
+					t.Errorf("stderr is %d bytes, want a bounded refusal: %q", len(stderr), stderr)
+				}
+				assertNoFiles(t, roots)
+			})
+		}
 	}
 }

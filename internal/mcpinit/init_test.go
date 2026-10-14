@@ -696,6 +696,36 @@ func TestReconcileHook_RepairsStaleGhostPathWindows(t *testing.T) {
 	}
 }
 
+// TestIsGhostBinaryName pins the launcher extensions a ghost command may carry.
+// A Windows install can resolve to a "ghost.bat"/"ghost.cmd" shim rather than
+// the native ".exe", and a hook command embedding one of those must still be
+// recognised as ghost's — that recognition is what makes the codex merge
+// idempotent on a re-run, not only on the platform the shim appears on.
+func TestIsGhostBinaryName(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"ghost", true},
+		{"/usr/local/bin/ghost", true},
+		{"C:\\old\\ghost.exe", true},
+		{"C:\\old\\GHOST.EXE", true},
+		{"C:\\old\\ghost.bat", true},
+		{"C:\\old\\GHOST.BAT", true},
+		{"C:\\old\\ghost.cmd", true},
+		{"ghost.bat", true},
+		{"/usr/local/bin/ghost-helper", false},
+		{"C:\\old\\ghost.batx", false},
+		{"ghostly", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isGhostBinaryName(tc.path); got != tc.want {
+			t.Errorf("isGhostBinaryName(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 // TestReconcileHook_RepairsStaleGhostPathPOSIX is the POSIX counterpart of
 // TestReconcileHook_RepairsStaleGhostPathWindows — the repair must not be
 // gated on isWindows, since binaries move on every platform.

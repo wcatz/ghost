@@ -165,6 +165,14 @@ type DecisionRetirement struct {
 	// composed text more than one memory carries) when no single one could be
 	// chosen. Nothing was retired for them and they still rank.
 	Ambiguous []string
+	// Shared are live memory ids that carry the old decision's link TOGETHER
+	// with the link of another decision that is not superseded: a consolidation
+	// folded several decision companions into one successor. Such a row is not an
+	// extra claimant and is not retired, because withholding it would withhold the
+	// other decision it still states; it keeps ranking, so the reversed text is
+	// still returned until its text is rewritten or every decision it holds is
+	// superseded, at which point the last supersede retires it.
+	Shared []string
 }
 
 // SupersedeDecision marks oldID as superseded by newID within one project and
@@ -193,8 +201,12 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // repointed. History is append-only and ghost_link_withdraw repairs a wrong edge.
 //
 // Both IDs must belong to projectID and must differ; a decision cannot
-// supersede itself. Superseding an already-superseded decision just repoints
-// it, so re-running is safe.
+// supersede itself. Re-running the same pair is a clean no-op, so re-running is
+// safe. A decision already superseded by a DIFFERENT decision that is still
+// live (active or revisit) is refused (#1144): the repoint would overwrite the
+// only record that the live successor replaced it, leaving two live decisions
+// and no link between them. A decision whose successor was itself superseded,
+// or no longer exists, has no live successor to lose and is repointed.
 func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
 	if oldID == newID {
@@ -225,6 +237,16 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", RefusalArg("decision_id", newID), RefusalArg("project_id", projectID))
 	}
 
+	// Inside the transaction, so a second writer cannot slip a repoint past a
+	// read-only check the caller made before it wrote anything (#1144).
+	successor, err := liveDecisionSuccessor(ctx, tx, projectID, oldID)
+	if err != nil {
+		return out, fmt.Errorf("supersede decision: lookup successor of %s: %w", RefusalArg("decision_id", oldID), err)
+	}
+	if successor != "" && successor != newID {
+		return out, &DecisionSuccessorError{Successor: successor}
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE decisions
 		SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
@@ -253,6 +275,48 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 	return out, nil
 }
 
+// DecisionSuccessorError is the refusal SupersedeDecisionReport returns when
+// the old decision is already superseded by a different decision that is still
+// live. Successor is that decision's id, a stored value; Error renders it through
+// SafeToken.
+type DecisionSuccessorError struct {
+	Successor string
+}
+
+func (e *DecisionSuccessorError) Error() string {
+	// No advice here: the store cannot know whether its caller already wrote the
+	// replacement, and "pass supersedes=<successor>" is wrong advice to a caller
+	// that did (ghost_decision_record words its own answer for that case).
+	return fmt.Sprintf("decision is already superseded by %s, which is still live", SafeToken(e.Successor))
+}
+
+// LiveDecisionSuccessor returns the id of the decision that superseded
+// decisionID when that decision is still live (active or revisit, the same
+// "live" FindLiveDecisionByTitle uses), or "" when decisionID is not
+// superseded, its successor was itself superseded, or its successor no longer
+// exists. It is the read-only form of the check SupersedeDecisionReport makes in
+// its transaction, so a caller can refuse before it writes anything.
+func (s *Store) LiveDecisionSuccessor(ctx context.Context, projectID, decisionID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return liveDecisionSuccessor(ctx, s.db, projectID, decisionID)
+}
+
+// liveDecisionSuccessor takes a queryRower so it runs on the store's handle and
+// inside SupersedeDecisionReport's write transaction alike.
+func liveDecisionSuccessor(ctx context.Context, q queryRower, projectID, decisionID string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT s.id FROM decisions d
+		JOIN decisions s ON s.id = d.superseded_by AND s.project_id = d.project_id
+		WHERE d.id = ? AND d.project_id = ? AND d.status = 'superseded' AND s.status != 'superseded'
+	`, decisionID, projectID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
 // decisionCompanionRef is the stable link from a companion memory back to the
 // decision it carries: written into memories.source_ref by RecordDecision, in
 // the same INSERT, so it cannot be absent on a row this build wrote and cannot
@@ -263,18 +327,154 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 // it requires the link to name exactly one memory instead.
 func decisionCompanionRef(decisionID string) string { return decisionRefPrefix + decisionID }
 
-// decisionRefPrefix is the source_ref namespace only RecordDecision writes. The
-// writer tools (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
+// decisionRefSeparator separates the decision links a consolidation successor
+// records when it stands in for more than one decision. A comma cannot occur
+// inside a link: RecordDecision mints hex ids, and CheckImportedDecision refuses
+// the separator in an imported id, which is the one writer that takes an id
+// verbatim. A source_ref that is not a link list splits into one token and is
+// matched whole.
+const decisionRefSeparator = ","
+
+// decisionRefsInSourceRef returns every decision link a stored source_ref names,
+// in order. Most rows carry at most one; a successor that folded several decision
+// companions carries all of them, and it is that list — not just its first entry
+// — that says which decisions the row stands for.
+func decisionRefsInSourceRef(ref string) []string {
+	if ref == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(ref, decisionRefSeparator) {
+		if strings.HasPrefix(part, decisionRefPrefix) {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// sourceRefNamesDecision reports whether ref links decisionID.
+func sourceRefNamesDecision(ref, decisionID string) bool {
+	return sourceRefCarriesToken(ref, decisionCompanionRef(decisionID))
+}
+
+// joinDecisionRefs renders the links of a successor that stands for more than one
+// decision, in the order they were gathered, with repeats removed.
+func joinDecisionRefs(refs []string) string {
+	seen := make(map[string]bool, len(refs))
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref == "" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	return strings.Join(out, decisionRefSeparator)
+}
+
+// extendDecisionRefs appends to base every link in refs that base does not
+// already carry as a token, in order. A consolidation successor's source_ref is
+// the value the ordinary rules chose — the emission's own, else the first
+// source's — EXTENDED by the decision links it stands for, never replaced by
+// them: replacing discarded the emission's stated value and any ordinary
+// reference, and keeping only a single link dropped a lone link behind a
+// non-decision first source, so the decision lost its companion.
+func extendDecisionRefs(base string, refs []string) string {
+	out := base
+	for _, ref := range refs {
+		if ref == "" || sourceRefCarriesToken(out, ref) {
+			continue
+		}
+		if out == "" {
+			out = ref
+			continue
+		}
+		out += decisionRefSeparator + ref
+	}
+	return out
+}
+
+// sourceRefCarriesToken reports whether ref holds token as one of its
+// separator-delimited parts — the reader's own matching rule.
+func sourceRefCarriesToken(ref, token string) bool {
+	for _, part := range strings.Split(ref, decisionRefSeparator) {
+		if part == token {
+			return true
+		}
+	}
+	return false
+}
+
+// errDecisionRefsOverflow is a merge whose decision links alone do not fit in
+// MaxSourceRefLen. ReplaceNonManual drops such an emission before it writes
+// anything (decisionLinksOverflowTx), so its sources stay live, each still the
+// companion of its decision; this error is what a writer that skipped that check
+// would meet rather than a silently truncated link list.
+var errDecisionRefsOverflow = errors.New("the decision links this merge stands for do not fit in a source_ref")
+
+// boundedDecisionRefs is extendDecisionRefs held to MaxSourceRefLen. The joined
+// value is composed here, not copied from a row a writer already bounded, so the
+// bound is applied here: a value over it would not re-import (CheckImportedMemory
+// bounds source_ref). When the base no longer fits beside the links it gives way
+// to them — a lost link is the silent supersede miss, a lost path is not — and
+// when the links alone do not fit, the merge is refused rather than truncated.
+func boundedDecisionRefs(base string, refs []string) (string, error) {
+	if len(refs) == 0 {
+		return base, nil
+	}
+	if out := extendDecisionRefs(base, refs); len(out) <= MaxSourceRefLen {
+		return out, nil
+	}
+	// The base's own links are links too, and a fallback that kept only refs
+	// would drop them (the reuse branch's base is the reused row's link).
+	if out := joinDecisionRefs(append(decisionRefsInSourceRef(base), refs...)); len(out) <= MaxSourceRefLen {
+		return out, nil
+	}
+	return "", errDecisionRefsOverflow
+}
+
+// decisionLinksOverflowTx reports whether the decision links carried by the rows
+// ids name would, joined, exceed MaxSourceRefLen — the one case boundedDecisionRefs
+// refuses. ReplaceNonManual asks it per emission before anything is written, so
+// such a merge is dropped and its sources kept instead of failing the whole pass
+// (which reflect would then re-propose on every run).
+func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (bool, error) {
+	var refs []string
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		var ref sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`, id, projectID).Scan(&ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("read source_ref of %s: %w", id, err)
+		}
+		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+	}
+	return len(joinDecisionRefs(refs)) > MaxSourceRefLen, nil
+}
+
+// decisionRefPrefix is the source_ref namespace only RecordDecision (and the
+// consolidation successor that inherits its link) writes. The writer tools
+// (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through
 // checkReservedSourceRef, so a caller cannot stamp an unrelated memory with a
 // decision's link; ImportMemory does not refuse it, because a restore must keep
-// the link, and the lookup's category and uniqueness checks cover that door.
+// the link — a merged successor's mixed value such as "docs/x.md,decision:<id>"
+// included — and the lookup's category and uniqueness checks cover that door.
 const decisionRefPrefix = "decision:"
 
-// checkReservedSourceRef refuses a caller-supplied source_ref in the reserved
-// decision namespace.
+// checkReservedSourceRef refuses a caller-supplied source_ref that carries a
+// decision link ANYWHERE the lookup would read one. The guard asks the reader
+// itself (decisionRefsInSourceRef) rather than restating its rule, because the
+// two drifting apart is the hole: a guard that refused only a leading prefix let
+// "runbook.md,decision:<id>" through, and the token reader then took that row
+// for the decision's companion.
 func checkReservedSourceRef(ref string) error {
-	if strings.HasPrefix(ref, decisionRefPrefix) {
-		return fmt.Errorf("source_ref %q is reserved: the %q prefix links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
+	if len(decisionRefsInSourceRef(ref)) > 0 {
+		return fmt.Errorf("source_ref %q is reserved: a %q entry links a decision to its memory and is written only when a decision is recorded; use a path, commit or URL", ref, decisionRefPrefix)
 	}
 	return nil
 }
@@ -291,94 +491,194 @@ func checkReservedSourceRef(ref string) error {
 // project's promoted memory. A companion written before that link existed
 // carries none, so for a decision with no linked companion at all the lookup
 // falls back to the composed text — but only when it is unambiguous: one live
-// unlinked decision_log memory with that text AND exactly one decisions row in
-// the project composing to it. Two decisions with identical text, or an edited
-// memory, match nothing rather than the wrong row: a stale decision left live is
-// recoverable, a wrong memory retired is not.
-func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous []string, err error) {
+// unlinked decision_log memory with that text, whatever its category now, AND
+// exactly one decisions row in the project composing to it. Two decisions with
+// identical text, or an edited memory, match nothing rather than the wrong row:
+// a stale decision left live is recoverable, a wrong memory retired is not.
+func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous, shared []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
-	// memory. When more than one claims it, the one RecordDecision wrote is the
-	// one with source 'decision_log' — an import downgrades the source — and it
-	// is the companion only if it is the sole such row. Otherwise nothing is
-	// chosen and the live claimants are returned as ambiguous, so the caller can
-	// say the decision's memory was left standing.
+	// memory, one with source 'decision_log', or one with source 'reflection'.
+	// The second arm is the companion a caller recategorised with
+	// ghost_memory_update (which decision_record itself points them at): it keeps
+	// the link and its source, and no writer tool can set that source while a
+	// default import downgrades it, so the category it has now is no reason to stop
+	// recognising it. The resolve guard then decides — a convention/preference
+	// companion is Declined, not skipped.
+	//
+	// The third arm is the reflect successor of that companion, and it is the one
+	// that closes the silent supersede: ReplaceNonManual hands the link to the row
+	// that stands in for the companion (the INSERT branch carries it through
+	// inheritedClaims, the reuse branch appends the absorbed sources' links to the
+	// reused row's own in fillReusedClaimsTx) and writes the row with
+	// source 'reflection' and the survivor's own category — which for a merge or
+	// for the SQLite tier's cross-category clustering is a category that is not
+	// 'decision'. No writer tool can set that source, so a linked row carrying it
+	// is a row Ghost's own consolidation wrote over the decision, or an import
+	// told to trust the artifact's provenance, which is the same row restored.
+	// Without it the lookup found nothing, the decisions row flipped, the reversed
+	// decision kept answering search and session start, and the caller was told
+	// the supersede was clean.
+	//
+	// When more than one claims it, the one RecordDecision wrote is the one with
+	// source 'decision_log' — an import downgrades the source — and it is the
+	// companion only if it is the sole such row. Otherwise nothing is chosen and
+	// the live claimants are returned as ambiguous, so the caller can say the
+	// decision's memory was left standing.
 	type linkRow struct {
 		id     string
 		source string
+		ref    string
 		live   bool
+		multi  bool
 	}
+	// The link is matched as a TOKEN, not by equality: a successor that folded
+	// more than one decision companion carries every link joined by
+	// decisionRefSeparator. The LIKE is deliberately broad — it selects candidates
+	// cheaply — and sourceRefNamesDecision then confirms the exact token, so a
+	// longer id sharing a prefix and a non-link source_ref carrying the substring
+	// are both rejected.
+	want := decisionCompanionRef(decisionID)
 	rows0, err := tx.QueryContext(ctx, `
-		SELECT id, source, resolved_at IS NULL FROM memories
-		WHERE project_id IN (?, ?) AND category = 'decision' AND source_ref = ?
+		SELECT id, source, COALESCE(source_ref, ''), resolved_at IS NULL FROM memories
+		WHERE project_id IN (?, ?) AND source_ref LIKE ?
+		  AND (category = 'decision' OR source = 'decision_log' OR source = 'reflection')
 		ORDER BY rowid
-	`, projectID, GlobalProjectID, decisionCompanionRef(decisionID))
+	`, projectID, GlobalProjectID, "%"+want+"%")
 	if err != nil {
-		return nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	var linked []linkRow
 	for rows0.Next() {
 		var r linkRow
-		if err := rows0.Scan(&r.id, &r.source, &r.live); err != nil {
+		var ref string
+		if err := rows0.Scan(&r.id, &r.source, &ref, &r.live); err != nil {
 			_ = rows0.Close()
-			return nil, nil, fmt.Errorf("scan linked companion: %w", err)
+			return nil, nil, nil, fmt.Errorf("scan linked companion: %w", err)
 		}
+		if !sourceRefNamesDecision(ref, decisionID) {
+			continue
+		}
+		r.ref = ref
 		linked = append(linked, r)
 	}
 	if err := rows0.Err(); err != nil {
 		_ = rows0.Close()
-		return nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	_ = rows0.Close()
-	if len(linked) == 1 {
-		if linked[0].live {
-			return []string{linked[0].id}, nil, nil
+	// A row is shared only while another decision it links is NOT reversed: once
+	// every other decision it holds is superseded it states nothing live, and it is
+	// judged as this decision's own companion — otherwise it would be reported as
+	// shared on every supersede and never retired. Read after the cursor is closed.
+	for i := range linked {
+		multi, err := linksAnotherUnsupersededDecisionTx(ctx, tx, linked[i].ref, decisionID)
+		if err != nil {
+			return nil, nil, nil, err
 		}
-		return nil, nil, nil
+		linked[i].multi = multi
 	}
-	if len(linked) > 1 {
+	if len(linked) == 0 {
+		return findUnlinkedDecisionCompanionTx(ctx, tx, projectID, decisionID)
+	}
+	// A live row that stands for more than one decision — another of which is not
+	// yet superseded — is not this decision's clean companion: retiring it would
+	// withhold whatever other decision it still states. It is reported on its own (shared), never retired and never
+	// counted as a competing claimant — it is not an extra, so the ambiguity
+	// answer's remedy of deleting the extras would destroy a live decision. The
+	// rows that carry this decision's link ALONE are then judged by the rules
+	// below exactly as if the shared rows were absent, so a decision_log
+	// preference can never pick a shared row.
+	var single []linkRow
+	for _, r := range linked {
+		if r.multi {
+			if r.live {
+				shared = append(shared, r.id)
+			}
+			continue
+		}
+		single = append(single, r)
+	}
+	if len(single) == 1 {
+		if single[0].live {
+			return []string{single[0].id}, nil, shared, nil
+		}
+		return nil, nil, shared, nil
+	}
+	if len(single) > 1 {
 		var logged []linkRow
-		for _, r := range linked {
+		for _, r := range single {
 			if r.source == "decision_log" {
 				logged = append(logged, r)
 			}
 		}
 		if len(logged) == 1 {
 			if logged[0].live {
-				return []string{logged[0].id}, nil, nil
+				return []string{logged[0].id}, nil, shared, nil
 			}
-			return nil, nil, nil
+			return nil, nil, shared, nil
 		}
-		for _, r := range linked {
+		for _, r := range single {
 			if r.live {
 				ambiguous = append(ambiguous, r.id)
 			}
 		}
-		return nil, ambiguous, nil
 	}
+	return nil, ambiguous, shared, nil
+}
 
+// linksAnotherUnsupersededDecisionTx reports whether ref links a decision other
+// than decisionID that is not superseded. A link to a decision this store does
+// not hold counts as not superseded: nothing says it was reversed, and retiring a
+// row on that absence would withhold a statement nobody withdrew.
+func linksAnotherUnsupersededDecisionTx(ctx context.Context, tx *sql.Tx, ref, decisionID string) (bool, error) {
+	want := decisionCompanionRef(decisionID)
+	for _, link := range decisionRefsInSourceRef(ref) {
+		if link == want {
+			continue
+		}
+		var status string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM decisions WHERE id = ?`,
+			strings.TrimPrefix(link, decisionRefPrefix)).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("read linked decision status: %w", err)
+		}
+		if status != "superseded" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// findUnlinkedDecisionCompanionTx is the composed-text fallback of
+// findDecisionCompanionsTx, for a decision with no linked companion at all. It
+// never returns a shared row: a text match carries no decision identity.
+func findUnlinkedDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous, shared []string, err error) {
 	var title, decision, rationale string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT title, decision, rationale FROM decisions WHERE id = ? AND project_id = ?`,
 		decisionID, projectID).Scan(&title, &decision, &rationale); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, nil
+			return nil, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("read decision: %w", err)
+		return nil, nil, nil, fmt.Errorf("read decision: %w", err)
 	}
 	content, _ := decisionCompanionContent(title, decision, rationale)
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT title, decision, rationale FROM decisions WHERE project_id = ?`, projectID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	same := 0
 	for rows.Next() {
 		var t, d, r string
 		if err := rows.Scan(&t, &d, &r); err != nil {
 			_ = rows.Close()
-			return nil, nil, fmt.Errorf("scan project decision: %w", err)
+			return nil, nil, nil, fmt.Errorf("scan project decision: %w", err)
 		}
 		if c, _ := decisionCompanionContent(t, d, r); c == content {
 			same++
@@ -386,26 +686,26 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, nil, fmt.Errorf("read project decisions: %w", err)
+		return nil, nil, nil, fmt.Errorf("read project decisions: %w", err)
 	}
 	_ = rows.Close()
 
 	unlinked, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
-		WHERE project_id = ? AND source = 'decision_log' AND category = 'decision'
+		WHERE project_id = ? AND source = 'decision_log'
 		  AND content = ? AND (source_ref IS NULL OR source_ref = '')
 		  AND resolved_at IS NULL
 	`, projectID, content)
 	if err != nil {
-		return nil, nil, fmt.Errorf("find unlinked companion: %w", err)
+		return nil, nil, nil, fmt.Errorf("find unlinked companion: %w", err)
 	}
 	if same == 1 && len(unlinked) == 1 {
-		return unlinked, nil, nil
+		return unlinked, nil, nil, nil
 	}
 	if len(unlinked) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return nil, unlinked, nil
+	return nil, unlinked, nil, nil
 }
 
 // retireDecisionCompanionTx retires the companion memory of a decision that has
@@ -437,15 +737,16 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 // the same pair finds nothing to stamp and writes no second history row.
 func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
 	var out DecisionRetirement
-	candidates, ambiguous, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
+	candidates, ambiguous, shared, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
 	if err != nil {
 		return out, err
 	}
 	out.Ambiguous = ambiguous
+	out.Shared = shared
 	// The replacement's companion names the reason. One with no companion (an
 	// imported decision) leaves the reason unstated rather than naming an id
 	// that is not a memory.
-	newCompanions, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
+	newCompanions, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
 	if err != nil {
 		return out, err
 	}

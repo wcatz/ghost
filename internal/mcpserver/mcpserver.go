@@ -525,7 +525,7 @@ type markCapableStore interface {
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
 	PurgeMemoryHistory(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
-	DeletePurge(ctx context.Context, memoryID string) (memory.PurgeOutcome, error)
+	DeletePurgeInProject(ctx context.Context, projectID, memoryID string) (memory.PurgeOutcome, error)
 }
 
 // asOfCapableStore narrows provider.MemoryStore to the historical read
@@ -700,7 +700,9 @@ const tagMaxCount = 10
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
 // the ASCII-only quoted string. Interpolating it raw would be a second injection
 // on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain.
+// because it is a character this error string must never contain. A tag that is
+// token-shaped, or that the caller sent longer than the bound a refusal repeats,
+// is withheld instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -713,6 +715,7 @@ func validateTags(tags []string) ([]string, error) {
 			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
+		orig := t
 		if len(t) > tagMaxLen {
 			// Cut on a RUNE boundary. This was `t[:64]`, which on a CJK tag
 			// returned half a rune — and the invalid bytes were STORED, not merely
@@ -736,10 +739,27 @@ func validateTags(tags []string) ([]string, error) {
 			return nil, fmt.Errorf("tag %d (%s) must hold no %s — a tag is printed in the metadata of a memory row, "+
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
-				"any length are fine. Change the tag and call again", i, assemble.Token(t), reason)
+				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
 		}
 	}
 	return tags, nil
+}
+
+// refusedTag renders a tag the shape check refused. A tag the token guard
+// recognises, or one the caller sent longer than memory.ArgEchoMaxBytes, is
+// withheld through memory.RefusalArg like every other argument refusal: the
+// shape check runs before the guard, so naming the tag here would hand a
+// credential back that the guard would have refused to store. Both are decided
+// on the tag as the caller sent it, before the cut, so a value cut to the tag
+// bound is not repeated and the length reported is the caller's own. Every
+// other tag is named through assemble.Token, in the form the row would print.
+// RefusalArg alone would not do for those: it quotes with %q, which keeps the
+// data delimiters this sentence must not carry.
+func refusedTag(orig, cut string) string {
+	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
+		return memory.RefusalArg("tag", orig)
+	}
+	return assemble.Token(cut)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
@@ -994,11 +1014,13 @@ const searchResponseMaxBytes = 2 * memory.MaxContentLen
 // content cap itself lives in memory.MaxContentLen — one named constant
 // shared by every writer (MCP tools, reflection proposals, imports) — and
 // memory.ClampContent both enforces it and appends the explicit truncation
-// marker. These remain MCP-local: titles and list items have their own,
-// smaller display-oriented budgets.
+// marker. The title cap and the alternatives bound are shared the same way, in
+// memory.MaxTitleLen and memory.BoundAlternatives, because the portable importers
+// are writers of those fields too and a second copy of the number here is how an
+// imported row stops being what this package stores (#1226). What stays here is
+// the response-side budget, which is about an ANSWER rather than a stored value.
 const (
-	maxTitleLen     = 300
-	maxAlternatives = 20
+	maxTitleLen = memory.MaxTitleLen
 
 	// globalMemoriesLimit bounds the ghost://memories/global resource. Shared by
 	// the resource Description and its handler so the advertised count and the
@@ -1064,7 +1086,7 @@ Also do NOT save credential values — an API key, access token, password, priva
 A memory holds durable knowledge: what survives the conversation and is expensive or inconvenient to rediscover. Save the rule and its reason, not what the repository already states. Good: 'Production schema changes require explicit approval.' and 'Deployment keeps database migrations separate from application rollout, on purpose.' Bad: 'foo.go contains HandleFoo()' — the repository is authoritative for that, so the note goes stale silently and is cheap to re-read from the code. This rule guides and never refuses: a save that reads as a repository fact is still stored, with a note saying so.
 
 ## Changed Decisions
-When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision.
+When the user changes or reverses a decision already recorded, call ghost_decisions_list to find it and record the new decision with ghost_decision_record and supersedes=<that decision_id>, never a second unlinked decision. If that decision already has a live successor the record is refused and names it; pass the successor instead.
 
 ## Reading Search Results
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
@@ -1276,10 +1298,10 @@ type updateArgs struct {
 }
 
 // taskCompleteArgs are ghost_task_complete's arguments: the task to complete and
-// the note to file under it. The note is the one task field with no length cap,
-// which is where "here is the value that fixed it" gets written, and it is
-// rendered straight into the next session's context — see
-// Store.CompleteTask, which guards it as a credential.
+// the note to file under it. The note is guarded as a credential on its
+// UNCLAMPED text and then capped at MaxContentLen by Store.CompleteTask — the
+// same cap ImportTask applies to a restored note — and the answer warns when
+// the cap cut it. See Store.CompleteTask.
 type taskCompleteArgs struct {
 	TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
 	Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
@@ -1352,7 +1374,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 	}
 
 	importance, err := optFloat32(args.Importance, "importance")
@@ -1508,10 +1530,10 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID == "_global" {
-		return "", fmt.Errorf("memory %s is already global", memoryID)
+		return "", fmt.Errorf("memory %s is already global", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", projectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", projectID))
 	}
 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
@@ -1801,13 +1823,15 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 			marker = "pinned (kept visible on purpose)"
 		case m.ExemptCategory:
 			marker = "standing category (never marked)"
+		case m.PersistentTier:
+			marker = "persistent tier (exempt from resolve)"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 	}
-	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
-		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.PersistentTier > 0 || res.Declined > 0 {
+		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, in a standing category or in the persistent tier is left as it is, and a\n"+
 			"report saying otherwise would be claiming a change that did not happen.\n")
 	}
 	stamped := markedMemoryIDs(res.Memories)
@@ -1960,7 +1984,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	// The same ownership check a live row gets, against the project the
 	// tombstone was filed under. One entry is enough to name it.
 	if entries[0].ProjectID != resolvedProjectID {
-		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", requestedProjectID))
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", requestedProjectID))
 	}
 	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
@@ -2062,6 +2086,17 @@ func (s *Server) registerTools() {
 				return nil, nil, err
 			}
 		}
+		// Refused with the allowed list, as every other tool that takes a category
+		// refuses it (#1041/#1079), and before the project is resolved so the
+		// caller is told about the argument that was wrong. Handed on, a plural or
+		// capitalised category reached the assembler's category predicate, which
+		// dropped every candidate and answered "nothing found passed the category
+		// filter" with advice to raise the limit — a confident false negative no
+		// limit could fix. Checked here, above the explain and as_of branches, so
+		// all three paths refuse it alike.
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
@@ -2071,6 +2106,23 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as ghost_task_list and
+		// ghost_decisions_list refuse it (#1179). `ResolveProject` answers an
+		// unknown name with `""`, which the assembler reads as a `_global`-only
+		// search, so a misspelt project came back as "no match — widen the
+		// limit", or as a `_global` row presented as an answerable hit for the
+		// misspelt name, with nothing saying the named project was never searched.
+		//
+		// A refusal rather than the not-registered sentence ghost_project_context
+		// appends, because this answer is rendered and measured by the assembler:
+		// a sentence added here would ship bytes the response cap never saw, the
+		// assembler's own verdict text (widen the limit, the query was not wrong)
+		// would still be in the body, and explain's JSON payload has no place for
+		// it. A refusal says the one true thing on the plain, explain and as_of
+		// paths alike. `_global` itself is a registered project and still resolves.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 
@@ -2765,7 +2817,11 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		// Verify the memory exists and belongs to the specified project.
+		// Verify the memory exists and belongs to the specified project. This
+		// read answers the caller's errors and finds the tombstone; it does not
+		// decide the write — every delete below carries resolvedProjectID, which
+		// the store checks inside its own transaction, so a row that moves to
+		// _global after this read is refused there rather than deleted (#1154).
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 		if err != nil {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
@@ -2781,7 +2837,7 @@ func (s *Server) registerTools() {
 			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if args.PurgeHistory {
@@ -2790,7 +2846,7 @@ func (s *Server) registerTools() {
 			// still purges and simply says less, rather than failing a redaction
 			// that would have worked.
 			if hs, ok := s.store.(historyCapableStore); ok {
-				outcome, err := hs.DeletePurge(ctx, args.MemoryID)
+				outcome, err := hs.DeletePurgeInProject(ctx, resolvedProjectID, args.MemoryID)
 				if err != nil {
 					return nil, nil, fmt.Errorf("delete failed: %w", err)
 				}
@@ -2801,7 +2857,7 @@ func (s *Server) registerTools() {
 							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
 				}, nil, nil
 			}
-			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
 				return nil, nil, fmt.Errorf("delete failed: %w", err)
 			}
 			s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -2815,7 +2871,7 @@ func (s *Server) registerTools() {
 					args.MemoryID)}},
 			}, nil, nil
 		}
-		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{}); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -3291,6 +3347,12 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
+		}
 		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
@@ -3348,14 +3410,19 @@ func (s *Server) registerTools() {
 		}
 		task, err := s.store.GetTask(ctx, args.TaskID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
+			return nil, nil, err
 		}
-		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
+		notesClamped, err := s.store.CompleteTask(ctx, args.TaskID, args.Notes)
+		if err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)
 		}
 		s.notifyProjectResource(ctx, task.ProjectID, "tasks")
+		msg := "Task completed."
+		if notesClamped {
+			msg += truncationWarning("task notes", taskTruncationAdvice)
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Task completed."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 
@@ -3369,7 +3436,7 @@ func (s *Server) registerTools() {
 		// arrays survive schema validation and are normalized in-handler.
 		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
-		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). Refused, with nothing written, if that decision already has a live successor; pass the successor instead. That decision is marked superseded and drops below live decisions in future listings, and its companion memory is retired: withheld from session start and demoted in search, linked to this decision's memory, and recorded in its history (unless that memory is pinned, retention-exempt or a convention/preference, in which case it stays live and the answer says so)."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -3400,23 +3467,19 @@ func (s *Server) registerTools() {
 		var decisionTruncated, rationaleTruncated bool
 		args.Decision, decisionTruncated = memory.ClampContent(args.Decision)
 		args.Rationale, rationaleTruncated = memory.ClampContent(args.Rationale)
-		originalAltCount := 0
 		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
 		if err != nil {
 			return nil, nil, err
 		}
-		originalAltCount = len(alternatives)
-		alternativesCountTruncated := originalAltCount > maxAlternatives
-		if alternativesCountTruncated {
-			alternatives = alternatives[:maxAlternatives]
-		}
-		alternativeEntryTruncated := false
-		for i, alt := range alternatives {
-			if len(alt) > maxTitleLen {
-				alternativeEntryTruncated = true
-			}
-			alternatives[i] = truncateUTF8(alt, maxTitleLen)
-		}
+		// Track whether the caller's list exceeds the stored bound, so the cut is
+		// reported instead of only being applied silently. memory.AlternativesClamped
+		// asks the same bound memory.BoundAlternatives applies, through the same
+		// call, so the two cannot disagree about whether a cut happened.
+		alternativesWereClamped := memory.AlternativesClamped(alternatives)
+		// memory.BoundAlternatives is the same bound the portable import applies,
+		// through the same call, so a decision's list is capped identically whichever
+		// route wrote it.
+		alternatives = memory.BoundAlternatives(alternatives)
 		if alternatives == nil {
 			alternatives = []string{}
 		}
@@ -3458,6 +3521,25 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 		args.ProjectID = canonical
+		// A target already superseded by a DIFFERENT decision that is still live
+		// is refused BEFORE RecordDecision commits anything (#1144). Repointing
+		// it overwrote the only record that the live successor replaced it, and
+		// left both live with the same-title advice skipped. The refusal names
+		// the successor, the decision that is current, so the caller can
+		// supersede that one instead. The same check runs again inside
+		// SupersedeDecisionReport's transaction; a writer racing past this one
+		// lands in the partial-failure branch below rather than in a silent
+		// repoint.
+		if args.Supersedes != "" {
+			successor, err := s.store.LiveDecisionSuccessor(ctx, args.ProjectID, args.Supersedes)
+			if err != nil {
+				return nil, nil, fmt.Errorf("check %s: %w", memory.RefusalArg("supersedes", args.Supersedes), err)
+			}
+			if successor != "" {
+				return nil, nil, fmt.Errorf("decision not recorded, nothing was written: %s is already superseded by decision %s, which is still live. If this decision replaces that one, record it with supersedes=%s",
+					memory.RefusalArg("supersedes", args.Supersedes), assemble.Token(successor), assemble.Token(successor))
+			}
+		}
 		// Looked up BEFORE the write, so the row this call is about to create
 		// cannot match itself.
 		sameTitleAdvice := ""
@@ -3494,8 +3576,19 @@ func (s *Server) registerTools() {
 				// the same renderer, so the whole sentence is bounded and nothing
 				// raw comes back through it.
 				supersedeFailed = true
-				supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
-					memory.RefusalArg("supersedes", args.Supersedes), err)
+				var successorErr *memory.DecisionSuccessorError
+				if errors.As(err, &successorErr) {
+					// The check before the write saw no live successor and the
+					// supersede's transaction did: another writer got there in
+					// between (#1144). The new decision is committed, so the
+					// refusal's advice — record with supersedes=<successor> — would
+					// write a second copy of it. Say it stands unlinked instead.
+					supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: it is already superseded by decision %s, which is still live. This decision stands and is NOT linked to either; do not record it again. If it replaces %s, the two live decisions need reconciling by the operator.",
+						memory.RefusalArg("supersedes", args.Supersedes), assemble.Token(successorErr.Successor), assemble.Token(successorErr.Successor))
+				} else {
+					supersedeNote = fmt.Sprintf(" WARNING: the new decision was committed, but %s was NOT marked superseded: %v.",
+						memory.RefusalArg("supersedes", args.Supersedes), err)
+				}
 			} else {
 				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", assemble.Token(args.Supersedes))
 				if len(retirement.Retired) > 0 {
@@ -3510,6 +3603,16 @@ func (s *Server) registerTools() {
 				if len(retirement.Ambiguous) > 0 {
 					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
+				}
+				// Shared is the same partial failure for a different reason: a
+				// consolidation folded this decision's companion and another
+				// decision's into one memory that still states a decision not yet
+				// superseded. It is not an extra, so the ambiguity remedy above — delete the extras —
+				// would destroy a live decision; nothing was retired, and the advice
+				// is to rewrite its text so it no longer states the reversed one.
+				if len(retirement.Shared) > 0 {
+					supersedeFailed = true
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because one merged memory (%s) holds this decision together with at least one other decision that is not superseded; nothing was retired, so session start and search still return the reversed text. Keep that memory — it still states that other decision; rewrite its text with ghost_memory_update so it no longer states the reversed one. It is retired once every decision it holds is superseded.", joinTokens(retirement.Shared))
 				}
 				if len(retirement.Declined) > 0 {
 					supersedeFailed = true
@@ -3549,11 +3652,8 @@ func (s *Server) registerTools() {
 			// names the composition cut in the stored row.
 			msg += truncationWarning("decision companion memory", memoryTruncationAdvice)
 		}
-		if alternativesCountTruncated {
-			msg += fmt.Sprintf(" — WARNING: decision alternatives were truncated to %d entries; the stored list is incomplete — shorten it, or move detail into the decision's rationale context.", maxAlternatives)
-		}
-		if alternativeEntryTruncated {
-			msg += truncationWarning("decision alternative", maxTitleLen, decisionTruncationAdvice)
+		if alternativesWereClamped {
+			msg += fmt.Sprintf(" — WARNING: decision alternatives were truncated to %d entries or %d bytes per entry; the stored list is incomplete — shorten it, or move detail into the decision's rationale context.", memory.MaxAlternatives, memory.MaxTitleLen)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -3963,10 +4063,10 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
-		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
+		if err := s.store.TogglePinInProject(ctx, resolvedProjectID, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -4075,6 +4175,12 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 
@@ -4267,6 +4373,11 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -4318,6 +4429,11 @@ func (s *Server) registerResources() {
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
 		}
 
 		var sb strings.Builder

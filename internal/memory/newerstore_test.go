@@ -225,14 +225,17 @@ func TestEveryAutocommitWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *t
 	}{
 		{"toggle-pin", func() error { return s.TogglePin(ctx, id, true) }},
 		{"touch", func() error { return s.Touch(ctx, []string{id}) }},
-		{"mark-link-scanned", func() error { return s.MarkLinkScanned(ctx, id) }},
+		{"mark-link-scanned", func() error { return s.MarkLinkScanned(ctx, id, nil) }},
 		{"invalidate-link", func() error {
 			_, err := s.InvalidateLink(ctx, id, otherID, "related")
 			return err
 		}},
 		{"store-embedding", func() error { return s.StoreEmbedding(ctx, id, []float32{0.1, 0.2}, "test-model") }},
 		{"delete-embedding", func() error { return s.DeleteEmbedding(ctx, id) }},
-		{"complete-task", func() error { return s.CompleteTask(ctx, taskID, "done before the migration landed") }},
+		{"complete-task", func() error {
+			_, err := s.CompleteTask(ctx, taskID, "done before the migration landed")
+			return err
+		}},
 		{"update-task", func() error {
 			status := "done"
 			_, err := s.UpdateTask(ctx, taskID, &status, nil, nil)

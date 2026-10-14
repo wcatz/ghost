@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 )
 
@@ -295,7 +296,7 @@ func CheckImportedMemory(m PortableMemory) error {
 	// explicit DELETE reaches. The field is named per record, never the value.
 	for i, e := range m.Evidence {
 		if !IsValidEvidenceKind(e.Kind) {
-			return fmt.Errorf("evidence record %d has invalid kind %q — must be one of: observed, imported, verified, legacy", i, e.Kind)
+			return fmt.Errorf("evidence record %d has invalid kind %s — must be one of: observed, imported, verified, legacy", i, RefusalArg("kind", e.Kind))
 		}
 		if err := rejectSecretFields(
 			secretField{fmt.Sprintf("evidence[%d].agent", i), e.Agent},
@@ -333,7 +334,7 @@ func CheckImportedTask(t Task) error {
 		return fmt.Errorf("title is required")
 	}
 	if !validTaskStatuses[t.Status] {
-		return fmt.Errorf("invalid status %q — must be one of: pending, active, done, blocked", t.Status)
+		return fmt.Errorf("invalid status %s — must be one of: pending, active, done, blocked", RefusalArg("status", t.Status))
 	}
 	if t.Priority < 0 || t.Priority > 4 {
 		return fmt.Errorf("invalid priority %d — must be between 0 and 4", t.Priority)
@@ -374,6 +375,17 @@ func CheckImportedDecision(d Decision) error {
 	if err := CheckImportedID(d.ID); err != nil {
 		return err
 	}
+	// A decision id is also the tail of its companion's `decision:<id>` link, and
+	// the lookup splits a source_ref on decisionRefSeparator. RecordDecision mints
+	// hex ids, but an import writes this one verbatim, so an id holding the
+	// separator would split its own link into tokens that name no decision: the
+	// companion is never found and a supersede answers clean while the reversed
+	// decision keeps ranking. The other characters a LIKE treats specially (% and
+	// _) only widen the lookup's candidate set, which the exact token check then
+	// narrows, so the separator is the one character that breaks a link.
+	if strings.Contains(d.ID, decisionRefSeparator) {
+		return fmt.Errorf("decision id must not contain %q — it separates the decision links a memory carries, so an id holding it names no decision. Give the decision a new id in the artifact", decisionRefSeparator)
+	}
 	if d.ProjectID == "" {
 		return fmt.Errorf("project_id is required")
 	}
@@ -387,7 +399,7 @@ func CheckImportedDecision(d Decision) error {
 		return fmt.Errorf("rationale is required")
 	}
 	if !validDecisionStatuses[d.Status] {
-		return fmt.Errorf("invalid status %q — must be one of: active, superseded, revisit", d.Status)
+		return fmt.Errorf("invalid status %s — must be one of: active, superseded, revisit", RefusalArg("status", d.Status))
 	}
 	// Same window as the memory's. alternatives is a list because it is one:
 	// ghost_decisions_list renders it back to the agent, so an entry is stored and

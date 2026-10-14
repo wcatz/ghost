@@ -23,6 +23,84 @@ import (
 // still bounded, never unbounded.
 const MaxContentLen = 8000
 
+// MaxTitleLen is the byte cap on a TITLE — a task's, a decision's — and on one
+// entry of a decision's alternatives list. It is the smaller, display-oriented
+// budget a title has rather than the prose budget a body has: a title is a
+// label in a listing line, so the cap exists to keep the LINE bounded.
+//
+// It lives here beside MaxContentLen rather than in the MCP package that
+// declared it, because it is not one package's rule: `ghost_task_create`,
+// `ghost_decision_record` and the two portable importers all cut a title at it,
+// and a second copy of the number in the importer is how an imported row stops
+// matching what the writer produces for the same text (#1226). Same reasoning,
+// same consequence: a title is CUT, never refused, because a shortened label is
+// a different label about the same thing and a refusal would put the task or
+// decision outside every `ghost export` — the exporter applies the importer's
+// own predicates — on the day the operator needs the backup.
+const MaxTitleLen = 300
+
+// MaxAlternatives is the number of entries a decision's alternatives list is
+// kept to, `ghost_decision_record`'s cap. `ghost_decisions_list` renders the
+// whole list back on one line, so an unbounded list is a row that grows with
+// whatever the artifact carried rather than with the decision (#1226).
+//
+// The list is TRUNCATED to the first MaxAlternatives entries, in artifact
+// order, for the reason the tags above do not apply to: an entry is a piece of
+// the record's own reasoning and the order it was recorded in is part of what
+// it says, so keeping the first N keeps a prefix of what was said instead of
+// an arbitrary half of it.
+const MaxAlternatives = 20
+
+// BoundAlternatives is the alternatives list a decision STORES: at most
+// MaxAlternatives entries, in the order they were recorded, each cut at
+// MaxTitleLen. `ghost_decision_record` and the portable import apply exactly
+// these three bounds, through this one function, so the two cannot drift (#1226).
+//
+// The caller's slice is never written through. A list that is already within
+// every bound is returned as it is — byte for byte, with no copy and no rewrite,
+// because an ordinary decision must round-trip unchanged — and anything that
+// needs bounding is answered with a fresh slice, so the artifact the caller
+// parsed still holds what it held.
+//
+// It asks AlternativesClamped rather than repeating the two bounds, so a caller
+// that has to REPORT a cut asks the same question the cut is made by.
+func BoundAlternatives(alternatives []string) []string {
+	if !AlternativesClamped(alternatives) {
+		return alternatives
+	}
+	bounded := make([]string, 0, MaxAlternatives)
+	for i, alt := range alternatives {
+		if i == MaxAlternatives {
+			break
+		}
+		bounded = append(bounded, TruncateUTF8(alt, MaxTitleLen))
+	}
+	return bounded
+}
+
+// AlternativesClamped reports whether BoundAlternatives would cut this list:
+// more than MaxAlternatives entries, or any entry past MaxTitleLen.
+//
+// It exists because a cut a caller cannot report is a cut nobody learns about.
+// BoundAlternatives answers with the list a decision STORES, and the stored row
+// says nothing about the entries past the twentieth or the tail of an oversized
+// one — no marker, as the title cap states — so the portable import has to know
+// whether a cut happened to put it on the record line. Answering that question
+// from the cap constants here would be the second copy of the rule that #1226
+// closed, and a rule that drifts is an import report that names a cut which did
+// not happen, or misses one that did.
+func AlternativesClamped(alternatives []string) bool {
+	if len(alternatives) > MaxAlternatives {
+		return true
+	}
+	for _, alt := range alternatives {
+		if len(alt) > MaxTitleLen {
+			return true
+		}
+	}
+	return false
+}
+
 // TruncationMarker returns the marker ClampContent appends to content it
 // cut: it names the exact limit so the stored value itself shows how much
 // was lost, even to a reader with no access to the original save response.
