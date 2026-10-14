@@ -1070,14 +1070,18 @@ type diversityDeferral struct {
 
 // maxSingleLegVectorRank and maxSingleLegFTSRank are the rank ceilings that
 // admit a row found by only one retrieval leg into a QUERY block. Ranks are
-// 0-based, so rank 0 is the best. A row found by both legs is always admitted;
-// a row found by the vector leg only survives when that leg ranks it at or
-// below maxSingleLegVectorRank, and a row found by the keyword leg only when
-// its FTS rank is at or below maxSingleLegFTSRank. Tuned on the synthetic
-// bench corpus (#1251); keep them named constants.
+// 0-based, so rank 0 is the best, and both ceilings are 0: a single-leg row is
+// admitted only when its OWN leg ranked it first. A row found by both legs is
+// always admitted; one the vector leg found alone survives only when
+// VectorRank <= maxSingleLegVectorRank, and one the keyword leg found alone
+// only when FTSRank <= maxSingleLegFTSRank. Tuned on the synthetic bench
+// corpus (#1251), then re-measured for the injection-precision audit (#1304):
+// the rank-1 and rank-2 bands the first tuning admitted were 3.3% and 1.1%
+// relevant, so admitting them bought tokens rather than answers. Keep them
+// named constants.
 const (
-	maxSingleLegVectorRank = 1
-	maxSingleLegFTSRank    = 2
+	maxSingleLegVectorRank = 0
+	maxSingleLegFTSRank    = 0
 )
 
 // runLegConsensus is a query-mode admission gate (#1251): admit a row that
