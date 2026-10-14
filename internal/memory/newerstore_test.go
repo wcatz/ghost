@@ -232,7 +232,10 @@ func TestEveryAutocommitWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *t
 		}},
 		{"store-embedding", func() error { return s.StoreEmbedding(ctx, id, []float32{0.1, 0.2}, "test-model") }},
 		{"delete-embedding", func() error { return s.DeleteEmbedding(ctx, id) }},
-		{"complete-task", func() error { return s.CompleteTask(ctx, taskID, "done before the migration landed") }},
+		{"complete-task", func() error {
+			_, err := s.CompleteTask(ctx, taskID, "done before the migration landed")
+			return err
+		}},
 		{"update-task", func() error {
 			status := "done"
 			_, err := s.UpdateTask(ctx, taskID, &status, nil, nil)

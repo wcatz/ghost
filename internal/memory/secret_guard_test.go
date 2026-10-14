@@ -260,9 +260,9 @@ func TestUpdateTaskRefusesCredentialContent(t *testing.T) {
 }
 
 // TestCompleteTaskRefusesCredentialNotes covers the last text write in the
-// schema and the one that had no length cap either: a completion note is where
-// "here is the value that fixed it" gets written, and it is rendered by
-// ghost_task_list into the next session's context.
+// schema: a completion note is where "here is the value that fixed it" gets
+// written, and it is rendered by ghost_task_list into the next session's
+// context.
 func TestCompleteTaskRefusesCredentialContent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -271,7 +271,7 @@ func TestCompleteTaskRefusesCredentialContent(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	err = s.CompleteTask(ctx, id, "done, the value was "+secretFixture)
+	_, err = s.CompleteTask(ctx, id, "done, the value was "+secretFixture)
 	assertRefusal(t, err, "notes")
 
 	var status, notes string

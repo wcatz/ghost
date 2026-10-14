@@ -197,6 +197,56 @@ func TestImportTaskAndDecisionLeaveSubCapTextByteIdentical(t *testing.T) {
 	}
 }
 
+// TestCompleteTaskClampsNotesLikeTheImporter pins #1238. A completion note is
+// the task field a caller can make arbitrarily long — it is where "here is the
+// value that fixed it" gets written — and it reaches the store through
+// CompleteTask. Before this, CompleteTask stored the note verbatim while
+// ImportTask clamped the same field, so the documented backup and restore path
+// lost text a save kept: a note written at 20010 bytes came back from an
+// artifact as 8029. The writer and the importer must store the same bytes for
+// the same input.
+func TestCompleteTaskClampsNotesLikeTheImporter(t *testing.T) {
+	ctx := context.Background()
+	src := testStore(t)
+	dst := testStore(t)
+
+	const overCap = "FIXED-BY: "
+	long := overCap + strings.Repeat("x", 20000)
+	id, err := src.CreateTask(ctx, testProject, "restore the completion note", "", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	clamped, err := src.CompleteTask(ctx, id, long)
+	if err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if !clamped {
+		t.Error("CompleteTask reported no clamp for a note over MaxContentLen")
+	}
+	saved, err := src.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if want := wantCutContent(long); saved.Notes != want {
+		t.Errorf("stored note = %d bytes, want the writer's cut at %d bytes; tail %q",
+			len(saved.Notes), len(want), tailBytes(saved.Notes, 48))
+	}
+
+	// Restore the exported row into a second store, the way an export then an
+	// apply of that artifact does.
+	if _, _, err := dst.ImportTask(ctx, saved, true); err != nil {
+		t.Fatalf("ImportTask: %v", err)
+	}
+	imported, err := dst.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask imported: %v", err)
+	}
+	if imported.Notes != saved.Notes {
+		t.Errorf("imported note = %d bytes, saved note = %d bytes; a restore must store the same bytes a save did",
+			len(imported.Notes), len(saved.Notes))
+	}
+}
+
 // markerClause names the marker a cut carries, so a failure message says which
 // bound is missing rather than only that two byte strings differ.
 func markerClause(isTitle bool) string {

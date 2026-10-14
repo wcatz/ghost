@@ -18,7 +18,7 @@ func TestCompleteTaskIsIdempotentOnADoneTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateTask: %v", err)
 		}
-		if err := s.CompleteTask(ctx, id, notes); err != nil {
+		if _, err := s.CompleteTask(ctx, id, notes); err != nil {
 			t.Fatalf("CompleteTask: %v", err)
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET completed_at = ? WHERE id = ?`, backdated, id); err != nil {
@@ -33,7 +33,7 @@ func TestCompleteTaskIsIdempotentOnADoneTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.CompleteTask(ctx, id, "why"); err != nil {
+		if _, err := s.CompleteTask(ctx, id, "why"); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.GetTask(ctx, id)
@@ -48,7 +48,7 @@ func TestCompleteTaskIsIdempotentOnADoneTask(t *testing.T) {
 	t.Run("repeat with empty notes keeps notes and stamp", func(t *testing.T) {
 		s := testStore(t)
 		id := newDone(t, s, "root cause: closed conn")
-		if err := s.CompleteTask(ctx, id, ""); err != nil {
+		if _, err := s.CompleteTask(ctx, id, ""); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.GetTask(ctx, id)
@@ -66,7 +66,7 @@ func TestCompleteTaskIsIdempotentOnADoneTask(t *testing.T) {
 	t.Run("repeat with new notes replaces notes and keeps stamp", func(t *testing.T) {
 		s := testStore(t)
 		id := newDone(t, s, "first")
-		if err := s.CompleteTask(ctx, id, "second"); err != nil {
+		if _, err := s.CompleteTask(ctx, id, "second"); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.GetTask(ctx, id)

@@ -320,6 +320,24 @@ func TestTruncationWarnings_NameTheirKind(t *testing.T) {
 			notWant: []string{"focused memories", "rationale context"},
 		},
 		{
+			// A completion note is a task field too (#1238): the store caps it at
+			// MaxContentLen like the importer does, and the tool must say so.
+			name: "task complete advises tasks",
+			call: func(t *testing.T, srv *Server, session *mcp.ClientSession) string {
+				id := parseToolID(t, callTool(t, session, "ghost_task_create", map[string]any{
+					"project_id": "test-project",
+					"title":      "cap test completion",
+				}))
+				res := callTool(t, session, "ghost_task_complete", map[string]any{
+					"task_id": id,
+					"notes":   strings.Repeat("n", 9000),
+				})
+				return resultText(res)
+			},
+			want:    "WARNING: task notes was truncated at 8000 bytes; the stored text is incomplete — split it into focused tasks or shorten it deliberately.",
+			notWant: []string{"focused memories", "rationale context"},
+		},
+		{
 			name: "decision record advises decision recovery",
 			call: func(t *testing.T, srv *Server, session *mcp.ClientSession) string {
 				res := callTool(t, session, "ghost_decision_record", map[string]any{
