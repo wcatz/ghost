@@ -1688,7 +1688,7 @@ func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
 
 	// Create a project whose hash ID differs from its name, exactly as the
 	// session-start hook does (path-hashed ID + human-readable name).
-	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
@@ -1738,7 +1738,7 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 	srv := New(store, logger, "test")
 
 	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
@@ -1788,7 +1788,7 @@ func TestResourceSubscription_NotifiesContextOnDecisionRecord(t *testing.T) {
 	ctx := context.Background()
 
 	// A hash ID that differs from the name, as the session-start hook creates.
-	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
