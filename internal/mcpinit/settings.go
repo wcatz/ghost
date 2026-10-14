@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -440,6 +441,94 @@ func (s *settingsFile) hasHook(event, cmdSubstr string) bool {
 // halt reconciliation instead.
 func isJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
+}
+
+// validate checks every part of settings.json that `ghost mcp init` parses in
+// steps 5-8 — the document, permissions, permissions.allow, hooks and each
+// event — BEFORE step 4 registers the MCP server. A structurally invalid file
+// is then refused with the file and the field named, nothing has been
+// registered, and the file is left exactly as the user wrote it; without this
+// pass the same document is discovered only after registration, or panics on
+// the nil map a JSON null decodes into, leaving Claude Code half-wired.
+//
+// An explicit JSON null for the document, permissions, hooks or an event is
+// present-but-structurally-invalid rather than absent, and decodes into a nil
+// map or slice with no error, so each is refused by name rather than filled in.
+// A wrong-typed value (permissions as an array or string, allow as anything but
+// a list of strings, hooks as anything but an object, an event as anything but
+// a list) is refused the same way instead of surfacing the raw json.Unmarshal
+// error naming a Go type the reader never wrote.
+func (s *settingsFile) validate() error {
+	name := filepath.Base(s.path)
+	if s.raw == nil {
+		return fmt.Errorf("%s is null", name)
+	}
+	if raw, ok := s.raw["permissions"]; ok {
+		if err := validatePermissionsField(name, raw); err != nil {
+			return err
+		}
+	}
+	if raw, ok := s.raw["hooks"]; ok {
+		if err := validateHooksField(name, raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validatePermissionsField refuses a permissions value getPermissions cannot
+// read into the allow list, naming the field so the reader can fix it.
+func validatePermissionsField(name string, raw json.RawMessage) error {
+	if isJSONNull(raw) {
+		return fmt.Errorf("%s: permissions is null", name)
+	}
+	var perms struct {
+		Allow json.RawMessage `json:"allow"`
+	}
+	if err := json.Unmarshal(raw, &perms); err != nil {
+		return fmt.Errorf("%s: permissions must be an object", name)
+	}
+	if perms.Allow == nil {
+		return nil
+	}
+	if isJSONNull(perms.Allow) {
+		return fmt.Errorf("%s: permissions.allow is null", name)
+	}
+	var allow []string
+	if err := json.Unmarshal(perms.Allow, &allow); err != nil {
+		return fmt.Errorf("%s: permissions.allow must be a list of strings", name)
+	}
+	return nil
+}
+
+// validateHooksField refuses a hooks value addHook/findHookCommand cannot read,
+// and each event value that is not the host's array shape. Events are checked in
+// sorted order so a file with several malformed events names the same one on
+// every run. The event name is rendered with %q because it is caller text.
+func validateHooksField(name string, raw json.RawMessage) error {
+	if isJSONNull(raw) {
+		return fmt.Errorf("%s: hooks is null", name)
+	}
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &hooks); err != nil {
+		return fmt.Errorf("%s: hooks must be an object", name)
+	}
+	events := make([]string, 0, len(hooks))
+	for event := range hooks {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	for _, event := range events {
+		eventRaw := hooks[event]
+		if isJSONNull(eventRaw) {
+			return fmt.Errorf("%s: hooks[%q] is null", name, event)
+		}
+		var entries []hookEntry
+		if err := json.Unmarshal(eventRaw, &entries); err != nil {
+			return fmt.Errorf("%s: hooks[%q] must be a list", name, event)
+		}
+	}
+	return nil
 }
 
 // findHookCommand returns the first hook command for event containing

@@ -38,6 +38,17 @@ func Run(w io.Writer, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
+	// Validate settings.json before any step touches it. Steps 5-8 read the
+	// document, permissions, permissions.allow, hooks and each event, so a
+	// structurally invalid file would otherwise be discovered only after step 4
+	// had registered the MCP server — leaving Claude Code with a ghost server
+	// but no hooks, no tool permissions and autoMemoryEnabled untouched, or
+	// panicking on the nil map a JSON null decodes into. Refusing here registers
+	// nothing and leaves the file exactly as the user wrote it.
+	if err := validateSettingsFile(); err != nil {
+		return retryHint(err)
+	}
+
 	// Step 1: Prerequisites. No retryHint here: a missing binary is an
 	// install-first problem that re-running init cannot fix, and the
 	// claude-missing error carries its own next-step guidance (alternative
@@ -532,6 +543,21 @@ func parseJSONObject(value string) (map[string]any, bool) {
 		return nil, false
 	}
 	return obj, true
+}
+
+// validateSettingsFile loads ~/.claude/settings.json and validates every part
+// of it `ghost mcp init` parses, before any step acts on the file. An absent
+// file is valid: init populates it. The error names the file and the field.
+func validateSettingsFile() error {
+	path, err := settingsPath()
+	if err != nil {
+		return err
+	}
+	sf, err := loadSettings(path)
+	if err != nil {
+		return err
+	}
+	return sf.validate()
 }
 
 // ensurePermissions loads settings.json and adds missing ghost permissions.
