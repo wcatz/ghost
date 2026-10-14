@@ -271,6 +271,48 @@ func TestFlagMemoryRefusalsWriteNothing(t *testing.T) {
 	}
 }
 
+// TestFlagWrongProjectRefusalNeverEchoesTheID: the ownership refusal names the
+// argument to fix and never repeats the memory id it refused. The not-found
+// branch already renders through RefusalArg; this pins the sibling branch, which
+// echoed the id raw, for the two shapes that make it matter — a
+// token-shaped id an import can store (the importer checks an id's SHAPE, not
+// whether it is token-shaped) and an id past the refusal bound. A stored row
+// owns the id under another project, so the refusal under test is the ownership
+// one and not "no memory" reached for the wrong reason.
+func TestFlagWrongProjectRefusalNeverEchoesTheID(t *testing.T) {
+	shapes := map[string]string{
+		"token-shaped": "ghp_" + strings.Repeat("a", 36),
+		"oversized":    strings.Repeat("z", ArgEchoMaxBytes+44),
+	}
+	for name, id := range shapes {
+		t.Run(name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			if err := s.EnsureProject(ctx, "other-project", "/tmp/other-project", "other-project"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			if _, err := s.db.ExecContext(ctx,
+				`INSERT INTO memories (id, project_id, category, content, source, importance)
+				 VALUES (?, 'other-project', 'fact', 'a memory the other project owns', 'manual', 0.5)`, id); err != nil {
+				t.Fatalf("seed the other project's memory: %v", err)
+			}
+
+			err := s.FlagMemory(ctx, FlagMemoryRequest{
+				ProjectID: testProject, MemoryID: id, Kind: FlagKindWrong, Reason: "no longer true",
+			})
+			if !errors.Is(err, ErrFlagWrongProject) {
+				t.Fatalf("err = %v, want the wrong-project refusal", err)
+			}
+			if strings.Contains(err.Error(), id) {
+				t.Errorf("the refusal repeated the memory id: %q", err.Error())
+			}
+			if rows := readFlagRows(t, s); len(rows) != 0 {
+				t.Errorf("a refused flag left %d row(s) behind: %+v", len(rows), rows)
+			}
+		})
+	}
+}
+
 // TestFlagMemoryAcceptsAReasonAtTheBound: the bound is 500 RUNES and the value
 // at it is accepted. A bound only pinned from the refusing side is one a reader
 // cannot tell from a bound set one lower, so both edges are asserted.

@@ -161,7 +161,7 @@ func (s *Store) FlagMemory(ctx context.Context, req FlagMemoryRequest) error {
 		return fmt.Errorf("flag memory: read the memory: %w", err)
 	}
 	if owner != req.ProjectID {
-		return fmt.Errorf("%w: %s", ErrFlagWrongProject, req.MemoryID)
+		return fmt.Errorf("%w: %s", ErrFlagWrongProject, RefusalArg("memory_id", req.MemoryID))
 	}
 
 	if _, err := tx.ExecContext(ctx, `
