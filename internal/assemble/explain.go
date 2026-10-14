@@ -256,6 +256,14 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			// this payload is always a query.
 			return fmt.Sprintf("cut by the relevance cutoff: the answer stops where relevance falls off, and this "+
 				"memory's fused Base was below %s of the top match's Base", cutoffShareLabel(p.req.RelevanceCutoff))
+		case reasonLegConsensus:
+			// The query-mode leg-consensus gate (#1251): a row only one
+			// retrieval leg found is admitted only when that leg ranked it at
+			// or above the ceiling for its leg. It names the rule and the two
+			// ceilings so a caller can see why a one-leg match was withheld.
+			return fmt.Sprintf("withheld by the leg-consensus rule: only one retrieval leg found this memory, and it "+
+				"ranked it worse than the admission ceiling (ranks are 0-based, so vector-only rows need vector rank "+
+				"<= %d and keyword-only rows need keyword rank <= %d)", maxSingleLegVectorRank, maxSingleLegFTSRank)
 		case reasonNothingClearedBar:
 			// The no-answer bar (#955): no row in the block was a close enough
 			// vector match, so the whole block was withheld. It names the rule and
