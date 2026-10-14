@@ -152,7 +152,10 @@ func TestCompleteTaskReportsATaskDeletedUnderItsWrite(t *testing.T) {
 	held, release := holdWriteLock(t, holder)
 
 	done := make(chan error, 1)
-	go func() { done <- completing.CompleteTask(ctx, id[:8], "closed it") }()
+	go func() {
+		_, err := completing.CompleteTask(ctx, id[:8], "closed it")
+		done <- err
+	}()
 	requireTaskBlocked(t, done, "CompleteTask")
 
 	// The row goes away inside the holder's own still-open transaction, and the

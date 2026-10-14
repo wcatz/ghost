@@ -105,6 +105,7 @@ var usageByCommand = map[string]string{
 	"mcp":                       mcpUsage,
 	"mcp init":                  mcpInitUsage,
 	"mcp status":                mcpStatusUsage,
+	"mcp wiring":                mcpWiringUsage,
 	"hook":                      hookUsage,
 	"reflect":                   reflectUsage,
 	"supersede":                 supersedeUsage,

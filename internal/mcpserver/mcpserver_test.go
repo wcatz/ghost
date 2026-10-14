@@ -693,7 +693,7 @@ func TestTaskLifecycle(t *testing.T) {
 	}
 
 	// Complete task.
-	if err := store.CompleteTask(ctx, id, "Fixed in commit abc"); err != nil {
+	if _, err := store.CompleteTask(ctx, id, "Fixed in commit abc"); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 

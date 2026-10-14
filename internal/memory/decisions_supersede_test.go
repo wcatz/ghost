@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -924,5 +925,462 @@ func TestSupersedeDecisionRefusesToDropALiveSuccessor(t *testing.T) {
 	}
 	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
 		t.Errorf("SupersedeDecision(A, C) after B was replaced: %v", err)
+	}
+}
+
+// TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions covers the
+// finding that a consolidation merge folding two decision companions into one
+// row kept only the first decision's link. Superseding the other decision was
+// then answered as a clean success while its reversed text stayed live, and
+// superseding the first retired a row that still stated the other decision.
+// The successor records every decision it stands for; a successor standing for
+// more than one is reported rather than retired (which would withhold a current
+// decision along with the reversed one) or ignored (which would leave the
+// reversed one ranking).
+func TestSupersedeDecisionDeclinesASuccessorThatStandsForTwoDecisions(t *testing.T) {
+	ctx := context.Background()
+	const merged = "Queue: use Postgres (SKIP LOCKED); retries max 5 attempts because of the upstream rate limit"
+
+	// build records three decisions and folds the first two companions into one
+	// successor, naming first first in the merge so both link orders are
+	// exercised; the third companion is kept verbatim and stands in as the
+	// replacement. It returns the store, the two folded decisions, the
+	// replacement decision, and the successor row.
+	build := func(t *testing.T, first string) (s *Store, firstDec, secondDec, replacementDec, successor string) {
+		t.Helper()
+		s = testStore(t)
+		record := func(title, decision, rationale string) (string, string) {
+			dec, mem, _, err := s.RecordDecision(ctx, testProject, title, decision, rationale, nil, nil)
+			if err != nil {
+				t.Fatalf("RecordDecision(%q): %v", title, err)
+			}
+			return dec, mem
+		}
+		aDec, aMem := record("Queue backend", "use Postgres", "already deployed for the cache")
+		cDec, cMem := record("Queue retries", "max 5 attempts", "the upstream rate limit")
+		dDec, dMem := record("Queue retries v2", "max 3 attempts", "the upstream limit is lower")
+		var heldContent string
+		if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, dMem).Scan(&heldContent); err != nil {
+			t.Fatalf("read held companion content: %v", err)
+		}
+		replaces := []string{aMem, cMem}
+		if first == "c" {
+			replaces = []string{cMem, aMem}
+		}
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "decision", Content: merged, Importance: 0.9, ReplacesIDs: replaces},
+			{Category: "decision", Content: heldContent, Importance: 0.9},
+		}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		successor = onlyMemoryWithContent(t, s, merged)
+		if first == "a" {
+			return s, aDec, cDec, dDec, successor
+		}
+		return s, cDec, aDec, dDec, successor
+	}
+
+	for _, first := range []string{"a", "c"} {
+		t.Run("merge names "+first+" first", func(t *testing.T) {
+			s, firstDec, secondDec, replacementDec, successor := build(t, first)
+
+			// The successor has to carry BOTH links whichever source was named
+			// first: one link is the defect, and neither decision may be the one
+			// silently dropped.
+			var ref string
+			if err := s.db.QueryRow(`SELECT COALESCE(source_ref, '') FROM memories WHERE id = ?`, successor).Scan(&ref); err != nil {
+				t.Fatalf("read successor link: %v", err)
+			}
+			if !sourceRefNamesDecision(ref, firstDec) || !sourceRefNamesDecision(ref, secondDec) {
+				t.Fatalf("the merge successor's link %q does not name both decisions", ref)
+			}
+
+			// Superseding the first folded decision must report the successor
+			// rather than retire it or answer clean: it still states the second.
+			got, err := s.SupersedeDecisionReport(ctx, testProject, firstDec, replacementDec)
+			if err != nil {
+				t.Fatalf("SupersedeDecisionReport(%s): %v", firstDec, err)
+			}
+			if len(got.Retired) != 0 {
+				t.Errorf("superseding %s retired %v; the successor still states a live decision", firstDec, got.Retired)
+			}
+			if len(got.Shared) != 1 || got.Shared[0] != successor {
+				t.Errorf("superseding %s shared = %v, want the multi-decision successor %s", firstDec, got.Shared, successor)
+			}
+			// It is not a competing claimant: the ambiguity channel's remedy is to
+			// delete the extras, and this row is the only memory of a live decision.
+			if len(got.Ambiguous) != 0 {
+				t.Errorf("superseding %s reported the shared successor as ambiguous %v", firstDec, got.Ambiguous)
+			}
+			if decisionMemoryResolved(t, s, successor) {
+				t.Errorf("superseding %s withheld the successor; the other decision's text went with it", firstDec)
+			}
+
+			// Once the second is superseded too, every decision the successor holds
+			// is reversed: it states nothing live, so it is retired like a sole
+			// companion instead of being reported as shared forever.
+			got, err = s.SupersedeDecisionReport(ctx, testProject, secondDec, replacementDec)
+			if err != nil {
+				t.Fatalf("SupersedeDecisionReport(%s): %v", secondDec, err)
+			}
+			if len(got.Retired) != 1 || got.Retired[0] != successor {
+				t.Errorf("superseding the last decision the successor holds: retired = %v, want %s", got.Retired, successor)
+			}
+			if len(got.Shared) != 0 || len(got.Ambiguous) != 0 {
+				t.Errorf("superseding the last decision the successor holds: shared = %v, ambiguous = %v, want none", got.Shared, got.Ambiguous)
+			}
+		})
+	}
+}
+
+// TestWriterPathsRefuseADecisionTokenAnywhereInTheSourceRef: the decision lookup
+// reads a source_ref as a comma-separated list and takes any token carrying the
+// decision prefix as a link, so the writer guard refuses that token wherever the
+// reader would accept one — not only as a leading prefix. Otherwise a caller
+// saving "runbook.md,decision:<id>" in the decision category becomes a claimed
+// companion of that decision, retired when it is superseded.
+func TestWriterPathsRefuseADecisionTokenAnywhereInTheSourceRef(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, ref := range []string{"runbook.md,decision:abc", "a,b,decision:abc", "docs/x.md,decision:"} {
+		_, _, _, err := s.UpsertWithOptions(ctx, testProject, "decision", "forged link "+ref, "manual", 0.5, nil,
+			UpsertOptions{Provenance: Provenance{SourceRef: ref}})
+		if err == nil {
+			t.Errorf("UpsertWithOptions accepted %q, a source_ref the decision lookup reads as a link", ref)
+		}
+		id, err := s.Create(ctx, testProject, Memory{Category: "decision", Content: "plain " + ref, Source: "manual", Importance: 0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{Provenance: Provenance{SourceRef: ref}}); err == nil {
+			t.Errorf("UpdateMemoryWithOptions accepted %q, a source_ref the decision lookup reads as a link", ref)
+		}
+	}
+	// A reference that only MENTIONS the word, in a token the reader does not take
+	// as a link, is an ordinary reference and stays accepted.
+	for _, ref := range []string{"docs/decision:abc.md", "runbook.md, decision:abc"} {
+		if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "ordinary ref "+ref, "manual", 0.5, nil,
+			UpsertOptions{Provenance: Provenance{SourceRef: ref}}); err != nil {
+			t.Errorf("UpsertWithOptions refused %q, which the decision lookup does not read as a link: %v", ref, err)
+		}
+	}
+}
+
+// TestImportDecisionRefusesTheLinkSeparatorInItsID: a decision id is the tail of
+// its companion's `decision:<id>` link, and the lookup splits a source_ref on
+// decisionRefSeparator. RecordDecision mints hex ids, but an import writes the
+// artifact's id verbatim, so an id holding the separator would split its own link
+// into tokens that name no decision: the companion is never found, and a
+// supersede answers clean while the reversed decision keeps ranking. The id is
+// refused at the import check, so the premise holds on every writer.
+func TestImportDecisionRefusesTheLinkSeparatorInItsID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, testProject, "/tmp/sep", "sep"); err != nil {
+		t.Fatal(err)
+	}
+	bad := Decision{ID: "ab" + decisionRefSeparator + "cd", ProjectID: testProject, Title: "t", Decision: "d", Rationale: "r", Status: "active"}
+	if err := CheckImportedDecision(bad); err == nil {
+		t.Errorf("CheckImportedDecision accepted id %q, which splits its own companion link", bad.ID)
+	}
+	if _, _, err := s.ImportDecision(ctx, bad, true); err == nil {
+		t.Errorf("ImportDecision imported id %q, which splits its own companion link", bad.ID)
+	}
+	good := bad
+	good.ID = "abcd"
+	if _, _, err := s.ImportDecision(ctx, good, true); err != nil {
+		t.Errorf("ImportDecision refused an ordinary id: %v", err)
+	}
+}
+
+// TestSupersedeDecisionRetiresTheSoleCompanionBesideASharedSuccessor: a row
+// standing for more than one decision is reported as shared and left live, and
+// it does not turn the decision's own single-link companion into an ambiguous
+// claimant — that companion states only the reversed decision, so it is retired
+// as it would be with no shared row beside it.
+func TestSupersedeDecisionRetiresTheSoleCompanionBesideASharedSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, _, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dDec, _, _, err := s.RecordDecision(ctx, testProject, "Queue backend v2", "use SQS", "managed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shared string
+	if err := s.db.QueryRow(`INSERT INTO memories (project_id, category, content, source, importance, source_ref)
+		VALUES (?, 'decision', 'Postgres queue, 5 retries', 'reflection', 0.9, ?) RETURNING id`,
+		testProject, decisionCompanionRef(aDec)+decisionRefSeparator+decisionCompanionRef(bDec)).Scan(&shared); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, aDec, dDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != aMem {
+		t.Errorf("retired = %v, want the decision's own companion %s", got.Retired, aMem)
+	}
+	if len(got.Shared) != 1 || got.Shared[0] != shared {
+		t.Errorf("shared = %v, want %s", got.Shared, shared)
+	}
+	if len(got.Ambiguous) != 0 {
+		t.Errorf("ambiguous = %v, want none", got.Ambiguous)
+	}
+	if decisionMemoryResolved(t, s, shared) {
+		t.Error("the shared successor was withheld; it still states the other decision")
+	}
+}
+
+// successorSourceRef reads the stored source_ref of the one memory holding content.
+func successorSourceRef(t *testing.T, s *Store, content string) (id, ref string) {
+	t.Helper()
+	id = onlyMemoryWithContent(t, s, content)
+	if err := s.db.QueryRow(`SELECT COALESCE(source_ref, '') FROM memories WHERE id = ?`, id).Scan(&ref); err != nil {
+		t.Fatalf("read successor source_ref: %v", err)
+	}
+	return id, ref
+}
+
+// TestMergeKeepsALoneDecisionLinkBehindANonDecisionSource: a merge whose FIRST
+// source carries an ordinary reference and whose second is a decision companion
+// stands in for that decision. First-source-wins kept only the path, so the
+// decision lost its companion: superseding it found nothing and answered clean
+// while the merged text kept stating the reversed decision. The link EXTENDS the
+// inherited reference rather than replacing it, so both survive.
+func TestMergeKeepsALoneDecisionLinkBehindANonDecisionSource(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	plain, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "the queue runbook lives in runbook.md", "mcp", 0.5, nil,
+		UpsertOptions{Provenance: Provenance{SourceRef: "runbook.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dDec, dMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend v2", "use SQS", "managed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, dMem).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	const merged = "Queue: Postgres, runbook in runbook.md"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: merged, Importance: 0.8, ReplacesIDs: []string{plain, aMem}},
+		{Category: "decision", Content: held, Importance: 0.9},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	successor, ref := successorSourceRef(t, s, merged)
+	if !sourceRefNamesDecision(ref, aDec) {
+		t.Fatalf("the merge successor's source_ref %q dropped the decision link", ref)
+	}
+	if !strings.HasPrefix(ref, "runbook.md") {
+		t.Errorf("the merge successor's source_ref %q dropped the first source's reference", ref)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, aDec, dDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != successor {
+		t.Errorf("retired = %v, want the successor %s that stands for the decision", got.Retired, successor)
+	}
+}
+
+// TestMergeDecisionLinksExtendTheEmissionsSourceRef: a value the emission states
+// wins over the sources', and the decision links a merge inherits are appended
+// to it rather than written over it.
+func TestMergeDecisionLinksExtendTheEmissionsSourceRef(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, bMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const merged = "Queue: Postgres, 5 retries"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: merged, Importance: 0.9, SourceRef: "docs/new.md", ReplacesIDs: []string{aMem, bMem}},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, ref := successorSourceRef(t, s, merged)
+	want := "docs/new.md" + decisionRefSeparator + decisionCompanionRef(aDec) + decisionRefSeparator + decisionCompanionRef(bDec)
+	if ref != want {
+		t.Errorf("source_ref = %q, want %q (the emission's value, extended by both links)", ref, want)
+	}
+}
+
+// TestMergeDecisionLinksStayWithinTheSourceRefBound: the joined value is written
+// by no caller, so the bound is enforced here. A base reference that no longer
+// fits beside the links gives way to them — a lost link is the silent supersede
+// miss — and a merge whose links ALONE would not fit is not written at all: its
+// sources stay live, each still the companion of its decision.
+func TestMergeDecisionLinksStayWithinTheSourceRefBound(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a long base gives way to the links", func(t *testing.T) {
+		s := testStore(t)
+		long := "docs/" + strings.Repeat("x", MaxSourceRefLen-len("docs/")-10)
+		plain, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "a long-referenced note", "mcp", 0.5, nil,
+			UpsertOptions{Provenance: Provenance{SourceRef: long}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const merged = "Queue: Postgres, see the long note"
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "fact", Content: merged, Importance: 0.8, ReplacesIDs: []string{plain, aMem}},
+		}, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		_, ref := successorSourceRef(t, s, merged)
+		if len(ref) > MaxSourceRefLen {
+			t.Errorf("source_ref is %d bytes, over the %d-byte bound", len(ref), MaxSourceRefLen)
+		}
+		if !sourceRefNamesDecision(ref, aDec) {
+			t.Errorf("source_ref %q dropped the decision link to stay in bounds", ref)
+		}
+	})
+	t.Run("links that cannot fit keep the sources", func(t *testing.T) {
+		s := testStore(t)
+		var mems []string
+		decs := map[string]string{}
+		for i := 0; i < 13; i++ {
+			dec, mem, _, err := s.RecordDecision(ctx, testProject, fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mems = append(mems, mem)
+			decs[mem] = dec
+		}
+		// 13 links of 41 bytes joined by commas are 545 bytes, over the bound.
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "decision", Content: "Thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems},
+		}, "", nil)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual failed the whole pass over one oversized merge: %v", err)
+		}
+		if dropped != 1 {
+			t.Errorf("dropped = %d, want the oversized merge dropped", dropped)
+		}
+		for _, mem := range mems {
+			var n int
+			if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE id = ? AND resolved_at IS NULL AND source_ref = ?`,
+				mem, decisionCompanionRef(decs[mem])).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != 1 {
+				t.Errorf("companion %s was not kept live with its link", mem)
+			}
+		}
+	})
+}
+
+// TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink: when the merge's
+// text is byte-identical to one source, that row is reused in place and the
+// others are deleted into it. The reused row's own reference wins, but a decision
+// link the absorbed sources carried must be added to it — otherwise the absorbed
+// decision has no companion left, and superseding it answers clean while the
+// merged row keeps stating it.
+func TestMergeReusingADecisionCompanionKeepsTheOtherDecisionsLink(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, bMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dDec, dMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries v2", "max 3", "lower limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := func(id string) string {
+		var c string
+		if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, id).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	aText, dText := content(aMem), content(dMem)
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: aText, Importance: 0.9, ReplacesIDs: []string{aMem, bMem}},
+		{Category: "decision", Content: dText, Importance: 0.9},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	reused, ref := successorSourceRef(t, s, aText)
+	if reused != aMem {
+		t.Fatalf("the merge did not reuse the identical row: got %s, want %s", reused, aMem)
+	}
+	if !sourceRefNamesDecision(ref, aDec) || !sourceRefNamesDecision(ref, bDec) {
+		t.Fatalf("the reused row's source_ref %q does not name both decisions", ref)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, bDec, dDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Shared) != 1 || got.Shared[0] != reused {
+		t.Errorf("superseding the absorbed decision: shared = %v, want the reused row %s", got.Shared, reused)
+	}
+}
+
+// TestMergeReusedRowKeepsItsOwnLinkWhenItsPathGivesWay: on the reuse branch the
+// base is the reused row's own reference, which can carry a decision link of its
+// own beside an ordinary path. When the path no longer fits beside the absorbed
+// links it gives way — but the row's own link must survive with them, or the
+// decision the row was the companion of is left with none.
+func TestMergeReusedRowKeepsItsOwnLinkWhenItsPathGivesWay(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	aDec, aMem, _, err := s.RecordDecision(ctx, testProject, "Queue backend", "use Postgres", "already deployed", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bDec, bMem, _, err := s.RecordDecision(ctx, testProject, "Queue retries", "max 5", "rate limit", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 450 bytes of path plus the row's own link fit the bound; adding the
+	// absorbed link does not.
+	own := "docs/" + strings.Repeat("p", 445) + decisionRefSeparator + decisionCompanionRef(aDec)
+	if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, own, aMem); err != nil {
+		t.Fatal(err)
+	}
+	var aText string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, aMem).Scan(&aText); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: aText, Importance: 0.9, ReplacesIDs: []string{aMem, bMem}},
+	}, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	reused, ref := successorSourceRef(t, s, aText)
+	if reused != aMem {
+		t.Fatalf("the merge did not reuse the identical row: got %s, want %s", reused, aMem)
+	}
+	if len(ref) > MaxSourceRefLen {
+		t.Errorf("source_ref is %d bytes, over the %d-byte bound", len(ref), MaxSourceRefLen)
+	}
+	if !sourceRefNamesDecision(ref, aDec) || !sourceRefNamesDecision(ref, bDec) {
+		t.Errorf("source_ref %q does not keep both the row's own link and the absorbed one", ref)
 	}
 }

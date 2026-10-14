@@ -260,9 +260,9 @@ func TestUpdateTaskRefusesCredentialContent(t *testing.T) {
 }
 
 // TestCompleteTaskRefusesCredentialNotes covers the last text write in the
-// schema and the one that had no length cap either: a completion note is where
-// "here is the value that fixed it" gets written, and it is rendered by
-// ghost_task_list into the next session's context.
+// schema: a completion note is where "here is the value that fixed it" gets
+// written, and it is rendered by ghost_task_list into the next session's
+// context.
 func TestCompleteTaskRefusesCredentialContent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -271,7 +271,7 @@ func TestCompleteTaskRefusesCredentialContent(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	err = s.CompleteTask(ctx, id, "done, the value was "+secretFixture)
+	_, err = s.CompleteTask(ctx, id, "done, the value was "+secretFixture)
 	assertRefusal(t, err, "notes")
 
 	var status, notes string
@@ -331,7 +331,7 @@ func TestPortableImportRefusesCredentialContent(t *testing.T) {
 		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		_, err := store.ImportTask(ctx, Task{
+		_, _, err := store.ImportTask(ctx, Task{
 			ID: "t1", ProjectID: "p1", Title: "rotation", Description: "quarterly",
 			Status: "done", Notes: "the value was " + secretFixture,
 		}, true)
@@ -346,7 +346,7 @@ func TestPortableImportRefusesCredentialContent(t *testing.T) {
 		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		_, err := store.ImportDecision(ctx, Decision{
+		_, _, err := store.ImportDecision(ctx, Decision{
 			ID: "d1", ProjectID: "p1", Title: "rotation", Status: "active",
 			Decision: "rotate quarterly", Rationale: "the value is " + secretFixture,
 		}, true)
@@ -405,7 +405,7 @@ func TestPortableImportSkipsAnAlreadyImportedRecordHoldingACredential(t *testing
 		plantPortableTask(t, store, rec)
 
 		for _, apply := range []bool{false, true} {
-			created, err := store.ImportTask(ctx, rec, apply)
+			created, _, err := store.ImportTask(ctx, rec, apply)
 			if err != nil {
 				t.Errorf("apply=%v: an already-present id was refused: %v", apply, err)
 			}
@@ -427,7 +427,7 @@ func TestPortableImportSkipsAnAlreadyImportedRecordHoldingACredential(t *testing
 		plantPortableDecision(t, store, rec)
 
 		for _, apply := range []bool{false, true} {
-			created, err := store.ImportDecision(ctx, rec, apply)
+			created, _, err := store.ImportDecision(ctx, rec, apply)
 			if err != nil {
 				t.Errorf("apply=%v: an already-present id was refused: %v", apply, err)
 			}

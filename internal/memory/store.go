@@ -3343,6 +3343,10 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
 // row a rewrite becomes — a COPY of a value this database already bounded, not new
 // caller text, and filtering there deletes the stored row rather than refusing one.
+// The one part of that value a merge COMPOSES rather than copies — the decision
+// links it stands for, appended to the copied reference — is held to the bound by
+// boundedDecisionRefs, and a merge whose links alone would not fit is dropped
+// before it writes (decisionLinksOverflowTx).
 // `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
 // since the renderer cannot assume its input came from a writer that enforces the
 // cap. A new statement that writes the column has to call boundedSourceRef — the
@@ -3679,6 +3683,25 @@ type UpsertOptions struct {
 	// memory's durable tier to its own would be scheduling that memory for
 	// deletion on the strength of a near-duplicate.
 	Retention string
+
+	// SkipExactContent makes the save write nothing when the project already
+	// holds a row whose content is byte-identical to the incoming text. The
+	// skip is reported as an empty id with duplicateOf naming the row that
+	// was found; every save that writes returns a non-empty id, so the two
+	// cannot be confused. Anything else — including a near-duplicate — takes
+	// the ordinary path: folded and linked, or inserted.
+	//
+	// It is the first step inside the write transaction, not a read the
+	// caller makes beforehand, because it is a read whose answer decides
+	// whether a write happens. Read on the pool, the window between the read
+	// and the write belongs to any other handle: two first-contact Claude
+	// imports both read an empty project and both stored every file, each one
+	// twice. Inside the transaction (BEGIN IMMEDIATE, so the write lock is
+	// held from before the lookup), the second writer waits and then finds the
+	// first one's row. Only the Claude auto-memory import sets it; the lookup
+	// is scoped to the project and ignores category, scope and resolved
+	// state, which is the same set the import's pre-read (GetAll) covers.
+	SkipExactContent bool
 }
 
 // mergeRetention resolves a fold's two tiers into the one the surviving row
@@ -4026,6 +4049,23 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	}
 
 	var existingID string
+
+	// The exact-content skip, when the caller asked for it, comes before the
+	// duplicate lookups and inside the same transaction as them and as the
+	// writes they decide on (see UpsertOptions.SkipExactContent). A hit returns
+	// with nothing written: the deferred Rollback ends the transaction, and no
+	// history, evidence or onSave follows, because there is no new row.
+	if opts.SkipExactContent {
+		var present string
+		switch qerr := db.QueryRowContext(ctx, `
+			SELECT id FROM memories WHERE project_id = ? AND content = ? LIMIT 1
+		`, projectID, content).Scan(&present); {
+		case qerr == nil:
+			return "", present, 0, nil
+		case !errors.Is(qerr, sql.ErrNoRows):
+			return "", "", 0, fmt.Errorf("look up exact content: %w", qerr)
+		}
+	}
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
 	// the first 30 words retrieves merge candidates cheaply. Stage 2
@@ -6366,6 +6406,33 @@ func (g *fedGuard) drop(m Memory) bool {
 	return true
 }
 
+// emissionClaimIDs is every candidate an emission could write over: the sources
+// it names and any stored row carrying the text it emits (the row a reuse would
+// take).
+func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
+	ids := append([]string(nil), m.ReplacesIDs...)
+	for _, c := range candidates {
+		if c.content == m.Content {
+			ids = append(ids, c.id)
+		}
+	}
+	return ids
+}
+
+// keepEmissionClaims marks every candidate an emission that is not written would
+// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim.
+func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) {
+	named := make(map[string]bool, len(m.ReplacesIDs))
+	for _, id := range m.ReplacesIDs {
+		named[id] = true
+	}
+	for _, c := range candidates {
+		if named[c.id] || c.content == m.Content {
+			concurrent[c.id] = true
+		}
+	}
+}
+
 // reusePreservesAge reports whether a reused row is unchanged by this replace
 // — the consolidator re-emitted the stored text byte-identically, in the same
 // category — and must therefore keep its created_at, source and provenance
@@ -6661,10 +6728,13 @@ type rowClaims struct {
 // filling them independently composes a pair no row ever asserted, and deciding
 // per source lets a single-boundary row lock the unit and lose a later source's
 // complementary end — a loss that depends on the order the consolidator named. See
-// the resolution below for the order of preference. verified_at, confidence, agent,
-// session_id and source_ref remain first-source-wins: each is one value with no
-// partner to disagree with, and a half-window problem cannot arise for any of
-// them. verified_at is a single value by that same reasoning AND is read by the
+// the resolution below for the order of preference. verified_at, confidence, agent
+// and session_id remain first-source-wins: each is one value with no partner to
+// disagree with, and a half-window problem cannot arise for any of them. source_ref
+// is one value EXCEPT for a decision link, which is a LIST: a merge that folds
+// several decision companions stands in for every one of them, so those links are
+// gathered and joined rather than truncated to the first, and the decision lookup
+// reads the whole list. verified_at is a single value by that same reasoning AND is read by the
 // same reader as the two boundaries, so it is judged by readability too rather
 // than for pairing alone. A maintainer reading this paragraph must not
 // reimplement the window the per-value way — that is the bug, and the resolution
@@ -6691,6 +6761,7 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	// set has been seen — deciding per source is the bug this shape exists to fix.
 	var completeWindow, firstHalfWindow Validity
 	var haveComplete, haveHalf bool
+	var decisionRefs []string
 	for _, id := range m.ReplacesIDs {
 		if id == "" {
 			continue
@@ -6753,7 +6824,25 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if claims.sourceRef == "" {
 			claims.sourceRef = sourceRef.String
 		}
+		// A decision link is gathered as a list, not a single value: a merge that
+		// folds two decision companions stands in for BOTH decisions, and carrying
+		// only the first link is what let supersede silently miss the second while
+		// wrongly retiring the row when the first was superseded.
+		decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
 	}
+	// A successor records every decision link it stands for, so no decision is
+	// left without its companion and none is retired on the strength of a link
+	// that names a different decision. The links EXTEND the value chosen above —
+	// the emission's own, else the first source's — rather than replacing it, so
+	// that value's precedence survives and a lone link behind a non-decision first
+	// source is not dropped. boundedDecisionRefs holds the result to
+	// MaxSourceRefLen; ReplaceNonManual has already dropped a merge whose links
+	// alone would not fit.
+	ref, err := boundedDecisionRefs(claims.sourceRef, decisionRefs)
+	if err != nil {
+		return rowClaims{}, err
+	}
+	claims.sourceRef = ref
 	// The window is inherited AS A UNIT, from one source or from none — never half
 	// from one row and half from another.
 	//
@@ -6948,7 +7037,9 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // with it — a decision companion's `decision:<id>` link among them — while the
 // fresh INSERT path keeps every one. The reused row is the FIRST source: its own
 // value wins, and an absorbed source supplies a value only where the row has none,
-// in ReplacesIDs order, by inheritedClaims' own rules.
+// in ReplacesIDs order, by inheritedClaims' own rules — except that the decision
+// links the absorbed sources carried are APPENDED to the row's own source_ref,
+// since a link is a list and keeping only the row's value drops a decision.
 //
 // The window is still a unit. It is filled only when the reused row states
 // neither boundary; a row holding one boundary keeps exactly that half, because
@@ -6976,6 +7067,22 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	if claims == (rowClaims{}) {
 		return nil
 	}
+	// source_ref is resolved here rather than by a COALESCE, because a decision
+	// link is a LIST: the reused row's own reference wins, but the decision links
+	// the absorbed sources carried are appended to it, exactly as on the fresh
+	// INSERT. A COALESCE kept the row's own value whole and threw the gathered
+	// links away, so an absorbed decision lost its only companion. A row with no
+	// reference of its own takes the inherited value, as before.
+	sourceRef := claims.sourceRef
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, id).Scan(&own); err != nil {
+		return fmt.Errorf("read the reused memory's source_ref: %w", err)
+	}
+	if own.String != "" {
+		if sourceRef, err = boundedDecisionRefs(own.String, decisionRefsInSourceRef(claims.sourceRef)); err != nil {
+			return err
+		}
+	}
 	// SQLite evaluates every SET expression against the row as it was, so the
 	// valid_until CASE reads the ORIGINAL valid_from and the window moves together.
 	if _, err := tx.ExecContext(ctx, `
@@ -6988,11 +7095,11 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 			confidence  = COALESCE(confidence, ?),
 			agent       = COALESCE(NULLIF(agent, ''), ?, agent),
 			session_id  = COALESCE(NULLIF(session_id, ''), ?, session_id),
-			source_ref  = COALESCE(NULLIF(source_ref, ''), ?, source_ref)
+			source_ref  = COALESCE(?, source_ref)
 		WHERE id = ?`,
 		nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 		claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
-		nullIfEmpty(claims.sourceRef), id); err != nil {
+		nullIfEmpty(sourceRef), id); err != nil {
 		return fmt.Errorf("fill the reused memory's claims: %w", err)
 	}
 	return nil
@@ -7202,6 +7309,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	dropEmission := make([]bool, len(memories))
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+		// A merge whose decision links alone would not fit in a source_ref is not
+		// written: truncating the list is the silent supersede miss, and failing
+		// the pass would re-propose the same merge forever. Its sources and any
+		// row carrying its text are kept, as a refused claim's are.
+		if !dropEmission[i] {
+			over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
+			if err != nil {
+				return nil, 0, 0, nil, err
+			}
+			if over {
+				dropEmission[i] = true
+				keepEmissionClaims(candidates, concurrent, m)
+			}
+		}
 		// A refusal about a FOLDED cross-project candidate belongs to the half
 		// that produced it, not to the project replace that happens to evaluate
 		// it: ApplyReflection subtracted both halves' drops from different

@@ -192,8 +192,23 @@ type (
 // spellings are refused, as --project is in export, and the default is the flag
 // left off. (VACUUM INTO's O_EXCL means nothing is destroyed either way; the
 // artifact simply lands where the caller did not name.)
+//
+// A REPEATED --out is refused, by occurrence count and before the empty check,
+// naming both values as `ghost context` does for --cwd: nothing is overwritten
+// (VACUUM INTO's O_EXCL refuses an existing path), but `ghost backup --out
+// intended.db --out actual.db` used to snapshot into actual.db, report it, and
+// exit 0 — on the commands people write into a && chain, where the flag
+// arrives from an argument list the operator did not type this time.
 func parseBackupArgs(args []string) (backupOptions, error) {
 	var opts backupOptions
+	// outSeen counts OCCURRENCES of --out rather than testing opts.Out for
+	// emptiness, because that test cannot see `--out A --out=`: the second value
+	// is empty, so a value test reads the first as unset and keeps it, answering
+	// a command line that named two destinations with one. The duplicate is asked
+	// FIRST, as it is in every scope parser here, and both values reach the
+	// sentence through memory.RefusalArg so a credential-shaped path is withheld
+	// rather than printed (#839).
+	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -202,16 +217,26 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", args[i]))
+			}
 			if args[i] == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = args[i]
+			outSeen = true
 		case strings.HasPrefix(arg, "--out="):
 			v := strings.TrimPrefix(arg, "--out=")
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", v))
+			}
 			if v == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = v
+			outSeen = true
 		default:
 			return opts, fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", arg))
 		}
@@ -240,13 +265,15 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 // parseExportArgs parses `ghost export`. Both --flag value and --flag=value are
 // accepted, matching the obsidian command's spelling.
 //
-// --out is last-one-wins: it names a destination, and a second one is an operator
-// overriding their own earlier flag rather than a second copy of the same scope.
-// An explicit EMPTY --out is still refused, and is the one thing last-one-wins
-// cannot answer: `--out=` is a script with an unset variable, and reading it as
-// "no flag given" wrote the artifact to the timestamped default path instead of
-// the destination the command line appeared to name. The refusal names the flag
-// in both spellings, and the default is the flag left off.
+// --out names a DESTINATION, and a second one is a refusal rather than an
+// override: `ghost export --out intended.jsonl --out actual.jsonl` wrote the
+// artifact to actual.jsonl, reported it and exited 0, and an export is a file
+// handed to someone else — a destination the reader did not intend is a copy
+// under the wrong name, not a preference between two spellings of one. An
+// explicit EMPTY --out is refused too: `--out=` is a script with an unset
+// variable, and reading it as "no flag given" wrote the artifact to the
+// timestamped default path instead of the destination the command line appeared
+// to name. Both refusals name the flag, and the default is the flag left off.
 //
 // --project is the opposite case and refuses a second value, because it is a SCOPE:
 // runExportCore reads an empty projectFilter as every project, so a second --project
@@ -264,6 +291,12 @@ func parseExportArgs(args []string) (exportOptions, error) {
 	// values stop at the first one, because with no first value there is no scope in
 	// the command line to be a duplicate of.
 	projectSeen := false
+	// outSeen counts OCCURRENCES of --out for the same reason, and for the harm
+	// the paragraph above states: an artifact that lands at a name the command
+	// line named twice. The duplicate is asked before the empty value, so
+	// `--out A --out=` is "given twice" and not "requires a value", and both
+	// values reach the sentence through memory.RefusalArg (#839).
+	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -272,16 +305,26 @@ func parseExportArgs(args []string) (exportOptions, error) {
 				return opts, fmt.Errorf("flag --out needs a value")
 			}
 			i++
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", args[i]))
+			}
 			if args[i] == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = args[i]
+			outSeen = true
 		case strings.HasPrefix(arg, "--out="):
 			v := strings.TrimPrefix(arg, "--out=")
+			if outSeen {
+				return opts, fmt.Errorf("--out was given twice (%s and %s)",
+					memory.RefusalArg("out", opts.Out), memory.RefusalArg("out", v))
+			}
 			if v == "" {
 				return opts, errors.New("--out requires a value")
 			}
 			opts.Out = v
+			outSeen = true
 		case arg == "--project":
 			if i+1 >= len(args) {
 				return opts, errors.New("--project requires a value")
@@ -652,10 +695,65 @@ func runExport() {
 	}
 }
 
+// exportPublish moves the finished temporary artifact to its final name and
+// removes the temporary name. It is a variable so a test can make the last step
+// fail, which is the one a killed process cannot be made to do on demand.
+//
+// os.Link, not os.Rename, because a rename silently replaces whatever appeared
+// at dest since the check in runExportCore, and the contract is that an existing
+// file is never overwritten. A filesystem without hard links (FAT, some network
+// mounts) falls back to claiming dest with O_EXCL and copying the temporary file
+// in, which refuses an existing file just as the link does. That fallback is not
+// atomic: a kill mid-copy can leave a partial file at dest, so it is the degraded
+// path, and on any error it removes the file it created.
+var exportPublish = func(tmp, dest string) error {
+	if err := exportLink(tmp, dest); err == nil {
+		_ = os.Remove(tmp)
+		return nil
+	} else if os.IsExist(err) {
+		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+	}
+	return exportPublishByCopy(tmp, dest)
+}
+
+// exportLink is the hard-link step of exportPublish, a variable so a test can
+// make it fail the way a link-less filesystem does.
+var exportLink = os.Link
+
+// exportPublishByCopy claims dest exclusively, copies the finished temporary
+// file into it, syncs, and removes the temporary file.
+func exportPublishByCopy(tmp, dest string) error {
+	src, err := os.Open(tmp)
+	if err != nil {
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	defer src.Close() //nolint:errcheck
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+		}
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	_, err = io.Copy(out, src)
+	if err == nil {
+		err = out.Sync()
+	}
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("publish %s: %w", dest, err)
+	}
+	_ = os.Remove(tmp)
+	return nil
+}
+
 // runExportCore writes the artifact and reports what it wrote. On a file
-// destination the file is created with the same 0600 width the database has,
-// before any record is written, so a failure part-way leaves a file only the
-// user can read.
+// destination the artifact is written to a 0600 temporary file beside it and
+// published under its name only once complete and synced, so a failure part-way
+// leaves nothing at the destination name.
 //
 // summary is where the run states what it did, and warn is where it names the
 // records it could not write. They are separate writers because the artifact may
@@ -672,29 +770,46 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 		}
 		return reportSkippedRecords(warn, stats.Skipped)
 	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	// An existing destination is refused for the same reason a backup refuses
+	// one: overwriting it would destroy the copy someone may be holding. The
+	// message says so, because "file exists" on its own reads as an obstacle
+	// rather than as the decision this is. Lstat, so a dangling symlink counts.
+	if _, err := os.Lstat(dest); err == nil {
+		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check %s: %w", dest, err)
+	}
+	// The artifact is written under a temporary name in the destination
+	// directory and only published under the requested name once it is complete
+	// and synced. A kill or a failure part-way therefore leaves nothing at the
+	// name the user asked for: an artifact carries no trailer, so a file cut on a
+	// record boundary would import cleanly and look whole. The temp name is a
+	// fixed prefix, never derived from the destination name, so a destination at
+	// NAME_MAX still works. os.CreateTemp creates
+	// the file 0600, the width the database has, before any record is written.
+	f, err := os.CreateTemp(filepath.Dir(dest), ".ghost-export-*.tmp")
 	if err != nil {
-		// O_EXCL refuses an existing artifact for the same reason a backup
-		// does: overwriting one would destroy the copy someone may be holding.
-		// The message says so, because "file exists" on its own reads as an
-		// obstacle rather than as the decision this is.
-		if os.IsExist(err) {
-			return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
-		}
 		return fmt.Errorf("create %s: %w", dest, err)
 	}
+	tmp := f.Name()
 	stats, exportErr := portable.Export(ctx, store, f, projectFilter)
-	// Close before reporting, so a write error the close surfaces is not lost
-	// and the file is flushed either way.
+	if exportErr == nil {
+		if err := f.Sync(); err != nil {
+			exportErr = fmt.Errorf("sync %s: %w", dest, err)
+		}
+	}
+	// Close before publishing, so a write error the close surfaces is not lost.
 	if err := f.Close(); err != nil && exportErr == nil {
 		exportErr = fmt.Errorf("close %s: %w", dest, err)
 	}
+	if exportErr == nil {
+		exportErr = exportPublish(tmp, dest)
+	}
 	if exportErr != nil {
-		// A partial artifact is worse than none: it is a file the user can see,
-		// and importing it half-succeeds. Removing it leaves the failure as the
-		// only record of the run.
-		if rmErr := os.Remove(dest); rmErr != nil && !os.IsNotExist(rmErr) {
-			return fmt.Errorf("%w (and the partial file %s could not be removed: %v)", exportErr, dest, rmErr)
+		// A partial artifact is worse than none, and so is a stray temp file.
+		// Removing it leaves the failure as the only record of the run.
+		if rmErr := os.Remove(tmp); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("%w (and the temporary file %s could not be removed: %v)", exportErr, tmp, rmErr)
 		}
 		return exportErr
 	}
@@ -1130,10 +1245,12 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
-	// record does not have.
-	isCreate := r.Action == portable.ActionCreate && r.Type == portable.TypeMemory
+	// record does not have — so the two provenance arms are gated on the type
+	// rather than on the action alone.
+	isCreate := r.Action == portable.ActionCreate
+	isMemory := r.Type == portable.TypeMemory
 	switch {
-	case isCreate && r.Downgraded:
+	case isCreate && isMemory && r.Downgraded:
 		// The provenance rewrite is the one thing about the record that is not
 		// visible afterwards: the stored source is the downgraded one, so the
 		// artifact's own value is gone from the store entirely. It is said here
@@ -1141,11 +1258,16 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// a keep-forever tier a file planted is one no pass can take back — so
 		// the line names both.
 		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
-	case isCreate && r.Clamped:
+	case isCreate && len(r.Clamped) > 0:
 		// A clamp is the other thing a reader cannot see in the file afterwards,
-		// because the stored text is the cut version.
-		detail = strings.TrimSpace(detail) + " …(truncated at the content cap)"
-	case isCreate:
+		// because the stored text is the cut version — and for a title, or for
+		// the alternatives past the twentieth, the row carries no marker at all,
+		// so the report is the only place the loss can be said (#1232). It names
+		// the fields, never their text: a clamp report is read by whoever holds
+		// the artifact, and the cut field may be the one carrying a value that
+		// must not be echoed back.
+		detail = strings.TrimSpace(detail) + " …(truncated at the cap: " + strings.Join(r.Clamped, ", ") + ")"
+	case isCreate && isMemory:
 		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
 	}
 	switch {

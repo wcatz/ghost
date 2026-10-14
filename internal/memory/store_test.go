@@ -2787,7 +2787,7 @@ func TestStoreTasks(t *testing.T) {
 	}
 
 	// Complete a task.
-	if err := s.CompleteTask(ctx, id1, "Fixed in PR #42"); err != nil {
+	if _, err := s.CompleteTask(ctx, id1, "Fixed in PR #42"); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 
@@ -2854,7 +2854,7 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	if got.Status != "active" || got.Description != "updated via prefix" {
 		t.Errorf("UpdateTask by prefix did not apply: status=%q desc=%q", got.Status, got.Description)
 	}
-	if err := s.CompleteTask(ctx, prefix, "done via prefix"); err != nil {
+	if _, err := s.CompleteTask(ctx, prefix, "done via prefix"); err != nil {
 		t.Fatalf("CompleteTask by prefix: %v", err)
 	}
 	got, err = s.GetTask(ctx, fullID)
@@ -2876,7 +2876,7 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	if _, err := s.GetTask(ctx, "AAAABBBB"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Errorf("GetTask ambiguous prefix: want ambiguity error, got %v", err)
 	}
-	if err := s.CompleteTask(ctx, "AAAABBBB", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := s.CompleteTask(ctx, "AAAABBBB", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Errorf("CompleteTask ambiguous prefix: want ambiguity error, got %v", err)
 	}
 	// A longer, unique prefix disambiguates.
@@ -2893,7 +2893,7 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	if _, err := s.GetTask(ctx, "ZZZZ9999"); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("GetTask unknown: want not-found error, got %v", err)
 	}
-	if err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+	if _, err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("CompleteTask unknown: want not-found error, got %v", err)
 	}
 	unknownStatus, unknownPriority, unknownDesc := "active", 1, ""
