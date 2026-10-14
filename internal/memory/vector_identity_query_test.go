@@ -276,3 +276,58 @@ func TestEmbeddingCosinesSharesTheSearchWarningGate(t *testing.T) {
 		t.Errorf("search + cosine lookup logged %d warnings for one retired identity, want 1: both paths must spend the same gate, or a query costs a second line", got)
 	}
 }
+
+// TestEmbeddingStatsIgnoresOrphanedEmbeddings: the three counts describe
+// memories, so an embedding row whose memory is gone is not coverage. A delete
+// made with foreign keys off (what a migration step does) leaves such a row
+// behind; the vector leg drops it because it joins memories, and counting it
+// here is what printed embedded > total and a negative unembedded count.
+// Run with and without a configured identity, and with one orphan of each
+// kind, so neither embedding subquery can count a row the other drops.
+func TestEmbeddingStatsIgnoresOrphanedEmbeddings(t *testing.T) {
+	for _, identity := range []string{"", identityCurrent} {
+		t.Run("identity="+identity, func(t *testing.T) {
+			store, ctx := setupTestStore(t)
+			store.SetEmbeddingIdentity(identity)
+
+			current, staleID := seedIdentityRows(t, store, ctx)
+			kept := createTestMemory(t, store, ctx, "memory whose vector stays backed")
+			if err := store.StoreEmbedding(ctx, kept, []float32{0, 1, 0}, identityCurrent); err != nil {
+				t.Fatalf("StoreEmbedding(kept): %v", err)
+			}
+
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{current, staleID} {
+				if _, err := conn.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var orphans int
+			if err := conn.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM memory_embeddings WHERE memory_id IN (?, ?)`, current, staleID).Scan(&orphans); err != nil || orphans != 2 {
+				t.Fatalf("the embedding rows were not left behind (%d, %v): this test no longer builds an orphan", orphans, err)
+			}
+			if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+
+			embedded, stale, total, err := store.EmbeddingStats(ctx)
+			if err != nil {
+				t.Fatalf("EmbeddingStats: %v", err)
+			}
+			if embedded != 1 || stale != 0 || total != 1 {
+				t.Fatalf("EmbeddingStats = embedded %d, stale %d, total %d, want 1, 0, 1: orphaned embedding rows are not coverage", embedded, stale, total)
+			}
+			if unembedded := total - embedded - stale; unembedded != 0 {
+				t.Errorf("unembedded = %d, want 0", unembedded)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -27,6 +28,10 @@ const (
 	// promptOmittedMarker stands in for such an argument so the record still
 	// shows that one was dropped, rather than silently misreporting the argv.
 	promptOmittedMarker = "[prompt omitted]"
+
+	// phaseTailTrimmedMarker stands in for a kept tail that is one partial
+	// line: the head cut landed inside it and no whole line follows.
+	phaseTailTrimmedMarker = "[earlier output trimmed]"
 )
 
 // phaseTail keeps the last max bytes written to it and discards everything
@@ -36,10 +41,19 @@ const (
 // It is used behind an io.MultiWriter alongside the real stderr, so Write must
 // always report the full byte count even when it discards: a short count would
 // tell the child its pipe broke and make it retry or abort mid-run.
+//
+// The cut is from the HEAD, so it can land inside a line — inside a token, in
+// the worst case, leaving a fragment without its ghp_ prefix that the token
+// guard downstream cannot recognise, as the first line of the marker the
+// session-start alert renders. String therefore drops a partial first line
+// (see there); cutAfterNewline records whether the last byte discarded was a
+// line break, which is what says the first kept line is whole.
 type phaseTail struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu              sync.Mutex
+	max             int
+	buf             []byte
+	trimmed         bool
+	cutAfterNewline bool
 }
 
 func newPhaseTail(max int) *phaseTail {
@@ -54,15 +68,30 @@ func (t *phaseTail) Write(p []byte) (int, error) {
 	if excess := len(t.buf) - t.max; excess > 0 {
 		// Copy rather than reslice so the retained window is a fresh backing
 		// array; a reslice would keep the discarded prefix alive.
+		t.trimmed = true
+		t.cutAfterNewline = t.buf[excess-1] == '\n'
 		t.buf = append([]byte(nil), t.buf[excess:]...)
 	}
 	return len(p), nil
 }
 
+// String returns the kept tail. When the head cut landed mid-line, that
+// partial first line is dropped, so no fragment of a line — of a token, in the
+// case this exists for — is recorded; when nothing but that partial line (or
+// only whitespace after it) was kept, phaseTailTrimmedMarker stands in for it.
+// A tail that was never cut, or was cut just after a line break, is returned
+// whole.
 func (t *phaseTail) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return string(t.buf)
+	if !t.trimmed || t.cutAfterNewline {
+		return string(t.buf)
+	}
+	i := bytes.IndexByte(t.buf, '\n')
+	if i < 0 || len(bytes.TrimSpace(t.buf[i+1:])) == 0 {
+		return phaseTailTrimmedMarker
+	}
+	return string(t.buf[i+1:])
 }
 
 // phaseFailureCause explains a failed phase in terms someone can act on.

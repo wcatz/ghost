@@ -1519,7 +1519,15 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
 	}
-	droppedTotal := droppedProject + droppedGlobal
+	// The store's refusals split by reason, and every report below reads one of
+	// the two separately. A drop the corpus guard made claims a row that moved,
+	// so the report names that row and suppresses the skip fingerprint; an
+	// overflow drop is a merge whose decision links do not fit in a source_ref,
+	// which no later run can write either — the report names the links and the
+	// bound, and the round is still allowed to record its fingerprint (#1228).
+	droppedTotal := droppedProject.Changed + droppedGlobal.Changed
+	overflowedTotal := droppedProject.Overflow + droppedGlobal.Overflow
+	overflowedLinks := droppedProject.OverflowLinks + droppedGlobal.OverflowLinks
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
@@ -1556,10 +1564,14 @@ func runReflect() {
 	// output are untouched in every case that already existed; the only
 	// behaviour this adds is in the !applied case, which did not exist before.
 	if !applied {
-		if droppedTotal == 0 {
+		switch {
+		case overflowedTotal > 0 && droppedTotal == 0:
+			fmt.Printf("Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", overflowedLinks, memory.MaxSourceRefLen)
+			fmt.Println("  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
+		case droppedTotal == 0:
 			fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
 			fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
-		} else {
+		default:
 			fmt.Println("Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
 			fmt.Println("  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
 		}
@@ -1596,7 +1608,7 @@ func runReflect() {
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
 	if summary, wrote := writeAppliedReport(os.Stdout, applied, parsed.promoteGlobals, appliedByCategory,
-		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal, deleted); wrote {
+		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal.Total(), deleted); wrote {
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
@@ -1613,12 +1625,29 @@ func runReflect() {
 		}
 	}
 
+	// An overflow drop is reported on its own terms and before the branches
+	// below, because it is neither of the two things they are about: no
+	// credential was held, and no row changed underneath the pass — the merge
+	// simply stood for more decision links than one source_ref can carry. It is
+	// also the one refusal a later run cannot act on, which is what the chain
+	// below has to notice: re-proposing that merge re-produces the same overflow,
+	// so this round stays recordable rather than held open forever (#1228).
+	if overflowedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d emission(s) stood for %d decision link(s) whose joined source_ref would exceed the %d-byte bound, and were dropped with every merged memory left live; the same merge would overflow again, so split it\n", overflowedTotal, overflowedLinks, memory.MaxSourceRefLen)
+	}
+
 	// A save that raced the LLM round trip is preserved untouched by
 	// ReplaceNonManual and is merged by the NEXT reflection. Recording a
 	// fingerprint over the post-apply corpus would absorb that survivor and make
 	// --skip-unchanged skip the merge, so record nothing when one happened; the
 	// next run re-consolidates and merges it.
-	if !applied {
+	//
+	// `!applied && overflowedTotal == 0` rather than plain `!applied`: an
+	// overflow-only round wrote nothing either, but nothing there is waiting to
+	// be consolidated — the merged memories are all live and unchanged, and the
+	// proposal that would have folded them cannot be written at all. Holding it
+	// open is what re-proposed and dropped the same merge on every later run.
+	if !applied && overflowedTotal == 0 {
 		// Not "no preserved survivors" — nothing at all was replaced, so the
 		// corpus still holds whatever it held. Recording a fingerprint over an
 		// unchanged corpus is what would make --skip-unchanged skip this project
@@ -1716,8 +1745,9 @@ type supersedePair struct{ source, target string }
 // value flags accept both "--flag value" and "--flag=value", exactly one
 // project is named (by --project or by a bare positional — two of them is a
 // command line whose scope is ambiguous, and last-one-wins would silently
-// answer for whichever project the last spelling named), a
-// non-numeric --threshold keeps the default, --reassess selects the repair
+// answer for whichever project the last spelling named), a --threshold
+// that is not a number in (0, 1] is refused (parseSupersedeThreshold),
+// --reassess selects the repair
 // pass over the edges already in the graph (issue #686), --withdraw names the
 // edges to remove outright, and any other flag is an unknown-flag error (which
 // the caller prints and exits on). The project may come from --project, which
@@ -1776,6 +1806,33 @@ func checkSupersedeConsensus(n int) error {
 		return fmt.Errorf("--consensus needs at least %d passes (1 would run the pass again and gate on nothing)", supersede.MinConsensus)
 	}
 	return nil
+}
+
+// parseSupersedeThreshold reads a --threshold value and refuses one that is not a
+// number in (0, 1]. The threshold is the minimum cosine similarity a neighbour
+// needs to become a candidate pair (supersede.SelectCandidates drops a neighbour
+// whose score is below it), and every candidate that survives the filters is a
+// billed classify call. Cosine lies in [-1, 1], so a threshold of 0 or below
+// admits every neighbour however unrelated, and one above 1 admits nothing: the
+// pass runs and proposes no pair. Neither is a value an operator means, and a
+// value that does not parse (a typo, a decimal comma) used to be dropped in
+// favour of the 0.80 default, so the pass ran at a threshold nobody typed.
+//
+// The check is written as "inside the range" rather than "outside it" so NaN,
+// which every comparison answers false for, is refused rather than admitted:
+// `score < NaN` is false, so a NaN threshold would filter nothing. It is applied
+// after the float32 conversion, so a value too small for float32 (1e-50 rounds
+// to 0) is judged by what the pass would actually compare against. One function
+// for both spellings, for the reason checkSupersedeConsensus gives. The operand
+// is echoed through memory.RefusalArg, as every refusal that repeats caller
+// text is.
+func parseSupersedeThreshold(raw string) (float32, error) {
+	v, err := strconv.ParseFloat(raw, 32)
+	t := float32(v)
+	if err != nil || !(t > 0 && t <= 1) {
+		return 0, fmt.Errorf("--threshold needs a cosine similarity in (0, 1], e.g. 0.85: got %s", memory.RefusalArg("threshold", raw))
+	}
+	return t, nil
 }
 
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, relation string, err error) {
@@ -1865,14 +1922,18 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			project = v
 			projectSeen = true
 		case args[i] == "--threshold" && i+1 < len(args):
-			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(args[i+1])
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 			i++
 		case strings.HasPrefix(args[i], "--threshold="):
-			if v, verr := strconv.ParseFloat(strings.TrimPrefix(args[i], "--threshold="), 32); verr == nil {
-				threshold = float32(v)
+			v, terr := parseSupersedeThreshold(strings.TrimPrefix(args[i], "--threshold="))
+			if terr != nil {
+				return "", "", false, false, 0, 0, nil, "", terr
 			}
+			threshold = v
 		case args[i] == "--source" && i+1 < len(args):
 			source = args[i+1]
 			i++
@@ -2008,7 +2069,8 @@ Flags:
                       costs no classify call, and is never voted on. Refused with
                       --withdraw, which asks no model at all. In a dry run it tells
                       you what --apply would do.
-  --threshold float   Min cosine similarity for a candidate pair (default 0.80)
+  --threshold float   Min cosine similarity for a candidate pair, in (0, 1]
+                      (default 0.80). Anything else is refused.
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
                       (detected from the environment and process ancestry); an
@@ -4053,7 +4115,7 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 	verb := "would mark resolved"
 	count := 0
 	for _, m := range res.Memories {
-		if m.AlreadyResolved || m.Pinned || m.ExemptCategory {
+		if m.AlreadyResolved || m.Pinned || m.ExemptCategory || m.PersistentTier {
 			continue
 		}
 		count++
@@ -4063,8 +4125,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 		count = res.Marked
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d declined\n",
-		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
+	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d persistent tier, %d declined\n",
+		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.PersistentTier, res.Declined)
 	for _, m := range res.Memories {
 		// The default is the CLAIM, not the absence of one, and that ordering is
 		// deliberate: a state this switch does not know about must fall through
@@ -4091,6 +4153,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 			marker = "pinned"
 		case m.ExemptCategory:
 			marker = "standing category"
+		case m.PersistentTier:
+			marker = "persistent tier"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}

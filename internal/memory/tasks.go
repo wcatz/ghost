@@ -129,7 +129,7 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 
 	switch len(ids) {
 	case 0:
-		return "", fmt.Errorf("task not found: %s", idOrPrefix)
+		return "", fmt.Errorf("task not found: %s", RefusalArg("task_id", idOrPrefix))
 	case 1:
 		return ids[0], nil
 	default:
@@ -145,24 +145,35 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 // replaces them. Both are decided inside the single UPDATE, against the row as
 // it stands when the write lands, so a concurrent edit cannot interleave.
 //
+// The note is guarded on its UNCLAMPED text and THEN clamped to MaxContentLen
+// (#1238). The guard is first so a credential-shaped value past the cap is
+// refused rather than quietly cut out of sight. The clamp is here because this
+// is a task note's writer, and ImportTask clamps the same field — the two must
+// store the same bytes for the same input, or the documented backup and restore
+// path loses what a save kept. The returned bool reports that ClampContent cut
+// something, which is what ghost_task_complete warns the caller about;
+// ClampContent's marker is already in the stored value, so a reader of the row
+// alone sees the loss too.
+//
 // The RowsAffected of the UPDATE is read and a 0-row update is an error rather
 // than a success (#1083): the row is resolved above and a task deleted in
 // between leaves nothing for the write to land on, which is a completion the
 // caller believes happened.
-func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
+func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) (bool, error) {
 	// Checked before resolveTaskID so the refusal is the same error whether or
-	// not the id resolves — and a completion note is the one task field with no
-	// length cap, which is where "here is the value that fixed it" gets
-	// written, and it is rendered straight into the next session's context.
+	// not the id resolves — and a completion note is where "here is the value
+	// that fixed it" gets written, so it is rendered straight into the next
+	// session's context.
 	if err := rejectSecret("notes", notes); err != nil {
-		return err
+		return false, err
 	}
+	notes, clamped := ClampContent(notes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	id, err := s.resolveTaskID(ctx, taskID)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	res, err := s.execGuardedWrite(ctx, "complete-task", `
@@ -173,16 +184,16 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 		WHERE id = ?
 	`, notes, notes, id)
 	if err != nil {
-		return fmt.Errorf("complete task: %w", err)
+		return false, fmt.Errorf("complete task: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("complete task: rows affected: %w", err)
+		return false, fmt.Errorf("complete task: rows affected: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("complete task: task %s was deleted before the write landed", id)
+		return false, fmt.Errorf("complete task: task %s was deleted before the write landed", id)
 	}
-	return nil
+	return clamped, nil
 }
 
 // GetTask returns a single task by ID. Accepts a full task ID or a unique prefix.

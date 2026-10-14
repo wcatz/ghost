@@ -121,7 +121,7 @@ func TestEveryTagBearingWriterIsGuarded(t *testing.T) {
 			Rationale: "quarterly is enough", Status: "active",
 			Tags: []string{"ops", credential},
 		}
-		_, err := s.ImportDecision(context.Background(), d, true)
+		_, _, err := s.ImportDecision(context.Background(), d, true)
 		if err == nil {
 			t.Fatal("ImportDecision accepted a credential as a tag — the artifact's tags " +
 				"column is written raw, and the decision row is re-emitted by every export")
@@ -160,7 +160,7 @@ func TestEveryTagBearingWriterIsGuarded(t *testing.T) {
 		if err := s.EnsureProject(context.Background(), testProject, "/tmp/"+testProject, testProject); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		if _, err := s.ImportDecision(context.Background(), Decision{
+		if _, _, err := s.ImportDecision(context.Background(), Decision{
 			ID: "tagrefusaldecision0000AA1", ProjectID: testProject,
 			Title: "rotate the pool keys", Decision: "rotate them quarterly",
 			Rationale: "quarterly is enough", Status: "active", Tags: tags,

@@ -94,14 +94,16 @@ type MemoryStore interface {
 	TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error
 
 	// Reflection
-	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, int, int, map[string]int, error)
+	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory, consolidatedSince string, fed []memory.CorpusRow) ([]string, memory.EmissionDrops, int, map[string]int, error)
 	CurrentTimestamp(ctx context.Context) (string, error)
 
 	// Tasks
 	CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error)
 	GetTask(ctx context.Context, taskID string) (memory.Task, error)
 	ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error)
-	CompleteTask(ctx context.Context, taskID, notes string) error
+	// CompleteTask returns whether the note was cut at MaxContentLen, which is
+	// what the tool answer reports; the same cap the portable importer applies.
+	CompleteTask(ctx context.Context, taskID, notes string) (notesClamped bool, err error)
 	UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (memory.Task, error)
 
 	// Decisions. companionClamped reports that the composed companion-memory

@@ -29,6 +29,9 @@ import (
 //
 //   - Lifecycle hooks are merged JSON-wise into ~/.codex/hooks.json, wiring
 //     SessionStart/Stop/SessionEnd onto `ghost hook <event> --source codex`.
+//     The merge owns ghost's own ACTION, never the rule around it: an action
+//     ghost rendered is rewritten in place, so a rule the user wrote that runs
+//     ghost beside their own command keeps that command and its matcher.
 //
 // Verified against primary sources (2026-08-24, developers.openai.com/codex/hooks):
 //
@@ -1293,26 +1296,129 @@ func marshalCodexJSON(v any) string {
 	return string(data) + "\n"
 }
 
-// isCodexGhostRule reports whether a hooks.json rule invokes the ghost binary
-// (any action whose leading command token has the ghost basename). Such rules
-// are ghost-managed: drifted copies are replaced, user rules referencing
-// other tools are never touched.
-func isCodexGhostRule(rule json.RawMessage) bool {
-	var parsed struct {
-		Hooks []struct {
-			Command string `json:"command"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(rule, &parsed); err != nil {
+// codexIsGhostHookAction reports whether cmd is the command ghost itself
+// renders for one event: the ghost binary — any path, any quoting — running
+// `hook <eventToken>`. Only such an action is ghost's to rewrite. A rule
+// running some other ghost subcommand, or ghost's hook for a different event,
+// belongs to the user and is left alone.
+func codexIsGhostHookAction(cmd, eventToken string) bool {
+	bin, rest, ok := splitHookCommand(cmd)
+	if !ok || !isGhostBinaryName(bin) {
 		return false
 	}
-	for _, action := range parsed.Hooks {
-		bin, _, ok := splitHookCommand(action.Command)
-		if ok && isGhostBinaryName(bin) {
-			return true
+	fields := strings.Fields(rest)
+	return len(fields) >= 2 && fields[0] == "hook" && fields[1] == eventToken
+}
+
+// codexObject is one JSON object decoded in document order. A Go map decodes
+// the same object and re-encodes it alphabetically, which would reshuffle a
+// user's keys over a change that touched none of them — so a rewrite keeps the
+// order the file had.
+type codexObject struct {
+	fields []codexField
+}
+
+type codexField struct {
+	key   string
+	value json.RawMessage
+}
+
+// decodeCodexObject reads one JSON object in document order. ok is false for
+// anything that is not an object, which nothing may rewrite.
+func decodeCodexObject(raw json.RawMessage) (codexObject, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return codexObject{}, false
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return codexObject{}, false
+	}
+	var obj codexObject
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return codexObject{}, false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return codexObject{}, false
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return codexObject{}, false
+		}
+		obj.fields = append(obj.fields, codexField{key: key, value: value})
+	}
+	if _, err := dec.Token(); err != nil {
+		return codexObject{}, false
+	}
+	return obj, true
+}
+
+// get returns the raw value of key, or nil when the object holds no such key
+// or holds it twice — a repeated key is a malformed object, and nothing
+// rewrites one.
+func (o codexObject) get(key string) json.RawMessage {
+	var found json.RawMessage
+	for _, f := range o.fields {
+		if f.key != key {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = f.value
+	}
+	return found
+}
+
+// set replaces the value of key where it sits, or appends the pair.
+func (o *codexObject) set(key string, value json.RawMessage) {
+	for i := range o.fields {
+		if o.fields[i].key == key {
+			o.fields[i].value = value
+			return
 		}
 	}
-	return false
+	o.fields = append(o.fields, codexField{key: key, value: value})
+}
+
+// remove deletes key and the value it carried, keeping the order of the rest.
+// Nothing is written in its place: rendering no timeout is what distinguishes
+// an event that has none from one whose budget is zero.
+func (o *codexObject) remove(key string) {
+	kept := make([]codexField, 0, len(o.fields))
+	for _, f := range o.fields {
+		if f.key != key {
+			kept = append(kept, f)
+		}
+	}
+	o.fields = kept
+}
+
+// marshal renders the object back out in the order it was decoded in.
+func (o codexObject) marshal() (json.RawMessage, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, f := range o.fields {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		key, err := json.Marshal(f.key)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(f.value)
+	}
+	buf.WriteByte('}')
+	var out bytes.Buffer
+	if err := json.Compact(&out, buf.Bytes()); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // codexRuleRendered renders our canonical rule for an event as raw JSON.
@@ -1324,27 +1430,33 @@ func codexRuleRendered(eventToken, ghostBin string) json.RawMessage {
 	return data
 }
 
-// codexRulePresent reports whether rules already contain want (compared
-// compacted, so whitespace differences don't force a rewrite).
-func codexRulePresent(rules []json.RawMessage, want json.RawMessage) bool {
-	var wb bytes.Buffer
-	if err := json.Compact(&wb, want); err != nil {
-		return false
+// codexActionCommand reads one action's command. ok is false for an action
+// with no command or an unreadable one — neither is ghost's to rewrite.
+func codexActionCommand(obj codexObject) (string, bool) {
+	raw := obj.get("command")
+	if raw == nil {
+		return "", false
 	}
-	for _, rule := range rules {
-		var rb bytes.Buffer
-		if json.Compact(&rb, rule) == nil && rb.String() == wb.String() {
-			return true
-		}
+	var cmd string
+	if err := json.Unmarshal(raw, &cmd); err != nil {
+		return "", false
 	}
-	return false
+	return cmd, cmd != ""
 }
 
 // mergeCodexHooksConfig overlays ghost's lifecycle rules onto an existing
 // hooks.json: unknown top-level keys, the user's description, foreign events,
-// and non-ghost rules are preserved verbatim; ghost-owned rules are pruned
-// and our three are (re-)appended. The result is deterministically rendered,
-// so feeding the output back through this function is a byte-level no-op.
+// and every rule that is not ghost's own are preserved verbatim.
+//
+// A rule that carries ghost's own hook action is repaired IN PLACE, one action
+// at a time: ghost's own action is rewritten to what ghost renders for that
+// event, and every other key of that action, the user's other actions and the
+// rule's matcher are the user's and are left where they are. Ghost owns exactly
+// one action per event, so a second copy of it is pruned rather than left to
+// fire twice, and a rule whose every action was such a copy disappears with
+// them. Ghost's canonical rule is appended only when no rule holds its action
+// at all. The result is deterministically rendered, so feeding the output back
+// through this function is a byte-level no-op.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(existing, &top); err != nil {
@@ -1353,6 +1465,14 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 
 	events := map[string]json.RawMessage{}
 	if raw, ok := top["hooks"]; ok {
+		// An explicit null is structurally-invalid-but-present data, not
+		// "absent": json.Unmarshal decodes null into a nil map with no error,
+		// and the assignment below would then panic on it. Refuse it the way
+		// the Claude settings path does, naming the file rather than treating
+		// the user's declaration as an empty object to fill in.
+		if isJSONNull(raw) {
+			return "", fmt.Errorf("hooks.json: hooks is null")
+		}
 		if err := json.Unmarshal(raw, &events); err != nil {
 			return "", fmt.Errorf("parse hooks.json hooks: %w", err)
 		}
@@ -1365,21 +1485,15 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 				return "", fmt.Errorf("parse hooks.json %s rules: %w", ev.Key, err)
 			}
 		}
-		kept := make([]json.RawMessage, 0, len(rules))
-		for _, rule := range rules {
-			if !isCodexGhostRule(rule) {
-				kept = append(kept, rule)
-			}
+		merged, err := mergeCodexEventRules(rules, ev.EventToken, ghostBin)
+		if err != nil {
+			return "", err
 		}
-		ours := codexRuleRendered(ev.EventToken, ghostBin)
-		if len(kept) != len(rules) || !codexRulePresent(rules, ours) {
-			kept = append(kept, ours)
-			rendered, err := json.Marshal(kept)
-			if err != nil {
-				return "", fmt.Errorf("render %s rules: %w", ev.Key, err)
-			}
-			events[ev.Key] = rendered
+		rendered, err := json.Marshal(merged)
+		if err != nil {
+			return "", fmt.Errorf("render %s rules: %w", ev.Key, err)
 		}
+		events[ev.Key] = rendered
 	}
 
 	out := make(map[string]json.RawMessage, len(top))
@@ -1402,13 +1516,115 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	return marshalCodexJSON(out), nil
 }
 
+// mergeCodexEventRules rewrites ghost's own hook action where it already sits
+// in an event's rule list and appends ghost's canonical rule when it sits
+// nowhere. What ghost renders for that action is the whole of it — command,
+// type and timeout — so a stale path, a hand-edited type or a budget from
+// another build are all repaired. Every other rule is carried across byte for
+// byte, every other key of a repaired action stays where it sits, and a rule
+// that is repaired is re-encoded in the key order it was read in.
+func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
+	desired := renderCodexHookAction(eventToken, ghostBin)
+	// No +1: capacity arithmetic over an unbounded rule count reads as a
+	// possible size overflow to static analysis, and the append below runs
+	// for at most one event per merge.
+	out := make([]json.RawMessage, 0, len(rules))
+	wired := false
+	for _, rule := range rules {
+		obj, ok := decodeCodexObject(rule)
+		if !ok {
+			out = append(out, rule)
+			continue
+		}
+		var actions []json.RawMessage
+		if raw := obj.get("hooks"); raw != nil {
+			if err := json.Unmarshal(raw, &actions); err != nil {
+				out = append(out, rule)
+				continue
+			}
+		}
+		kept := make([]json.RawMessage, 0, len(actions))
+		rewrote, dropped := 0, 0
+		for _, action := range actions {
+			actionObj, ok := decodeCodexObject(action)
+			if !ok {
+				kept = append(kept, action)
+				continue
+			}
+			cmd, ok := codexActionCommand(actionObj)
+			if !ok || !codexIsGhostHookAction(cmd, eventToken) {
+				kept = append(kept, action)
+				continue
+			}
+			if wired {
+				dropped++
+				continue
+			}
+			fresh, err := json.Marshal(desired.Command)
+			if err != nil {
+				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+			}
+			actionObj.set("command", fresh)
+			// The WHOLE of ghost's action is what ghost rendered, so a stale
+			// or hand-edited type and timeout are repaired beside the command.
+			// Every other key is the user's and stays where it sits.
+			typed, err := json.Marshal(desired.Type)
+			if err != nil {
+				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+			}
+			actionObj.set("type", typed)
+			if desired.Timeout > 0 {
+				budget, err := json.Marshal(desired.Timeout)
+				if err != nil {
+					return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+				}
+				actionObj.set("timeout", budget)
+			} else {
+				// An event with no timeout of its own must not inherit a stale
+				// one, so the key goes rather than being rewritten to 0.
+				actionObj.remove("timeout")
+			}
+			rewritten, err := actionObj.marshal()
+			if err != nil {
+				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+			}
+			kept = append(kept, rewritten)
+			rewrote++
+			wired = true
+		}
+		if rewrote == 0 && dropped == 0 {
+			out = append(out, rule)
+			continue
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		hooks, err := json.Marshal(kept)
+		if err != nil {
+			return nil, fmt.Errorf("render %s rule hooks: %w", eventToken, err)
+		}
+		obj.set("hooks", hooks)
+		rebuilt, err := obj.marshal()
+		if err != nil {
+			return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
+		}
+		out = append(out, rebuilt)
+	}
+	if !wired {
+		out = append(out, codexRuleRendered(eventToken, ghostBin))
+	}
+	return out, nil
+}
+
 // installCodexHooks wires SessionStart/Stop/SessionEnd onto the contract
 // entrypoint in ~/.codex/hooks.json. An existing file is MERGED, never
 // replaced: the user's own hooks (any event ghost doesn't manage) and unknown
-// fields survive byte-semantically. Idempotent via byte-compare against the
-// deterministically rendered desired document. Both writes go through
-// writeFileAtomic, so the merge lands by rename and a codex process reading
-// hooks.json during the repair sees a whole document, not a truncated one.
+// fields survive byte-semantically, and a rule that runs ghost beside the
+// user's own actions keeps those actions while ghost's is repaired in place.
+// Idempotent via byte-compare against the deterministically rendered desired
+// document. Both writes go through writeFileAtomic, so the merge lands by
+// rename and a codex process reading hooks.json during the repair sees a
+// whole document, not a truncated one.
 func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := codexHooksPath()
 	if err != nil {

@@ -379,6 +379,51 @@ func carryEvidenceTx(ctx context.Context, tx *sql.Tx, toMemoryID string, fromIDs
 	return nil
 }
 
+// uncarryRestoredSourcesTx takes off the rows a restore keeps IN PLACE the
+// records a merge carried onto them from rows this snapshot brings back.
+//
+// Two merges keep a row in place and delete others into it: ReplaceNonManual's
+// reuse branch and FoldRows' survivor. Each carries the absorbed rows' records
+// onto the kept row with carried_from naming the absorbed id. The restore puts
+// the absorbed rows back with their own records from the snapshot and puts the
+// kept row's columns back too, so a carried copy left behind would count every
+// absorbed record twice and leave the kept row's evidence claiming a
+// verification its restored verified_at no longer states.
+//
+// The rule is "carried_from names a row in this snapshot". A carry is written
+// after the snapshot of the pass that deleted its source, so a source that is
+// in the snapshot was live when the snapshot was taken and the carry undone is
+// the one the restore is undoing. Everything else on the row stays: its own
+// records, and any support recorded after the snapshot, which a restore never
+// touches on a row it did not delete (restoreSnapshotEvidenceTx). The one shape
+// this over-reaches on is a carry whose source SURVIVED the pass that carried
+// it (a ReplacesIDs entry another emission reused) and is therefore in a LATER
+// snapshot too; restoring that later snapshot drops the copy, and the source
+// still holds the original records.
+//
+// The in-place set uses the same predicate as the restore's UPDATE, so a pinned,
+// resolved, persistent or promoted row the restore leaves alone keeps its records
+// as well.
+func uncarryRestoredSourcesTx(ctx context.Context, tx *sql.Tx, snapshotID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM memory_provenance
+		WHERE carried_from IS NOT NULL
+		  AND carried_from IN (
+		      SELECT memory_id FROM memory_snapshots
+		      WHERE snapshot_id = ? AND memory_id IS NOT NULL)
+		  AND memory_id IN (
+		      SELECT m.id FROM memories m
+		      JOIN memory_snapshots s ON s.memory_id = m.id
+		      WHERE s.snapshot_id = ? AND m.project_id = s.project_id
+		        AND m.pinned = 0 AND m.resolved_at IS NULL
+		        AND m.`+retentionExemptSQL+`)`,
+		snapshotID, snapshotID,
+	); err != nil {
+		return fmt.Errorf("remove evidence carried from restored rows: %w", err)
+	}
+	return nil
+}
+
 // restoreSnapshotEvidenceTx puts back the evidence a snapshot carried, for the
 // rows the restore re-created.
 //

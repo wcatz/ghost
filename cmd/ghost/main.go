@@ -59,7 +59,7 @@ type commandGroup struct {
 // here — and adding it here without routing an unknown word in the dispatch
 // fails that test rather than reproducing #691 for the new group.
 var commandGroups = []commandGroup{
-	{path: "mcp", subs: []string{"init", "status"}, defaultAction: true},
+	{path: "mcp", subs: []string{"init", "status", "wiring"}, defaultAction: true},
 	{path: "backup", subs: []string{"verify"}, defaultAction: true},
 	{path: "maintenance", subs: []string{"status", "clean-scratch"}},
 	{path: "obsidian", subs: []string{"export", "sync"}},
@@ -160,6 +160,9 @@ func dispatchCommand(argv []string) int {
 					return 0
 				case "status":
 					runMCPStatus()
+					return 0
+				case "wiring":
+					runMCPWiring()
 					return 0
 				}
 				return usageError("mcp", sub, true, mcpUsage)
@@ -345,6 +348,7 @@ Commands:
   mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  Configure MCP client integration
                                                          (auto-detects when --client is omitted)
   mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
+  mcp wiring                    Check client wiring against this binary's embedded sources
   hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop, session-end, message-submit, edit)
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)

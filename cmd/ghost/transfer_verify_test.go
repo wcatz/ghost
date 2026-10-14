@@ -158,16 +158,26 @@ func TestRunBackupVerifyCoreFailsOnADamagedBackup(t *testing.T) {
 
 	// The manifest's own hash, edited to a wrong value: the file is untouched
 	// and perfectly restorable, so the only thing wrong is the description of
-	// it. A verify that trusted the file because it opens would pass this.
+	// it. A verify that trusted the file because it opens would pass this. The
+	// edit swaps one hex digit for another, so the value is still a well-formed
+	// digest — one that is not would be refused as an unreadable manifest
+	// before the sha256 check ran.
 	manifest := memory.ManifestPath(dest)
 	raw, err := os.ReadFile(manifest)
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	tampered := strings.Replace(string(raw), `"sha256": "`, `"sha256": "0`, 1)
-	if tampered == string(raw) {
+	const field = `"sha256": "`
+	at := strings.Index(string(raw), field)
+	if at < 0 {
 		t.Fatalf("manifest has no sha256 field to tamper with:\n%s", raw)
 	}
+	digit := at + len(field)
+	swapped := byte('0')
+	if raw[digit] == '0' {
+		swapped = '1'
+	}
+	tampered := string(raw[:digit]) + string(swapped) + string(raw[digit+1:])
 	if err := os.WriteFile(manifest, []byte(tampered), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
@@ -288,5 +298,69 @@ func TestRunBackupVerifyCoreClaimsNothingAboutAFileItCouldNotRead(t *testing.T) 
 	}
 	if !strings.Contains(text, "refusing "+path) {
 		t.Errorf("the report does not say it is refusing the file:\n%s", text)
+	}
+}
+
+// TestRunBackupVerifyCorePrintsEveryCheckOnADamagedCopy: the issue's own
+// reproduction, as a test. A copy cut short opens, and SQLite cannot read a
+// schema or count rows out of it — and the report used to stop there, printing
+// two of the four documented checks. An operator deciding whether to keep a
+// damaged copy needs to know which questions were asked, so all four rows
+// print, the two that could not run say skipped, and the verdict is still
+// refusing.
+func TestRunBackupVerifyCorePrintsEveryCheckOnADamagedCopy(t *testing.T) {
+	ctx := context.Background()
+	store := transferTestStore(t)
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := store.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "one", Source: "mcp"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "snap.db")
+	if err := runBackupCore(ctx, store, io.Discard, dest); err != nil {
+		t.Fatalf("runBackupCore: %v", err)
+	}
+
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf("stat snapshot: %v", err)
+	}
+	const left = 20000
+	if info.Size() <= left {
+		t.Skipf("the snapshot is %d bytes, too small to cut to %d and leave a half-written database", info.Size(), left)
+	}
+	if err := os.Truncate(dest, left); err != nil {
+		t.Fatalf("truncate snapshot: %v", err)
+	}
+
+	var out strings.Builder
+	if err := runBackupVerifyCore(ctx, &out, dest); err == nil {
+		t.Fatalf("runBackupVerifyCore accepted a copy cut to %d bytes:\n%s", left, out.String())
+	}
+	text := out.String()
+	if !strings.Contains(text, "refusing "+dest) {
+		t.Errorf("the report does not say it is refusing the file:\n%s", text)
+	}
+	// Every check named, whether it ran or not: a table missing two rows reads
+	// like a build that only has two checks.
+	for _, name := range []string{"sha256", "integrity check", "schema version", "row counts"} {
+		found := false
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "  "+name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the report has no line for %q:\n%s", name, text)
+		}
+	}
+	// The two that could not run say so, and say why, rather than being dropped.
+	testCheckLine(t, text, "schema version", "skipped")
+	testCheckLine(t, text, "row counts", "skipped")
+	// And nothing is claimed about rows nobody counted.
+	if strings.Contains(text, "no rows") {
+		t.Errorf("the report claims a row count for a file it could not read:\n%s", text)
 	}
 }

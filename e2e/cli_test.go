@@ -110,6 +110,7 @@ var cliCommands = []cliCommand{
 	{path: "mcp", help: "Usage: ghost mcp", coveredBy: "TestMCPSurface"},
 	{path: "mcp init", help: "Usage: ghost mcp init", coveredBy: "TestCLIMCPInit"},
 	{path: "mcp status", help: "Usage: ghost mcp status", coveredBy: "TestCLIMCPInit/status for every client"},
+	{path: "mcp wiring", help: "Usage: ghost mcp wiring", run: runMCPWiringCommand},
 	{path: "hook", help: "Usage: ghost hook", coveredBy: "TestHookSessionStartInjectsContext, TestHookStop, TestHookFailOpen, TestHookSessionEnd"},
 	{path: "reflect", help: "Usage: ghost reflect", coveredBy: "TestCLIReflect"},
 	{path: "supersede", help: "Usage: ghost supersede",
@@ -612,6 +613,58 @@ func (s *sandbox) writeSessionsJSON(t *testing.T, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(s.bin, "opencode.sessions"), []byte(body+"\n"), 0o644); err != nil {
 		t.Fatalf("write opencode.sessions: %v", err)
+	}
+}
+
+// runMCPWiringCommand is the real invocation behind the `mcp wiring` row, and
+// it is the end of #1215: the check judges installed wiring against the
+// sources embedded in the binary that runs it, so the only interesting cases
+// are which image is doing the judging and what it sees. The sandbox's own
+// binary is the image — this IS the new-binary case the upgrade path reaches
+// by exec'ing the release it just installed — and the verdict is read off a
+// plugin file installed as an OLD release rendered it, so the byte-compare has
+// to find it outdated. Read-only throughout: no store, no harness, nothing
+// written.
+func runMCPWiringCommand(t *testing.T, s *sandbox) {
+	t.Helper()
+
+	// No client wiring in use: the check is silent, and silent is the whole
+	// point — a finding on a machine with nothing wired would teach the reader
+	// to skip the report.
+	quiet := s.mustRun("mcp", "wiring")
+	if strings.TrimSpace(quiet.stdout) != "" {
+		t.Fatalf("`ghost mcp wiring` reported something with no client wiring in use:\n%s", quiet.stdout)
+	}
+	if quiet.stderr != "" {
+		t.Fatalf("`ghost mcp wiring` wrote to stderr:\n%s", quiet.stderr)
+	}
+
+	// opencode in use, with its lifecycle plugin left as an older release
+	// rendered it: the check compares the installed file against THIS binary's
+	// embed and reports the drift, naming the command that repairs it. Without
+	// the new image doing the judging, the comparison is against sources the
+	// drift was measured by and sees nothing.
+	pluginDir := filepath.Join(s.config, "opencode", "plugins")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("mkdir the opencode plugin dir: %v", err)
+	}
+	stale := filepath.Join(pluginDir, "ghost-opencode.ts")
+	if err := os.WriteFile(stale, []byte("// ghost-opencode — rendered by an older release\n"), 0o644); err != nil {
+		t.Fatalf("write the stale plugin: %v", err)
+	}
+
+	drifted := s.mustRun("mcp", "wiring")
+	mustContain(t, "mcp wiring with a drifted plugin", drifted.stdout, "Integration wiring check:")
+	mustContain(t, "mcp wiring with a drifted plugin", drifted.stdout, "opencode lifecycle plugin is missing or outdated")
+	mustContain(t, "mcp wiring names the repair", drifted.stdout, "ghost mcp init --client opencode")
+
+	// Repairing it in place — the same write `ghost mcp init --client
+	// opencode` makes — brings the report back to silence, which is the other
+	// half of the check being usable at all.
+	repair := s.mustRun("mcp", "init", "--client", "opencode")
+	mustMatch(t, "mcp init --client opencode", repair.stdout, "(?i)plugin")
+	if after := s.mustRun("mcp", "wiring"); strings.TrimSpace(after.stdout) != "" {
+		t.Fatalf("a repaired plugin is still reported as outdated:\n%s", after.stdout)
 	}
 }
 

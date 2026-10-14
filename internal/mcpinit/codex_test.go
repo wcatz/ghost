@@ -1641,6 +1641,408 @@ func TestRunCodex_HooksMergePreservesUserHooks(t *testing.T) {
 	}
 }
 
+// codexMergedRule is the parsed view of one rule in a merged hooks.json.
+type codexMergedRule struct {
+	Matcher string           `json:"matcher"`
+	Hooks   []map[string]any `json:"hooks"`
+}
+
+// codexMergedEvent parses one event's rule list out of a merged document.
+func codexMergedEvent(t *testing.T, doc []byte, event string) []codexMergedRule {
+	t.Helper()
+	var parsed struct {
+		Hooks map[string][]codexMergedRule `json:"hooks"`
+	}
+	if err := json.Unmarshal(doc, &parsed); err != nil {
+		t.Fatalf("merged hooks.json invalid JSON: %v", err)
+	}
+	return parsed.Hooks[event]
+}
+
+// codexRuleCommands returns the commands of one rule's actions in order.
+func codexRuleCommands(rule codexMergedRule) []string {
+	cmds := make([]string, 0, len(rule.Hooks))
+	for _, action := range rule.Hooks {
+		cmd, _ := action["command"].(string)
+		cmds = append(cmds, cmd)
+	}
+	return cmds
+}
+
+// TestAuditCodexMixedRuleKeepsUserAction is #1217's reproduction: the user
+// wired ghost beside their own command inside one SessionStart rule. Ghost
+// owns the action it rendered, so a stale path is repaired in place — the
+// user's action and the rule's matcher are not ghost's to delete, and a fresh
+// run must not print that it touched the file without saying what was lost.
+func TestAuditCodexMixedRuleKeepsUserAction(t *testing.T) {
+	const userAction = "/usr/local/bin/notify-start"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"matcher":"startup","hooks":[
+        {"type":"command","command":` + jsonString(shellQuote("/old/ghost")+" hook session-start --source codex") + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 1 {
+		t.Fatalf("the user's rule must survive, got %d rules:\n%s", len(rules), got)
+	}
+	if rules[0].Matcher != "startup" {
+		t.Errorf("the rule's matcher must survive, got %q", rules[0].Matcher)
+	}
+	cmds := codexRuleCommands(rules[0])
+	if len(cmds) != 2 {
+		t.Fatalf("the user's action must survive beside ghost's, got %v", cmds)
+	}
+	if want := shellQuote("/new/ghost") + " hook session-start --source codex"; cmds[0] != want {
+		t.Errorf("ghost's action should be repaired to the resolved path, got %q, want %q", cmds[0], want)
+	}
+	if cmds[1] != userAction {
+		t.Errorf("user action %s was deleted", userAction)
+	}
+
+	// Ghost still fires once: no second rule of its own was appended.
+	for _, event := range []string{"Stop", "SessionEnd"} {
+		other := codexMergedEvent(t, []byte(got), event)
+		if len(other) != 1 || len(other[0].Hooks) != 1 {
+			t.Errorf("%s should carry exactly ghost's rule, got %+v", event, other)
+		}
+	}
+}
+
+// TestAuditCodexMixedRuleCurrentPath is the same rule with ghost's action
+// already at the resolved path: nothing needed repairing, so the merge owes
+// the user's action exactly what it owed it above.
+func TestAuditCodexMixedRuleCurrentPath(t *testing.T) {
+	const userAction = "/usr/local/bin/notify-start"
+	current := shellQuote("/new/ghost") + " hook session-start --source codex"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"matcher":"startup","hooks":[
+        {"type":"command","command":` + jsonString(current) + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 1 {
+		t.Fatalf("the user's rule must survive, got %d rules:\n%s", len(rules), got)
+	}
+	cmds := codexRuleCommands(rules[0])
+	if len(cmds) != 2 || cmds[0] != current || cmds[1] != userAction {
+		t.Errorf("user action %s was deleted even though the ghost action is already current, got %v", userAction, cmds)
+	}
+	if rules[0].Matcher != "startup" {
+		t.Errorf("the rule's matcher must survive, got %q", rules[0].Matcher)
+	}
+
+	again, err := mergeCodexHooksConfig([]byte(got), "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+	}
+	if again != got {
+		t.Errorf("merging the merged document again must be a byte-level no-op:\nfirst:\n%s\nsecond:\n%s", got, again)
+	}
+}
+
+// TestMergeCodexHooksLeavesAGhostCommandGhostDidNotRender pins the other half:
+// a rule running some other ghost subcommand is the user's, is preserved
+// verbatim, and does not stop the event from being wired.
+func TestMergeCodexHooksLeavesAGhostCommandGhostDidNotRender(t *testing.T) {
+	const userAction = "'/usr/local/bin/ghost' mcp status"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "` + userAction + `"}]},
+      {"hooks": [{"type": "command", "command": "/usr/local/bin/say-start"}]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 3 {
+		t.Fatalf("both user rules should survive beside ghost's, got %d:\n%s", len(rules), got)
+	}
+	if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != userAction {
+		t.Errorf("a ghost command ghost did not render must be left alone, got %v", cmds)
+	}
+	if cmds := codexRuleCommands(rules[1]); len(cmds) != 1 || cmds[0] != "/usr/local/bin/say-start" {
+		t.Errorf("the user's own rule must come through untouched, got %v", cmds)
+	}
+	if want := shellQuote("/new/ghost") + " hook session-start --source codex"; codexRuleCommands(rules[2])[0] != want {
+		t.Errorf("ghost's own rule should be appended, got %+v", rules[2])
+	}
+}
+
+// TestMergeCodexHooksFiresGhostOncePerEvent pins the invariant that makes
+// rewriting in place safe: ghost owns ONE action per event, so a second copy
+// — our own rule beside a rule the user extended — is pruned rather than left
+// to fire twice.
+func TestMergeCodexHooksFiresGhostOncePerEvent(t *testing.T) {
+	const userAction = "/usr/local/bin/notify-start"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(shellQuote("/new/ghost")+" hook session-start --source codex") + `}]},
+      {"matcher":"startup","hooks":[
+        {"type":"command","command":` + jsonString(shellQuote("/old/ghost")+" hook session-start --source codex") + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 2 {
+		t.Fatalf("both rules should survive, got %d:\n%s", len(rules), got)
+	}
+	ghost, seen := 0, 0
+	for _, rule := range rules {
+		if rule.Matcher == "startup" {
+			cmds := codexRuleCommands(rule)
+			if len(cmds) != 1 || cmds[0] != userAction {
+				t.Errorf("the user's rule must keep its matcher and its own action, got %+v", rule)
+			}
+			continue
+		}
+		for _, cmd := range codexRuleCommands(rule) {
+			if strings.Contains(cmd, "hook session-start --source codex") {
+				ghost++
+				continue
+			}
+			seen++
+		}
+	}
+	if ghost != 1 {
+		t.Errorf("ghost must fire exactly once per event, got %d actions", ghost)
+	}
+	if seen != 0 {
+		t.Errorf("no user action outside the user's own rule should be carried, got %d", seen)
+	}
+}
+
+// TestMergeCodexHooksRecognizesAWindowsBatchShim pins the launcher form the
+// other tests never reach: on Windows a ghost command can resolve to a
+// "ghost.bat"/"ghost.cmd" shim rather than the native ".exe", and the merge
+// must still treat that action as ghost's own. Missing it makes every re-run
+// append a second rule, so hooks.json never reaches a fixed point — the
+// failure the idempotence test sees only on a Windows runner.
+func TestMergeCodexHooksRecognizesAWindowsBatchShim(t *testing.T) {
+	const userAction = "C:\\Tools\\notify.exe"
+	shim := "\"C:\\Tools\\ghost.bat\" hook session-start --source codex"
+	seed := []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {"matcher":"startup","hooks":[
+        {"type":"command","command":` + jsonString(shim) + `},
+        {"type":"command","command":` + jsonString(userAction) + `}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(rules) != 1 {
+		t.Fatalf("a recognised shim must not gain a second rule, got %d:\n%s", len(rules), got)
+	}
+	cmds := codexRuleCommands(rules[0])
+	if len(cmds) != 2 {
+		t.Fatalf("the user's action must survive beside the repaired shim, got %v", cmds)
+	}
+	if want := shellQuote("/new/ghost") + " hook session-start --source codex"; cmds[0] != want {
+		t.Errorf("the shim action should be repaired in place, got %q, want %q", cmds[0], want)
+	}
+	if cmds[1] != userAction {
+		t.Errorf("user action %s was deleted", userAction)
+	}
+}
+
+// TestMergeCodexHooksRepairsGhostsOwnActionFields pins the whole-action repair.
+// Rewriting only ghost's command left a stale budget on the action itself:
+// a hand-edited or pre-#1217 `"timeout":1` on the SessionEnd action is not the
+// same thing as a current one, and SessionStart/Stop carry no timeout of their
+// own, so a budget someone left on them survives every run. Ghost's action is
+// therefore written as what ghost renders — command, type and timeout. Every
+// other key of that action, and every user action beside it, is not ghost's to
+// touch. It also pins that a ghost action is matched by its executable and its
+// event alone, so a `--source` copied from another host's file is rewritten to
+// this host's.
+func TestMergeCodexHooksRepairsGhostsOwnActionFields(t *testing.T) {
+	const userAction = "https://example.com/end"
+	stalePath := shellQuote("/old/ghost") + " hook session-end --source codex"
+	foreignSource := shellQuote("/old/ghost") + " hook stop --source claude"
+	currentStart := shellQuote("/new/ghost") + " hook session-start --source codex"
+	seed := []byte(`{
+  "hooks": {
+    "SessionEnd": [
+      {"matcher":"end","hooks":[
+        {"type":"command","command":` + jsonString(stalePath) + `,"timeout":1,"note":"mine"},
+        {"type":"http","command":` + jsonString(userAction) + `,"timeout":9}
+      ]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(foreignSource) + `}]}
+    ],
+    "SessionStart": [
+      {"hooks": [
+        {"type":"command","command":` + jsonString(currentStart) + `,"timeout":42,"async":true}
+      ]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+
+	// SessionEnd: the stale path AND its stale budget are repaired, and the
+	// action keeps the key the user added to it.
+	endRules := codexMergedEvent(t, []byte(got), "SessionEnd")
+	if len(endRules) != 1 || endRules[0].Matcher != "end" {
+		t.Fatalf("the user's rule must survive with its matcher, got %+v", endRules)
+	}
+	actions := endRules[0].Hooks
+	if len(actions) != 2 {
+		t.Fatalf("the user's action must survive beside ghost's, got %+v", actions)
+	}
+	ghostAction := actions[0]
+	if want := shellQuote("/new/ghost") + " hook session-end --source codex"; ghostAction["command"] != want {
+		t.Errorf("ghost action command = %v, want %q", ghostAction["command"], want)
+	}
+	if ghostAction["type"] != "command" {
+		t.Errorf("ghost action type = %v, want %q", ghostAction["type"], "command")
+	}
+	if timeout, _ := ghostAction["timeout"].(float64); timeout != float64(codexSessionEndTimeoutSec) {
+		t.Errorf("ghost action timeout = %v, want %d", ghostAction["timeout"], codexSessionEndTimeoutSec)
+	}
+	if ghostAction["note"] != "mine" {
+		t.Errorf("an unknown key on ghost's own action is not ghost's to delete, got %v", ghostAction["note"])
+	}
+	user := actions[1]
+	if user["type"] != "http" || user["command"] != userAction {
+		t.Errorf("a user action must survive untouched, got %+v", user)
+	}
+	if timeout, _ := user["timeout"].(float64); timeout != 9 {
+		t.Errorf("a user action's own timeout was rewritten, got %v", user["timeout"])
+	}
+
+	// Stop: matched on the executable and the event alone, so another host's
+	// --source is rewritten to this host's, and the budget it did not need goes.
+	stop := codexMergedEvent(t, []byte(got), "Stop")
+	if len(stop) != 1 || len(stop[0].Hooks) != 1 {
+		t.Fatalf("Stop should carry exactly one action, got %+v", stop)
+	}
+	if want := shellQuote("/new/ghost") + " hook stop --source codex"; stop[0].Hooks[0]["command"] != want {
+		t.Errorf("ghost action --source = %v, want %q", stop[0].Hooks[0]["command"], want)
+	}
+	if _, ok := stop[0].Hooks[0]["timeout"]; ok {
+		t.Errorf("Stop carries no timeout of its own, so a stale one must go, got %+v", stop[0].Hooks[0])
+	}
+
+	// SessionStart: already at the current path, so only the fields are still
+	// repaired — the budget some other event needs is not left on this one.
+	start := codexMergedEvent(t, []byte(got), "SessionStart")
+	if len(start) != 1 || len(start[0].Hooks) != 1 {
+		t.Fatalf("SessionStart should carry exactly one action, got %+v", start)
+	}
+	startAction := start[0].Hooks[0]
+	if startAction["command"] != currentStart {
+		t.Errorf("a current ghost action command changed, got %v", startAction["command"])
+	}
+	if _, ok := startAction["timeout"]; ok {
+		t.Errorf("SessionStart carries no timeout of its own, so a stale one must go, got %+v", startAction)
+	}
+	if startAction["async"] != true {
+		t.Errorf("an unknown key on ghost's own action is not ghost's to delete, got %v", startAction["async"])
+	}
+
+	// A repair settles: merging the merged document again changes no byte.
+	again, err := mergeCodexHooksConfig([]byte(got), "/new/ghost")
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+	}
+	if again != got {
+		t.Errorf("merging the merged document again must be a byte-level no-op:\nfirst:\n%s\nsecond:\n%s", got, again)
+	}
+}
+
+// TestAuditCodexHooksNull pins #1219: a hooks.json whose "hooks" value is the
+// JSON literal null must be refused, not merged into. json.Unmarshal decodes
+// null into a nil map with no error, so without the isJSONNull guard the
+// assignment of ghost's rendered rules panics with "assignment to entry in nil
+// map" — under a dry run too, because the merge runs before the dry-run check,
+// and with it every client after codex in a multi-client run. The Claude
+// settings path refuses the same value the same way (findHookCommand's
+// "hooks is null").
+func TestAuditCodexHooksNull(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("mergeCodexHooksConfig panicked on a null hooks value: %v", r)
+		}
+	}()
+
+	if _, err := mergeCodexHooksConfig([]byte(`{"description":"my hooks","hooks":null}`), "/new/ghost"); err == nil {
+		t.Fatal("a null hooks value must be refused, not silently overwritten with ghost's rules")
+	}
+}
+
+// TestRunCodex_NullHooksIsRefused pins the install path the audit walked: a
+// hooks.json carrying an explicit null is refused with an error rather than
+// crashing, and the file is left exactly as it was. It runs the dry-run form,
+// where the merge happens before the dry-run check and the panic used to take
+// the whole command down.
+func TestRunCodex_NullHooksIsRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = `{"description":"my hooks","hooks":null}`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, true); err == nil {
+		t.Fatal("a null hooks value must be refused, not merged into")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused merge must leave the file untouched:\ngot:\n%s", got)
+	}
+}
+
 func TestRunCodex_DryRunWritesNothing(t *testing.T) {
 	home, xdg := setupCodexTestEnv(t)
 

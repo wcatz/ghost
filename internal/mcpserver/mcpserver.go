@@ -700,7 +700,9 @@ const tagMaxCount = 10
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
 // the ASCII-only quoted string. Interpolating it raw would be a second injection
 // on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain.
+// because it is a character this error string must never contain. A tag that is
+// token-shaped, or that the caller sent longer than the bound a refusal repeats,
+// is withheld instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -713,6 +715,7 @@ func validateTags(tags []string) ([]string, error) {
 			len(tags), tagMaxCount, len(tags)-tagMaxCount)
 	}
 	for i, t := range tags {
+		orig := t
 		if len(t) > tagMaxLen {
 			// Cut on a RUNE boundary. This was `t[:64]`, which on a CJK tag
 			// returned half a rune — and the invalid bytes were STORED, not merely
@@ -736,10 +739,27 @@ func validateTags(tags []string) ([]string, error) {
 			return nil, fmt.Errorf("tag %d (%s) must hold no %s — a tag is printed in the metadata of a memory row, "+
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
-				"any length are fine. Change the tag and call again", i, assemble.Token(t), reason)
+				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
 		}
 	}
 	return tags, nil
+}
+
+// refusedTag renders a tag the shape check refused. A tag the token guard
+// recognises, or one the caller sent longer than memory.ArgEchoMaxBytes, is
+// withheld through memory.RefusalArg like every other argument refusal: the
+// shape check runs before the guard, so naming the tag here would hand a
+// credential back that the guard would have refused to store. Both are decided
+// on the tag as the caller sent it, before the cut, so a value cut to the tag
+// bound is not repeated and the length reported is the caller's own. Every
+// other tag is named through assemble.Token, in the form the row would print.
+// RefusalArg alone would not do for those: it quotes with %q, which keeps the
+// data delimiters this sentence must not carry.
+func refusedTag(orig, cut string) string {
+	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
+		return memory.RefusalArg("tag", orig)
+	}
+	return assemble.Token(cut)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
@@ -994,11 +1014,13 @@ const searchResponseMaxBytes = 2 * memory.MaxContentLen
 // content cap itself lives in memory.MaxContentLen — one named constant
 // shared by every writer (MCP tools, reflection proposals, imports) — and
 // memory.ClampContent both enforces it and appends the explicit truncation
-// marker. These remain MCP-local: titles and list items have their own,
-// smaller display-oriented budgets.
+// marker. The title cap and the alternatives bound are shared the same way, in
+// memory.MaxTitleLen and memory.BoundAlternatives, because the portable importers
+// are writers of those fields too and a second copy of the number here is how an
+// imported row stops being what this package stores (#1226). What stays here is
+// the response-side budget, which is about an ANSWER rather than a stored value.
 const (
-	maxTitleLen     = 300
-	maxAlternatives = 20
+	maxTitleLen = memory.MaxTitleLen
 
 	// globalMemoriesLimit bounds the ghost://memories/global resource. Shared by
 	// the resource Description and its handler so the advertised count and the
@@ -1007,16 +1029,24 @@ const (
 )
 
 // truncationWarning is the caller-facing half of the explicit-truncation
-// contract: whenever memory.ClampContent cut content at the cap, the
-// save/update response appends this line so the saving agent learns the
-// full text did NOT land and can act instead of believing it all stored.
-// what names the field that was cut and advice names the recovery step
-// for THAT writer — a task description must not be told to split into
-// memories, and a decision must not be told to split into tasks. The
-// stored half is the marker memory.ClampContent appends to the content
-// itself — truncation is visible on both sides.
+// contract for fields cut at memory.MaxContentLen: it wraps
+// truncationWarningAt with the content cap so the historical call sites
+// keep their (what, advice) shape.
 func truncationWarning(what, advice string) string {
-	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, memory.MaxContentLen, advice)
+	return truncationWarningAt(what, memory.MaxContentLen, advice)
+}
+
+// truncationWarningAt is the caller-facing half of the explicit-truncation
+// contract: whenever a bounded field was cut, the save/update response
+// appends this line so the saving agent learns the full text did NOT land
+// and can act instead of believing it all stored. what names the field that
+// was cut, maxBytes the byte limit it was cut to, and advice the recovery
+// step for THAT writer — a task description must not be told to split into
+// memories, and a decision must not be told to split into tasks. The
+// stored half is the marker where the writer appends one (content only);
+// titles carry no marker, so this warning is their only notice of loss.
+func truncationWarningAt(what string, maxBytes int, advice string) string {
+	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, maxBytes, advice)
 }
 
 // Recovery advice per writer kind, kept as named constants so each call
@@ -1261,10 +1291,10 @@ type updateArgs struct {
 }
 
 // taskCompleteArgs are ghost_task_complete's arguments: the task to complete and
-// the note to file under it. The note is the one task field with no length cap,
-// which is where "here is the value that fixed it" gets written, and it is
-// rendered straight into the next session's context — see
-// Store.CompleteTask, which guards it as a credential.
+// the note to file under it. The note is guarded as a credential on its
+// UNCLAMPED text and then capped at MaxContentLen by Store.CompleteTask — the
+// same cap ImportTask applies to a restored note — and the answer warns when
+// the cap cut it. See Store.CompleteTask.
 type taskCompleteArgs struct {
 	TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
 	Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
@@ -1337,7 +1367,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 	}
 
 	importance, err := optFloat32(args.Importance, "importance")
@@ -1493,10 +1523,10 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID == "_global" {
-		return "", fmt.Errorf("memory %s is already global", memoryID)
+		return "", fmt.Errorf("memory %s is already global", memory.RefusalArg("memory_id", memoryID))
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", projectID))
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", projectID))
 	}
 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
@@ -1786,13 +1816,15 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 			marker = "pinned (kept visible on purpose)"
 		case m.ExemptCategory:
 			marker = "standing category (never marked)"
+		case m.PersistentTier:
+			marker = "persistent tier (exempt from resolve)"
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 	}
-	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
-		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.PersistentTier > 0 || res.Declined > 0 {
+		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, in a standing category or in the persistent tier is left as it is, and a\n"+
 			"report saying otherwise would be claiming a change that did not happen.\n")
 	}
 	stamped := markedMemoryIDs(res.Memories)
@@ -1945,7 +1977,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	// The same ownership check a live row gets, against the project the
 	// tombstone was filed under. One entry is enough to name it.
 	if entries[0].ProjectID != resolvedProjectID {
-		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.RefusalArg("project_id", requestedProjectID))
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", requestedProjectID))
 	}
 	outcome, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
@@ -2047,6 +2079,17 @@ func (s *Server) registerTools() {
 				return nil, nil, err
 			}
 		}
+		// Refused with the allowed list, as every other tool that takes a category
+		// refuses it (#1041/#1079), and before the project is resolved so the
+		// caller is told about the argument that was wrong. Handed on, a plural or
+		// capitalised category reached the assembler's category predicate, which
+		// dropped every candidate and answered "nothing found passed the category
+		// filter" with advice to raise the limit — a confident false negative no
+		// limit could fix. Checked here, above the explain and as_of branches, so
+		// all three paths refuse it alike.
+		if args.Category != "" && !memory.IsValidCategory(args.Category) {
+			return nil, nil, invalidCategory(args.Category)
+		}
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
@@ -2056,6 +2099,23 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as ghost_task_list and
+		// ghost_decisions_list refuse it (#1179). `ResolveProject` answers an
+		// unknown name with `""`, which the assembler reads as a `_global`-only
+		// search, so a misspelt project came back as "no match — widen the
+		// limit", or as a `_global` row presented as an answerable hit for the
+		// misspelt name, with nothing saying the named project was never searched.
+		//
+		// A refusal rather than the not-registered sentence ghost_project_context
+		// appends, because this answer is rendered and measured by the assembler:
+		// a sentence added here would ship bytes the response cap never saw, the
+		// assembler's own verdict text (widen the limit, the query was not wrong)
+		// would still be in the body, and explain's JSON payload has no place for
+		// it. A refusal says the one true thing on the plain, explain and as_of
+		// paths alike. `_global` itself is a registered project and still resolves.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 
@@ -2770,7 +2830,7 @@ func (s *Server) registerTools() {
 			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if args.PurgeHistory {
@@ -3056,6 +3116,7 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("title", args.Title); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var descTruncated bool
 		args.Description, descTruncated = memory.ClampContent(args.Description)
@@ -3088,6 +3149,9 @@ func (s *Server) registerTools() {
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
 		msg := fmt.Sprintf("Task created (id: %s)", id)
+		if titleTruncated {
+			msg += truncationWarningAt("task title", maxTitleLen, taskTruncationAdvice)
+		}
 		if descTruncated {
 			msg += truncationWarning("task description", taskTruncationAdvice)
 		}
@@ -3276,6 +3340,12 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
+		}
 		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
@@ -3333,14 +3403,19 @@ func (s *Server) registerTools() {
 		}
 		task, err := s.store.GetTask(ctx, args.TaskID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
+			return nil, nil, err
 		}
-		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
+		notesClamped, err := s.store.CompleteTask(ctx, args.TaskID, args.Notes)
+		if err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)
 		}
 		s.notifyProjectResource(ctx, task.ProjectID, "tasks")
+		msg := "Task completed."
+		if notesClamped {
+			msg += truncationWarning("task notes", taskTruncationAdvice)
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Task completed."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 
@@ -3380,6 +3455,7 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
+		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
 		args.Decision, decisionTruncated = memory.ClampContent(args.Decision)
@@ -3388,12 +3464,15 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(alternatives) > maxAlternatives {
-			alternatives = alternatives[:maxAlternatives]
-		}
-		for i, alt := range alternatives {
-			alternatives[i] = truncateUTF8(alt, maxTitleLen)
-		}
+		// Track whether the caller's list exceeds the stored bound, so the cut is
+		// reported instead of only being applied silently. memory.AlternativesClamped
+		// asks the same bound memory.BoundAlternatives applies, through the same
+		// call, so the two cannot disagree about whether a cut happened.
+		alternativesWereClamped := memory.AlternativesClamped(alternatives)
+		// memory.BoundAlternatives is the same bound the portable import applies,
+		// through the same call, so a decision's list is capped identically whichever
+		// route wrote it.
+		alternatives = memory.BoundAlternatives(alternatives)
 		if alternatives == nil {
 			alternatives = []string{}
 		}
@@ -3518,6 +3597,16 @@ func (s *Server) registerTools() {
 					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
 				}
+				// Shared is the same partial failure for a different reason: a
+				// consolidation folded this decision's companion and another
+				// decision's into one memory that still states a decision not yet
+				// superseded. It is not an extra, so the ambiguity remedy above — delete the extras —
+				// would destroy a live decision; nothing was retired, and the advice
+				// is to rewrite its text so it no longer states the reversed one.
+				if len(retirement.Shared) > 0 {
+					supersedeFailed = true
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because one merged memory (%s) holds this decision together with at least one other decision that is not superseded; nothing was retired, so session start and search still return the reversed text. Keep that memory — it still states that other decision; rewrite its text with ghost_memory_update so it no longer states the reversed one. It is retired once every decision it holds is superseded.", joinTokens(retirement.Shared))
+				}
 				if len(retirement.Declined) > 0 {
 					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its companion memory (%s) was left live because the resolve guard refuses it (pinned, retention-exempt or a convention/preference), so session start and search still return it at full rank.", joinTokens(retirement.Declined))
@@ -3536,6 +3625,9 @@ func (s *Server) registerTools() {
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
 		}
+		if titleTruncated {
+			msg += truncationWarningAt("decision title", maxTitleLen, decisionTruncationAdvice)
+		}
 		if decisionTruncated || rationaleTruncated {
 			what := "decision text"
 			switch {
@@ -3552,6 +3644,9 @@ func (s *Server) registerTools() {
 			// already tells the caller to shorten, and the marker still
 			// names the composition cut in the stored row.
 			msg += truncationWarning("decision companion memory", memoryTruncationAdvice)
+		}
+		if alternativesWereClamped {
+			msg += fmt.Sprintf(" — WARNING: decision alternatives were truncated to %d entries or %d bytes per entry; the stored list is incomplete — shorten it, or move detail into the decision's rationale context.", memory.MaxAlternatives, memory.MaxTitleLen)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -3961,7 +4056,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", args.MemoryID))
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.RefusalArg("project_id", args.ProjectID))
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", args.MemoryID), memory.RefusalArg("project_id", args.ProjectID))
 		}
 
 		if err := s.store.TogglePinInProject(ctx, resolvedProjectID, args.MemoryID, args.Pinned); err != nil {
@@ -4073,6 +4168,12 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// An unresolved name is refused, as `ghost_task_create` refuses it: listing
+		// `project_id = ''` answered a misspelt project with the sentence a real
+		// empty project gets, and an agent told so may re-create what exists.
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 
@@ -4265,6 +4366,11 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -4317,6 +4423,11 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// Refused for the reason the matching list tool refuses it: the empty
+		// sentence below would describe a project that does not exist.
+		if projectID == "" {
+			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+		}
 
 		var sb strings.Builder
 		sb.WriteString("## Open Tasks\n\n")
@@ -4325,7 +4436,7 @@ func (s *Server) registerResources() {
 		for _, status := range []string{"active", "blocked", "pending"} {
 			tasks, err := s.store.ListTasks(ctx, projectID, status, 15)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("list tasks for %s: %w", memory.RefusalArg("project_id", projectID), err)
 			}
 			for _, t := range tasks {
 				// The explainer goes in with the first row and only there: this is
