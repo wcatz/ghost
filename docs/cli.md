@@ -243,6 +243,8 @@ Every input id appears in exactly one line or one count, and every count is a co
 
 The `Applied:` line states how many rows the replace removed (`Applied: 0 memories consolidated, 2 removed`) whenever that count is non-zero, and says nothing about removal otherwise. A round whose every emission the concurrent-edit guard refused can still delete the rows nothing claimed, and the count is what tells the operator so; the restore hint follows on the next line.
 
+Two refusals are reported apart, because they ask opposite things of the next run. An emission the **concurrent-edit guard** refused claimed a memory that changed or was deleted while the harness was answering, so that memory is still live and still needs consolidating: the note says so and records no skip fingerprint, so `--skip-unchanged` re-merges it. An emission dropped because it **folded more decision links than one `source_ref` can carry** is a property of the corpus, not of the window — every merged memory stays live and linked to its own decision, and re-proposing the same merge would overflow again for the same reason. That one gets its own line (how many links, and the 512-byte bound) and does **not** block the fingerprint, so a later `--skip-unchanged` skips the project rather than paying for the same refusal on every round. A merge that overflows has to be split, or the memory recorded by hand.
+
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 
 

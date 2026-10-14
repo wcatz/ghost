@@ -1519,7 +1519,15 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
 	}
-	droppedTotal := droppedProject + droppedGlobal
+	// The store's refusals split by reason, and every report below reads one of
+	// the two separately. A drop the corpus guard made claims a row that moved,
+	// so the report names that row and suppresses the skip fingerprint; an
+	// overflow drop is a merge whose decision links do not fit in a source_ref,
+	// which no later run can write either — the report names the links and the
+	// bound, and the round is still allowed to record its fingerprint (#1228).
+	droppedTotal := droppedProject.Changed + droppedGlobal.Changed
+	overflowedTotal := droppedProject.Overflow + droppedGlobal.Overflow
+	overflowedLinks := droppedProject.OverflowLinks + droppedGlobal.OverflowLinks
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
@@ -1556,10 +1564,14 @@ func runReflect() {
 	// output are untouched in every case that already existed; the only
 	// behaviour this adds is in the !applied case, which did not exist before.
 	if !applied {
-		if droppedTotal == 0 {
+		switch {
+		case overflowedTotal > 0 && droppedTotal == 0:
+			fmt.Printf("Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", overflowedLinks, memory.MaxSourceRefLen)
+			fmt.Println("  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
+		case droppedTotal == 0:
 			fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
 			fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
-		} else {
+		default:
 			fmt.Println("Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
 			fmt.Println("  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
 		}
@@ -1596,7 +1608,7 @@ func runReflect() {
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
 	if summary, wrote := writeAppliedReport(os.Stdout, applied, parsed.promoteGlobals, appliedByCategory,
-		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal, deleted); wrote {
+		keptProjectMems, keptGlobalMems, keptMems, projectForSummary, promoted, droppedGlobal.Total(), deleted); wrote {
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
@@ -1613,12 +1625,29 @@ func runReflect() {
 		}
 	}
 
+	// An overflow drop is reported on its own terms and before the branches
+	// below, because it is neither of the two things they are about: no
+	// credential was held, and no row changed underneath the pass — the merge
+	// simply stood for more decision links than one source_ref can carry. It is
+	// also the one refusal a later run cannot act on, which is what the chain
+	// below has to notice: re-proposing that merge re-produces the same overflow,
+	// so this round stays recordable rather than held open forever (#1228).
+	if overflowedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d emission(s) stood for %d decision link(s) whose joined source_ref would exceed the %d-byte bound, and were dropped with every merged memory left live; the same merge would overflow again, so split it\n", overflowedTotal, overflowedLinks, memory.MaxSourceRefLen)
+	}
+
 	// A save that raced the LLM round trip is preserved untouched by
 	// ReplaceNonManual and is merged by the NEXT reflection. Recording a
 	// fingerprint over the post-apply corpus would absorb that survivor and make
 	// --skip-unchanged skip the merge, so record nothing when one happened; the
 	// next run re-consolidates and merges it.
-	if !applied {
+	//
+	// `!applied && overflowedTotal == 0` rather than plain `!applied`: an
+	// overflow-only round wrote nothing either, but nothing there is waiting to
+	// be consolidated — the merged memories are all live and unchanged, and the
+	// proposal that would have folded them cannot be written at all. Holding it
+	// open is what re-proposed and dropped the same merge on every later run.
+	if !applied && overflowedTotal == 0 {
 		// Not "no preserved survivors" — nothing at all was replaced, so the
 		// corpus still holds whatever it held. Recording a fingerprint over an
 		// unchanged corpus is what would make --skip-unchanged skip this project
