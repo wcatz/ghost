@@ -3683,6 +3683,25 @@ type UpsertOptions struct {
 	// memory's durable tier to its own would be scheduling that memory for
 	// deletion on the strength of a near-duplicate.
 	Retention string
+
+	// SkipExactContent makes the save write nothing when the project already
+	// holds a row whose content is byte-identical to the incoming text. The
+	// skip is reported as an empty id with duplicateOf naming the row that
+	// was found; every save that writes returns a non-empty id, so the two
+	// cannot be confused. Anything else — including a near-duplicate — takes
+	// the ordinary path: folded and linked, or inserted.
+	//
+	// It is the first step inside the write transaction, not a read the
+	// caller makes beforehand, because it is a read whose answer decides
+	// whether a write happens. Read on the pool, the window between the read
+	// and the write belongs to any other handle: two first-contact Claude
+	// imports both read an empty project and both stored every file, each one
+	// twice. Inside the transaction (BEGIN IMMEDIATE, so the write lock is
+	// held from before the lookup), the second writer waits and then finds the
+	// first one's row. Only the Claude auto-memory import sets it; the lookup
+	// is scoped to the project and ignores category, scope and resolved
+	// state, which is the same set the import's pre-read (GetAll) covers.
+	SkipExactContent bool
 }
 
 // mergeRetention resolves a fold's two tiers into the one the surviving row
@@ -4030,6 +4049,23 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	}
 
 	var existingID string
+
+	// The exact-content skip, when the caller asked for it, comes before the
+	// duplicate lookups and inside the same transaction as them and as the
+	// writes they decide on (see UpsertOptions.SkipExactContent). A hit returns
+	// with nothing written: the deferred Rollback ends the transaction, and no
+	// history, evidence or onSave follows, because there is no new row.
+	if opts.SkipExactContent {
+		var present string
+		switch qerr := db.QueryRowContext(ctx, `
+			SELECT id FROM memories WHERE project_id = ? AND content = ? LIMIT 1
+		`, projectID, content).Scan(&present); {
+		case qerr == nil:
+			return "", present, 0, nil
+		case !errors.Is(qerr, sql.ErrNoRows):
+			return "", "", 0, fmt.Errorf("look up exact content: %w", qerr)
+		}
+	}
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
 	// the first 30 words retrieves merge candidates cheaply. Stage 2
