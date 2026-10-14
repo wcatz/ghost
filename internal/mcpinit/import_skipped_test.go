@@ -41,10 +41,25 @@ func TestImportMemoriesNamesARefusedFileOnce(t *testing.T) {
 	}
 
 	fakeHome := filepath.Join(root, "home")
-	t.Setenv("HOME", fakeHome)
+	// setHome moves HOME and USERPROFILE together; setting HOME alone leaves
+	// os.UserHomeDir on the runner's real profile on Windows, where the import
+	// then looks outside this fixture.
+	setHome(t, fakeHome)
 	t.Setenv("XDG_DATA_HOME", dataHome)
-	memDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
-	mkdirAll(t, memDir)
+
+	// Plant the file in the directory the importer ITSELF resolves, created with
+	// filepath.Join so the separators are this host's, and take the path back
+	// from ClaudeMemoryDir — the function importMemories uses — rather than a
+	// hand-built string that could drift from it.
+	plantedDir := filepath.Join(fakeHome, ".claude", "projects", claudeimport.EncodeProjectPath(projPath), "memory")
+	mkdirAll(t, plantedDir)
+	memDir := claudeimport.ClaudeMemoryDir(projPath)
+	if memDir == "" {
+		t.Fatalf("ClaudeMemoryDir(%q) is empty; home is %q", projPath, fakeHome)
+	}
+	if memDir != plantedDir {
+		t.Fatalf("ClaudeMemoryDir(%q) = %q, want %q", projPath, memDir, plantedDir)
+	}
 	const refusedName = "refused-note.md"
 	const refusedText = "The service account value is ghp_0123456789abcdefghijklmnopqrstuvwxyzAB for CI"
 	if err := os.WriteFile(filepath.Join(memDir, refusedName), []byte("Imported from a hostile file.\n\n"+refusedText), 0o600); err != nil {
