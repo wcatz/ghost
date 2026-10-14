@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/config"
@@ -1297,17 +1298,36 @@ func marshalCodexJSON(v any) string {
 }
 
 // codexIsGhostHookAction reports whether cmd is the command ghost itself
-// renders for one event: the ghost binary — any path, any quoting — running
-// `hook <eventToken>`. Only such an action is ghost's to rewrite. A rule
-// running some other ghost subcommand, or ghost's hook for a different event,
-// belongs to the user and is left alone.
-func codexIsGhostHookAction(cmd, eventToken string) bool {
+// renders for this event: the binary it bakes — any name, any path, any
+// quoting — running `hook <eventToken>`. The basename rule also recognises a
+// binary named "ghost" (or its native .exe / .bat/.cmd launcher forms) under
+// any path, so an install made by a differently named binary still repairs an
+// older ghost-named rule in place. Only such an action is ghost's to rewrite.
+// A rule running some other binary, some other ghost subcommand, or ghost's
+// hook for a different event, belongs to the user and is left alone.
+func codexIsGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	bin, rest, ok := splitHookCommand(cmd)
-	if !ok || !isGhostBinaryName(bin) {
+	if !ok || (!isGhostBinaryName(bin) && !isBakedGhostBinary(bin, ghostBin)) {
 		return false
 	}
 	fields := strings.Fields(rest)
 	return len(fields) >= 2 && fields[0] == "hook" && fields[1] == eventToken
+}
+
+// isBakedGhostBinary reports whether bin is the path this merge renders for
+// ghost, so the rule ghost itself just wrote is recognised as its own (#1249).
+// Without it a binary baked under any other name — /g, a renamed .exe, a
+// .bat/.cmd shim — was invisible to the merge, which appended it again on
+// every pass and never reached a fixed point. The compare is case-insensitive
+// on Windows, where a path's spelling carries no meaning.
+func isBakedGhostBinary(bin, ghostBin string) bool {
+	if ghostBin == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(bin, ghostBin)
+	}
+	return bin == ghostBin
 }
 
 // codexObject is one JSON object decoded in document order. A Go map decodes
@@ -1451,12 +1471,16 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // A rule that carries ghost's own hook action is repaired IN PLACE, one action
 // at a time: ghost's own action is rewritten to what ghost renders for that
 // event, and every other key of that action, the user's other actions and the
-// rule's matcher are the user's and are left where they are. Ghost owns exactly
-// one action per event, so a second copy of it is pruned rather than left to
-// fire twice, and a rule whose every action was such a copy disappears with
-// them. Ghost's canonical rule is appended only when no rule holds its action
-// at all. The result is deterministically rendered, so feeding the output back
-// through this function is a byte-level no-op.
+// rule's matcher are the user's and are left where they are. An action is
+// ghost's own when it runs the binary this call bakes — whatever that binary
+// is named — or one named "ghost" under the launcher extensions, so the rule
+// ghost itself wrote is recognised as its own even under a renamed or shimmed
+// path (#1249). Ghost owns exactly one action per event, so a second copy of
+// it is pruned rather than left to fire twice, and a rule whose every action
+// was such a copy disappears with them. Ghost's canonical rule is appended
+// only when no rule holds its action at all. The result is deterministically
+// rendered, so feeding the output back through this function is a byte-level
+// no-op for every accepted input and every path.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(existing, &top); err != nil {
@@ -1552,7 +1576,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			cmd, ok := codexActionCommand(actionObj)
-			if !ok || !codexIsGhostHookAction(cmd, eventToken) {
+			if !ok || !codexIsGhostHookAction(cmd, eventToken, ghostBin) {
 				kept = append(kept, action)
 				continue
 			}

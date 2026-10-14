@@ -71,7 +71,7 @@ ghost mcp init --client goose
 ghost mcp init --client all
 ```
 
-`--client all` attempts every supported installer, so each target client must be installed. `ghost mcp init` is idempotent and non-destructive. Re-running it repairs missing or outdated wiring.
+`--client all` attempts every supported installer, so each target client must be installed. `ghost mcp init` is idempotent and non-destructive. Re-running it repairs missing or outdated wiring, and a merge of its own earlier output is a byte-level no-op whatever name the binary carries.
 
 ### Claude Code
 
