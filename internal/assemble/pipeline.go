@@ -1092,7 +1092,7 @@ func runLegConsensus(p *pipeline) {
 		p.trace.record(stageLegConsensus, in, in, nil)
 		return
 	}
-	ftsLive, vecLive := true, true
+	var ftsLive, vecLive bool
 	if p.set != nil && p.set.Legs != nil {
 		fs, ok := p.set.Legs["fts"]
 		ftsLive = ok && fs.Applicable && fs.Available
@@ -1144,9 +1144,6 @@ func runLegConsensus(p *pipeline) {
 	p.rows, p.items = keptRows, keptItems
 	p.trace.record(stageLegConsensus, in, len(keptRows), dropped)
 }
-
-// Alias for any entry point a companion test might expect.
-var runConsensus = runLegConsensus
 
 // runCutoff is stage 8, on QUERY-mode requests only: the relative relevance
 // cutoff (#954).

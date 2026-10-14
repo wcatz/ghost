@@ -194,10 +194,6 @@ const (
 	// gated on p.passive and on both retrieval legs being live.
 	stageLegConsensus = "leg_consensus"
 	// Aliases for any stage-name identifier a companion test might reference.
-	stageConsensus        = stageLegConsensus
-	stageSingleLeg        = stageLegConsensus
-	stageLegTop           = stageLegConsensus
-	stageLegConsensusNote = stageLegConsensus
 
 	// stageCutoff is the relative-to-top relevance cutoff (#954), a query-mode
 	// reduction that runs between diversity and the budget. It is the query-mode
