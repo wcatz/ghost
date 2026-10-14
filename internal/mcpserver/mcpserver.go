@@ -2639,12 +2639,9 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, skippedFiles)
 		if err != nil {
 			return nil, nil, err
-		}
-		if len(skippedFiles) > 0 {
-			text += "\n\nClaude memory import skipped files (token-shaped): " + strings.Join(skippedFiles, ", ")
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},

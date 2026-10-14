@@ -846,7 +846,7 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 // New side effects. The handler resolves the name and handles as_of and the
 // unregistered name before it gets here; `asked` is the name as the caller wrote
 // it, which the not-registered sentence has to quote.
-func (s *Server) projectContextBlock(ctx context.Context, projectID, asked string, limit int) (string, error) {
+func (s *Server) projectContextBlock(ctx context.Context, projectID, asked string, limit int, skippedFiles []string) (string, error) {
 	// The block is built as RESPONSE PARTS, not straight into a builder (#1039):
 	// the memory rows are cuttable, every heading, count line and learned summary
 	// is framing, so fitting the answer to the response byte budget drops whole
@@ -952,6 +952,9 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 			text = "Project lookup failed — unable to determine whether it is registered. Try again or call ghost_memory_save to create it."
 		case exists:
 			text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
+			if len(skippedFiles) > 0 {
+				text += "\n\nClaude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
+			}
 		default:
 			text = projectNotRegistered(asked)
 		}
@@ -977,6 +980,10 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		parts = append(parts, responsePart{text: "\n\n" + note})
 	}
 
+	if len(skippedFiles) > 0 {
+		msg := "Claude memory import skipped files (token-shaped): " + renderSkippedImportFiles(skippedFiles)
+		parts = append(parts, responsePart{text: "\n\n" + msg})
+	}
 	// The response byte budget (#1039): fit the whole block by cutting whole
 	// memory rows from the end, framing (headings, the learned summary, the
 	// cross-project note) counted but never cut.
@@ -1004,7 +1011,7 @@ func (s *Server) now() time.Time {
 // block is built, and so does a caller of this.
 func ProjectContextAt(ctx context.Context, store provider.MemoryStore, projectID string, limit int, now time.Time) (string, error) {
 	s := newMeasuredServer(store, now)
-	return s.projectContextBlock(ctx, projectID, projectID, limit)
+	return s.projectContextBlock(ctx, projectID, projectID, limit, nil)
 }
 
 // ProjectResourceAt is ProjectContextAt for the `ghost://project/{id}/context`
@@ -1023,4 +1030,19 @@ func newMeasuredServer(store provider.MemoryStore, now time.Time) *Server {
 		searchMaxBytes: searchResponseMaxBytes,
 		clock:          func() time.Time { return now },
 	}
+}
+
+func renderSkippedImportFiles(skipped []string) string {
+	const maxNames = 10
+	names := skipped
+	more := 0
+	if len(names) > maxNames {
+		more = len(names) - maxNames
+		names = names[:maxNames]
+	}
+	out := strings.Join(names, ", ")
+	if more > 0 {
+		out += fmt.Sprintf(" (+%d more)", more)
+	}
+	return out
 }
