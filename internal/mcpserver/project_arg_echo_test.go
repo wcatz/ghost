@@ -146,13 +146,6 @@ var projectResolvingSurfaces = []struct {
 	// resolving it, so the ambiguity shapes — which need a resolver to be ambiguous
 	// — skip it.
 	neverResolves bool
-	// silentWhenUnknown marks a surface whose answer for a project Ghost has never
-	// heard of is an ordinary empty result rather than a sentence about the project.
-	// `ghost_memory_search` reports "nothing found" and never mentions the
-	// argument, so there is nothing there to withhold and nothing to name: the
-	// unknown-project shape asserts only that nothing is echoed on it, which is
-	// the whole of what is true.
-	silentWhenUnknown bool
 	// storeRefusal marks a surface whose unknown-project sentence is built by the
 	// STORE rather than by the handler, so the field name the handler knows is not
 	// available to it and the refusal must carry the neutral label instead. Only
@@ -161,8 +154,7 @@ var projectResolvingSurfaces = []struct {
 }{
 	{
 		name: "ghost_memory_search", argKey: "project_id", argName: "project_id",
-		read:              toolReader("ghost_memory_search", "project_id", map[string]any{"query": "anything"}),
-		silentWhenUnknown: true,
+		read: toolReader("ghost_memory_search", "project_id", map[string]any{"query": "anything"}),
 	},
 	{
 		name: "ghost_project_context", argKey: "project_id", argName: "project_id",
@@ -408,15 +400,6 @@ func TestACredentialShapedProjectIDIsNeverEchoedBackByAResolvingSurface(t *testi
 					// merely looks different once escaped is still the value.
 					if logged := logs.String(); logged != "" {
 						assertNoCredentialEcho(t, surface.name+" (log)", argument, logged)
-					}
-
-					// A surface that reports an ordinary empty result for a project
-					// it has never heard of says nothing about the argument at all —
-					// it never quoted it, so there is nothing to withhold and nothing
-					// to name. That is the whole of what is true on it, and the
-					// echo assertion above is the whole of what can be checked.
-					if surface.silentWhenUnknown && !shape.needsPlanting {
-						return
 					}
 
 					// The FORMAT is named, which is what makes the refusal
