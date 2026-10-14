@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/json"
 
 	"os"
 	"path/filepath"
@@ -513,5 +514,45 @@ func TestVerifyOpencodeRegistration_V2SkipsMcpList(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "could not verify") || strings.Contains(out.String(), "not listed") {
 		t.Errorf("V2 must not report a false registration failure, got:\n%s", out.String())
+	}
+}
+
+// TestRenderedOpencodePluginPathIsAJSLiteral pins that the baked binary path
+// is a proper string literal: a quote, backslash or newline in the path must
+// neither break the plugin nor inject code, and an ordinary path renders as
+// the plain quoted string it always did.
+func TestRenderedOpencodePluginPathIsAJSLiteral(t *testing.T) {
+	const prefix = "const GHOST_BIN_DEFAULT = "
+	paths := []string{
+		`/usr/local/bin/ghost`,
+		`/opt/a"b/ghost`,
+		`/opt/a\b/ghost`,
+		`/opt/it's/ghost`,
+		"/opt/a\nb/ghost",
+		`/opt/x"; process.exit(1); //`,
+		"/opt/a b c/ghost",
+		`/opt/a&b<c>/ghost`,
+	}
+	for _, p := range paths {
+		out := renderOpencodeGhostPlugin(p)
+		_, rest, ok := strings.Cut(out, prefix)
+		if !ok {
+			t.Fatalf("%q: rendered plugin has no %q line", p, prefix)
+		}
+		line, _, _ := strings.Cut(rest, "\n")
+		var got string
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Errorf("%q: rendered constant %q is not a string literal: %v", p, line, err)
+			continue
+		}
+		if got != p {
+			t.Errorf("%q: constant decodes to %q", p, got)
+		}
+		if strings.Contains(out, ghostBinPlaceholder) {
+			t.Errorf("%q: placeholder left in rendered plugin", p)
+		}
+	}
+	if got := renderOpencodeGhostPlugin("/usr/local/bin/ghost"); !strings.Contains(got, prefix+`"/usr/local/bin/ghost"`+"\n") {
+		t.Errorf("ordinary path is not rendered as the plain quoted string")
 	}
 }
