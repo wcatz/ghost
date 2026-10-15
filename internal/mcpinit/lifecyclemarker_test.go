@@ -311,6 +311,48 @@ func TestSessionStart_EmitsFreshLifecycleFailureAlert(t *testing.T) {
 	}
 }
 
+// TestRenderSessionContextCarriesTheHookMaintenanceAlert pins parity for the
+// maintenance notification across the two session-start surfaces. The
+// SessionStart hook prints the alert ahead of the block; the host that cannot
+// consume that stdout injection is served by the block this renderer returns,
+// so it has to lead with the same alert line and then the block. The
+// historical render is a question about the past, so it must keep omitting the
+// present's paused consolidation.
+func TestRenderSessionContextCarriesTheHookMaintenanceAlert(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project:      "p1",
+		PhasesFailed: []string{"reflect"},
+		Error:        "no CLI LLM backend available; reflect skipped",
+		At:           at,
+		Version:      1,
+	})
+
+	hookFirst, hookOut := alertFirstLine(t, projDir)
+	if !strings.HasPrefix(hookFirst, "**Ghost maintenance alert:**") {
+		t.Fatalf("the hook emitted no alert, so there is nothing to compare:\n%s", hookOut)
+	}
+
+	block := RenderSessionContext(projDir)
+	blockFirst, _, _ := strings.Cut(block, "\n")
+	if blockFirst != hookFirst {
+		t.Errorf("the rendered block must lead with the hook's alert line\n got: %s\nwant: %s", blockFirst, hookFirst)
+	}
+	if !strings.Contains(block, "## Ghost context: myproj") {
+		t.Errorf("the context block must still follow the alert; got:\n%s", block)
+	}
+
+	instant := time.Now().UTC()
+	if hist := RenderSessionContextAt(projDir, &instant); strings.Contains(hist, "Ghost maintenance alert") {
+		t.Errorf("a historical render must omit the present's maintenance alert; got:\n%s", hist)
+	}
+}
+
 // TestSessionStart_NoMarkerStdoutByteIdentical pins byte-identical stdout
 // when no marker exists: the session-start output must equal this golden
 // exactly (this test passes on unmodified main, which is what makes it a

@@ -101,3 +101,20 @@ func TestResolveSessionProject(t *testing.T) {
 		}
 	})
 }
+
+// TestIsFilesystemRoot pins the volume-root rule on the running platform: the
+// root of the current volume is a root and a nested path is not. The Windows
+// drive and share roots that motivated the rule are in the windows-only test,
+// because only a Windows build can produce one.
+func TestIsFilesystemRoot(t *testing.T) {
+	root := string(os.PathSeparator)
+	if !isFilesystemRoot(root) {
+		t.Fatalf("isFilesystemRoot(%q) = false, want true", root)
+	}
+	if isFilesystemRoot(filepath.Join(root, "home", "u")) {
+		t.Fatalf("isFilesystemRoot(nested path) = true, want false")
+	}
+	if isFilesystemRoot("") {
+		t.Fatalf(`isFilesystemRoot("") = true, want false`)
+	}
+}

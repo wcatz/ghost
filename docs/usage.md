@@ -123,7 +123,9 @@ axes that decide eligibility:
   candidate at all, so the payload has no row for it — but a query whose matches
   all retired is still answered `empty reason=all_invalid` ("withheld as out of
   date"), not `no_candidates`, because each leg reports how many it withheld
-  (keyword, semantic-only and hybrid alike).
+  (keyword, semantic-only and hybrid alike) — including on a machine with no
+  embedder, where the reason stays `all_invalid` and the vector leg's `not_run`
+  state is reported on the machine line instead.
   `validity_penalty` stays `0`.
 - `confidence` — the stored provenance confidence, reported so you can see it was
   not used.
@@ -275,6 +277,8 @@ ghost import ghost-export.jsonl --apply --trust-provenance
 ```
 
 The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"`, unpinned and set to the durable `project` tier whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules, and cannot plant a keep-forever tier no lifecycle pass may take back — pass the flag when the artifact is your own export.
+
+An export carries no memory history, so `ghost history <memory-id>` on a restored memory shows only the row the import wrote, whatever the source store held. `ghost backup` is the copy that keeps the versions, and the artifact's omissions are listed under [Backup, export and import](cli.md#backup-export-and-import).
 
 Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 

@@ -150,3 +150,13 @@ func logAtOrOverCap(path string, probe func(string) (os.FileInfo, error)) bool {
 	info, err := probe(path)
 	return err == nil && info.Mode().IsRegular() && info.Size() >= logRotateCap
 }
+
+// LogRotateCap is logRotateCap for a caller outside this package.
+const LogRotateCap = logRotateCap
+
+// OpenLogForAppend is openLogForAppend for a caller outside this package: the
+// MCP server's GHOST_LOG_FILE redirect names an arbitrary path rather than a
+// data-dir file, and takes the same cap, single ".1" copy and 0600 create.
+func OpenLogForAppend(path string) (*os.File, error) {
+	return openLogForAppend(path)
+}

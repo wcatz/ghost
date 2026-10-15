@@ -114,6 +114,54 @@ func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
 	}
 }
 
+// TestParseObsidianFlagsRefusesAnEmptyInterval: --interval is the cadence half
+// of the same rule as --out, and an explicit empty value is the unset-variable
+// spelling rather than "no flag given". The parser returned "" for it, and
+// runObsidian reads "" as "use obsidian.interval" (30s by default), so
+// `ghost obsidian sync --interval "$INTERVAL"` with INTERVAL unset polled at a
+// cadence nobody chose and exited 0. The default is the flag left off.
+func TestParseObsidianFlagsRefusesAnEmptyInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"attached empty", []string{"--interval="}},
+		{"separate empty", []string{"--interval", ""}},
+		{"attached empty after a valid flag", []string{"--out", "/v", "--interval="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, interval, err := parseObsidianFlags(tc.args)
+			if err == nil {
+				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --interval must be refused, not read as the default cadence", tc.args, interval)
+			}
+			if err.Error() != "--interval requires a value" {
+				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--interval requires a value")
+			}
+		})
+	}
+
+	// The duplicate is asked FIRST, as for --out: a cadence followed by an
+	// empty one is "given twice" naming both, not a complaint about an empty
+	// value the reader could not have meant.
+	if _, _, _, err := parseObsidianFlags([]string{"--interval", "5m", "--interval="}); err == nil {
+		t.Fatal("a cadence followed by an empty one must be refused")
+	} else if !strings.Contains(err.Error(), "was given twice") {
+		t.Errorf("error = %q, want the duplicate refusal naming both values", err)
+	}
+
+	// Positive controls: a value still parses in both spellings, and an absent
+	// --interval is not an error and leaves interval empty for the default to
+	// fill.
+	for _, args := range [][]string{{"--interval", "30s"}, {"--interval=30s"}} {
+		if _, _, interval, err := parseObsidianFlags(args); err != nil || interval != "30s" {
+			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want 30s", args, interval, err)
+		}
+	}
+	if _, _, interval, err := parseObsidianFlags([]string{"--out=/v"}); err != nil || interval != "" {
+		t.Errorf("absent --interval = %q (err %v), want empty and no error", interval, err)
+	}
+}
+
 // TestParseMCPClient verifies --client parsing rejects a missing or empty
 // value (which previously silently fell back to Claude) and accepts both
 // "--client NAME" and "--client=NAME" forms.
@@ -879,6 +927,110 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 			t.Errorf("merge %q -> %q: expected _global refusal, got: %v", tc.oldArg, tc.newArg, err)
 		}
 	}
+}
+
+// TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs: merge resolves both of
+// its arguments and then names the STORED ids it resolved, not the operands it
+// was handed. A stored id is not automatically safe: the bound-free import
+// predicate accepts an artifact's project id verbatim (it refuses a control
+// character, a backtick and a delimiter, and never asks the token guard), so a
+// store can hold an id the guard recognises and ResolveProject hands it back.
+// The self-merge refusal and the `Merging …` line that precedes the write
+// therefore render each id through memory.RefusalArg under the neutral
+// memory.ProjectIdentifierLabel — the renderer the not-found refusals beside
+// them and the store's _global guard already use.
+//
+// The ordinary case rides in the same test on purpose: RefusalArg is exactly %q
+// for a value the guard does not recognise, so a renderer that withheld
+// everything would keep the token out AND stop naming the project it merged.
+// It also pins what the change did to the ordinary output: the self-merge
+// refusal already quoted the id with %q and is byte-identical, while the
+// `Merging …` line printed each id bare and now quotes it.
+func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
+	const key = "AKIAIOSFODNN7EXAMPLE" // an AWS access key ID, per internal/secret
+	newStore := func(t *testing.T) *memory.Store {
+		t.Helper()
+		db, err := memory.OpenDB(":memory:")
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		s := memory.NewStore(db, logger)
+		if err := s.EnsureProject(context.Background(), key, "/tmp/tok", "token-name"); err != nil {
+			t.Fatalf("EnsureProject token: %v", err)
+		}
+		if err := s.EnsureProject(context.Background(), "old-proj", "/tmp/old", "old-name"); err != nil {
+			t.Fatalf("EnsureProject old: %v", err)
+		}
+		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
+			t.Fatalf("EnsureProject new: %v", err)
+		}
+		return s
+	}
+
+	t.Run("the self-merge refusal withholds the stored id", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, key, key)
+		if err == nil {
+			t.Fatal("merging a project into itself was accepted")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, key) {
+			t.Errorf("the refusal quotes the stored id:\n%s", msg)
+		}
+		if !strings.Contains(msg, "itself") {
+			t.Errorf("the refusal no longer names the self-merge:\n%s", msg)
+		}
+		if !strings.Contains(msg, "<"+memory.ProjectIdentifierLabel+" withheld") {
+			t.Errorf("the refusal does not say what was withheld:\n%s", msg)
+		}
+	})
+
+	t.Run("the merging line withholds the stored id", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		if err := runProjectMergeCore(context.Background(), store, &out, key, "new-name"); err != nil {
+			t.Fatalf("runProjectMergeCore: %v", err)
+		}
+		line := out.String()
+		if strings.Contains(line, key) {
+			t.Errorf("the merging line quotes the stored id:\n%s", line)
+		}
+		if !strings.Contains(line, "<"+memory.ProjectIdentifierLabel+" withheld") {
+			t.Errorf("the merging line does not say what was withheld:\n%s", line)
+		}
+		if !strings.Contains(line, `"new-proj"`) {
+			t.Errorf("the merging line stopped naming the survivor:\n%s", line)
+		}
+	})
+
+	t.Run("the merging line quotes an ordinary id, where it used to print it bare", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		if err := runProjectMergeCore(context.Background(), store, &out, "old-name", "new-name"); err != nil {
+			t.Fatalf("runProjectMergeCore: %v", err)
+		}
+		want := "Merging \"old-name\" (\"old-proj\") into \"new-name\" (\"new-proj\")\n" +
+			"merged: all records from \"old-name\" now belong to \"new-name\"\n"
+		if got := out.String(); got != want {
+			t.Errorf("output = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("an ordinary stored id is still named verbatim", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, "new-name", "new-proj")
+		if err == nil {
+			t.Fatal("merging a project into itself was accepted")
+		}
+		want := `refusing to merge a project into itself ("new-proj")`
+		if err.Error() != want {
+			t.Errorf("refusal = %q, want %q", err.Error(), want)
+		}
+	})
 }
 
 // TestLifecyclePhasesOrder pins the ordering contract that the single-process

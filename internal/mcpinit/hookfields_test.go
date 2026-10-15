@@ -69,13 +69,13 @@ func runClaudeHookInit(t *testing.T, path, ghostBin string) string {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := ensureHook(&out, sf, ghostBin); err != nil {
+	if err := ensureHook(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureStopHook(&out, sf, ghostBin); err != nil {
+	if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureWorkingMomentHooks(&out, sf, ghostBin); err != nil {
+	if err := ensureWorkingMomentHooks(&out, sf, ghostBin, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := sf.save(); err != nil {
@@ -130,7 +130,7 @@ func TestUserHookFieldsSurviveInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code") || !contractHookWired(sf, "PostToolUse", "edit", "claude-code") {
+	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code", ghostBin) || !contractHookWired(sf, "PostToolUse", "edit", "claude-code", ghostBin) {
 		t.Error("working-moment hooks were not wired")
 	}
 	if len(after["UserPromptSubmit"]) != 2 || len(after["PostToolUse"]) != 2 {

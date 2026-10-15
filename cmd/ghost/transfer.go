@@ -1247,10 +1247,16 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	// said "provenance kept as exported" would be a sentence about a field the
 	// record does not have — so the two provenance arms are gated on the type
 	// rather than on the action alone.
+	//
+	// The downgrade note and the cut note are built INDEPENDENTLY rather than as
+	// cases of one switch: a record can be both, and the common restore path —
+	// no --trust-provenance, so every memory is downgraded — is exactly the one
+	// whose over-long bodies used to be shortened with no note at all, because
+	// the downgrade case won the switch and the cut case never ran (#1275). The
+	// order is fixed: the downgrade clause first, then the cut.
 	isCreate := r.Action == portable.ActionCreate
 	isMemory := r.Type == portable.TypeMemory
-	switch {
-	case isCreate && isMemory && r.Downgraded:
+	if isCreate && isMemory && r.Downgraded {
 		// The provenance rewrite is the one thing about the record that is not
 		// visible afterwards: the stored source is the downgraded one, so the
 		// artifact's own value is gone from the store entirely. It is said here
@@ -1258,7 +1264,8 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// a keep-forever tier a file planted is one no pass can take back — so
 		// the line names both.
 		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
-	case isCreate && len(r.Clamped) > 0:
+	}
+	if isCreate && len(r.Clamped) > 0 {
 		// A clamp is the other thing a reader cannot see in the file afterwards,
 		// because the stored text is the cut version — and for a title, or for
 		// the alternatives past the twentieth, the row carries no marker at all,
@@ -1267,7 +1274,11 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 		// the artifact, and the cut field may be the one carrying a value that
 		// must not be echoed back.
 		detail = strings.TrimSpace(detail) + " …(truncated at the cap: " + strings.Join(r.Clamped, ", ") + ")"
-	case isCreate && isMemory:
+	}
+	// "Kept as exported" is stated only when neither rewrite happened: a
+	// downgrade or a cut has just said what became of the artifact's own value,
+	// and claiming it was kept beside either would contradict it.
+	if isCreate && isMemory && !r.Downgraded && len(r.Clamped) == 0 {
 		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
 	}
 	switch {

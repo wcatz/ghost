@@ -560,7 +560,10 @@ func TestSearchExplainSharesTheResponseCap(t *testing.T) {
 	if len(full) != 3 {
 		t.Fatalf("precondition: uncapped answer lists %d rows, want 3", len(full))
 	}
-	srv.searchMaxBytes = 900
+	// The cap must clear one row AND the cut notice a trim now adds, and still be
+	// too small for two: 900 cleared neither row once the notice was counted, so
+	// the answer went empty and there was no cut to explain.
+	srv.searchMaxBytes = 1200
 	capped := listingIDs(t, session, "capped corpus", nil)
 	if len(capped) == 0 || len(capped) >= 3 {
 		t.Fatalf("precondition: the cap left %d of 3 rows, want a cut", len(capped))

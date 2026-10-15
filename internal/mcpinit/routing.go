@@ -37,10 +37,10 @@ func defaultProjectForSessions() string {
 	return config.LoadForHook().Routing.DefaultProject
 }
 
-// isHomeOrRoot reports whether cwd is the user's home directory or the
-// filesystem root — the two cwds that mean "not really working in a project".
+// isHomeOrRoot reports whether cwd is the user's home directory or the root of
+// its filesystem — the two cwds that mean "not really working in a project".
 func isHomeOrRoot(cwd string) bool {
-	if cwd == "/" {
+	if isFilesystemRoot(cwd) {
 		return true
 	}
 	home, err := os.UserHomeDir()
@@ -61,4 +61,13 @@ func isHomeOrRoot(cwd string) bool {
 		return false
 	}
 	return evalCwd == evalHome
+}
+
+// isFilesystemRoot reports whether cwd is the root of its volume: "/" on POSIX,
+// and a drive root ("C:\", "D:\") or a network share root ("\\server\share\")
+// on Windows. A Windows root can never equal the literal "/", so comparing
+// against only that left a root session unrouted there (#1299).
+func isFilesystemRoot(cwd string) bool {
+	root := filepath.VolumeName(cwd) + string(os.PathSeparator)
+	return filepath.Clean(cwd) == filepath.Clean(root)
 }

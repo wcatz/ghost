@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // writeTranscript writes lines to a temp transcript file and returns its path.
@@ -222,6 +223,110 @@ func TestRunStop_NeverSweepsForeignPaths(t *testing.T) {
 	}
 }
 
+// unsetEnvForTest removes key from the environment for the rest of the test and
+// restores it afterwards. Unlike t.Setenv(key, "") it models a runtime that does
+// not see the variable at all.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	if old, ok := os.LookupEnv(key); ok {
+		t.Setenv(key, old)
+		_ = os.Unsetenv(key)
+	}
+}
+
+// sweepableGhostDir materialises an opencode-materialized transcript under a
+// fresh `ghost-*` directory inside base and returns that directory. base stands
+// in for the temp directory the test wants the hook to recognise as the host's.
+func sweepableGhostDir(t *testing.T, base, name string) string {
+	t.Helper()
+	dir := filepath.Join(base, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create ghost session dir: %v", err)
+	}
+	path := filepath.Join(dir, "messages.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{lineUser, ocLineBashTool()}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	return dir
+}
+
+// sweepViaStopHook drives one opencode stop through the hook for transcriptPath,
+// which is how the sweep runs in production (the deferred cleanup).
+func sweepViaStopHook(t *testing.T, transcriptPath string) {
+	t.Helper()
+	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
+		fmt.Sprintf(`{"session_id":"oc-sweep","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, transcriptPath))
+	var out bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
+}
+
+// TestRunStop_SweepsGhostDirDespiteATrailingSeparator pins the first runtime
+// divergence: Go reports the temp variable verbatim while the plugin's runtime
+// strips one trailing separator, so a raw comparison saw two spellings of the
+// same directory as different and left the session directory behind.
+func TestRunStop_SweepsGhostDirDespiteATrailingSeparator(t *testing.T) {
+	isolatedHome(t)
+	base := filepath.Join(t.TempDir(), "hosttmp")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatalf("create host temp dir: %v", err)
+	}
+	unsetEnvForTest(t, "TMP")
+	unsetEnvForTest(t, "TEMP")
+	t.Setenv("TMPDIR", base+string(filepath.Separator))
+
+	dir := sweepableGhostDir(t, base, "ghost-trailing")
+	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("ghost session dir survived a trailing separator in the temp variable: %v", err)
+	}
+}
+
+// TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar pins the second
+// divergence: with TMPDIR unset the plugin's runtime falls back to TMP or TEMP
+// while os.TempDir reads only the system default, so a directory created under
+// the host's fall-back was never recognised as being inside a temp directory.
+func TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar(t *testing.T) {
+	for _, key := range []string{"TMP", "TEMP"} {
+		t.Run(key, func(t *testing.T) {
+			isolatedHome(t)
+			base := filepath.Join(t.TempDir(), "hosttmp")
+			if err := os.MkdirAll(base, 0o700); err != nil {
+				t.Fatalf("create host temp dir: %v", err)
+			}
+			unsetEnvForTest(t, "TMPDIR")
+			unsetEnvForTest(t, "TMP")
+			unsetEnvForTest(t, "TEMP")
+			t.Setenv(key, base)
+
+			dir := sweepableGhostDir(t, base, "ghost-fallback")
+			sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("ghost session dir under the host's %s survived: %v", key, err)
+			}
+		})
+	}
+}
+
+// TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase keeps the widened
+// candidate set honest: a `ghost-*` directory whose parent is not a temp base is
+// left in place, so accepting more bases did not turn the sweep into one that
+// removes any directory named like the plugin's.
+func TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase(t *testing.T) {
+	isolatedHome(t)
+	parent := filepath.Join(t.TempDir(), "notatemp")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("create parent dir: %v", err)
+	}
+	dir := sweepableGhostDir(t, parent, "ghost-elsewhere")
+	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("a ghost dir outside every temp base must survive: %v", err)
+	}
+}
+
 // TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
 // stop_hook_active suppresses a repeat stop entirely, but session-end fires
 // once per real session end, so its lifecycle spawns run regardless of any
@@ -384,6 +489,76 @@ func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
+	}
+}
+
+// TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID is #1327: the
+// cooldown's skip line is the one durable record of why a run did not happen,
+// and a stored project id is not token-guarded — CheckImportedProjectID refuses
+// a control character but never asks the guard — so a session in the affected
+// project's recorded directory resolves to a token-shaped id and the line
+// interpolated it with a bare %s. Every neighbouring lifecycle surface renders
+// the same value (the lock and the start stamp through RefusalArg, the marker's
+// alert through renderMarkerProject); this one wrote it into a file that
+// operators and diagnostic tooling read.
+//
+// Both halves are asserted from one log: the token-shaped id must not appear,
+// and an ordinary id still must. A renderer that withheld everything would pass
+// the first half and leave the line unable to name the project it skipped.
+func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+	dataDir := filepath.Join(dataHome, "ghost")
+
+	// Obviously fake, shaped by the detector's own GitHub rule. The directory
+	// and the name are ordinary on purpose: the creation guard asks the guard of
+	// a project's name and path but not of its id — which is the hole itself, an
+	// imported artifact's id arriving verbatim — so planting one through
+	// EnsureProject is the shape the store really ends up in, and the id is what
+	// a session resolves to.
+	//
+	// The ordinary project is planted in the same store so one log shows both
+	// halves.
+	const tokenID = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	now := time.Now()
+	for _, p := range []struct{ id, dir, name string }{
+		{tokenID, "tokproj", "Token Project"},
+		{"p1", "ordinaryproj", "Ordinary Project"},
+	} {
+		dir := filepath.Join(t.TempDir(), p.dir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p.dir, err)
+		}
+		canonical, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("EvalSymlinks: %v", err)
+		}
+		seedProject(t, dataHome, p.id, canonical, p.name)
+		// A stamp inside the window, so this call takes the cooldown branch —
+		// the only writer of the line, and the only path that writes nothing
+		// else (the spawn log and the pid file are both past it).
+		writeStamp(t, dataDir, p.id, now, time.Minute)
+		spawnLifecycleIfConfigured(canonical, "", nil)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dataDir, "lifecycle.log"))
+	if err != nil {
+		t.Fatalf("read lifecycle.log: %v", err)
+	}
+	line := string(b)
+	if strings.Contains(line, tokenID) {
+		t.Errorf("lifecycle.log repeats the token-shaped project id: %s", line)
+	}
+	if !strings.Contains(line, "project \"p1\"") {
+		t.Errorf("an ordinary project id no longer appears in the log: %s", line)
+	}
+	// The line still has to be actionable: a bare "withheld" that named neither
+	// the argument nor the format found would tell an operator nothing.
+	if !strings.Contains(line, "<project withheld: it holds a GitHub personal access token>") {
+		t.Errorf("the log does not name the withheld project and its format: %s", line)
+	}
+	if n := strings.Count(strings.TrimRight(line, "\n"), "\n") + 1; n != 2 {
+		t.Errorf("lifecycle.log holds %d lines, want 2 (one skip per project):\n%s", n, line)
 	}
 }
 

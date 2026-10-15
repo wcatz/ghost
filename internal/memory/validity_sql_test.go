@@ -280,7 +280,7 @@ func TestPassiveFetchSQLUsesTheValidityBuilder(t *testing.T) {
 	if !cols.HasValidity {
 		t.Fatalf("fixture: the store must have the validity columns for this to test anything")
 	}
-	q, args := passiveFetchSQL(projectPassivePolicy(), passiveRequest("proj"), cols)
+	q, args := passiveKeyScanSQL(projectPassivePolicy(), passiveRequest("proj"), cols, false)
 	if !strings.Contains(q, validityMatchesSQL()) {
 		t.Errorf("the passive fetch does not use validityMatchesSQL, so the pin tests a predicate the "+
 			"fetch does not run:\n%s", q)

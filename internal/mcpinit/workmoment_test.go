@@ -452,7 +452,7 @@ func TestEnsureWorkingMomentHooksIsIdempotentAndNonDestructive(t *testing.T) {
 	}
 	var out bytes.Buffer
 	for i := 0; i < 3; i++ {
-		if err := ensureWorkingMomentHooks(&out, sf, "/opt/ghost"); err != nil {
+		if err := ensureWorkingMomentHooks(&out, sf, "/opt/ghost", false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -492,7 +492,7 @@ func TestEnsureWorkingMomentHooksIsIdempotentAndNonDestructive(t *testing.T) {
 	if got := strings.Count(out.String(), "added"); got != 2 {
 		t.Errorf("reported %d additions across 3 runs, want 2 (first run only):\n%s", got, out.String())
 	}
-	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code") || !contractHookWired(sf, "PostToolUse", "edit", "claude-code") {
+	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code", "/opt/ghost") || !contractHookWired(sf, "PostToolUse", "edit", "claude-code", "/opt/ghost") {
 		t.Error("status would report the hooks as unwired")
 	}
 }

@@ -973,7 +973,7 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, 
 			}
 			if _, err := tx.ExecContext(ctx, historyCompactRestoreSQL, stamp, c.memoryID, projectID); err != nil {
 				_ = tx.Rollback() //nolint:errcheck
-				return fixed, unreadable, unrecorded, fmt.Errorf("restore updated_at of %s: %w", c.memoryID, err)
+				return fixed, unreadable, unrecorded, fmt.Errorf("restore updated_at of %s: %w", RefusalArg("memory_id", c.memoryID), err)
 			}
 		}
 		if tx != nil {

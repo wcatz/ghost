@@ -1872,3 +1872,165 @@ func TestHandleSessionStartHook_DecisionIDShown(t *testing.T) {
 		t.Errorf("decision ID must be shown (%s) so it can be passed to supersedes; got:\n%s", decisionID, result)
 	}
 }
+
+// TestHandleSessionStartHook_RevisitDecisionShown: the session-start block reads
+// a project's live decisions, not active-only, so a decision flagged for
+// reconsideration is shown and labelled "(revisit)" rather than hidden. A
+// superseded decision stays out of the block.
+func TestHandleSessionStartHook_RevisitDecisionShown(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for _, d := range []struct{ id, title, decision, rationale, status, createdMod string }{
+		{"a1", "keep sqlite", "sqlite stays", "no cgo", "active", "-1 day"},
+		{"r1", "revisit the cache", "reconsider rrf weights", "tuning changed", "revisit", "-1 minute"},
+		{"s1", "retired choice", "we dropped this", "reversed", "superseded", "-1 day"},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO decisions (id, project_id, title, decision, rationale, status, created_at, updated_at)
+			 VALUES (?, 'p1', ?, ?, ?, ?, datetime('now', ?), datetime('now'))`,
+			d.id, d.title, d.decision, d.rationale, d.status, d.createdMod,
+		); err != nil {
+			t.Fatalf("insert %s decision: %v", d.status, err)
+		}
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "**«revisit the cache»** (revisit):") {
+		t.Errorf("a revisit decision is not shown and labelled:\n%s", result)
+	}
+	if strings.Contains(result, "retired choice") {
+		t.Errorf("a superseded decision reached the block:\n%s", result)
+	}
+	// The visit row is the NEWEST decision in the project, so only the
+	// active-first order renders the active one ahead of it; an answer ordered by
+	// recency alone swaps them and this fails.
+	assertRowOrder(t, result, "keep sqlite", "revisit the cache")
+}
+
+// seedSessionDecisions opens a throwaway store in a fresh data directory holding
+// one project and the given decisions, and returns its directory, the project
+// directory a session must stand in, and a closing handle. The created stamps
+// are explicit because the column default is datetime('now'): un-stamped rows
+// share a wall-clock second, so an order built on recency agrees with
+// active-first by coincidence and a test built on it proves nothing about the
+// order term.
+func seedSessionDecisions(t *testing.T, decisions []struct{ id, title, decision, rationale, status, createdMod string }) (xdgHome, projDir string) {
+	t.Helper()
+	xdgHome = t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir = filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for _, d := range decisions {
+		if _, err := db.Exec(
+			`INSERT INTO decisions (id, project_id, title, decision, rationale, status, created_at, updated_at)
+			 VALUES (?, 'p1', ?, ?, ?, ?, datetime('now', ?), datetime('now'))`,
+			d.id, d.title, d.decision, d.rationale, d.status, d.createdMod,
+		); err != nil {
+			t.Fatalf("insert %s decision %s: %v", d.status, d.id, err)
+		}
+	}
+	_ = db.Close()
+	return xdgHome, projDir
+}
+
+// TestHandleSessionStartHook_RevisitDecisionDoesNotDisplaceAnActiveOne: the
+// session-start block's five-row cap is filled by active decisions first, so a
+// decision flagged for reconsideration cannot push an active one out of the
+// block. The revisit row is stamped the NEWEST decision in the project, so
+// without the active-first order it is the row that takes the last slot.
+func TestHandleSessionStartHook_RevisitDecisionDoesNotDisplaceAnActiveOne(t *testing.T) {
+	rows := make([]struct{ id, title, decision, rationale, status, createdMod string }, 0, 6)
+	for i := 0; i < 5; i++ {
+		id := "a" + string(rune('0'+i))
+		rows = append(rows, struct{ id, title, decision, rationale, status, createdMod string }{
+			id, "active decision " + id, "body " + id, "why", "active", "-1 day",
+		})
+	}
+	rows = append(rows, struct{ id, title, decision, rationale, status, createdMod string }{
+		"r1", "revisit beyond the cap", "body r1", "why", "revisit", "-1 minute",
+	})
+
+	xdgHome, projDir := seedSessionDecisions(t, rows)
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	for i := 0; i < 5; i++ {
+		id := "a" + string(rune('0'+i))
+		if !strings.Contains(result, "active decision "+id) {
+			t.Errorf("active decision %s was pushed out by a revisit row:\n%s", id, result)
+		}
+	}
+	if strings.Contains(result, "revisit beyond the cap") {
+		t.Errorf("a revisit row displaced an active decision inside a full window:\n%s", result)
+	}
+}
+
+// assertRowOrder fails when the row naming firstTitle does not render before the
+// row naming secondTitle. Used across the three injected surfaces: in every
+// caller the revisit row is the newest decision in the store, so an answer
+// ordered by recency alone puts it first and this fails.
+func assertRowOrder(t *testing.T, text, firstTitle, secondTitle string) {
+	t.Helper()
+	first := strings.Index(text, firstTitle)
+	second := strings.Index(text, secondTitle)
+	if first < 0 {
+		t.Fatalf("row %q is missing from the output:\n%s", firstTitle, text)
+	}
+	if second < 0 {
+		t.Fatalf("row %q is missing from the output:\n%s", secondTitle, text)
+	}
+	if first > second {
+		t.Errorf("%q must render before %q when both are in the window (first at %d, second at %d)", firstTitle, secondTitle, first, second)
+	}
+}

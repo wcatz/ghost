@@ -21,7 +21,9 @@ type memoryStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
-	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error
+	// StoreEmbeddingForContent stores the vector only if the memory's content is
+	// still the text it was computed from, and reports whether it did.
+	StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error)
 }
 
 // OllamaDownMarkerFilename is the sentinel file checkAlive writes into
@@ -407,8 +409,13 @@ func (w *Worker) EmbedOne(ctx context.Context, memoryID string) {
 		return
 	}
 
-	if err := w.store.StoreEmbedding(ctx, memoryID, vec, w.client.Identity()); err != nil {
+	stored, err := w.store.StoreEmbeddingForContent(ctx, memoryID, vec, w.client.Identity(), content)
+	if err != nil {
 		w.logger.Error("embed: store", "error", err, "memory_id", memoryID)
+		return
+	}
+	if !stored {
+		w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", memoryID)
 	}
 }
 
@@ -609,11 +616,18 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 		}
 		timeouts = 0
 
-		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.Identity()); err != nil {
+		stored, err := w.store.StoreEmbeddingForContent(ctx, id, vec, w.client.Identity(), content)
+		if err != nil {
 			w.logger.Error("embed: store", "error", err, "memory_id", id)
 			continue
 		}
 		w.forgetSlowRow(id)
+		if !stored {
+			// An edit landed while the endpoint was computing: the vector is the
+			// old text's, so it is dropped and the row stays pending (#1159).
+			w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", id)
+			continue
+		}
 		embedded++
 	}
 

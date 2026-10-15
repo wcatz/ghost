@@ -378,6 +378,24 @@ var defaultSeedMemories = []seedGlobalMemory{
 	},
 }
 
+// shippedSeedContents returns the content of every memory Ghost ships and
+// writes itself on open.
+//
+// It is how a reader recognises one of Ghost's own seeds without asking the
+// store: `SeedGlobalMemories` writes each seed under a per-install random id, so
+// the id is no help, and the content sentence is what actually identifies the
+// row. The portable export uses it to leave the seeds out of an artifact, and
+// keying that exclusion on the CONTENT rather than on `source = 'builtin'` is
+// what keeps a user's own row — which may legally carry that source — in the
+// artifact.
+func shippedSeedContents() []string {
+	out := make([]string, 0, len(defaultSeedMemories))
+	for _, seed := range defaultSeedMemories {
+		out = append(out, seed.Content)
+	}
+	return out
+}
+
 // SeedGlobalMemories ensures the _global project exists and inserts any
 // missing seed memories. Seeds are pinned and source='builtin' so they
 // survive consolidation without being presented as user-authored. Idempotent —
@@ -521,7 +539,10 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 	var path string
 	err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = ?`, id).Scan(&path)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("project %s not found", id)
+		// `id` can be a caller's project operand (a CLI flag or a tool argument)
+		// or an id an artifact wrote verbatim, so the refusal renders it rather
+		// than repeating it.
+		return "", fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	if err != nil {
 		return "", fmt.Errorf("get project path: %w", err)
@@ -1001,7 +1022,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return id, true, nil
 	}
 	if existingRemote != "" {
-		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
+		return "", true, fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 	}
 
 	// The repository found in a directory is that directory's own, so the
@@ -1445,7 +1466,7 @@ func (s *Store) bindRepoRemoteIfUnsetTx(ctx context.Context, tx *sql.Tx, id, rep
 		return err
 	}
 	if updated != 1 {
-		return fmt.Errorf("project %q repository changed concurrently", id)
+		return fmt.Errorf("project %s repository changed concurrently", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	return nil
 }
@@ -1459,7 +1480,7 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 	}
 	if existingErr == nil {
 		if existingRemote != "" && existingRemote != repoRemote {
-			return "", fmt.Errorf("project %q belongs to a different repository", id)
+			return "", fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 		}
 		if existingRemote == "" {
 			if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
@@ -1482,10 +1503,10 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 		}
 		if err == nil {
 			if ownerID == "_global" {
-				return "", fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", id, ownerID)
+				return "", fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, id), RefusalArg(ProjectIdentifierLabel, ownerID))
 			}
 			if ownerRemote != "" && ownerRemote != repoRemote {
-				return "", fmt.Errorf("project %q belongs to a different repository", ownerID)
+				return "", fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, ownerID))
 			}
 			if ownerRemote == "" {
 				if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, ownerID, repoRemote); err != nil {
@@ -1537,7 +1558,7 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 	}
 	if existingRemote != "" {
 		if existingRemote != repoRemote {
-			return fmt.Errorf("project %q belongs to a different repository", existingID)
+			return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, existingID))
 		}
 		return nil
 	}
@@ -1555,8 +1576,8 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 	var holder string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT id FROM projects WHERE repo_remote = ? AND id != ?`+clause+` ORDER BY id`, args...).Scan(&holder); err == nil {
-		return fmt.Errorf("%w: repository %q is already recorded on project %q, so it cannot also be bound to %q",
-			ErrAmbiguousProject, repoRemote, holder, existingID)
+		return fmt.Errorf("%w: repository %q is already recorded on project %s, so it cannot also be bound to %s",
+			ErrAmbiguousProject, repoRemote, RefusalArg(ProjectIdentifierLabel, holder), RefusalArg(ProjectIdentifierLabel, existingID))
 	} else if err != sql.ErrNoRows {
 		return fmt.Errorf("check repository identity before binding: %w", err)
 	}
@@ -1573,7 +1594,7 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 		return fmt.Errorf("check merge target repository: %w", err)
 	}
 	if updated != 1 {
-		return fmt.Errorf("project %q repository changed concurrently", existingID)
+		return fmt.Errorf("project %s repository changed concurrently", RefusalArg(ProjectIdentifierLabel, existingID))
 	}
 	return nil
 }
@@ -1623,7 +1644,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 			return fmt.Errorf("check project repository: %w", incomingErr)
 		}
 		if incomingRemote != "" && incomingRemote != repoRemote {
-			return fmt.Errorf("project %q belongs to a different repository", id)
+			return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 		}
 
 		var existingID string
@@ -1771,7 +1792,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 // session's context.
 func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1839,7 +1860,7 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 	// would delete it. The guard lives in the shared primitive so every caller
 	// inherits it — the public wrapper, this merge, and migrateV15.
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("%w: refusing to merge the _global project (old=%q new=%q)", ErrAmbiguousProject, oldID, newID)
+		return fmt.Errorf("%w: refusing to merge the _global project (old=%s new=%s)", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	for _, stmt := range projectMergeStatements {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -1985,7 +2006,7 @@ func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, n
 		return nil
 	}
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 	// Validate the outgoing row's recorded identity first: it must not claim a
 	// DIFFERENT repository, or the merge would silently move that project's
@@ -2020,7 +2041,7 @@ func validateMergeRepoTx(ctx context.Context, tx *sql.Tx, oldID, repoRemote stri
 		return fmt.Errorf("read merge source repository: %w", err)
 	}
 	if existingRemote != "" && existingRemote != repoRemote {
-		return fmt.Errorf("project %q belongs to a different repository", oldID)
+		return fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, oldID))
 	}
 	return nil
 }
@@ -2030,7 +2051,7 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		return nil
 	}
 	if oldID == "_global" || newID == "_global" {
-		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 
 	// Reassign all child records from old project to new.
@@ -2371,7 +2392,7 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 		return fmt.Errorf("delete project rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("project %q was already deleted", id)
+		return fmt.Errorf("project %s was already deleted", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	return nil
 }
@@ -4383,7 +4404,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				return "", "", 0, fmt.Errorf("strengthen memory rows: %w", affectedErr)
 			}
 			if affected == 0 {
-				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", existingID)
+				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", RefusalArg("memory_id", existingID))
 			}
 			// The fold is a write to the target — it raises its importance and
 			// access count — so it gets its own history entry, attributed to the
@@ -5160,6 +5181,59 @@ type judgedRow struct {
 	project string
 }
 
+// ResolveJustification is the deterministic signal a resolve pass read, before
+// its classify call, as the reason to demote one row without asking the
+// classifier (#1389). The stamp is only as good as that signal, and the signal
+// can be withdrawn in the window: a supersedes edge invalidated, a correction
+// memory deleted or rewritten. A row is stamped only while AT LEAST ONE of its
+// signals still holds at write time, checked inside the stamping transaction.
+// The zero value justifies nothing and means "no signal to re-check", which is
+// how a classifier verdict is written: that verdict's own freshness is the
+// content and project CAS.
+type ResolveJustification struct {
+	// EdgeSources are the sources of the live 'supersedes'/'llm' edges that
+	// pointed at the row when the pass read them.
+	EdgeSources []string
+	// Corrections are the correction memories that paired the row, as read: a
+	// pairing holds only while the correction still exists with that content.
+	Corrections []Memory
+}
+
+func (j ResolveJustification) empty() bool {
+	return len(j.EdgeSources) == 0 && len(j.Corrections) == 0
+}
+
+// resolveJustificationHoldsTx reports whether any signal in j still holds for
+// the target, read inside the stamping transaction. A supersedes edge holds
+// while it is live; a correction holds while its row still has the content the
+// pass paired against.
+func resolveJustificationHoldsTx(ctx context.Context, tx *sql.Tx, target string, j ResolveJustification) (bool, error) {
+	for _, src := range j.EdgeSources {
+		var one int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM memory_links
+			WHERE source_id = ? AND target_id = ? AND relation = 'supersedes'
+			  AND source = 'llm' AND invalidated_at IS NULL`, src, target).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("check supersedes edge: %w", err)
+		}
+	}
+	for _, c := range j.Corrections {
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ? AND content = ?`, c.ID, c.Content).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("check correction: %w", err)
+		}
+	}
+	return false, nil
+}
+
 // setResolvedStampTx is the shared body of the resolve writers: one transaction,
 // batches of setResolvedBatchSize, and one history row per row the UPDATE
 // actually changed. It returns the ids it stamped and the ids it found STALE,
@@ -5186,7 +5260,7 @@ type judgedRow struct {
 // resolved, retention-exempt) is neither stamped nor stale, exactly as before:
 // "no longer eligible" and "changed since judged" are different states and only
 // the second is this writer's to report.
-func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow) (stamped, stale []string, err error) {
+func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -5276,9 +5350,42 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 				stale = append(stale, id)
 			}
 		}
+		// #1389: a demotion that rests on a deterministic signal is refused when
+		// that signal was withdrawn during the classify call. The check is here,
+		// inside the transaction that holds the write lock, so no withdrawal can
+		// land between it and the UPDATE; a refused row is stale, like a rewrite.
+		if len(why) > 0 {
+			held := fresh[:0:0]
+			for _, id := range fresh {
+				j := why[id]
+				if j.empty() {
+					held = append(held, id)
+					continue
+				}
+				ok, err := resolveJustificationHoldsTx(ctx, tx, id, j)
+				if err != nil {
+					return nil, nil, err
+				}
+				if ok {
+					held = append(held, id)
+				} else {
+					stale = append(stale, id)
+				}
+			}
+			fresh = held
+		}
 		if len(fresh) == 0 {
 			continue
 		}
+		// The UPDATE binds the rows that passed every check, not the whole batch:
+		// a row refused for its justification still matches the content CAS.
+		pairs = pairs[:0]
+		pairArgs = pairArgs[:0]
+		for _, id := range fresh {
+			pairs = append(pairs, "(?,?,?)")
+			pairArgs = append(pairArgs, id, judged[id].content, judged[id].project)
+		}
+		pairArgs = append(pairArgs, projectID, projectID)
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedJudgedUpdateSQL, strings.Join(pairs, ",")), pairArgs...); err != nil {
 			return nil, nil, fmt.Errorf("set resolved: %w", err)
 		}
@@ -5323,7 +5430,7 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	stamped, _, err := s.setResolvedStampTx(ctx, ids, "", Provenance{}, nil)
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, "", Provenance{}, nil, nil)
 	return len(stamped), err
 }
 
@@ -5366,6 +5473,17 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 // caller that named one id twice with two texts has no single row to judge.
 // A no-op on an empty slice.
 func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped, stale []string, err error) {
+	return s.SetResolvedJustified(ctx, judged, nil)
+}
+
+// SetResolvedJustified is SetResolvedJudged for a pass that demoted some rows on
+// a deterministic signal rather than a verdict (#1389). why maps a row id to the
+// signal it was demoted on; a row with an entry is stamped only while one of its
+// signals still holds, read inside the stamping transaction, and is reported
+// stale otherwise — the same outcome as a row rewritten mid-pass. A row with no
+// entry is written exactly as SetResolvedJudged writes it. A nil or empty why is
+// SetResolvedJudged.
+func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	if len(judged) == 0 {
 		return nil, nil, nil
 	}
@@ -5382,7 +5500,7 @@ func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped
 	// row is REPORTED stale instead of being silently ineligible. The pass's
 	// project rides in the judged map, where it is compared as the CAS's second
 	// field.
-	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want)
+	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want, why)
 }
 
 // MarkResolved stamps resolved_at on the named ids IN projectID and returns the
@@ -5449,7 +5567,7 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 		// guard the next caller forgets.
 		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
-	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil)
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil, nil)
 	return stamped, err
 }
 
@@ -5507,7 +5625,7 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 			`UPDATE memories SET resolve_kept_hash = ? WHERE id = ? AND project_id = ?`,
 			hash, id, projectID,
 		); err != nil {
-			return fmt.Errorf("mark resolve kept %s: %w", id, err)
+			return fmt.Errorf("mark resolve kept %s: %w", RefusalArg("memory_id", id), err)
 		}
 	}
 	return tx.Commit()
@@ -5582,7 +5700,7 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 				older_hash = excluded.older_hash,
 				checked_at = datetime('now')
 		`, key[0], key[1], projectID, check.NewerHash, check.OlderHash); err != nil {
-			return fmt.Errorf("mark supersede neither %s->%s: %w", key[0], key[1], err)
+			return fmt.Errorf("mark supersede neither %s->%s: %w", RefusalArg("memory_id", key[0]), RefusalArg("memory_id", key[1]), err)
 		}
 	}
 	return tx.Commit()
@@ -6791,7 +6909,7 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 			continue
 		}
 		if err != nil {
-			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
+			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", RefusalArg("memory_id", id), err)
 		}
 		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
 		// See the resolution after the loop for why, and for what a candidate is
@@ -6967,7 +7085,7 @@ func sourceRetentionTx(ctx context.Context, tx *sql.Tx, projectID string, ids []
 			continue
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("read replaced memory %s retention: %w", id, err)
+			return "", false, fmt.Errorf("read replaced memory %s retention: %w", RefusalArg("memory_id", id), err)
 		}
 		if !found {
 			tier, found = current, true
@@ -7718,7 +7836,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		LIMIT 1
 	`, projectID).Scan(&snapshotID)
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("no snapshots found for project %s", projectID)
+		return 0, fmt.Errorf("no snapshots found for project %s", RefusalArg(ProjectIdentifierLabel, projectID))
 	}
 	if err != nil {
 		return 0, fmt.Errorf("find snapshot: %w", err)
@@ -8033,12 +8151,12 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 //
 // A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
 // listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
-// of every window a ranking surface reads, because `passiveFetchSQL` and the query
-// path both bind `resolved_at IS NULL`. So "how many does this project hold" and
+// of every window a ranking surface reads, because the passive key scan (`passiveKeyScanSQL`)
+// and the query path both bind `resolved_at IS NULL`. So "how many does this project hold" and
 // "how many of its rows a window could even consider" are different counts, and a
 // caller that needs the second cannot derive it from the first.
 //
-// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveFetchSQL`,
+// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveKeyScanSQL`,
 // and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
 // whether an exclusion verdict may be rendered as a claim about the requested
 // project: a validity-invalid row of that project's own IS the cause the validity
@@ -8240,92 +8358,105 @@ var memoryColumns = qualifyColumns("")
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {
-		var m Memory
-		var lastAccessed sql.NullString
-		var resolvedAt sql.NullString
-		var tagsJSON string
-		var pinned int
-		var agent, sessionID, sourceRef sql.NullString
-		var confidence sql.NullFloat64
-		var scopeRaw sql.NullString
-		var validFrom, validUntil, verifiedAt sql.NullString
-		var expiresAt sql.NullString
-
-		if err := rows.Scan(
-			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
-			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
-			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
-			&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
-			&validFrom, &validUntil, &verifiedAt,
-			&m.Retention, &expiresAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan memory: %w", err)
+		m, err := scanMemoryRow(rows)
+		if err != nil {
+			return nil, err
 		}
-
-		if lastAccessed.Valid {
-			m.LastAccessed = &lastAccessed.String
-		}
-		if resolvedAt.Valid {
-			m.ResolvedAt = &resolvedAt.String
-		}
-		m.Pinned = pinned == 1
-
-		// NULL provenance reads back as the empty string. There is no
-		// meaningful empty value for an agent, session or reference, so
-		// collapsing NULL to "" costs nothing — while Confidence stays a
-		// pointer, because nil ("no belief recorded") and 0.0 ("rated
-		// worthless") are different claims.
-		if agent.Valid {
-			m.Agent = agent.String
-		}
-		if sessionID.Valid {
-			m.SessionID = sessionID.String
-		}
-		if sourceRef.Valid {
-			m.SourceRef = sourceRef.String
-		}
-		if confidence.Valid {
-			m.Confidence = &confidence.Float64
-		}
-		m.Scope = parseScope(scopeRaw)
-		// Validity columns are read the way they are stored: SQLite holds them
-		// as unconstrained text, and deciding what a value means needs the
-		// request clock, which lives above this layer. NULL stays nil so "no
-		// claim" cannot be confused with a claim about the empty string.
-		if validFrom.Valid {
-			m.ValidFrom = &validFrom.String
-		}
-		if validUntil.Valid {
-			m.ValidUntil = &validUntil.String
-		}
-		if verifiedAt.Valid {
-			m.VerifiedAt = &verifiedAt.String
-		}
-		// Same rule as the validity triple: the expiry is the stored string, and
-		// NULL stays nil because "no expiry is claimed" is the claim that keeps a
-		// row out of a prune's candidate set.
-		if expiresAt.Valid {
-			m.ExpiresAt = &expiresAt.String
-		}
-		// A row whose tier reads empty is a row a query did not select, not a
-		// fourth tier. Resolving it here — once — means no reader downstream has
-		// to know that shape exists, and the one value it resolves to is the one
-		// that costs nothing: a row nobody classified behaves as the corpus
-		// always has.
-		if m.Retention == "" {
-			m.Retention = RetentionProject
-		}
-
-		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
-			m.Tags = []string{}
-		}
-
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("memory rows: %w", err)
 	}
 	return memories, nil
+}
+
+// scanMemoryRow scans ONE row of a statement selecting memoryColumns, so a
+// reader that must not materialise a whole result set can stream it: the passive
+// fetch keeps a bounded window out of the project's population and never holds
+// the bucket. It is the same column order and the same post-processing
+// scanMemories has always applied, split out so the two readers cannot drift.
+func scanMemoryRow(rows *sql.Rows) (Memory, error) {
+	var m Memory
+	var lastAccessed sql.NullString
+	var resolvedAt sql.NullString
+	var tagsJSON string
+	var pinned int
+	var agent, sessionID, sourceRef sql.NullString
+	var confidence sql.NullFloat64
+	var scopeRaw sql.NullString
+	var validFrom, validUntil, verifiedAt sql.NullString
+	var expiresAt sql.NullString
+
+	if err := rows.Scan(
+		&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
+		&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
+		&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
+		&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
+		&validFrom, &validUntil, &verifiedAt,
+		&m.Retention, &expiresAt,
+	); err != nil {
+		return m, fmt.Errorf("scan memory: %w", err)
+	}
+
+	if lastAccessed.Valid {
+		m.LastAccessed = &lastAccessed.String
+	}
+	if resolvedAt.Valid {
+		m.ResolvedAt = &resolvedAt.String
+	}
+	m.Pinned = pinned == 1
+
+	// NULL provenance reads back as the empty string. There is no
+	// meaningful empty value for an agent, session or reference, so
+	// collapsing NULL to "" costs nothing — while Confidence stays a
+	// pointer, because nil ("no belief recorded") and 0.0 ("rated
+	// worthless") are different claims.
+	if agent.Valid {
+		m.Agent = agent.String
+	}
+	if sessionID.Valid {
+		m.SessionID = sessionID.String
+	}
+	if sourceRef.Valid {
+		m.SourceRef = sourceRef.String
+	}
+	if confidence.Valid {
+		m.Confidence = &confidence.Float64
+	}
+	m.Scope = parseScope(scopeRaw)
+	// Validity columns are read the way they are stored: SQLite holds them
+	// as unconstrained text, and deciding what a value means needs the
+	// request clock, which lives above this layer. NULL stays nil so "no
+	// claim" cannot be confused with a claim about the empty string.
+	if validFrom.Valid {
+		m.ValidFrom = &validFrom.String
+	}
+	if validUntil.Valid {
+		m.ValidUntil = &validUntil.String
+	}
+	if verifiedAt.Valid {
+		m.VerifiedAt = &verifiedAt.String
+	}
+	// Same rule as the validity triple: the expiry is the stored string, and
+	// NULL stays nil because "no expiry is claimed" is the claim that keeps a
+	// row out of a prune's candidate set.
+	if expiresAt.Valid {
+		m.ExpiresAt = &expiresAt.String
+	}
+	// A row whose tier reads empty is a row a query did not select, not a
+	// fourth tier. Resolving it here — once — means no reader downstream has
+	// to know that shape exists, and the one value it resolves to is the one
+	// that costs nothing: a row nobody classified behaves as the corpus
+	// always has.
+	if m.Retention == "" {
+		m.Retention = RetentionProject
+	}
+
+	if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
+		m.Tags = []string{}
+	}
+
+	return m, nil
 }
 
 // sanitizeFTS strips FTS5 special operators from text to prevent query injection.

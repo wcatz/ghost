@@ -224,7 +224,7 @@ const (
 	// "stop surfacing this first", not "forget it". With RRF k=60 every fused
 	// score sits in a band of a few thousandths — a rank-1 two-leg hit is
 	// 0.3/61 + 0.7/61 ≈ 0.0164 — so halving lands the row at ≈ 0.0082, under
-	// the 0.7/80 ≈ 0.0088 floor of the deepest vector-leg row in a default
+	// the 0.7/70 ≈ 0.01 floor of the deepest vector-leg row in a default
 	// window: effectively below the live pool rather than below one
 	// comparable neighbour, and still the answer when nothing live matched.
 	resolvedDemotionFactor = 0.5
