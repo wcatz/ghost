@@ -549,7 +549,7 @@ func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T)
 	if strings.Contains(line, tokenID) {
 		t.Errorf("lifecycle.log repeats the token-shaped project id: %s", line)
 	}
-	if !strings.Contains(line, "p1") {
+	if !strings.Contains(line, "project \"p1\"") {
 		t.Errorf("an ordinary project id no longer appears in the log: %s", line)
 	}
 	// The line still has to be actionable: a bare "withheld" that named neither
