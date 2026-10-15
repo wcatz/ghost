@@ -316,7 +316,7 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 		// +1 because the memory itself is its own nearest neighbor.
 		neighbors, err := store.SearchVectorScoped(ctx, projectID, vec, maxNeighbors+1, m.Scope)
 		if err != nil {
-			return sel, fmt.Errorf("search vector for %s: %w", m.ID, err)
+			return sel, fmt.Errorf("search vector for %s: %w", memory.RefusalArg("memory_id", m.ID), err)
 		}
 		for _, n := range neighbors {
 			if n.MemoryID == m.ID || n.Score < threshold {
@@ -787,7 +787,7 @@ func withholdSupersedesDrop(supersedes, causes int) (dropSup, dropCauses int, su
 func sweepCausesBothWays(ctx context.Context, store vectorStore, claims map[pairKey][]liveEdge, newer, older string) (int, error) {
 	dropped, err := store.InvalidateLink(ctx, older, newer, string(RelationCauses))
 	if err != nil {
-		return 0, fmt.Errorf("invalidate causes link %s→%s: %w", older, newer, err)
+		return 0, fmt.Errorf("invalidate causes link %s→%s: %w", memory.RefusalArg("memory_id", older), memory.RefusalArg("memory_id", newer), err)
 	}
 	total := int(dropped)
 	if !claimsHold(claims, older, newer, RelationCauses) {
@@ -795,7 +795,7 @@ func sweepCausesBothWays(ctx context.Context, store vectorStore, claims map[pair
 	}
 	reverse, err := store.InvalidateLink(ctx, newer, older, string(RelationCauses))
 	if err != nil {
-		return total, fmt.Errorf("invalidate reverse causes link %s→%s: %w", newer, older, err)
+		return total, fmt.Errorf("invalidate reverse causes link %s→%s: %w", memory.RefusalArg("memory_id", newer), memory.RefusalArg("memory_id", older), err)
 	}
 	return total + int(reverse), nil
 }
@@ -2155,7 +2155,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// longer exists, so there is nothing to link.
 			pairAlive, err := endpointsExist(ctx, store, c.NewerID, c.OlderID)
 			if err != nil {
-				return res, nil, fmt.Errorf("stale check %s→%s: %w", c.NewerID, c.OlderID, err)
+				return res, nil, fmt.Errorf("stale check %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 			}
 			if !pairAlive {
 				// StaleAtWrite and NOT StaleSkipped: this pair WAS classified, so
@@ -2196,7 +2196,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			case RelationSupersedes:
 				wrote, err := store.CreateLinkUnopposed(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm", c.JudgedAt)
 				if err != nil {
-					return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 				}
 				if wrote {
 					res.Created++
@@ -2235,7 +2235,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// which the statement can move a row.
 				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", memory.RefusalArg("memory_id", c.OlderID), memory.RefusalArg("memory_id", c.NewerID), err)
 				}
 				c.CausesDropped = int(causesDropped)
 				// The sweep above takes the 'causes' edge that AGREES with the
@@ -2250,7 +2250,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				if claimsHold(claims, c.OlderID, c.NewerID, RelationCauses) {
 					reverseDropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationCauses))
 					if err != nil {
-						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", c.NewerID, c.OlderID, err)
+						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 					}
 					c.CausesDropped += int(reverseDropped)
 				}
@@ -2308,7 +2308,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// 'supersedes' has.
 				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 				}
 				causesDropped := 0
 				if claimsHold(claims, c.OlderID, c.NewerID, RelationCauses) {
@@ -2319,13 +2319,13 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					// (see the reconciliation above).
 					reverseDropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationCauses))
 					if err != nil {
-						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", c.NewerID, c.OlderID, err)
+						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 					}
 					causesDropped = int(reverseDropped)
 				}
 				wrote, err := store.CreateLinkUnopposed(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt)
 				if err != nil {
-					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+					return res, nil, fmt.Errorf("create causes link %s→%s: %w", memory.RefusalArg("memory_id", c.OlderID), memory.RefusalArg("memory_id", c.NewerID), err)
 				}
 				if !wrote {
 					// The pair's other 'causes' direction was already live when
@@ -2365,7 +2365,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			case RelationNeither:
 				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 				}
 				causesDropped, err := sweepCausesBothWays(ctx, store, claims, c.NewerID, c.OlderID)
 				if err != nil {
@@ -2399,7 +2399,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// because this branch is where the backwards edge used to die.
 				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate reversed supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					return res, nil, fmt.Errorf("invalidate reversed supersedes link %s→%s: %w", memory.RefusalArg("memory_id", c.NewerID), memory.RefusalArg("memory_id", c.OlderID), err)
 				}
 				causesDropped, err := sweepCausesBothWays(ctx, store, claims, c.NewerID, c.OlderID)
 				if err != nil {

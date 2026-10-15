@@ -407,7 +407,7 @@ func liveCausesPairs(ctx context.Context, store reassessStore, settled []judgedE
 	for _, id := range ids {
 		links, err := store.GetLinks(ctx, id)
 		if err != nil {
-			return nil, fmt.Errorf("load links of %s: %w", id, err)
+			return nil, fmt.Errorf("load links of %s: %w", memory.RefusalArg("memory_id", id), err)
 		}
 		for _, l := range links {
 			if l.Relation == string(RelationCauses) && l.SourceID == id {
@@ -856,7 +856,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 				// failure from earlier in this run is still true, and the
 				// unjudged edges it left behind are the other half of what the
 				// operator has to fix.
-				fail = errors.Join(fail, fmt.Errorf("withdraw supersedes link %s→%s: %w", w.NewerID, w.OlderID, err))
+				fail = errors.Join(fail, fmt.Errorf("withdraw supersedes link %s→%s: %w", memory.RefusalArg("memory_id", w.NewerID), memory.RefusalArg("memory_id", w.OlderID), err))
 				break
 			}
 			if n == 0 {
@@ -892,7 +892,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 				w.SweepFailed = true
 				withdrawn[len(withdrawn)-1] = w
 				res.CausesSweepFailed++
-				fail = errors.Join(fail, fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err))
+				fail = errors.Join(fail, fmt.Errorf("withdraw causes link %s→%s: %w", memory.RefusalArg("memory_id", w.OlderID), memory.RefusalArg("memory_id", w.NewerID), err))
 				break
 			}
 			// What actually moved, not what the row predicted.
