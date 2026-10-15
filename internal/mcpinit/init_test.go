@@ -859,6 +859,92 @@ func TestReconcileHook_PreservesOtherKeys(t *testing.T) {
 	}
 }
 
+// TestMigratePreContractHook_LeavesAForeignCommandAlone pins the executable
+// test the migration shares with isStaleGhostHookCommand: a bare `… hook
+// <event>` is rewritten only when its leading token is a ghost binary, so a
+// wrapper or another tool whose command happens to end in the same argument
+// tail keeps its command. The genuine bare ghost hook beside it must still be
+// migrated, for both events.
+func TestMigratePreContractHook_LeavesAForeignCommandAlone(t *testing.T) {
+	for _, tc := range []struct {
+		event    string
+		bareTail string
+		desired  string
+		foreign  []string
+		ghost    string
+	}{
+		{
+			event:    "SessionStart",
+			bareTail: "hook session-start",
+			desired:  "/opt/ghost hook session-start --source claude-code",
+			foreign: []string{
+				"/usr/local/bin/othertool hook session-start",
+				`'/usr/local/bin/othertool' hook session-start`,
+				`"C:\tools\othertool.exe" hook session-start`,
+			},
+			ghost: "'/usr/local/bin/ghost' hook session-start",
+		},
+		{
+			event:    "Stop",
+			bareTail: "hook stop",
+			desired:  "/opt/ghost hook stop --source claude-code",
+			foreign: []string{
+				"/usr/local/bin/othertool hook stop",
+				`'/usr/local/bin/othertool' hook stop`,
+				`"C:\tools\othertool.exe" hook stop`,
+			},
+			ghost: "'/usr/local/bin/ghost' hook stop",
+		},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+			for _, cmd := range tc.foreign {
+				if err := sf.addHook(tc.event, hookEntry{Hooks: []hookAction{{Type: "command", Command: cmd}}}); err != nil {
+					t.Fatalf("addHook foreign %q: %v", cmd, err)
+				}
+			}
+			if err := sf.addHook(tc.event, hookEntry{Hooks: []hookAction{{Type: "command", Command: tc.ghost}}}); err != nil {
+				t.Fatalf("addHook ghost: %v", err)
+			}
+
+			migrated, err := migratePreContractHook(sf, tc.event, tc.bareTail, tc.desired)
+			if err != nil {
+				t.Fatalf("migratePreContractHook: %v", err)
+			}
+			if !migrated {
+				t.Error("expected the genuine bare ghost hook to be migrated")
+			}
+			for _, cmd := range tc.foreign {
+				intact, err := sf.hasExactHookCommand(tc.event, cmd)
+				if err != nil {
+					t.Fatalf("hasExactHookCommand(%q): %v", cmd, err)
+				}
+				if !intact {
+					t.Errorf("foreign command %q was rewritten by the migration", cmd)
+				}
+			}
+			stillGhost, err := sf.hasExactHookCommand(tc.event, tc.ghost)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand(ghost): %v", err)
+			}
+			if stillGhost {
+				t.Error("genuine bare ghost hook survived the migration")
+			}
+			isDesired, err := sf.hasExactHookCommand(tc.event, tc.desired)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand(desired): %v", err)
+			}
+			if !isDesired {
+				t.Error("contract-form command not found after migration")
+			}
+		})
+	}
+}
+
 func TestWarnPercentPath(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("warnPercentPath only warns on windows")

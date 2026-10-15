@@ -919,17 +919,19 @@ func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string, dr
 	return nil
 }
 
-// migratePreContractHook rewrites every hook whose argument tail is exactly
-// the pre-contract bare form (e.g. `… hook stop` with no flags) into
-// desiredCmd, which carries `--source claude-code`. The contract has no
-// legacy mode, so a stale bare invocation fails open on every fire until
-// rewritten here; this migration keeps `ghost mcp init` (idempotent,
-// non-destructive) the one-step fix. Every registered command is examined —
-// not just the first substring match — so a stale duplicate sorting ahead of
-// the real bare hook can never mask it. Matching is exact on the arg tail: a
-// hand-edited wrapper that adds redirections or env vars never matches and is
-// left untouched, same policy as reconcileHook. Reports whether any
-// migration happened.
+// migratePreContractHook rewrites every hook whose leading token is a ghost
+// binary and whose argument tail is exactly the pre-contract bare form (e.g.
+// `… hook stop` with no flags) into desiredCmd, which carries `--source
+// claude-code`. The contract has no legacy mode, so a stale bare invocation
+// fails open on every fire until rewritten here; this migration keeps
+// `ghost mcp init` (idempotent, non-destructive) the one-step fix. Every
+// registered command is examined — not just the first substring match — so a
+// stale duplicate sorting ahead of the real bare hook can never mask it.
+// Matching is exact on the arg tail, and the leading token must be a ghost
+// binary: a hand-edited wrapper that adds redirections or env vars, or another
+// tool whose command happens to end in the same tail, never matches and is
+// left untouched — the same executable test isStaleGhostHookCommand applies.
+// Reports whether any migration happened.
 func migratePreContractHook(sf *settingsFile, event, bareTail, desiredCmd string) (bool, error) {
 	cmds, err := sf.hookCommands(event)
 	if err != nil || len(cmds) == 0 {
@@ -942,8 +944,8 @@ func migratePreContractHook(sf *settingsFile, event, bareTail, desiredCmd string
 			continue // replaceHookCommand already rewrote every exact instance
 		}
 		seen[cmd] = true
-		_, rest, ok := splitHookCommand(cmd)
-		if !ok || rest != bareTail {
+		bin, rest, ok := splitHookCommand(cmd)
+		if !ok || !isGhostBinaryName(bin) || rest != bareTail {
 			continue
 		}
 		changed, err := sf.replaceHookCommand(event, cmd, desiredCmd)
