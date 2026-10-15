@@ -633,6 +633,9 @@ function Install-Ghost {
 
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
     $extractDir = Join-Path ([System.IO.Path]::GetDirectoryName($ZipPath)) 'extracted'
     if (Test-Path $extractDir) {
         Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -648,15 +651,12 @@ function Install-Ghost {
     try {
         $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
         try {
-            $entry = @($archive.Entries | Where-Object { $_.FullName -eq 'ghost.exe' -or $_.FullName -eq 'ghost' }) | Select-Object -First 1
+            $entry = @($archive.Entries | Where-Object { $_.FullName -ceq 'ghost.exe' -or $_.FullName -ceq 'ghost' }) | Select-Object -First 1
             if (-not $entry) {
                 throw 'ghost binary not found in archive'
             }
-            if ($entry.FullName.EndsWith('/')) {
-                throw 'ghost in the archive is not a regular file'
-            }
             if ($entry.Length -eq 0) {
-                throw 'ghost in the archive is empty — refusing to install a zero-byte binary'
+                throw 'ghost in the archive is empty - refusing to install a zero-byte binary'
             }
             $outStream = [System.IO.File]::Create($exePath)
             try {
@@ -680,7 +680,7 @@ function Install-Ghost {
     try {
         $asideBase = [System.IO.Path]::GetFileName($destExe) + '.old-'
         Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name.StartsWith($asideBase) } |
+            Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' } |
             ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
     }
     catch { }
@@ -745,7 +745,7 @@ function Install-Ghost {
         try {
             $asideBase = [System.IO.Path]::GetFileName($destExe) + '.old-'
             Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name.StartsWith($asideBase) } |
+                Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' } |
                 ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
         }
         catch { }
