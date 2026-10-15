@@ -633,30 +633,130 @@ function Install-Ghost {
 
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
-    $extractDir = Join-Path ([System.IO.Path]::GetDirectoryName($ZipPath)) 'extracted'
-    Expand-Archive -Path $ZipPath -DestinationPath $extractDir -Force
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+    $extractDir = Join-Path ([System.IO.Path]::GetDirectoryName($ZipPath)) 'extracted'
+    if (Test-Path $extractDir) {
+        Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+    # Extract only the expected binary member. goreleaser puts ghost.exe at
+    # the archive root. Only an entry whose FullName is exactly 'ghost' or
+    # 'ghost.exe' (both case-sensitive) is considered, which excludes anything
+    # under a subdirectory; directories never match those names, so a directory
+    # entry is excluded by name. A zero-length entry is refused. The ZipArchive
+    # API used here does not expose Unix file modes, so a link entry carrying
+    # that name cannot be distinguished from a regular one and passes this check
+    # if its declared length is non-zero.
     $exePath = Join-Path $extractDir 'ghost.exe'
+    $stream = [System.IO.File]::OpenRead($ZipPath)
+    try {
+        $archive = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+        try {
+            $entry = @($archive.Entries | Where-Object { $_.FullName -ceq 'ghost.exe' -or $_.FullName -ceq 'ghost' }) | Select-Object -First 1
+            if (-not $entry) {
+                throw 'ghost binary not found in archive'
+            }
+            if ($entry.Length -eq 0) {
+                throw 'ghost in the archive is empty - refusing to install a zero-byte binary'
+            }
+            $outStream = [System.IO.File]::Create($exePath)
+            try {
+                $entryStream = $entry.Open()
+                try { $entryStream.CopyTo($outStream) }
+                finally { $entryStream.Dispose() }
+            }
+            finally { $outStream.Dispose() }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
+
     if (-not (Test-Path $exePath)) {
         throw "ghost.exe not found in extracted archive at $exePath"
     }
 
     $destExe = Join-Path $Destination 'ghost.exe'
+
+    # Sweep unique asides left by earlier locked runs, best effort. A reparse
+    # point carrying that name is left alone: it is not a binary this installer
+    # wrote, and following it would delete whatever it points at.
+    try {
+        Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    catch { }
+
     $oldExe = "$destExe.old"
     $hadExisting = Test-Path $destExe
     if ($hadExisting) {
-        Move-Item -Path $destExe -Destination $oldExe -Force
+        # Reuse the fixed name only while it can actually be removed. A file
+        # left by a previous run that is still locked — the normal outcome on
+        # Windows while a ghost mcp client runs from it — must not fail the
+        # whole later install, so move the current target to a unique sibling.
+        $aside = $oldExe
+        $removeFailed = $false
+        if (Test-Path $aside) {
+            try {
+                Remove-Item -Path $aside -Force -ErrorAction Stop
+            }
+            catch {
+                $removeFailed = $true
+            }
+        }
+        if ($removeFailed) {
+            $aside = "$destExe.old-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+            Write-Warning "$oldExe could not be removed (a running ghost mcp client holds it; restarting the client releases it)"
+        }
+
+        try {
+            Move-Item -Path $destExe -Destination $aside -Force
+        }
+        catch {
+            throw "move the current binary aside to $aside`: $($_.Exception.Message) (a running ghost mcp client holds it; restarting the client releases it)"
+        }
+
+        try {
+            Copy-Item -Path $exePath -Destination $destExe -Force
+        }
+        catch {
+            $installErr = $_.Exception.Message
+            $restoreErr = $null
+            if (Test-Path $aside) {
+                try { Move-Item -Path $aside -Destination $destExe -Force }
+                catch { $restoreErr = $_.Exception.Message }
+            }
+            if ($restoreErr) {
+                throw "install the new binary: $installErr (the previous binary is at $aside and could not be moved back: $restoreErr)"
+            }
+            throw "install the new binary: $installErr"
+        }
+
+        # Remove the aside when the platform lets us. On Windows the aside is
+        # the image this process is still running from, so the delete fails
+        # until the process exits and the file waits for a later run.
+        if (Test-Path $aside) {
+            try {
+                Remove-Item -Path $aside -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "$aside could not be removed (a running ghost mcp client holds it; restarting the client releases it)"
+            }
+        }
+
+        try {
+            Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+                ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+        catch { }
     }
-    try {
+    else {
         Copy-Item -Path $exePath -Destination $destExe -Force
     }
-    catch {
-        if ($hadExisting -and (Test-Path $oldExe)) {
-            Move-Item -Path $oldExe -Destination $destExe -Force
-        }
-        throw
-    }
-    Remove-Item -Path $oldExe -Force -ErrorAction SilentlyContinue
 
     return $destExe
 }
