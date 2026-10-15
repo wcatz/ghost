@@ -635,7 +635,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 			res.Skipped += len(g)
 			if logger != nil {
 				logger.Debug("supersede reassess: leaving a scope-conflicting edge alone",
-					"newer", l.SourceID, "older", l.TargetID)
+					"newer", memory.RefusalArg("memory_id", l.SourceID), "older", memory.RefusalArg("memory_id", l.TargetID))
 			}
 			continue
 		}
@@ -662,7 +662,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 				res.Unoriented++
 				if logger != nil {
 					logger.Info("supersede reassess: a cyclic pair whose two rows share both timestamps; no edge withdrawn",
-						"a", dec.first.SourceID, "b", dec.first.TargetID)
+						"a", memory.RefusalArg("memory_id", dec.first.SourceID), "b", memory.RefusalArg("memory_id", dec.first.TargetID))
 				}
 				continue
 			}
@@ -692,7 +692,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 			res.Vetoed++
 			if logger != nil {
 				logger.Debug("supersede reassess: the older note states a rule this edge does not retire",
-					"newer", cand.NewerID, "older", cand.OlderID, "reason", reason)
+					"newer", memory.RefusalArg("memory_id", cand.NewerID), "older", memory.RefusalArg("memory_id", cand.OlderID), "reason", reason)
 			}
 			settled = append(settled, judged{cand: cand, reason: "vetoed: " + reason, vetoed: true, sweep: true})
 			continue
@@ -772,7 +772,7 @@ func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, proj
 				if logger != nil {
 					top, n := votes[i].best()
 					logger.Info("supersede reassess: the passes did not agree; no edge withdrawn",
-						"newer", c.NewerID, "older", c.OlderID,
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID),
 						"passes", passes, "top", string(top), "top_votes", n)
 				}
 				continue

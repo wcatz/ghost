@@ -734,10 +734,11 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // the caller that acts on that; Run deliberately does not, and says so where it
 // ignores the prefix.
 //
-// The pair prefix on a failure names each stored id through
-// `memory.RefusalArg("memory_id", …)`, because a stored id is not token-guarded
-// (`ghost import` writes an artifact's id verbatim) and this error reaches the
-// caller's terminal and, on the detached lifecycle path, `lifecycle.log`.
+// The pair prefix on a failure, and the classifier's own log lines for the same
+// pair, name each stored id through `memory.RefusalArg("memory_id", …)`, because
+// a stored id is not token-guarded (`ghost import` writes an artifact's id
+// verbatim) and both reach the caller's terminal and, on the detached lifecycle
+// path, `lifecycle.log`.
 func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -761,7 +762,7 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 				if errors.Is(err, errUnparseableVerdict) {
 					if h.logger != nil {
 						h.logger.Warn("supersede: unparseable verdict",
-							"newer", chunk[0].NewerID, "older", chunk[0].OlderID, "error", err)
+							"newer", memory.RefusalArg("memory_id", chunk[0].NewerID), "older", memory.RefusalArg("memory_id", chunk[0].OlderID), "error", err)
 					}
 					out = append(out, "")
 					continue
@@ -866,7 +867,7 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 				if errors.Is(err, errUnparseableVerdict) {
 					if h.logger != nil {
 						h.logger.Warn("supersede: unparseable verdict in batch fallback",
-							"newer", chunk[i].NewerID, "older", chunk[i].OlderID, "error", err)
+							"newer", memory.RefusalArg("memory_id", chunk[i].NewerID), "older", memory.RefusalArg("memory_id", chunk[i].OlderID), "error", err)
 					}
 					continue
 				}

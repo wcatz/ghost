@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // capturedLog is a slog.Handler that keeps every record a pass emits, so a
@@ -223,10 +225,10 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 			// came from where.
 			want := map[string]string{
 				"link_relation": string(tc.relation),
-				"link_source":   linkSource,
-				"link_target":   linkTarget,
-				"scan_newer":    recent,
-				"scan_older":    old,
+				"link_source":   memory.RefusalArg("memory_id", linkSource),
+				"link_target":   memory.RefusalArg("memory_id", linkTarget),
+				"scan_newer":    memory.RefusalArg("memory_id", recent),
+				"scan_older":    memory.RefusalArg("memory_id", old),
 			}
 			if len(attrs) != len(want) {
 				t.Errorf("the line carries %d attribute(s) %v, want exactly %d %v: every value needs a key of its own, and no value may become one",
@@ -649,15 +651,15 @@ func runPassesLogKeys(t *testing.T, log *capturedLog) {
 	// caught by the case's coverage floor, and a count above one silently
 	// disables the check, which is the failure this whole guard exists to
 	// remove. Selecting by identity runs whatever the count is.
-	unclassified := log.onlyRecordFor(t, "skipping pair with an unclassifiable verdict", "newer", blankNewer)
-	if unclassified.attrs["older"] != blankOlder {
+	unclassified := log.onlyRecordFor(t, "skipping pair with an unclassifiable verdict", "newer", memory.RefusalArg("memory_id", blankNewer))
+	if unclassified.attrs["older"] != memory.RefusalArg("memory_id", blankOlder) {
 		t.Errorf("the unclassifiable line names older=%s, want %s: the fixture exists so the line's keys carry the pair that produced them",
-			unclassified.attrs["older"], blankOlder)
+			unclassified.attrs["older"], memory.RefusalArg("memory_id", blankOlder))
 	}
 
-	vetoed := log.onlyRecordFor(t, "vetoed pair whose older note states a rule", "newer", vetoNewer)
-	if vetoed.attrs["older"] != vetoOlder {
-		t.Errorf("the veto line names older=%s, want %s", vetoed.attrs["older"], vetoOlder)
+	vetoed := log.onlyRecordFor(t, "vetoed pair whose older note states a rule", "newer", memory.RefusalArg("memory_id", vetoNewer))
+	if vetoed.attrs["older"] != memory.RefusalArg("memory_id", vetoOlder) {
+		t.Errorf("the veto line names older=%s, want %s", vetoed.attrs["older"], memory.RefusalArg("memory_id", vetoOlder))
 	}
 	if vetoed.attrs["reason"] == "" {
 		t.Error("the veto line carries no reason; the whole point of the line is naming the imperative that fired")

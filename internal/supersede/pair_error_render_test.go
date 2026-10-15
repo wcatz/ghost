@@ -72,3 +72,33 @@ func TestRelationClassifierNamesBothOrdinaryStoredIDsInPairErrors(t *testing.T) 
 		t.Errorf("pair failure = %q, want %q", err.Error(), want)
 	}
 }
+
+// TestRelationClassifierLogWithholdsTokenShapedStoredIDs is the log half of the
+// same rule. The unparseable-verdict warning names the pair on its way to
+// stderr, which on the detached lifecycle path is lifecycle.log, so it renders
+// each id through the same guard as the error beside it. Without this a leak
+// two lines above a guarded return would pass every test above.
+func TestRelationClassifierLogWithholdsTokenShapedStoredIDs(t *testing.T) {
+	log := &capturedLog{}
+	cls := NewRelationClassifier(&fakeProvider{resp: "banana"})
+	cls.SetLogger(log.logger())
+
+	if _, err := cls.ClassifyBatch(context.Background(), []Candidate{
+		{NewerID: tokenShapedStoredID, OlderID: ordinaryStoredID, NewerContent: "n", OlderContent: "o"},
+	}); err != nil {
+		t.Fatalf("an unparseable verdict is counted, not fatal: %v", err)
+	}
+	recs := log.find("supersede: unparseable verdict")
+	if len(recs) != 1 {
+		t.Fatalf("got %d unparseable-verdict line(s), want 1", len(recs))
+	}
+	if got := recs[0].attrs["newer"]; got != `"<memory_id withheld: it holds a GitHub personal access token>"` {
+		t.Errorf("the log line did not withhold the token-shaped id: newer=%q", got)
+	}
+	if got, want := recs[0].attrs["older"], `"`+ordinaryStoredID+`"`; got != want {
+		t.Errorf("the log line withheld an ordinary id: older=%q, want %q", got, want)
+	}
+	if strings.Contains(recs[0].attrs["newer"], tokenShapedStoredID) {
+		t.Error("the log line echoed the token-shaped id")
+	}
+}

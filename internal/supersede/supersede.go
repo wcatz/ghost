@@ -1667,7 +1667,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			res.Bidirectional++
 			if logger != nil {
 				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --consensus 3 --apply withdraws one)",
-					"newer", edges[0].source, "older", edges[0].target)
+					"newer", memory.RefusalArg("memory_id", edges[0].source), "older", memory.RefusalArg("memory_id", edges[0].target))
 			}
 			continue
 		case pairCauses:
@@ -1722,7 +1722,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					res.Unoriented++
 					if logger != nil {
 						logger.Info("supersede: a pair linked only by 'causes' whose two rows share both timestamps; no direction to judge it in",
-							"a", edges[0].newer, "b", edges[0].older)
+							"a", memory.RefusalArg("memory_id", edges[0].newer), "b", memory.RefusalArg("memory_id", edges[0].older))
 					}
 				}
 				continue
@@ -1770,8 +1770,8 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// say which end of the pair the link's own ids are (#823).
 				logger.Info("supersede: scan proposed the reverse of a live link; keeping the link's direction",
 					"link_relation", string(v.relation),
-					"link_source", edges[0].source, "link_target", edges[0].target,
-					"scan_newer", cand.NewerID, "scan_older", cand.OlderID)
+					"link_source", memory.RefusalArg("memory_id", edges[0].source), "link_target", memory.RefusalArg("memory_id", edges[0].target),
+					"scan_newer", memory.RefusalArg("memory_id", cand.NewerID), "scan_older", memory.RefusalArg("memory_id", cand.OlderID))
 			}
 		}
 		newerMem, ok1 := memByID[v.newer]
@@ -1825,7 +1825,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			res.StaleSkipped++
 			if logger != nil {
 				logger.Info("supersede: dropping stale pair (endpoint replaced by a concurrent pass)",
-					"newer", c.NewerID, "older", c.OlderID)
+					"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 			}
 			continue
 		}
@@ -1843,7 +1843,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		if memory.ScopesConflict(newerMem.Scope, olderMem.Scope) {
 			if logger != nil {
 				logger.Info("supersede: dropping pair whose scopes conflict",
-					"newer", c.NewerID, "older", c.OlderID)
+					"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 			}
 			continue
 		}
@@ -1861,7 +1861,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		if memory.RetentionExempt(newerMem) || memory.RetentionExempt(olderMem) {
 			if logger != nil {
 				logger.Info("supersede: dropping pair with a persistent endpoint",
-					"newer", c.NewerID, "older", c.OlderID)
+					"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 			}
 			continue
 		}
@@ -1892,7 +1892,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			res.Vetoed++
 			if logger != nil {
 				logger.Debug("supersede: vetoed pair whose older note states a rule",
-					"newer", c.NewerID, "older", c.OlderID, "reason", reason)
+					"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID), "reason", reason)
 			}
 			continue
 		}
@@ -2007,7 +2007,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				res.Unclassified++
 				if logger != nil {
 					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
-						"newer", c.NewerID, "older", c.OlderID, "passes", passes)
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID), "passes", passes)
 				}
 				continue
 			case disputed:
@@ -2019,7 +2019,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				if logger != nil {
 					top, n := votes[i].best()
 					logger.Info("supersede: passes did not agree; no edge written",
-						"newer", c.NewerID, "older", c.OlderID,
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID),
 						"passes", passes, "top", string(top), "top_votes", n)
 				}
 				continue
@@ -2070,7 +2070,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				res.WithdrawSuppressed++
 				if logger != nil {
 					logger.Info("supersede: a denying verdict on a live supersedes edge is reported, not applied (ghost supersede --reassess --consensus 3 --apply withdraws it)",
-						"newer", c.NewerID, "older", c.OlderID, "verdict", string(verdict))
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID), "verdict", string(verdict))
 				}
 			}
 
@@ -2087,7 +2087,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					// existence check, so it claims no write. The drop, if
 					// it happens, is logged where it happens.
 					logger.Warn("supersede: refusing a reversed verdict (older note is the current one)",
-						"newer", c.NewerID, "older", c.OlderID)
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 				}
 			}
 			// A verdict that came back as the relation the live edge already
@@ -2187,7 +2187,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				}
 				if logger != nil {
 					logger.Info("supersede: skipping write, endpoint replaced by a concurrent pass",
-						"newer", c.NewerID, "older", c.OlderID)
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 				}
 				continue
 			}
@@ -2219,7 +2219,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					c.OpposedLive = true
 					if logger != nil {
 						logger.Info("supersede: not written, the pair's reverse supersedes edge is already live (a concurrent pass wrote it first)",
-							"newer", c.NewerID, "older", c.OlderID)
+							"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID))
 					}
 				}
 				// The 'causes' sweep, and it now has a direction to sweep in.
@@ -2346,7 +2346,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					c.OpposedLive = true
 					if logger != nil {
 						logger.Info("supersede: causes link not written, the pair's reverse causes edge is already live (a concurrent pass wrote it first)",
-							"older", c.OlderID, "newer", c.NewerID)
+							"older", memory.RefusalArg("memory_id", c.OlderID), "newer", memory.RefusalArg("memory_id", c.NewerID))
 					}
 				} else {
 					res.CausesWritten++
@@ -2414,12 +2414,12 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// between the two cases observable.
 				if logger != nil && dropped+int64(causesDropped) > 0 {
 					logger.Info("supersede: dropped the links of a reversed pair",
-						"newer", c.NewerID, "older", c.OlderID,
+						"newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID),
 						"links", dropped+int64(causesDropped))
 				}
 			}
 			if logger != nil {
-				logger.Debug("supersede classified", "newer", c.NewerID, "older", c.OlderID, "verdict", c.Relation)
+				logger.Debug("supersede classified", "newer", memory.RefusalArg("memory_id", c.NewerID), "older", memory.RefusalArg("memory_id", c.OlderID), "verdict", c.Relation)
 			}
 		}
 
