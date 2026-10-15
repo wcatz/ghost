@@ -489,10 +489,12 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// whether a database exists.
 	cfg := config.LoadForHook()
 	// reportOllamaDownDuration only fires when embedding is enabled AND
-	// checkOllama's live probe just found Ollama unreachable — see that
+	// checkOllama's live probe reached a CONCLUSIVE Unreachable — see that
 	// function's doc comment for why a stale marker must never be printed
-	// next to a currently-passing Ollama check.
-	if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
+	// next to a currently-passing Ollama check, and why an Inconclusive probe
+	// (a missed deadline, which establishes nothing) must not be rendered as
+	// an ongoing outage either.
+	if reach := checkOllama(w, cfg, check); cfg.Embedding.Enabled && reach == embedding.Unreachable {
 		// A refused data dir must not have had a marker written into it before
 		// the report says so (#721), so this resolves the directory the same way
 		// the store open below does. DataDirPath, not DataDir: a status run
