@@ -49,6 +49,12 @@ func writeGrandchildHarness(t *testing.T, body string) (bin, pidFile string) {
 // descriptor the grandchild inherits and the reason a cancelled Wait used to
 // block. It returns once the fake has recorded its grandchild, so the context
 // is cancelled with the helper already running rather than racing its start.
+//
+// The helper records its OWN pid, after it has installed whatever disposition
+// the test depends on, and that ordering is what removes the race: a pid the
+// harness shell wrote for a background job can be read before that job has
+// started, and a deadline landing in that window would kill a helper that had
+// not yet set up rather than the one under test.
 func startHarness(t *testing.T, ctx context.Context, bin, pidFile string) (*exec.Cmd, func(), int) {
 	t.Helper()
 	cmd, release, err := harnessCommand(ctx, bin, nil, os.Environ(), harnessGoose)
@@ -62,7 +68,12 @@ func startHarness(t *testing.T, ctx context.Context, bin, pidFile string) (*exec
 		release()
 		t.Fatalf("start the fake harness: %v", err)
 	}
-	return cmd, release, waitForRecordedPid(t, pidFile)
+	grandchild := waitForRecordedPid(t, pidFile)
+	if !processAlive(grandchild) {
+		release()
+		t.Fatalf("the fake recorded helper pid %d but it is not running, so this run does not cover the case under test", grandchild)
+	}
+	return cmd, release, grandchild
 }
 
 // waitForRecordedPid blocks until the fake has written its helper's pid. It
@@ -134,7 +145,7 @@ func killGrandchild(t *testing.T, pid int) {
 // cannot tell the group signal apart from the WaitDelay backstop, which is
 // covered by the test below.
 func TestHarnessDeadlineSweepsTheProcessGroup(t *testing.T) {
-	bin, pidFile := writeGrandchildHarness(t, "sleep 30 &\necho $! > \"$HARNESS_GRANDCHILD_PID\"\nwait\n")
+	bin, pidFile := writeGrandchildHarness(t, "sh -c 'echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' &\nwait\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -168,7 +179,7 @@ func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 	// so the process whose pid is recorded is itself the one ignoring SIGTERM.
 	// The hold is well past twice the backstop so the assertion separates the
 	// two by a wide margin rather than sharing one.
-	bin, pidFile := writeGrandchildHarness(t, "sh -c 'trap \"\" TERM; exec sleep 10' &\necho $! > \"$HARNESS_GRANDCHILD_PID\"\nwait\n")
+	bin, pidFile := writeGrandchildHarness(t, "sh -c 'trap \"\" TERM; echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 10' &\nwait\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
