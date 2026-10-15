@@ -607,12 +607,18 @@ func (s *settingsFile) validate() error {
 // is never rolled forward, capturing ghost's bytes there would fill the slot
 // for good and the user's own file could never be backed up afterwards.
 //
-// Recognising ghost's hooks uses the same ownership rule the reconcile uses
-// (isGhostHookCommand over ghostHookTail), which accepts a ghost binary under
-// any path: an upgrade that moved the binary leaves the file ghost's own
-// output still, so the stale-path repair does not capture it. Whatever is not
-// affirmatively ghost's own makes the answer false, so an unusual shape costs
-// a harmless extra backup rather than a skipped one.
+// A hook counts only when it is byte-for-byte what init writes: one entry per
+// event holding exactly the keys matcher and hooks, the matcher init uses for
+// that event, one action holding exactly the keys type and command, and a
+// command equal to the one init builds for the binary it names. This is
+// deliberately stricter than the ownership rule the reconcile uses
+// (isGhostHookCommand), which also accepts hand-edited wrappers, a timeout or
+// a `&& other-tool` tail: those are the user's edits to ghost's hook and the
+// file holding them is not ghost's own output. A hook naming an older ghost
+// path still counts when it equals what init would have written for that path,
+// so an upgrade that moved the binary does not capture the file. Whatever is
+// not affirmatively ghost's own makes the answer false, so an unusual shape
+// costs a harmless extra backup rather than a skipped one.
 func (s *settingsFile) holdsOnlyGhostManaged() bool {
 	if s.raw == nil {
 		return false
@@ -648,14 +654,14 @@ func (s *settingsFile) holdsOnlyGhostManaged() bool {
 		return false
 	}
 
-	// hooks must hold only the events ghost writes, each carrying only ghost's
-	// own command for that event.
+	// hooks must hold only the events ghost writes, each exactly as init
+	// writes it (see ghostWrittenHookEntry).
 	hooks, present, err := s.hooksMap()
 	if err != nil || !present || len(hooks) == 0 {
 		return false
 	}
 	for event := range hooks {
-		var token string
+		var token, matcher string
 		switch event {
 		case "SessionStart":
 			token = "session-start"
@@ -664,23 +670,56 @@ func (s *settingsFile) holdsOnlyGhostManaged() bool {
 		case "UserPromptSubmit":
 			token = "message-submit"
 		case "PostToolUse":
-			token = "edit"
+			token, matcher = "edit", workMomentMatcher
 		default:
 			return false
 		}
-		cmds, err := s.hookCommands(event)
-		if err != nil || len(cmds) == 0 {
+		list, _, err := s.hookEventList(event)
+		if err != nil || len(list) != 1 || !ghostWrittenHookEntry(list[0], matcher, token) {
 			return false
-		}
-		for _, cmd := range cmds {
-			if !isGhostHookCommand(cmd, "hook "+token, "") {
-				return false
-			}
 		}
 	}
 
 	v, present := s.getAutoMemoryEnabled()
 	return present && !v
+}
+
+// ghostWrittenHookEntry reports whether raw is exactly the entry init writes
+// for the event whose hook token is token: the keys matcher and hooks and no
+// others, the given matcher, and a single action of exactly type "command" and
+// a command equal to shellQuote(binary) + " hook <token> --source claude-code"
+// for a binary named ghost. Any other key (timeout, statusMessage), a second
+// action, a different matcher or a command that differs by one byte is not
+// ghost's own output.
+func ghostWrittenHookEntry(raw json.RawMessage, matcher, token string) bool {
+	var entry map[string]json.RawMessage
+	if json.Unmarshal(raw, &entry) != nil || len(entry) != 2 {
+		return false
+	}
+	var gotMatcher string
+	if m, ok := entry["matcher"]; !ok || json.Unmarshal(m, &gotMatcher) != nil || gotMatcher != matcher {
+		return false
+	}
+	var actions []map[string]json.RawMessage
+	if h, ok := entry["hooks"]; !ok || json.Unmarshal(h, &actions) != nil || len(actions) != 1 {
+		return false
+	}
+	action := actions[0]
+	if len(action) != 2 {
+		return false
+	}
+	var typ, cmd string
+	if t, ok := action["type"]; !ok || json.Unmarshal(t, &typ) != nil || typ != "command" {
+		return false
+	}
+	if c, ok := action["command"]; !ok || json.Unmarshal(c, &cmd) != nil {
+		return false
+	}
+	bin, _, ok := splitHookCommand(cmd)
+	if !ok || !isGhostBinaryName(bin) {
+		return false
+	}
+	return cmd == shellQuote(bin)+" hook "+token+" --source claude-code"
 }
 
 // sameStringSet reports whether a and b hold the same strings, ignoring order

@@ -249,6 +249,87 @@ func TestRunDoesNotBackUpItsOwnSettings(t *testing.T) {
 	}
 }
 
+// TestRunBacksUpSettingsThatAreNotPurelyGhosts pins the other side of the skip:
+// a settings.json that differs from ghost's own output by anything at all keeps
+// its one-time .bak. Each case starts from the file a clean run writes, changes
+// one thing, and runs init again; the .bak must hold exactly that edited file.
+func TestRunBacksUpSettingsThatAreNotPurelyGhosts(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(t *testing.T, doc map[string]any)
+	}{
+		{"user top-level key", func(t *testing.T, doc map[string]any) {
+			doc["effortLevel"] = "high"
+		}},
+		{"foreign hook entry", func(t *testing.T, doc map[string]any) {
+			hooks := doc["hooks"].(map[string]any)
+			hooks["SessionStart"] = append(hooks["SessionStart"].([]any), map[string]any{
+				"matcher": "",
+				"hooks":   []any{map[string]any{"type": "command", "command": "other-tool start"}},
+			})
+		}},
+		{"extra permission", func(t *testing.T, doc map[string]any) {
+			perms := doc["permissions"].(map[string]any)
+			perms["allow"] = append(perms["allow"].([]any), "Bash(ls:*)")
+		}},
+		{"deny key", func(t *testing.T, doc map[string]any) {
+			doc["permissions"].(map[string]any)["deny"] = []any{"Bash(rm:*)"}
+		}},
+		{"autoMemoryEnabled true", func(t *testing.T, doc map[string]any) {
+			doc["autoMemoryEnabled"] = true
+		}},
+		{"ghost hook entry with a timeout", func(t *testing.T, doc map[string]any) {
+			entry := doc["hooks"].(map[string]any)["Stop"].([]any)[0].(map[string]any)
+			entry["hooks"].([]any)[0].(map[string]any)["timeout"] = 30
+		}},
+		{"ghost hook command with a tool tail", func(t *testing.T, doc map[string]any) {
+			entry := doc["hooks"].(map[string]any)["Stop"].([]any)[0].(map[string]any)
+			action := entry["hooks"].([]any)[0].(map[string]any)
+			action["command"] = action["command"].(string) + " && other-tool"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := installEnv(t)
+			path := filepath.Join(home, ".claude", "settings.json")
+
+			var first bytes.Buffer
+			if err := Run(&first, false); err != nil {
+				t.Fatalf("first Run: %v\n%s", err, first.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(data, &doc); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(t, doc)
+			edited, err := json.MarshalIndent(doc, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited = append(edited, '\n')
+			if err := os.WriteFile(path, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var second bytes.Buffer
+			if err := Run(&second, false); err != nil {
+				t.Fatalf("second Run: %v\n%s", err, second.String())
+			}
+			bak, err := os.ReadFile(path + ".bak")
+			if err != nil {
+				t.Fatalf("no .bak was written for a file that is not purely ghost's: %v", err)
+			}
+			if !bytes.Equal(bak, edited) {
+				t.Errorf(".bak = %q, want the edited file %q", bak, edited)
+			}
+		})
+	}
+}
+
 // TestRunInstallsWithValidSettings is the whole-command happy path: a
 // well-formed file is installed into, keeping the user's entries and adding
 // ghost's.
