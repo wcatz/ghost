@@ -2,7 +2,9 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -51,13 +53,44 @@ func beforeHybridHydrate(ids []string) {
 // transaction it is cleared by the DELETE, and after it is refused by the mark's
 // own byte check.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
+	_, err := s.storeEmbedding(ctx, memoryID, vec, model, nil)
+	return err
+}
+
+// StoreEmbeddingForContent is StoreEmbedding for a vector computed from a text
+// the caller read earlier: it stores the vector only if the memory's content,
+// read inside the same write transaction, is still that text, and reports
+// whether it did. An edit deletes the row's embedding; the vector of the text it
+// replaced must not be written back over that deletion, or the wrong vector
+// stays current and UnembeddedMemoryIDs never selects the row again (#1159). A
+// refused write (or a memory deleted meanwhile) stores nothing and returns
+// (false, nil), leaving the row pending for the next pass.
+func (s *Store) StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error) {
+	return s.storeEmbedding(ctx, memoryID, vec, model, &content)
+}
+
+func (s *Store) storeEmbedding(ctx context.Context, memoryID string, vec []float32, model string, wantContent *string) (bool, error) {
 	blob := float32sToBytes(vec)
 
 	tx, lock, err := s.beginWrite(ctx, "store-embedding")
 	if err != nil {
-		return fmt.Errorf("begin store embedding: %w", err)
+		return false, fmt.Errorf("begin store embedding: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	if wantContent != nil {
+		var current string
+		err := tx.QueryRowContext(ctx, `SELECT content FROM memories WHERE id = ?`, memoryID).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("check embedded content: %w", err)
+		}
+		if current != *wantContent {
+			return false, nil
+		}
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM link_scans
@@ -65,7 +98,7 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND model <> ?
 		)
 	`, memoryID, memoryID, model); err != nil {
-		return fmt.Errorf("invalidate link scan: %w", err)
+		return false, fmt.Errorf("invalidate link scan: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -73,14 +106,14 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 		VALUES (?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model, created_at = datetime('now')
 	`, memoryID, blob, model); err != nil {
-		return fmt.Errorf("store embedding: %w", err)
+		return false, fmt.Errorf("store embedding: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit store embedding: %w", err)
+		return false, fmt.Errorf("commit store embedding: %w", err)
 	}
 	lock.reportHold("store-embedding", time.Now())
-	return nil
+	return true, nil
 }
 
 // DeleteEmbedding removes the embedding for a memory.
