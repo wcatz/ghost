@@ -1182,7 +1182,10 @@ not a message but an unprintable memory, and echoing the resolved id would not m
 it safe — the announcement and the transaction are one breath apart, and one wrong
 character in a pasted prefix is still a unique match. The refusal prints the full id
 the prefix names, so the way through is `ghost history <prefix>` and then
-`ghost history purge <that id>`. A whole id the store does not hold is reported as a
+`ghost history purge <that id>`. The prefix and the id it names are rendered through
+the same credential guard every other refusal uses, so an ordinary id is named in
+quotes and a token-shaped one is withheld with its format rather than repeated. A
+whole id the store does not hold is reported as a
 miss ("nothing to purge"), not as a prefix — which is also what re-running a purge
 that already succeeded looks like.
 
