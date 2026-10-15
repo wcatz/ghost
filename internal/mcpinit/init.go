@@ -1166,6 +1166,9 @@ func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]s
 // ghost …`). And a newline arrives as the `;` token hookCommandTokens
 // normalises it to, so `cd /d` + newline + `ghost …` is a command list too.
 func startsCommand(tokens []string, i int) bool {
+	if followsOptionOperandSlot(tokens, i) {
+		return false
+	}
 	idx := i - 1
 	for idx >= 0 {
 		tok := tokens[idx]
@@ -1206,6 +1209,28 @@ func startsCommand(tokens []string, i int) bool {
 		return false
 	}
 	return true
+}
+
+// followsOptionOperandSlot reports whether the word at i is the separate
+// operand of the option left of it, for the nearest transparent prefix command
+// (`timeout -k ghost …`, `env -u ghost …`, `sudo -u ghost …`): the binary is
+// then that option's value, not the command the prefix runs. Only the
+// per-command table counts: the shared one lists `-p`, which `time -p ghost …`
+// takes no operand for. `--opt=value` forms are one token and never match.
+func followsOptionOperandSlot(tokens []string, i int) bool {
+	if i < 1 {
+		return false
+	}
+	opt := tokens[i-1]
+	for j := i - 2; j >= 0; j-- {
+		if shellConnectives[tokens[j]] {
+			return false
+		}
+		if b := hookCommandBase(tokens[j]); transparentPrefixes[b] {
+			return prefixOptionOperands[b][opt]
+		}
+	}
+	return false
 }
 
 // isAssignmentWord reports whether word is a shell assignment prefix such as

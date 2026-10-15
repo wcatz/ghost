@@ -1783,3 +1783,23 @@ func TestWarnPercentPath(t *testing.T) {
 		t.Errorf("expected a warning, got %q", out.String())
 	}
 }
+
+// TestEnsureHook_AnOptionOperandIsNotTheCommand pins the word an option takes
+// as its own value: in `timeout -k /opt/bin/ghost hook stop …`, `env -u …` and
+// `sudo -u …` the ghost binary is the option's operand, so the prefix runs
+// `hook` and the stop hook never fires.
+func TestEnsureHook_AnOptionOperandIsNotTheCommand(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+
+	for _, command := range []string{
+		"timeout -k /opt/bin/ghost hook stop --source claude-code",
+		"env -u /opt/bin/ghost hook stop --source claude-code",
+		"sudo -u /opt/bin/ghost hook stop --source claude-code",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if _, ok := ghostHookTail(command, "stop", ghostBin); ok {
+				t.Error("ghostHookTail credited a ghost binary that is an option's operand")
+			}
+		})
+	}
+}
