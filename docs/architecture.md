@@ -2226,7 +2226,13 @@ and whose vector leg then failed.)
 - **The empty result says which of three things happened.** An empty block whose
   rows were found and then withheld — out of date, out of scope, out of
   category, or cut by a budget — says "no sufficiently trustworthy memory found"
-  and names the cause. A search that never finished says so. Only
+  and names the cause. A search that never finished says so. A validity
+  exclusion the legs' own SQL window predicate counted outranks both leg
+  reasons: rows were found and withheld is a fact about the STORE, while a leg
+  that never ran is a fact about the MACHINE, so `all_invalid` is named even on
+  a hybrid search whose vector leg never started (the shipped shape on a machine
+  with no embedder), and the leg's state stays on the line's `legs=` field rather
+  than displacing the cause. Only
   `no_candidates` may say nothing matched, and only over coverage every
   applicable leg vouched for: available, error-free, untruncated, and
   `LegStatus.CoverageComplete`. The vector leg reports that last one as **false**
