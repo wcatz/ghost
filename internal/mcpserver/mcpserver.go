@@ -846,17 +846,14 @@ func decisionStatusError(status string) error {
 }
 
 // decisionRevisitMarker renders the label the injected decision surfaces put
-// beside a decision flagged for reconsideration. A live decision that is not
-// active is one a reader should see — it is exactly context worth injecting —
-// but it must be distinguishable from an active one, so the marker sits right
-// after the quoted title on the decisions resource, the Recent Decisions
-// section and the session-start block. An active (or any unrecognised) status
-// adds nothing, so the ordinary row's shape is unchanged.
+// beside a decision flagged for reconsideration. It is a delegation to
+// memory.DecisionRevisitMarker and not a second copy of that rule: three
+// surfaces print this label and the docs promise all three print the same one,
+// so the rule sits beside the status vocabulary it reads and every renderer
+// calls it. The dependency runs assemble -> memory, which is why the rule cannot
+// live in a package these two import in the other direction.
 func decisionRevisitMarker(status string) string {
-	if status == "revisit" {
-		return " (revisit)"
-	}
-	return ""
+	return memory.DecisionRevisitMarker(status)
 }
 
 // defaultImportance returns the importance value, defaulting to fallback when nil.

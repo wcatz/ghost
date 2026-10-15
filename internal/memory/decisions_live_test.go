@@ -2,8 +2,38 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
+
+// TestDecisionRevisitMarkerLabelsOnlyRevisit: three surfaces print this label
+// and the docs promise all three print the same one, so the rule lives in one
+// place — internal/memory, beside the status vocabulary it reads — and a surface
+// that already knows its rows carry the label cannot tell this function what to
+// render. Both renderers delegate to it, so a second copy cannot exist to drift,
+// and this test pins the delegation's behaviour rather than each caller's copy.
+func TestDecisionRevisitMarkerLabelsOnlyRevisit(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   string
+	}{
+		{"revisit", " (revisit)"},
+		{"active", ""},
+		{"", ""},
+		{"superseded", ""},
+		{"nonsense", ""},
+	} {
+		if got := DecisionRevisitMarker(tc.status); got != tc.want {
+			t.Errorf("DecisionRevisitMarker(%q) = %q, want %q", tc.status, got, tc.want)
+		}
+	}
+	// The cap and order are the reason a marker exists at all: a live decision
+	// that is not active is shown, and it must read as the one that needs
+	// reconsidering rather than as an ordinary active row.
+	if got := DecisionRevisitMarker("revisit"); !strings.Contains(got, "revisit") {
+		t.Errorf("the marker never names the status it marks: %q", got)
+	}
+}
 
 // TestLiveDecisionsShowsActiveBeforeRevisitAndExcludesSuperseded: the injected
 // surfaces' read returns a project's non-superseded decisions (active or

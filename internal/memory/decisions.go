@@ -926,6 +926,29 @@ func scanDecisions(rows *sql.Rows) ([]Decision, error) {
 	return decisions, rows.Err()
 }
 
+// DecisionRevisitMarker renders the label the injected decision surfaces put
+// beside a decision flagged for reconsideration.
+//
+// It lives HERE, beside the status vocabulary that decides it, because three
+// surfaces print that label and the docs promise all three print the SAME one
+// (docs/mcp.md, docs/cli.md): a live decision that is not active is context a
+// reader should see, so it must be distinguishable from an active one, and two
+// copies of the rule would be two rules — the copy nobody edited would be the
+// copy that ships the label the docs no longer describe. The dependency runs
+// assemble -> memory, so a function the renderers in internal/assemble,
+// internal/mcpserver and internal/mcpinit all delegate to cannot live below
+// them; that is the arrangement assemble.Token already uses for SafeToken.
+//
+// An active (or any unrecognised) status adds nothing, so an ordinary row's
+// shape is unchanged and only the row that needs marking carries the marker,
+// directly after its quoted title.
+func DecisionRevisitMarker(status string) string {
+	if status == "revisit" {
+		return " (revisit)"
+	}
+	return ""
+}
+
 // FindLiveDecisionByTitle returns the id of the newest decision in the project
 // that is not superseded (active or revisit) and whose title equals title,
 // trimmed and case-insensitively, or "" when none does. It reads only the id

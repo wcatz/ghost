@@ -1187,14 +1187,14 @@ func quoteData(s string) string {
 }
 
 // revisitMarker renders the label the Recent Decisions section puts beside a
-// decision flagged for reconsideration, so a live decision that is not active
-// is shown and distinguishable from an active one. An active (or any
-// unrecognised) status adds nothing, so the ordinary row's shape is unchanged.
+// decision flagged for reconsideration, so a live decision that is not active is
+// shown and distinguishable from an active one. It delegates to
+// memory.DecisionRevisitMarker rather than restating the rule, because the
+// docs/mcp.md and docs/cli.md parity this marker exists for is a claim about
+// three surfaces printing one label (docs/cli.md asserts it for the session
+// block too), and two implementations would be two labels.
 func revisitMarker(status string) string {
-	if status == "revisit" {
-		return " (revisit)"
-	}
-	return ""
+	return memory.DecisionRevisitMarker(status)
 }
 
 // truncateUTF8 truncates s to at most maxBytes bytes without breaking
