@@ -51,17 +51,17 @@ const contextFixtureKey = "global_rule"
 //
 //   - q_pool's vector sets every component, so it has a positive cosine with every
 //     embedded row and the keyword leg names every one of them too — including
-//     "sqlite", which is how a `_global` row reaches two of the three blocks and
-//     gives the bucket table a query count as well as a row count. The global row
-//     is embedded like the project rows, so the query-mode leg-consensus gate
-//     admits it in q_pool as a row both legs found rather than a keyword-only one.
+//     "sqlite", the `_global` row. The global row is embedded like the project
+//     rows, so the query-mode leg-consensus gate admits it as a row both legs
+//     found; it reaches the window and is then cut by the five-item cap, because
+//     the five project rows stage 2 leaves fill the budget first.
 //   - q_global's vector is orthogonal to every project row, so its whole block is
 //     one keyword-leg hit on the global row. A fixture whose second query returned
 //     the whole corpus could not tell a narrow block from a lopsided one.
 //
-// The admitted sets are therefore: q_pool the five project rows stage 2 leaves plus
-// the global row (6), q_global the global row alone (1) — seven rows over two
-// answered queries, of which three are graded relevant and one is contaminated.
+// The admitted sets are therefore: q_pool the five project rows stage 2 leaves (5),
+// q_global the global row alone (1) — six rows over two answered queries, of which
+// three are graded relevant and one is contaminated.
 func contextFixture(t *testing.T) (Dataset, Vectors) {
 	t.Helper()
 	dim := 8
@@ -241,20 +241,21 @@ func TestContextFixtureWithholdsWhatItShouldAndFlagsWhatItLeaks(t *testing.T) {
 		t.Error("the _global row was never admitted, so diversity has only one bucket to count")
 	}
 
-	// Two answered queries: q_pool admits five project rows plus the global one,
-	// q_global admits the global row alone.
+	// Two answered queries: q_pool admits its five project rows (the five-item cap
+	// fills before the global row, which is only reachable in q_global), q_global
+	// admits the global row alone.
 	if rep.Answered != 2 {
 		t.Errorf("answered %d queries, want 2", rep.Answered)
 	}
-	if rep.Items != 7 {
-		t.Errorf("pooled %d admitted rows, want 7 (6 for q_pool + 1 for q_global)", rep.Items)
+	if rep.Items != 6 {
+		t.Errorf("pooled %d admitted rows, want 6 (5 for q_pool + 1 for q_global)", rep.Items)
 	}
-	// q_pool grades two of its six rows; q_global grades its one. So 3 of 7.
-	if got, want := rep.Precision, (Ratio{Num: 3, Den: 7}); got != want {
+	// q_pool grades two of its five rows; q_global grades its one. So 3 of 6.
+	if got, want := rep.Precision, (Ratio{Num: 3, Den: 6}); got != want {
 		t.Errorf("context precision = %+v, want %+v", got, want)
 	}
-	// One contaminated row, the resolved one, out of the same seven.
-	if got, want := rep.Contamination, (Ratio{Num: 1, Den: 7}); got != want {
+	// One contaminated row, the resolved one, out of the same six.
+	if got, want := rep.Contamination, (Ratio{Num: 1, Den: 6}); got != want {
 		t.Errorf("contamination = %+v, want %+v", got, want)
 	}
 	if got := rep.Arms[0]; got.Name != assemble.LeakResolved || got.Count != 1 {
@@ -312,11 +313,11 @@ func TestContextMeasuresTheBlockNotTheRanking(t *testing.T) {
 	if rep.Budget.MaxTokens <= 0 {
 		t.Error("no token estimate was measured, so the cost of a block is unmeasured")
 	}
-	// The fixture is two queries of seven rows and neither fills the item cap, so
-	// nothing is trimmed and the trim counters have to say so rather than read as
-	// a budget that was never reached.
-	if rep.Budget.TrimmedQueries.Defined() && rep.Budget.TrimmedQueries.Num != 0 {
-		t.Errorf("%d answered queries were trimmed on a fixture that fits the cap", rep.Budget.TrimmedQueries.Num)
+	// The fixture is two queries: q_pool offers six rows to a five-item cap and is
+	// trimmed once, q_global offers one and is not. The counter has to say exactly
+	// that rather than read as a budget that was never reached.
+	if got, want := rep.Budget.TrimmedQueries, (Ratio{Num: 1, Den: 2}); got != want {
+		t.Errorf("trimmed queries = %+v, want %+v (q_pool over its five-item cap)", got, want)
 	}
 
 	// Two buckets, and the `_global` row is its own. One bucket would mean the
@@ -328,16 +329,14 @@ func TestContextMeasuresTheBlockNotTheRanking(t *testing.T) {
 	for _, b := range rep.Diversity.Buckets {
 		byBucket[b.Bucket] = b
 	}
-	// The `_global` row is in BOTH blocks: q_pool's text names "sqlite" and
-	// q_global's whole answer is that row. So the bucket carries one row per query
-	// while the project's five rows all come from q_pool — which is the case a
-	// per-query count exists for, since one bucket's 2/7 share hides that it
-	// reached every block.
-	if got := byBucket[globalProject]; got.Items != 2 || got.Queries != 2 || got.Share.Den != 7 {
-		t.Errorf("%s bucket = %+v, want 2 rows over 2 queries of the 7 admitted", globalProject, got)
+	// The `_global` row reaches q_global alone, because q_pool's five-item cap
+	// fills with the project's own five rows first. So the global bucket carries
+	// one row over one query, and the project's five rows all come from q_pool.
+	if got := byBucket[globalProject]; got.Items != 1 || got.Queries != 1 || got.Share.Den != 6 {
+		t.Errorf("%s bucket = %+v, want 1 row over 1 query of the 6 admitted", globalProject, got)
 	}
-	if got := byBucket["ctx-tiny"]; got.Items != 5 || got.Queries != 1 || got.Share.Den != 7 {
-		t.Errorf("project bucket = %+v, want 5 rows over 1 query of the 7 admitted", got)
+	if got := byBucket["ctx-tiny"]; got.Items != 5 || got.Queries != 1 || got.Share.Den != 6 {
+		t.Errorf("project bucket = %+v, want 5 rows over 1 query of the 6 admitted", got)
 	}
 	// The dominant bucket per query: q_pool is 5 (all project) and q_global is 1
 	// (all global), so the mean is 3 over the two answered queries.
@@ -407,20 +406,19 @@ func TestContextEmptyResultCountsOnlyTowardTheResultRate(t *testing.T) {
 
 // contextTrimFixture is the corpus that makes the BUDGET table falsifiable.
 //
-// contextFixture holds 8 rows against the tool's 10-item cap, so nothing in it is
-// ever trimmed and every trim ratio in that report is a step function with a single
-// reachable value. 1.000 is a true reading there, and it is also exactly what a
-// trim that had stopped firing altogether would print: a ratio that cannot go below
-// 1.000 cannot tell a budget that binds from a budget that was removed, and the
-// graded corpus's 220/220 was true only because the cap binds on every one of its
-// queries.
+// contextFixture holds 8 rows against the tool's 5-item cap, so its trim ratios have
+// almost no range: only q_pool trims, by a single row, and a ratio that barely moves
+// cannot tell a budget that binds from a budget that was removed. A fully-trimming
+// corpus reads 1.000, which is also exactly what a trim that had stopped firing
+// altogether would print — the graded corpus's 220/220 was true only because the cap
+// binds on every one of its queries.
 //
 // So this fixture is 12 rows against that cap, with its two queries shaped to land
-// on either side of it: q_wide reaches all 12 and is trimmed, q_narrow reaches three
-// and is not. Every row is graded relevant, which is what makes "how many of the
-// relevant rows did the cap cost" a number this fixture can NAME rather than one
-// that happens to coincide with the admitted count — the two coincide only when the
-// other trim dropped nothing.
+// on either side of it: q_wide reaches past the cap and is trimmed, q_narrow reaches
+// three and is not. Every row q_wide reaches is graded relevant, which is what makes
+// "how many of the relevant rows did the cap cost" a number this fixture can NAME
+// rather than one that happens to coincide with the admitted count — the two
+// coincide only when the other trim dropped nothing.
 //
 // The vector shapes are the reason each candidate set is the size it is. q_wide
 // sets every component, so it has a positive cosine with every embedded row;
@@ -525,22 +523,22 @@ func contextTrimReport(t *testing.T) ContextReport {
 // denominator is, and all three DIFFER here — which is what makes the fixture able to
 // catch a rule that reaches for the wrong one:
 //
-//   - rows the cap reached: 15 (q_wide's 10 kept + its 2 cut, q_narrow's 3 kept; a
+//   - rows the cap reached: 11 (q_wide's 5 kept + its 3 cut, q_narrow's 3 kept; a
 //     fit-dropped row would have passed the cap on its way, so nothing else is in it)
-//   - GRADED rows the cap reached: 13 (q_wide grades all 12 rows it reached — 10 kept
-//     plus the 2 cut — and q_narrow grades 1 of its 3 kept rows)
+//   - GRADED rows the cap reached: 9 (q_wide grades all 8 rows it reached — 5 kept
+//     plus the 3 cut — and q_narrow grades 1 of its 3 kept rows)
 //   - answered queries: 2, one trimmed and one not
 //
-// So the cap's cost in relevant rows reads 2/13. Note that 13 is ALSO the pooled
-// admitted count here (10 + 3) — a coincidence of this fixture, not the definition,
-// and the fixture is built so the two cannot be told apart by accident elsewhere: the
-// assertions below pin all three denominators, and
+// So the cap's cost in relevant rows reads 3/9. Note that 9 is NOT the pooled
+// admitted count here (8): a reader handed "3 of 9" can tell the fraction is of
+// the graded rows the cap saw, not of the rows it kept. The assertions below pin
+// all three denominators, and
 // TestContextTrimRatiosGiveEachStageTheRowsItActuallySaw pins the both-trims-fire case
 // where they diverge.
 func TestContextTrimRatiosCountEveryAnsweredQuery(t *testing.T) {
 	rep := contextTrimReport(t)
-	if rep.Answered != 2 || rep.Items != 13 {
-		t.Fatalf("answered %d queries with %d rows, want 2 and 13 (a trimmed 10-row block plus a 3-row one)", rep.Answered, rep.Items)
+	if rep.Answered != 2 || rep.Items != 8 {
+		t.Fatalf("answered %d queries with %d rows, want 2 and 8 (a trimmed 5-row block plus a 3-row one)", rep.Answered, rep.Items)
 	}
 	for _, tc := range []struct {
 		what string
@@ -548,21 +546,21 @@ func TestContextTrimRatiosCountEveryAnsweredQuery(t *testing.T) {
 		want Ratio
 	}{
 		{"cap trimmed 1 of 2 answered queries", rep.Budget.TrimmedQueries, Ratio{Num: 1, Den: 2}},
-		// 15 rows: q_wide's 10 kept plus its 2 cut, and q_narrow's 3 kept. The
+		// 11 rows: q_wide's 5 kept plus its 3 cut, and q_narrow's 3 kept. The
 		// untrimmed query contributes, which it did not before.
-		{"cap cut 2 of the 15 rows that reached it", rep.Budget.TrimmedItems, Ratio{Num: 2, Den: 15}},
-		// 13 GRADED rows — not 15, and not the 10 that survived. q_wide grades all
-		// twelve rows it reached and q_narrow grades one of its three, so the three
-		// denominators differ here, which is the point: a reader handed "2 of 13"
-		// can tell what it is a fraction of, and cannot be handed 2/10 by a rule
+		{"cap cut 3 of the 11 rows that reached it", rep.Budget.TrimmedItems, Ratio{Num: 3, Den: 11}},
+		// 9 GRADED rows — not 11, and not the 8 that survived. q_wide grades all
+		// eight rows it reached and q_narrow grades one of its three, so the three
+		// denominators differ here, which is the point: a reader handed "3 of 9"
+		// can tell what it is a fraction of, and cannot be handed 3/8 by a rule
 		// that reads "the admitted count" and gets the right answer here for the
 		// wrong reason.
-		{"cap cut 2 of the 13 graded rows it saw", rep.Budget.TrimmedRelevant, Ratio{Num: 2, Den: 13}},
+		{"cap cut 3 of the 9 graded rows it saw", rep.Budget.TrimmedRelevant, Ratio{Num: 3, Den: 9}},
 		// The fit pass ran on both queries and cut nothing, which is 0.000 over a
 		// real population — not n/a, and not 1.000.
 		{"fit trimmed 0 of 2 answered queries", rep.Budget.FittedQueries, Ratio{Num: 0, Den: 2}},
-		{"fit cut 0 of the 13 rows that reached it", rep.Budget.FittedItems, Ratio{Num: 0, Den: 13}},
-		{"fit cut 0 of the 11 graded rows it saw", rep.Budget.FittedRelevant, Ratio{Num: 0, Den: 11}},
+		{"fit cut 0 of the 8 rows that reached it", rep.Budget.FittedItems, Ratio{Num: 0, Den: 8}},
+		{"fit cut 0 of the 6 graded rows it saw", rep.Budget.FittedRelevant, Ratio{Num: 0, Den: 6}},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %+v, want %+v", tc.what, tc.got, tc.want)
@@ -724,8 +722,8 @@ func TestContextRequestIsTheBudgetTheToolSends(t *testing.T) {
 	if req.Condition != assemble.CondHybrid {
 		t.Errorf("Condition = %q, want %q: the tool's search runs hybrid", req.Condition, assemble.CondHybrid)
 	}
-	if req.Budget.MaxItems != 10 {
-		t.Errorf("MaxItems = %d, want the tool's default limit of 10", req.Budget.MaxItems)
+	if req.Budget.MaxItems != 5 {
+		t.Errorf("MaxItems = %d, want the tool's default limit of 5", req.Budget.MaxItems)
 	}
 	if req.Budget.MaxBytes != 2*memory.MaxContentLen {
 		t.Errorf("MaxBytes = %d, want the tool's response cap of 2*MaxContentLen (%d)", req.Budget.MaxBytes, 2*memory.MaxContentLen)

@@ -986,8 +986,8 @@ func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandida
 // Selecting by fused score alone is what made the window unable to admit a
 // keyword-only hit. RRF weights the vector leg 0.7 and the keyword leg 0.3, so
 // with k=60 the keyword leg's rank-1 row scores 0.3/61 ≈ 0.0049, while the
-// vector leg's 20th row — still comfortably inside the fetched window — scores
-// 0.7/80 ≈ 0.0088. A full vector leg therefore outranked the best keyword
+// vector leg's 10th row — still comfortably inside the fetched window — scores
+// 0.7/70 ≈ 0.01. A full vector leg therefore outranked the best keyword
 // match, every time, and no amount of exact identifier matching could put that
 // memory in the results. That is the case FTS exists for.
 //
