@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -9,8 +11,13 @@ import (
 // The lifecycle phase's process-group moves are the shared ones in
 // internal/procgroup, the same package the harness spawn (internal/ai) uses, so
 // the two cannot drift apart. The bodies below are named for the phase because
-// that is the seam the watchdog and its tests are written against.
-
+// that is the seam the watchdog and its tests are written against. On unix the
+// phase follows the harness's behaviour exactly: it sits in its own process
+// group so the phase deadline can sweep it and its CLI helpers. The Windows
+// group setup is deliberately kept a no-op (see lifecycle_windows.go); a ghost
+// phase is its own process and must still receive console Ctrl-C alongside the
+// rest of Ghost, which is what maintenanceContext is built for.
+//
 // setPhaseProcessGroup puts a lifecycle phase in its own process group, so the
 // deadline's Cancel can signal it. The CLI harnesses the phase spawns are NOT
 // in this group: each runs in its own (boundHarnessProcess, internal/ai) so the

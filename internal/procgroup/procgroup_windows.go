@@ -11,8 +11,12 @@ import (
 // positive group signal, so this does not let TerminateGroup or KillGroup reach
 // a grandchild the way the unix Setpgid does; what it does buy is that a
 // Ctrl-C and its console events are not delivered to the child with the
-// parent, which CREATE_NEW_PROCESS_GROUP is the closest analogue of and the
-// same flag the harness spawn already used.
+// parent, which CREATE_NEW_PROCESS_GROUP is the closest analogue of. THIS IS
+// FOR THE HARNESS SPAWN ONLY. The lifecycle phase spawn in cmd/ghost does not
+// call it on Windows: a phase is ghost itself and must keep receiving the
+// console Ctrl-C that maintenanceContext relies on, so cmd/ghost's
+// setPhaseProcessGroup is a no-op there. That asymmetry is deliberate, and the
+// two must not be "reconciled".
 func SetGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
