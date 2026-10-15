@@ -455,6 +455,15 @@ written before a write-boundary refusal landed, restored from a snapshot an olde
 Ghost took, or edited by hand. Rendering is the load-bearing layer precisely
 because a store can hold anything and the renderer never has to ask.
 
+**A tool RESULT that names a stored id uses these renderers too.** An answer
+sentence is as reachable to an id a store already holds as a payload line is:
+`ghost_memory_update`'s confirmation, both save tools' duplicate and fold clauses,
+the promote, delete-purge, decision-record, task-create and flag answers all name
+an id through `assemble.Token` — or `shortID` where a listing abbreviates — so the
+same value cannot forge a line in a sentence any more than in a row. An ordinary
+32-hex id is byte-identical, because a value every character of which is
+allowlisted is written bare.
+
 **Validation is separate, and refuses rather than clamps.** `ghost import`
 refuses a record id — a memory's, a task's or a decision's — carrying a control
 character, whitespace, a backtick or a `«»`, and one longer than 128 bytes. A

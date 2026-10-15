@@ -1494,7 +1494,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	msg := fmt.Sprintf("Memory updated (id: %s): %s", args.MemoryID, strings.Join(changed, ", "))
+	msg := fmt.Sprintf("Memory updated (id: %s): %s", assemble.Token(args.MemoryID), strings.Join(changed, ", "))
 	// The same advisory the two save tools carry (#674), and on the same
 	// reasoning: an update that rewrites a memory into a repository fact is the
 	// same durable-knowledge mistake, and this response reports a real stored id
@@ -1566,7 +1566,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	// project's rows reach.
 	s.notifyMemoryRow(ctx, resolvedProjectID)
 	s.notifyMemoryRow(ctx, memory.GlobalProjectID)
-	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
+	return fmt.Sprintf("Memory promoted to global scope (id: %s).", assemble.Token(memoryID)), nil
 }
 
 // withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
@@ -2030,7 +2030,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 			fmt.Sprintf("Memory %s was already deleted; its %d recorded version(s) of text and the "+
 				"reflection snapshot holding it were removed. The memory itself is not restored.",
-				memoryID, outcome.Rows), outcome)}},
+				assemble.Token(memoryID), outcome.Rows), outcome)}},
 	}, nil, nil
 }
 
@@ -2445,9 +2445,9 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		msg := fmt.Sprintf("Memory saved (id: %s)", id)
+		msg := fmt.Sprintf("Memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
-			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", assemble.Token(id), assemble.Token(duplicateOf), score)
 		}
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
@@ -2459,7 +2459,7 @@ func (s *Server) registerTools() {
 		if args.Pin {
 			msg += " — pinned, so consolidation will not rewrite it"
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", assemble.Token(duplicateOf))
 			}
 		}
 		// And the same for the fields a fold hands the target, for the same reason:
@@ -2467,7 +2467,7 @@ func (s *Server) registerTools() {
 		// answering. COALESCE in the store means only what is named here moved.
 		if duplicateOf != "" {
 			if moved := fields.foldNotice(prov); moved != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", assemble.Token(duplicateOf), moved)
 			}
 		}
 		// Advisory only: the write has already happened and the id above is
@@ -2485,7 +2485,7 @@ func (s *Server) registerTools() {
 		if args.Retention != "" {
 			msg += fmt.Sprintf(" — retention %s", retention)
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
 		msg += repoFactHint(args.Content, args.Category)
@@ -2904,7 +2904,7 @@ func (s *Server) registerTools() {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 						fmt.Sprintf("Memory %s was deleted, and its recorded history and any reflection "+
-							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
+							"snapshot that could have restored the row were removed.", assemble.Token(args.MemoryID)), outcome)}},
 				}, nil, nil
 			}
 			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
@@ -2918,7 +2918,7 @@ func (s *Server) registerTools() {
 						"recorded history and any reflection snapshot that could have restored the row were "+
 						"removed. Text an older Ghost version already freed into the file's free space, a copy "+
 						"in a backup taken before this, or another machine's store, is out of reach.",
-					args.MemoryID)}},
+					assemble.Token(args.MemoryID))}},
 			}, nil, nil
 		}
 		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
@@ -3114,16 +3114,16 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
+		msg := fmt.Sprintf("Global memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
-			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", assemble.Token(id), assemble.Token(duplicateOf), score)
 		}
 		// The fold's message names the fields the claim moved onto the target
 		// rather than only the copy's id; see ghost_memory_save for why, and
 		// writeFields.foldNotice for the COALESCE half of it.
 		if duplicateOf != "" {
 			if moved := fields.foldNotice(prov); moved != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", assemble.Token(duplicateOf), moved)
 			}
 		}
 		// The same advisory the project save carries, and for the same reason:
@@ -3135,7 +3135,7 @@ func (s *Server) registerTools() {
 		if args.Retention != "" {
 			msg += fmt.Sprintf(" — retention %s", retention)
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
 		msg += repoFactHint(args.Content, args.Category)
@@ -3205,7 +3205,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("create task: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
-		msg := fmt.Sprintf("Task created (id: %s)", id)
+		msg := fmt.Sprintf("Task created (id: %s)", assemble.Token(id))
 		if titleTruncated {
 			msg += truncationWarningAt("task title", maxTitleLen, taskTruncationAdvice)
 		}
@@ -3701,7 +3701,7 @@ func (s *Server) registerTools() {
 
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
-			decisionID, memoryID, supersedeNote)
+			assemble.Token(decisionID), assemble.Token(memoryID), supersedeNote)
 		msg += sameTitleAdvice
 		// A decision routed to a project of its own while a same-named project
 		// kept the name (#613) has to say so, for the reason the save result
@@ -4089,7 +4089,7 @@ func (s *Server) registerTools() {
 			// and a retry appends a SECOND objection — so the refusal states both
 			// halves: what happened, and what not to do about it.
 			return nil, nil, fmt.Errorf("ghost_memory_flag: memory %s was flagged, but the count could not be read back — do NOT retry, a retry appends a second flag: %w",
-				args.MemoryID, err)
+				assemble.Token(args.MemoryID), err)
 		}
 		// Count and id only. The reason deliberately does not come back: this
 		// result lands in the same agent context the reason came from, and echoing
