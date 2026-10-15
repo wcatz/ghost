@@ -1290,7 +1290,7 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 func TestEnsureHook_RecognisesTransparentPrefixesInsideAShellScript(t *testing.T) {
 	const ghostBin = "/usr/local/bin/ghost"
 	const shell = "/bin/sh"
-	desired := shellQuotePOSIX(ghostBin) + " hook stop --source claude-code"
+	desired := shellQuote(ghostBin) + " hook stop --source claude-code"
 
 	script := func(inner string) string {
 		return shell + ` -c "` + inner + " " + ghostBin + ` hook stop --source claude-code"`
