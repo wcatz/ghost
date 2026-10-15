@@ -23,6 +23,20 @@ import (
 // or the child has already exited.
 const harnessWaitDelay = 2 * time.Second
 
+// boundHarnessProcess gives a harness child the whole-call deadline bound: its
+// own process group, a Cancel that signals that group, and the WaitDelay
+// backstop. harnessCommand applies it to every child it builds, and the one
+// caller that must build its own child — the cleanup runner, which has to reach
+// the user's own opencode store rather than an isolated tree — applies it too.
+// Keeping it one function is what makes the bound a property of a harness child
+// rather than of having gone through the funnel: a second caller can share it,
+// and a second caller that forgets it is a missing call a reader can see.
+func boundHarnessProcess(cmd *exec.Cmd) {
+	setHarnessProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminateHarnessProcess(cmd) }
+	cmd.WaitDelay = harnessWaitDelay
+}
+
 // harnessCommand builds the subprocess command every LLM harness client runs,
 // confined to a fresh per-invocation directory under Ghost's owned scratch
 // root (internal/scratch): the child's working directory and TMPDIR/TMP/TEMP
@@ -81,18 +95,11 @@ func harnessCommand(ctx context.Context, binary string, args, baseEnv []string, 
 	// helper that inherited stdout keeps the copy pipe's write end open and Wait
 	// blocks until the orphan exits — measured as a 500 ms context returning
 	// after 6 s, which is the deadline failing at exactly the thing
-	// defaultTimeout (cli_client.go) claims it prevents. Three settings close
-	// that, in the same shape the lifecycle phase spawn uses one level up.
-	//
-	// The child runs in its own process group so Cancel can signal the WHOLE
-	// group, which is what reaches a helper that is still running. WaitDelay is
-	// the backstop for a helper that ignores the signal, so an inherited pipe
-	// cannot hold Wait past the deadline. Both are set here rather than at each
-	// call site, because this is the single spawn funnel and a backend that
-	// built its own command would lose them.
-	setHarnessProcessGroup(cmd)
-	cmd.Cancel = func() error { return terminateHarnessProcess(cmd) }
-	cmd.WaitDelay = harnessWaitDelay
+	// defaultTimeout (cli_client.go) claims it prevents. boundHarnessProcess
+	// closes that, in the same shape the lifecycle phase spawn uses one level
+	// up, and it lives in one function so the cleanup runner's children — which
+	// are built here-adjacent rather than through this funnel — share it.
+	boundHarnessProcess(cmd)
 	dir, err := scratch.Open()
 	if err == nil {
 		cmd.Dir = dir.Path()

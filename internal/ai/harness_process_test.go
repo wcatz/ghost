@@ -199,3 +199,53 @@ func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 		t.Errorf("the call was held open for %s by a helper that inherited the child's stdout, want it bounded by the %s backstop", elapsed, harnessWaitDelay)
 	}
 }
+
+// TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper covers the one harness
+// child that is NOT built by harnessCommand. The cleanup runner builds its own
+// command, because it must reach the user's own opencode store rather than the
+// isolated tree the funnel's clients use, so the bound has to reach it another
+// way — through the shared helper. Without that, this child keeps exactly the
+// defect the fallback below pins for the funnel: a helper that inherited its
+// stdout holds the call open past the deadline.
+func TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper(t *testing.T) {
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "opencode")
+	body := `dir=$(dirname "$0")
+export dir
+if [ "$1:$2" = "session:list" ]; then
+  sh -c 'trap "" TERM; echo $$ > "$dir/helper.pid"; exec sleep 20' &
+  wait
+fi
+printf '%s' '[]'
+`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+
+	runner := openCodeCleanupRunner{binary: bin, tempRoot: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.run(ctx, []string{"session", "list", "--format", "json"})
+	}()
+	helper := waitForRecordedPid(t, filepath.Join(dir, "helper.pid"))
+	defer killGrandchild(t, helper)
+	if !processAlive(helper) {
+		t.Fatalf("the fake recorded helper pid %d but it is not running, so this run does not cover the case under test", helper)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cleanup child was held open by a helper that inherited its stdout, so the call outlived its deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the cleanup call returned %s after it started, want it bounded by the %s backstop", elapsed, harnessWaitDelay)
+	}
+}

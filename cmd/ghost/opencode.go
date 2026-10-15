@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -106,7 +105,9 @@ func runOpenCodeCleanupSessions(args []string) {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
 		os.Exit(1)
 	}
-	res, err := ai.CleanupOpenCodeSessions(context.Background(), cfg.CLI.OpenCodeBinary, opts, os.Stdout)
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
+	res, err := ai.CleanupOpenCodeSessions(ctx, cfg.CLI.OpenCodeBinary, opts, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
