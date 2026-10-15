@@ -7709,21 +7709,28 @@ type RestoreResult struct {
 	// Restored is the number of memories the restore brought back: rows it
 	// rewrote in place plus rows it re-inserted under their old ids.
 	Restored int
-	// UncapturedRetention is the number of rows the snapshot could not supply
-	// a tier for, read from the snapshot itself: rows whose retention_captured
-	// marker is 0 predate the column (or were backfilled by hand), so the
-	// restore left each live row's own tier alone — and a row it re-inserted
-	// took the memories column DEFAULT. Zero on every snapshot this build
-	// writes.
+	// UncapturedRetention is the count of the marker-0 rows the restore
+	// actually covered — a "covered" row being one the restore rewrote in
+	// place (a live row in this project, neither pinned nor resolved nor
+	// persistent) or one it re-inserted (genuinely gone since). Pinned,
+	// persistent and promoted rows the restore never touched do not count,
+	// because none of their tiers was the restore's to put back. Among the
+	// counted rows, retention_captured = 0 means the row predates the column
+	// (or was backfilled by hand); the restore left each live such row's own
+	// tier alone and re-inserted a genuinely-gone one at the column DEFAULT.
+	// Zero on every snapshot this build writes.
 	UncapturedRetention int
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project,
 // putting back the content, the scope and the retention tier the snapshot
-// recorded, and re-deriving the expiry of a restored session row through
-// sessionExpiry exactly as a save does (#1341). The result carries both the
-// number of memories restored and the number of snapshot rows that predate the
-// retention column, so a caller can report an undo that could not be complete.
+// recorded. The expiry is re-derived through sessionExpiry exactly as a save
+// does (#1341) — except that a session row whose tier never moved (already
+// session, carrying an expiry) keeps the expiry it holds, so a restore never
+// extends an untouched row's life and a second run leaves the corpus alone.
+// The result carries both the number of memories restored and the number of
+// covered snapshot rows that predate the retention column, so a caller can
+// report an undo that could not be complete.
 func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
