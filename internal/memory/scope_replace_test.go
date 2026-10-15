@@ -322,6 +322,190 @@ func TestRestoreSnapshotBringsScopeBack(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualRewriteInheritsScope verifies that a single-source
+// rewrite inherits the source's scope. This is the fix for #1391: the fresh
+// INSERT branch of ReplaceNonManual must read the source rows' scope rather
+// than using the emission's (which is nil from reflection).
+func TestReplaceNonManualRewriteInheritsScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a source memory with a specific scope.
+	srcID, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production db port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+
+	// Rewrite it (single source). The emission has NO scope (as from reflection).
+	// The successor should inherit the source's scope.
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "production db port is 5433 (rewritten)",
+			Importance:  0.6,
+			ReplacesIDs: []string{srcID},
+			// Scope is nil - exactly what reflection produces
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var rewritten *Memory
+	for i := range all {
+		if all[i].Content == "production db port is 5433 (rewritten)" {
+			rewritten = &all[i]
+			break
+		}
+	}
+	if rewritten == nil {
+		t.Fatalf("rewritten memory not found: %+v", all)
+	}
+	if rewritten.Scope["environment"] != "production" {
+		t.Errorf("rewrite scope = %v, want environment=production — single-source rewrite must inherit source scope", rewritten.Scope)
+	}
+}
+
+// TestReplaceNonManualMergeInheritsScope verifies that a merge inherits the
+// scope when all sources agree. This is the fix for #1391.
+func TestReplaceNonManualMergeInheritsScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create two source memories with the SAME scope.
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "prod port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "staging port is 8443",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	// Merge them. The emission has NO scope.
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "ports: prod 5432; staging 8443",
+			Importance:  0.6,
+			ReplacesIDs: []string{src1, src2},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var merged *Memory
+	for i := range all {
+		if all[i].Content == "ports: prod 5432; staging 8443" {
+			merged = &all[i]
+			break
+		}
+	}
+	if merged == nil {
+		t.Fatalf("merged memory not found: %+v", all)
+	}
+	if merged.Scope["environment"] != "production" {
+		t.Errorf("merge scope = %v, want environment=production — merge with agreeing sources must inherit scope", merged.Scope)
+	}
+}
+
+// TestReplaceNonManualMergeDisagreeingScope verifies that a merge with
+// disagreeing scopes does NOT silently widen the scope. Per #1391, the
+// expected behavior is that the merge is not performed (sources stay unmerged)
+// or only shared keys are kept. The current implementation will drop the
+// emission (via the corpus guard) when sources disagree on scope.
+func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create two source memories with DIFFERENT scopes.
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "prod port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "staging port is 8443",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	// Merge them - the emission has NO scope.
+	// The corpus guard should drop this emission because the sources
+	// have conflicting scopes and we can't silently widen.
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "ports: prod 5432; staging 8443",
+			Importance:  0.6,
+			ReplacesIDs: []string{src1, src2},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// The emission should be dropped due to scope conflict
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to scope conflict, but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{src1, src2})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	foundProd, foundStaging := false, false
+	for _, r := range rows {
+		if r.Content == "prod port is 5432" {
+			foundProd = true
+		}
+		if r.Content == "staging port is 8443" {
+			foundStaging = true
+		}
+	}
+	if !foundProd || !foundStaging {
+		t.Errorf("sources were modified: %+v", rows)
+	}
+}
+
 // TestRestoreSnapshotRewritesScopeOnExistingRow: restore updates rows that
 // still exist by matching snapshot to memory id. That UPDATE has to carry
 // scope too, or a restore into a row whose scope was edited in the meantime

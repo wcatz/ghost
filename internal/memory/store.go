@@ -6964,6 +6964,98 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 	return NormalizeRetention(m.Retention)
 }
 
+// inheritedScope computes the scope a consolidation successor should inherit
+// from the rows it replaces. It follows the same "inherits rather than invents"
+// principle as inheritedClaims and inheritedRetention.
+//
+// Rules:
+//   - If the emission states a scope, it wins (the emission is explicit).
+//   - Otherwise, read the scope from each source in ReplacesIDs order.
+//   - If all scoped sources agree on every key, return that scope.
+//   - If sources disagree on any key, or only some sources are scoped, return
+//     an error to signal the corpus guard to drop the emission rather than
+//     silently widening scope.
+//   - If no source has a scope, return nil (applies everywhere).
+//
+// This ensures a single-source rewrite keeps the source's scope, a merge with
+// agreeing sources keeps the shared scope, and a merge with conflicting scopes
+// is dropped (the sources stay unmerged).
+func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (map[string]string, error) {
+	// If the emission explicitly states a scope, it wins.
+	if m.Scope != nil {
+		return m.Scope, nil
+	}
+
+	var agreedScope map[string]string
+	haveAgreed := false
+
+	for _, id := range m.ReplacesIDs {
+		if id == "" {
+			continue
+		}
+		var scopeJSONStr sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT scope FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+		).Scan(&scopeJSONStr)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Source doesn't exist in this store; skip it.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read replaced memory %s scope: %w", RefusalArg("memory_id", id), err)
+		}
+
+		var sourceScope map[string]string
+		if scopeJSONStr.Valid && scopeJSONStr.String != "" {
+			if err := json.Unmarshal([]byte(scopeJSONStr.String), &sourceScope); err != nil {
+				return nil, fmt.Errorf("unmarshal scope for memory %s: %w", RefusalArg("memory_id", id), err)
+			}
+		}
+
+		if sourceScope == nil {
+			// This source is unscoped (applies everywhere). It doesn't constrain
+			// the agreed scope, but if we already have an agreed scope, this
+			// source's lack of scope means we can't keep keys it doesn't have.
+			if haveAgreed {
+				// Some sources are scoped, this one isn't. We can only keep
+				// keys that ALL sources share - but an unscoped source has no
+				// keys, so the intersection is empty.
+				return nil, fmt.Errorf("scope conflict: source %s is unscoped but others are scoped", id)
+			}
+			// All sources so far are unscoped; continue.
+			continue
+		}
+
+		if !haveAgreed {
+			// First scoped source we've seen.
+			agreedScope = sourceScope
+			haveAgreed = true
+			continue
+		}
+
+		// We have a previous agreed scope; check if this source agrees.
+		if !scopeEqual(agreedScope, sourceScope) {
+			return nil, fmt.Errorf("scope conflict: source %s disagrees with previous sources", id)
+		}
+		// They agree; continue checking other sources.
+	}
+
+	return agreedScope, nil
+}
+
+// scopeEqual returns true if two scope maps have the same keys and values.
+func scopeEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // sourceRetentionTx folds the tiers of the given source rows into the one life
 // they share, and reports whether any of them named one. The second answer is
 // what keeps the two callers apart: the fresh INSERT has no row of its own, so a
@@ -7345,6 +7437,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
 	// behaviour above exactly.
 	guard := newFedGuard(candidates, fed, concurrent)
+	// Build a candidatesByID map for scope conflict handling in the drop loop.
+	candidatesByID := make(map[string]replaceCandidate, len(candidates))
+	for _, c := range candidates {
+		candidatesByID[c.id] = c
+	}
 	dropEmission := make([]bool, len(memories))
 	overflowed := make([]bool, len(memories))
 	overflowLinks := make([]int, len(memories))
@@ -7359,6 +7456,27 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	overflowKept := make(map[string]bool)
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
+		// Check for scope conflicts: if sources have disagreeing scopes, or only
+		// some are scoped, drop the emission to avoid silently widening scope.
+		if !dropEmission[i] && len(m.ReplacesIDs) > 0 {
+			scope, err := inheritedScope(ctx, tx, projectID, m)
+			if err != nil {
+				dropEmission[i] = true
+				// Mark sources as concurrent so they survive (excluded from reusable and deleteIDs).
+				for _, replaced := range m.ReplacesIDs {
+					if _, stored := candidatesByID[replaced]; stored {
+						concurrent[replaced] = true
+					}
+				}
+				// Also mark any row carrying the emission's text as concurrent.
+				for _, c := range candidates {
+					if c.content == m.Content {
+						concurrent[c.id] = true
+					}
+				}
+			}
+			_ = scope // scope is only used for the conflict check here; the fresh INSERT will recompute it.
+		}
 		// A merge whose decision links alone would not fit in a source_ref is not
 		// written: truncating the list is the silent supersede miss, and failing
 		// the pass would re-propose the same merge forever. Its sources and any
@@ -7611,6 +7729,27 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
+		// The scope, inherited from the source rows. If the emission states a
+		// scope it wins; otherwise we read the sources. Conflicts were already
+		// checked in the drop loop; if we reach here, scope is guaranteed to be
+		// computable without conflict.
+		scope, err := inheritedScope(ctx, tx, projectID, m)
+		if err != nil {
+			// This should not happen since conflicts are caught in the drop loop,
+			// but handle it defensively.
+			dropped.record(false, 0)
+			for _, replaced := range m.ReplacesIDs {
+				if _, stored := candidatesByID[replaced]; stored {
+					concurrent[replaced] = true
+				}
+			}
+			for _, c := range candidates {
+				if c.content == m.Content {
+					concurrent[c.id] = true
+				}
+			}
+			continue
+		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, scope,
@@ -7621,7 +7760,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			        ?, ?, ?, ?, ?, ?, ?,
 			        ?, ?)
 			RETURNING id
-		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope),
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(scope),
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
