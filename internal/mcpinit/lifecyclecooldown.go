@@ -144,7 +144,9 @@ func TouchLifecycleStart(project string) error {
 // project's recorded directory resolves to it. This file is read by operators and
 // diagnostic tooling, so the value goes through `memory.RefusalArg` exactly as the
 // neighbouring lifecycle surfaces do (the lock and the start stamp, the marker's
-// alert through its own renderer) and an ordinary id comes back unchanged.
+// alert through its own renderer): an ordinary id is named quoted — `project "p1"`,
+// the spelling those neighbouring surfaces already use — and only a token-shaped
+// one is withheld, behind a placeholder naming the argument and the format found.
 //
 // It goes to the log rather than the hook's stderr because the hook's stderr is
 // the host's: one line per turn, forever, is noise nobody can act on. It is
