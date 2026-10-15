@@ -23,9 +23,9 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// renderWeirdError is the failure every fake store returns, so a test asserts on
+// errHarnessDown is the failure every fake store returns, so a test asserts on
 // the caller's sentence rather than on a transport detail.
-var renderWeirdError = errors.New("harness down")
+var errHarnessDown = errors.New("harness down")
 
 // renderStore is a canned store implementing every interface the three entry
 // points take, so one fake can drive the scan, the pass, the repair and the
@@ -53,7 +53,7 @@ func (s *renderStore) GetAll(_ context.Context, _ string, _ int) ([]memory.Memor
 func (s *renderStore) GetByIDs(_ context.Context, ids []string) ([]memory.Memory, error) {
 	s.getByIDsCalls++
 	if s.failGetByIDsAt != 0 && s.getByIDsCalls == s.failGetByIDsAt {
-		return nil, renderWeirdError
+		return nil, errHarnessDown
 	}
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -75,7 +75,7 @@ func (s *renderStore) GetEmbedding(_ context.Context, _ string) ([]float32, erro
 func (s *renderStore) SearchVectorScoped(_ context.Context, _ string, _ []float32, _ int, _ map[string]string) ([]memory.ScoredMemory, error) {
 	s.searchCalls++
 	if s.failSearchAt != 0 && s.searchCalls == s.failSearchAt {
-		return nil, renderWeirdError
+		return nil, errHarnessDown
 	}
 	out := make([]memory.ScoredMemory, 0, len(s.mems))
 	for _, m := range s.mems {
@@ -86,7 +86,7 @@ func (s *renderStore) SearchVectorScoped(_ context.Context, _ string, _ []float3
 
 func (s *renderStore) CreateLinkJudged(_ context.Context, _, _, relation string, _ float32, _, _ string) error {
 	if relation == string(RelationCauses) && s.failCreateCauses {
-		return renderWeirdError
+		return errHarnessDown
 	}
 	return nil
 }
@@ -95,11 +95,11 @@ func (s *renderStore) CreateLinkUnopposed(_ context.Context, _, _, relation stri
 	switch relation {
 	case string(RelationSupersedes):
 		if s.failCreateSupersedes {
-			return false, renderWeirdError
+			return false, errHarnessDown
 		}
 	case string(RelationCauses):
 		if s.failCreateCauses {
-			return false, renderWeirdError
+			return false, errHarnessDown
 		}
 	}
 	return true, nil
@@ -108,7 +108,7 @@ func (s *renderStore) CreateLinkUnopposed(_ context.Context, _, _, relation stri
 func (s *renderStore) InvalidateLink(_ context.Context, _, _, _ string) (int64, error) {
 	s.invalidateCalls++
 	if s.failInvalidateAt != 0 && s.invalidateCalls == s.failInvalidateAt {
-		return 0, renderWeirdError
+		return 0, errHarnessDown
 	}
 	return 1, nil
 }
@@ -133,7 +133,7 @@ func (s *renderStore) MarkSupersedeNeither(_ context.Context, _ string, _ map[[2
 
 func (s *renderStore) GetLinks(_ context.Context, memoryID string) ([]memory.Link, error) {
 	if s.failGetLinks {
-		return nil, renderWeirdError
+		return nil, errHarnessDown
 	}
 	var out []memory.Link
 	for _, l := range s.links {
@@ -439,7 +439,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 // prefix in ClassifyBatch and the per-pair fallback inside classifyChunk.
 func TestRelationClassifierWithholdsTokenShapedStoredIDsInChunkErrors(t *testing.T) {
 	t.Run("batched chunk prefix", func(t *testing.T) {
-		cls := NewRelationClassifier(&fakeProvider{err: renderWeirdError})
+		cls := NewRelationClassifier(&fakeProvider{err: errHarnessDown})
 		cls.SetRetryDelay(0)
 		_, err := cls.ClassifyBatch(context.Background(), []Candidate{
 			{NewerID: tokenShapedStoredID, OlderID: ordinaryStoredID, NewerContent: "n1", OlderContent: "o1"},
@@ -481,5 +481,5 @@ func (p *flakyClassifyProvider) Classify(_ context.Context, _, _ string) (string
 	if p.calls == 1 {
 		return "banana", nil
 	}
-	return "", renderWeirdError
+	return "", errHarnessDown
 }
