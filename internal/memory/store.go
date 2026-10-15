@@ -7761,19 +7761,32 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	}
 
 	// What the snapshot could not tell the restore, read here so the report
-	// below is a fact rather than a guess about the rows (#1341). The count is
-	// every row of the chosen snapshot whose marker is 0: snapshots are written
-	// by one statement, so a table this build wrote has none, and a whole
-	// snapshot taken before schema v26 reads as all of them. It is deliberately
-	// the SNAPSHOT's count rather than only the rows this run touched — the
-	// sentence it feeds is about the snapshot, and a run that restored nothing
-	// must not read as a snapshot that lost nothing.
+	// below is a fact rather than a guess about the rows (#1341). Only the
+	// rows the restore actually covered count: the rows it rewrote in place
+	// (a live twin in this project, neither pinned nor resolved nor exempt
+	// under the persistent tier) plus the rows it re-inserted (gone since, or
+	// with no live twin here — a promoted memory is neither). Pinned,
+	// persistent and promoted rows the restore never touched do not inflate the
+	// number, because none of their tiers was the restore's to put back. A
+	// snapshot this build wrote has none in any covered row, and a whole
+	// snapshot from before schema v26 reads as every covered one.
 	var uncapturedRetention int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM memory_snapshots
-		WHERE snapshot_id = ? AND retention_captured = 0
+		SELECT count(*) FROM memory_snapshots s
+		WHERE s.snapshot_id = ? AND s.retention_captured = 0
+		  AND (
+		        EXISTS (SELECT 1 FROM memories m
+		                WHERE m.id = s.memory_id AND m.project_id = s.project_id
+		                  AND m.pinned = 0 AND m.resolved_at IS NULL
+		                  AND m.retention <> 'persistent')
+		    OR (s.memory_id IS NOT NULL AND s.memory_id NOT IN (SELECT id FROM memories))
+		    OR (s.memory_id IS NULL
+		        AND NOT EXISTS (SELECT 1 FROM memories m
+		                        WHERE m.project_id = s.project_id
+		                          AND m.content = s.content AND m.source = s.source))
+		  )
 	`, snapshotID).Scan(&uncapturedRetention); err != nil {
-		return RestoreResult{}, fmt.Errorf("count snapshot rows without a recorded tier: %w", err)
+		return RestoreResult{}, fmt.Errorf("count covered rows without a recorded tier: %w", err)
 	}
 
 	// The one expiry a session row may be restored with, derived here rather
@@ -7952,14 +7965,31 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		    retention = CASE WHEN s.retention_captured = 1 AND s.retention IS NOT NULL
 		                     THEN s.retention ELSE memories.retention END,
 		    -- The expiry is RE-DERIVED, never copied, because sessionExpiry
-		    -- is the only source of one: a recorded session tier is restored
-		    -- with a fresh now+SessionTTL exactly as a save writes it, and a
-		    -- durable tier is restored with none. A row that was already a
-		    -- session row when the snapshot was taken therefore comes back
+		    -- is the only source of one — with one exception, which is the
+		    -- one that keeps a restore idempotent (#1341). A row whose tier
+		    -- moves onto session gets a fresh now+SessionTTL exactly as a save
+		    -- writes it; a tier that never moved (session already, with an
+		    -- expiry) keeps the expiry it holds, expiry and all, so a second
+		    -- restore changes nothing; a durable tier is restored with none.
+		    -- A session row coming back to life therefore still ends up
 		    -- prunable rather than permanent, which is the property the tier
 		    -- exists to carry.
 		    expires_at = CASE
 		        WHEN s.retention_captured = 0 OR s.retention IS NULL THEN memories.expires_at
+		        -- Idempotence (#1341): a snapshot the replace reproduced verbatim
+		        -- must not extend a session row's life every restore. The UPDATE
+		        -- touches every covered row, so re-deriving expires_at = now +
+		        -- SessionTTL would push the expiry further out on each run and
+		        -- break the claim that a second run leaves the corpus alone. A row
+		        -- whose tier already matches the recorded snapshot's therefore
+		        -- keeps the expiry it holds, including one a fold refreshed; only
+		        -- a tier that actually moves, or a row carrying none, is
+		        -- re-derived. The tier itself still takes the snapshot's value
+		        -- (see retention above), matching how a restore reverts content,
+		        -- scope and importance.
+		        WHEN s.retention = 'session'
+		             AND memories.retention = 'session'
+		             AND memories.expires_at IS NOT NULL THEN memories.expires_at
 		        WHEN s.retention = 'session' THEN ?
 		        ELSE NULL END
 		FROM memory_snapshots s

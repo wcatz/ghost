@@ -115,10 +115,12 @@ func TestARestorePutsTheTierAndItsExpiryBack(t *testing.T) {
 			t.Fatal("the row was not reused, so the snapshot does not name its id")
 		}
 
-		// The edit and the raise the restore has to undo: a row whose text has not
-		// moved would never have been rewritten before the fix either, because the
-		// UPDATE's history set is gated on the recorded columns. A PROJECT save
-		// raises the tier and clears the expiry.
+		// The edit and the raise the restore has to undo. The UPDATE rewrites
+		// every row the snapshot covers — a restore is a revert, not a diff —
+		// and only the history append below is gated on the recorded columns,
+		// so a row whose text and tier had not moved would come back byte
+		// identical and prove nothing. A PROJECT save raises the tier and
+		// clears the expiry.
 		edited := "the staging cluster answers on port 8443, kept for the record"
 		if err := s.UpdateMemory(ctx, testProject, live, &edited, nil, nil, nil); err != nil {
 			t.Fatalf("edit the row after the snapshot: %v", err)
@@ -347,4 +349,84 @@ func TestARestoreReportsTheLegacySnapshotOnTheInsertPath(t *testing.T) {
 	if res.UncapturedRetention == 0 {
 		t.Errorf("the restore reported no uncaptured retention for a snapshot whose every row predates the column")
 	}
+}
+
+// TestARestoreIdempotenceForAnUnchangedSessionRow covers the fix that a restore
+// rewriting every covered row must not extend an untouched session row's life:
+// re-deriving expires_at = now + SessionTTL for a row whose tier did not move
+// would push the expiry further out on every run and break the documented
+// claim that a second restore leaves the corpus alone.
+func TestARestoreIdempotenceForAnUnchangedSessionRow(t *testing.T) {
+	t.Run("a session row reused verbatim keeps its expiry across two restores", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const body = "the staging cluster answers on port 8443"
+		live, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", body, "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession})
+		if err != nil {
+			t.Fatalf("save the session row: %v", err)
+		}
+		ageSessionRow(t, s, live, 400*24*time.Hour)
+		aged := expiryText(getOne(t, s, live).ExpiresAt)
+		if aged == "" {
+			t.Fatalf("the aged row has no expires_at")
+		}
+		// Byte-identical re-emission: reuses the row, and raiseReusedRetentionTx
+		// finds no other source to raise the tier from, so nothing writes.
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
+		}}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if before := getOne(t, s, live); before.Retention != RetentionSession {
+			t.Fatalf("the reuse raised the row to %q; the idempotence fixture needs it to stay session", before.Retention)
+		}
+		pre := expiryText(getOne(t, s, live).ExpiresAt)
+		if pre != aged {
+			t.Fatalf("the reuse changed the expiry (%q, want %q); the idempotence premise is broken", pre, aged)
+		}
+		for i := 0; i < 2; i++ {
+			if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+				t.Fatalf("RestoreSnapshot run %d: %v", i+1, err)
+			}
+			if got := expiryText(getOne(t, s, live).ExpiresAt); got != pre {
+				t.Errorf("run %d left expires_at = %q, want %q: an untouched session row's expiry must not move on restore",
+					i+1, got, pre)
+			}
+		}
+	})
+
+	t.Run("an expiry a fold refreshed survives when the tier did not move", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const body = "the staging cluster answers on port 8443"
+		live, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", body, "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession})
+		if err != nil {
+			t.Fatalf("save the session row: %v", err)
+		}
+		// A real fold: re-emitting with a different importance writes the row and
+		// refreshes its expiry (#772); the snapshot takes the session tier.
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: body, Importance: 0.6, ReplacesIDs: []string{live},
+		}}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if before := getOne(t, s, live); before.Retention != RetentionSession {
+			t.Fatalf("the fold moved the tier to %q; this fixture needs it unchanged", before.Retention)
+		}
+		refreshed := expiryText(getOne(t, s, live).ExpiresAt)
+		if refreshed == "" {
+			t.Fatalf("the fold did not refresh the expiry")
+		}
+		ageSessionRow(t, s, live, 400*24*time.Hour)
+		aged := expiryText(getOne(t, s, live).ExpiresAt)
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("RestoreSnapshot: %v", err)
+		}
+		if got := expiryText(getOne(t, s, live).ExpiresAt); got != aged {
+			t.Errorf("the restore re-derived the expiry to %q, want %q; when the tier never moved, a restore must not extend the row's life",
+				got, aged)
+		}
+	})
 }
