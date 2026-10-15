@@ -141,7 +141,7 @@ host SessionStart
   → write the digest to the host
 ```
 
-opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead.
+opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead. The block it renders is the hook's, alert included: when a failed unattended `ghost lifecycle` run has left a current per-project failure marker, both surfaces lead with the same one-line maintenance alert ahead of the digest.
 
 ### Working moment
 
@@ -185,7 +185,7 @@ The cooldown exists because the hook fires once per turn, so a chain per turn is
 
 A skip is the only thing the hook records about a run that did not happen, so it leaves one line in `lifecycle.log` rather than a line on the host's stderr. The project in that line is a resolved id out of the store, and it is rendered through the same guard the lifecycle refusals use, because a stored id is not token-guarded on the write side — `CheckImportedProjectID` refuses control characters and `CheckImportedProject` asks the guard of a name and a path, but neither asks it of the id, so an imported artifact's id is held verbatim and a session in that project's directory resolves to it.
 
-A run that fails records it in a per-project failure marker, `lifecycle-last-failure-<stem>.json`, which the next session start turns into one alert line; a fully successful run clears its own project's marker and nobody else's. The stem is a digest of the project (the first 16 bytes of its SHA-256, lowercase hex), not a sanitized spelling of it: the sanitized stem folded punctuation, so two projects differing only in a space and an underscore shared one file and one's success erased the other's failure. A digest is injective in practice, survives a case-insensitive filesystem, and keeps the `--project` operand out of the file name. Markers written under the old sanitized name are still read and cleared, but only when the project they record is the one asking, because that name can belong to more than one project. The file name never carries the operand, and the marker's `project` field does not either when the operand is credential shaped and resolves to no project: it records the token guard's placeholder instead, and the file is still keyed on the raw operand's digest so that operand's clean run clears it.
+A run that fails records it in a per-project failure marker, `lifecycle-last-failure-<stem>.json`, which the next session start turns into one alert line — on both session-start surfaces, the hook's stdout injection and the `ghost context` render a host runs instead; a fully successful run clears its own project's marker and nobody else's. The stem is a digest of the project (the first 16 bytes of its SHA-256, lowercase hex), not a sanitized spelling of it: the sanitized stem folded punctuation, so two projects differing only in a space and an underscore shared one file and one's success erased the other's failure. A digest is injective in practice, survives a case-insensitive filesystem, and keeps the `--project` operand out of the file name. Markers written under the old sanitized name are still read and cleared, but only when the project they record is the one asking, because that name can belong to more than one project. The file name never carries the operand, and the marker's `project` field does not either when the operand is credential shaped and resolves to no project: it records the token guard's placeholder instead, and the file is still keyed on the raw operand's digest so that operand's clean run clears it.
 
 ### The supersede pass, and why it is KEEP-biased
 
@@ -1443,7 +1443,9 @@ changes what the answer *means*.
 path runs. The Obsidian mirror and the session-count bump exist because that
 command backs a session start; a past reading is a diagnostic a person asked for,
 and counting it would move the present's session number to answer a question about
-the past.
+the past. The current path's maintenance alert is omitted for the same reason: a
+current failure marker is a statement about the present, and a block that names
+an instant in the past must not carry the present's paused consolidation.
 
 Restoring or rolling the store back to a past state is explicitly **not** this —
 that is export/import ([#586](https://github.com/wcatz/ghost/issues/586)).
