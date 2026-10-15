@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // writeTranscript writes lines to a temp transcript file and returns its path.
@@ -488,6 +489,76 @@ func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
+	}
+}
+
+// TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID is #1327: the
+// cooldown's skip line is the one durable record of why a run did not happen,
+// and a stored project id is not token-guarded — CheckImportedProjectID refuses
+// a control character but never asks the guard — so a session in the affected
+// project's recorded directory resolves to a token-shaped id and the line
+// interpolated it with a bare %s. Every neighbouring lifecycle surface renders
+// the same value (the lock and the start stamp through RefusalArg, the marker's
+// alert through renderMarkerProject); this one wrote it into a file that
+// operators and diagnostic tooling read.
+//
+// Both halves are asserted from one log: the token-shaped id must not appear,
+// and an ordinary id still must. A renderer that withheld everything would pass
+// the first half and leave the line unable to name the project it skipped.
+func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+	dataDir := filepath.Join(dataHome, "ghost")
+
+	// Obviously fake, shaped by the detector's own GitHub rule. The directory
+	// and the name are ordinary on purpose: the creation guard asks the guard of
+	// a project's name and path but not of its id — which is the hole itself, an
+	// imported artifact's id arriving verbatim — so planting one through
+	// EnsureProject is the shape the store really ends up in, and the id is what
+	// a session resolves to.
+	//
+	// The ordinary project is planted in the same store so one log shows both
+	// halves.
+	const tokenID = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	now := time.Now()
+	for _, p := range []struct{ id, dir, name string }{
+		{tokenID, "tokproj", "Token Project"},
+		{"p1", "ordinaryproj", "Ordinary Project"},
+	} {
+		dir := filepath.Join(t.TempDir(), p.dir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p.dir, err)
+		}
+		canonical, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("EvalSymlinks: %v", err)
+		}
+		seedProject(t, dataHome, p.id, canonical, p.name)
+		// A stamp inside the window, so this call takes the cooldown branch —
+		// the only writer of the line, and the only path that writes nothing
+		// else (the spawn log and the pid file are both past it).
+		writeStamp(t, dataDir, p.id, now, time.Minute)
+		spawnLifecycleIfConfigured(canonical, "", nil)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dataDir, "lifecycle.log"))
+	if err != nil {
+		t.Fatalf("read lifecycle.log: %v", err)
+	}
+	line := string(b)
+	if strings.Contains(line, tokenID) {
+		t.Errorf("lifecycle.log repeats the token-shaped project id: %s", line)
+	}
+	if !strings.Contains(line, "project \"p1\"") {
+		t.Errorf("an ordinary project id no longer appears in the log: %s", line)
+	}
+	// The line still has to be actionable: a bare "withheld" that named neither
+	// the argument nor the format found would tell an operator nothing.
+	if !strings.Contains(line, "<project withheld: it holds a GitHub personal access token>") {
+		t.Errorf("the log does not name the withheld project and its format: %s", line)
+	}
+	if n := strings.Count(strings.TrimRight(line, "\n"), "\n") + 1; n != 2 {
+		t.Errorf("lifecycle.log holds %d lines, want 2 (one skip per project):\n%s", n, line)
 	}
 }
 

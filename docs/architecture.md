@@ -182,6 +182,8 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 
 The cooldown exists because the hook fires once per turn, so a chain per turn is a chain per turn. Two independent guards bound it: the per-project PID file (`AcquireLifecycleLock` — a run is not already in progress) and `lifecycle.min_interval` (a run did not start too recently). The second is a file's mtime rather than a row, because the hook's synchronous path must not open the database to ask the question. The `ghost lifecycle` process writes it, once it has passed every precondition that can exit non-zero — so a run that dies before doing any work does not burn the window, and does not add to the silent-death class the failure marker exists to catch. A foreground run writes it too, which is what a user retrying the alert's command wants.
 
+A skip is the only thing the hook records about a run that did not happen, so it leaves one line in `lifecycle.log` rather than a line on the host's stderr. The project in that line is a resolved id out of the store, and it is rendered through the same guard the lifecycle refusals use, because a stored id is not token-guarded on the write side — `CheckImportedProjectID` refuses control characters and `CheckImportedProject` asks the guard of a name and a path, but neither asks it of the id, so an imported artifact's id is held verbatim and a session in that project's directory resolves to it.
+
 A run that fails records it in a per-project failure marker, `lifecycle-last-failure-<stem>.json`, which the next session start turns into one alert line; a fully successful run clears its own project's marker and nobody else's. The stem is a digest of the project (the first 16 bytes of its SHA-256, lowercase hex), not a sanitized spelling of it: the sanitized stem folded punctuation, so two projects differing only in a space and an underscore shared one file and one's success erased the other's failure. A digest is injective in practice, survives a case-insensitive filesystem, and keeps the `--project` operand out of the file name. Markers written under the old sanitized name are still read and cleared, but only when the project they record is the one asking, because that name can belong to more than one project. The file name never carries the operand, and the marker's `project` field does not either when the operand is credential shaped and resolves to no project: it records the token guard's placeholder instead, and the file is still keyed on the raw operand's digest so that operand's clean run clears it.
 
 ### The supersede pass, and why it is KEEP-biased
@@ -434,8 +436,8 @@ rank, not a filter. With RRF k=60 the factor effectively ranks a demoted row
 below every live candidate in the pool rather than below one comparable
 neighbour: every fused score lives in a band of a few thousandths — the best
 any row can earn is a rank-1 hit in both legs, 0.3/61 + 0.7/61 ≈ 0.0164 — so
-halving one lands at ≈ 0.0082, under the ≈ 0.0088 that the deepest vector-leg
-row in a default `limit`-10 window still scores and under the 0.0125 of the
+halving one lands at ≈ 0.0082, under the ≈ 0.01 that the deepest vector-leg
+row in a default `limit`-5 window still scores and under the 0.0143 of the
 deepest row in a keyword-only search. The only live rows a demoted leader can
 still outrank are ones the vector leg never fetched (no embedding yet), whose
 keyword-only score is capped at 0.3/61 ≈ 0.0049. That is what keeps resolved
@@ -608,8 +610,8 @@ failure the marker prevents.
 
 Window selection reserves real estate for the keyword leg. A plain cut on the
 fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
-row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
-inside the fetched window — scores 0.7/80 ≈ 0.0088. A full vector leg
+row scores 0.3/61 ≈ 0.0049, while the vector leg's 10th row — still well
+inside the fetched window — scores 0.7/70 ≈ 0.01. A full vector leg
 therefore outranked the best keyword match every time, and an exact identifier
 match could never reach the results, which is the case FTS exists for.
 
@@ -1861,11 +1863,13 @@ Axis interaction rules:
 > stage 7, and the two never both act on one request because each is gated on the
 > opposite mode: a relative-to-top fused-Base cut applied after dedup and before
 > the budget, on a QUERY only, that stops the answer where relevance falls off —
-> `ghost_memory_search` used to always fill its window, so a block that answered a
-> question whose useful row ranked first still carried nine rows of noise (context
-> precision 0.141). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
-> of the top row's fused Base below which a row is cut), chosen from the
-> `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
+> `ghost_memory_search` used to fill a 10-row window on almost every query, so a
+> block that answered a question whose useful row ranked first still carried nine
+> rows of noise (context precision about 0.14). ONE rule, ONE parameter
+> (`context.relevance_cutoff`, the share of the top row's fused Base below which a
+> row is cut), chosen from the `ghost bench --cutoff-sweep` gradient at that
+> budget; at the 5-item budget the item cap already removes the tail it would cut
+> and the sweep is flat. It can only SHORTEN an answer: `limit`
 > stays the maximum, the top row is always kept (a result rate below 1.000 would
 > be a regression), and a pinned row and a keyword-reserved row are never cut. The comparison is on Base, the score before the age decay, so age and category never read as irrelevance. Each cut row is recorded once —
 > a decision at the stage with reason `relevance_cutoff`, which the retrieval
@@ -1878,7 +1882,7 @@ Axis interaction rules:
 > The no-answer step ([#955](https://github.com/wcatz/ghost/issues/955)) follows
 > stage 8 on a QUERY only and is numbered with it rather than as a new stage 9: a
 > question nothing in the store answers still filled its window (the bench's 24
-> no-answer queries got ten rows each), so when the best vector cosine among the
+> no-answer queries got five rows each), so when the best vector cosine among the
 > block's rows is strictly below one absolute bar (`context.no_answer_cosine`) the
 > block is withheld and the answer says "No memory answers this: nothing cleared
 > the bar", with the score shown. ONE rule, ONE parameter. A pinned row is never

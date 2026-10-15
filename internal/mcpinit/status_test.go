@@ -2,8 +2,11 @@ package mcpinit
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1581,5 +1584,64 @@ func TestStatus_NoOllamaDownDurationWhenAbsent(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Ollama down since") {
 		t.Errorf("expected no Ollama-down line without a marker file, got:\n%s", out.String())
+	}
+}
+
+// TestStatus_OllamaDownDurationSuppressedWhenInconclusive is the regression
+// test for a liveness probe that missed its own deadline. `Inconclusive` is
+// evidence of nothing — the endpoint may be listening and merely slow — so
+// `ghost mcp status` must not turn it into the positive, timed claim
+// "Ollama down since …": that line reads the worker's down marker, which a
+// currently-up-but-busy Ollama can leave stamped for hours, and the probe that
+// is supposed to authorise the claim established no outage at all. The
+// endpoint must be reported as slow or undetermined instead.
+func TestStatus_OllamaDownDurationSuppressedWhenInconclusive(t *testing.T) {
+	statusEnv(t)
+	t.Setenv("PATH", writeStubGhost(t))
+
+	// A handler that never answers. The liveness probe's own deadline expires
+	// with nothing written, which is the Inconclusive verdict — not a refusal.
+	release := make(chan struct{})
+	wedged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	// Defers run LIFO, so the handler is released before Close waits on it.
+	defer wedged.Close()
+	defer close(release)
+
+	model := "nomic-embed-text:v1.5"
+	// Assert the liveness state directly, so the test cannot pass on a
+	// different verdict reached for some other reason.
+	if got := embedding.NewClient(wedged.URL, model, 768).Probe(context.Background()); got != embedding.Inconclusive {
+		t.Fatalf("Probe at an endpoint that never answers = %v, want Inconclusive", got)
+	}
+
+	writeGhostConfigFile(t, fmt.Sprintf(`embedding:
+  ollama_url: %s
+  model: %s
+  dimensions: 768
+  enabled: true
+`, wedged.URL, model))
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+
+	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	stale := time.Now().Add(-5 * time.Hour).UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(ghostDir, embedding.OllamaDownMarkerFilename), []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if strings.Contains(out.String(), "Ollama down since") {
+		t.Errorf("an inconclusive liveness probe must not report a down-duration, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "liveness undetermined") {
+		t.Errorf("expected the expired probe to be reported as undetermined, got:\n%s", out.String())
 	}
 }

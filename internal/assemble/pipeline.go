@@ -1175,14 +1175,17 @@ func runLegConsensus(p *pipeline) {
 // runCutoff is stage 8, on QUERY-mode requests only: the relative relevance
 // cutoff (#954).
 //
-// ghost_memory_search always fills its window, so a block that carries ten rows
-// answers a question whose useful row ranked first with nine rows of noise a
-// model has to discount: the graded bench reports context precision 0.138 at
-// about 297 estimated tokens per answer, eight or nine of every ten rows being
-// noise. This stage stops the answer where relevance falls off, so a caller gets
-// fewer, better rows. The ranking is not the problem — hybrid MRR@10 is 0.902,
-// so the useful row is usually first — the block simply never stops, and this is
-// what stops it. It runs after dedup and before the budget.
+// ghost_memory_search used to fill a 10-row window on almost every query, so a
+// block answering a question whose useful row ranked first still carried nine
+// rows of noise a model had to discount: the graded bench reported context
+// precision near 0.14 at about 300 estimated tokens per answer. This stage stops
+// the answer where relevance falls off, so a caller gets fewer, better rows. At
+// the shipped 5-item budget the item cap already removes the tail it would cut on
+// the graded corpus, so it is a recorded pass-through there and binds only for a
+// caller who raises `limit` (docs/benchmarks.md gives both). The ranking is not
+// the problem — hybrid MRR@10 is about 0.9, so the useful row is usually first —
+// the block simply never stopped, and this is what stops it. It runs after dedup
+// and before the budget.
 //
 // WHY QUERY-MODE ONLY, AND WHY THE MODE AND NOT THE SOURCE. A query is a
 // relevance question and this is a relevance answer, so it can only shorten a
