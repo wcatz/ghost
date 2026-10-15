@@ -929,6 +929,91 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 	}
 }
 
+// TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs: merge resolves both of
+// its arguments and then names the STORED ids it resolved, not the operands it
+// was handed. A stored id is not automatically safe: the bound-free import
+// predicate accepts an artifact's project id verbatim (it refuses a control
+// character, a backtick and a delimiter, and never asks the token guard), so a
+// store can hold an id the guard recognises and ResolveProject hands it back.
+// The self-merge refusal and the `Merging …` line that precedes the write
+// therefore render each id through memory.RefusalArg under the neutral
+// memory.ProjectIdentifierLabel — the renderer the not-found refusals beside
+// them and the store's _global guard already use.
+//
+// The ordinary case rides in the same test on purpose: RefusalArg is exactly %q
+// for a value the guard does not recognise, so a renderer that withheld
+// everything would keep the token out AND stop naming the project it merged.
+func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
+	const key = "AKIAIOSFODNN7EXAMPLE" // an AWS access key ID, per internal/secret
+	newStore := func(t *testing.T) *memory.Store {
+		t.Helper()
+		db, err := memory.OpenDB(":memory:")
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		s := memory.NewStore(db, logger)
+		if err := s.EnsureProject(context.Background(), key, "/tmp/tok", "token-name"); err != nil {
+			t.Fatalf("EnsureProject token: %v", err)
+		}
+		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
+			t.Fatalf("EnsureProject new: %v", err)
+		}
+		return s
+	}
+
+	t.Run("the self-merge refusal withholds the stored id", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, key, key)
+		if err == nil {
+			t.Fatal("merging a project into itself was accepted")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, key) {
+			t.Errorf("the refusal quotes the stored id:\n%s", msg)
+		}
+		if !strings.Contains(msg, "itself") {
+			t.Errorf("the refusal no longer names the self-merge:\n%s", msg)
+		}
+		if !strings.Contains(msg, "<"+memory.ProjectIdentifierLabel+" withheld") {
+			t.Errorf("the refusal does not say what was withheld:\n%s", msg)
+		}
+	})
+
+	t.Run("the merging line withholds the stored id", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		if err := runProjectMergeCore(context.Background(), store, &out, key, "new-name"); err != nil {
+			t.Fatalf("runProjectMergeCore: %v", err)
+		}
+		line := out.String()
+		if strings.Contains(line, key) {
+			t.Errorf("the merging line quotes the stored id:\n%s", line)
+		}
+		if !strings.Contains(line, "<"+memory.ProjectIdentifierLabel+" withheld") {
+			t.Errorf("the merging line does not say what was withheld:\n%s", line)
+		}
+		if !strings.Contains(line, `"new-proj"`) {
+			t.Errorf("the merging line stopped naming the survivor:\n%s", line)
+		}
+	})
+
+	t.Run("an ordinary stored id is still named verbatim", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, "new-name", "new-proj")
+		if err == nil {
+			t.Fatal("merging a project into itself was accepted")
+		}
+		want := `refusing to merge a project into itself ("new-proj")`
+		if err.Error() != want {
+			t.Errorf("refusal = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 // TestLifecyclePhasesOrder pins the ordering contract that the single-process
 // coordinator exists to enforce: reflect (a rewrite) must run before resolve
 // (stamps resolved_at) and supersede (links rows).
