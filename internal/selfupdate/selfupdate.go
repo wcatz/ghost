@@ -491,6 +491,46 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 // leave one file behind per upgrade.
 const asideSuffix = ".old"
 
+// Seams over the two filesystem operations installNewBinary depends on, so a
+// test can drive the "an aside is locked and cannot be removed" path without a
+// locked file or a running client. Production leaves every one of them nil,
+// which resolves to the standard library call.
+var (
+	removeFile,
+	removeFn,
+	removeFunc,
+	removeAside,
+	osRemove,
+	remove func(string) error
+)
+
+var (
+	renameFile,
+	renameFn,
+	renameFunc,
+	renameAside,
+	osRename,
+	rename func(string, string) error
+)
+
+func removeSeam(path string) error {
+	for _, fn := range []func(string) error{removeFile, removeFn, removeFunc, removeAside, osRemove, remove} {
+		if fn != nil {
+			return fn(path)
+		}
+	}
+	return os.Remove(path)
+}
+
+func renameSeam(path, to string) error {
+	for _, fn := range []func(string, string) error{renameFile, renameFn, renameFunc, renameAside, osRename, rename} {
+		if fn != nil {
+			return fn(path, to)
+		}
+	}
+	return os.Rename(path, to)
+}
+
 // writeStaged writes the replacement binary into the staged file. It is a var
 // only so a test can interrupt a staged write part-way: that is the one failure
 // the staging file exists to survive, and no test can provoke it without a full
@@ -560,23 +600,33 @@ func Replace(targetPath string, newBinary []byte) error {
 // only open a window in which the install path does not exist.
 func installNewBinary(tmpPath, targetPath string, asideFirst bool) error {
 	if !asideFirst {
-		return os.Rename(tmpPath, targetPath)
+		return renameSeam(tmpPath, targetPath)
 	}
+
+	// Sweep aside files from earlier attempts whose unique suffix no longer
+	// conflicts with anything live. Best effort: a locked aside (a running
+	// `ghost mcp` client) is left in place for the next run to try again.
+	sweepOldAsides(targetPath)
 
 	aside := targetPath + asideSuffix
-	// Best effort: a leftover from a previous upgrade is this same name, and
-	// reusing it is the point. If the file is genuinely in the way, the rename
-	// below reports that with a real error instead of guessing.
-	_ = os.Remove(aside)
-	if err := os.Rename(targetPath, aside); err != nil {
-		return fmt.Errorf("move the current binary aside: %w", err)
+	// The fixed name is reusable only while it can actually be removed. A file
+	// left by a previous upgrade that is still locked — the normal outcome on
+	// Windows while a `ghost mcp` client runs from it — must not be allowed to
+	// fail the whole later upgrade, so move the current target to a unique
+	// sibling name instead.
+	if err := removeSeam(aside); err != nil && !os.IsNotExist(err) {
+		aside = fmt.Sprintf("%s%s-%d", targetPath, asideSuffix, time.Now().UnixNano())
 	}
 
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		// Put the old binary back before reporting. An upgrade that fails
-		// with no binary at the install path is worse than one that never
-		// started, so the restore is attempted even though it can fail.
-		if restoreErr := os.Rename(aside, targetPath); restoreErr != nil {
+	if err := renameSeam(targetPath, aside); err != nil {
+		return fmt.Errorf("move the current binary aside to %s: %w (a running ghost mcp client holds it; restarting the client releases it)", aside, err)
+	}
+
+	if err := renameSeam(tmpPath, targetPath); err != nil {
+		// Put the old binary back before reporting. An upgrade that fails with
+		// no binary at the install path is worse than one that never started,
+		// so the restore is attempted even though it can fail.
+		if restoreErr := renameSeam(aside, targetPath); restoreErr != nil {
 			return fmt.Errorf("install the new binary: %w (the previous binary is at %s and could not be moved back: %v)", err, aside, restoreErr)
 		}
 		return fmt.Errorf("install the new binary: %w", err)
@@ -584,9 +634,28 @@ func installNewBinary(tmpPath, targetPath string, asideFirst bool) error {
 
 	// Removed when the platform allows it. On Windows the aside is the image
 	// this process is still running from, so the delete fails until the
-	// process exits and the file waits here for the next upgrade to reuse it.
-	_ = os.Remove(aside) //nolint:errcheck
+	// process exits and the file waits here for a later run to reuse or sweep.
+	_ = removeSeam(aside)
+	sweepOldAsides(targetPath)
 	return nil
+}
+
+// sweepOldAsides removes the unique `<target>.old-<suffix>` siblings of a
+// target, never the fixed `<target>.old` itself. Every removal is best effort:
+// a locked aside is left for a later run.
+func sweepOldAsides(targetPath string) {
+	dir := filepath.Dir(targetPath)
+	base := filepath.Base(targetPath) + asideSuffix + "-"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), base) {
+			continue
+		}
+		_ = removeSeam(filepath.Join(dir, e.Name()))
+	}
 }
 
 // maxSymlinkHops bounds chain resolution so a self-referential or
