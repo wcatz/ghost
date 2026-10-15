@@ -40,11 +40,18 @@ func TestDecisionRevisitMarkerLabelsOnlyRevisit(t *testing.T) {
 // revisit) and orders active ahead of revisit, so a decision flagged for
 // reconsideration is shown but never ahead of a live one. Superseded decisions
 // stay out entirely.
+//
+// The stamps are explicit and the REVISIT row is the newest of the lot, because
+// that is the only shape that makes the order discriminating: `RecordDecision`
+// writes every created_at from datetime('now'), so un-stamped rows share a
+// wall-clock second and an answer ordered by created_at alone would coincidentally
+// agree with active-first. Making the revisit row newest means dropping the
+// order term sorts it to the FRONT, where it displaces an active one.
 func TestLiveDecisionsShowsActiveBeforeRevisitAndExcludesSuperseded(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	record := func(title, status string) string {
+	record := func(title, status, createdMod string) string {
 		t.Helper()
 		id, _, _, err := s.RecordDecision(ctx, testProject, title, "body "+title, "why", nil, nil)
 		if err != nil {
@@ -55,12 +62,23 @@ func TestLiveDecisionsShowsActiveBeforeRevisitAndExcludesSuperseded(t *testing.T
 				t.Fatalf("set %q to %s: %v", title, status, err)
 			}
 		}
+		// Stamp rather than leave the column default: the newest row is the
+		// revisit one, so its POSITION is what the order term decides.
+		if _, err := s.db.Exec(`UPDATE decisions SET created_at = datetime('now', ?) WHERE id = ?`, createdMod, id); err != nil {
+			t.Fatalf("stamp created_at on %q: %v", title, err)
+		}
 		return id
 	}
 
-	activeIDs := []string{record("active one", "active"), record("active two", "active"), record("active three", "active")}
-	revisitID := record("revisit one", "revisit")
-	supersededID := record("superseded one", "superseded")
+	activeIDs := []string{
+		record("active one", "active", "-1 day"),
+		record("active two", "active", "-1 day"),
+		record("active three", "active", "-1 day"),
+	}
+	// The revisit row is the NEWEST row in the project, so only the active-first
+	// order keeps it out of a window the active rows should fill.
+	revisitID := record("revisit one", "revisit", "-1 minute")
+	supersededID := record("superseded one", "superseded", "-1 day")
 
 	all, err := s.LiveDecisions(ctx, testProject, 10)
 	if err != nil {
