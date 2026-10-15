@@ -396,30 +396,44 @@ func TestValidateAcceptsAbsentFields(t *testing.T) {
 	}
 }
 
-// TestRunRefusesBOMSettingsByName pins #1379: a settings.json that starts with
-// a UTF-8 byte-order mark is refused with a message that names the mark, never
-// the false claim that a JSON object is not one. The file is left as written.
-func TestRunRefusesBOMSettingsByName(t *testing.T) {
+// TestRunMergesBOMSettings pins #1379: Claude Code reads a settings.json that
+// starts with a UTF-8 byte-order mark, so init merges into it instead of
+// refusing, keeps the mark at the start of the file and the user's keys, and
+// still takes the one-time .bak of the user's pre-ghost bytes.
+func TestRunMergesBOMSettings(t *testing.T) {
 	home, _ := installEnv(t)
 	seed := "\ufeff{\"model\":\"opus\"}\n"
 	path := writeSettings(t, home, seed)
 
 	var out bytes.Buffer
-	err := Run(&out, false)
-	if err == nil {
-		t.Fatalf("Run accepted a BOM-prefixed settings.json; output:\n%s", out.String())
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run refused a BOM-prefixed settings.json: %v", err)
 	}
-	if !strings.Contains(err.Error(), "byte-order mark") {
-		t.Errorf("refusal must name the byte-order mark, got: %v", err)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(err.Error(), "must be a JSON object") {
-		t.Errorf("refusal must not claim a JSON object is not one, got: %v", err)
+	if !strings.HasPrefix(string(got), "\ufeff{") {
+		t.Errorf("the byte-order mark must stay at the start of the file, got:\n%q", got)
 	}
-	got, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if strings.Count(string(got), "\ufeff") != 1 {
+		t.Errorf("exactly one byte-order mark expected, got:\n%q", got)
 	}
-	if string(got) != seed {
-		t.Errorf("a refused file must be left untouched, got:\n%q", got)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimPrefix(got, []byte("\ufeff")), &doc); err != nil {
+		t.Fatalf("merged file is not valid JSON after the mark: %v", err)
+	}
+	if string(doc["model"]) != `"opus"` {
+		t.Errorf("the user's key must survive the merge, got %s", doc["model"])
+	}
+	if _, ok := doc["hooks"]; !ok {
+		t.Error("ghost's hooks were not merged")
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the pre-ghost file must be backed up: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak must hold the user's original bytes, got %q", bak)
 	}
 }

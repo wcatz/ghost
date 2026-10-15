@@ -63,6 +63,24 @@ type settingsFile struct {
 	// save runs; save reads it to keep the one-time .bak for the user's
 	// pre-ghost file instead of capturing ghost's own output.
 	ghostManaged bool
+	// bom is the leading byte-order mark the file was loaded with, or "".
+	// save writes it back first so the user's file keeps its encoding.
+	bom string
+}
+
+// jsonBOM is the UTF-8 byte-order mark as a string.
+const jsonBOM = "\ufeff"
+
+// leadingBOMError refuses a JSON document that starts with a UTF-8 byte-order
+// mark, and returns nil for any other document. It serves the readers whose
+// host rejects the mark (codex's serde_json, opencode's JSONC reader), where
+// encoding/json's own error is an anonymous invalid character: the refusal
+// names the mark instead, and the file is never rewritten. what names the file.
+func leadingBOMError(data []byte, what string) error {
+	if !bytes.HasPrefix(data, []byte(jsonBOM)) {
+		return nil
+	}
+	return fmt.Errorf("%s starts with a UTF-8 byte-order mark, which its host does not read as JSON — save the file as UTF-8 without a BOM", what)
 }
 
 // settingsPath returns the path to ~/.claude/settings.json.
@@ -76,21 +94,9 @@ func settingsPath() (string, error) {
 
 // loadSettings reads and parses the settings file.
 // If the file does not exist, returns an empty settings ready to populate.
-// leadingBOMError refuses a JSON document that starts with a UTF-8 byte-order
-// mark (what a Windows editor or PowerShell 5.1 `-Encoding UTF8` writes), and
-// returns nil for any other document. encoding/json rejects the mark, and the
-// error it gives — an invalid character, or worse a claim that a valid object
-// is not one — misdirects the user. Ghost cannot show that the host's own
-// loader (Claude Code, codex's serde_json, opencode's JSONC reader) accepts a
-// mark, so unlike codex's config.toml, whose TOML parser does, the file is
-// refused rather than tolerated, and never rewritten. what names the file.
-func leadingBOMError(data []byte, what string) error {
-	if !bytes.HasPrefix(data, []byte("\ufeff")) {
-		return nil
-	}
-	return fmt.Errorf("%s starts with a UTF-8 byte-order mark, which ghost does not read as JSON — save the file as UTF-8 without a BOM", what)
-}
-
+// One leading UTF-8 byte-order mark (what a Windows editor or PowerShell 5.1
+// `-Encoding UTF8` writes) is stripped before decoding, because Claude Code
+// itself reads such a file; save puts it back, so the file keeps its mark.
 func loadSettings(path string) (*settingsFile, error) {
 	s := &settingsFile{
 		path: path,
@@ -105,8 +111,9 @@ func loadSettings(path string) (*settingsFile, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	if err := leadingBOMError(data, filepath.Base(path)); err != nil {
-		return nil, err
+	if bytes.HasPrefix(data, []byte(jsonBOM)) {
+		s.bom = jsonBOM
+		data = data[len(jsonBOM):]
 	}
 	if err := json.Unmarshal(data, &s.raw); err != nil {
 		return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
@@ -148,6 +155,7 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 	out = append(out, '\n')
+	out = append([]byte(s.bom), out...)
 
 	return writeFileAtomicPrivate(s.path, out, 0600)
 }
