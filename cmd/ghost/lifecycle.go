@@ -245,14 +245,7 @@ func runLifecycle() {
 		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 
 		phaseDone := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				time.Sleep(phaseGracePeriod)
-				killPhaseProcess(cmd)
-			case <-phaseDone:
-			}
-		}()
+		go phaseWatchdog(ctx, phaseDone, cmd, phaseGracePeriod, killPhaseProcess)
 
 		start := time.Now()
 		runErr := cmd.Run()
@@ -516,6 +509,45 @@ func consolidationContext(parent context.Context, minutes int) (context.Context,
 // phaseGracePeriod is how long a phase has to exit after its deadline's
 // SIGTERM before its whole process group is force-killed.
 const phaseGracePeriod = 30 * time.Second
+
+// phaseWatchdog is the second half of a phase's deadline. The deadline's Cancel
+// has already asked the phase's whole process group to shut down; this is the
+// escalation for a phase that ignored it, and it returns as soon as the phase
+// ends.
+//
+// Two things about the shape are load-bearing, and both were wrong in the
+// inline goroutine this replaces. A phase that exits on the SIGTERM it was
+// given inside the grace period has been reaped by then, so its process group
+// id belongs to nobody in this run and signalling it can only hit an unrelated
+// group on a busy machine. And Go's select picks a ready case at random, so a
+// phase that ended before the goroutine parked — both channels closed by the
+// time it ran — took the deadline branch about half the time and killed a dead
+// group the grace period later. So phaseDone is always asked first and without
+// blocking, and it is asked again after the grace period.
+func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd)) {
+	select {
+	case <-phaseDone:
+		return
+	default:
+	}
+
+	select {
+	case <-phaseDone:
+	case <-ctx.Done():
+		select {
+		case <-phaseDone:
+		case <-time.After(grace):
+			// A phase that has exited and been reaped is never signalled;
+			// the gap between this check and the kill is as small as a
+			// goroutine can make it.
+			select {
+			case <-phaseDone:
+			default:
+				kill(cmd)
+			}
+		}
+	}
+}
 
 // lifecyclePhase is one step of the auto-consolidation chain: a ghost
 // subcommand, its arguments, and the outer bound on how long it may run. A
