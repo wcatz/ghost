@@ -643,9 +643,13 @@ function Install-Ghost {
     New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
 
     # Extract only the expected binary member. goreleaser puts ghost.exe at
-    # the archive root, and only a regular, non-empty, root entry is accepted:
-    # a directory or link carrying that name has no body, and installing one
-    # would leave a zero-byte executable behind a success line.
+    # the archive root. Only an entry whose FullName is exactly 'ghost' or
+    # 'ghost.exe' (both case-sensitive) is considered, which excludes anything
+    # under a subdirectory; directories never match those names, so a directory
+    # entry is excluded by name. A zero-length entry is refused. The ZipArchive
+    # API used here does not expose Unix file modes, so a link entry carrying
+    # that name cannot be distinguished from a regular one and passes this check
+    # if its declared length is non-zero.
     $exePath = Join-Path $extractDir 'ghost.exe'
     $stream = [System.IO.File]::OpenRead($ZipPath)
     try {
