@@ -514,7 +514,7 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"portable.go:PortableMemories":         true,
 		"portable.go:scanPortableMemory":       true, // the artifact's row scanner
 		"store.go:IsZero":                      true, // Validity.IsZero — reads the field, no SQL
-		"store.go:scanMemories":                true, // the memories row scanner
+		"store.go:scanMemoryRow":               true, // the memories row scanner
 		"store.go:GetAll":                      true,
 		"store.go:GetByCategory":               true,
 		"store.go:GetTopMemories":              true,
@@ -766,7 +766,7 @@ var classifiedNames = map[string]bool{
 	"portable.go:scanPortableMemory":        true,
 	"portable.go:portableEvidence":          true,
 	"store.go:IsZero":                       true,
-	"store.go:scanMemories":                 true,
+	"store.go:scanMemoryRow":                true,
 	"store.go:GetAll":                       true,
 	"store.go:GetByCategory":                true,
 	"store.go:GetTopMemories":               true,

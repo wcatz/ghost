@@ -14,6 +14,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -315,7 +316,7 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 		return nil, nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
 	}
 	defer func() { _ = rows.Close() }()
-	memories, err := scanMemories(rows)
+	memories, err := scanPassiveWindow(rows, pol, req.Now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -332,6 +333,112 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	}
 	memories = append(memories, replacements...)
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
+}
+
+// scanPassiveWindow reads a policy's population and keeps its window: the top
+// OverFetch rows under the policy's own order. The rows stream out of the index
+// one at a time and are offered to a bounded window, so the bucket is never held
+// and never sorted — the `LIMIT` the fetch used to carry is this window's size,
+// and the `ORDER BY` it used to carry is passiveWindowLess.
+//
+// The window is a strict functional replacement for the SQL cut, not a
+// re-approximation of it: the same rows in the same order come out of it. The
+// SQL bound its clock through stampLayoutForSQL (whole seconds), so the score is
+// recomputed here against the same truncated instant rather than against Now's
+// sub-second part — otherwise a row's rank could differ by the fraction of a
+// second the two clocks disagree on, which is a reorder nothing downstream could
+// attribute.
+//
+// A row that is OFFERED to the window but loses is dropped here and never
+// reaches the selection. That is the same membership the SQL produced, and the
+// validity predicate already removed the ineligible rows in SQL, so nothing that
+// reaches this loop is a row the window should have refused for eligibility.
+func scanPassiveWindow(rows *sql.Rows, pol SlicePolicy, now time.Time) ([]Memory, error) {
+	clock := now.UTC().Truncate(time.Second)
+	window := make([]passiveRow, 0, pol.OverFetch)
+	for rows.Next() {
+		m, err := scanMemoryRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		age := ageDays(m.CreatedAt, clock)
+		decay := DecayFactor(m.Category, m.Retention, m.Pinned, age)
+		window = insertPassiveWindow(window, passiveRow{
+			mem:   m,
+			age:   age,
+			decay: decay,
+			score: float64(m.Importance) * decay,
+		}, pol.Order, pol.OverFetch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Memory, len(window))
+	for i, r := range window {
+		out[i] = r.mem
+	}
+	return out, nil
+}
+
+// insertPassiveWindow places one row into the window, which is held BEST FIRST
+// and capped at capN. A row that belongs past the cap is dropped: the window
+// keeps its length and the row is as far outside it as the SQL's LIMIT left it.
+func insertPassiveWindow(window []passiveRow, r passiveRow, order string, capN int) []passiveRow {
+	at := sort.Search(len(window), func(i int) bool { return passiveWindowLess(r, window[i], order) })
+	if at >= capN {
+		return window
+	}
+	if len(window) >= capN {
+		window = window[:capN-1]
+	}
+	window = append(window, passiveRow{})
+	copy(window[at+1:], window[at:])
+	window[at] = r
+	return window
+}
+
+// passiveWindowLess is the policy's window order, and it is the SQL ORDER BY the
+// fetch used to state, moved into Go so the engine does not sort the bucket. It
+// reports whether a ranks before b.
+//
+// The two policies genuinely differ, which is why the order travels as a value:
+// `decay` ranks on the composite score, and `pinned_importance_updated` on
+// pinned, then importance, then the most recently updated. Both lead with
+// `pinned DESC`, and that is the half of the pin's slot guarantee that decides
+// whether a pinned row is in the window AT ALL: a pinned row at importance 0.1
+// ranks behind every 0.9 row the bucket holds, so a window of N rows full of
+// better ones never contains it unless the order puts it first.
+//
+// Every key is the SQL key: `score` is the Go mirror of the bound decay
+// expression (DecayFactor), importance and created_at are compared as the store
+// holds them, and `id` is the trailing tie-break the shipped loader lacks. Naming
+// `id` makes the window a function of the store's contents rather than of the
+// order SQLite happened to produce — what a golden comparison across machines
+// needs — and it can only REORDER rows left tied, never move a row past one it
+// ranked.
+func passiveWindowLess(a, b passiveRow, order string) bool {
+	if a.mem.Pinned != b.mem.Pinned {
+		return a.mem.Pinned
+	}
+	if order == OrderPinnedImportanceUpdated {
+		if a.mem.Importance != b.mem.Importance {
+			return a.mem.Importance > b.mem.Importance
+		}
+		if a.mem.UpdatedAt != b.mem.UpdatedAt {
+			return a.mem.UpdatedAt > b.mem.UpdatedAt
+		}
+		return a.mem.ID < b.mem.ID
+	}
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	if a.mem.Importance != b.mem.Importance {
+		return a.mem.Importance > b.mem.Importance
+	}
+	if a.mem.CreatedAt != b.mem.CreatedAt {
+		return a.mem.CreatedAt > b.mem.CreatedAt
+	}
+	return a.mem.ID < b.mem.ID
 }
 
 // passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
@@ -412,63 +519,43 @@ func passivePopulationSQL(pol SlicePolicy, req CandidateRequest, cols passiveCol
 	return where, []any{pol.Bucket}
 }
 
-// passiveFetchSQL builds one policy's read and its bindings TOGETHER, because a
-// mismatch between an ORDER BY and its argument list is not an error — it binds
-// the clock to the wrong column, and a fully decayed row then reads as a fresh
-// one with no complaint anywhere.
+// passiveFetchSQL builds one policy's population read and its bindings. It
+// SELECTS the bucket and binds the bucket, plus the validity stamps when the
+// store has the columns; it does NOT order or limit.
 //
-// The validity predicate is applied HERE, in SQL, rather than only in the
-// assembler's stage 2. The over-fetch chooses which rows are read at all, so a row
-// whose validity window has closed or has not opened must not spend any of the
-// window: filtering it afterwards would fill the window with rows the caller
-// cannot use and then cut them, and a window that small reaches a weaker block.
-// It is GATED on the column existing, because on a store below the validity floor
-// the predicate names columns that are not there and the whole fetch would fail
-// with "no such column: valid_from". The rows the block then shows are the ones
-// that store has, labelled without a validity window — the block it produced
-// before validity was read.
+// The order and the window are decided in Go (see scanPassiveWindow), and that
+// is the whole point of the shape. The policy's rank is a DECAY EXPRESSION over
+// a bound clock, so no index can serve it, and an `ORDER BY` on it made SQLite
+// sort the entire bucket behind a `LIMIT` that then threw almost all of it away
+// — O(project memories) work at every session start for a window of tens of
+// rows. Ranking in Go over the stream turns that into one index pass with a
+// bounded window held, and the top of the window is provably the same rows the
+// full sort's top was, because the rank applied here is the rank the SQL
+// expression stated (see passiveWindowLess).
+//
+// The validity predicate stays HERE, in SQL, rather than moving to the streaming
+// stage with the order. The window chooses which rows are kept, so a row whose
+// validity window has closed must not spend one of its slots: judging it before
+// it is offered to the window is what keeps the window full of rows the caller
+// can use. It is GATED on the column existing, because on a store below the
+// validity floor the predicate names columns that are not there and the whole
+// fetch would fail with "no such column: valid_from". The rows the block then
+// shows are the ones that store has, labelled without a validity window — the
+// block it produced before validity was read.
 //
 // The bindings are in TEXT order: the bucket, then the validity stamps when the
-// predicate is present, then the clock for the decay order, then the limit. The
-// validity stamps are bound rather than interpolated, so the same clock value the
-// decay ranking and the selection use is the one the window is filtered against.
+// predicate is present. The stamps are bound rather than interpolated, so the
+// same clock value the Go ranking and the selection use is the one the window is
+// filtered against.
 func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
 	where, args := passivePopulationSQL(pol, req, cols)
 	if cols.HasValidity {
-		// The clock is bound to the same instant the decay ranking uses, so the
+		// The clock is bound to the same instant the Go ranking uses, so the
 		// window, the decay score derived from it in selectPassive, and the row
 		// ages the trace reports are all made against the same clock.
 		stamp := req.Now.UTC().Format(stampLayoutForSQL)
 		where += " AND " + validityMatchesSQL()
 		args = append(args, stamp, stamp)
-	}
-
-	// The `_global` order carries a trailing `id` that the shipped loader's query
-	// does not. It is a divergence from the specification and a deliberate one: a
-	// tie on (pinned, importance, updated_at) has no defined order, so the loader
-	// returned those rows in whatever order SQLite produced — which is stable for
-	// a given database file but is not a function of the data. Naming `id` makes
-	// the block a function of the store's contents, which is what a golden
-	// comparison across machines needs. It can only ever REORDER rows the loader
-	// left unordered, never move a row past one it ranked.
-	orderBy := "pinned DESC, importance DESC, updated_at DESC, id"
-	if pol.Order == "" || pol.Order == OrderDecay {
-		// The rank expression takes a BOUND instant rather than julianday('now'),
-		// so the window, the decay score derived from it in selectPassive, and
-		// the row ages the trace reports are all made against the same clock. The
-		// wall-clock form is what the shipped loaders interpolate, and using it
-		// here would reintroduce the drift a bound Now exists to remove, at a
-		// moment when the two reads can straddle a second boundary.
-		rank, clock := decayRankingSQLAt(req.Now, cols.HasTier)
-		// `pinned DESC` leads, and it is the half of the pin's slot guarantee that
-		// decides whether a pinned row is in the window AT ALL: the LIMIT cuts the
-		// window by this order, and a pinned row at importance 0.1 ranks behind
-		// every 0.9 row the bucket holds, so a window of N rows full of better ones
-		// never contains it. The decay score keeps ordering the pinned rows among
-		// themselves (a pin exempts a row from decay, not from importance), and
-		// ordering the rest exactly as it did.
-		orderBy = fmt.Sprintf("pinned DESC, (%s) DESC, importance DESC, created_at DESC, id", rank)
-		args = append(args, clock...)
 	}
 
 	// The column list is the shared one every whole-Memory reader selects, rather
@@ -480,13 +567,18 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	// The predicate is a FRAGMENT spliced in, not a bind, because it is built from
 	// a policy field and the constant `_global` — never from caller text. The one
 	// caller-supplied value, the bucket, is bound in passivePopulationSQL.
+	//
+	// `ORDER BY importance DESC` is a SCAN HINT, not the ranking: it is the one
+	// order `idx_memories_project_imp` serves without a temp b-tree, so the
+	// population streams out of the index instead of the table. The window order
+	// is applied in Go and can be the opposite of this one, which is why the rows
+	// are not returned in it.
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM memories
 		WHERE %s
-		ORDER BY %s
-		LIMIT ?`, cols.list, where, orderBy)
-	return query, append(args, pol.OverFetch)
+		ORDER BY importance DESC`, cols.list, where)
+	return query, args
 }
 
 // passivePinnedBeyond counts the pinned rows the window's LIMIT left unread, by

@@ -1186,9 +1186,10 @@ func TestCandidatesPassiveReadsAStoreBelowTheValidityFloor(t *testing.T) {
 		t.Error("a store stamped below the validity floor must not report the validity columns as present")
 	}
 
-	// A pinned-order policy, so the only bindings are the bucket and the limit: a
-	// validity stamp bound but not consumed (or the reverse) shows up as a
-	// placeholder count that does not match the argument list.
+	// A pinned-order policy. The only binding is the bucket: the window's size is
+	// the Go window, not a SQL LIMIT, so a stray limit (or a validity stamp bound
+	// but not consumed) shows up as a placeholder count that does not match the
+	// argument list.
 	pol := projectPassivePolicy()
 	pol.Order = OrderPinnedImportanceUpdated
 	q, args := passiveFetchSQL(pol, passiveRequest("proj"), cols)
@@ -1199,8 +1200,8 @@ func TestCandidatesPassiveReadsAStoreBelowTheValidityFloor(t *testing.T) {
 		t.Errorf("the validity predicate is present in a statement for a store with no validity columns; it names columns that are not there, "+
 			"which is `no such column: valid_from` at run time: %s", q)
 	}
-	if len(args) != 2 {
-		t.Errorf("args = %d, want 2 (bucket and limit) with no validity stamp bound on a pre-validity store", len(args))
+	if len(args) != 1 {
+		t.Errorf("args = %d, want 1 (the bucket) with no validity stamp and no limit bound on a pre-validity store", len(args))
 	}
 
 	set, err := st.Candidates(ctx, passiveRequest("proj", projectPassivePolicy()))
