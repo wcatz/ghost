@@ -2301,6 +2301,7 @@ func TestMergeCodexHooksAddsItsRuleBesideAForeignCommand(t *testing.T) {
 	} {
 		for _, foreign := range []struct{ label, command string }{
 			{"foreign-tool", "/usr/local/bin/othertool hook " + ev.token + " --source codex"},
+			{"argument-position", "echo /opt/bin/ghost hook " + ev.token + " --source codex"},
 			{"quoted-argument", `/usr/local/bin/othertool --note "ghost hook ` + ev.token + ` --source codex"`},
 			{"echoed-inside-sh-c", `/bin/sh -c "echo ghost hook ` + ev.token + ` --source codex"`},
 		} {
