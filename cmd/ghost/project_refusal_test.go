@@ -122,14 +122,34 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 	}
 }
 
-// TestNoDuplicateFlagRefusalQuotesWithPercentQ: the structural half, over every
-// non-test file in this package, and it is what stops the third parser.
+// TestNoRefusalQuotesAScopeOrProjectWithPercentQ: the structural half, over every
+// non-test file in this package, and it is what stops the third parser and the next
+// raw project id.
 //
-// The rule: in a "was given twice" refusal, every operand printed with a %q-family
-// verb must BE a memory.ProjectArg call — matched POSITIONALLY, verb to argument. The
-// positional part is the whole test, and the first version of this guard did not have
-// it: it counted `%q` substrings and counted ProjectArg arguments and compared the two
-// for equality, which two shapes walked straight through.
+// The rule: a refusal that names a project argument, or that refuses a duplicate
+// command-line scope, must not print any operand with a %q-family verb unless that
+// operand is a memory.ProjectArg or memory.RefusalArg call — matched POSITIONALLY,
+// verb to argument. A project id is the value this holds: `ghost import` accepts an
+// artifact's project id verbatim, so a stored id can be token-shaped or oversized,
+// and the refusal is printed to the terminal and lands in the log. A raw `%q` of one
+// is a hole in #839's rule, not an exception to it.
+//
+// WHY THOSE TWO SHAPES, and the second is the widening this guard needed. The
+// duplicate-scope formats are the refusals an earlier round fixed one parser at a
+// time (`--project was given twice`, `--cwd was given twice`, `--out`, `--interval`).
+// The project-naming formats are every OTHER refusal whose sentence names the
+// argument, which is where `ghost project merge`'s self-merge refusal was hiding: its
+// format never said "was given twice", so a filter on that phrase alone never saw it.
+// Both are recognised by their format TEXT, which is the honest limit of a scan with
+// no type checker: a sentence that names a project some other way is out of scope
+// here, and a project-naming sentence is read as if every %q verb printed the project
+// itself, so one that quotes another value beside it has to be disambiguated here
+// rather than written past. That is why the renderer is a coverage promise as well as
+// an enforced one.
+//
+// The positional part is the whole test, and the first version of this guard did not
+// have it: it counted `%q` substrings and counted ProjectArg arguments and compared
+// the two for equality, which two shapes walked straight through.
 //
 //   - A MIXED refusal. `--project was given twice (%q and %s)` with
 //     (opts.Project, memory.ProjectArg("project", value)) counts one verb and one
@@ -150,15 +170,17 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 //     guessing, and the guard reports that as a failure to be fixed here — a scan that
 //     cannot attribute a verb to an argument must say so, not pass silently.
 //
-// It also fails if it finds no such refusal at all, so it cannot pass by scanning
-// nothing.
-func TestNoDuplicateFlagRefusalQuotesWithPercentQ(t *testing.T) {
+// It also fails if it finds no refusal of either kind, so it cannot pass by scanning
+// nothing. The two counts are kept apart for that reason: a filter widened to a
+// second shape must still have found something of each, or the widening could have
+// dropped the shape it was holding.
+func TestNoRefusalQuotesAScopeOrProjectWithPercentQ(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("Glob: %v", err)
 	}
-	scanned := 0
+	duplicateScanned, projectScanned := 0, 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -172,41 +194,84 @@ func TestNoDuplicateFlagRefusalQuotesWithPercentQ(t *testing.T) {
 			if !ok || !isFmtErrorf(call) || len(call.Args) == 0 {
 				return true
 			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
+			format, ok := literalFormat(call.Args[0])
+			if !ok {
 				return true
 			}
-			format, err := strconv.Unquote(lit.Value)
-			if err != nil || !strings.Contains(format, "was given twice") {
+			duplicate := strings.Contains(format, "was given twice")
+			namesProject := strings.Contains(strings.ToLower(format), "project")
+			if !duplicate && !namesProject {
 				return true
 			}
-			scanned++
+			if duplicate {
+				duplicateScanned++
+			}
+			if namesProject {
+				projectScanned++
+			}
 			quotes, perr := quoteOperandIndexes(format)
 			if perr != nil {
 				t.Errorf("%s: %v, so this scan cannot tell which operand the verb prints; "+
-					"extend quoteOperandIndexes here rather than letting the refusal past (%s)",
-					fset.Position(call.Pos()), perr, lit.Value)
+					"extend quoteOperandIndexes here rather than letting the refusal past (%q)",
+					fset.Position(call.Pos()), perr, format)
 				return true
 			}
 			for _, idx := range quotes {
 				if idx+1 >= len(call.Args) {
 					t.Errorf("%s: the format has %d operands and %d arguments, so verb %d prints "+
-						"nothing at all (%s)", fset.Position(call.Pos()), len(quotes), len(call.Args)-1,
-						idx, lit.Value)
+						"nothing at all (%q)", fset.Position(call.Pos()), len(quotes), len(call.Args)-1,
+						idx, format)
 					continue
 				}
-				if !isMemoryProjectArg(call.Args[idx+1]) {
-					t.Errorf("%s: a \"was given twice\" refusal prints operand %d with %%q and it "+
-						"does not go through memory.ProjectArg, so a credential in the flag is echoed "+
-						"verbatim (%s)", fset.Position(call.Pos()), idx, lit.Value)
+				if !isMemoryProjectRenderer(call.Args[idx+1]) {
+					t.Errorf("%s: a refusal prints operand %d with %%q and it does not go through "+
+						"memory.ProjectArg or memory.RefusalArg, so a caller-supplied or stored "+
+						"project value is echoed verbatim (%q)", fset.Position(call.Pos()), idx, format)
 				}
 			}
 			return true
 		})
 	}
-	if scanned == 0 {
-		t.Error("no \"was given twice\" refusal was found to scan, so this guard is holding nothing")
+	if duplicateScanned == 0 {
+		t.Error("no \"was given twice\" refusal was found to scan, so this guard is holding " +
+			"nothing on the duplicate-scope side")
 	}
+	if projectScanned == 0 {
+		t.Error("no project-naming refusal was found to scan, so this guard is holding " +
+			"nothing on the project side")
+	}
+}
+
+// literalFormat returns the string value of a format expression: a single string
+// literal, or a `+` chain of them, which is how a long refusal is wrapped across
+// lines. A concatenation is the same sentence as one literal, and skipping it would
+// be a hole in this guard rather than a limit of it.
+func literalFormat(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(e.Value)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	case *ast.BinaryExpr:
+		if e.Op != token.ADD {
+			return "", false
+		}
+		left, ok := literalFormat(e.X)
+		if !ok {
+			return "", false
+		}
+		right, ok := literalFormat(e.Y)
+		if !ok {
+			return "", false
+		}
+		return left + right, true
+	}
+	return "", false
 }
 
 // TestQuoteOperandIndexesIsTheCountingTheGuardDependsOn: the guard above is a claim
@@ -336,13 +401,13 @@ func isFmtErrorf(call *ast.CallExpr) bool {
 	return ok && pkg.Name == "fmt"
 }
 
-func isMemoryProjectArg(expr ast.Expr) bool {
+func isMemoryProjectRenderer(expr ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "ProjectArg" {
+	if !ok || (sel.Sel.Name != "ProjectArg" && sel.Sel.Name != "RefusalArg") {
 		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
