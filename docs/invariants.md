@@ -379,7 +379,17 @@ makes `ghost reflect`, `ghost resolve`, `ghost supersede` and `ghost opencode
 cleanup-sessions` catch SIGINT/SIGTERM and cancel the context their harness
 calls derive from, so each in-flight harness's own Cancel signals its group
 before the process exits — the call the process is blocked on is what delivers
-the signal on the way out. The lifecycle watchdog's phase-group sweep stays as
-the backstop for a phase that does not wind down. This is why the phase-group
-invariant above now says the phase's group does not contain the harnesses.
+the signal on the way out. **A cancelled run is fatal rather than a tier failure**:
+the LLM tier reports the cancellation as its error, and reading that as a tier
+failure would let the mechanical tier run and, with `--apply`, rewrite the
+corpus and exit 0 for a command the operator stopped. So
+`TieredConsolidator.Consolidate` (`internal/reflection/consolidator.go`)
+returns the context error after EVERY tier rather than falling through, and
+`runReflect` checks the context after the consolidation and before it applies,
+which covers a bare mechanical selection that never consults the context at
+all. Pinned by `TestTieredConsolidatorDoesNotFallThroughACancelledCaller` and
+`TestTieredConsolidatorRefusesAMechanicalResultFromACancelledCaller`. The
+lifecycle watchdog's phase-group sweep stays as the backstop for a phase that
+does not wind down. This is why the phase-group invariant above now says the
+phase's group does not contain the harnesses.
 

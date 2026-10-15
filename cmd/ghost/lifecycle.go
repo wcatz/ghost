@@ -1428,6 +1428,15 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
 		os.Exit(1)
 	}
+	// A cancelled run must not apply. The tier guard inside a tiered list makes
+	// a cancellation fatal there; this covers the consolidators that are not
+	// one — a bare mechanical tier returns a result without ever looking at the
+	// context — so a command the operator stopped cannot rewrite the corpus and
+	// exit 0.
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "error: consolidation cancelled: %v\n", ctx.Err())
+		os.Exit(1)
+	}
 
 	var validMemories []reflection.ReflectMemory
 	for _, m := range result.Memories {
