@@ -95,8 +95,8 @@ func TestLegConsensusAdmitsARowTheVectorLegCouldNotSee(t *testing.T) {
 	}
 	// The exemption is per row: the embedded keyword-only row at rank 5 is
 	// still dropped, so the gate has not been disabled.
-	if d := traceDecision(res, "ftsDrop", stageLegConsensus); d != nil {
-		t.Errorf("ftsDrop = %+v, want it dropped: an embedded single-leg row is still judged", d)
+	if d := traceDecision(res, "ftsDrop", stageLegConsensus); d == nil || d.Kept {
+		t.Errorf("ftsDrop = %+v, want a drop decision: an embedded single-leg row is still judged", d)
 	}
 }
 
