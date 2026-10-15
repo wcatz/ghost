@@ -656,11 +656,14 @@ func purgeHistoryMemory(ctx context.Context, s historyPurgeStore, memoryID strin
 		// its own transaction and refuses otherwise, rather than erasing a live
 		// row's history under this "already deleted" line. The project is the one
 		// the newest entry names; MemoryHistory returns oldest first.
-		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
+		// Announced AFTER the purge: the purge can refuse a row that came back,
+		// and a line saying the text is being erased, printed before that, would
+		// contradict the refusal.
 		outcome, err := s.PurgeDeletedMemoryHistoryInProject(ctx, entries[len(entries)-1].ProjectID, memoryID)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("Memory %s is already deleted; purged its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
 		return printPurgeReport(os.Stdout, outcome)
 	}
 }

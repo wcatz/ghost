@@ -62,7 +62,7 @@ func TestRunHistoryPurgeOfADeletedMemoryRefusesARowThatCameBack(t *testing.T) {
 			w := &restoreAfterLiveReadStore{Store: s, promote: tc.promote, target: id}
 			w.armed.Store(true)
 
-			err = purgeHistoryMemory(ctx, w, id)
+			stdout := captureStdout(t, func() { err = purgeHistoryMemory(ctx, w, id) })
 			if w.hookErr != nil {
 				t.Fatalf("interleave: %v", w.hookErr)
 			}
@@ -71,6 +71,9 @@ func TestRunHistoryPurgeOfADeletedMemoryRefusesARowThatCameBack(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantRefusal) {
 				t.Errorf("err = %v, want a refusal containing %q", err, tc.wantRefusal)
+			}
+			if strings.Contains(stdout, "already deleted") || strings.Contains(stdout, "purging") {
+				t.Errorf("a refused purge announced one on stdout: %q", stdout)
 			}
 			mems, gerr := s.GetByIDs(ctx, []string{id})
 			if gerr != nil || len(mems) != 1 {
