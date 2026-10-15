@@ -76,6 +76,52 @@ func TestPortableMemoriesLeavesOutGhostsOwnSeeds(t *testing.T) {
 	}
 }
 
+// TestPortableMemoriesCarriesAUsersGlobalRowWhoseSourceIsBuiltin: the seed
+// exclusion is keyed on the seed's own CONTENT, the way SeedGlobalMemories
+// recognises its own rows, and never on its source.
+//
+// `builtin` is a legal memories.source, and `ghost import --trust-provenance`
+// stores an artifact's source verbatim, so a user's own row can sit in the
+// reserved global project carrying it. That row is the only copy of itself, and
+// an exclusion written as `project AND source` dropped it from every artifact
+// while the export still reported success and exited 0 — a backup that silently
+// loses a row.
+func TestPortableMemoriesCarriesAUsersGlobalRowWhoseSourceIsBuiltin(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := store.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+	// The global project, the builtin source, and content of the user's own —
+	// the shape an artifact carries after `ghost import --trust-provenance`.
+	const userContent = "a global note of the user's own that arrived as a builtin row"
+	id, err := store.Create(ctx, "_global", Memory{Category: "fact", Content: userContent, Source: "builtin"})
+	if err != nil {
+		t.Fatalf("Create(_global, builtin): %v", err)
+	}
+
+	got, err := store.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	var found bool
+	for _, m := range got {
+		if m.ID == id {
+			found = true
+		}
+		// Ghost's own shipped seed is still excluded, by its content.
+		if m.ProjectID == "_global" && m.Content == builtinSeedContent {
+			t.Errorf("the artifact carries Ghost's own shipped seed %s; the exclusion is on the seed's content and must still leave it out", m.ID)
+		}
+	}
+	if !found {
+		t.Errorf("the artifact left out the user's own _global builtin row %s — the exclusion must be keyed on the seed's content, not on its source", id)
+	}
+}
+
 // TestImportingAnotherInstallsSeedsDoesNotDuplicateThem is the end-to-end
 // statement of the same property, through a real export and a real import into
 // a store that has already been seeded — the case the round-trip tests miss
