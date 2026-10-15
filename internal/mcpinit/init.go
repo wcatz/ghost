@@ -660,6 +660,17 @@ const (
 // non-destructive on re-run. The legacy-quoting match is exact, not
 // substring, so a hand-edited wrapper that happens to also mention cmdSubstr
 // is never rewritten.
+//
+// "Leave a command alone" and "count it as ghost's hook" are different
+// decisions, and only the first one may be made about a command ghost does not
+// own (#1326): another tool's command that merely ends in the same argument
+// tail used to be read as ghost's hook, so init reported the event as already
+// configured and installed nothing — Ghost's own hook then never ran under a
+// success line. A command that does not run ghost stays exactly as written and
+// ghost's own entry is added beside it; one that runs ghost through a prefix —
+// `env X=1 ghost …`, `cd d && ghost …` — is ghost's own hook and gets no second
+// entry, because two would fire it twice. Only a command whose LEADING token is
+// ghost's binary is ever rewritten, by the legacy-quoting or stale-path repair.
 func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
 	return reconcileHookMatcher(sf, event, "", cmdSubstr, desiredCmd, legacyCmd, isWindows)
 }
@@ -669,21 +680,29 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd str
 // the hook is ADDED; an existing hook keeps whatever matcher it has, so a
 // hand-edited one is never rewritten.
 func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
-	existingCmd, exists, err := sf.findHookCommand(event, cmdSubstr)
+	cmds, err := sf.hookCommands(event)
 	if err != nil {
 		return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
 	}
+
+	// ghost's own command for this event, wherever it sits in the list. The
+	// first command containing the argument tail is another tool's as often as
+	// it is ghost's, and which one sorts first used to decide what a
+	// substring read found — so on the foreign-first shape the reconciled
+	// command was never ghost's at all.
+	existingCmd, exists := "", false
+	for _, cmd := range cmds {
+		if isGhostHookCommand(cmd, cmdSubstr, desiredCmd) {
+			existingCmd, exists = cmd, true
+			break
+		}
+	}
+
+	// No ghost hook here: add one. This covers both an event with no command
+	// carrying the tail and one whose only such command belongs to another
+	// tool, which is left exactly as the user wrote it.
 	if !exists {
-		entry := hookEntry{
-			Matcher: matcher,
-			Hooks: []hookAction{
-				{Type: "command", Command: desiredCmd},
-			},
-		}
-		if err := sf.addHook(event, entry); err != nil {
-			return hookUnchanged, fmt.Errorf("add hook: %w", err)
-		}
-		return hookAdded, nil
+		return addGhostHook(sf, event, matcher, desiredCmd)
 	}
 
 	if existingCmd == desiredCmd {
@@ -711,6 +730,199 @@ func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCm
 	}
 
 	return hookUnchanged, nil
+}
+
+// addGhostHook appends ghost's own hook entry for event. The matcher applies
+// only to the entry being added: an existing entry keeps whatever matcher it
+// has, so a hand-edited one is never rewritten.
+func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReconcileAction, error) {
+	entry := hookEntry{
+		Matcher: matcher,
+		Hooks: []hookAction{
+			{Type: "command", Command: desiredCmd},
+		},
+	}
+	if err := sf.addHook(event, entry); err != nil {
+		return hookUnchanged, fmt.Errorf("add hook: %w", err)
+	}
+	return hookAdded, nil
+}
+
+// isGhostHookCommand reports whether cmd runs ghost for the event cmdSubstr
+// names, wherever ghost sits in the command: a token that is the ghost binary —
+// the one this run writes, under whatever name it carries, or a ghost-named one
+// under any path and any quoting — immediately followed by that event's
+// `hook <event>` tail. Tokens are read with the same quoting splitHookCommand
+// applies to the leading one.
+//
+// Reading every token, not only the leading one, is what makes a hand-edited
+// wrapper ghost's own hook: `env X=1 /path/ghost hook session-start` and
+// `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
+// and adds nothing beside them — a second entry would fire ghost's hook twice.
+// Another tool whose command merely contains the words `hook session-start`,
+// with no ghost-binary token before them, is not ghost's and still gets ghost's
+// own entry added beside it (#1326). A quoted argument that carries the whole
+// invocation (`sh -c "ghost hook stop …"`) is read inside, at command position
+// only — see ghostHookTail for why that bound is the difference between
+// recognising a wrapper and the false positive #1326 closed.
+func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
+	eventToken := strings.TrimPrefix(cmdSubstr, "hook ")
+	if eventToken == cmdSubstr {
+		return false
+	}
+	desiredBin, _, _ := splitHookCommand(desiredCmd)
+	_, ok := ghostHookTail(cmd, eventToken, desiredBin)
+	return ok
+}
+
+// ghostHookTail returns the tokens following `hook <eventToken>` when cmd runs
+// ghost for that event — a token that is a ghost binary immediately before the
+// tail — and false otherwise. It is the one ownership rule, shared by the
+// settings reconcile and the status reader, so both answer the same question
+// about the same file; the tail is returned so a reader can go on to check a
+// flag that follows it, as status does for --source.
+//
+// Reading every token, not only the leading one, is what makes a hand-edited
+// wrapper ghost's own hook: `env X=1 /path/ghost hook session-start` and
+// `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
+// and adds nothing beside them — a second entry would fire ghost's hook twice.
+// Another tool whose command merely contains the words `hook session-start`,
+// with no ghost-binary token before them, is not ghost's and still gets ghost's
+// own entry added beside it (#1326).
+//
+// Two more shapes run ghost and are read here too, because a second entry fires
+// the hook twice. A quoted argument can carry the whole invocation —
+// `sh -c "ghost hook stop …"`, `bash -lc "…"` — and a command whose LAST token's
+// quoting never closes is still a valid ghost invocation up to that point. Both
+// readings are bounded: inside a quoted argument the ghost binary must be in
+// COMMAND position, and the interior is read to a fixed depth.
+func ghostHookTail(cmd, eventToken, ghostBin string) ([]string, bool) {
+	// Fail soft: a trailing token whose quoting never closes still leaves the
+	// tokens before it readable, and those are the ones that carry the hook.
+	tokens, _ := hookCommandTokens(cmd)
+	if tail, ok := ghostTailOver(tokens, eventToken, ghostBin, 0); ok {
+		return tail, true
+	}
+	return nil, false
+}
+
+// shellConnectives are the shell words that start a new command in the command
+// list they precede. `;`, `&&`, `||`, `|`, `&` and `exec` all leave the next
+// word as a command, so a ghost binary there is one that runs.
+var shellConnectives = map[string]bool{
+	"exec": true, ";": true, "&&": true, "||": true, "|": true, "&": true,
+}
+
+// shellInterpreters name the commands that run a later argument as a command
+// list, and carriesCommandArgument reports whether the word before a token
+// does: `sh -c SCRIPT`, `bash -lc SCRIPT`. A flag ending in `c` is how every
+// one of them spells it, and a shell name takes the script positionally
+// (`busybox sh SCRIPT`). Without this gate an ARGUMENT that merely mentions
+// ghost — `othertool --note 'ghost hook stop …'` — would be read as a command
+// that runs, which is the #1326 false positive.
+var (
+	shellInterpreters = map[string]bool{
+		"sh": true, "bash": true, "zsh": true, "dash": true,
+		"ksh": true, "ash": true, "busybox": true,
+	}
+)
+
+func carriesCommandArgument(tokens []string, i int) bool {
+	if i == 0 {
+		return false
+	}
+	prev := tokens[i-1]
+	if strings.HasPrefix(prev, "-") && strings.HasSuffix(prev, "c") {
+		return true
+	}
+	return shellInterpreters[hookCommandBase(prev)]
+}
+
+// ghostTailOver walks tokens for a ghost binary immediately followed by the
+// event's tail. At the top level (depth 0) a ghost binary at ANY position
+// counts: that is what makes a leading wrapper's prefix ghost's own, and
+// #1326's requirement that an `env X=1 …` wrapper be recognised. A quoted
+// argument is only read INSIDE when the word before it makes it a command list
+// (`sh -c "…"`, `bash -lc "…"`), because otherwise it is data to the command
+// that received it and a ghost binary named in it is somebody else's text —
+// which is the #1326 false positive. Inside, the binary must be in COMMAND
+// position there as well (`sh -c "echo ghost hook stop"` runs echo, not
+// ghost). Recursion is bounded in depth so a nested quote cannot recurse
+// forever.
+func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]string, bool) {
+	for i := 0; i < len(tokens); i++ {
+		if isGhostToken(tokens[i], ghostBin) {
+			if depth > 0 && !startsCommand(tokens, i) {
+				continue
+			}
+			if i+2 < len(tokens) && tokens[i+1] == "hook" && tokens[i+2] == eventToken {
+				return tokens[i+3:], true
+			}
+			continue
+		}
+		if depth < 2 && carriesCommandArgument(tokens, i) &&
+			strings.ContainsRune(tokens[i], ' ') {
+			if inner, ok := hookCommandTokens(tokens[i]); ok {
+				if tail, ok := ghostTailOver(inner, eventToken, ghostBin, depth+1); ok {
+					return tail, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// startsCommand reports whether the token at i starts a command in the command
+// list it belongs to: the first token, one right after a connective, or one
+// right after an assignment prefix (`X=1`), which is not a command word.
+func startsCommand(tokens []string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	prev := tokens[i-1]
+	return shellConnectives[prev] || isAssignmentWord(prev)
+}
+
+// isAssignmentWord reports whether word is a shell assignment prefix such as
+// `X=1`, which sets an environment variable rather than naming a command.
+func isAssignmentWord(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	return eq > 0
+}
+
+// isGhostToken reports whether one token of a hook command names a ghost
+// binary: a ghost-named one under any path and any quoting, or the exact binary
+// this run writes under whatever name it carries — the isBakedGhostBinary
+// recognition the Codex merge applies, so a renamed binary stays recognised.
+func isGhostToken(token, desiredBin string) bool {
+	if isGhostBinaryName(token) {
+		return true
+	}
+	return desiredBin != "" && isBakedGhostBinary(token, desiredBin)
+}
+
+// hookCommandTokens splits a hook command into its tokens, reversing the
+// Windows double-quoting and POSIX single-quoting shellQuote produces exactly
+// as splitHookCommand does for each token: a token is quoted as its first byte
+// says, or bare up to the next space, so a quoted argument comes back as ONE
+// token with its interior spaces intact. When a token's quoting never closes
+// the split stops there and the function reports false — but it still returns
+// the tokens read before that point, which are real: a trailing unclosed quote
+// (`ghost hook stop …; echo "oops`) must not cost the reader the valid ghost
+// invocation at the front of the command. Callers use the tokens either way.
+func hookCommandTokens(cmd string) ([]string, bool) {
+	var tokens []string
+	for {
+		token, rest, ok := splitHookCommand(cmd)
+		if !ok {
+			return tokens, false
+		}
+		tokens = append(tokens, token)
+		if rest == "" {
+			return tokens, true
+		}
+		cmd = rest
+	}
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary

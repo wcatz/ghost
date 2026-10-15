@@ -275,6 +275,80 @@ func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 	}
 }
 
+// TestStatus_ForeignHookIsNotWired: a command that runs another tool but ends
+// in ghost's argument tail is not ghost's hook, so status must report the event
+// missing rather than configured — the same executable ownership rule
+// `ghost mcp init` applies (#1326). The reader used to ignore the binary
+// entirely and match the tail alone, so a foreign command read as a healthy
+// install and no repair was ever surfaced.
+func TestStatus_ForeignHookIsNotWired(t *testing.T) {
+	statusEnv(t)
+	home := os.Getenv("HOME")
+	settingsDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/othertool hook session-start --source claude-code"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/othertool hook stop --source claude-code"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	output := out.String()
+	if strings.Contains(output, "✓ SessionStart hook configured") {
+		t.Errorf("a foreign command carrying ghost's tail must not read as ghost's hook, got:\n%s", output)
+	}
+	if !strings.Contains(output, "✗ SessionStart hook missing") {
+		t.Errorf("expected SessionStart hook to be reported missing, got:\n%s", output)
+	}
+}
+
+// TestStatus_WrappedGhostHookIsWired: a hand-edited wrapper that does run ghost
+// — an assignment prefix, or a directory change joined to the invocation — is
+// ghost's own hook, so status must report it configured, because init leaves
+// such a command in place and writes nothing to repair it. A reader that looked
+// only at the leading token would call it missing and send the operator to a
+// `ghost mcp init` that changes nothing.
+func TestStatus_WrappedGhostHookIsWired(t *testing.T) {
+	statusEnv(t)
+	home := os.Getenv("HOME")
+	settingsDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "env GHOST_QUIET=1 /opt/ghost/bin/ghost hook session-start --source claude-code"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "cd /somewhere && /opt/ghost/bin/ghost hook stop --source claude-code"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "✓ SessionStart hook configured") {
+		t.Errorf("a wrapper that runs ghost is ghost's own hook, got:\n%s", output)
+	}
+	if !strings.Contains(output, "✓ Stop hook configured") {
+		t.Errorf("a wrapper that runs ghost is ghost's own hook, got:\n%s", output)
+	}
+}
+
 // TestStatus_ReportsInaccessibleDatabase verifies that a database which cannot
 // be stat'd for a reason other than absence (e.g. a permission error) is
 // surfaced as a failed check instead of being reported as a fresh install.

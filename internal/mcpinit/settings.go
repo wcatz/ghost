@@ -591,6 +591,13 @@ func (s *settingsFile) validate() error {
 // which unmarshals into a nil map/slice with no error — so callers must treat
 // that as "stop", not "absent": proceeding to addHook on a nil "hooks" map
 // panics, and on a nil per-event value silently discards it.
+//
+// The match is positional and by substring only, so the command it returns is
+// whichever one sorts first, which is another tool's as often as it is
+// ghost's. It decides WHICH command an event holds first, never WHOSE it is:
+// ownership is the executable test isGhostHookCommand applies, and reading it
+// here is what made a foreign command carrying ghost's argument tail count as
+// ghost's own hook (#1326).
 func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok bool, err error) {
 	entries, present, err := s.hookEntries(event)
 	if err != nil || !present {
