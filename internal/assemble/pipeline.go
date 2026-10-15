@@ -1087,9 +1087,13 @@ const (
 // runLegConsensus is a query-mode admission gate (#1251): admit a row that
 // only one retrieval leg found only when that leg ranks it near the top, so
 // single-leg noise clustered just above the relevance floor is dropped. It is a
-// query-mode rule: passive blocks are untouched. When one leg is unavailable
-// (no embedding endpoint, vector leg down or degraded) both legs are not in
-// play, so the consensus rule cannot apply and the stage is skipped rather than
+// query-mode rule: passive blocks are untouched. A row the vector leg could not
+// see at all — no embedding under the configured identity, which is what a
+// memory saved moments ago looks like before the worker has embedded it — is
+// admitted outright (#1319): it has no vector leg to agree or disagree, so its
+// missing VectorRank is not low consensus. When one leg is unavailable (no
+// embedding endpoint, vector leg down or degraded) both legs are not in play,
+// so the consensus rule cannot apply and the stage is skipped rather than
 // emptying the block.
 func runLegConsensus(p *pipeline) {
 	in := len(p.rows)
@@ -1129,6 +1133,18 @@ func runLegConsensus(p *pipeline) {
 	for i := range p.rows {
 		c := p.rows[i]
 		bothLegs := c.FTSRank >= 0 && c.VectorRank >= 0
+		// A row with no embedding under the configured identity is invisible to
+		// the vector leg: its VectorRank of -1 is "the leg could not see it",
+		// not "the leg ranked it low". Such a row cannot have vector agreement
+		// to give, so the consensus rule has nothing to judge it on and must
+		// not read its silence as dissent (#1319). The retriever sets this
+		// false whenever the vector leg did not answer, so the rule is
+		// untouched on the paths where the leg is out of play.
+		if c.Unembedded {
+			keptRows = append(keptRows, c)
+			keptItems = append(keptItems, p.items[i])
+			continue
+		}
 		// The same exemptions the cutoff and diversity stages apply. The top
 		// row is always kept, so this stage can never empty a query block and
 		// its removals never need an outcome reason: a block it would have

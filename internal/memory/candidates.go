@@ -342,6 +342,15 @@ type Candidate struct {
 	// relevance cutoff (#954) keeps such a row rather than undo the reservation.
 	// It is set on query-mode rows only and does not need an explain request.
 	KeywordReserved bool
+	// Unembedded says the vector leg could not have retrieved this row: it
+	// carries no embedding usable by the configured identity — no vector at
+	// all, or one stamped with a different identity. It is false whenever the
+	// vector leg is not in play (no embedder, no query vector, a failed leg),
+	// because then no row is judged against that leg. The leg-consensus stage
+	// reads it so a row the vector leg could never see is not penalised for
+	// lacking vector agreement (#1319): a row saved moments ago has no
+	// embedding yet, and its silence must not read as a second leg's dissent.
+	Unembedded bool
 	// Evidence counts the records supporting this memory, read in the SAME
 	// snapshot as the rows. It rides here because the assembler may reach the
 	// store through this one read and no other, so a fact only this read can
@@ -712,7 +721,82 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
 	}
+
+	// A row the vector leg could never have retrieved — no embedding under the
+	// configured identity — must not read as a row that leg ranked low
+	// (#1319). The read is taken only when the vector leg actually ran and
+	// answered, because only then does the leg-consensus gate ask the
+	// question: with the leg skipped or failed the gate is a pass-through and
+	// the field is never read. rows shares its backing array with set.Rows, so
+	// the marks below reach the returned set.
+	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity)
+		if err != nil {
+			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
+		}
+		for i := range rows {
+			rows[i].Unembedded = unembedded[rows[i].ID]
+		}
+	}
 	return set, nil
+}
+
+// unembeddedAmong returns the candidates that carry no embedding usable by
+// identity: no vector at all, or one stamped with a different identity (a
+// model, dimension or task-prefix change). An empty identity means "any
+// recorded vector counts", so nothing is unembedded — the state of a store
+// with no embedder configured, where the vector leg does not run anyway.
+//
+// It is the rule UnembeddedMemoryIDs applies, narrowed to one retrieval's rows
+// and taken from the same snapshot: a row with a vector the leg could score is
+// a row the leg saw, whether or not it ranked the row; a row with none is one
+// the leg could never have considered. Chunked like the edge and evidence
+// reads, because SQLite caps a statement's bound parameters.
+func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string) (map[string]bool, error) {
+	out := make(map[string]bool, len(candidates))
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.ID
+	}
+	head := `SELECT m.id FROM memories m LEFT JOIN memory_embeddings e ON e.memory_id = m.id`
+	var prefix []any
+	if identity != "" {
+		head += ` AND e.model = ?`
+		prefix = append(prefix, identity)
+	}
+	for start := 0; start < len(ids); start += edgeChunkIDs {
+		end := min(start+edgeChunkIDs, len(ids))
+		chunk := ids[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, 0, len(prefix)+len(chunk))
+		args = append(args, prefix...)
+		for i, id := range chunk {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := db.QueryContext(ctx, head+
+			` WHERE m.id IN (`+strings.Join(ph, ",")+`) AND e.memory_id IS NULL`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read unembedded rows: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("scan unembedded rows: %w", err)
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("iterate unembedded rows: %w", err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
 }
 
 // totalLegFailure reports an error when every leg that actually ran failed.
