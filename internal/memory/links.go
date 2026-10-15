@@ -113,7 +113,7 @@ func (s *Store) CreateLinkUnopposed(ctx context.Context, sourceID, targetID, rel
 // is a parameter here and not something a wrapper could add around the call.
 func (s *Store) createLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string, requireUnopposed bool) (bool, error) {
 	if sourceID == targetID {
-		return false, fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
+		return false, fmt.Errorf("create link: self-links not allowed (id %s)", RefusalArg("memory_id", sourceID))
 	}
 	if symmetricRelations[relation] && sourceID > targetID {
 		sourceID, targetID = targetID, sourceID

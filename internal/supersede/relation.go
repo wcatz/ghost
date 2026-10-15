@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/memory"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -732,6 +733,12 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // question — once for the call that died and again for the rerun. Reassess is
 // the caller that acts on that; Run deliberately does not, and says so where it
 // ignores the prefix.
+//
+// The pair prefix on a failure, and the classifier's own log lines for the same
+// pair, name each stored id through `memory.RefusalArg("memory_id", …)`, because
+// a stored id is not token-guarded (`ghost import` writes an artifact's id
+// verbatim) and both reach the caller's terminal and, on the detached lifecycle
+// path, `lifecycle.log`.
 func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -755,19 +762,19 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 				if errors.Is(err, errUnparseableVerdict) {
 					if h.logger != nil {
 						h.logger.Warn("supersede: unparseable verdict",
-							"newer", chunk[0].NewerID, "older", chunk[0].OlderID, "error", err)
+							"newer", memory.RefusalArg("memory_id", chunk[0].NewerID), "older", memory.RefusalArg("memory_id", chunk[0].OlderID), "error", err)
 					}
 					out = append(out, "")
 					continue
 				}
-				return out, partialVerdicts(out, fmt.Errorf("%s→%s: %w", chunk[0].NewerID, chunk[0].OlderID, err))
+				return out, partialVerdicts(out, fmt.Errorf("%s→%s: %w", memory.RefusalArg("memory_id", chunk[0].NewerID), memory.RefusalArg("memory_id", chunk[0].OlderID), err))
 			}
 			out = append(out, rel)
 			continue
 		}
 		rels, err := h.classifyChunk(ctx, chunk)
 		if err != nil {
-			return out, partialVerdicts(out, fmt.Errorf("pairs %d-%d (%s→%s): %w", start+1, end, chunk[0].NewerID, chunk[0].OlderID, err))
+			return out, partialVerdicts(out, fmt.Errorf("pairs %d-%d (%s→%s): %w", start+1, end, memory.RefusalArg("memory_id", chunk[0].NewerID), memory.RefusalArg("memory_id", chunk[0].OlderID), err))
 		}
 		out = append(out, rels...)
 	}
@@ -860,11 +867,11 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 				if errors.Is(err, errUnparseableVerdict) {
 					if h.logger != nil {
 						h.logger.Warn("supersede: unparseable verdict in batch fallback",
-							"newer", chunk[i].NewerID, "older", chunk[i].OlderID, "error", err)
+							"newer", memory.RefusalArg("memory_id", chunk[i].NewerID), "older", memory.RefusalArg("memory_id", chunk[i].OlderID), "error", err)
 					}
 					continue
 				}
-				return nil, fmt.Errorf("%s→%s: %w", chunk[i].NewerID, chunk[i].OlderID, err)
+				return nil, fmt.Errorf("%s→%s: %w", memory.RefusalArg("memory_id", chunk[i].NewerID), memory.RefusalArg("memory_id", chunk[i].OlderID), err)
 			}
 			rels[i] = rel
 		}

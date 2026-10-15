@@ -462,6 +462,15 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 //     can sit on a history row that names a different memory. Those cells are
 //     redacted rather than their rows deleted: the event (which memory, when,
 //     which agent) is worth keeping, and the text is what the purge is for.
+//     The match set for that redaction includes this memory's OWN
+//     `merged_content`, not only its content columns: wording a fold brought INTO
+//     this memory is absent from every content column of this one, so a list drawn
+//     from those columns alone could never reach the copy another row kept. It is
+//     gathered into a slice of its own rather than added to the content list,
+//     because that list also keys the snapshot delete — and a snapshot is the
+//     rollback point for a whole project, so folding this wording into it would
+//     delete an unrelated memory's snapshot whose content happens to equal the
+//     wording this one let go.
 //   - memory_provenance and memory_snapshot_evidence. The evidence records are
 //     deleted outright rather than kept as a record: they carry no text of the
 //     memory, but they name the agents, sessions and references that reported it,
@@ -497,6 +506,19 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		memoryID, memoryID, memoryID)
 	if err != nil {
 		return 0, fmt.Errorf("collect texts to purge: %w", err)
+	}
+
+	// The folded-in wording recorded on this memory's own merge rows is absent
+	// from every content column gathered above, so it is collected separately. It
+	// is deliberately kept OUT of texts: texts also keys the snapshot delete
+	// below, and a snapshot is the rollback point for a whole project — folding
+	// this wording into that list would delete an unrelated memory's snapshot
+	// whose content merely equals the wording this one let go.
+	foldedTexts, err := selectIDs(ctx, tx, `
+		SELECT merged_content FROM memory_history WHERE memory_id = ? AND merged_content IS NOT NULL`,
+		memoryID)
+	if err != nil {
+		return 0, fmt.Errorf("collect folded-in texts to purge: %w", err)
 	}
 
 	// The snapshots first: they are the copies that can bring the row back, so
@@ -690,10 +712,16 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 
 	// Another memory's discarded wording, in batches small enough that the
 	// statement's text stays sane: a text is up to MaxContentLen bytes, and a
-	// memory's history is bounded but not by this.
+	// memory's history is bounded but not by this. The match set is this
+	// memory's content columns AND its own folded-in wording — the latter is the
+	// only way to reach the copy a second row kept when the wording lived in no
+	// content column of this one.
 	const redactionBatch = 25
-	for start := 0; start < len(texts); start += redactionBatch {
-		batch := texts[start:min(start+redactionBatch, len(texts))]
+	redactTexts := make([]string, 0, len(texts)+len(foldedTexts))
+	redactTexts = append(redactTexts, texts...)
+	redactTexts = append(redactTexts, foldedTexts...)
+	for start := 0; start < len(redactTexts); start += redactionBatch {
+		batch := redactTexts[start:min(start+redactionBatch, len(redactTexts))]
 		placeholders := make([]string, 0, len(batch))
 		args := make([]interface{}, 0, len(batch))
 		for _, text := range batch {
@@ -972,7 +1000,7 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 		SET related_id = ?
 		WHERE memory_id = ? AND phase = ? AND related_id IS NULL
 	`, successorID, oldID, phaseDelete); err != nil {
-		return fmt.Errorf("record history successor for %s: %w", oldID, err)
+		return fmt.Errorf("record history successor for %s: %w", RefusalArg("memory_id", oldID), err)
 	}
 	return nil
 }

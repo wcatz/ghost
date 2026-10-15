@@ -104,7 +104,7 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 			return st, "no longer exists", nil
 		}
 		if err != nil {
-			return st, "", fmt.Errorf("re-read %s: %w", r.ID, err)
+			return st, "", fmt.Errorf("re-read %s: %w", RefusalArg("memory_id", r.ID), err)
 		}
 		switch {
 		case project != projectID:

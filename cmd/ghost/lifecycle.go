@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -245,17 +247,23 @@ func runLifecycle() {
 		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 
 		phaseDone := make(chan struct{})
-		go func() {
-			select {
-			case <-ctx.Done():
-				time.Sleep(phaseGracePeriod)
-				killPhaseProcess(cmd)
-			case <-phaseDone:
-			}
-		}()
 
 		start := time.Now()
-		runErr := cmd.Run()
+		// The watchdog is started only once the phase EXISTS: it signals the
+		// phase's process group, and a goroutine launched before Start reads
+		// cmd.Process while Start is writing it — a race on the one field the
+		// kill is decided by. It also cannot have anything to escalate before
+		// then, since the deadline's Cancel needs a process to signal.
+		runErr := cmd.Start()
+		if runErr == nil {
+			go phaseWatchdog(ctx, phaseDone, cmd, phaseEscalation{
+				grace:          phaseGracePeriod,
+				after:          time.After,
+				groupInhabited: phaseGroupInhabited,
+				kill:           killPhaseProcess,
+			})
+			runErr = cmd.Wait()
+		}
 		close(phaseDone)
 		cancel()
 		if runErr != nil {
@@ -492,6 +500,24 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 	return project, source, signals, nil
 }
 
+// maintenanceContext is the root context of a maintenance command that spawns
+// CLI harnesses: `ghost reflect`, `ghost resolve`, `ghost supersede` and
+// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
+// the harnesses from being orphaned when the process is asked to stop.
+//
+// Harness children run in their own process group, so this process's group is
+// no longer the umbrella that reaches them: the phase's own deadline (the
+// lifecycle phase group signal) and a terminal Ctrl-C would otherwise end this
+// process and leave a harness with no deadline of its own, because its context
+// lives here. Cancelling this context makes each in-flight harness's own Cancel
+// signal its group before this process exits — the harness call is what the
+// process is blocked on, so the signal has been delivered by the time the
+// cancellation unwinds to the exit. The lifecycle watchdog's group sweep stays
+// as the backstop for a command that does not wind down.
+func maintenanceContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 // consolidationContext bounds a single consolidation call by
 // reflection.consolidation_timeout_minutes. It exists because the bound used to
 // be a hardcoded 3 minutes, which a large project's prompt hits (the opencode
@@ -516,6 +542,60 @@ func consolidationContext(parent context.Context, minutes int) (context.Context,
 // phaseGracePeriod is how long a phase has to exit after its deadline's
 // SIGTERM before its whole process group is force-killed.
 const phaseGracePeriod = 30 * time.Second
+
+// phaseEscalation is the impure edge of a phase's deadline: the grace period,
+// the clock that measures it, the question of whether anything is still in the
+// phase's process group, and the signal itself. All four are fields so a test
+// can set the boundary where the grace is up and the group has emptied at once,
+// rather than waiting for it to arrive.
+type phaseEscalation struct {
+	grace          time.Duration
+	after          func(time.Duration) <-chan time.Time
+	groupInhabited func(*exec.Cmd) bool
+	kill           func(*exec.Cmd)
+}
+
+// phaseWatchdog is the second half of a phase's deadline. The deadline's Cancel
+// has already asked the phase's whole process group to shut down; this is the
+// escalation for a phase that ignored it, and it returns without escalating
+// when the phase ends before its deadline.
+//
+// The question it asks before signalling is about the GROUP, not the phase
+// process, and the difference is the whole point. cmd.Wait returns the instant
+// the direct child is reaped, and a phase is a plain ghost process with no
+// SIGTERM handler, so it dies the moment the deadline's group signal lands —
+// while the CLI harness it spawned, same group, can ignore or slowly handle the
+// signal and survive as an orphan. That orphan is the reason killPhaseProcess
+// exists, so "the phase has been waited for" is not a reason to stay the
+// escalation; "the group is empty" is. Asking the group is also what keeps the
+// id safe to signal: an empty group is the one whose id belongs to no run here
+// and, on a busy machine, can already have been reused. Go's select picks a
+// ready case at random, but the phaseDone/ctx.Done choice below no longer
+// decides anything: both cases fall through to the deadline test.
+func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
+	// Wait for the deadline, or for the phase to end first.
+	select {
+	case <-phaseDone:
+	case <-ctx.Done():
+	}
+
+	// Only a deadline escalates. The phase loop also cancels this context once
+	// the phase has returned, and a context the loop cancelled is not a
+	// deadline: a phase that ended on its own has nothing to sweep. When the
+	// deadline did fire, it fired BEFORE the SIGTERM that is what ends the
+	// phase, so the answer here is DeadlineExceeded by the time phaseDone
+	// closes — the check does not race the signal that caused it.
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return
+	}
+
+	// The deadline fired. The group has the grace period to empty out on the
+	// SIGTERM it was sent, and whatever is still in it is force-killed.
+	<-esc.after(esc.grace)
+	if esc.groupInhabited(cmd) {
+		esc.kill(cmd)
+	}
+}
 
 // lifecyclePhase is one step of the auto-consolidation chain: a ghost
 // subcommand, its arguments, and the outer bound on how long it may run. A
@@ -1079,7 +1159,8 @@ func runReflect() {
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
@@ -1345,6 +1426,15 @@ func runReflect() {
 	result, err := consolidator.Consolidate(consolidateCtx, input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
+		os.Exit(1)
+	}
+	// A cancelled run must not apply. The tier guard inside a tiered list makes
+	// a cancellation fatal there; this covers the consolidators that are not
+	// one — a bare mechanical tier returns a result without ever looking at the
+	// context — so a command the operator stopped cannot rewrite the corpus and
+	// exit 0.
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "error: consolidation cancelled: %v\n", ctx.Err())
 		os.Exit(1)
 	}
 
@@ -3102,7 +3192,8 @@ func runSupersede() {
 
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
@@ -4387,7 +4478,8 @@ func runResolve() {
 
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 	applyPhaseModel(cfg.CLI.ModelResolve, source)

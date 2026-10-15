@@ -326,6 +326,34 @@ func TestASearchWithNoEmbedderNamesTheLegItNeverRan(t *testing.T) {
 	}
 }
 
+// TestARetiredOnlyMatchWithNoEmbedderReportsAllInvalid is the shipped-condition
+// half of the reason precedence, taken through the live tool rather than the
+// assembler's seam. ghost_memory_search always asks for a hybrid search, so on a
+// machine with no embedder the vector leg is applicable and never attempted — and
+// a query whose only match has retired used to answer `vector_backend_unavailable`,
+// discarding the fact that a row was FOUND and withheld as out of date. The reason
+// names the store fact; the leg state stays on the machine line, so a caller still
+// learns the keyword leg was the only one that ran.
+func TestARetiredOnlyMatchWithNoEmbedderReportsAllInvalid(t *testing.T) {
+	_, session := newCapSession(t)
+	saveGlobalValidityRow(t, session, "the ledger reconciliation runbook has been retired",
+		map[string]any{"valid_from": "2020-01-01", "valid_until": "2021-01-01"})
+
+	out := searchText(t, session, "ledger reconciliation runbook")
+
+	if !strings.Contains(out, "reason=all_invalid") {
+		t.Errorf("a query whose only match retired did not report all_invalid: the row was found and "+
+			"withheld, and the reason has to say so:\n%s", out)
+	}
+	if !strings.Contains(out, ",vector:not_run") {
+		t.Errorf("the verdict line does not report the vector leg as never executed, so the missing "+
+			"embedder is no longer visible:\n%s", out)
+	}
+	if !strings.Contains(out, "withheld as out of date") {
+		t.Errorf("the answer does not say the match was withheld as out of date:\n%s", out)
+	}
+}
+
 // TestTheSearchResponseStaysInsideItsByteCap: the cap is what keeps a 100-row
 // result of 8000-byte memories from spending a harness's whole context window.
 // It bounds the whole response, framing included, so it is asserted on the bytes
@@ -361,6 +389,17 @@ func TestTheSearchResponseStaysInsideItsByteCap(t *testing.T) {
 	}
 	if !strings.Contains(out, "admitted=") {
 		t.Errorf("the verdict line does not report how many rows were admitted:\n%s", tail(out, 300))
+	}
+	// A trimmed search ends with the same cut notice the five listing tools
+	// render, naming how many whole rows went and how to see the rest. The
+	// machine line's admitted= is a trace of the cut, not the disclosure: an
+	// agent reading the answer has to be told a row it cannot see exists.
+	if cut := cutCount(t, out); cut < 1 {
+		t.Errorf("no cut notice on a trimmed search (cut=%d): the listing tools name the rows they "+
+			"withheld, and this answer must too:\n%s", cut, tail(out, 400))
+	}
+	if !strings.Contains(out, "narrow the query to see the rest") {
+		t.Errorf("the cut notice does not say how to see the rest:\n%s", tail(out, 400))
 	}
 	// And the fixture has to be big enough that the assertion above is a real
 	// test: an uncapped answer over this corpus is several times the cap.

@@ -80,7 +80,7 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 			opts.Purge = true
 		default:
 			if opts.MemoryID != "" {
-				return opts, fmt.Errorf("history takes one memory id, got %q as well", arg)
+				return opts, fmt.Errorf("history takes one memory id, got %s as well", memory.RefusalArg("id", arg))
 			}
 			opts.MemoryID = arg
 		}
@@ -638,7 +638,7 @@ func purgeHistoryMemory(ctx context.Context, s historyPurgeStore, memoryID strin
 		return err
 	}
 	if len(entries) == 0 && len(live) == 0 {
-		return fmt.Errorf("no memory and no history for %s — nothing to purge", memoryID)
+		return noMemoryToPurge(memoryID)
 	}
 	switch {
 	case len(live) > 0:
@@ -764,17 +764,38 @@ func purgePrefixRefusal(ids []string, ref string) error {
 		// depends on nothing this call can see: the id may be a whole id whose
 		// memory and text are both already gone, and there is nothing to say to
 		// an operator who has just watched a purge succeed.
-		return fmt.Errorf("no memory and no history for %s — nothing to purge", ref)
+		return noMemoryToPurge(ref)
 	}
 	id, err := memref.ResolveIn(ids, "id", ref)
 	if err != nil {
 		// Ambiguous, or below memref's floor. Both are memref's sentences rather
 		// than this command's, wrapped so the reason a prefix was refused at all
-		// is on the same line.
-		return fmt.Errorf("purge needs a whole memory id and %q is not one: %w", ref, err)
+		// is on the same line. The ref in FRONT of the wrapped error is this
+		// command's own text, so it renders through the same guard every other
+		// caller value on a refusal does; memref renders the copy inside its own
+		// sentence.
+		return fmt.Errorf("purge needs a whole memory id and %s is not one: %w", memory.RefusalArg("id", ref), err)
 	}
-	return fmt.Errorf("purge needs a whole memory id, not the %d-character prefix %q, because it erases recorded text for good — the memory it names is %s: run 'ghost history purge %s' to purge it",
-		utf8.RuneCountInString(ref), ref, id, id)
+	// Both ids are caller-shaped text: the prefix is what the operator typed, and
+	// the resolved id is what the store holds — and `ghost import` writes an
+	// artifact's ids verbatim, so a stored one can be token-shaped. They render
+	// through RefusalArg, which is `%q` for an ordinary id, so the sentence still
+	// prints the full id the prefix names; the hint is the next command, so its id
+	// carries the same rendering.
+	return fmt.Errorf("purge needs a whole memory id, not the %d-character prefix %s, because it erases recorded text for good — the memory it names is %s: run 'ghost history purge %s' to purge it",
+		utf8.RuneCountInString(ref), memory.RefusalArg("id", ref), memory.RefusalArg("id", id), memory.RefusalArg("id", id))
+}
+
+// noMemoryToPurge is the one "nothing to purge" sentence, shared by the two
+// misses on this command: an argument no memory or history answers to
+// (purgePrefixRefusal), and an id this store names that reaches neither a table
+// (purgeHistoryMemory, after the stored spelling is taken from the store). One
+// function so the two cannot drift, and the id goes through memory.RefusalArg
+// because a stored id is caller text too — `ghost import` writes an artifact's
+// ids verbatim, so one can be token-shaped, and the value here is the caller's
+// operand or the spelling the store holds for it.
+func noMemoryToPurge(id string) error {
+	return fmt.Errorf("no memory and no history for %s — nothing to purge", memory.RefusalArg("id", id))
 }
 
 // resolveHistoryRef turns the argument `ghost history` was given into the id its

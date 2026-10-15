@@ -101,10 +101,16 @@ var (
 // name (the common case), and then only the name is printed, so the ordinary
 // refusal reads exactly as it did before.
 func projectRef(name, id string) string {
+	// The id names ANOTHER project — one held under a name the reader may never
+	// have seen — and is printed so they can address it with `ghost project
+	// merge`. A stored project id can be one `ghost import` wrote verbatim, so
+	// it is rendered rather than repeated raw; for an ordinary id this is
+	// exactly the `%q` the sentence used before.
+	rendered := RefusalArg(ProjectIdentifierLabel, id)
 	if name == "" || name == id {
-		return fmt.Sprintf("%q", id)
+		return rendered
 	}
-	return fmt.Sprintf("%q (%s)", name, id)
+	return fmt.Sprintf("%q (%s)", name, rendered)
 }
 
 // ProjectBinding reports what one bind changed, so a caller can tell the user
@@ -256,7 +262,7 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		`SELECT name, path, COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).
 		Scan(&name, &storedPath, &storedRemote)
 	if errors.Is(err, sql.ErrNoRows) {
-		return result, fmt.Errorf("%w: %q", ErrBindProjectNotFound, id)
+		return result, fmt.Errorf("%w: %s", ErrBindProjectNotFound, RefusalArg(ProjectIdentifierLabel, id))
 	}
 	if err != nil {
 		return result, fmt.Errorf("read project for binding: %w", err)
@@ -268,7 +274,7 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 
 	if remote != "" {
 		if storedRemote != "" && storedRemote != remote {
-			return result, fmt.Errorf("%w: %q is bound to %q, not %q — merge the projects instead of rebinding", ErrBindRemoteConflict, id, storedRemote, remote)
+			return result, fmt.Errorf("%w: %s is bound to %q, not %q — merge the projects instead of rebinding", ErrBindRemoteConflict, RefusalArg(ProjectIdentifierLabel, id), storedRemote, remote)
 		}
 		if storedRemote == "" {
 			var owner, ownerName string
@@ -471,8 +477,8 @@ func checkPathResolvable(ctx context.Context, tx *sql.Tx, id, physical, remote s
 			ErrBindPathUnmatchable, physical)
 	}
 	if bestID != id {
-		return fmt.Errorf("%w: %q records a longer matching path, so resolution would return it instead",
-			ErrBindPathUnmatchable, bestID)
+		return fmt.Errorf("%w: %s records a longer matching path, so resolution would return it instead",
+			ErrBindPathUnmatchable, RefusalArg(ProjectIdentifierLabel, bestID))
 	}
 	return nil
 }

@@ -91,17 +91,17 @@ func Status(w io.Writer) (bool, error) {
 			// fire time and a wrong-source or lookalike value would too — all
 			// must report as missing here so the fix is actionable via
 			// `ghost mcp init`.
-			hasHk := contractHookWired(sf, "SessionStart", "session-start", "claude-code")
+			hasHk := contractHookWired(sf, "SessionStart", "session-start", "claude-code", ghostBin)
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing or pre-contract (run ghost mcp init)")
 
-			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code")
+			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code", ghostBin)
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
 			// The working-moment hooks are an addition, and a user who removed
 			// them on purpose is not unhealthy: reported, never counted against
 			// the overall verdict.
 			for _, c := range []struct{ event, token string }{{"UserPromptSubmit", "message-submit"}, {"PostToolUse", "edit"}} {
-				if contractHookWired(sf, c.event, c.token, "claude-code") {
+				if contractHookWired(sf, c.event, c.token, "claude-code", ghostBin) {
 					_, _ = fmt.Fprintf(w, "  ✓ %s hook configured (working-moment context)\n", c.event)
 				} else {
 					_, _ = fmt.Fprintf(w, "  - %s hook not configured (optional; run ghost mcp init for working-moment context)\n", c.event)
@@ -266,31 +266,35 @@ func StatusOpencode(w io.Writer) (bool, error) {
 }
 
 // contractHookWired reports whether any registered hook command for event
-// invokes `hook <eventToken>` with an exact --source token equal to wantSource.
-// Both accepted flag forms count: "--source X" and "--source=X". Token-based,
-// not substring-based — a lookalike like "--source claude-code-extra" is
-// rejected by hostevent.Parse at runtime, so status must never call it wired;
-// conversely the equals form works and must not read as missing. Unparseable
-// commands (exotic hand-edited quoting) conservatively don't count.
-func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource string) bool {
+// RUNS GHOST and invokes `hook <eventToken>` with an exact --source token equal
+// to wantSource. Both accepted flag forms count: "--source X" and "--source=X".
+// Token-based, not substring-based — a lookalike like "--source
+// claude-code-extra" is rejected by hostevent.Parse at runtime, so status must
+// never call it wired; conversely the equals form works and must not read as
+// missing. Ownership is the same executable rule the reconcile applies
+// (ghostHookTail), so a foreign command that merely ends in `hook <event>
+// --source claude-code` does not read as ghost's own, and a hand-edited wrapper
+// that does run ghost does — status and `ghost mcp init` agree on the same
+// file. Unparseable commands (exotic hand-edited quoting) conservatively don't
+// count, EXCEPT that a trailing token whose quoting never closes still leaves
+// the tokens before it usable — a ghost invocation at the front of such a
+// command is ghost's hook, and reporting it missing would send the operator to
+// a `ghost mcp init` that only adds a second copy beside it.
+func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource, ghostBin string) bool {
 	cmds, err := sf.hookCommands(hookEvent)
 	if err != nil {
 		return false
 	}
 	for _, cmd := range cmds {
-		_, rest, ok := splitHookCommand(cmd)
+		tail, ok := ghostHookTail(cmd, eventToken, ghostBin)
 		if !ok {
 			continue
 		}
-		fields := strings.Fields(rest)
-		if len(fields) < 2 || fields[0] != "hook" || fields[1] != eventToken {
-			continue
-		}
-		for i := 2; i < len(fields); i++ {
-			if fields[i] == "--source" && i+1 < len(fields) && fields[i+1] == wantSource {
+		for i := 0; i < len(tail); i++ {
+			if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == wantSource {
 				return true
 			}
-			if strings.HasPrefix(fields[i], "--source=") && strings.TrimPrefix(fields[i], "--source=") == wantSource {
+			if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == wantSource {
 				return true
 			}
 		}
@@ -322,7 +326,7 @@ func ReportStaleIntegrations(w io.Writer) {
 				if err != nil || len(cmds) == 0 {
 					continue // integration not in use, or unreadable — leave status to `ghost mcp status`
 				}
-				if !contractHookWired(sf, c.event, c.token, "claude-code") {
+				if !contractHookWired(sf, c.event, c.token, "claude-code", findBinary("ghost")) {
 					hints = append(hints, fmt.Sprintf("%s hook is pre-contract or miswired — run `ghost mcp init` to migrate it", c.label))
 				}
 			}
@@ -358,7 +362,7 @@ func ReportStaleIntegrations(w io.Writer) {
 			if rules, rerr := loadCodexHooksRules(); rerr == nil {
 				wired = true
 				for _, ev := range codexLifecycleEvents {
-					if !codexContractHookWired(rules[ev.Key], ev.EventToken, "codex") {
+					if !codexContractHookWired(rules[ev.Key], ev.EventToken, "codex", bin) {
 						wired = false
 						break
 					}
@@ -488,10 +492,12 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// whether a database exists.
 	cfg := config.LoadForHook()
 	// reportOllamaDownDuration only fires when embedding is enabled AND
-	// checkOllama's live probe just found Ollama unreachable — see that
+	// checkOllama's live probe reached a CONCLUSIVE Unreachable — see that
 	// function's doc comment for why a stale marker must never be printed
-	// next to a currently-passing Ollama check.
-	if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
+	// next to a currently-passing Ollama check, and why an Inconclusive probe
+	// (a missed deadline, which establishes nothing) must not be rendered as
+	// an ongoing outage either.
+	if reach := checkOllama(w, cfg, check); cfg.Embedding.Enabled && reach == embedding.Unreachable {
 		// A refused data dir must not have had a marker written into it before
 		// the report says so (#721), so this resolves the directory the same way
 		// the store open below does. DataDirPath, not DataDir: a status run

@@ -137,6 +137,10 @@ func TestNoContradictionMarkerWithoutAPinnedContradiction(t *testing.T) {
 func TestPinnedMarkerDropsAKeptPartnerTheResponseFitCut(t *testing.T) {
 	older := pinnedStamped("OLD", 0.9, "2026-01-01 00:00:00")
 	newer := pinnedStamped("NEW", 0.5, "2026-06-01 00:00:00")
+	// NEW is the row the cap cuts and is deliberately LARGE: the trim's cut
+	// notice is counted against the cap, so a short last row would not free
+	// enough for the notice and a second row would follow it out.
+	newer.Content = "database configuration NEW " + strings.Repeat("newer detail ", 20) + "NEW"
 	set := contradicting([][2]string{{"NEW", "OLD"}}, older, newer)
 	req := separationRequest()
 	full := run(t, &fakeRetriever{set: set}, req)

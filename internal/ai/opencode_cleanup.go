@@ -374,6 +374,12 @@ func (r openCodeCleanupRunner) run(ctx context.Context, args []string) ([]byte, 
 	cctx, cancel := context.WithTimeout(ctx, sessionCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, r.binary, args...)
+	// The same bound every harness child gets: this runner builds its own
+	// command because it must reach the user's own opencode store rather than
+	// the isolated tree the funnel's clients use, but its child runs the same
+	// opencode CLI and can leave the same stdout-holding helper behind, so it
+	// takes the bound through the shared helper rather than os/exec's default.
+	boundHarnessProcess(cmd)
 	cmd.Env = harnessEnv(os.Environ(), harnessOpencode)
 	if r.tempRoot != "" {
 		cmd.Env = scratchEnv(cmd.Env, r.tempRoot)

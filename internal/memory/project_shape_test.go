@@ -34,6 +34,14 @@ func TestEveryProjectCreationRouteRefusesAShapeTheImporterRefuses(t *testing.T) 
 		"a backtick in the id":  {"p`id", "p", "/src/p"},
 		"a guillemet in the id": {"p«id", "p", "/src/p"},
 		"a nul in the id":       {"p\x00id", "p", "/src/p"},
+		// The Zl/Zp separators. They are NOT control characters (`unicode.IsControl`
+		// is Cc only) and not in the C0/DEL range the renderer used to test, so both
+		// the boundary and the renderer let them through until #1363 — and a name
+		// holding one forges a line in the session-start block's own heading.
+		"a line separator in the id":        {"p\u2028id", "p", "/src/p"},
+		"a paragraph separator in the id":   {"p\u2029id", "p", "/src/p"},
+		"a line separator in the name":      {"psl", "bad\u2028name", "/src/psl"},
+		"a paragraph separator in the path": {"psp", "p", "/src/p\u2029p"},
 		// An ordinary id with the NAME hostile, and an ordinary id with the PATH
 		// hostile: `ensureProjectFor` stores the caller's argument as all three, but
 		// the store's routes are also called directly with distinct values (the

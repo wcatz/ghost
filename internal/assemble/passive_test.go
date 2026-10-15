@@ -529,8 +529,33 @@ func TestRunPassiveAnEmptyWindowStillNamesTheLeg(t *testing.T) {
 	}
 }
 
+// TestRunPassiveAValidityExclusionOutranksALegThatNeverRan is the SQL-counted
+// counterpart of TestRunPassiveAnExclusionOutranksALegFact: that test puts the
+// expired row in the set for stage 2 to drop, so it never reaches the empty
+// reason. Here the retriever's own predicate withheld the only row before the
+// window, so the set arrives empty and the withheld count is the only evidence
+// a row existed — and it must outrank the leg that never ran, for the same
+// reason the stage case does. The sentence is the passive one: a surface that
+// ran neither leg must not be handed "the query was not wrong".
+func TestRunPassiveAValidityExclusionOutranksALegThatNeverRan(t *testing.T) {
+	set := passiveSet()
+	set.ValidityExcluded = 1
+	set.Legs = map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: true},
+		"vector": {Applicable: true, Attempted: false},
+	}
+	res := run(t, &fakeRetriever{set: set}, passiveRequest())
+	if res.Reason != reasonAllInvalid {
+		t.Errorf("reason: got %q, want %q — a row the fetch withheld is a fact about the store and "+
+			"outranks a leg that never ran", res.Reason, reasonAllInvalid)
+	}
+	if strings.Contains(res.Abstention, "vector leg could not run") {
+		t.Errorf("the abstention reports a leg failure for a set the fetch emptied: %q", res.Abstention)
+	}
+}
+
 // TestRunPassiveRefusesACategoryPredicate is the filter the passive fetch cannot
-// honour. `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL`
+// honour. `passiveKeyScanSQL` binds `WHERE project_id = ? AND resolved_at IS NULL`
 // plus scope — there is no category and no tier in its SQL — while the query path
 // WIDENS the window when either is set, precisely so a matching row ranked below
 // the cut stays reachable (that widening is what closed #573).

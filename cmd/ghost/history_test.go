@@ -461,6 +461,104 @@ func TestRunHistoryPurgeReportsAnIdItNeverHeldAsAMiss(t *testing.T) {
 	}
 }
 
+// historyTokenID is an AWS-access-key-shaped id, the shape a memory id can hold:
+// `ghost import` writes an artifact's ids verbatim and CheckImportedID bounds only
+// length and control characters, so a stored id — and a ref a caller types for one
+// — can be token-shaped. The refusal sentences on this command render every such
+// value through memory.RefusalArg, the same renderer internal/memref's miss
+// refusal uses, so none of them hands the value back.
+const historyTokenID = "AKIAIOSFODNN7EXAMPLE"
+
+// assertHistoryRefusalWithheld asserts an error names the field and the format of
+// a token-shaped value and holds no part of the value. The placeholder is the one
+// memory.RefusalArg returns for a value under its cap.
+func assertHistoryRefusalWithheld(t *testing.T, err error, field string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, historyTokenID) {
+		t.Errorf("the refusal echoes the token-shaped value:\n%s", msg)
+	}
+	if want := "<" + field + " withheld: it holds a AWS access key ID>"; !strings.Contains(msg, want) {
+		t.Errorf("the refusal does not carry %q:\n%s", want, msg)
+	}
+}
+
+// TestParseHistoryArgsWithholdsATokenShapedOperand: the second operand is read as
+// a memory id and refused as one, so the reader sees that id withheld rather than
+// repeated.
+func TestParseHistoryArgsWithholdsATokenShapedOperand(t *testing.T) {
+	_, err := parseHistoryArgs([]string{"abc123", historyTokenID})
+	assertHistoryRefusalWithheld(t, err, "id")
+}
+
+// TestNoMemoryToPurgeWithholdsItsID: the one "nothing to purge" sentence, shared
+// by the miss purgePrefixRefusal returns and the stored id purgeHistoryMemory
+// names after it re-spells the argument. There is one function because there is
+// one sentence, so the two sites cannot drift.
+func TestNoMemoryToPurgeWithholdsItsID(t *testing.T) {
+	assertHistoryRefusalWithheld(t, noMemoryToPurge(historyTokenID), "id")
+}
+
+// TestPurgePrefixRefusalWithholdsATokenShapedRef: an argument that names nothing
+// is the miss sentence, and a token-shaped one is withheld there.
+func TestPurgePrefixRefusalWithholdsATokenShapedRef(t *testing.T) {
+	assertHistoryRefusalWithheld(t, purgePrefixRefusal(nil, historyTokenID), "id")
+}
+
+// TestPurgePrefixRefusalWithholdsTheRefItWraps: memref's own refusal is wrapped
+// in front of this command's sentence, so the clause this command owns renders
+// the ref through the guard too rather than adding a second, raw copy of it. This
+// asserts the placeholder the clause adds and not the absence of the value,
+// because the copies inside memref's own sentence are memref's to render.
+func TestPurgePrefixRefusalWithholdsTheRefItWraps(t *testing.T) {
+	ids := []string{historyTokenID + "AAAA", historyTokenID + "BBBB"}
+	err := purgePrefixRefusal(ids, historyTokenID)
+	if err == nil {
+		t.Fatal("purgePrefixRefusal accepted an ambiguous ref")
+	}
+	if want := "<id withheld: it holds a AWS access key ID>"; !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal does not render the wrapped ref through the guard:\n%s", err)
+	}
+}
+
+// TestPurgePrefixRefusalWithholdsTheIDItNames: a prefix is refused with the full
+// id it names, and that id is what the sentence exists to hand over — a
+// token-shaped stored id is exactly the value a refusal must not repeat. Here the
+// ref is an ordinary eight characters and the STORED id is token-shaped as a
+// whole, which is the case the guard is asked about on an id the caller can only
+// address through a prefix.
+func TestPurgePrefixRefusalWithholdsTheIDItNames(t *testing.T) {
+	const ref = "AKIAIOSF" // the first eight characters, below the shape the rule matches
+	assertHistoryRefusalWithheld(t, purgePrefixRefusal([]string{historyTokenID}, ref), "id")
+}
+
+// TestPurgePrefixRefusalStillNamesTheFullIDForAnOrdinaryPrefix: memory.RefusalArg
+// is exactly %q for a value the guard does not recognise, so an ordinary id keeps
+// the behaviour docs/cli.md states — the refusal prints the full id the prefix
+// names, and the command that purges it. The id appears twice, in the "memory it
+// names" clause and in the next command, and both carry the rendering.
+func TestPurgePrefixRefusalStillNamesTheFullIDForAnOrdinaryPrefix(t *testing.T) {
+	const stored = "L1A2B3C4D5E6F70819293A4B5C6D7E8F9"
+	ref := memref.Short(stored)
+	err := purgePrefixRefusal([]string{stored}, ref)
+	if err == nil {
+		t.Fatal("purgePrefixRefusal accepted a prefix")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "whole memory id") {
+		t.Errorf("the refusal no longer says a whole id is needed:\n%s", msg)
+	}
+	if !strings.Contains(msg, `"`+ref+`"`) {
+		t.Errorf("the refusal does not name the prefix:\n%s", msg)
+	}
+	if got := strings.Count(msg, `"`+stored+`"`); got != 2 {
+		t.Errorf("the full id appears %d time(s), want 2 (the memory it names and the next command):\n%s", got, msg)
+	}
+}
+
 // TestRunHistoryPurgeErasesTheFullID: the full-id path is unchanged — the row and
 // its recorded text go in one transaction, and the report says how much text was
 // about to go. This is the regression guard for the asymmetry above: refusing a

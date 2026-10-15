@@ -85,6 +85,7 @@ internal/memory/                    SQLite store, FTS5, vectors, links, schema
 internal/obsidian/                  One-way Markdown vault exporter/sync
 internal/portable/                  Portable JSONL artifact: read (export) and
                                     write (import) of the portable record format
+internal/procgroup/                 Shared process-group set/signal/kill helpers
 internal/procstat/                  Cross-platform process liveness/start time
 internal/provider/                  MemoryStore and LLMProvider interfaces
 internal/reflection/                Tiered memory consolidation
@@ -103,14 +104,14 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 `internal/mcpinit` owns the host-specific setup paths:
 
-- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects. The MCP registration is replaced in place — the existing entry is removed before the new one is added — so a refused `claude mcp add-json` rolls the previous entry back from the `claude mcp get` output the same run read, and the error says whether that entry came back whole, came back without the parts the get rendering could not carry, or was removed, rather than failing silently over a user left with no ghost server.
+- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, the working-moment hooks (UserPromptSubmit, PostToolUse on Edit|Write|MultiEdit), file-memory migration, and redirects. `settings.json` hooks are reconciled by the EXECUTABLE, not by a substring: a hook counts as ghost's own when a token of it is the ghost binary in COMMAND position — the one this run writes under whatever name it carries, or a `ghost` basename under any path and any quoting, the same test the Codex merge applies — immediately followed by that event's `hook <event>` tail (#1326, #1358). So a hand-edited WRAPPER that runs ghost (`env X=1 /path/ghost hook session-start`, `cd d && ghost hook stop`) has its binary in command position behind a prefix `startsCommand` walks back over, so it is ghost's own and is left byte-identical, with no second entry added beside it, because two entries would fire the session-start context and stop hook twice. A ghost binary that is only an ARGUMENT of another program — bare like `echo /opt/bin/ghost hook stop …`, which runs echo — is foreign at the top level too, held to the same command-position rule applied inside a quoted command list. TWO MORE SHAPES ARE GHOST'S OWN, for that same reason (#1337, #1339): a quoted argument a shell's own command-list flag — a single-dash flag ending in `c`, right after a shell name: `sh -c "ghost hook stop …"`, `bash -lc "…"`, `busybox sh -c "…"`, but never another tool's `-c` or `--sync` — or a shell name taking the script positionally makes a command list, so the argument carries the invocation whole and its interior is read, but only behind that gate and only at COMMAND position inside it — a first token, or after a connective, an `X=1` assignment, or a word that runs what follows unchanged (`sudo`, `env [-i] [NAME=VALUE …]`, `nice`, `command`, `exec`, `nohup`, `time`, `doas`, `stdbuf`, `ionice`, `chrt`, `taskset`, `timeout 5`) — which is what keeps `othertool --note "ghost hook stop …"` (an argument, not a command), `othertool -c "ghost hook stop …"` (some other tool's flag) and `sh -c "echo ghost hook stop …"` (runs echo, not sudo's ghost) foreign. The walk reads the rest of shell's own command boundaries as well: a NEWLINE ends a command as `;` does, a `;` or `&&` glued to a word still ends the list that word is in (`(cd /d; ghost …)`), and `(` or `{` opens a command list whose first word is in command position (`{ ghost hook stop …; }`) — because an UNQUOTED operator is cut into a token of its own, while a `;`, `&` or `|` inside a QUOTED argument (`--note "a;b"`, `'x|y'`, a URL with `&`) is the user's text and opens nothing, so a ghost binary behind it stays that command's argument rather than reading as ghost's own (an `&` glued to a `>` is a redirection, `2>&1`, and is left whole too); a prefix command that takes a plain word of its own before the one it runs — a duration or a CPU mask — leaves that command in command position (`timeout 5 ghost …`, `taskset 0x3 ghost …`, `chrt -f 10 ghost …`), and so does one whose option carries a separate operand (`timeout -k 5 10 ghost …`, `stdbuf -o L ghost …`, `doas -u user ghost …`); and a command whose LAST token's quoting never closes still holds the tokens before it, because throwing them away loses a valid ghost invocation at the front of the command. Bounded in depth, so a nested quote cannot recurse forever. A command that does not run ghost — another tool's, ending in the same argument tail with no ghost-binary token before it — is never rewritten and never counted as ghost's: ghost's own entry is added beside it, because "leave it alone" and "treat it as ghost's hook" are different decisions and the second hid a missing install behind `✓ already configured`. The entry that reconciles is ghost's own, wherever it sits in the list, which is what keeps a foreign command that sorts first from appending a second copy on every re-run; only a command whose LEADING token is ghost's binary is ever rewritten, by the legacy-quoting or stale-path repair. The `ghost mcp status` reader (`contractHookWired`, and `ReportStaleIntegrations` behind `ghost upgrade`) applies the same ownership rule — including the fail-soft read and the quoted-argument gate — before it checks the `--source` token, so the diagnostic and the reconcile agree on the same file: a foreign command reads as missing and actionable, a wrapper that runs ghost reads as configured. The MCP registration is replaced in place — the existing entry is removed before the new one is added — so a refused `claude mcp add-json` rolls the previous entry back from the `claude mcp get` output the same run read, and the error says whether that entry came back whole, came back without the parts the get rendering could not carry, or was removed, rather than failing silently over a user left with no ghost server.
 - opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
-- Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command. It recognises its own action by the binary path init bakes — under any name — or by a `ghost` basename, so the merge stays a fixed point for whatever the binary is called (#1249).
+- Codex: `config.toml` registration plus `hooks.json` entries that require user trust. The hooks merge is additive at the ACTION level: ghost rewrites the hook action it rendered wherever it already sits and appends its rule only where it is missing, so a rule that runs ghost beside the user's own command keeps that command. It recognises its own action by the binary path init bakes — under any name — or by a `ghost` basename, so the merge stays a fixed point for whatever the binary is called (#1249). A blank `hooks.json` is written as the canonical document rather than refused, and a structurally invalid one is refused before the MCP server is registered, leaving nothing half wired.
 - Goose: an Agent Plugins package with MCP and Open Plugins hooks.
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
 
-Every user-owned config write — the Claude `settings.json`, the codex `config.toml` and `hooks.json`, the opencode plugin, the goose package and the MEMORY.md redirect — goes through one atomic path (temp file in the same directory, then rename, under a random hidden name), so an interrupted write cannot leave a half-written host config, and a host reading a config while init repairs it reads a whole document rather than a truncated one. The rename alone only orders that for a *reader*; a *power cut* is answered by the two flushes around it: the temp file is fsynced (its data and its mode together) before the rename, and the parent directory is fsynced after it, because a rename that reaches the disk before the bytes it points at leaves a config that reads as empty or truncated, and a directory entry that never reaches the disk leaves the file gone even though its contents were written. A temp-file flush that fails stops the write and is reported — nothing has been published yet, so the user's config is still the one that was there. A directory flush that fails is not reported: the rename already published the document, there is nothing left to refuse, and the alternative is failing an init that did its job on a filesystem that cannot flush a directory at all (Windows has no equivalent — `FlushFileBuffers` on a directory handle fails and NTFS orders that metadata itself — so the directory flush is a no-op there). A symlinked config is written through to its target rather than replaced by it; a link whose target does not exist yet is the one case that cannot be, and is replaced by a regular file. A rename swaps in a new inode, so the permission bits are copied across but the owner, POSIX ACLs, xattrs and hardlinks are not: a config owned by another account changes owner, its ACL entries are dropped for the directory's defaults, and a config hardlinked into a dotfiles repo instead of symlinked silently diverges from its repo copy. An existing file keeps its own permissions, so a repair never widens or narrows a mode the user chose, except on the Claude side: `settings.json` is clamped so it can never be group- or world-readable whatever mode the user's copy had. That clamp is backwards compatibility, not a credential policy — it is the ceiling every save enforced before the refactor, and a copy narrower than `0600` is left at its own narrower mode. The other files keep a wider mode on purpose, including a codex `config.toml` whose `[mcp_servers.ghost.env]` sub-table can hold a credential. The Claude `settings.json.bak` backup is captured once, by the first save that finds a file to back up, so repeated `init` runs never overwrite the pristine original with ghost's own output. No other user-owned config is backed up: a `hooks.json` repair that merged wrongly can only be repaired by hand, and a once-only `.bak` for the merged hosts is still open.
+Every user-owned config write — the Claude `settings.json`, the codex `config.toml` and `hooks.json`, the opencode plugin, the goose package and the MEMORY.md redirect — goes through one atomic path (temp file in the same directory, then rename, under a random hidden name), so an interrupted write cannot leave a half-written host config, and a host reading a config while init repairs it reads a whole document rather than a truncated one. The rename alone only orders that for a *reader*; a *power cut* is answered by the two flushes around it: the temp file is fsynced (its data and its mode together) before the rename, and the parent directory is fsynced after it, because a rename that reaches the disk before the bytes it points at leaves a config that reads as empty or truncated, and a directory entry that never reaches the disk leaves the file gone even though its contents were written. A temp-file flush that fails stops the write and is reported — nothing has been published yet, so the user's config is still the one that was there. A directory flush that fails is not reported: the rename already published the document, there is nothing left to refuse, and the alternative is failing an init that did its job on a filesystem that cannot flush a directory at all (Windows has no equivalent — `FlushFileBuffers` on a directory handle fails and NTFS orders that metadata itself — so the directory flush is a no-op there). A symlinked config is written through to its target rather than replaced by it; a link whose target does not exist yet is the one case that cannot be, and is replaced by a regular file. A rename swaps in a new inode, so the permission bits are copied across but the owner, POSIX ACLs, xattrs and hardlinks are not: a config owned by another account changes owner, its ACL entries are dropped for the directory's defaults, and a config hardlinked into a dotfiles repo instead of symlinked silently diverges from its repo copy. An existing file keeps its own permissions, so a repair never widens or narrows a mode the user chose, except on the Claude side: `settings.json` is clamped so it can never be group- or world-readable whatever mode the user's copy had. That clamp is backwards compatibility, not a credential policy — it is the ceiling every save enforced before the refactor, and a copy narrower than `0600` is left at its own narrower mode. The other files keep a wider mode on purpose, including a codex `config.toml` whose `[mcp_servers.ghost.env]` sub-table can hold a credential. The Claude `settings.json.bak` backup is captured once, by the first save that finds the user's own content in the file, so repeated `init` runs never overwrite the pristine original with ghost's own output; a file holding nothing but ghost's own output — the `settings.json` a fresh install created, or a codex `config.toml` carrying only the block ghost manages, its command recognised by the ghost basename so an upgrade that moved the binary is still ghost's own — is skipped rather than backed up, because capturing ghost's bytes there would fill the one-time slot for good and the user's file could never be kept afterwards. No other user-owned config is backed up: a `hooks.json` repair that merged wrongly can only be repaired by hand, and a once-only `.bak` for the merged hosts is still open.
 
 If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently using the wrong harness or billing path. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child home/config tree is invocation-owned, only a configured `auth.json` is carried into its data root, and its tool/MCP policy is deny-all, so the user's global OpenCode model, plugins, and MCP servers are not inherited.
 
@@ -140,7 +141,7 @@ host SessionStart
   → write the digest to the host
 ```
 
-opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead.
+opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead. The block it renders is the hook's, alert included: when a failed unattended `ghost lifecycle` run has left a current per-project failure marker, both surfaces lead with the same one-line maintenance alert ahead of the digest.
 
 ### Working moment
 
@@ -182,7 +183,9 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 
 The cooldown exists because the hook fires once per turn, so a chain per turn is a chain per turn. Two independent guards bound it: the per-project PID file (`AcquireLifecycleLock` — a run is not already in progress) and `lifecycle.min_interval` (a run did not start too recently). The second is a file's mtime rather than a row, because the hook's synchronous path must not open the database to ask the question. The `ghost lifecycle` process writes it, once it has passed every precondition that can exit non-zero — so a run that dies before doing any work does not burn the window, and does not add to the silent-death class the failure marker exists to catch. A foreground run writes it too, which is what a user retrying the alert's command wants.
 
-A run that fails records it in a per-project failure marker, `lifecycle-last-failure-<stem>.json`, which the next session start turns into one alert line; a fully successful run clears its own project's marker and nobody else's. The stem is a digest of the project (the first 16 bytes of its SHA-256, lowercase hex), not a sanitized spelling of it: the sanitized stem folded punctuation, so two projects differing only in a space and an underscore shared one file and one's success erased the other's failure. A digest is injective in practice, survives a case-insensitive filesystem, and keeps the `--project` operand out of the file name. Markers written under the old sanitized name are still read and cleared, but only when the project they record is the one asking, because that name can belong to more than one project. The file name never carries the operand, and the marker's `project` field does not either when the operand is credential shaped and resolves to no project: it records the token guard's placeholder instead, and the file is still keyed on the raw operand's digest so that operand's clean run clears it.
+A skip is the only thing the hook records about a run that did not happen, so it leaves one line in `lifecycle.log` rather than a line on the host's stderr. The project in that line is a resolved id out of the store, and it is rendered through the same guard the lifecycle refusals use, because a stored id is not token-guarded on the write side — `CheckImportedProjectID` refuses control characters and `CheckImportedProject` asks the guard of a name and a path, but neither asks it of the id, so an imported artifact's id is held verbatim and a session in that project's directory resolves to it.
+
+A run that fails records it in a per-project failure marker, `lifecycle-last-failure-<stem>.json`, which the next session start turns into one alert line — on both session-start surfaces, the hook's stdout injection and the `ghost context` render a host runs instead; a fully successful run clears its own project's marker and nobody else's. The stem is a digest of the project (the first 16 bytes of its SHA-256, lowercase hex), not a sanitized spelling of it: the sanitized stem folded punctuation, so two projects differing only in a space and an underscore shared one file and one's success erased the other's failure. A digest is injective in practice, survives a case-insensitive filesystem, and keeps the `--project` operand out of the file name. Markers written under the old sanitized name are still read and cleared, but only when the project they record is the one asking, because that name can belong to more than one project. The file name never carries the operand, and the marker's `project` field does not either when the operand is credential shaped and resolves to no project: it records the token guard's placeholder instead, and the file is still keyed on the raw operand's digest so that operand's clean run clears it.
 
 ### The supersede pass, and why it is KEEP-biased
 
@@ -243,6 +246,8 @@ One asymmetry is worth stating, because it is the only place the creation pass's
 That leaves the case neither repair can reach, and it is a real one: a pair that is wrong for a reason no rubric can see — the newer note is not a replacement of the older one at all (the same fact recorded either side of a release), or the note the edge calls "newer" is itself the stale one by content. A classifier re-asked about that pair has not made a mistake by its own lights, so `--reassess` confirms the edge and the wrong edge keeps burying its target. `ghost supersede <project> --withdraw <source-id> <target-id> [--apply]` is the operator's undo for that, and `ghost_link_withdraw` is the same core over MCP, so an agent that can see the wrong edge can name it. Nothing is judged: the caller's judgement is the decision, which is why no harness is involved and nothing is billed.
 
 Its rules are the ones a delete needs. The ids are refs: a full id, or **8 or more characters** of one, because every Ghost report abbreviates to eight and a withdrawal that insisted on the full 32 characters could not be driven from the report that names the wrong edge. One literal-prefix query answers both forms, so a full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim and the id column only *defaults* to hex, so a ref check that insisted on hex would make an imported endpoint unnameable — while the 8-character floor applies to a prefix alone, which names a class of ids rather than one, and is applied by comparing the match with the ref rather than by inspecting the ref's characters. The match is literal and case-insensitively scoped to the project (plus `_global`, which a promotion moves a memory into without touching its links) — except under `_global` itself, where a ref resolves against the whole store's live rows, because a pair whose source was promoted there can bury a memory in any project and both of its endpoints have to be nameable from the one command that can withdraw it; and **an ambiguous ref is a refusal that lists the matches**, never a choice: guessing which memory to unlink is not a decision the tool may make. A pair with no live edge is an error, and the refusal names the target's live edges of BOTH relations (e.g. "no live supersedes or causes link A→B"), because "no live supersedes link A→B" is a dead end and "B is superseded by C and D" is an answer — and a pair whose only edge is a 'causes' one needs that naming to tell an operator what to withdraw. Several pairs may be given in one command, and **the whole request is settled before anything is written** — a request of five pairs with one bad pair withdraws none of them, because withdrawing four and reporting an error about the fifth is a graph state nobody asked for. The edge is found through the project that owns **either** endpoint of it, and `_global` is owned by every project. The target's half is what makes the undo survive a promotion: `ghost_memory_promote` moves a memory into `_global` and keeps its links, so the project that owns the memory being buried must still be able to name the edge burying it — otherwise a promotion quietly deletes the repair for a wrong edge, and the target stays demoted and `resolved_at`-stamped by a claim no command can name. An edge with both endpoints in another project is that project's edge, and a project-scoped command cannot even name its source, so one project still cannot withdraw or learn about another's. This is also what keeps the repair surfaces agreeing with each other and with the ranking: `SupersedePenalties` has no project predicate at all, so it demotes a target for ANY live edge, and the two project-scoped reads now cover every edge with an endpoint in the caller's project or in `_global` — the cases where the ranking and the repair could otherwise disagree about the same edge. The passes that judge and write whole pairs require **both** endpoints rather than either, because judging an edge acts on both of them; a targeted withdrawal, whose subject is the one memory the caller named, is the one read that takes either. The write is the ordinary `InvalidateLink`, so it leaves the `unsupersede` history row, and it is soft: a later pass that still judges the pair a supersession re-creates the edge. Every report ends by naming the step that un-hides the target, and it is the SCOPED one — the `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply` that `internal/followup.ResolveCommand` builds, with the `--only-file` beside it — because withdrawing the edge is half the repair and the resolution it caused keeps the target out of injection until that runs. The UNSCOPED `ghost resolve <project> --reassess --apply` is never printed: it is the project-wide re-judge, so a report naming it would name the one command that does the most harm. The report also prints the target's own first line: an operator withdrawing an edge they believe is wrong has to be able to confirm from the output that it was the right edge.
+
+A pass that fails reports the failure on stderr, and on the detached lifecycle path that stream is `lifecycle.log` — a file in the data directory that a later reading surfaces. The pair prefixes those failures carry, and the pass's own log lines for the same pairs, used to interpolate both stored ids with a bare `%s`, and a stored id is not token-guarded: `ghost import` writes an artifact's id verbatim and the id shape check never asks the guard, so a `ghp_`-shaped 40-character id is a legal stored id and rode out of the pass in the error or the line it caused. Every supersede, reassess and relation failure and log line that names a stored id now renders each one through `memory.RefusalArg("memory_id", …)`, so an ordinary id reads quoted — the renderer's one visible change on prefixes that printed it bare — while a token-shaped or over-256-byte one is withheld behind a placeholder naming the field and the format the guard found, and the line still says which pair or write failed.
 
 ### Scoping a repair, and why the unscoped repair is the wrong tool
 
@@ -339,7 +344,7 @@ is still the corpus.
 
 **The signal is in the database.** Schema v24 adds `vector_epoch`, a one-row
 counter (created by its first bump, read as 0 until then) that triggers bump in the writing transaction, on exactly the writes that
-change what the vector query (`vectorScanColumns`) returns:
+change what the vector query (`vectorScanColumns`) returns (schema v25 adds the validity arm below):
 
 | Trigger | Fires on |
 |---|---|
@@ -349,6 +354,7 @@ change what the vector query (`vectorScanColumns`) returns:
 | `vector_epoch_mem_au` | UPDATE OF `resolved_at`, `scope`, `project_id` on `memories` that changes one of them |
 | `vector_epoch_mem_ad` | DELETE on `memories` (which covers a delete that did not cascade, e.g. under `foreign_keys=OFF`) |
 | `vector_epoch_mem_ai` | INSERT on `memories` whose id already has an embedding row (an orphan from a delete under `foreign_keys=OFF`) |
+| `vector_epoch_mem_validity_au` | UPDATE OF `valid_from`, `valid_until` on `memories` that changes one of them (schema v25) |
 
 Everything else a memory carries (access count, `last_accessed`, tags,
 importance, content, `pinned`), and every other table (retrieval records, links,
@@ -367,7 +373,8 @@ trigger's `WHEN` names `memories.scope`, which a pre-v12 database lacks, so a
 trigger created that early breaks the legacy steps that alter `memories`. It is
 created right after `initSQL` for a fresh database, by `migrateV24` for an
 upgraded one, and by `ensurePostMigrationIndexes` (all `IF NOT EXISTS`) for a
-current one. A later migration that rebuilds `memories` or `memory_embeddings`
+current one; the validity arm rides that same DDL on a fresh or current store and
+is delivered to a pre-v25 one by `migrateV25`. A later migration that rebuilds `memories` or `memory_embeddings`
 drops these triggers with the table and must recreate them.
 
 **A hit is exact.** A search reads the counter under the store's read lock, on
@@ -432,8 +439,8 @@ rank, not a filter. With RRF k=60 the factor effectively ranks a demoted row
 below every live candidate in the pool rather than below one comparable
 neighbour: every fused score lives in a band of a few thousandths — the best
 any row can earn is a rank-1 hit in both legs, 0.3/61 + 0.7/61 ≈ 0.0164 — so
-halving one lands at ≈ 0.0082, under the ≈ 0.0088 that the deepest vector-leg
-row in a default `limit`-10 window still scores and under the 0.0125 of the
+halving one lands at ≈ 0.0082, under the ≈ 0.01 that the deepest vector-leg
+row in a default `limit`-5 window still scores and under the 0.0143 of the
 deepest row in a keyword-only search. The only live rows a demoted leader can
 still outrank are ones the vector leg never fetched (no embedding yet), whose
 keyword-only score is capped at 0.3/61 ≈ 0.0049. That is what keeps resolved
@@ -606,8 +613,8 @@ failure the marker prevents.
 
 Window selection reserves real estate for the keyword leg. A plain cut on the
 fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
-row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
-inside the fetched window — scores 0.7/80 ≈ 0.0088. A full vector leg
+row scores 0.3/61 ≈ 0.0049, while the vector leg's 10th row — still well
+inside the fetched window — scores 0.7/70 ≈ 0.01. A full vector leg
 therefore outranked the best keyword match every time, and an exact identifier
 match could never reach the results, which is the case FTS exists for.
 
@@ -1441,7 +1448,9 @@ changes what the answer *means*.
 path runs. The Obsidian mirror and the session-count bump exist because that
 command backs a session start; a past reading is a diagnostic a person asked for,
 and counting it would move the present's session number to answer a question about
-the past.
+the past. The current path's maintenance alert is omitted for the same reason: a
+current failure marker is a statement about the present, and a block that names
+an instant in the past must not carry the present's paused consolidation.
 
 Restoring or rolling the store back to a past state is explicitly **not** this —
 that is export/import ([#586](https://github.com/wcatz/ghost/issues/586)).
@@ -1815,13 +1824,16 @@ Axis interaction rules:
 > renderer that has to say a line was cut. The header's totals are the
 > assembler's too rather than a second census of the store: the shown, ranked-out
 > and withheld counts come from the same retrieval's trace, and "of M total" is
-> the trace plus ONE count (`Store.PassiveEligibleCount`) over the window's own
-> predicates (`passiveWhere`, shared with the fetch), so M is every eligible row
-> the store holds and not the over-fetched window's size. A row a stage withheld
-> is inside the window and so is not counted twice; eligible rows the over-fetch
-> never read are ranked out, because the window is ordered by the ranking and cut
-> at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
-> that split). A row the retriever fetched and then removed as a near-duplicate
+> the trace plus ONE count (`Store.PassiveEligibleCount`) over the population the
+> window and the count share (`passivePopulationSQL`), so M is the eligible rows
+> the store holds and not the over-fetched window's size. That count is CAPPED at
+> `passiveEligibleCountCap`: past it the count is UNKNOWN and the header describes
+> the window alone, because an exact census of a bucket that large costs a table
+> pass at every session start for a number no reader acts on. A row a stage
+> withheld is inside the window and so is not counted twice; eligible rows the
+> threshold scan never read are ranked out, because the window is ordered by the
+> ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch
+> limit for exactly that split). A row the retriever fetched and then removed as a near-duplicate
 > loser never enters `CandidateSet.Rows`, but the retriever reports it in
 > `CandidateSet.DroppedLosers` with the ids it lost to, and stage 6 files it as a
 > `dedup` / `near_duplicate` decision (`Decision.Against` names the winner). That
@@ -1835,7 +1847,7 @@ Axis interaction rules:
 > since [#926](https://github.com/wcatz/ghost/issues/926): `ghost_memory_search`'s retrieval collapses its
 > near-duplicate pairs the way the passive policy drops them, so that explain row is
 > reached by a real search and is pinned over it rather than by a hand-built
-> fixture. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> fixture. The passive key scan's own SQL validity predicate removes closed-window rows before the window fills (a row whose window has closed must not spend one of its slots), so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state. It therefore renders and applies
@@ -1862,11 +1874,13 @@ Axis interaction rules:
 > stage 7, and the two never both act on one request because each is gated on the
 > opposite mode: a relative-to-top fused-Base cut applied after dedup and before
 > the budget, on a QUERY only, that stops the answer where relevance falls off —
-> `ghost_memory_search` used to always fill its window, so a block that answered a
-> question whose useful row ranked first still carried nine rows of noise (context
-> precision 0.141). ONE rule, ONE parameter (`context.relevance_cutoff`, the share
-> of the top row's fused Base below which a row is cut), chosen from the
-> `ghost bench --cutoff-sweep` gradient. It can only SHORTEN an answer: `limit`
+> `ghost_memory_search` used to fill a 10-row window on almost every query, so a
+> block that answered a question whose useful row ranked first still carried nine
+> rows of noise (context precision about 0.14). ONE rule, ONE parameter
+> (`context.relevance_cutoff`, the share of the top row's fused Base below which a
+> row is cut), chosen from the `ghost bench --cutoff-sweep` gradient at that
+> budget; at the 5-item budget the item cap already removes the tail it would cut
+> and the sweep is flat. It can only SHORTEN an answer: `limit`
 > stays the maximum, the top row is always kept (a result rate below 1.000 would
 > be a regression), and a pinned row and a keyword-reserved row are never cut. The comparison is on Base, the score before the age decay, so age and category never read as irrelevance. Each cut row is recorded once —
 > a decision at the stage with reason `relevance_cutoff`, which the retrieval
@@ -1879,7 +1893,7 @@ Axis interaction rules:
 > The no-answer step ([#955](https://github.com/wcatz/ghost/issues/955)) follows
 > stage 8 on a QUERY only and is numbered with it rather than as a new stage 9: a
 > question nothing in the store answers still filled its window (the bench's 24
-> no-answer queries got ten rows each), so when the best vector cosine among the
+> no-answer queries got five rows each), so when the best vector cosine among the
 > block's rows is strictly below one absolute bar (`context.no_answer_cosine`) the
 > block is withheld and the answer says "No memory answers this: nothing cleared
 > the bar", with the score shown. ONE rule, ONE parameter. A pinned row is never
@@ -2024,7 +2038,7 @@ What exists now:
   project and none of them is in the block above" — is about what the project holds,
   names no cause, and `CountMemories` answers it. The ABSTENTION names a cause, so it
   is a claim about which rows that cause explains, and the population it can be about
-  is the WINDOW's: the project's own rows `passiveFetchSQL` could have admitted.
+  is the WINDOW's: the project's own rows the passive key scan could have admitted.
   `projectWindowRowCount` asks exactly that — `CountActiveMemories`, a
   `windowCountCapableStore` assertion, whose predicate is the window's own — and
   where it is zero, or the store cannot answer, the cause belongs to somebody else and
@@ -2167,7 +2181,7 @@ What exists now:
   an empty over-fetched window is `no_memories` (a statement about the window, not
   a census of the store) unless the validity predicate emptied it, in which case it
   is `all_invalid` and carries the exclusion wording: passive validity runs in
-  `passiveFetchSQL` before the `LIMIT` (so an expired row cannot spend the window),
+  `passiveKeyScanSQL` during the scan, before a row can enter the window (so an expired row cannot spend a window slot),
   the store counts what it removed into `CandidateSet.ValidityExcluded`, and
   assemble stage 2 stays the authority and must agree. The passive demotions
   (supersede, then near-duplicate, which drops its losers on `_global`) run after
@@ -2227,7 +2241,13 @@ and whose vector leg then failed.)
 - **The empty result says which of three things happened.** An empty block whose
   rows were found and then withheld — out of date, out of scope, out of
   category, or cut by a budget — says "no sufficiently trustworthy memory found"
-  and names the cause. A search that never finished says so. Only
+  and names the cause. A search that never finished says so. A validity
+  exclusion the legs' own SQL window predicate counted outranks both leg
+  reasons: rows were found and withheld is a fact about the STORE, while a leg
+  that never ran is a fact about the MACHINE, so `all_invalid` is named even on
+  a hybrid search whose vector leg never started (the shipped shape on a machine
+  with no embedder), and the leg's state stays on the line's `legs=` field rather
+  than displacing the cause. Only
   `no_candidates` may say nothing matched, and only over coverage every
   applicable leg vouched for: available, error-free, untruncated, and
   `LegStatus.CoverageComplete`. The vector leg reports that last one as **false**
@@ -2471,11 +2491,15 @@ The schema check is **asymmetric on purpose**. A file from a newer Ghost is refu
 
 The reads and writes are separate store methods rather than reuse, and each for a stated reason. `PortableProjects` exists because `ListProjects` has no `repo_remote` column — the field that makes two checkouts of one repository one project, and that another machine needs to resolve a project from its own directory. `PortableMemories` exists because the ordinary list readers drop the validity triple, and restoring a memory with a fresh `created_at` would age it out of injection immediately. The `Import*` methods exist because no existing writer can preserve an imported id, an imported `created_at` or an imported pin: `Create` generates its own id and `Upsert` is deliberately a dedup probe, which is the wrong operation for a restore. Each takes an `apply` flag, so a dry run runs the same validation as the run it previews rather than a second code path that can disagree with it.
 
-Four things are deliberately outside the artifact, and the first three are there for one shared reason — they are derived rather than stored knowledge. `memory_embeddings` and `memory_links` are rebuilt by the embedding and linking workers, and `memories.resolve_kept_hash` is recomputed by the resolve pass; shipping them would mean shipping a model's output as if it were the memory, importing edges ahead of their endpoints, and marking a memory the classifier has never seen as reviewed.
+Six things are deliberately outside the artifact, and the first three are there for one shared reason — they are derived rather than stored knowledge. `memory_embeddings` and `memory_links` are rebuilt by the embedding and linking workers, and `memories.resolve_kept_hash` is recomputed by the resolve pass; shipping them would mean shipping a model's output as if it were the memory, importing edges ahead of their endpoints, and marking a memory the classifier has never seen as reviewed.
 
 The fourth is Ghost's own `_global` `builtin` seeds, and they are excluded because no import could ever reconcile them. `SeedGlobalMemories` writes each seed under the schema's default `hex(randomblob(16))` id, which is per-install, so an artifact's copy never equals the destination's own — and every importer dedups by id alone. Importing one machine's artifact into a store Ghost had already bootstrapped therefore inserted a second row with byte-identical content: a second pinned `builtin` copy of a shipped rule, or, after the default provenance downgrade, an `onboarding` copy that has silently lost the "this is Ghost's own" label. Nothing repairs it, because re-seeding skips by content and no path deletes memories.
 
-The exclusion is at the export read rather than in the import: it keeps the import rule simple, and the destination already re-creates exactly those rows by content on every open, so a restored store ends up with one copy — written by Ghost, not two. It is on the seed (`project_id` **and** `source`) rather than on the project, because a user's own memory filed under `_global` is the only copy of itself and has no other way in.
+The exclusion is at the export read rather than in the import: it keeps the import rule simple, and the destination already re-creates exactly those rows by content on every open, so a restored store ends up with one copy — written by Ghost, not two. It is on the seed's known CONTENT — a row in the reserved global project whose text is one of the shipped sentences, `shippedSeedContents` — and never on its `source`: `builtin` is a legal `memories.source` for a user's own row (`ghost import --trust-provenance` stores an artifact's source verbatim), so an exclusion written as project and source dropped that row from every artifact while the export still reported success. A user's own memory filed under `_global` is the only copy of itself and has no other way in, so only a shipped sentence may be left out.
+
+The fifth is `memory_history`, and it is excluded for a reason of its own rather than the derived one: it is the append-only change log of how a memory reached its current state, and nothing rebuilds it. An imported memory starts a fresh change log holding only the `import` row `ImportMemory` writes in the same transaction as the insert, so `ghost history` on a restored memory shows just that row; carrying the versions in the artifact would be a format change of its own, and `ghost backup` is the full-fidelity copy that keeps them.
+
+The sixth is `memory_flags`, and it is excluded for the same not-derived reason: it is one agent's append-only, attributed claim that a memory is `wrong` or `stale`, with the reason that agent gave, and nothing recomputes an objection somebody made. A restored memory carries no flags, so the resolve and reflect passes lose the count they were handed; carrying them in the artifact would be another format change, and `ghost backup` is the copy that keeps them.
 
 Provenance is a per-run policy, not a per-record one, and it lives in `memory.ImportOptions` because the store is what enforces it. A dry run opens the database read-only, so the preview cannot migrate a store whose schema is behind or seed the builtin rows while reporting "nothing written" — the import's own writes all return before their INSERT when `apply` is false, so the read-only connection loses no capability the preview needs.
 
@@ -2533,7 +2557,7 @@ The contract guards are `internal/memory/perms_test.go` and `internal/mcpinit/ho
 
 That placement is the second attempt, and the first one is why it is worth stating. Guarding the store-opening entry points (`cmd/ghost`'s `bootstrap()` and its per-command resolvers, plus a set of wrappers in `internal/mcpinit`) left four paths that resolve the data directory WITHOUT opening a store, and three of them wrote: `scratch.Root` (so `ghost lifecycle`'s `scratch.Reap`, its first statement, created `<dataDir>/scratch`), `WriteLifecycleFailure` and `ClearLifecycleFailure` (whose `resolved == ""` fallback then wrote or deleted a marker named after a project the code had been told it cannot resolve), and `readLifecycleFailure` (which runs on every session start, ahead of anything else, and whose age-based self-clean calls `ClearLifecycleFailure`). A guard placed at the callers is a guard with a hole in it, and the hole is found by a path that resolves a directory for a purpose other than opening a store.
 
-So the callers' obligation is the ordinary one: handle the error. The fail-open paths — every hook loader, the marker bookkeeping, `TightenPermissions`' `isDataDir`, the scratch budget's run record — already returned, skipped or reported on a data-dir error of any kind, which is why the refusal needed no new handling in any of them. `ghost mcp status` reports it as a failed check rather than staying silent, because its job is to say what is wrong, and `cmd/ghost`'s commands report it and exit `1`. The one exception is that report's own pre-existing early return: under a plugin-managed install `mcpinit.Status` reports the plugin and skips the whole store section, so no store check — the refusal included — runs on that path.
+So the callers' obligation is the ordinary one: handle the error. The fail-open paths — every hook loader, the marker bookkeeping, `TightenPermissions`' `isDataDir`, the scratch budget's run record — already returned, skipped or reported on a data-dir error of any kind, which is why the refusal needed no new handling in any of them. `ghost mcp status` reports it as a failed check rather than staying silent, because its job is to say what is wrong, and `cmd/ghost`'s commands report it and exit `1`. The Claude Code installer (`mcpinit.Run`) resolves the directory once, after its settings pre-flight and before its first step, so a refusal stops that installer rather than being downgraded to a warning by the two steps that later resolve the same directory for real — its scratch root and its memory import — and it exits `1` without registering the client or writing a configuration file; a per-project import failure stays non-fatal, and the codex, opencode and goose installers never resolve the data directory at all, so no refusal can reach them. The one exception is that report's own pre-existing early return: under a plugin-managed install `mcpinit.Status` reports the plugin and skips the whole store section, so no store check — the refusal included — runs on that path.
 
 "Release" is `selfupdate.IsRelease`, so it is the release parser's answer and not a second spelling of "looks like a version": `dev`, a `git describe` stamp and a prerelease all parse and are not releases, and a tag that is not a semantic version is not one either. The version reaches `config` as a value `cmd/ghost`'s dispatch hands over once (`config.SetBuildVersion`, beside `memory.SetDetectRemote`, from the same `version` var the release ldflags stamp and `ghost version` prints), and `config`'s own default is `dev`: a build that never wired the version is a development build and is refused, which is the direction a default has to fail in.
 

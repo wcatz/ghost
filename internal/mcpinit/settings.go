@@ -3,6 +3,7 @@
 package mcpinit
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,30 @@ type hookAction struct {
 type settingsFile struct {
 	path string
 	raw  map[string]json.RawMessage
+	// ghostManaged records whether the document AS LOADED held nothing but
+	// what ghost itself writes. It is decided at load, before any step merges
+	// into the in-memory document, so it describes the file still on disk when
+	// save runs; save reads it to keep the one-time .bak for the user's
+	// pre-ghost file instead of capturing ghost's own output.
+	ghostManaged bool
+	// bom is the leading byte-order mark the file was loaded with, or "".
+	// save writes it back first so the user's file keeps its encoding.
+	bom string
+}
+
+// jsonBOM is the UTF-8 byte-order mark as a string.
+const jsonBOM = "\ufeff"
+
+// leadingBOMError refuses a JSON document that starts with a UTF-8 byte-order
+// mark, and returns nil for any other document. It serves the readers whose
+// host rejects the mark (codex's serde_json, opencode's JSONC reader), where
+// encoding/json's own error is an anonymous invalid character: the refusal
+// names the mark instead, and the file is never rewritten. what names the file.
+func leadingBOMError(data []byte, what string) error {
+	if !bytes.HasPrefix(data, []byte(jsonBOM)) {
+		return nil
+	}
+	return fmt.Errorf("%s starts with a UTF-8 byte-order mark, which its host does not read as JSON — save the file as UTF-8 without a BOM", what)
 }
 
 // settingsPath returns the path to ~/.claude/settings.json.
@@ -69,6 +94,9 @@ func settingsPath() (string, error) {
 
 // loadSettings reads and parses the settings file.
 // If the file does not exist, returns an empty settings ready to populate.
+// One leading UTF-8 byte-order mark (what a Windows editor or PowerShell 5.1
+// `-Encoding UTF8` writes) is stripped before decoding, because Claude Code
+// itself reads such a file; save puts it back, so the file keeps its mark.
 func loadSettings(path string) (*settingsFile, error) {
 	s := &settingsFile{
 		path: path,
@@ -83,6 +111,10 @@ func loadSettings(path string) (*settingsFile, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	if bytes.HasPrefix(data, []byte(jsonBOM)) {
+		s.bom = jsonBOM
+		data = data[len(jsonBOM):]
+	}
 	if err := json.Unmarshal(data, &s.raw); err != nil {
 		return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
 	}
@@ -94,6 +126,7 @@ func loadSettings(path string) (*settingsFile, error) {
 	if s.raw == nil {
 		return nil, fmt.Errorf("%s is null", filepath.Base(path))
 	}
+	s.ghostManaged = s.holdsOnlyGhostManaged()
 	return s, nil
 }
 
@@ -104,8 +137,14 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
 
-	// Backup the pre-merge file, once.
-	if data, err := os.ReadFile(s.path); err == nil {
+	// Backup the pre-merge file, once — unless it holds nothing but ghost's own
+	// output. The .bak is the user's pre-ghost file, and it is never rolled
+	// forward, so capturing ghost's bytes there would fill the slot forever
+	// and the user's own file could never be kept: on a fresh install the first
+	// run creates settings.json, and it is the SECOND run whose save sees a
+	// file to back up — ghost's own output. `ghostManaged` is that case, and
+	// only a file with user content of its own is backed up.
+	if data, err := os.ReadFile(s.path); err == nil && !s.ghostManaged {
 		if err := writeBackupOnce(s.path+".bak", data); err != nil {
 			return err
 		}
@@ -116,6 +155,7 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 	out = append(out, '\n')
+	out = append([]byte(s.bom), out...)
 
 	return writeFileAtomicPrivate(s.path, out, 0600)
 }
@@ -584,6 +624,150 @@ func (s *settingsFile) validate() error {
 	return nil
 }
 
+// holdsOnlyGhostManaged reports whether the document as loaded holds nothing
+// but what ghost itself writes: ghost's tool permissions, ghost's lifecycle
+// hooks, and the autoMemoryEnabled flag, with no other key, permission or
+// hook. An empty document counts — it carries nothing of the user's either.
+// save reads it to decide whether settings.json is worth backing up, because
+// the one-time .bak exists for the user's pre-ghost file: a file that holds
+// only ghost's own output has no pre-ghost content to keep, and since the .bak
+// is never rolled forward, capturing ghost's bytes there would fill the slot
+// for good and the user's own file could never be backed up afterwards.
+//
+// A hook counts only when it is byte-for-byte what init writes: one entry per
+// event holding exactly the keys matcher and hooks, the matcher init uses for
+// that event, one action holding exactly the keys type and command, and a
+// command equal to the one init builds for the binary it names. This is
+// deliberately stricter than the ownership rule the reconcile uses
+// (isGhostHookCommand), which also accepts hand-edited wrappers, a timeout or
+// a `&& other-tool` tail: those are the user's edits to ghost's hook and the
+// file holding them is not ghost's own output. A hook naming an older ghost
+// path still counts when it equals what init would have written for that path,
+// so an upgrade that moved the binary does not capture the file. Whatever is
+// not affirmatively ghost's own makes the answer false, so an unusual shape
+// costs a harmless extra backup rather than a skipped one.
+func (s *settingsFile) holdsOnlyGhostManaged() bool {
+	if s.raw == nil {
+		return false
+	}
+	if len(s.raw) == 0 {
+		return true
+	}
+	for k := range s.raw {
+		switch k {
+		case "permissions", "hooks", "autoMemoryEnabled":
+		default:
+			return false
+		}
+	}
+
+	// permissions must be exactly ghost's list under an allow-only object:
+	// another key (deny, defaultMode) or another permission is the user's.
+	raw, ok := s.raw["permissions"]
+	if !ok {
+		return false
+	}
+	var perms map[string]json.RawMessage
+	if json.Unmarshal(raw, &perms) != nil || perms == nil {
+		return false
+	}
+	for k := range perms {
+		if k != "allow" {
+			return false
+		}
+	}
+	allow, err := s.getPermissions()
+	if err != nil || !sameStringSet(allow, ghostPermissions) {
+		return false
+	}
+
+	// hooks must hold only the events ghost writes, each exactly as init
+	// writes it (see ghostWrittenHookEntry).
+	hooks, present, err := s.hooksMap()
+	if err != nil || !present || len(hooks) == 0 {
+		return false
+	}
+	for event := range hooks {
+		var token, matcher string
+		switch event {
+		case "SessionStart":
+			token = "session-start"
+		case "Stop":
+			token = "stop"
+		case "UserPromptSubmit":
+			token = "message-submit"
+		case "PostToolUse":
+			token, matcher = "edit", workMomentMatcher
+		default:
+			return false
+		}
+		list, _, err := s.hookEventList(event)
+		if err != nil || len(list) != 1 || !ghostWrittenHookEntry(list[0], matcher, token) {
+			return false
+		}
+	}
+
+	v, present := s.getAutoMemoryEnabled()
+	return present && !v
+}
+
+// ghostWrittenHookEntry reports whether raw is exactly the entry init writes
+// for the event whose hook token is token: the keys matcher and hooks and no
+// others, the given matcher, and a single action of exactly type "command" and
+// a command equal to shellQuote(binary) + " hook <token> --source claude-code"
+// for a binary named ghost. Any other key (timeout, statusMessage), a second
+// action, a different matcher or a command that differs by one byte is not
+// ghost's own output.
+func ghostWrittenHookEntry(raw json.RawMessage, matcher, token string) bool {
+	var entry map[string]json.RawMessage
+	if json.Unmarshal(raw, &entry) != nil || len(entry) != 2 {
+		return false
+	}
+	var gotMatcher string
+	if m, ok := entry["matcher"]; !ok || json.Unmarshal(m, &gotMatcher) != nil || gotMatcher != matcher {
+		return false
+	}
+	var actions []map[string]json.RawMessage
+	if h, ok := entry["hooks"]; !ok || json.Unmarshal(h, &actions) != nil || len(actions) != 1 {
+		return false
+	}
+	action := actions[0]
+	if len(action) != 2 {
+		return false
+	}
+	var typ, cmd string
+	if t, ok := action["type"]; !ok || json.Unmarshal(t, &typ) != nil || typ != "command" {
+		return false
+	}
+	if c, ok := action["command"]; !ok || json.Unmarshal(c, &cmd) != nil {
+		return false
+	}
+	bin, _, ok := splitHookCommand(cmd)
+	if !ok || !isGhostBinaryName(bin) {
+		return false
+	}
+	return cmd == shellQuote(bin)+" hook "+token+" --source claude-code"
+}
+
+// sameStringSet reports whether a and b hold the same strings, ignoring order
+// and repeats.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // findHookCommand returns the first hook command for event containing
 // cmdSubstr, and whether one was found. err is non-nil when the existing
 // "hooks" value (or the specific event's value within it) is present but
@@ -591,6 +775,13 @@ func (s *settingsFile) validate() error {
 // which unmarshals into a nil map/slice with no error — so callers must treat
 // that as "stop", not "absent": proceeding to addHook on a nil "hooks" map
 // panics, and on a nil per-event value silently discards it.
+//
+// The match is positional and by substring only, so the command it returns is
+// whichever one sorts first, which is another tool's as often as it is
+// ghost's. It decides WHICH command an event holds first, never WHOSE it is:
+// ownership is the executable test isGhostHookCommand applies, and reading it
+// here is what made a foreign command carrying ghost's argument tail count as
+// ghost's own hook (#1326).
 func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok bool, err error) {
 	entries, present, err := s.hookEntries(event)
 	if err != nil || !present {

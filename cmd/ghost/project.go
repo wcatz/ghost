@@ -262,9 +262,11 @@ func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer
 		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if oldID == newID {
-		return fmt.Errorf("refusing to merge a project into itself (%q)", oldID)
+		return fmt.Errorf("refusing to merge a project into itself (%s)", memory.RefusalArg(memory.ProjectIdentifierLabel, oldID))
 	}
-	if _, err := fmt.Fprintf(out, "Merging %q (%s) into %q (%s)\n", oldName, oldID, newName, newID); err != nil {
+	if _, err := fmt.Fprintf(out, "Merging %q (%s) into %q (%s)\n",
+		oldName, memory.RefusalArg(memory.ProjectIdentifierLabel, oldID),
+		newName, memory.RefusalArg(memory.ProjectIdentifierLabel, newID)); err != nil {
 		return err
 	}
 	if err := store.MergeProject(ctx, oldID, newID); err != nil {
