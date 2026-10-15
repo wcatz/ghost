@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -58,7 +59,7 @@ func TestInstallNewBinaryMovesARunningTargetAside(t *testing.T) {
 	writeFile(t, target, "old-binary")
 	writeFile(t, staged, "new-binary")
 
-	if err := installNewBinary(staged, target, true); err != nil {
+	if _, err := installNewBinary(staged, target, true); err != nil {
 		t.Fatalf("installNewBinary with the aside path: %v", err)
 	}
 
@@ -84,7 +85,7 @@ func TestInstallNewBinaryReusesTheAsideName(t *testing.T) {
 	writeFile(t, target+asideSuffix, "leftover-from-a-previous-upgrade")
 	writeFile(t, staged, "new-binary")
 
-	if err := installNewBinary(staged, target, true); err != nil {
+	if _, err := installNewBinary(staged, target, true); err != nil {
 		t.Fatalf("installNewBinary over a stale aside: %v", err)
 	}
 
@@ -115,7 +116,7 @@ func TestInstallNewBinaryRestoresTheTargetWhenTheMoveFails(t *testing.T) {
 	aside := target + asideSuffix
 	writeFile(t, target, "old-binary")
 
-	err := installNewBinary(filepath.Join(dir, "never-staged"), target, true)
+	_, err := installNewBinary(filepath.Join(dir, "never-staged"), target, true)
 	if err == nil {
 		t.Fatal("expected an error when the staged file cannot be moved into place")
 	}
@@ -138,7 +139,7 @@ func TestInstallNewBinaryRenamesDirectlyWhereThePlatformAllowsIt(t *testing.T) {
 	writeFile(t, target, "old-binary")
 	writeFile(t, staged, "new-binary")
 
-	if err := installNewBinary(staged, target, false); err != nil {
+	if _, err := installNewBinary(staged, target, false); err != nil {
 		t.Fatalf("installNewBinary without the aside path: %v", err)
 	}
 
@@ -174,7 +175,7 @@ func TestReplaceAppliesThePlatformPolicy(t *testing.T) {
 	target := filepath.Join(dir, "ghost")
 	writeFile(t, target, "old-binary")
 
-	if err := Replace(target, []byte("new-binary")); err != nil {
+	if _, err := Replace(target, []byte("new-binary")); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	if got, _ := readIfPresent(t, target); string(got) != "new-binary" {
@@ -211,7 +212,7 @@ func TestReplaceLeavesTheOldBinaryWhenAStagedWriteIsInterrupted(t *testing.T) {
 		return errors.New("no space left on device")
 	}
 
-	err := Replace(target, []byte("new-binary"))
+	_, err := Replace(target, []byte("new-binary"))
 	if err == nil {
 		t.Fatal("expected Replace to report an interrupted staged write")
 	}
@@ -288,7 +289,7 @@ func TestReplaceIsNeverObservedHalfWritten(t *testing.T) {
 		}
 	}()
 
-	if err := Replace(target, newBinary); err != nil {
+	if _, err := Replace(target, newBinary); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 	close(stop)
@@ -322,5 +323,126 @@ func assertOnlyEntry(t *testing.T, dir, target string) {
 	}
 	if len(names) != 1 || names[0] != filepath.Base(target) {
 		t.Errorf("%s holds %v, want only %s: a failed upgrade must leave no debris", dir, names, filepath.Base(target))
+	}
+}
+
+func TestInstallNewBinaryUsesUniqueAsideWhenFixedAsideCannotBeRemoved(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ghost")
+	staged := filepath.Join(dir, ".ghost-update-staged")
+	writeFile(t, target, "old-binary")
+	writeFile(t, target+asideSuffix, "leftover-from-a-previous-upgrade")
+	writeFile(t, staged, "new-binary")
+
+	locked := errors.New("locked")
+	removeFile = func(path string) error {
+		if path == target+asideSuffix {
+			return locked
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { removeFile = os.Remove })
+
+	note, err := installNewBinary(staged, target, true)
+	if err != nil {
+		t.Fatalf("installNewBinary: %v", err)
+	}
+	if got, _ := readIfPresent(t, target); string(got) != "new-binary" {
+		t.Errorf("target holds %q, want the new binary", got)
+	}
+	if note == "" {
+		t.Error("expected a note reporting the locked aside")
+	}
+	if !strings.Contains(note, "ghost mcp") {
+		t.Errorf("note should mention a running ghost mcp client: %q", note)
+	}
+	assertAsideHoldsTheReplacedBinary(t, target+asideSuffix, "leftover-from-a-previous-upgrade")
+}
+
+func TestSweepOldAsidesKeepsNonMatchingEntries(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ghost")
+	writeFile(t, target, "old-binary")
+	writeFile(t, filepath.Join(dir, "ghost.old"), "fixed")
+	writeFile(t, filepath.Join(dir, "ghost.old-123"), "unique")
+	writeFile(t, filepath.Join(dir, "ghost.old-notes"), "notes")
+	if err := os.MkdirAll(filepath.Join(dir, "ghost.old-456"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepOldAsides(target)
+
+	if _, err := os.Stat(filepath.Join(dir, "ghost.old-123")); !os.IsNotExist(err) {
+		t.Error("ghost.old-123 should have been swept")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ghost.old-notes")); err != nil {
+		t.Errorf("ghost.old-notes must survive the sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ghost.old-456")); err != nil {
+		t.Errorf("ghost.old-456 directory must survive the sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ghost.old")); err != nil {
+		t.Errorf("the fixed ghost.old must survive the sweep: %v", err)
+	}
+}
+
+func TestInstallNewBinaryRestoresTargetWhenUniqueAsideFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ghost")
+	staged := filepath.Join(dir, "never-staged")
+	writeFile(t, target, "old-binary")
+	writeFile(t, target+asideSuffix, "leftover-from-a-previous-upgrade")
+
+	locked := errors.New("locked")
+	removeFile = func(path string) error {
+		if path == target+asideSuffix {
+			return locked
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { removeFile = os.Remove })
+
+	_, err := installNewBinary(staged, target, true)
+	if err == nil {
+		t.Fatal("expected an error when the staged file cannot be moved into place")
+	}
+
+	if got, present := readIfPresent(t, target); !present || string(got) != "old-binary" {
+		t.Errorf("target holds %q (present=%v), want the original binary restored", got, present)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), filepath.Base(target)+asideSuffix+"-") {
+			t.Errorf("unique aside survived a failed install: %s", e.Name())
+		}
+	}
+}
+
+func TestInstallNewBinaryFailedRestoreNamesAsidePath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ghost")
+	staged := filepath.Join(dir, "never-staged")
+	writeFile(t, target, "old-binary")
+
+	renameFile = func(src, dst string) error {
+		if src == target+asideSuffix && dst == target {
+			return errors.New("restore denied")
+		}
+		return os.Rename(src, dst)
+	}
+	t.Cleanup(func() { renameFile = os.Rename })
+
+	_, err := installNewBinary(staged, target, true)
+	if err == nil {
+		t.Fatal("expected an error when restoring the aside fails")
+	}
+	if !strings.Contains(err.Error(), target+asideSuffix) {
+		t.Errorf("error should name the aside path %q, got: %v", target+asideSuffix, err)
+	}
+	if !strings.Contains(err.Error(), "could not be moved back") {
+		t.Errorf("error should say the previous binary could not be moved back, got: %v", err)
 	}
 }
