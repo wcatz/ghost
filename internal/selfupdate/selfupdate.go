@@ -609,9 +609,13 @@ func installNewBinary(tmpPath, targetPath string, asideFirst bool) (string, erro
 	if lockedErr != nil {
 		notes = append(notes, fmt.Sprintf("could not remove %s: %v (a running ghost mcp client may hold the old binary, and restarting the client releases it)", fixedAside, lockedErr))
 	}
-	if err := removeFile(aside); err != nil && !os.IsNotExist(err) {
-		notes = append(notes, fmt.Sprintf("could not remove the replaced binary at %s: %v", aside, err))
-	}
+	// The aside a successful install just created is the image the upgrading
+	// process is still running from on every platform that needed the move, so
+	// the remove here fails on every normal upgrade of that kind and warning
+	// about it would train the reader to ignore warnings. It stays
+	// best-effort and silent; only the fixed `.old` an EARLIER run left behind
+	// is reported, because nothing in this run can account for that one.
+	_ = removeFile(aside) //nolint:errcheck
 	sweepOldAsides(targetPath)
 	return strings.Join(notes, "; "), nil
 }

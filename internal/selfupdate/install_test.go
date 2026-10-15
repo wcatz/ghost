@@ -353,6 +353,9 @@ func TestInstallNewBinaryUsesUniqueAsideWhenFixedAsideCannotBeRemoved(t *testing
 	if note == "" {
 		t.Error("expected a note reporting the locked aside")
 	}
+	if !strings.Contains(note, target+asideSuffix) {
+		t.Errorf("note should name the fixed aside path: %q", note)
+	}
 	if !strings.Contains(note, "ghost mcp") {
 		t.Errorf("note should mention a running ghost mcp client: %q", note)
 	}
@@ -445,4 +448,41 @@ func TestInstallNewBinaryFailedRestoreNamesAsidePath(t *testing.T) {
 	if !strings.Contains(err.Error(), "could not be moved back") {
 		t.Errorf("error should say the previous binary could not be moved back, got: %v", err)
 	}
+}
+
+func TestInstallNewBinaryDoesNotReportRemovingItsOwnAside(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ghost")
+	staged := filepath.Join(dir, ".ghost-update-staged")
+	writeFile(t, target, "old-binary")
+	writeFile(t, staged, "new-binary")
+
+	// The first call to removeFile (sweep at the start) finds the fixed
+	// aside absent; the post-install call points at the aside this run just
+	// created, which is the running image on Windows and always fails. Neither
+	// failure may become a warning.
+	var calls int
+	removeFile = func(path string) error {
+		if path != target+asideSuffix {
+			return os.Remove(path)
+		}
+		calls++
+		if calls == 1 {
+			return os.ErrNotExist
+		}
+		return errors.New("locked by this process")
+	}
+	t.Cleanup(func() { removeFile = os.Remove })
+
+	note, err := installNewBinary(staged, target, true)
+	if err != nil {
+		t.Fatalf("installNewBinary: %v", err)
+	}
+	if note != "" {
+		t.Errorf("must not warn about removing this run's own aside, got note %q", note)
+	}
+	if got, _ := readIfPresent(t, target); string(got) != "new-binary" {
+		t.Errorf("target holds %q, want the new binary", got)
+	}
+	assertAsideHoldsTheReplacedBinary(t, target+asideSuffix, "old-binary")
 }
