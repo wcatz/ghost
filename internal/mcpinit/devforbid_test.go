@@ -610,3 +610,57 @@ func TestTouchLifecycleStartTouchesNothingInAForbiddenDataDir(t *testing.T) {
 		}
 	}
 }
+
+// TestRunStopsOnAForbiddenDataDirBeforeReportingDone is the command-level half
+// of the guard: a development build pointed at a refused store must stop rather
+// than print "Done!" and exit 0. Both places `ghost mcp init` resolves the
+// directory — the scratch root at step 2 and the import at step 9 — resolve
+// through the same guard and both downgrade a failure to a "(continuing)"
+// warning, so the refusal was reported and the run still claimed success: a
+// script branching on the exit code could not tell the install's
+// data-directory step had been refused.
+//
+// The recording `claude` stub is the proof the stop is BEFORE the wiring, not
+// merely before the "Done!" line: the run must not reach step 4 and register
+// the MCP server, so a refused install leaves no half-built client behind.
+func TestRunStopsOnAForbiddenDataDirBeforeReportingDone(t *testing.T) {
+	withBuildVersion(t, devBuild)
+	home, binDir := installEnv(t)
+	dataDir := filepath.Join(home, "data", "ghost")
+	t.Setenv(config.DevForbidDataDirEnv, dataDir)
+
+	var out bytes.Buffer
+	err := Run(&out, false)
+	if err == nil {
+		t.Fatalf("Run accepted a forbidden data directory, want a refusal; it printed:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), config.DevForbidDataDirEnv) {
+		t.Errorf("the refusal does not name %s: %v", config.DevForbidDataDirEnv, err)
+	}
+	// The data home does not exist yet — run must not have created it — so the
+	// refusal names the path with its deepest existing ancestor resolved.
+	if want := filepath.Join(realPath(t, home), "data", "ghost"); !strings.Contains(err.Error(), want) {
+		t.Errorf("the refusal does not name the data directory %s: %v", want, err)
+	}
+	if strings.Contains(out.String(), "Done!") {
+		t.Errorf("init reported success after refusing the data directory:\n%s", out.String())
+	}
+	requireMissing(t, binDir, "calls")
+	// And the refused directory itself was not created: resolving it for the
+	// refusal is a pure query.
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Errorf("the refused run created the data directory, stat error: %v", statErr)
+	}
+
+	// The control: the same sandbox with nothing refused installs and reports
+	// success, so the assertions above are about the guard rather than about an
+	// init that cannot run in this environment at all.
+	t.Setenv(config.DevForbidDataDirEnv, "")
+	var ok bytes.Buffer
+	if err := Run(&ok, false); err != nil {
+		t.Fatalf("Run with nothing refused = %v, want the install; it printed:\n%s", err, ok.String())
+	}
+	if !strings.Contains(ok.String(), "Done!") {
+		t.Errorf("an unrefused install did not report success:\n%s", ok.String())
+	}
+}
