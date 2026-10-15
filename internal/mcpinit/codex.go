@@ -1851,15 +1851,43 @@ func codexWrappedActionCarriesSource(cmd, eventToken, ghostBin string) bool {
 	if !ok {
 		return false
 	}
+	return codexTailNamesSource(tail, "codex")
+}
+
+// codexTailNamesSource reports whether the arguments ghost itself receives —
+// tail, the tokens after its `hook <event>` invocation — carry an exact --source
+// token equal to wantSource, in either accepted spelling. The scan stops at the
+// first token that ends a command list, because a `--source` behind `&&`, `||`,
+// `;`, `|` or `&` belongs to a command chained after ghost's, not to ghost: a
+// wrapper whose own invocation names no source must not be read as wired on the
+// strength of the next command's flag. A connective glued to a token (`&&tool`,
+// `stop;`) ends the list there too.
+func codexTailNamesSource(tail []string, wantSource string) bool {
 	for i := 0; i < len(tail); i++ {
-		if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == "codex" {
+		if codexTokenEndsCommand(tail[i]) {
+			return false
+		}
+		if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == wantSource {
 			return true
 		}
-		if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == "codex" {
+		if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == wantSource {
 			return true
 		}
 	}
 	return false
+}
+
+// codexTokenEndsCommand reports whether tok ends the shell command list it
+// belongs to, as a standalone connective or one glued to a word (`&&tool`,
+// `stop;`, `build|tee`). A token carrying any of `;&|` is treated as a
+// boundary, which is the safe direction: at worst a real flag written without
+// separating space goes unread and ghost's canonical rule is appended, where
+// crediting a chained command's flag would leave ghost silently unwired.
+func codexTokenEndsCommand(tok string) bool {
+	if shellConnectives[tok] {
+		return true
+	}
+	return strings.ContainsAny(tok, ";&|")
 }
 
 // codexContractHookWired is the codex analog of contractHookWired: it walks
@@ -1888,13 +1916,8 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, gho
 			if !ok {
 				continue
 			}
-			for i := 0; i < len(tail); i++ {
-				if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == wantSource {
-					return true
-				}
-				if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == wantSource {
-					return true
-				}
+			if codexTailNamesSource(tail, wantSource) {
+				return true
 			}
 		}
 	}

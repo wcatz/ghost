@@ -2441,6 +2441,75 @@ func TestMergeCodexHooksKeepsEveryWrappedAction(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksReadsOnlyGhostsOwnArguments pins the reviewer finding on
+// the wrapped-survivor read: the --source token that decides whether a wrapper
+// is wired must belong to ghost's own invocation, so the scan stops at the
+// first shell connective. A --source codex on a command chained behind && or ;
+// is another tool's and must never suppress the canonical codex rule.
+func TestMergeCodexHooksReadsOnlyGhostsOwnArguments(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"SessionStart", "session-start"},
+		{"Stop", "stop"},
+		{"SessionEnd", "session-end"},
+	} {
+		t.Run(ev.key, func(t *testing.T) {
+			canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+
+			// A --source codex after the ghost invocation belongs to the
+			// chained command, so the wrapper is not ghost's wired survivor
+			// and the canonical rule must be appended beside it.
+			chained := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " && /usr/local/bin/tool --source codex"
+			seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(chained) + `}]}
+    ]
+  }
+}`)
+			got, err := mergeCodexHooksConfig(seed, ghostBin)
+			if err != nil {
+				t.Fatalf("mergeCodexHooksConfig: %v", err)
+			}
+			rules := codexMergedEvent(t, []byte(got), ev.key)
+			if len(rules) != 2 {
+				t.Fatalf("a --source of a chained command must not count: ghost's rule should be appended, got %d rules:\n%s", len(rules), got)
+			}
+			if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != chained {
+				t.Errorf("the wrapper must survive byte-identical, got %v", cmds)
+			}
+			if cmds := codexRuleCommands(rules[1]); len(cmds) != 1 || cmds[0] != canonical {
+				t.Errorf("ghost's own codex rule should be appended beside the wrapper, got %v", cmds)
+			}
+
+			// The day's positive control: a --source codex that IS ghost's own
+			// still makes the wrapper the sole survivor.
+			own := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/other-tool"
+			seed = []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(own) + `}]}
+    ]
+  }
+}`)
+			got, err = mergeCodexHooksConfig(seed, ghostBin)
+			if err != nil {
+				t.Fatalf("mergeCodexHooksConfig: %v", err)
+			}
+			rules = codexMergedEvent(t, []byte(got), ev.key)
+			if len(rules) != 1 {
+				t.Fatalf("ghost's own --source must keep the wrapper as sole survivor, got %d rules:\n%s", len(rules), got)
+			}
+			if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != own {
+				t.Errorf("the wrapper must survive byte-identical, got %v", cmds)
+			}
+			if again, err := mergeCodexHooksConfig([]byte(got), ghostBin); err != nil || again != got {
+				t.Errorf("not a fixed point: %v", err)
+			}
+		})
+	}
+}
+
 // TestAuditCodexHooksNull pins #1219: a hooks.json whose "hooks" value is the
 // JSON literal null must be refused, not merged into. json.Unmarshal decodes
 // null into a nil map with no error, so without the isJSONNull guard the
@@ -2765,6 +2834,8 @@ func TestCodexContractHookWired_FlagForms(t *testing.T) {
 		{"'/opt/bin/ghost' hook stop --source codex-extra", false},
 		{"env X=1 '/opt/bin/ghost' hook stop --source codex", true},
 		{"cd /d && '/opt/bin/ghost' hook stop --source codex", true},
+		{"cd /d && '/opt/bin/ghost' hook stop && /usr/local/bin/tool --source codex", false},
+		{"cd /d && '/opt/bin/ghost' hook stop --source codex && /usr/local/bin/tool", true},
 		{`/bin/sh -c "'/opt/bin/ghost' hook stop --source codex"`, true},
 		{"'/opt/bin/othertool' hook stop --source codex", false},
 		{`/usr/local/bin/othertool --note "ghost hook stop --source codex"`, false},
