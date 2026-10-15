@@ -2331,6 +2331,112 @@ func TestStatusCodex_WrappedHooksAreWired(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksPrefersTheWrappedSurvivor pins the #1345 self-heal in
+// both orders: a wrapper that carries its own command beside ghost's hook wins
+// over a canonical ghost rule, whether it sits before or after it. Unwrapped
+// (canonical) actions that came second were pruned already; what must not
+// happen is a wrapper being pruned and its chained command lost with it.
+func TestMergeCodexHooksPrefersTheWrappedSurvivor(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, order := range []string{"canonical-first", "wrapper-first"} {
+		t.Run(order, func(t *testing.T) {
+			for _, ev := range []struct{ key, token string }{
+				{"SessionStart", "session-start"},
+				{"Stop", "stop"},
+				{"SessionEnd", "session-end"},
+			} {
+				t.Run(ev.key, func(t *testing.T) {
+					canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+					wrapped := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/other-tool"
+					var first, second string
+					if order == "canonical-first" {
+						first, second = canonical, wrapped
+					} else {
+						first, second = wrapped, canonical
+					}
+					seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(first) + `}]},
+      {"hooks": [{"type": "command", "command": ` + jsonString(second) + `}]}
+    ]
+  }
+}`)
+
+					got, err := mergeCodexHooksConfig(seed, ghostBin)
+					if err != nil {
+						t.Fatalf("mergeCodexHooksConfig: %v", err)
+					}
+					rules := codexMergedEvent(t, []byte(got), ev.key)
+					if len(rules) != 1 {
+						t.Fatalf("preferred survivor must stand alone, got %d rules:\n%s", len(rules), got)
+					}
+					cmds := codexRuleCommands(rules[0])
+					if len(cmds) != 1 || cmds[0] != wrapped {
+						t.Fatalf("the wrapper must survive byte-identical, got %v", cmds)
+					}
+
+					ghostFires := 0
+					for _, c := range cmds {
+						if strings.Contains(c, "hook "+ev.token+" --source codex") {
+							ghostFires++
+						}
+					}
+					if ghostFires != 1 {
+						t.Errorf("ghost must fire exactly once, got %d actions", ghostFires)
+					}
+
+					again, err := mergeCodexHooksConfig([]byte(got), ghostBin)
+					if err != nil {
+						t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+					}
+					if again != got {
+						t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(again)-len(got), got, again)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestMergeCodexHooksKeepsEveryWrappedAction pins the corollary for the new
+// rule: when no canonical ghost action is present, every wrapped rule that
+// runs ghost is carried across and nothing is pruned — a wrapper is never
+// removed, even if another wrapper runs ghost beside it.
+func TestMergeCodexHooksKeepsEveryWrappedAction(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"Stop", "stop"},
+	} {
+		w1 := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/first-tool"
+		w2 := "GHOST_X=1 " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+		seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(w1) + `}]},
+      {"hooks": [{"type": "command", "command": ` + jsonString(w2) + `}]}
+    ]
+  }
+}`)
+		got, err := mergeCodexHooksConfig(seed, ghostBin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules := codexMergedEvent(t, []byte(got), ev.key)
+		if len(rules) != 2 {
+			t.Fatalf("both wrapped actions must survive, got %d:\n%s", len(rules), got)
+		}
+		got1 := codexRuleCommands(rules[0])[0]
+		got2 := codexRuleCommands(rules[1])[0]
+		if got1 != w1 || got2 != w2 {
+			t.Fatalf("both wrappers must stay byte-identical:\ngot: %v %v", got1, got2)
+		}
+		if again, err := mergeCodexHooksConfig([]byte(got), ghostBin); err != nil || again != got {
+			t.Fatalf("not a fixed point: %v", err)
+		}
+	}
+}
+
 // TestAuditCodexHooksNull pins #1219: a hooks.json whose "hooks" value is the
 // JSON literal null must be refused, not merged into. json.Unmarshal decodes
 // null into a nil map with no error, so without the isJSONNull guard the

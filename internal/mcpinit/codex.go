@@ -1598,8 +1598,37 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 	// No +1: capacity arithmetic over an unbounded rule count reads as a
 	// possible size overflow to static analysis, and the append below runs
 	// for at most one event per merge.
+	// Any wrapped ghost action present is never pruned, and its presence
+	// decides the survivor (see below). Pre-scan so the decision does not
+	// depend on rule order.
+	hasWrapper := false
+	for _, r := range rules {
+		ro, ok := decodeCodexObject(r)
+		if !ok {
+			continue
+		}
+		var acts []json.RawMessage
+		if raw := ro.get("hooks"); raw != nil {
+			_ = json.Unmarshal(raw, &acts)
+		}
+		for _, a := range acts {
+			ao, ok := decodeCodexObject(a)
+			if !ok {
+				continue
+			}
+			c, ok := codexActionCommand(ao)
+			if !ok || !codexIsGhostHookAction(c, eventToken, ghostBin) {
+				continue
+			}
+			if !codexLeadingGhostHookAction(c, eventToken, ghostBin) {
+				hasWrapper = true
+			}
+		}
+	}
+
 	out := make([]json.RawMessage, 0, len(rules))
-	wired := false
+	hasGhost := false
+	canonicalKept := false
 	for _, rule := range rules {
 		obj, ok := decodeCodexObject(rule)
 		if !ok {
@@ -1626,17 +1655,27 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				kept = append(kept, action)
 				continue
 			}
-			if wired {
-				dropped++
+			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
+				// A wrapped action runs ghost but is never pruned and never
+				// rewritten: its prefix, its path and any chained command are
+				// the user's to keep. It is what the canonical ghost rule
+				// yields to — see hasWrapper — so a wrapper survives even
+				// when a canonical copy precedes it.
+				kept = append(kept, action)
+				hasGhost = true
 				continue
 			}
-			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
-				// A wrapper that runs ghost is ghost's to COUNT — no second
-				// rule is appended beside it — but not to rewrite: the prefix
-				// and the path inside it are the user's, exactly as the
-				// Claude side leaves a wrapped hook untouched.
-				kept = append(kept, action)
-				wired = true
+			if hasWrapper {
+				// The event carries a wrapper, which is the preferred
+				// survivor: prune canonical leading-token actions (and drop a
+				// rule that becomes empty) regardless of their position, so
+				// ghost fires once per event from the user's form.
+				dropped++
+				hasGhost = true
+				continue
+			}
+			if canonicalKept {
+				dropped++
 				continue
 			}
 			fresh, err := json.Marshal(desired.Command)
@@ -1669,7 +1708,8 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 			}
 			kept = append(kept, rewritten)
 			rewrote++
-			wired = true
+			canonicalKept = true
+			hasGhost = true
 		}
 		if rewrote == 0 && dropped == 0 {
 			out = append(out, rule)
@@ -1689,7 +1729,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 		}
 		out = append(out, rebuilt)
 	}
-	if !wired {
+	if !hasGhost {
 		out = append(out, codexRuleRendered(eventToken, ghostBin))
 	}
 	return out, nil
