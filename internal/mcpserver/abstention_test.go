@@ -326,6 +326,34 @@ func TestASearchWithNoEmbedderNamesTheLegItNeverRan(t *testing.T) {
 	}
 }
 
+// TestARetiredOnlyMatchWithNoEmbedderReportsAllInvalid is the shipped-condition
+// half of the reason precedence, taken through the live tool rather than the
+// assembler's seam. ghost_memory_search always asks for a hybrid search, so on a
+// machine with no embedder the vector leg is applicable and never attempted — and
+// a query whose only match has retired used to answer `vector_backend_unavailable`,
+// discarding the fact that a row was FOUND and withheld as out of date. The reason
+// names the store fact; the leg state stays on the machine line, so a caller still
+// learns the keyword leg was the only one that ran.
+func TestARetiredOnlyMatchWithNoEmbedderReportsAllInvalid(t *testing.T) {
+	_, session := newCapSession(t)
+	saveGlobalValidityRow(t, session, "the ledger reconciliation runbook has been retired",
+		map[string]any{"valid_from": "2020-01-01", "valid_until": "2021-01-01"})
+
+	out := searchText(t, session, "ledger reconciliation runbook")
+
+	if !strings.Contains(out, "reason=all_invalid") {
+		t.Errorf("a query whose only match retired did not report all_invalid: the row was found and "+
+			"withheld, and the reason has to say so:\n%s", out)
+	}
+	if !strings.Contains(out, ",vector:not_run") {
+		t.Errorf("the verdict line does not report the vector leg as never executed, so the missing "+
+			"embedder is no longer visible:\n%s", out)
+	}
+	if !strings.Contains(out, "withheld as out of date") {
+		t.Errorf("the answer does not say the match was withheld as out of date:\n%s", out)
+	}
+}
+
 // TestTheSearchResponseStaysInsideItsByteCap: the cap is what keeps a 100-row
 // result of 8000-byte memories from spending a harness's whole context window.
 // It bounds the whole response, framing included, so it is asserted on the bytes

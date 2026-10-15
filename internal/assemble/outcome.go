@@ -190,9 +190,12 @@ func (p *pipeline) retrievalPartial() bool {
 }
 
 // emptyReason is the reason for a result that admitted no row. The stage that
-// emptied the set names it, and stage 1's own failures are named before any
-// stage is consulted: an absent row is only evidence of absence when the search
-// that failed to find it actually ran.
+// emptied the set names it, and a validity exclusion the retriever's own
+// predicate counted is named ahead of the leg facts: rows were found and
+// withheld, which is the fact the caller acts on, and the leg's state is still
+// on the machine line. Otherwise stage 1's own failures come before any
+// empty-window verdict: an absent row is only evidence of absence when the
+// search that failed to find it actually ran.
 func (p *pipeline) emptyReason() string {
 	if len(p.set.Rows) > 0 {
 		// The response-fit post-pass runs after every stage, so when it removed
@@ -204,6 +207,22 @@ func (p *pipeline) emptyReason() string {
 			return reasonAllOverBudget
 		}
 		return p.removalReason()
+	}
+	// A validity exclusion is a fact about the STORE, and it is named before any
+	// leg fact below. The retriever's predicate found rows and withheld them as
+	// out of date, which is the fact the caller acts on, and once the window is
+	// empty the withheld count is the only evidence the rows existed at all.
+	// Naming a leg instead sends the caller to an embedder that was never the
+	// reason there is no answer; the leg's own state stays on the machine line
+	// (`legs=`), so a missing or broken leg is not lost, only subordinated.
+	//
+	// This is the SAME precedence the `len(p.set.Rows) > 0` branch keeps above,
+	// where a stage that removed rows outranks a leg that never ran. The count is
+	// that removal, done early in SQL rather than by a stage, and both paths —
+	// passive and query — reach it through one check so they cannot spell the
+	// precedence differently.
+	if p.set.ValidityExcluded > 0 {
+		return reasonAllInvalid
 	}
 	// The two retrieval reasons are events, not synonyms, and the ORDER of the
 	// checks is the whole point. `vector_backend_unavailable` is a machine with no
@@ -221,23 +240,6 @@ func (p *pipeline) emptyReason() string {
 		return reasonRetrievalFailed
 	}
 	if p.passive {
-		// The validity predicate runs in SQL on this path, before the window closes,
-		// so a bucket whose every row is outside its window comes back empty with
-		// NO stage having run — and the empty window below would call that
-		// `no_memories`, whose sentence is a census of absence and whose callers
-		// keep the never-saved verdict. It is not the same fact: rows were found and
-		// withheld. The retriever states how many its predicate removed, and a
-		// non-zero count is `all_invalid`, the same reason stage 2 produces when it
-		// is the one dropping them, so every surface reads one reason for one fact.
-		//
-		// It sits BELOW the two leg checks deliberately, which is what the block
-		// above says in its own terms: a leg fact is only reached when no stage
-		// removed rows, and a validity exclusion is a stage's removal — done early,
-		// in SQL, but the same removal. It sits ABOVE `no_memories` for the reason
-		// this branch exists.
-		if p.set.ValidityExcluded > 0 {
-			return reasonAllInvalid
-		}
 		// The last line, and the only one the passive path changes. Reaching here
 		// means no stage removed anything and no leg fact explains the emptiness, so
 		// the window itself is what was empty — and `no_candidates` would claim a
@@ -249,16 +251,13 @@ func (p *pipeline) emptyReason() string {
 		// above.
 		return reasonNoMemories
 	}
-	// The query path's own counterpart, for the reason the passive branch above
-	// gives it in its own terms: since #1053 the keyword leg applies the window
-	// predicate in SQL BEFORE its LIMIT, so a query whose every match lies
-	// outside its window comes back with no candidate and no stage having run.
-	// `no_candidates` is the last reason a caller may read as absence, and this
-	// is not absence — rows were found and withheld as out of date, which is
-	// `all_invalid` everywhere else. The retriever states the count.
-	if p.set.ValidityExcluded > 0 {
-		return reasonAllInvalid
-	}
+	// The query path's reachable last reason. Since #1053 the keyword leg applies
+	// the window predicate in SQL BEFORE its LIMIT, so a query whose every match
+	// lies outside its window comes back with no candidate and no stage having
+	// run; that case is the ValidityExcluded check above, and by the time this
+	// line is reached the queried universe really held nothing. `no_candidates` is
+	// the last reason a caller may read as absence, and it is only reached when
+	// nothing was found to withhold.
 	return reasonNoCandidates
 }
 
