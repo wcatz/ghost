@@ -136,6 +136,18 @@ func TouchLifecycleStart(project string) error {
 // decision is the mtime — so the line names the project and both durations and
 // nothing else has to read it.
 //
+// The project is a RESOLVED id from the store, not this process's operand, and a
+// stored id is not token-guarded: `memory.CheckImportedProjectID` refuses control
+// characters, backticks and delimiters but never asks the guard, and
+// `memory.CheckImportedProject` asks it of a name and a path but not of the id.
+// So an artifact's project id is stored verbatim, and a session standing in that
+// project's recorded directory resolves to it. This file is read by operators and
+// diagnostic tooling, so the value goes through `memory.RefusalArg` exactly as the
+// neighbouring lifecycle surfaces do (the lock and the start stamp, the marker's
+// alert through its own renderer): an ordinary id is named quoted — `project "p1"`,
+// the spelling those neighbouring surfaces already use — and only a token-shaped
+// one is withheld, behind a placeholder naming the argument and the format found.
+//
 // It goes to the log rather than the hook's stderr because the hook's stderr is
 // the host's: one line per turn, forever, is noise nobody can act on. It is
 // best-effort for the same reason — a log that cannot be opened is not a reason
@@ -147,5 +159,5 @@ func logLifecycleCooldownSkip(dataDir, projectID string, since, minInterval time
 	}
 	defer f.Close() //nolint:errcheck
 	_, _ = fmt.Fprintf(f, "%s lifecycle: skipping spawn for project %s — last run started %s ago, inside lifecycle.min_interval=%s\n",
-		time.Now().UTC().Format(time.RFC3339), projectID, since.Round(time.Second), minInterval)
+		time.Now().UTC().Format(time.RFC3339), memory.RefusalArg("project", projectID), since.Round(time.Second), minInterval)
 }

@@ -41,3 +41,21 @@ func killPhaseProcess(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// phaseGroupInhabited reports whether anything is still in the phase's process
+// group. It answers the question the escalation actually turns on: cmd.Wait
+// returns as soon as the direct child is reaped, and a phase is a plain ghost
+// process with no SIGTERM handler, so the phase process is gone within
+// milliseconds of the deadline's group signal while the CLI harness it spawned
+// — same group — can still be running. Signal 0 asks the question without
+// delivering anything, and ESRCH is the one answer that means empty: a group
+// whose id belongs to no run here, and which must not be signalled because on a
+// busy machine it can already have been reused. EPERM (it exists but is not
+// ours) counts as inhabited, and any other error is treated the same way rather
+// than as an excuse to skip a group that may hold an orphan.
+func phaseGroupInhabited(cmd *exec.Cmd) bool {
+	if cmd.Process == nil {
+		return false
+	}
+	return syscall.Kill(-cmd.Process.Pid, 0) != syscall.ESRCH
+}
