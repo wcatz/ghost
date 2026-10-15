@@ -808,11 +808,88 @@ var shellConnectives = map[string]bool{
 // transparentPrefixes name the commands that run the word after their own
 // flags and assignments unchanged: a ghost binary behind one of them is still
 // the command that runs (`sudo ghost hook stop …`, `env -i X=1 ghost …`, `nice
-// …`, `command …`), so a second entry would fire the hook twice (#1339).
+// …`, `command …`, `nohup …`, `time …`, `doas …`, `timeout 5 …`), so a second
+// entry would fire the hook twice (#1339). A few of them take a plain slot of
+// their own before the command they run (prefixPositionalSlots) or an option
+// with a separate operand (prefixOptionOperands), which is what puts the
+// command after `timeout 5 ghost …` rather than the duration.
 // `env`'s `-i` flag is swallowed as well, but only directly after `env`
 // itself, so another tool's `-i` stays an argument of that tool.
 var transparentPrefixes = map[string]bool{
 	"sudo": true, "nice": true, "command": true, "env": true,
+	"nohup": true, "time": true, "doas": true, "stdbuf": true,
+	"ionice": true, "chrt": true, "taskset": true, "timeout": true,
+}
+
+// prefixPositionalSlots names the transparent prefix commands that take one
+// plain word of their own before the command they run: timeout's DURATION
+// (`timeout 5 ghost hook stop …`, `timeout -k 5 10 ghost …`), taskset's CPU
+// mask (`taskset 0x3 ghost …`) and chrt's priority (`chrt -f 10 ghost …`). A
+// word in that slot belongs to the command and not to the invocation, so the
+// walk steps over it rather than stopping there and reading the real command as
+// a foreign one.
+var prefixPositionalSlots = map[string]int{
+	"timeout": 1, "taskset": 1, "chrt": 1,
+}
+
+// prefixOptionOperands lists the options of the prefix commands that consume a
+// separate following word as their operand (`timeout -k 5 10 ghost …`,
+// `stdbuf -o L ghost …`, `ionice -c 2 -n 4 ghost …`, `taskset -c 0,1 ghost …`,
+// `doas -u user ghost …`). It is keyed by command rather than shared, because
+// the same spelling is an operand for one of them and nothing at all for
+// another: `env`'s and `sudo`'s `-i` and `sudo`'s `-e` take none, so a shared
+// table would read `sudo -e ghost …`'s ghost as a flag operand and then treat
+// the real command as somebody else's.
+var prefixOptionOperands = map[string]map[string]bool{
+	"timeout": {"-k": true, "-s": true, "--signal": true},
+	"stdbuf":  {"-i": true, "-o": true, "-e": true},
+	"ionice":  {"-c": true, "-n": true, "--class": true, "--class-data": true, "-p": true, "--pid": true},
+	"taskset": {"-c": true, "--cpu-list": true, "-p": true, "--pid": true},
+	"doas":    {"-u": true, "--user": true},
+}
+
+// prefixRegionBefore reports whether the words between the nearest transparent
+// prefix command to the left of idx and idx itself are that command's own — its
+// options with their operands, its assignment words (`timeout 5 X=1 ghost …`)
+// and at most prefixPositionalSlots plain words — and returns the index the
+// walk should continue from: the word left of that command. It carries the
+// shapes whose own words sit between the command and the invocation it runs
+// (`timeout -k 5 10 ghost …`), which the plain walk cannot classify, and refuses
+// a plain word none of them owns (`echo 5 ghost …`), because there is no prefix
+// command to own it and the ghost binary is then an argument of echo.
+func prefixRegionBefore(tokens []string, idx int) (int, bool) {
+	head, base := -1, ""
+	for j := idx; j >= 0; j-- {
+		if b := hookCommandBase(tokens[j]); transparentPrefixes[b] {
+			head, base = j, b
+			break
+		}
+	}
+	if head < 0 {
+		return 0, false
+	}
+	operands, slots, positional := prefixOptionOperands[base], prefixPositionalSlots[base], 0
+	for j := head + 1; j <= idx; j++ {
+		tok := tokens[j]
+		switch {
+		case isAssignmentWord(tok):
+		case operands[tok] || prefixOptionTakesOperand[tok]:
+			// The option's operand must be one of the words between the
+			// command and the invocation, never the invocation's own token:
+			// `timeout -k ghost hook stop …` names ghost as the duration.
+			if j+1 > idx {
+				return 0, false
+			}
+			j++
+		case isLikelyOption(tok):
+		default:
+			positional++
+		}
+	}
+	if positional > slots {
+		return 0, false
+	}
+	return head - 1, true
 }
 
 // prefixOptionTakesOperand names the short options, common to the transparent
@@ -943,23 +1020,42 @@ func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]s
 // preceded only by words that are not the command itself — an assignment
 // prefix (`X=1`) or a transparent prefix word (`sudo ghost …`, `env -i X=1
 // ghost …`) — so the scan walks back until something else appears and `echo
-// sudo ghost hook stop` still runs `echo` (#1339).
+// sudo ghost hook stop` still runs `echo` (#1339). A transparent prefix word is
+// compared by basename (`/usr/bin/env ghost …` runs ghost just as `env ghost …`
+// does), the way shellBehind already resolves shell names by hookCommandBase,
+// so a path-qualified wrapper keeps its command position instead of reading as
+// a foreign command that gains a second entry.
+//
+// Three more shapes leave the following word as a command, and each of them was
+// a wrapper ghost's own hook used to be counted as. A connective glued to a
+// word (`d;`, `cd&&`, `build|tee`) ends the list that word is in, so the next
+// one starts a command — the test codexTokenEndsCommand already applies to
+// ghost's own arguments, in that same safe direction. A group opener (`(` or
+// `{`) opens a command list, so the first word inside it is in command
+// position (`(cd /d; ghost …)`, `{ ghost …; }`). And a word a prefix command
+// owns as its own operand or slot is stepped over
+// (prefixRegionBefore, `timeout -k 5 10 ghost …`).
 func startsCommand(tokens []string, i int) bool {
 	idx := i - 1
 	for idx >= 0 {
 		tok := tokens[idx]
-		if shellConnectives[tok] {
+		if shellConnectives[tok] || strings.ContainsAny(tok, ";&|") {
 			return true
+		}
+		if tok == "(" || tok == "{" {
+			// A group opener: the first word inside it is a command.
+			idx--
+			continue
 		}
 		if isAssignmentWord(tok) {
 			idx--
 			continue
 		}
-		if transparentPrefixes[tok] {
+		if transparentPrefixes[hookCommandBase(tok)] {
 			idx--
 			continue
 		}
-		if tok == "-i" && idx > 0 && tokens[idx-1] == "env" {
+		if tok == "-i" && idx > 0 && hookCommandBase(tokens[idx-1]) == "env" {
 			idx--
 			continue
 		}
@@ -971,6 +1067,10 @@ func startsCommand(tokens []string, i int) bool {
 		// left (e.g. `sudo -u user ghost`: `user` at idx, `-u` left)
 		if idx > 0 && prefixOptionTakesOperand[tokens[idx-1]] {
 			idx -= 2
+			continue
+		}
+		if run, ok := prefixRegionBefore(tokens, idx); ok {
+			idx = run
 			continue
 		}
 		return false
@@ -1007,6 +1107,12 @@ func isGhostToken(token, desiredBin string) bool {
 // invocation at the front of the command. Callers use the tokens either way.
 func hookCommandTokens(cmd string) ([]string, bool) {
 	var tokens []string
+	// A NEWLINE separates commands in shell exactly as `;` does, so it is
+	// normalised to that connective before the split: a hand-edited
+	// `cd /d` + newline + `ghost hook stop …` is a command list, and the
+	// leading-newline trim below must not swallow the separator itself.
+	cmd = strings.ReplaceAll(cmd, "\r\n", "\n")
+	cmd = strings.ReplaceAll(cmd, "\n", " ; ")
 	for {
 		// Leading whitespace is indentation, not an empty leading token: a
 		// hand-edited `   /path/ghost hook stop …` must tokenise as the ghost

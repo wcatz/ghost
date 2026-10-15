@@ -1297,6 +1297,8 @@ func TestEnsureHook_AGhostTokenInArgumentPositionIsForeign(t *testing.T) {
 		"echo /opt/bin/ghost hook stop --source claude-code",
 		"/usr/local/bin/othertool --note " + ghostBin + " hook stop --source claude-code",
 		"printf '%s' " + ghostBin + " hook stop --source claude-code",
+		"env OTHER=1 /usr/local/bin/othertool " + ghostBin + " hook stop --source claude-code",
+		"grep pattern " + ghostBin + " hook stop --source claude-code",
 	} {
 		t.Run(command, func(t *testing.T) {
 			if isGhostHookCommand(command, "hook stop", desired) {
@@ -1328,6 +1330,132 @@ func TestEnsureHook_AGhostTokenInArgumentPositionIsForeign(t *testing.T) {
 			}
 			if len(cmds) != 2 || cmds[0] != command || cmds[1] != desired {
 				t.Errorf("event = %q, want the foreign command untouched and ghost's own hook beside it", cmds)
+			}
+		})
+	}
+}
+
+// TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost pins the prefix
+// walk against a PATH-QUALIFIED wrapper: `/usr/bin/env ghost hook stop …` and
+// `/usr/bin/sudo ghost hook stop …` run ghost just as the bare words do, so the
+// command-position walk must see through them — reading them as foreign writes
+// a second entry beside a wrapper that already fires the hook, and the hook
+// then runs twice per session.
+func TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	for _, command := range []string{
+		"/usr/bin/env " + ghostBin + " hook stop --source claude-code",
+		"/usr/bin/sudo " + ghostBin + " hook stop --source claude-code",
+		"/usr/bin/env -i X=1 " + ghostBin + " hook stop --source claude-code",
+		"/usr/bin/sudo -u user " + ghostBin + " hook stop --source claude-code",
+	} {
+		t.Run(command, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if strings.Contains(out.String(), "added") {
+				t.Errorf("a path-qualified transparent prefix got a second entry:\n%s", out.String())
+			}
+			if !strings.Contains(out.String(), "already configured") {
+				t.Errorf("a path-qualified transparent prefix was not reported as configured:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 1 || cmds[0] != command {
+				t.Errorf("event = %q, want only the untouched wrapper %q", cmds, command)
+			}
+		})
+	}
+}
+
+// TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised pins the rest of the
+// wrappers that genuinely run ghost after the command-position walk became the
+// top-level rule: a DURATION or mask slot before the command (timeout, taskset,
+// chrt), the words that run their operand as a command (nohup, time, doas,
+// stdbuf, ionice), a NEWLINE as a command separator, a parenthesised subshell
+// and a `{ …; }` group. Each must read as ghost's own, be left byte-identical
+// and get no second entry, or the hook fires twice per session. The negative
+// controls in TestEnsureHook_AGhostTokenInArgumentPositionIsForeign — a ghost
+// binary that is another program's argument — stay foreign: echo, printf,
+// othertool and grep do not run it.
+func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	for _, tc := range []struct {
+		command string
+		// statusWired is whether `ghost mcp status` credits the wrapper's
+		// --source. Its read is token-exact on purpose (a lookalike must never
+		// read as wired), so a wrapper that closes its group right after the
+		// value leaves the shell's `)` or `;` on that token and status does not
+		// credit it. The ownership walk still reads the wrapper as ghost's own,
+		// which is what leaves it byte-identical and adds nothing beside it.
+		statusWired bool
+	}{
+		{"timeout 5 " + ghostBin + " hook stop --source claude-code", true},
+		{"timeout -k 5 10 " + ghostBin + " hook stop --source claude-code", true},
+		{"timeout --signal=TERM 10 " + ghostBin + " hook stop --source claude-code", true},
+		{"/usr/bin/timeout 5 " + ghostBin + " hook stop --source claude-code", true},
+		{"nohup " + ghostBin + " hook stop --source claude-code", true},
+		{"time " + ghostBin + " hook stop --source claude-code", true},
+		{"time -p " + ghostBin + " hook stop --source claude-code", true},
+		{"doas " + ghostBin + " hook stop --source claude-code", true},
+		{"doas -u user " + ghostBin + " hook stop --source claude-code", true},
+		{"stdbuf -oL -eL " + ghostBin + " hook stop --source claude-code", true},
+		{"ionice -c 2 -n 4 " + ghostBin + " hook stop --source claude-code", true},
+		{"chrt -f 10 " + ghostBin + " hook stop --source claude-code", true},
+		{"taskset 0x3 " + ghostBin + " hook stop --source claude-code", true},
+		{"taskset -c 0,1 " + ghostBin + " hook stop --source claude-code", true},
+		{"cd /d\n" + ghostBin + " hook stop --source claude-code", true},
+		{"(cd /d; " + ghostBin + " hook stop --source claude-code)", false},
+		{"{ " + ghostBin + " hook stop --source claude-code; }", false},
+		{"X=1 timeout -k 5 10 " + ghostBin + " hook stop --source claude-code", true},
+	} {
+		command := tc.command
+		t.Run(command, func(t *testing.T) {
+			if _, ok := ghostHookTail(command, "stop", ghostBin); !ok {
+				t.Error("ghostHookTail does not recognise a wrapper that runs ghost")
+			}
+
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if strings.Contains(out.String(), "added") {
+				t.Errorf("a wrapper that runs ghost got a second entry:\n%s", out.String())
+			}
+			if !strings.Contains(out.String(), "already configured") {
+				t.Errorf("a wrapper that runs ghost was not reported as configured:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 1 || cmds[0] != command {
+				t.Errorf("event = %q, want only the untouched wrapper %q", cmds, command)
+			}
+			// Status reads the same file with the same ownership rule.
+			if wired := contractHookWired(sf, "Stop", "stop", "claude-code", ghostBin); wired != tc.statusWired {
+				t.Errorf("status wired = %v, want %v", wired, tc.statusWired)
 			}
 		})
 	}
