@@ -2530,6 +2530,49 @@ func TestAuditCodexHooksNull(t *testing.T) {
 	}
 }
 
+// TestAuditCodexHooksNullEventValue pins #1247: the top-level guard stops at the
+// top level, but a managed event's value being the JSON literal null is the same
+// structurally-invalid-but-present data one level down. json.Unmarshal decodes
+// null into a nil []json.RawMessage with no error, so without a guard the merge
+// hands that nil slice to mergeCodexEventRules, which appends ghost's canonical
+// rule as if the event were empty — the user's explicit null is silently
+// replaced. The guard runs in the shared decode, so the install pre-flight and
+// the merge refuse the same shape with the same error, as the top-level guard
+// does.
+func TestAuditCodexHooksNullEventValue(t *testing.T) {
+	_, err := mergeCodexHooksConfig([]byte(`{"description":"my hooks","hooks":{"SessionStart":null}}`), "/new/ghost")
+	if err == nil {
+		t.Fatal("a null event value must be refused, not silently replaced with ghost's rule")
+	}
+	if !strings.Contains(err.Error(), "hooks.json") {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("refusal must name the event, got: %v", err)
+	}
+}
+
+// TestMergeCodexHooksLeavesAnUnmanagedEventNull pins the SCOPE of the #1247
+// guard: it covers only the events ghost manages. An explicit null on an event
+// ghost does not touch is the user's data and is carried through verbatim, as
+// any foreign event is, so the guard does not start refusing a file init has
+// always been able to merge for every managed event.
+func TestMergeCodexHooksLeavesAnUnmanagedEventNull(t *testing.T) {
+	got, err := mergeCodexHooksConfig([]byte(`{"hooks":{"PreToolUse":null}}`), "/new/ghost")
+	if err != nil {
+		t.Fatalf("an unmanaged event's null must not be refused: %v", err)
+	}
+	var top struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(got), &top); err != nil {
+		t.Fatalf("parse merged hooks.json: %v", err)
+	}
+	if raw, ok := top.Hooks["PreToolUse"]; !ok || !isJSONNull(raw) {
+		t.Errorf("an unmanaged event's null must survive the merge verbatim, got: %q", raw)
+	}
+}
+
 // TestRunCodex_NullHooksIsRefused pins the install path the audit walked: a
 // hooks.json carrying an explicit null is refused with an error rather than
 // crashing, and the file is left exactly as it was. It runs the dry-run form,
@@ -2556,6 +2599,52 @@ func TestRunCodex_NullHooksIsRefused(t *testing.T) {
 	}
 	if string(got) != seed {
 		t.Errorf("a refused merge must leave the file untouched:\ngot:\n%s", got)
+	}
+}
+
+// TestRunCodex_NullEventValueRefused pins the install path for #1247: a managed
+// event whose value is an explicit null is refused by the pre-flight — the same
+// shared decode the merge uses — naming the file and the event, before step 3
+// registers the MCP server, with the file left exactly as written. It covers
+// `{"hooks":{"SessionStart":null}}`, the shape the top-level guard does not
+// reach.
+func TestRunCodex_NullEventValueRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = `{"description":"my hooks","hooks":{"SessionStart":null}}`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := RunCodex(&out, true)
+	if err == nil {
+		t.Fatal("a null event value must be refused, not merged into")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("refusal must name the event, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Fix or delete") {
+		t.Errorf("refusal must carry the edit that clears it, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "to retry") {
+		t.Errorf("refusal must not carry the generic re-run hint, got: %v", err)
+	}
+	if _, statErr := os.Stat(codexConfigToml(home)); !os.IsNotExist(statErr) {
+		t.Errorf("a refused hooks.json must leave config.toml unregistered (stat err %v)", statErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused file must be left untouched, got:\n%s", got)
 	}
 }
 

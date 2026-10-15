@@ -696,7 +696,7 @@ func installedGhost(t *testing.T, body string) string {
 // installOver wires performUpgrade to a real selfupdate.Replace against target,
 // so a test sees the file an upgrade produced rather than a recorded argument.
 func installOver(target string) func([]byte) error {
-	return func(binary []byte) error { return selfupdate.Replace(target, binary) }
+	return func(binary []byte) error { _, err := selfupdate.Replace(target, binary); return err }
 }
 
 // assertUnchanged checks that a refused upgrade left the installed binary
