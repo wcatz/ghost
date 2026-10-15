@@ -559,3 +559,16 @@ func TestRenderedOpencodePluginPathIsAJSLiteral(t *testing.T) {
 		t.Errorf("ordinary path is not rendered as the plain quoted string: %q", line)
 	}
 }
+
+// TestParseOpencodeConfig_BOMIsRefusedByName pins #1379: stripJSONC does not
+// remove a leading byte-order mark, so the parse failure is named as a BOM
+// rather than reported as an anonymous invalid character.
+func TestParseOpencodeConfig_BOMIsRefusedByName(t *testing.T) {
+	_, err := parseOpencodeConfig([]byte("\ufeff{\"mcp\":{}}"))
+	if err == nil {
+		t.Fatal("a BOM-prefixed opencode config must be refused")
+	}
+	if !strings.Contains(err.Error(), "byte-order mark") {
+		t.Errorf("refusal must name the byte-order mark, got: %v", err)
+	}
+}

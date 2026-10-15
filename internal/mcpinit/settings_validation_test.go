@@ -395,3 +395,31 @@ func TestValidateAcceptsAbsentFields(t *testing.T) {
 		}
 	}
 }
+
+// TestRunRefusesBOMSettingsByName pins #1379: a settings.json that starts with
+// a UTF-8 byte-order mark is refused with a message that names the mark, never
+// the false claim that a JSON object is not one. The file is left as written.
+func TestRunRefusesBOMSettingsByName(t *testing.T) {
+	home, _ := installEnv(t)
+	seed := "\ufeff{\"model\":\"opus\"}\n"
+	path := writeSettings(t, home, seed)
+
+	var out bytes.Buffer
+	err := Run(&out, false)
+	if err == nil {
+		t.Fatalf("Run accepted a BOM-prefixed settings.json; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "byte-order mark") {
+		t.Errorf("refusal must name the byte-order mark, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "must be a JSON object") {
+		t.Errorf("refusal must not claim a JSON object is not one, got: %v", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused file must be left untouched, got:\n%q", got)
+	}
+}

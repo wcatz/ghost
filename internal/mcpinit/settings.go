@@ -3,6 +3,7 @@
 package mcpinit
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -75,6 +76,21 @@ func settingsPath() (string, error) {
 
 // loadSettings reads and parses the settings file.
 // If the file does not exist, returns an empty settings ready to populate.
+// leadingBOMError refuses a JSON document that starts with a UTF-8 byte-order
+// mark (what a Windows editor or PowerShell 5.1 `-Encoding UTF8` writes), and
+// returns nil for any other document. encoding/json rejects the mark, and the
+// error it gives — an invalid character, or worse a claim that a valid object
+// is not one — misdirects the user. Ghost cannot show that the host's own
+// loader (Claude Code, codex's serde_json, opencode's JSONC reader) accepts a
+// mark, so unlike codex's config.toml, whose TOML parser does, the file is
+// refused rather than tolerated, and never rewritten. what names the file.
+func leadingBOMError(data []byte, what string) error {
+	if !bytes.HasPrefix(data, []byte("\ufeff")) {
+		return nil
+	}
+	return fmt.Errorf("%s starts with a UTF-8 byte-order mark, which ghost does not read as JSON — save the file as UTF-8 without a BOM", what)
+}
+
 func loadSettings(path string) (*settingsFile, error) {
 	s := &settingsFile{
 		path: path,
@@ -89,6 +105,9 @@ func loadSettings(path string) (*settingsFile, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	if err := leadingBOMError(data, filepath.Base(path)); err != nil {
+		return nil, err
+	}
 	if err := json.Unmarshal(data, &s.raw); err != nil {
 		return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
 	}

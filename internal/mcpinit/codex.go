@@ -1580,6 +1580,9 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // document it accepts is a document the merge can act on — and keeps both
 // callers refusing the same shapes with the same parse errors.
 func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
+	if err := leadingBOMError(existing, "hooks.json"); err != nil {
+		return nil, nil, err
+	}
 	if err := json.Unmarshal(existing, &top); err != nil {
 		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
 	}
@@ -1916,6 +1919,9 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read hooks.json: %w", err)
+	}
+	if err := leadingBOMError(data, "hooks.json"); err != nil {
+		return nil, err
 	}
 	var top struct {
 		Hooks map[string]json.RawMessage `json:"hooks"`
