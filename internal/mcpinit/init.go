@@ -749,11 +749,11 @@ func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReco
 }
 
 // isGhostHookCommand reports whether cmd runs ghost for the event cmdSubstr
-// names, wherever ghost sits in the command. It is a thin read of
-// ghostHookTail, the one ownership rule this file keeps — shared with the
-// status reader, so both answer the same question about the same file — and
-// its doc records which shapes that rule accepts and which it holds foreign
-// (#1326, #1337, #1339).
+// names, wherever ghost sits in the command as long as it is in command
+// position. It is a thin read of ghostHookTail, the one ownership rule this
+// file keeps — shared with the status reader, so both answer the same question
+// about the same file — and its doc records which shapes that rule accepts and
+// which it holds foreign (#1326, #1337, #1339, #1358).
 func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
 	eventToken := strings.TrimPrefix(cmdSubstr, "hook ")
 	if eventToken == cmdSubstr {
@@ -775,16 +775,19 @@ func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
 // wrapper ghost's own: `env X=1 /path/ghost hook session-start` and
 // `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
 // and adds nothing beside them — a second entry would fire ghost's hook twice.
+// The walk accepts those wrappers because their ghost binary sits in COMMAND
+// position behind a prefix `startsCommand` sees through; a ghost binary that is
+// only an ARGUMENT of another command (`echo /opt/bin/ghost hook stop …`, which
+// runs echo) is not ghost's and gets ghost's own entry added beside it (#1358).
 // Another tool whose command merely contains the words `hook session-start`,
-// with no ghost-binary token before them, is not ghost's and still gets ghost's
-// own entry added beside it (#1326).
+// with no ghost-binary token before them, is not ghost's either (#1326).
 //
 // Two more shapes run ghost and are read here too, because a second entry fires
 // the hook twice. A quoted argument can carry the whole invocation —
 // `sh -c "ghost hook stop …"`, `bash -lc "…"` — and a command whose LAST token's
 // quoting never closes is still a valid ghost invocation up to that point. Both
-// readings are bounded: inside a quoted argument the ghost binary must be in
-// COMMAND position, and the interior is read to a fixed depth.
+// readings are bounded: the ghost binary must be in command position there too,
+// and the interior is read to a fixed depth.
 func ghostHookTail(cmd, eventToken, ghostBin string) ([]string, bool) {
 	// Fail soft: a trailing token whose quoting never closes still leaves the
 	// tokens before it readable, and those are the ones that carry the hook.
@@ -901,20 +904,21 @@ func isShellCommandListFlag(word string) bool {
 }
 
 // ghostTailOver walks tokens for a ghost binary immediately followed by the
-// event's tail. At the top level (depth 0) a ghost binary at ANY position
-// counts: that is what makes a leading wrapper's prefix ghost's own, and
-// #1326's requirement that an `env X=1 …` wrapper be recognised. A quoted
-// argument is only read INSIDE when the word before it makes it a command list
-// (`sh -c "…"`, `bash -lc "…"`), because otherwise it is data to the command
-// that received it and a ghost binary named in it is somebody else's text —
-// which is the #1326 false positive. Inside, the binary must be in COMMAND
-// position there as well (`sh -c "echo ghost hook stop"` runs echo, not
-// ghost). Recursion is bounded in depth so a nested quote cannot recurse
-// forever.
+// event's tail. A ghost binary counts only in COMMAND position, at every depth:
+// the top level applies the same startsCommand walk as the interior of a quoted
+// command list, so a leading wrapper's prefix — an assignment (`X=1 ghost …`), a
+// transparent prefix word (`sudo ghost …`) or a connective (`cd d && ghost …`)
+// — still reads as ghost's own, while a ghost binary that is only an ARGUMENT of
+// another command (`echo /opt/bin/ghost hook stop …`, which runs echo) does not
+// (#1358). A quoted argument is read INSIDE only when the word before it makes
+// it a command list (`sh -c "…"`, `bash -lc "…"`), because otherwise it is data
+// to the command that received it and a ghost binary named in it is somebody
+// else's text — the #1326 false positive. Recursion is bounded in depth so a
+// nested quote cannot recurse forever.
 func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]string, bool) {
 	for i := 0; i < len(tokens); i++ {
 		if isGhostToken(tokens[i], ghostBin) {
-			if depth > 0 && !startsCommand(tokens, i) {
+			if !startsCommand(tokens, i) {
 				continue
 			}
 			if i+2 < len(tokens) && tokens[i+1] == "hook" && tokens[i+2] == eventToken {
@@ -1004,6 +1008,10 @@ func isGhostToken(token, desiredBin string) bool {
 func hookCommandTokens(cmd string) ([]string, bool) {
 	var tokens []string
 	for {
+		// Leading whitespace is indentation, not an empty leading token: a
+		// hand-edited `   /path/ghost hook stop …` must tokenise as the ghost
+		// invocation it is, so the command-position walk reaches its binary.
+		cmd = strings.TrimLeft(cmd, " \t")
 		token, rest, ok := splitHookCommand(cmd)
 		if !ok {
 			return tokens, false
