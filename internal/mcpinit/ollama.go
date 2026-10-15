@@ -20,32 +20,48 @@ import (
 // feeds its own check closure; on failure it prints the fail text via that
 // closure (e.g. Status's closure also flags the run unhealthy).
 //
-// The returned bool reports whether Ollama itself was actually probed and
-// answered reachable: false both when embedding is disabled (never probed)
-// and when the probe found it unreachable, true whenever Ollama answered —
-// regardless of whether the configured model happens to be installed.
-// checkStoreHealth uses it to gate the "Ollama down since" duration line onto
-// a currently unreachable Ollama, and to suppress it while disabled.
-func checkOllama(w io.Writer, cfg *config.Config, check func(ok bool, pass, fail string)) bool {
+// The returned Reachability is the verdict the probe reached, three-valued for
+// the reason embedding.Probe is: Reachable when Ollama answered, Unreachable
+// when the endpoint is conclusively not there (a refused connection or a
+// non-200), and Inconclusive when the probe's own deadline expired without an
+// answer. checkStoreHealth uses it to gate the "Ollama down since" duration
+// line onto a CONCLUSIVE outage: a missed deadline establishes nothing, so it
+// must never be rendered as an ongoing outage with a start time. The two
+// non-Reachable verdicts print their own fail text — "unreachable" for the
+// conclusive case, an undetermined endpoint for the timeout — and only the
+// former licenses a duration beside it.
+//
+// Embedding disabled means nothing was probed, so the function returns before
+// the client is built; the returned value carries no claim then, and the only
+// caller that reads it (checkStoreHealth) gates the duration line on
+// cfg.Embedding.Enabled as well, so a disabled config can never print an
+// outage.
+func checkOllama(w io.Writer, cfg *config.Config, check func(ok bool, pass, fail string)) embedding.Reachability {
 	if !cfg.Embedding.Enabled {
 		_, _ = fmt.Fprintln(w, "  - embedding disabled in config (FTS-only search)")
-		return false
+		return embedding.Reachable
 	}
 	client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
 	ctx := context.Background()
-	if !client.Alive(ctx) {
+	switch client.Probe(ctx) {
+	case embedding.Unreachable:
 		check(false, "", fmt.Sprintf("Ollama unreachable at %s — embeddings paused", cfg.Embedding.OllamaURL))
-		return false
+		return embedding.Unreachable
+	case embedding.Inconclusive:
+		// A missed deadline is not an outage: report the endpoint as slow or
+		// undetermined so the reader does not take it for one.
+		check(false, "", fmt.Sprintf("Ollama liveness undetermined at %s — embeddings paused (probe timed out, not an outage)", cfg.Embedding.OllamaURL))
+		return embedding.Inconclusive
 	}
 	present, err := client.HasModel(ctx)
 	if err != nil {
 		check(false, "", fmt.Sprintf("Ollama model check failed: %v", err))
-		return true
+		return embedding.Reachable
 	}
 	check(present,
 		fmt.Sprintf("Ollama model %s installed", cfg.Embedding.Model),
 		fmt.Sprintf("Ollama model %s missing — run: ollama pull %s", cfg.Embedding.Model, cfg.Embedding.Model))
-	return true
+	return embedding.Reachable
 }
 
 // reportOllamaDownDuration prints how long Ollama has been unreachable, based
@@ -58,14 +74,17 @@ func checkOllama(w io.Writer, cfg *config.Config, check func(ok bool, pass, fail
 // output.
 //
 // The caller must only invoke this once it has independently confirmed via
-// checkOllama's live probe that Ollama is *currently* unreachable. The marker
-// can otherwise outlive an outage — it's only cleared the next time some
-// worker instance's own Alive() probe observes Ollama reachable again, which
-// never happens if that MCP server process has since exited — and printing a
-// stale duration next to a passing Ollama check would contradict the check
-// directly above it. This function stays a read-only reporter (it does not
-// delete a stale marker itself even when it declines to print); the marker is
-// harmless clutter until a future worker run clears it.
+// checkOllama's live probe that Ollama is *conclusively* unreachable — an
+// Unreachable verdict, never an Inconclusive one. Inconclusive means the
+// probe's own deadline expired, which establishes nothing about the endpoint;
+// treating it as an outage is how a currently-up-but-busy Ollama gets reported
+// as hours down. A marker can otherwise outlive an outage — it's only cleared
+// the next time some worker instance's own Alive() probe observes Ollama
+// reachable again, which never happens if that MCP server process has since
+// exited — and printing a stale duration next to a passing Ollama check would
+// contradict the check directly above it. This function stays a read-only
+// reporter (it does not delete a stale marker itself even when it declines to
+// print); the marker is harmless clutter until a future worker run clears it.
 func reportOllamaDownDuration(w io.Writer, dataDir string) {
 	data, err := os.ReadFile(filepath.Join(dataDir, embedding.OllamaDownMarkerFilename))
 	if err != nil {
