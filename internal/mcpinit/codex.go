@@ -989,6 +989,55 @@ func codexMCPCurrent(vals codexMCPServerValues, ghostBin string) bool {
 	return vals.Command == ghostBin && len(vals.Args) == 1 && vals.Args[0] == "mcp"
 }
 
+// codexConfigHoldsOnlyGhostOutput reports whether a config.toml holds nothing
+// but the block ghost manages: the managed comment, the [mcp_servers.ghost]
+// table, and its own command/args keys, with every other line blank. A file
+// the user added anything to — another table, a sub-table such as
+// [mcp_servers.ghost.env], another key in the ghost table — is not this and
+// must be backed up.
+//
+// The command is recognised as ghost's own by basename, not by this run's
+// resolved path, and the args must be the canonical ["mcp"]: a fresh install
+// writes exactly this block, so after an upgrade moved the binary the
+// stale-path repair finds a file that is still only ghost's output and must
+// not capture it. Drifted ghost output is deliberately NOT this shape — an
+// earlier ghost table with different args carries a value ghost never wrote —
+// and keeps its .bak.
+func codexConfigHoldsOnlyGhostOutput(lines []string) bool {
+	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
+	if !found {
+		return false
+	}
+	for i := 0; i < start; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || (i == start-1 && trimmed == codexMCPServerComment) {
+			continue
+		}
+		return false
+	}
+	for i := end; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return false
+		}
+	}
+	for i := start + 1; i < end; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		key, _, ok := splitCodexAssignment(lines[i])
+		if !ok {
+			return false
+		}
+		switch codexOwnedKeyName(key) {
+		case "command", "args":
+		default:
+			return false
+		}
+	}
+	vals := parseCodexMCPServerBlock(lines[start:end])
+	return isGhostBinaryName(vals.Command) && len(vals.Args) == 1 && vals.Args[0] == "mcp"
+}
+
 // codexMCPServerComment marks the block ghost owns inside a config.toml the
 // user also edits by hand. It is written once, above the table.
 const codexMCPServerComment = "# Ghost persistent memory (managed by `ghost mcp init --client codex`)"
@@ -1263,7 +1312,19 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// every init to work out. Restoring a comments-only .bak costs the user
 	// comments, not data, which is a different trade from the one above. A file
 	// that did not exist before this run returned earlier and never gets here.
-	if len(existing) > 0 {
+	//
+	// The second skip is a file that holds nothing but the block ghost manages.
+	// On the FRESH INSTALL that file is ghost's own output — a config.toml the
+	// earlier run appended its table to from nothing — and the slot is the
+	// user's pre-ghost file, so capturing ghost's bytes there would, because the
+	// backup is never rolled forward, fill it for good and leave the user's own
+	// file with nowhere to be kept. The case that reaches here is the
+	// stale-path repair after an upgrade moved the binary: the block is ghost's,
+	// at the old path, and codexConfigHoldsOnlyGhostOutput recognises it by the
+	// ghost basename rather than by this run's resolved path. A file the user
+	// added anything to — another table, a sub-table, another key in the ghost
+	// table — is not that and is backed up.
+	if len(existing) > 0 && !codexConfigHoldsOnlyGhostOutput(lines) {
 		if err := writeBackupOnce(path+".bak", existing); err != nil {
 			return false, err
 		}

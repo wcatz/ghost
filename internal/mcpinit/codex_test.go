@@ -1346,6 +1346,50 @@ func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLDoesNotBackUpItsOwnOutput pins the other skip, beside the
+// empty-file one: a config.toml holding nothing but the block ghost manages is
+// ghost's own output, so a repair of it takes no .bak. The shape that reaches
+// the repair path is the block an earlier init wrote with a command a later
+// upgrade moved — the stale-path repair — and the .bak slot is the user's
+// pre-ghost file, which ghost's own bytes must never fill, because the backup
+// is never rolled forward and the user's file would then have nowhere to go.
+// A ghost table carrying anything ghost did not write — different args, a
+// sub-table, another table — keeps its .bak, pinned by the tests around this
+// one.
+func TestRunCodex_TOMLDoesNotBackUpItsOwnOutput(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := codexMCPServerComment + "\n" +
+		"[mcp_servers.ghost]\n" +
+		"command = '/old/install/ghost'\n" +
+		"args = [\"mcp\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	// The repair ran: the stale command is replaced with this run's binary.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), codexTOMLString(ghostBin)) {
+		t.Fatalf("the stale-path repair did not run:\n%s", got)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		bak, _ := os.ReadFile(path + ".bak")
+		t.Errorf("a repair of ghost's own output left a .bak:\n%q", bak)
+	}
+}
+
 // TestRunCodex_TOMLRepairBacksUpOnce pins that a repair of a user's
 // config.toml keeps their pre-ghost file beside it, the same way a save of
 // settings.json does. The repair rewrites lines inside the user's own file, and
