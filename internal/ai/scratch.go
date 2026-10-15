@@ -12,25 +12,28 @@ import (
 )
 
 // harnessWaitDelay bounds how long a harness call's Wait may spend on I/O pipes
-// a grandchild still holds after the call's context is done. The deadline's
-// Cancel signals the harness's process group, which ends a child that respects
-// the signal; WaitDelay is the backstop for the one that does not, and for a
-// helper that merely inherited the child's stdout: without it, os/exec reads
-// that pipe until EOF, which does not arrive until the orphan closes its copy
-// of the write end, and the call blocks for the orphan's lifetime however long
-// that is. Two seconds is a grace for a harness that is winding down, not a
-// budget for one still working — the timer only starts once the context is done
-// or the child has already exited.
+// a grandchild still holds after the call's context is done, and is also the
+// grace a group signal gets before it is force-killed. The deadline's Cancel
+// signals the harness's process group, then force-kills whatever is still in
+// it once this grace is up, which ends a child that respects the signal and one
+// that ignores it alike; WaitDelay is the backstop for the pipes themselves,
+// because os/exec reads a helper's inherited stdout until EOF and that does not
+// arrive until the helper's copy of the write end is closed. Without it the
+// call blocks for the orphan's lifetime however long that is. Two seconds is a
+// grace for a harness that is winding down, not a budget for one still working
+// — the timer only starts once the context is done or the child has already
+// exited.
 const harnessWaitDelay = 2 * time.Second
 
 // boundHarnessProcess gives a harness child the whole-call deadline bound: its
-// own process group, a Cancel that signals that group, and the WaitDelay
-// backstop. harnessCommand applies it to every child it builds, and the one
-// caller that must build its own child — the cleanup runner, which has to reach
-// the user's own opencode store rather than an isolated tree — applies it too.
-// Keeping it one function is what makes the bound a property of a harness child
-// rather than of having gone through the funnel: a second caller can share it,
-// and a second caller that forgets it is a missing call a reader can see.
+// own process group, a Cancel that signals that group and then force-kills
+// whatever the grace period left, and the WaitDelay backstop. harnessCommand
+// applies it to every child it builds, and the one caller that must build its
+// own child — the cleanup runner, which has to reach the user's own opencode
+// store rather than an isolated tree — applies it too. Keeping it one function
+// is what makes the bound a property of a harness child rather than of having
+// gone through the funnel: a second caller can share it, and a second caller
+// that forgets it is a missing call a reader can see.
 func boundHarnessProcess(cmd *exec.Cmd) {
 	setHarnessProcessGroup(cmd)
 	cmd.Cancel = func() error { return terminateHarnessProcess(cmd) }
@@ -69,10 +72,11 @@ func boundHarnessProcess(cmd *exec.Cmd) {
 // absorb, and it returns an error rather than a command a caller could run.
 //
 // Every child is also bounded by its caller's context as a whole. The child is
-// started in its own process group, Cancel signals that group, and a WaitDelay
-// backstops a grandchild that ignores the signal — so a harness that leaves a
-// helper holding its stdout cannot make cmd.Run block past the deadline. See
-// harnessWaitDelay for why the default os/exec cancellation is not enough.
+// started in its own process group, Cancel signals that group and force-kills
+// whatever the grace period left, and a WaitDelay backstops the pipes a helper
+// holds — so a harness that leaves a helper holding its stdout cannot make
+// cmd.Run block past the deadline, and nothing it started outlives the call.
+// See harnessWaitDelay for why the default os/exec cancellation is not enough.
 //
 // The returned release is always safe to call, repeatedly and after the
 // directory has already been removed — including on the error path, where it
