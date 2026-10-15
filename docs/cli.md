@@ -853,6 +853,7 @@ These things are deliberately **not** exported:
 | `memory_embeddings` | The vector is derived from the content by a local model, not stored knowledge. The embedding worker rebuilds it for every imported memory. |
 | `memory_links` | A link only means something between two memories that are both present, so importing edges ahead of their endpoints would fail the foreign key or fabricate relationships. The linking worker recomputes related edges after an import. |
 | `resolve_kept_hash` | A cache of the resolve classifier's verdicts, keyed by `resolve.KeepStamp` — the content hash plus the negative retrieval evidence if one applied. Ghost recomputes it. |
+| `memory_history` | The append-only change log of how a memory reached its current state. It is not a derived value, so nothing rebuilds it: an imported memory gets exactly one `import` version, and `ghost history` on a restored memory shows only that row. Carrying the versions would be a format change of its own, and `ghost backup` is the full-fidelity copy that keeps them. |
 | Ghost's own `_global` `builtin` seeds | The shipped rules this Ghost carries. Each is written under a per-install random id, so your copy and the destination's could never be recognised as the same row and the import would add a second one beside it — and nothing would ever remove it. The destination writes them itself, by content, on every open, so the restored store ends up with one copy, written by Ghost. A memory of your own filed under `_global` is **not** one of these: it is the only copy of itself, and it exports. |
 
 That last row is why an export's memory count can be one lower than the row count `ghost backup` prints for the same store: the seed is in the database copy and deliberately not in the artifact.
@@ -985,6 +986,8 @@ The reason is that an artifact is a file that arrived from somewhere, and on its
 `onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, prunable only as the durable tier is (never), and honest about where it came from.
 
 **Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source, pin and tier, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once. A `session` row restored that way is given a fresh derived expiry (24 hours from the import), because the artifact carries no `expires_at` and a session row with none would be a row no `ghost prune` could ever reach.
+
+The artifact carries no `memory_history` either, and it is the one thing here `--trust-provenance` cannot bring back: a restored memory's change log starts at its own `import` row, so `ghost history` on it shows only that row. `ghost backup` is the copy that keeps the versions, and the [not-exported table](#ghost-export) says why they do not travel.
 
 ```text
   skip    project:  line 2  "one" (p1)

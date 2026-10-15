@@ -42,6 +42,12 @@ type PortableProject struct {
 //     keyed by the content hash, plus the negative audit evidence the verdict
 //     was judged with when there was any (#880). Ghost recomputes it, and a
 //     stale one would mark a memory it has never classified as reviewed.
+//   - memory_history. The change log is not a derived value, so nothing
+//     rebuilds it: an imported memory starts a fresh one, holding only the
+//     single `import` row ImportMemory writes in the same transaction as the
+//     insert, and `ghost history` on a restored memory shows just that row.
+//     Carrying the versions would be a format change of its own; `ghost
+//     backup` is the copy that keeps them.
 //
 // Every other column is here, including the ones Memory does not expose:
 // access_count, last_accessed, the validity triple (valid_from, valid_until,
