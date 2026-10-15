@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1299,6 +1300,7 @@ func TestEnsureHook_AGhostTokenInArgumentPositionIsForeign(t *testing.T) {
 		"printf '%s' " + ghostBin + " hook stop --source claude-code",
 		"env OTHER=1 /usr/local/bin/othertool " + ghostBin + " hook stop --source claude-code",
 		"grep pattern " + ghostBin + " hook stop --source claude-code",
+		"time -p echo " + ghostBin + " hook stop --source claude-code",
 	} {
 		t.Run(command, func(t *testing.T) {
 			if isGhostHookCommand(command, "hook stop", desired) {
@@ -1544,11 +1546,9 @@ func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
 	for _, tc := range []struct {
 		command string
 		// statusWired is whether `ghost mcp status` credits the wrapper's
-		// --source. Its read is token-exact on purpose (a lookalike must never
-		// read as wired), so a wrapper that closes its subshell right after the
-		// value leaves the shell's `)` on that token and status does not credit
-		// it. The ownership walk still reads the wrapper as ghost's own, which is
-		// what leaves it byte-identical and adds nothing beside it.
+		// --source. The subshell's closing `)` is its own token, so the value
+		// reads exactly as `claude-code` and status agrees with the ownership
+		// walk that leaves the wrapper byte-identical.
 		statusWired bool
 	}{
 		{"timeout 5 " + ghostBin + " hook stop --source claude-code", true},
@@ -1574,7 +1574,7 @@ func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
 		{"stdbuf --output L " + ghostBin + " hook stop --source claude-code", true},
 		{"ionice --class 2 --classdata 4 " + ghostBin + " hook stop --source claude-code", true},
 		{"sudo --user=alice " + ghostBin + " hook stop --source claude-code", true},
-		{"(cd /d; " + ghostBin + " hook stop --source claude-code)", false},
+		{"(cd /d; " + ghostBin + " hook stop --source claude-code)", true},
 		{"{ " + ghostBin + " hook stop --source claude-code; }", true},
 		{"X=1 timeout -k 5 10 " + ghostBin + " hook stop --source claude-code", true},
 	} {
@@ -1801,5 +1801,29 @@ func TestEnsureHook_AnOptionOperandIsNotTheCommand(t *testing.T) {
 				t.Error("ghostHookTail credited a ghost binary that is an option's operand")
 			}
 		})
+	}
+}
+
+// TestSplitUnquotedOperators_CutsASubshellCloser: the `)` that closes a
+// subshell is its own token, a `)` inside quotes or paired with a `(` in the
+// same word is left alone.
+func TestSplitUnquotedOperators_CutsASubshellCloser(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"claude-code)", []string{"claude-code", ")"}},
+		{"claude-code))", []string{"claude-code", ")", ")"}},
+		{"x;y)", []string{"x", ";", "y", ")"}},
+		{"$(date)", []string{"$(date)"}},
+		{")", []string{")"}},
+	} {
+		if got := splitUnquotedOperators(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("splitUnquotedOperators(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	got, _ := hookCommandTokens(`echo "a)" b`)
+	if want := []string{"echo", "a)", "b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("quoted closer tokens = %q, want %q", got, want)
 	}
 }

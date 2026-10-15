@@ -993,7 +993,7 @@ func prefixRegionBefore(tokens []string, idx int) (int, bool) {
 		tok := tokens[j]
 		switch {
 		case isAssignmentWord(tok):
-		case operands[tok] || prefixOptionTakesOperand[tok]:
+		case operands[tok]:
 			// The option's operand must be one of the words between the
 			// command and the invocation, never the invocation's own token:
 			// `timeout -k ghost hook stop …` names ghost as the duration.
@@ -1013,16 +1013,6 @@ func prefixRegionBefore(tokens []string, idx int) (int, bool) {
 		return 0, false
 	}
 	return head - 1, true
-}
-
-// prefixOptionTakesOperand names the short options, common to the transparent
-// prefix commands above, that consume a separate following word as an operand
-// (`sudo -u user`, `nice -n 10`, `env -u FOO`, `sudo -g group`). Options
-// without operands (`-i`, `-E`, `-S`) are walked as single tokens by
-// isLikelyOption and do NOT need an entry here.
-var prefixOptionTakesOperand = map[string]bool{
-	"-u": true, "-g": true, "-U": true, "-r": true, "-p": true, "-n": true,
-	"-C": true, "-S": true, "-o": true, "-O": true,
 }
 
 // shellOptionTakesOperand is the same question for shell flags (`bash -o
@@ -1196,12 +1186,6 @@ func startsCommand(tokens []string, i int) bool {
 			idx--
 			continue
 		}
-		// operand of an option-taking short flag sitting immediately to the
-		// left (e.g. `sudo -u user ghost`: `user` at idx, `-u` left)
-		if idx > 0 && prefixOptionTakesOperand[tokens[idx-1]] {
-			idx -= 2
-			continue
-		}
 		if run, ok := prefixRegionBefore(tokens, idx); ok {
 			idx = run
 			continue
@@ -1312,7 +1296,7 @@ func hookCommandTokens(cmd string) ([]string, bool) {
 // `&>file`), not to a command boundary: `othertool 2>&1 ghost hook stop …`
 // passes ghost to othertool, so that token is left whole too.
 func splitUnquotedOperators(token string) []string {
-	if !strings.ContainsAny(token, ";&|") {
+	if !strings.ContainsAny(token, ";&|)") {
 		return []string{token}
 	}
 	var (
@@ -1346,7 +1330,35 @@ func splitUnquotedOperators(token string) []string {
 		i = j
 	}
 	flush()
-	return pieces
+	var out []string
+	for _, p := range pieces {
+		out = append(out, cutGroupCloser(p)...)
+	}
+	return out
+}
+
+// cutGroupCloser cuts the unquoted `)` that closes a subshell off the end of a
+// bare word into a token of its own, so `(cd /d; ghost hook stop --source
+// claude-code)` ends its tail at the closer and the value reads as
+// `claude-code`. Only a `)` with no `(` left in the word to pair with is a
+// closer: `$(date)` keeps its own.
+func cutGroupCloser(word string) []string {
+	if len(word) < 2 || word[len(word)-1] != ')' {
+		return []string{word}
+	}
+	open := strings.Count(word, "(")
+	end := len(word)
+	for end > 0 && word[end-1] == ')' && strings.Count(word[:end], ")") > open {
+		end--
+	}
+	if end == len(word) || end == 0 {
+		return []string{word}
+	}
+	out := []string{word[:end]}
+	for k := end; k < len(word); k++ {
+		out = append(out, ")")
+	}
+	return out
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
