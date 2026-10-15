@@ -506,6 +506,198 @@ func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualMergeMixedScopeOrderAB verifies that a merge with
+// one unscoped and one scoped source is dropped regardless of order.
+// This is the fix for the order-dependency bug: sources [unscoped A, scoped B]
+// in order [A,B] used to write the merge with B's scope; now it drops in
+// both orders.
+func TestReplaceNonManualMergeMixedScopeOrderAB(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create an unscoped source and a scoped source.
+	unscoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "unscoped fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		// No scope = applies everywhere
+	})
+	if err != nil {
+		t.Fatalf("create unscoped: %v", err)
+	}
+	scoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped: %v", err)
+	}
+
+	// Order: unscoped first, then scoped (used to succeed with scoped scope)
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "merged fact",
+			Importance:  0.6,
+			ReplacesIDs: []string{unscoped, scoped},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to mixed scopes (order AB), but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{unscoped, scoped})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualMergeMixedScopeOrderBA verifies that a merge with
+// one unscoped and one scoped source is dropped regardless of order.
+// This is the fix for the order-dependency bug: sources [scoped B, unscoped A]
+// in order [B,A] used to drop; now both orders drop consistently.
+func TestReplaceNonManualMergeMixedScopeOrderBA(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a scoped source and an unscoped source.
+	scoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped: %v", err)
+	}
+	unscoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "unscoped fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		// No scope = applies everywhere
+	})
+	if err != nil {
+		t.Fatalf("create unscoped: %v", err)
+	}
+
+	// Order: scoped first, then unscoped
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "merged fact",
+			Importance:  0.6,
+			ReplacesIDs: []string{scoped, unscoped},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to mixed scopes (order BA), but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{scoped, unscoped})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualReuseDisagreeingScope verifies that a multi-source
+// emission that would reuse an existing row is also dropped when sources
+// disagree on scope. The reuse branch now applies the same "never silently
+// change scope" rule: if the emission's sources have conflicting scopes,
+// the emission is dropped and both sources remain unchanged.
+func TestReplaceNonManualReuseDisagreeingScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a source that will be reused (byte-identical content).
+	reuseSrc, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "reused content",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create reuseSrc: %v", err)
+	}
+
+	// Create another source with different scope.
+	otherSrc, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "other fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create otherSrc: %v", err)
+	}
+
+	// Try to merge them into the reused content (byte-identical to reuseSrc).
+	// This would take the reuse branch but sources disagree on scope.
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "reused content", // byte-identical to reuseSrc
+			Importance:  0.6,              // different importance
+			ReplacesIDs: []string{reuseSrc, otherSrc},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// The emission should be dropped due to scope conflict
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to scope conflict in reuse branch, but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist unchanged
+	rows, err := s.GetByIDs(ctx, []string{reuseSrc, otherSrc})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	foundReuse, foundOther := false, false
+	for _, r := range rows {
+		if r.Content == "reused content" {
+			foundReuse = true
+			if r.Importance != 0.5 {
+				t.Errorf("reuseSrc importance changed: got %f, want 0.5", r.Importance)
+			}
+			if r.Scope["environment"] != "production" {
+				t.Errorf("reuseSrc scope changed: got %v, want production", r.Scope)
+			}
+		}
+		if r.Content == "other fact" {
+			foundOther = true
+			if r.Scope["environment"] != "staging" {
+				t.Errorf("otherSrc scope changed: got %v, want staging", r.Scope)
+			}
+		}
+	}
+	if !foundReuse || !foundOther {
+		t.Errorf("sources were modified or missing: %+v", rows)
+	}
+}
+
 // TestRestoreSnapshotRewritesScopeOnExistingRow: restore updates rows that
 // still exist by matching snapshot to memory id. That UPDATE has to carry
 // scope too, or a restore into a row whose scope was edited in the meantime

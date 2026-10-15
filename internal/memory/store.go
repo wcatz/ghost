@@ -7076,7 +7076,10 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 //
 // This ensures a single-source rewrite keeps the source's scope, a merge with
 // agreeing sources keeps the shared scope, and a merge with conflicting scopes
-// is dropped (the sources stay unmerged).
+// or a mix of scoped and unscoped sources is dropped (the sources stay
+// unmerged). The decision is ORDER-INDEPENDENT: we track whether we saw any
+// scoped source and any unscoped source, and if both are present it is a
+// conflict regardless of the order ReplacesIDs lists them.
 func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (map[string]string, error) {
 	// If the emission explicitly states a scope, it wins.
 	if m.Scope != nil {
@@ -7085,6 +7088,7 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 
 	var agreedScope map[string]string
 	haveAgreed := false
+	haveUnscoped := false
 
 	for _, id := range m.ReplacesIDs {
 		if id == "" {
@@ -7110,16 +7114,7 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 		}
 
 		if sourceScope == nil {
-			// This source is unscoped (applies everywhere). It doesn't constrain
-			// the agreed scope, but if we already have an agreed scope, this
-			// source's lack of scope means we can't keep keys it doesn't have.
-			if haveAgreed {
-				// Some sources are scoped, this one isn't. We can only keep
-				// keys that ALL sources share - but an unscoped source has no
-				// keys, so the intersection is empty.
-				return nil, fmt.Errorf("scope conflict: source %s is unscoped but others are scoped", id)
-			}
-			// All sources so far are unscoped; continue.
+			haveUnscoped = true
 			continue
 		}
 
@@ -7135,6 +7130,11 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 			return nil, fmt.Errorf("scope conflict: source %s disagrees with previous sources", id)
 		}
 		// They agree; continue checking other sources.
+	}
+
+	// If we saw both scoped and unscoped sources, it's a conflict.
+	if haveAgreed && haveUnscoped {
+		return nil, fmt.Errorf("scope conflict: mix of scoped and unscoped sources")
 	}
 
 	return agreedScope, nil
@@ -7556,10 +7556,12 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// Check for scope conflicts: if sources have disagreeing scopes, or only
 		// some are scoped, drop the emission to avoid silently widening scope.
 		if !dropEmission[i] && len(m.ReplacesIDs) > 0 {
-			scope, err := inheritedScope(ctx, tx, projectID, m)
-			if err != nil {
+			if _, err := inheritedScope(ctx, tx, projectID, m); err != nil {
 				dropEmission[i] = true
-				// Mark sources as concurrent so they survive (excluded from reusable and deleteIDs).
+				// Mark sources as concurrent so they survive this replace
+				// (excluded from reusable and deleteIDs). A scope conflict is
+				// permanent, not a transient concurrent edit, but the same
+				// "keep the sources" logic applies.
 				for _, replaced := range m.ReplacesIDs {
 					if _, stored := candidatesByID[replaced]; stored {
 						concurrent[replaced] = true
@@ -7572,7 +7574,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 					}
 				}
 			}
-			_ = scope // scope is only used for the conflict check here; the fresh INSERT will recompute it.
 		}
 		// A merge whose decision links alone would not fit in a source_ref is not
 		// written: truncating the list is the silent supersede miss, and failing
@@ -7832,20 +7833,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// computable without conflict.
 		scope, err := inheritedScope(ctx, tx, projectID, m)
 		if err != nil {
-			// This should not happen since conflicts are caught in the drop loop,
-			// but handle it defensively.
-			dropped.record(false, 0)
-			for _, replaced := range m.ReplacesIDs {
-				if _, stored := candidatesByID[replaced]; stored {
-					concurrent[replaced] = true
-				}
-			}
-			for _, c := range candidates {
-				if c.content == m.Content {
-					concurrent[c.id] = true
-				}
-			}
-			continue
+			// This should not happen since conflicts are caught in the drop loop.
+			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("unexpected scope conflict in fresh INSERT: %w", err)
 		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
