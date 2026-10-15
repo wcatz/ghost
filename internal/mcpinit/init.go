@@ -749,22 +749,11 @@ func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReco
 }
 
 // isGhostHookCommand reports whether cmd runs ghost for the event cmdSubstr
-// names, wherever ghost sits in the command: a token that is the ghost binary —
-// the one this run writes, under whatever name it carries, or a ghost-named one
-// under any path and any quoting — immediately followed by that event's
-// `hook <event>` tail. Tokens are read with the same quoting splitHookCommand
-// applies to the leading one.
-//
-// Reading every token, not only the leading one, is what makes a hand-edited
-// wrapper ghost's own hook: `env X=1 /path/ghost hook session-start` and
-// `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
-// and adds nothing beside them — a second entry would fire ghost's hook twice.
-// Another tool whose command merely contains the words `hook session-start`,
-// with no ghost-binary token before them, is not ghost's and still gets ghost's
-// own entry added beside it (#1326). A quoted argument that carries the whole
-// invocation (`sh -c "ghost hook stop …"`) is read inside, at command position
-// only — see ghostHookTail for why that bound is the difference between
-// recognising a wrapper and the false positive #1326 closed.
+// names, wherever ghost sits in the command. It is a thin read of
+// ghostHookTail, the one ownership rule this file keeps — shared with the
+// status reader, so both answer the same question about the same file — and
+// its doc records which shapes that rule accepts and which it holds foreign
+// (#1326, #1337, #1339).
 func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
 	eventToken := strings.TrimPrefix(cmdSubstr, "hook ")
 	if eventToken == cmdSubstr {
@@ -783,7 +772,7 @@ func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
 // flag that follows it, as status does for --source.
 //
 // Reading every token, not only the leading one, is what makes a hand-edited
-// wrapper ghost's own hook: `env X=1 /path/ghost hook session-start` and
+// wrapper ghost's own: `env X=1 /path/ghost hook session-start` and
 // `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
 // and adds nothing beside them — a second entry would fire ghost's hook twice.
 // Another tool whose command merely contains the words `hook session-start`,
@@ -813,13 +802,28 @@ var shellConnectives = map[string]bool{
 	"exec": true, ";": true, "&&": true, "||": true, "|": true, "&": true,
 }
 
+// transparentPrefixes name the commands that run the word after their own
+// flags and assignments unchanged: a ghost binary behind one of them is still
+// the command that runs (`sudo ghost hook stop …`, `env -i X=1 ghost …`, `nice
+// …`, `command …`), so a second entry would fire the hook twice (#1339).
+// `env`'s `-i` flag is swallowed as well, but only directly after `env`
+// itself, so another tool's `-i` stays an argument of that tool.
+var transparentPrefixes = map[string]bool{
+	"sudo": true, "nice": true, "command": true, "env": true,
+}
+
 // shellInterpreters name the commands that run a later argument as a command
-// list, and carriesCommandArgument reports whether the word before a token
-// does: `sh -c SCRIPT`, `bash -lc SCRIPT`. A flag ending in `c` is how every
-// one of them spells it, and a shell name takes the script positionally
-// (`busybox sh SCRIPT`). Without this gate an ARGUMENT that merely mentions
-// ghost — `othertool --note 'ghost hook stop …'` — would be read as a command
-// that runs, which is the #1326 false positive.
+// list, and carriesCommandArgument reports whether the words before a token
+// say the token is one: a shell's own command-list flag — a single-dash flag
+// ending in `c`, which is how every one of them spells `-c` and combined
+// forms like `-lc` — directly after a shell name (`sh -c SCRIPT`, `bash -lc
+// SCRIPT`), or a shell name taking the script positionally (`busybox sh
+// SCRIPT`). A flag belongs to any tool, so the flag form only counts after a
+// shell: `othertool -c 'ghost hook stop …'` and `othertool --sync '…'` hand
+// ghost's invocation over as DATA to another tool, and reading either as a
+// command list is the false positive #1339 closed. Without this gate an
+// ARGUMENT that merely mentions ghost — `othertool --note 'ghost hook stop …'`
+// — would be read as a command that runs, which is the #1326 false positive.
 var (
 	shellInterpreters = map[string]bool{
 		"sh": true, "bash": true, "zsh": true, "dash": true,
@@ -832,10 +836,19 @@ func carriesCommandArgument(tokens []string, i int) bool {
 		return false
 	}
 	prev := tokens[i-1]
-	if strings.HasPrefix(prev, "-") && strings.HasSuffix(prev, "c") {
-		return true
+	if isShellCommandListFlag(prev) {
+		return i > 1 && shellInterpreters[hookCommandBase(tokens[i-2])]
 	}
 	return shellInterpreters[hookCommandBase(prev)]
+}
+
+// isShellCommandListFlag reports whether word is a single-dash flag ending in
+// `c` — the shape every known shell spells `-c` and combined forms like `-lc`
+// with. A long flag (`--sync`) never carries a command list, and the single-
+// dash form only means one directly after a shell name
+// (carriesCommandArgument).
+func isShellCommandListFlag(word string) bool {
+	return len(word) > 1 && strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--") && strings.HasSuffix(word, "c")
 }
 
 // ghostTailOver walks tokens for a ghost binary immediately followed by the
@@ -874,13 +887,25 @@ func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]s
 
 // startsCommand reports whether the token at i starts a command in the command
 // list it belongs to: the first token, one right after a connective, or one
-// right after an assignment prefix (`X=1`), which is not a command word.
+// preceded only by words that are not the command itself — an assignment
+// prefix (`X=1`) or a transparent prefix word (`sudo ghost …`, `env -i X=1
+// ghost …`) — so the scan walks back until something else appears and `echo
+// sudo ghost hook stop` still runs `echo` (#1339).
 func startsCommand(tokens []string, i int) bool {
-	if i == 0 {
-		return true
+	for j := i - 1; j >= 0; j-- {
+		prev := tokens[j]
+		if shellConnectives[prev] {
+			return true
+		}
+		if isAssignmentWord(prev) || transparentPrefixes[prev] {
+			continue
+		}
+		if prev == "-i" && j > 0 && tokens[j-1] == "env" {
+			continue
+		}
+		return false
 	}
-	prev := tokens[i-1]
-	return shellConnectives[prev] || isAssignmentWord(prev)
+	return true
 }
 
 // isAssignmentWord reports whether word is a shell assignment prefix such as
