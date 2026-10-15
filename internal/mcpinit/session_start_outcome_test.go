@@ -12,7 +12,25 @@ import (
 
 // outcomeSession builds a store whose project bucket holds nLive live rows and
 // nExpired rows whose validity window has closed, points XDG_DATA_HOME at it,
-// and returns the project path for the block to read.
+// and returns the project path for the block to read. Its `_global` bucket is
+// empty; outcomeSessionWithGlobals adds retired cross-project rows to it.
+func outcomeSession(t *testing.T, nLive, nExpired int) string {
+	t.Helper()
+	return outcomeSessionRows(t, nLive, nExpired, 0)
+}
+
+// outcomeSessionWithGlobals is outcomeSession's store plus nExpiredGlobals
+// `_global` rows whose validity windows have closed, for the all-withheld GLOBAL
+// bucket (#1316). The cross-project rows are withheld the same way the project's
+// are, and for the same reason they carry the HIGHEST importance and the NEWEST
+// created_at: a row the global ranking wanted must be the one withheld, so a
+// section that leaves it out proves the withholding rather than the ranking.
+func outcomeSessionWithGlobals(t *testing.T, nLive, nExpired, nExpiredGlobals int) string {
+	t.Helper()
+	return outcomeSessionRows(t, nLive, nExpired, nExpiredGlobals)
+}
+
+// outcomeSessionRows is the ONE builder behind both fixtures above.
 //
 // The fixture is built the way validitySession's is, for the same reasons: the
 // moving window is written relative to now in memory.StoredStampLayout (an RFC
@@ -20,7 +38,7 @@ import (
 // KEEPS the row), and the expired rows are given the HIGHEST importance and the
 // NEWEST created_at on purpose — a row that survives must be the one that earned
 // its place, so a dropped row has to be a row the ranking wanted.
-func outcomeSession(t *testing.T, nLive, nExpired int) (projectPath string) {
+func outcomeSessionRows(t *testing.T, nLive, nExpired, nExpiredGlobals int) (projectPath string) {
 	t.Helper()
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -77,6 +95,21 @@ func outcomeSession(t *testing.T, nLive, nExpired int) (projectPath string) {
 			t.Fatalf("fixture stamp is not one memory.ParseStamp reads")
 		}
 	}
+	for i := 0; i < nExpiredGlobals; i++ {
+		// The `_global` counterpart of the loop above: a retired cross-project
+		// row, carrying the highest importance so it is one the global ranking
+		// wanted, for the all-withheld GLOBAL bucket (#1316).
+		id := "gexpired" + pad2(i)
+		if _, err := db.Exec(`
+			INSERT INTO memories (id, project_id, category, content, source, importance, created_at, valid_until)
+			VALUES (?, '_global', 'preference', ?, 'manual', ?, ?, ?)`,
+			id, "expired global row "+pad2(i)+" content for the outcome fixture", 0.98+float64(i)*0.001,
+			time.Date(2026, 3, 1+i, 3, 4, 5, 0, time.UTC).Format("2006-01-02 15:04:05"),
+			now.Add(-24*time.Hour).Format(memory.StoredStampLayout),
+		); err != nil {
+			t.Fatalf("insert expired global %d: %v", i, err)
+		}
+	}
 	_ = db.Close()
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -110,6 +143,60 @@ func TestSessionStartSaysRowsWereWithheldWhenEveryRowIsExpired(t *testing.T) {
 		if strings.Contains(got, absent) {
 			t.Errorf("a withheld row rendered as if current (%q); got:\n%s", absent, got)
 		}
+	}
+}
+
+// TestSessionStartSaysRowsWereWithheldWhenEveryGlobalRowIsExpired is #1316, the
+// global counterpart of #897: a `_global` bucket whose every row's validity
+// window had closed dropped its section entirely, so the block read exactly like
+// one for a store that holds no cross-project memories. The rows WERE found and
+// then withheld — the global half must keep its heading, say so in the
+// assembler's own words, and point at the tool that still shows the rows with
+// the window they carry, mirroring the project half above.
+func TestSessionStartSaysRowsWereWithheldWhenEveryGlobalRowIsExpired(t *testing.T) {
+	got := renderSessionStart(t, outcomeSessionWithGlobals(t, 1, 0, 2))
+
+	if !strings.Contains(got, "**Global (applies to all projects):**\n") {
+		t.Errorf("a wholly-withheld global bucket must still render a Global section with the bare heading; got:\n%s", got)
+	}
+	for _, want := range []string{
+		"No sufficiently trustworthy memory found",
+		"withheld as out of date",
+		"Call ghost_memories_list to see them, still marked with the window they carry",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the block does not say the global rows were withheld (%q); got:\n%s", want, got)
+		}
+	}
+	// The origin guidance describes whose preferences the SHOWN rows are, so
+	// with nothing shown the block must not claim these rows are the user's own
+	// — the misattribution the heading is the last link in (#545).
+	if strings.Contains(got, "the user's own saved cross-project preferences") {
+		t.Errorf("a wholly-withheld global bucket presented the rows as the user's own preferences; got:\n%s", got)
+	}
+	for _, absent := range []string{"expired global row 00", "expired global row 01"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("a withheld global row rendered as if current (%q); got:\n%s", absent, got)
+		}
+	}
+}
+
+// TestSessionStartRendersNoGlobalSectionWhenTheStoreHasNoGlobals is the control
+// for the regression above: a store whose global bucket is EMPTY — nothing was
+// ever saved, rather than found and withheld — keeps today's output and gains no
+// Global heading and no withheld sentence. Without it the fix could pass by
+// printing the note whenever the section is short.
+func TestSessionStartRendersNoGlobalSectionWhenTheStoreHasNoGlobals(t *testing.T) {
+	got := renderSessionStart(t, outcomeSessionWithGlobals(t, 1, 0, 0))
+
+	if !strings.Contains(got, "live row 00") {
+		t.Fatalf("the fixture project did not render its live row, so the block is not exercising the no-globals branch:\n%s", got)
+	}
+	if strings.Contains(got, "Global (applies to all projects)") {
+		t.Errorf("a store with no global rows must render no Global section:\n%s", got)
+	}
+	if strings.Contains(got, "Call ghost_memories_list") {
+		t.Errorf("a store with no global rows must not claim rows were withheld — nothing was seen:\n%s", got)
 	}
 }
 
