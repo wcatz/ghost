@@ -338,3 +338,28 @@ under the production environment to answer it — behind `GHOST_LIVE_TESTS=1`,
 because a real turn costs a model call. So the mode is confirmed end-to-end only
 where goose is installed and a provider is configured, and not in CI.
 
+## Key pattern: a harness call is bounded by its whole deadline
+
+`harnessCommand` (`internal/ai/scratch.go`) is the one spawn funnel, so the
+deadline bound is set there and no backend can lose it. `exec.CommandContext`'s
+default cancellation is NOT that bound: on the deadline Go kills only the direct
+child, and a harness helper that inherited the child's stdout keeps the copy
+pipe's write end open, so `os/exec` reads that pipe until EOF and `Run` blocks
+until the orphan exits, however long that is — measured as a 500 ms context
+returning after 6 s, which is exactly what `defaultTimeout`
+(`internal/ai/cli_client.go`) claims to prevent. Three settings in the funnel
+close it, in the same shape the lifecycle phase spawn uses one level up
+(`cmd/ghost/lifecycle.go`): the child starts in its own process group
+(`setHarnessProcessGroup`, `Setpgid` on unix and `CREATE_NEW_PROCESS_GROUP` on
+Windows), `cmd.Cancel` signals the WHOLE group (`terminateHarnessProcess`), and
+`cmd.WaitDelay` (`harnessWaitDelay`, 2 s) is the backstop for a helper that
+ignores the signal — after it `Wait` closes the pipes and returns, so the call
+ends at the deadline plus the backstop rather than at the orphan's lifetime. The
+group signal is what reaches a helper on unix; on Windows there is no portable
+group signal, so the direct child is killed and the backstop does the bounding.
+The two halves are pinned separately so neither is inferred from the other:
+`TestHarnessDeadlineSweepsTheProcessGroup` requires a SIGTERM-respecting helper
+to be gone once the call returns, and
+`TestHarnessWaitDelayBoundsAPipeHoldingGrandchild` requires a SIGTERM-ignoring
+helper to still be running when the call has already returned.
+

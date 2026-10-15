@@ -6,9 +6,22 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/wcatz/ghost/internal/scratch"
 )
+
+// harnessWaitDelay bounds how long a harness call's Wait may spend on I/O pipes
+// a grandchild still holds after the call's context is done. The deadline's
+// Cancel signals the harness's process group, which ends a child that respects
+// the signal; WaitDelay is the backstop for the one that does not, and for a
+// helper that merely inherited the child's stdout: without it, os/exec reads
+// that pipe until EOF, which does not arrive until the orphan closes its copy
+// of the write end, and the call blocks for the orphan's lifetime however long
+// that is. Two seconds is a grace for a harness that is winding down, not a
+// budget for one still working — the timer only starts once the context is done
+// or the child has already exited.
+const harnessWaitDelay = 2 * time.Second
 
 // harnessCommand builds the subprocess command every LLM harness client runs,
 // confined to a fresh per-invocation directory under Ghost's owned scratch
@@ -41,6 +54,12 @@ import (
 // silently become a weaker policy: this is the one failure the function cannot
 // absorb, and it returns an error rather than a command a caller could run.
 //
+// Every child is also bounded by its caller's context as a whole. The child is
+// started in its own process group, Cancel signals that group, and a WaitDelay
+// backstops a grandchild that ignores the signal — so a harness that leaves a
+// helper holding its stdout cannot make cmd.Run block past the deadline. See
+// harnessWaitDelay for why the default os/exec cancellation is not enough.
+//
 // The returned release is always safe to call, repeatedly and after the
 // directory has already been removed — including on the error path, where it
 // removes nothing.
@@ -57,6 +76,23 @@ func harnessCommand(ctx context.Context, binary string, args, baseEnv []string, 
 	scratch.EnforceBudget()
 
 	cmd := exec.CommandContext(ctx, binary, args...)
+	// The call's context is a real bound on the whole call, not only on the
+	// direct child. os/exec's default Cancel kills just that child, so a harness
+	// helper that inherited stdout keeps the copy pipe's write end open and Wait
+	// blocks until the orphan exits — measured as a 500 ms context returning
+	// after 6 s, which is the deadline failing at exactly the thing
+	// defaultTimeout (cli_client.go) claims it prevents. Three settings close
+	// that, in the same shape the lifecycle phase spawn uses one level up.
+	//
+	// The child runs in its own process group so Cancel can signal the WHOLE
+	// group, which is what reaches a helper that is still running. WaitDelay is
+	// the backstop for a helper that ignores the signal, so an inherited pipe
+	// cannot hold Wait past the deadline. Both are set here rather than at each
+	// call site, because this is the single spawn funnel and a backend that
+	// built its own command would lose them.
+	setHarnessProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminateHarnessProcess(cmd) }
+	cmd.WaitDelay = harnessWaitDelay
 	dir, err := scratch.Open()
 	if err == nil {
 		cmd.Dir = dir.Path()
