@@ -254,7 +254,12 @@ func runLifecycle() {
 		// then, since the deadline's Cancel needs a process to signal.
 		runErr := cmd.Start()
 		if runErr == nil {
-			go phaseWatchdog(ctx, phaseDone, cmd, phaseGracePeriod, killPhaseProcess, time.After)
+			go phaseWatchdog(ctx, phaseDone, cmd, phaseEscalation{
+				grace:          phaseGracePeriod,
+				after:          time.After,
+				groupInhabited: phaseGroupInhabited,
+				kill:           killPhaseProcess,
+			})
 			runErr = cmd.Wait()
 		}
 		close(phaseDone)
@@ -518,57 +523,57 @@ func consolidationContext(parent context.Context, minutes int) (context.Context,
 // SIGTERM before its whole process group is force-killed.
 const phaseGracePeriod = 30 * time.Second
 
+// phaseEscalation is the impure edge of a phase's deadline: the grace period,
+// the clock that measures it, the question of whether anything is still in the
+// phase's process group, and the signal itself. All four are fields so a test
+// can set the boundary where the grace is up and the group has emptied at once,
+// rather than waiting for it to arrive.
+type phaseEscalation struct {
+	grace          time.Duration
+	after          func(time.Duration) <-chan time.Time
+	groupInhabited func(*exec.Cmd) bool
+	kill           func(*exec.Cmd)
+}
+
 // phaseWatchdog is the second half of a phase's deadline. The deadline's Cancel
 // has already asked the phase's whole process group to shut down; this is the
-// escalation for a phase that ignored it, and it returns as soon as the phase
-// ends.
+// escalation for a phase that ignored it, and it returns without escalating
+// when the phase ends before its deadline.
 //
-// Two things about the shape are load-bearing, and both were wrong in the
-// inline goroutine this replaces. A phase that exits on the SIGTERM it was
-// given inside the grace period has been reaped by then, so its process group
-// id belongs to nobody in this run and signalling it can only hit an unrelated
-// group on a busy machine. And Go's select picks a ready case at random, so a
-// phase that ended before the goroutine parked — both channels closed by the
-// time it ran — took the deadline branch about half the time and killed a dead
-// group the grace period later. So phaseDone is always asked first and without
-// blocking, and the wait after the deadline completes on EITHER phaseDone or
-// the grace period and then asks phaseDone once more before signalling. That
-// re-check is on every path rather than only under the timer, which is what
-// makes it testable: `after` is a parameter (time.After in production) so a
-// test can hold the grace and phaseDone ready at once.
-func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd), after func(time.Duration) <-chan time.Time) {
-	// A phase that has already ended is never signalled. This select is
-	// random when both of its cases are ready, and the goroutine does start
-	// after both have closed — the phase completing while the deadline had
-	// already fired — so phaseDone is asked first and without blocking.
+// The question it asks before signalling is about the GROUP, not the phase
+// process, and the difference is the whole point. cmd.Wait returns the instant
+// the direct child is reaped, and a phase is a plain ghost process with no
+// SIGTERM handler, so it dies the moment the deadline's group signal lands —
+// while the CLI harness it spawned, same group, can ignore or slowly handle the
+// signal and survive as an orphan. That orphan is the reason killPhaseProcess
+// exists, so "the phase has been waited for" is not a reason to stay the
+// escalation; "the group is empty" is. Asking the group is also what keeps the
+// id safe to signal: an empty group is the one whose id belongs to no run here
+// and, on a busy machine, can already have been reused. Go's select picks a
+// ready case at random, but the phaseDone/ctx.Done choice below no longer
+// decides anything: both cases fall through to the deadline test.
+func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
+	// Wait for the deadline, or for the phase to end first.
 	select {
 	case <-phaseDone:
-		return
-	default:
-	}
-
-	select {
-	case <-phaseDone:
-		return
 	case <-ctx.Done():
 	}
 
-	// The deadline fired. The phase has the grace period to be gone on the
-	// SIGTERM it was sent, and one still running after that is force-killed.
-	select {
-	case <-phaseDone:
-	case <-after(grace):
+	// Only a deadline escalates. The phase loop also cancels this context once
+	// the phase has returned, and a context the loop cancelled is not a
+	// deadline: a phase that ended on its own has nothing to sweep. When the
+	// deadline did fire, it fired BEFORE the SIGTERM that is what ends the
+	// phase, so the answer here is DeadlineExceeded by the time phaseDone
+	// closes — the check does not race the signal that caused it.
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return
 	}
-	// Ask again whatever woke the wait up: a phase that exited inside the
-	// grace period has been reaped, and its group id can by now name an
-	// unrelated group, so the signal is the one thing that must not follow.
-	// The gap between this check and the signal is as small as a goroutine
-	// can make it, because the re-check and the signal cannot be one
-	// operation.
-	select {
-	case <-phaseDone:
-	default:
-		kill(cmd)
+
+	// The deadline fired. The group has the grace period to empty out on the
+	// SIGTERM it was sent, and whatever is still in it is force-killed.
+	<-esc.after(esc.grace)
+	if esc.groupInhabited(cmd) {
+		esc.kill(cmd)
 	}
 }
 

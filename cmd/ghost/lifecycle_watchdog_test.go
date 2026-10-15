@@ -1,10 +1,20 @@
+//go:build !windows
+
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -17,7 +27,7 @@ import (
 const phaseExitsOnTerm = "trap 'exit 0' TERM; while :; do sleep 0.05; done"
 
 // phaseIgnoresTerm is a phase that never exits on its own: the case where the
-// escalation is the only thing that ends it.
+// escalation is the only thing that ends the group.
 const phaseIgnoresTerm = "trap '' TERM; while :; do sleep 0.05; done"
 
 // newPhaseCmd builds a phase exactly the way the phase loop in runLifecycle
@@ -33,15 +43,19 @@ func newPhaseCmd(timeout time.Duration, script string) (context.Context, context
 	return ctx, cancel, cmd
 }
 
-// countingKill is the seam on killPhaseProcess: it records the escalation and
-// then performs the real one, so a phase the assertion expects to survive it
-// still dies when it is wrong to have been signalled, and a phase the
-// escalation is right about still ends and the wait returns. The count is
+// realEscalation is the production phaseEscalation with one replacement: the
+// kill records that it fired before it performs the real one, so a phase the
+// assertion expects to be swept still dies and the wait returns. The count is
 // atomic because the watchdog writes it from its own goroutine.
-func countingKill(attempts *atomic.Int64) func(*exec.Cmd) {
-	return func(cmd *exec.Cmd) {
-		attempts.Add(1)
-		killPhaseProcess(cmd)
+func realEscalation(grace time.Duration, attempts *atomic.Int64) phaseEscalation {
+	return phaseEscalation{
+		grace:          grace,
+		after:          time.After,
+		groupInhabited: phaseGroupInhabited,
+		kill: func(cmd *exec.Cmd) {
+			attempts.Add(1)
+			killPhaseProcess(cmd)
+		},
 	}
 }
 
@@ -50,7 +64,7 @@ func countingKill(attempts *atomic.Int64) func(*exec.Cmd) {
 // phase loop starts the phase first: the watchdog signals the phase's process
 // group, and a goroutine that reads cmd.Process before Start writes it races
 // with Start on the one field the kill is decided by.
-func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd)) *sync.WaitGroup {
+func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan struct{}, cmd *exec.Cmd, esc phaseEscalation) *sync.WaitGroup {
 	t.Helper()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start the phase: %v", err)
@@ -59,7 +73,7 @@ func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan str
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		phaseWatchdog(ctx, phaseDone, cmd, grace, kill, time.After)
+		phaseWatchdog(ctx, phaseDone, cmd, esc)
 	}()
 	return &wg
 }
@@ -77,10 +91,51 @@ func assertPhaseExitedItself(t *testing.T, cmd *exec.Cmd) {
 	}
 }
 
+// readPid reads a pid a phase wrote, polling briefly because the file may be
+// written just as the phase is being reaped.
+func readPid(t *testing.T, path string) int {
+	t.Helper()
+	var raw []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(path)
+		if err == nil && len(bytes.TrimSpace(b)) > 0 {
+			raw = b
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("read the recorded pid: %v (%q)", err, raw)
+	}
+	return pid
+}
+
+// processAlive reports whether pid still exists. EPERM means it exists but is
+// not ours to signal, which still counts as alive.
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// waitGone polls until pid is gone, so the test does not race the reparented
+// process being reaped after the group SIGKILL.
+func waitGone(pid int, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("still running after %s", within)
+}
+
 // TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod is
 // the deterministic path: the deadline fires, the phase exits on that SIGTERM
-// inside the grace period, and the group is reaped before the escalation
-// lands. The escalation used to sleep out the grace period and kill
+// inside the grace period, and the group is empty by the time the escalation
+// asks. The escalation used to sleep out the grace period and kill
 // unconditionally, so this run always signalled a process group id that no
 // longer belonged to anything in it.
 func TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod(t *testing.T) {
@@ -93,7 +148,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod(t *te
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
-	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, grace, countingKill(&attempts))
+	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, realEscalation(grace, &attempts))
 
 	// The deadline interrupted the phase, so the wait reports the context
 	// error whatever the exit code was; what says the phase left on its own
@@ -104,20 +159,21 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod(t *te
 
 	assertPhaseExitedItself(t, cmd)
 	if n := attempts.Load(); n != 0 {
-		t.Errorf("the escalation fired %d time(s) for a phase that had already exited and been reaped", n)
+		t.Errorf("the escalation fired %d time(s) for a phase that had already exited and emptied its group", n)
 	}
 }
 
 // TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan is the racing
-// path: the phase ends, and the loop closes phaseDone and cancels the context,
+// path: the phase ends, and the loop closes phaseDone and cancels the context
 // before the watchdog goroutine has parked in its select. Go's select then
-// picks a ready case at random, so the old shape took the deadline branch
-// about half the time and killed a dead group the rest of it later.
+// picks a ready case at random, so the old shape took the deadline branch about
+// half the time and killed a dead group the rest of it later. Neither case
+// escalates now, because the context the loop cancelled is not a deadline.
 //
 // The goroutine is held on a gate until both channels are ready, which makes
-// the precondition deterministic rather than a coin toss; it runs twenty times
-// because a random choice that favours the right case a twentieth of the time
-// is a flake, not a pass.
+// the precondition deterministic rather than a coin toss, and it runs twenty
+// times because a branch that escalated only half the time would be a flake,
+// not a pass.
 func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) {
 	const grace = 50 * time.Millisecond
 
@@ -137,7 +193,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 			defer wg.Done()
 			close(started)
 			<-release
-			phaseWatchdog(ctx, phaseDone, cmd, grace, countingKill(&attempts), time.After)
+			phaseWatchdog(ctx, phaseDone, cmd, realEscalation(grace, &attempts))
 		}()
 		<-started
 
@@ -159,54 +215,47 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 	}
 }
 
-// TestThePhaseWatchdogRechecksThePhaseAfterTheGracePeriod pins the boundary the
-// grace period is a race against: the timer is up AND the phase has ended. The
-// wait after the deadline will return on one or the other, so the escalation
-// has to ask phaseDone once more before it signals — with the re-check removed
-// the wait alone is enough to let a bare kill through, on a group whose phase
-// is already reaped.
-//
-// The timer is injected so the boundary is a state the test sets, not a moment
-// it waits for: `after` parks the watchdog in the wait with the phase still
-// running, and the test then ends the phase and brings the timer up together.
-func TestThePhaseWatchdogRechecksThePhaseAfterTheGracePeriod(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the deadline has already fired
+// TestThePhaseWatchdogAsksTheGroupBeforeItSignals pins the escalation's
+// decision at the boundary where the grace is up, with the clock and the group
+// question both injected so the state is set rather than waited for. An empty
+// group must not be signalled — its id belongs to no run here and can already
+// have been reused — and an inhabited one must be.
+func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		groupAlive bool
+		wantKills  int64
+	}{
+		{"an empty group is not signalled", false, 0},
+		{"an inhabited group is signalled", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+			defer cancel()
+			<-ctx.Done() // the deadline has fired
 
-	phaseDone := make(chan struct{})
-	reached := make(chan struct{})
-	graceUp := make(chan time.Time)
-	after := func(time.Duration) <-chan time.Time {
-		close(reached)
-		return graceUp
-	}
+			graceUp := make(chan time.Time)
+			close(graceUp) // and the grace is up
 
-	var kills atomic.Int64
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		phaseWatchdog(ctx, phaseDone, &exec.Cmd{}, 0, func(*exec.Cmd) { kills.Add(1) }, after)
-	}()
+			var kills atomic.Int64
+			phaseWatchdog(ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+				grace:          0,
+				after:          func(time.Duration) <-chan time.Time { return graceUp },
+				groupInhabited: func(*exec.Cmd) bool { return tc.groupAlive },
+				kill:           func(*exec.Cmd) { kills.Add(1) },
+			})
 
-	// The watchdog is inside the wait, with the phase still running and the
-	// grace timer not yet up. End the phase and bring the timer up together:
-	// whichever of the two the wait returns on, phaseDone is closed by the
-	// time the re-check runs.
-	<-reached
-	close(phaseDone)
-	close(graceUp)
-	<-finished
-
-	if n := kills.Load(); n != 0 {
-		t.Errorf("the escalation fired %d time(s) with the phase already ended and reaped", n)
+			if got := kills.Load(); got != tc.wantKills {
+				t.Errorf("the escalation fired %d time(s), want %d", got, tc.wantKills)
+			}
+		})
 	}
 }
 
-// TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod is the other half
-// of the same rule: the re-check must not become an unconditional skip, or a
-// phase that ignores SIGTERM keeps a harness grandchild running forever. A
-// harness grandchild that survived the deadline is the whole reason the group
-// is signalled at all.
+// TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod is the case where
+// the phase process itself is still running when the escalation asks: the whole
+// group is force-killed, or a phase that ignores SIGTERM keeps a harness
+// grandchild running forever.
 func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 	const (
 		timeout = 100 * time.Millisecond
@@ -217,7 +266,7 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
-	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, grace, countingKill(&attempts))
+	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, realEscalation(grace, &attempts))
 
 	runErr := cmd.Wait()
 	close(phaseDone)
@@ -228,5 +277,51 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 	}
 	if n := attempts.Load(); n != 1 {
 		t.Errorf("the escalation fired %d time(s), want exactly 1", n)
+	}
+}
+
+// TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind is the shape a real
+// phase produces on a deadline, and the one a re-check on the phase process
+// alone would skip: the phase has no SIGTERM handler, so it dies the moment the
+// deadline's group signal lands and cmd.Wait returns at once, while the CLI
+// harness it spawned — same group, its own stdio, so it does not hold the
+// phase's pipes — ignores the signal and survives. The phase being reaped is
+// not the group being empty, so the escalation must still reach the harness.
+func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
+	const (
+		timeout = 150 * time.Millisecond
+		grace   = 250 * time.Millisecond
+	)
+	pidFile := filepath.Join(t.TempDir(), "harness.pid")
+	// The grandchild ignores SIGTERM and gets its own stdio, exactly as a CLI
+	// harness does, so it neither dies on the group signal nor holds the
+	// phase's stdout open past the phase's own exit.
+	script := fmt.Sprintf(
+		"(trap '' TERM; while :; do sleep 0.05; done) >/dev/null 2>&1 & echo $! > %s; "+
+			"trap 'exit 0' TERM; while :; do sleep 0.05; done", pidFile)
+	ctx, cancel, cmd := newPhaseCmd(timeout, script)
+	defer cancel()
+
+	var attempts atomic.Int64
+	phaseDone := make(chan struct{})
+	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+
+	if runErr := cmd.Wait(); runErr == nil {
+		t.Fatal("the phase exited on its own instead of taking the deadline's SIGTERM")
+	}
+	close(phaseDone)
+
+	harness := readPid(t, pidFile)
+	if !processAlive(harness) {
+		t.Fatal("the harness was already gone before the escalation ran; this case is not covered")
+	}
+
+	wg.Wait()
+
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("the escalation fired %d time(s), want exactly 1", n)
+	}
+	if err := waitGone(harness, 3*time.Second); err != nil {
+		t.Errorf("the harness (pid %d) survived the escalation: the phase was reaped but its group was not swept (%v)", harness, err)
 	}
 }
