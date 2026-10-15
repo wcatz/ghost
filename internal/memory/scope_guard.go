@@ -62,13 +62,13 @@ func (e *ScopeBoundError) Error() string {
 	}
 }
 
-// scopeKeyValueError is a scope key or value that breaks the character rules.
+// ScopeKeyValueError is a scope key or value that breaks the character rules.
 // It carries the field name (as the token guard does) and the reason class.
-type scopeKeyValueError struct {
+type ScopeKeyValueError struct {
 	Field, Reason string
 }
 
-func (e *scopeKeyValueError) Error() string {
+func (e *ScopeKeyValueError) Error() string {
 	return fmt.Sprintf("%s must not be %s", e.Field, e.Reason)
 }
 
@@ -150,20 +150,20 @@ func validateScopeKeyValue(field, value string) error {
 	if strings.TrimFunc(value, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
 	}) == "" {
-		return &scopeKeyValueError{Field: field, Reason: "empty or blank"}
+		return &ScopeKeyValueError{Field: field, Reason: "empty or blank"}
 	}
 	// Invalid UTF-8.
 	if !utf8.ValidString(value) {
-		return &scopeKeyValueError{Field: field, Reason: "valid UTF-8"}
+		return &ScopeKeyValueError{Field: field, Reason: "invalid UTF-8"}
 	}
 	// NUL byte.
 	if strings.IndexByte(value, 0) >= 0 {
-		return &scopeKeyValueError{Field: field, Reason: "a NUL byte"}
+		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte"}
 	}
 	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085 NEL).
 	for _, r := range value {
 		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
-			return &scopeKeyValueError{Field: field, Reason: "a control character or line separator"}
+			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator"}
 		}
 	}
 	return nil

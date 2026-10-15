@@ -188,7 +188,8 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			err := memory.CheckImportedMemory(m)
 			reason, secret = exportRefusal(err)
 			var bound *memory.ScopeBoundError
-			scope = errors.As(err, &bound)
+			var scopeChar *memory.ScopeKeyValueError
+			scope = errors.As(err, &bound) || errors.As(err, &scopeChar)
 		}
 		if reason != "" {
 			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, Orphan: orphan})
@@ -381,6 +382,10 @@ func exportRefusal(err error) (reason string, secret bool) {
 	var bound *memory.ScopeBoundError
 	if errors.As(err, &bound) {
 		return scopeBoundReason(bound), false
+	}
+	var scopeChar *memory.ScopeKeyValueError
+	if errors.As(err, &scopeChar) {
+		return "ghost import refuses it: " + scopeChar.Error(), false
 	}
 	var refused *memory.SecretContentError
 	if errors.As(err, &refused) {

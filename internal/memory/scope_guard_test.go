@@ -298,6 +298,20 @@ func TestScopeCharacterRulesAreRefusedOnEveryWriter(t *testing.T) {
 			wantCreateErr: "scope[key] must not be a control character or line separator",
 			wantImportErr: "scope[key] must not be a control character or line separator",
 		},
+		{
+			name:          "invalid UTF-8 in key",
+			scope:         map[string]string{"key\xffinvalid": "value"},
+			wantSaveErr:   "scope_key[0] must not be invalid UTF-8",
+			wantCreateErr: "scope_key[0] must not be invalid UTF-8",
+			wantImportErr: "scope_key[0] must not be invalid UTF-8",
+		},
+		{
+			name:          "invalid UTF-8 in value",
+			scope:         map[string]string{"key": "value\xffinvalid"},
+			wantSaveErr:   "scope[key] must not be invalid UTF-8",
+			wantCreateErr: "scope[key] must not be invalid UTF-8",
+			wantImportErr: "scope[key] must not be invalid UTF-8",
+		},
 	}
 	for _, tc := range cases {
 		t.Run("save/"+tc.name, func(t *testing.T) {
