@@ -763,20 +763,35 @@ func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReco
 // with no ghost-binary token before them, is not ghost's and still gets ghost's
 // own entry added beside it (#1326).
 func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
-	tokens, ok := hookCommandTokens(cmd)
-	if !ok {
+	eventToken := strings.TrimPrefix(cmdSubstr, "hook ")
+	if eventToken == cmdSubstr {
 		return false
 	}
 	desiredBin, _, _ := splitHookCommand(desiredCmd)
+	_, ok := ghostHookTail(cmd, eventToken, desiredBin)
+	return ok
+}
+
+// ghostHookTail returns the tokens following `hook <eventToken>` when cmd runs
+// ghost for that event — a token that is a ghost binary immediately before the
+// tail — and false otherwise. It is the one ownership rule, shared by the
+// settings reconcile and the status reader, so both answer the same question
+// about the same file; the tail is returned so a reader can go on to check a
+// flag that follows it, as status does for --source.
+func ghostHookTail(cmd, eventToken, ghostBin string) ([]string, bool) {
+	tokens, ok := hookCommandTokens(cmd)
+	if !ok {
+		return nil, false
+	}
 	for i := 0; i+2 < len(tokens); i++ {
-		if !isGhostToken(tokens[i], desiredBin) {
+		if !isGhostToken(tokens[i], ghostBin) {
 			continue
 		}
-		if tokens[i+1] == "hook" && "hook "+tokens[i+2] == cmdSubstr {
-			return true
+		if tokens[i+1] == "hook" && tokens[i+2] == eventToken {
+			return tokens[i+3:], true
 		}
 	}
-	return false
+	return nil, false
 }
 
 // isGhostToken reports whether one token of a hook command names a ghost
