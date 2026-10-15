@@ -465,7 +465,7 @@ type flagCapableStore interface {
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
-// the methods ghost_resolve needs (ResolveCandidates, SetResolvedJudged, the
+// the methods ghost_resolve needs (ResolveCandidates, SetResolvedJustified, the
 // supersedes-link read for deterministic demotion with GetByIDs for the link
 // endpoints' scopes, and the KEEP-verdict cache). These aren't part of
 // provider.MemoryStore, so s.store is type-asserted to this interface at call
@@ -473,7 +473,7 @@ type flagCapableStore interface {
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
-	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
+	SetResolvedJustified(ctx context.Context, judged []memory.Memory, why map[string]memory.ResolveJustification) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error

@@ -121,7 +121,7 @@ func (s *fakeStore) GetByIDs(_ context.Context, ids []string) ([]memory.Memory, 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
 	return s.candidates, nil
 }
-func (s *fakeStore) SetResolvedJudged(_ context.Context, judged []memory.Memory) ([]string, []string, error) {
+func (s *fakeStore) SetResolvedJustified(_ context.Context, judged []memory.Memory, _ map[string]memory.ResolveJustification) ([]string, []string, error) {
 	s.setResolvedCalled = true
 	if s.err != nil {
 		return nil, nil, s.err
