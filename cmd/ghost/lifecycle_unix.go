@@ -8,9 +8,13 @@ import (
 )
 
 // setPhaseProcessGroup puts a lifecycle phase in its own process group, so the
-// whole group can be signalled at once. The phase is a `ghost` process that
-// spawns CLI harnesses (claude/opencode/codex/goose); signalling only the
-// direct child would orphan those harnesses on a timeout.
+// deadline's Cancel can signal it. The CLI harnesses the phase spawns are NOT
+// in this group: each runs in its own (boundHarnessProcess, internal/ai) so the
+// harness's own deadline can sweep it, and the phase command catches the signal
+// through maintenanceContext, cancelling its work so each in-flight harness's
+// own Cancel signals its group before the phase exits. This group signal is
+// what starts that wind-down, and killPhaseProcess is the backstop for a phase
+// that does not take it.
 func setPhaseProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
