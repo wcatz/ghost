@@ -78,7 +78,7 @@ func TestTaskAndDecisionListingsRefuseAMisspeltProject(t *testing.T) {
 		tail, empty, present string
 	}{
 		{"tasks", "No open tasks", "a real task"},
-		{"decisions", "No active decisions", "a real decision"},
+		{"decisions", "No live decisions", "a real decision"},
 	} {
 		t.Run("ghost://project/{id}/"+tc.tail, func(t *testing.T) {
 			out, err := readResource(t, misspelt, tc.tail)

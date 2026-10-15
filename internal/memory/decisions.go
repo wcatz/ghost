@@ -879,6 +879,38 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	}
 	defer rows.Close() //nolint:errcheck
 
+	return scanDecisions(rows)
+}
+
+// LiveDecisions returns a project's live decisions — active or revisit,
+// superseded ones excluded — newest first, with active decisions sorted above
+// revisit ones. The order is applied before the window closes, so a revisit row
+// never pushes an active one out of the `limit` the caller asked for. It is the
+// read the injected decision surfaces use, so a decision flagged for
+// reconsideration is shown and labelled rather than hidden, and it is the same
+// "not superseded" reading FindLiveDecisionByTitle and LiveDecisionSuccessor
+// share.
+func (s *Store) LiveDecisions(ctx context.Context, projectID string, limit int) ([]Decision, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, decision, alternatives, rationale, status,
+	                 COALESCE(superseded_by, '') AS superseded_by, tags, created_at, updated_at
+	          FROM decisions
+	          WHERE project_id = ? AND status != 'superseded'
+	          ORDER BY (status = 'revisit'), created_at DESC
+	          LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list live decisions: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	return scanDecisions(rows)
+}
+
+// scanDecisions reads the decision row shape both ListDecisions and
+// LiveDecisions select, so the two cannot drift in how a stored row is decoded.
+func scanDecisions(rows *sql.Rows) ([]Decision, error) {
 	var decisions []Decision
 	for rows.Next() {
 		var d Decision

@@ -1040,7 +1040,7 @@ ghost context
 ghost context --cwd /path/to/project
 ```
 
-This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response. It is a session start, with a session start's side effects: it counts a session for the project and starts the Obsidian mirror when that is configured.
+This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response. It is a session start, with a session start's side effects: it counts a session for the project and starts the Obsidian mirror when that is configured. The block's `Recent Decisions` section lists the project's live decisions — active and revisit, active first — and labels a revisit one `(revisit)`, matching the `ghost://project/{id}/decisions` resource and `ghost_project_context`; superseded decisions stay out.
 
 This mode takes two flags:
 

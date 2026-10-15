@@ -1872,3 +1872,60 @@ func TestHandleSessionStartHook_DecisionIDShown(t *testing.T) {
 		t.Errorf("decision ID must be shown (%s) so it can be passed to supersedes; got:\n%s", decisionID, result)
 	}
 }
+
+// TestHandleSessionStartHook_RevisitDecisionShown: the session-start block reads
+// a project's live decisions, not active-only, so a decision flagged for
+// reconsideration is shown and labelled "(revisit)" rather than hidden. A
+// superseded decision stays out of the block.
+func TestHandleSessionStartHook_RevisitDecisionShown(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for _, d := range []struct{ id, title, decision, rationale, status string }{
+		{"a1", "keep sqlite", "sqlite stays", "no cgo", "active"},
+		{"r1", "revisit the cache", "reconsider rrf weights", "tuning changed", "revisit"},
+		{"s1", "retired choice", "we dropped this", "reversed", "superseded"},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'p1', ?, ?, ?, ?)`,
+			d.id, d.title, d.decision, d.rationale, d.status,
+		); err != nil {
+			t.Fatalf("insert %s decision: %v", d.status, err)
+		}
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "**«revisit the cache»** (revisit):") {
+		t.Errorf("a revisit decision is not shown and labelled:\n%s", result)
+	}
+	if strings.Contains(result, "retired choice") {
+		t.Errorf("a superseded decision reached the block:\n%s", result)
+	}
+}
