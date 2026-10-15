@@ -276,7 +276,10 @@ func StatusOpencode(w io.Writer) (bool, error) {
 // --source claude-code` does not read as ghost's own, and a hand-edited wrapper
 // that does run ghost does — status and `ghost mcp init` agree on the same
 // file. Unparseable commands (exotic hand-edited quoting) conservatively don't
-// count.
+// count, EXCEPT that a trailing token whose quoting never closes still leaves
+// the tokens before it usable — a ghost invocation at the front of such a
+// command is ghost's hook, and reporting it missing would send the operator to
+// a `ghost mcp init` that only adds a second copy beside it.
 func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource, ghostBin string) bool {
 	cmds, err := sf.hookCommands(hookEvent)
 	if err != nil {
