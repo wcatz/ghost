@@ -70,6 +70,36 @@ func TestLegConsensusKeepsDualAndTopSingleLegs(t *testing.T) {
 	}
 }
 
+// TestLegConsensusAdmitsARowTheVectorLegCouldNotSee: a row with no embedding
+// under the configured identity reaches the pool through the keyword leg only
+// because the vector leg never had it to score — the shape of a memory saved
+// moments ago, before the worker has embedded it. Its absent VectorRank is not
+// a second leg's dissent, so the gate must admit it whatever rank the keyword
+// leg gave it (#1319); otherwise a scoped search drops a row the vector side
+// could never have judged, and does so on a timing-dependent schedule.
+func TestLegConsensusAdmitsARowTheVectorLegCouldNotSee(t *testing.T) {
+	rows := []memory.Candidate{
+		legCandidate("dual", 3, 4, 1.0),
+		legCandidate("ftsDrop", 5, -1, 0.5),
+	}
+	unembedded := legCandidate("unembedded", 7, -1, 0.4)
+	unembedded.Unembedded = true
+	rows = append(rows, unembedded)
+	set := &memory.CandidateSet{Rows: rows, Legs: aliveLegs()}
+	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
+	if ids := itemIDs(res.Items); !eq(ids, []string{"dual", "unembedded"}) {
+		t.Fatalf("items = %v, want the unembedded row admitted beside the dual-leg row", ids)
+	}
+	if d := traceDecision(res, "unembedded", stageLegConsensus); d != nil {
+		t.Errorf("a row the vector leg could never see must not be dropped as low consensus: %+v", d)
+	}
+	// The exemption is per row: the embedded keyword-only row at rank 5 is
+	// still dropped, so the gate has not been disabled.
+	if d := traceDecision(res, "ftsDrop", stageLegConsensus); d == nil || d.Kept {
+		t.Errorf("ftsDrop = %+v, want a drop decision: an embedded single-leg row is still judged", d)
+	}
+}
+
 func TestLegConsensusSkipsWhenOneLegUnavailable(t *testing.T) {
 	rows := []memory.Candidate{
 		legCandidate("dual", 3, 4, 1.0),
