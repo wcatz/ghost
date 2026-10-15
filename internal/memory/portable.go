@@ -48,6 +48,11 @@ type PortableProject struct {
 //     insert, and `ghost history` on a restored memory shows just that row.
 //     Carrying the versions would be a format change of its own; `ghost
 //     backup` is the copy that keeps them.
+//   - memory_flags. An agent's append-only `wrong`/`stale` claim about a
+//     memory is not here either, and nothing recomputes an objection somebody
+//     made: a restored memory carries no flags, so the resolve and reflect
+//     passes lose the count they were handed. That is a format change of its
+//     own again, and `ghost backup` is the copy that keeps them.
 //
 // Every other column is here, including the ones Memory does not expose:
 // access_count, last_accessed, the validity triple (valid_from, valid_until,
