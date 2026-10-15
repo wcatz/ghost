@@ -177,7 +177,7 @@ func TestTheGlobalProjectContextRendersItsOwnWindow(t *testing.T) {
 		// fixture seeds 22 rows against a 20-row cap, and WHICH two are cut is a
 		// function of `hex(randomblob(16))`: every row shares a category, an
 		// importance and a pinned value, and `created_at` is the schema default at
-		// second precision, so `passiveFetchSQL`'s final tie-break is the id and the
+		// second precision, so the passive window's final tie-break is the id and the
 		// two rows with the largest ids are cut. A test naming one row therefore
 		// fails on roughly 2 runs in 22, and the sibling test in this file already
 		// states the rule it would break. The first version of this assertion did

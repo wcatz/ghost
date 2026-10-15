@@ -318,8 +318,8 @@ func TestPassiveCorpusSeparatesAContradictsPair(t *testing.T) {
 //
 // The mutation has to be seeded rather than made by deleting the assembler's
 // stage-2 drop: the passive fetch excludes a closed window in SQL before the
-// window closes (passiveFetchSQL), so a row stage 2 would drop never reaches it
-// and removing the stage alone moves no figure on any surface.
+// window closes (the key scan in `passiveKeyScanSQL`), so a row stage 2 would drop
+// never reaches it and removing the stage alone moves no figure on any surface.
 func TestPassiveMeasurementCatchesADisabledFilter(t *testing.T) {
 	for _, tc := range []struct {
 		blind PassiveBlind

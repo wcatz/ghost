@@ -1819,13 +1819,16 @@ Axis interaction rules:
 > renderer that has to say a line was cut. The header's totals are the
 > assembler's too rather than a second census of the store: the shown, ranked-out
 > and withheld counts come from the same retrieval's trace, and "of M total" is
-> the trace plus ONE count (`Store.PassiveEligibleCount`) over the window's own
-> predicates (`passiveWhere`, shared with the fetch), so M is every eligible row
-> the store holds and not the over-fetched window's size. A row a stage withheld
-> is inside the window and so is not counted twice; eligible rows the over-fetch
-> never read are ranked out, because the window is ordered by the ranking and cut
-> at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
-> that split). A row the retriever fetched and then removed as a near-duplicate
+> the trace plus ONE count (`Store.PassiveEligibleCount`) over the population the
+> window and the count share (`passivePopulationSQL`), so M is the eligible rows
+> the store holds and not the over-fetched window's size. That count is CAPPED at
+> `passiveEligibleCountCap`: past it the count is UNKNOWN and the header describes
+> the window alone, because an exact census of a bucket that large costs a table
+> pass at every session start for a number no reader acts on. A row a stage
+> withheld is inside the window and so is not counted twice; eligible rows the
+> threshold scan never read are ranked out, because the window is ordered by the
+> ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch
+> limit for exactly that split). A row the retriever fetched and then removed as a near-duplicate
 > loser never enters `CandidateSet.Rows`, but the retriever reports it in
 > `CandidateSet.DroppedLosers` with the ids it lost to, and stage 6 files it as a
 > `dedup` / `near_duplicate` decision (`Decision.Against` names the winner). That
@@ -1839,7 +1842,7 @@ Axis interaction rules:
 > since [#926](https://github.com/wcatz/ghost/issues/926): `ghost_memory_search`'s retrieval collapses its
 > near-duplicate pairs the way the passive policy drops them, so that explain row is
 > reached by a real search and is pinned over it rather than by a hand-built
-> fixture. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> fixture. The passive key scan's own SQL validity predicate removes closed-window rows before the window fills (a row whose window has closed must not spend one of its slots), so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state. It therefore renders and applies
@@ -2030,7 +2033,7 @@ What exists now:
   project and none of them is in the block above" — is about what the project holds,
   names no cause, and `CountMemories` answers it. The ABSTENTION names a cause, so it
   is a claim about which rows that cause explains, and the population it can be about
-  is the WINDOW's: the project's own rows `passiveFetchSQL` could have admitted.
+  is the WINDOW's: the project's own rows the passive key scan could have admitted.
   `projectWindowRowCount` asks exactly that — `CountActiveMemories`, a
   `windowCountCapableStore` assertion, whose predicate is the window's own — and
   where it is zero, or the store cannot answer, the cause belongs to somebody else and
@@ -2173,7 +2176,7 @@ What exists now:
   an empty over-fetched window is `no_memories` (a statement about the window, not
   a census of the store) unless the validity predicate emptied it, in which case it
   is `all_invalid` and carries the exclusion wording: passive validity runs in
-  `passiveFetchSQL` before the `LIMIT` (so an expired row cannot spend the window),
+  `passiveKeyScanSQL` during the scan, before a row can enter the window (so an expired row cannot spend a window slot),
   the store counts what it removed into `CandidateSet.ValidityExcluded`, and
   assemble stage 2 stays the authority and must agree. The passive demotions
   (supersede, then near-duplicate, which drops its losers on `_global`) run after
