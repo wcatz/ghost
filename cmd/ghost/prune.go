@@ -127,7 +127,7 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 				// argument has to survive a credential having been pasted into
 				// one (#839's way out). The same rule and the same shape as the
 				// --audit parser's refusal —
-				// TestNoDuplicateFlagRefusalQuotesWithPercentQ holds both of them.
+				// TestNoRefusalQuotesAScopeOrProjectWithPercentQ holds both of them.
 				return opts, fmt.Errorf("--project was given twice (%s and %s)",
 					memory.RefusalArg("project", opts.Project), memory.RefusalArg("project", value))
 			}
