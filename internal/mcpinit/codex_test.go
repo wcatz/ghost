@@ -734,6 +734,146 @@ func TestRunCodex_TOMLHeaderSpellings(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLLeadingBOM covers a config.toml whose first line starts with
+// a UTF-8 byte-order mark, which a Windows editor leaves there. Codex's TOML
+// lexer strips one before it reads the document, so such a file is valid codex
+// config, but U+FEFF is not whitespace: a scanner that only trims space cannot
+// normalise a BOM-prefixed header, so init read the ghost table as absent and
+// appended a SECOND one (a duplicate-key document TOML rejects) while status
+// read the same way and called the broken install healthy. The merge strips one
+// leading BOM before scanning and writes it back, so the repair lands in place
+// and the user's file keeps its encoding.
+func TestRunCodex_TOMLLeadingBOM(t *testing.T) {
+	const bom = "\ufeff"
+
+	t.Run("table header", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := bom + "[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"args = [\"mcp\"]\n" +
+			"\n" +
+			"[profiles.ci]\n" +
+			"model = \"gpt-5-mini\"\n"
+		// The BOM stays at the very start of the file, where the TOML parser
+		// expects it; only the two owned keys are rewritten.
+		want := bom + codexMCPServerComment + "\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = " + codexTOMLString(ghostBin) + "\n" +
+			"args = [\"mcp\"]\n" +
+			"\n" +
+			"[profiles.ci]\n" +
+			"model = \"gpt-5-mini\"\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if !strings.HasPrefix(string(got), bom) {
+			t.Errorf("the byte-order mark should be preserved on write, got:\n%q", got)
+		}
+		if !strings.Contains(out.String(), "+ repaired the ghost MCP server entry") {
+			t.Errorf("expected a repair, got:\n%s", out.String())
+		}
+
+		// A second run over the repaired file is a fixed point.
+		var again bytes.Buffer
+		if err := RunCodex(&again, false); err != nil {
+			t.Fatalf("RunCodex (second run): %v", err)
+		}
+		gotAgain, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotAgain) != string(got) {
+			t.Errorf("second run changed the file:\nbefore:\n%q\nafter:\n%q", got, gotAgain)
+		}
+
+		var status bytes.Buffer
+		if _, err := StatusCodex(&status); err != nil {
+			t.Fatalf("StatusCodex: %v", err)
+		}
+		if !strings.Contains(status.String(), "✓ ghost MCP server registered in config.toml") {
+			t.Errorf("status should see the repaired table as registered, got:\n%s", status.String())
+		}
+	})
+
+	// The BOM must not hide the other two guards: a dotted or inline definition
+	// would otherwise be appended beside, and an unparseable header would get a
+	// second table written next to it.
+	t.Run("dotted key", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		seed := bom + "mcp_servers.ghost = { command = \"/bin/ghost\", args = [\"mcp\"] }\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != seed {
+			t.Errorf("a dotted definition must be left unchanged, got:\n%s", got)
+		}
+		if !strings.Contains(out.String(), "dotted or inline key") {
+			t.Errorf("expected a dotted-key warning, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("ambiguous header", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		seed := bom + "[[mcp_servers.ghost]]\ncommand = \"/bin/ghost\"\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != seed {
+			t.Errorf("an unparseable header must be left unchanged, got:\n%s", got)
+		}
+		if !strings.Contains(out.String(), "left unchanged") {
+			t.Errorf("expected a warning that the file was left unchanged, got:\n%s", out.String())
+		}
+	})
+}
+
 // TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone covers headers that name ghost
 // but cannot be parsed with confidence, or that use a structure ghost does not
 // manage. init must leave such a file alone: reading it as "absent" would append
@@ -805,7 +945,9 @@ func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
 func countCodexGhostHeaders(content string) int {
 	n := 0
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
+		// Strip a byte-order mark the line may carry: only the file's first
+		// line has one, but a repair can prepend a comment above it.
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "\ufeff")
 		if !strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
