@@ -526,9 +526,16 @@ func CheckImportedID(id string) error {
 // as given. `/Users/w/My Projects/ghost` is a real project id in a real store, and
 // `ghost_list_projects` and the health report print it for a human to copy.
 //
-// What is refused is the part that forges a LINE: a control character, a backtick
-// that closes the span it is printed in, or a «» that opens a data block of its
-// own. A space does none of those.
+// What is refused is the part that forges a LINE: a control character, a line
+// separator (U+2028/U+2029), a backtick that closes the span it is printed in, or
+// a «» that opens a data block of its own. A space does none of those.
+//
+// The line separator is refused for the reason the renderer escapes it (#1363):
+// U+2028 and U+2029 are the Zl/Zp separators, NOT control characters, so a check
+// written against `unicode.IsControl` alone let them through — and a value holding
+// one forged a line in the session-start block's own heading, above the explainer
+// that marks stored data. The boundary and `assemble.Label` now name the same
+// line-ending class.
 //
 // There is deliberately NO LENGTH BOUND, and the first version of this function
 // had MaxImportedIDLen here, which was wrong in a way that reached much further
@@ -543,7 +550,7 @@ func CheckImportedID(id string) error {
 // a line are. See CheckImportedProjectText, which has never had a bound.
 func CheckImportedProjectID(id string) error {
 	if unprintableInIdentifier(id, false) != "" {
-		return fmt.Errorf("project id must hold no control character, backtick or data delimiter — it is printed inside backticks " +
+		return fmt.Errorf("project id must hold no control character, line separator, backtick or data delimiter — it is printed inside backticks " +
 			"and outside the data delimiters, so one of those ends the line or the span. A space is fine, and so " +
 			"is any length: a project id is often a filesystem path, and a deep checkout is a longer one. This " +
 			"sentence does not repeat the offending id, because it is also the export report's, where the caller's " +
@@ -554,15 +561,17 @@ func CheckImportedProjectID(id string) error {
 }
 
 // CheckImportedProjectText is the same rule for a project's name and path: no
-// control character, no backtick, no «». A space is fine, for the reason
-// CheckImportedProjectID gives — a project name is normally full of them.
+// control character, no line separator (U+2028/U+2029 — the Zl/Zp separators,
+// which `unicode.IsControl` does not cover, #1363), no backtick, no «». A space
+// is fine, for the reason CheckImportedProjectID gives — a project name is
+// normally full of them.
 //
 // field names the column so the refusal says which value to fix, and no length
 // bound is applied because length is not the threat class here: a long name or
 // path is still one line, and the renderer keeps it that way whatever it holds.
 func CheckImportedProjectText(field, value string) error {
 	if unprintableInIdentifier(value, false) != "" {
-		return fmt.Errorf("project %s must hold no control character, backtick or data delimiter — it is printed as a label on "+
+		return fmt.Errorf("project %s must hold no control character, line separator, backtick or data delimiter — it is printed as a label on "+
 			"every listing and in the session-start block's own heading, and one of those ends the line. A space is "+
 			"fine. This sentence does not repeat the offending value, because it is also the export report's, where "+
 			"the caller's text is noise and a hazard; a write boundary that names the value it refused does so "+
@@ -580,14 +589,18 @@ func CheckImportedProjectText(field, value string) error {
 // the value is FOR: a record id is a `--only` selector and a shell operand, where
 // a space word-splits, and a project id is often a path, where it does not.
 //
-// It takes the value and returns a reason rather than returning a bool, because
-// every caller writes its own message anyway: an id, a project name and a path are
-// different fields with different consequences, and only the class is shared.
+// The line-ending class is TWO tests, and it has to be: `unicode.IsControl` is Cc
+// (C0, DEL and C1) and does NOT cover the Zl/Zp separators U+2028 and U+2029,
+// which end a line for every reader that honours Unicode (#1363). `unicode.IsSpace`
+// covers them only in the `spaces` branch, so it cannot stand in for the control
+// test on a project's id, name or path — that is the branch that let them through.
 func unprintableInIdentifier(s string, spaces bool) string {
 	for _, r := range s {
 		switch {
 		case unicode.IsControl(r):
 			return "control character"
+		case unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):
+			return "line separator"
 		case spaces && unicode.IsSpace(r):
 			return "whitespace"
 		case r == '`':
