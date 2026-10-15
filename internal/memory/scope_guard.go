@@ -3,6 +3,9 @@ package memory
 import (
 	"fmt"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The write-time bounds on a memory's scope. A scope is a handful of short labels
@@ -14,7 +17,7 @@ import (
 // key is as long as a tag (the MCP tools cut a tag at 64 bytes), a value is as long
 // as an agent (MaxAgentLen, 128 bytes), and the count equals maxScopeKeys, the
 // number of keys an explanation names. All three are refused rather than clamped,
-// for the reason MaxSourceRefLen is: a shortened key is a different key, and a
+// for the reason MaxSourceLen is: a shortened key is a different key, and a
 // scope that silently matched something other than what the caller wrote would
 // filter retrieval on a label nobody stated.
 const (
@@ -59,18 +62,31 @@ func (e *ScopeBoundError) Error() string {
 	}
 }
 
+// scopeKeyValueError is a scope key or value that breaks the character rules.
+// It carries the field name (as the token guard does) and the reason class.
+type scopeKeyValueError struct {
+	Field, Reason string
+}
+
+func (e *scopeKeyValueError) Error() string {
+	return fmt.Sprintf("%s must not be %s", e.Field, e.Reason)
+}
+
 // checkScope is the whole of what a scope is checked for before it reaches SQL:
-// the bounds, then the token guard over every key and every key=value pair. It is one
+// the bounds, the character rules (blank, NUL, invalid UTF-8, control, line-break),
+// then the token guard over every key and every key=value pair. It is one
 // function because the writers that store a scope are several — Create and
 // CreateWithID (checkMemoryWrite), UpsertWithOptions and the portable importer
 // (CheckImportedMemory) — and two copies of a guard eventually disagree about
 // which half they apply.
 //
 // The bounds run first and quote nothing, so an over-long value that is also a
-// token is refused for its length and never printed. The guard then names a key by
-// position and a pair by its (already guarded, already shape-safe) key, so a
-// refusal never carries the offending text. Keys are walked in sorted order so the
-// field a caller is told about does not change between two identical calls.
+// token is refused for its length and never printed. The character rules run
+// second, naming a key by position and a value by its (already bounded) key,
+// so a refusal never carries the offending text. The guard then names a key by
+// position and a pair by its (already guarded, already shape-safe) key. Keys are
+// walked in sorted order so the field a caller is told about does not change
+// between two identical calls.
 //
 // An empty or nil scope is no scope and passes.
 func checkScope(scope map[string]string) error {
@@ -96,6 +112,16 @@ func checkScope(scope map[string]string) error {
 			return &ScopeBoundError{Kind: ScopeValueTooLong, Key: k, Limit: MaxScopeValueLen, Got: len(v)}
 		}
 	}
+	// Character rules: blank, NUL, invalid UTF-8, control, line-break (U+2028, U+2029, U+0085).
+	for i, k := range keys {
+		if err := validateScopeKeyValue(fmt.Sprintf("scope_key[%d]", i), k); err != nil {
+			return err
+		}
+		v := scope[k]
+		if err := validateScopeKeyValue(fmt.Sprintf("scope[%s]", SafeToken(k)), v); err != nil {
+			return err
+		}
+	}
 	for i, k := range keys {
 		if err := rejectSecret(fmt.Sprintf("scope_key[%d]", i), k); err != nil {
 			return err
@@ -109,6 +135,35 @@ func checkScope(scope map[string]string) error {
 		// value under a key that names a secret.
 		if err := rejectSecret(field, k+"="+scope[k]); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
+// byte, is not valid UTF-8, contains a control character, or contains a line
+// separator (U+2028, U+2029) or next line (U+0085). The field is the caller's
+// name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
+// refusal is actionable without quoting the offending text.
+func validateScopeKeyValue(field, value string) error {
+	// Blank: empty or only whitespace/format characters.
+	if strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+	}) == "" {
+		return &scopeKeyValueError{Field: field, Reason: "empty or blank"}
+	}
+	// Invalid UTF-8.
+	if !utf8.ValidString(value) {
+		return &scopeKeyValueError{Field: field, Reason: "valid UTF-8"}
+	}
+	// NUL byte.
+	if strings.IndexByte(value, 0) >= 0 {
+		return &scopeKeyValueError{Field: field, Reason: "a NUL byte"}
+	}
+	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085 NEL).
+	for _, r := range value {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
+			return &scopeKeyValueError{Field: field, Reason: "a control character or line separator"}
 		}
 	}
 	return nil
