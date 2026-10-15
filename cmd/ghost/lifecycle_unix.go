@@ -4,42 +4,44 @@ package main
 
 import (
 	"os/exec"
-	"syscall"
+
+	"github.com/wcatz/ghost/internal/procgroup"
 )
 
+// The lifecycle phase's process-group moves are the shared ones in
+// internal/procgroup, the same package the harness spawn (internal/ai) uses, so
+// the two cannot drift apart. The bodies below are named for the phase because
+// that is the seam the watchdog and its tests are written against. On unix the
+// phase follows the harness's behaviour exactly: it sits in its own process
+// group so the phase deadline can sweep it and its CLI helpers. The Windows
+// group setup is deliberately kept a no-op (see lifecycle_windows.go); a ghost
+// phase is its own process and must still receive console Ctrl-C alongside the
+// rest of Ghost, which is what maintenanceContext is built for.
+//
 // setPhaseProcessGroup puts a lifecycle phase in its own process group, so the
-// whole group can be signalled at once. The phase is a `ghost` process that
-// spawns CLI harnesses (claude/opencode/codex/goose); signalling only the
-// direct child would orphan those harnesses on a timeout.
+// deadline's Cancel can signal it. The CLI harnesses the phase spawns are NOT
+// in this group: each runs in its own (boundHarnessProcess, internal/ai) so the
+// harness's own deadline can sweep it, and the phase command catches the signal
+// through maintenanceContext, cancelling its work so each in-flight harness's
+// own Cancel signals its group before the phase exits. This group signal is
+// what starts that wind-down, and killPhaseProcess is the backstop for a phase
+// that does not take it.
 func setPhaseProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(cmd)
 }
 
 // terminatePhaseProcess asks the phase's whole process group to shut down
 // gracefully.
 func terminatePhaseProcess(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
-	}
-	// Negative PID targets the process group created by setPhaseProcessGroup.
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		return cmd.Process.Signal(syscall.SIGTERM)
-	}
-	return nil
+	return procgroup.TerminateGroup(cmd)
 }
 
 // killPhaseProcess force-kills the phase's whole process group. WaitDelay's
-// own escalation calls Process.Kill, which reaches only the direct child —
-// a harness grandchild that ignored SIGTERM would then survive as an orphan,
-// so the watchdog uses this instead.
+// own escalation calls Process.Kill, which reaches only the direct child — a
+// harness grandchild that ignored SIGTERM would then survive as an orphan, so
+// the watchdog uses this instead.
 func killPhaseProcess(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	// ESRCH (the group already exited) is the expected race and is ignored.
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		_ = cmd.Process.Kill()
-	}
+	procgroup.KillGroup(cmd)
 }
 
 // phaseGroupInhabited reports whether anything is still in the phase's process
@@ -47,15 +49,7 @@ func killPhaseProcess(cmd *exec.Cmd) {
 // returns as soon as the direct child is reaped, and a phase is a plain ghost
 // process with no SIGTERM handler, so the phase process is gone within
 // milliseconds of the deadline's group signal while the CLI harness it spawned
-// — same group — can still be running. Signal 0 asks the question without
-// delivering anything, and ESRCH is the one answer that means empty: a group
-// whose id belongs to no run here, and which must not be signalled because on a
-// busy machine it can already have been reused. EPERM (it exists but is not
-// ours) counts as inhabited, and any other error is treated the same way rather
-// than as an excuse to skip a group that may hold an orphan.
+// — same group — can still be running.
 func phaseGroupInhabited(cmd *exec.Cmd) bool {
-	if cmd.Process == nil {
-		return false
-	}
-	return syscall.Kill(-cmd.Process.Pid, 0) != syscall.ESRCH
+	return procgroup.GroupInhabited(cmd)
 }

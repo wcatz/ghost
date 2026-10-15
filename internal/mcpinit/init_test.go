@@ -1070,6 +1070,7 @@ func TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn(t *testing.T) {
 			{"cd-and", "cd /somewhere && " + ghostBin + " " + tc.tail + " --source claude-code"},
 			{"leading-space", "   " + ghostBin + " " + tc.tail + " --source claude-code"},
 			{"quoted-argument", `/bin/sh -c "` + ghostBin + ` ` + tc.tail + ` --source claude-code"`},
+			{"sudo-prefix", "sudo " + ghostBin + " " + tc.tail + " --source claude-code"},
 		} {
 			t.Run(tc.event+"/"+w.label, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "settings.json")
@@ -1153,6 +1154,9 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 	}{
 		{"sh-c-quoted", shell + ` -c "` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"bash-qlc", `bash -lc "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"sh-e", shell + ` -e -c "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"bash-o-posix", `bash -o posix -c "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"bash-posix", `bash --posix -c "` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-exec-assignment", shell + ` -c "exec ` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-env-assignment", shell + ` -c "env X=1 ` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-joined-directory", shell + ` -c "cd /d && exec ` + ghostBin + ` hook stop --source claude-code"`, true},
@@ -1239,16 +1243,16 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 
 	// A ghost binary named inside another tool's quoted argument is NOT a
 	// command that runs. Reading it as one is the #1326 false positive, and the
-	// interior rule must not reintroduce it.
+	// interior rule must not reintroduce it. The gate itself belongs to a
+	// shell, not to any flag (#1339): a single-dash flag ending in `c` only
+	// opens the argument directly after a shell name, so another tool's `-c`
+	// or `--sync` hands ghost's invocation over as data, exactly like
+	// `--note`.
 	//
-	// One limitation is accepted and not asserted here: a tool of our own that
-	// spells a flag `-c` and is handed a complete ghost invocation as that
-	// flag's value is indistinguishable, without knowing the tool, from
-	// `sh -c`. The interior read is gated on the word before the argument being
-	// a command-list flag (`-c`, `-lc`) or a shell name, which is what keeps the
-	// realistic argument families (`--note`, `--message`, a bare positional)
-	// foreign. The same ambiguity already exists at the top level, #1326's own
-	// shape: `othertool --note ghost hook stop …` unquoted has a ghost binary in
+	// One limitation is accepted and not asserted here: a shell name before
+	// such a flag still stands for a shell wherever it appears, and the same
+	// ambiguity already exists at the top level, #1326's own shape:
+	// `othertool --note ghost hook stop …` unquoted has a ghost binary in
 	// command position and is read as ghost's own, because the spec requires
 	// `env X=1 ghost …` to be.
 	for _, foreign := range []string{
@@ -1260,6 +1264,9 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 		`/usr/local/bin/othertool "echo ghost hook stop --source claude-code"`,
 		`/usr/local/bin/othertool --note "sh: ghost hook stop --source claude-code"`,
 		`/usr/local/bin/othertool --note "x && ghost hook stop --source claude-code"`,
+		`/usr/local/bin/othertool -c "ghost hook stop --source claude-code"`,
+		`/usr/local/bin/othertool -xc "ghost hook stop --source claude-code"`,
+		`/usr/local/bin/othertool --sync "ghost hook stop --source claude-code"`,
 	} {
 		t.Run("foreign:"+foreign, func(t *testing.T) {
 			if isGhostHookCommand(foreign, "hook stop", desired) {
@@ -1267,6 +1274,111 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 			}
 			if _, ok := ghostHookTail(foreign, "stop", ghostBin); ok {
 				t.Error("ghostHookTail recognised a foreign command")
+			}
+		})
+	}
+}
+
+// TestEnsureHook_RecognisesTransparentPrefixesInsideAShellScript is #1339:
+// inside a shell script the ghost binary may sit behind a word that runs the
+// command behind it unchanged — `sudo ghost hook stop …`, `env -i ghost hook
+// stop …`, `nice …`, `command …`, `exec …` — so init must read the whole
+// invocation as ghost's own, or it appends a second entry and the hook fires
+// twice per session. A prefix word only counts where the scan reaches a
+// command position behind it, so `echo sudo ghost hook stop …` (echo runs)
+// and `othertool -i ghost hook stop …` (-i is othertool's argument, not
+// env's) stay foreign. Status agrees with the reconcile on every recognised
+// shape: a run that reads its own wrapper as missing sends the operator to an
+// init that only duplicates.
+func TestEnsureHook_RecognisesTransparentPrefixesInsideAShellScript(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	const shell = "/bin/sh"
+	desired := shellQuote(ghostBin) + " hook stop --source claude-code"
+
+	script := func(inner string) string {
+		return shell + ` -c "` + inner + " " + ghostBin + ` hook stop --source claude-code"`
+	}
+
+	for _, tc := range []struct{ label, inner string }{
+		{"sudo", "sudo"},
+		{"env-i", "env -i"},
+		{"env-i-assignment", "env -i X=1"},
+		{"env-assignment", "env X=1"},
+		{"nice", "nice"},
+		{"nice-n", "nice -n 10"},
+		{"command", "command"},
+		{"exec", "exec"},
+		{"sudo-env-assignment", "sudo env X=1"},
+		{"sudo-u", "sudo -u user"},
+		{"env-u", "env -u FOO"},
+		{"env-then-nice", "env X=1 nice"},
+	} {
+		t.Run("recognised:"+tc.label, func(t *testing.T) {
+			command := script(tc.inner)
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatalf("addHook: %v", err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if strings.Contains(out.String(), "added") {
+				t.Errorf("a prefixed ghost invocation got a second entry:\n%s", out.String())
+			}
+			if !strings.Contains(out.String(), "already configured") {
+				t.Errorf("a prefixed ghost invocation was not reported as configured:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 1 || cmds[0] != command {
+				t.Errorf("event = %q, want only the untouched wrapper %q", cmds, command)
+			}
+			if !contractHookWired(sf, "Stop", "stop", "claude-code", ghostBin) {
+				t.Error("status reads the wrapper as unwired, which would ask for a repair that duplicates it")
+			}
+		})
+	}
+
+	for _, tc := range []struct{ label, inner string }{
+		{"echo-sudo", "echo sudo"},
+		{"othertool-sudo", "othertool sudo"},
+		{"othertool-env-assignment", "othertool env X=1"},
+		{"othertool-i", "othertool -i"},
+		{"othertool-n", "othertool -n 10"},
+		{"assignment-then-othertool", "X=1 othertool"},
+	} {
+		t.Run("foreign:"+tc.label, func(t *testing.T) {
+			command := script(tc.inner)
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatalf("addHook: %v", err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if !strings.Contains(out.String(), "added") {
+				t.Errorf("a foreign script was read as ghost's own hook:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 2 || cmds[0] != command || cmds[1] != desired {
+				t.Errorf("event = %q, want the foreign script untouched and ghost's own hook beside it", cmds)
 			}
 		})
 	}

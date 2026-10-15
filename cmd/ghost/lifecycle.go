@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -496,6 +498,24 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 		return "", "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
 	}
 	return project, source, signals, nil
+}
+
+// maintenanceContext is the root context of a maintenance command that spawns
+// CLI harnesses: `ghost reflect`, `ghost resolve`, `ghost supersede` and
+// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
+// the harnesses from being orphaned when the process is asked to stop.
+//
+// Harness children run in their own process group, so this process's group is
+// no longer the umbrella that reaches them: the phase's own deadline (the
+// lifecycle phase group signal) and a terminal Ctrl-C would otherwise end this
+// process and leave a harness with no deadline of its own, because its context
+// lives here. Cancelling this context makes each in-flight harness's own Cancel
+// signal its group before this process exits — the harness call is what the
+// process is blocked on, so the signal has been delivered by the time the
+// cancellation unwinds to the exit. The lifecycle watchdog's group sweep stays
+// as the backstop for a command that does not wind down.
+func maintenanceContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 // consolidationContext bounds a single consolidation call by
@@ -1139,7 +1159,8 @@ func runReflect() {
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
@@ -1413,6 +1434,15 @@ func runReflect() {
 	result, err := consolidator.Consolidate(consolidateCtx, input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
+		os.Exit(1)
+	}
+	// A cancelled run must not apply. The tier guard inside a tiered list makes
+	// a cancellation fatal there; this covers the consolidators that are not
+	// one — a bare mechanical tier returns a result without ever looking at the
+	// context — so a command the operator stopped cannot rewrite the corpus and
+	// exit 0.
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "error: consolidation cancelled: %v\n", ctx.Err())
 		os.Exit(1)
 	}
 
@@ -3170,7 +3200,8 @@ func runSupersede() {
 
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
@@ -4455,7 +4486,8 @@ func runResolve() {
 
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
-	ctx := context.Background()
+	ctx, stopSignals := maintenanceContext()
+	defer stopSignals()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 	applyPhaseModel(cfg.CLI.ModelResolve, source)

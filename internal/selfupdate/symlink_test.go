@@ -166,7 +166,7 @@ func TestReplaceThroughRelativeSymlinkWritesToRealTarget(t *testing.T) {
 
 	t.Chdir(elsewhere)
 
-	if err := Replace(link, []byte("new-binary")); err != nil {
+	if _, err := Replace(link, []byte("new-binary")); err != nil {
 		t.Fatalf("Replace through a relative symlink: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestReplaceLeavesNoTempFilesBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Replace(plain, []byte("new")); err != nil {
+	if _, err := Replace(plain, []byte("new")); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
 

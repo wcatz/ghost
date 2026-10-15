@@ -278,6 +278,8 @@ ghost import ghost-export.jsonl --apply --trust-provenance
 
 The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"`, unpinned and set to the durable `project` tier whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules, and cannot plant a keep-forever tier no lifecycle pass may take back — pass the flag when the artifact is your own export.
 
+An export carries no memory history, so `ghost history <memory-id>` on a restored memory shows only the row the import wrote, whatever the source store held. `ghost backup` is the copy that keeps the versions, and the artifact's omissions are listed under [Backup, export and import](cli.md#backup-export-and-import).
+
 Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 
 To remove a single memory, use the corresponding MCP delete tool. To remove an entire project, use `ghost project delete <name>` without `--apply` first. The CLI then requires the project name to be retyped before permanent deletion; see the [CLI reference](cli.md#project-operations).

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -428,11 +429,22 @@ func Token(s string) string {
 //
 // So Label keeps ordinary text exactly as written — spaces, slashes, dots, every
 // word a name is made of — and neutralises only what could end the line or open a
-// construct around it. Three things are printed around a project name and path, so
-// three characters are delimiters here that are not delimiters for an id: a
-// control character, which ends the line; «», which opens a data block; and the
-// backtick and the double quote, which close the backtick span a path is printed
-// in and the `"…"` the session-start block tells the reader to pass to every tool.
+// construct around it. Four things are printed around a project name and path, so
+// four classes are delimiters here that are not delimiters for an id: any rune
+// that ends a line for a reader, which is the package's own isLineBreak set
+// (LF, VT, FF, CR, FS/GS/RS, NEL, LS, PS) plus the rest of the C0 and C1 control
+// classes, so the escape test and Data's fold share ONE notion of what makes a
+// line; «», which opens a data block; and the backtick and the double quote,
+// which close the backtick span a path is printed in and the `"…"` the
+// session-start block tells the reader to pass to every tool.
+//
+// The line-ending class is taken WHOLE rather than approximated by `r < 0x20`:
+// that test is C0 and DEL only, so NEL (U+0085) — the only C1 control in
+// isLineBreak — and the Zl/Zp separators LS (U+2028) and PS (U+2029), which are
+// not control characters at all, went through raw and a project name holding one
+// forged a line in the session-start block's own heading (#1363). isLineBreak is
+// the shared set the content fold already uses; asking `unicode.IsControl`
+// alongside it covers the C0/C1 classes without a second hand-written list.
 //
 // The escaping is `strconv.QuoteToASCII` — the same call Token makes, so the two
 // renderers cannot disagree about what a newline looks like — with the surrounding
@@ -454,7 +466,7 @@ func Label(s string) string {
 func labelNeedsEscaping(s string) bool {
 	for _, r := range s {
 		switch {
-		case r < 0x20 || r == 0x7f:
+		case unicode.IsControl(r) || isLineBreak(r):
 			return true
 		case r == '`', r == '"', r == '«', r == '»':
 			return true
