@@ -213,9 +213,13 @@ type tagsResponse struct {
 	} `json:"models"`
 }
 
-// HasModel reports whether the configured model is installed in Ollama.
-// A model name without a tag matches its ":latest" variant, mirroring
-// Ollama's own resolution.
+// HasModel reports whether the configured model is installed in Ollama. Both
+// the configured name and each installed name are normalised to the spelling
+// Ollama resolves to — the leading "registry.ollama.ai/" and "library/"
+// prefixes dropped, and a missing (or empty) tag filled in as ":latest" — so
+// "registry.ollama.ai/library/nomic-embed-text:v1.5" and the bare
+// "nomic-embed-text:v1.5" name the one installed model, and an untagged name
+// (or one left with a trailing colon) matches its ":latest" variant.
 func (c *Client) HasModel(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -238,16 +242,32 @@ func (c *Client) HasModel(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("decode tags: %w", err)
 	}
 
-	want := c.model
-	if !strings.Contains(want, ":") {
-		want += ":latest"
-	}
+	want := resolvedModelName(c.model)
 	for _, m := range tags.Models {
-		if m.Name == want {
+		if resolvedModelName(m.Name) == want {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// resolvedModelName normalises a model name to the spelling Ollama resolves it
+// to before the /api/tags comparison: a leading "registry.ollama.ai/" and then
+// a leading "library/" are dropped, any other qualifier is kept — it names a
+// distinct model, so "hf.co/alice/m:q" and "hf.co/bob/m:q" do not collide — and
+// a name carrying no tag, including one left with a trailing colon, is filled
+// in as ":latest". It is deliberately narrower than ModelFamily, which answers
+// a different question: which task prefixes a model's weights require.
+func resolvedModelName(name string) string {
+	name = strings.TrimPrefix(name, "registry.ollama.ai/")
+	name = strings.TrimPrefix(name, "library/")
+	if i := strings.LastIndexByte(name, ':'); i >= 0 {
+		if i < len(name)-1 {
+			return name
+		}
+		name = name[:i]
+	}
+	return name + ":latest"
 }
 
 // Model returns the configured model name.
