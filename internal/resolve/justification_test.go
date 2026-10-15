@@ -184,3 +184,46 @@ func TestAnUntouchedCorrectionStillStamps(t *testing.T) {
 		t.Error("claim resolved_at is NULL, want stamped")
 	}
 }
+
+// A batch holding one row whose edge was withdrawn and one whose edge is live:
+// the UPDATE runs (the live row reaches it), so only binding it to the rows that
+// passed every check keeps the refused row live — it still matches the content
+// CAS.
+func TestAMixedBatchStampsOnlyTheRowsWhoseSignalHolds(t *testing.T) {
+	s, ctx, project := newFreshnessStore(t)
+	refusedID := mustCreate(t, s, ctx, project, "the cache layer uses redis for sessions")
+	liveID := mustCreate(t, s, ctx, project, "the queue layer uses nats for events")
+	newer := mustCreate(t, s, ctx, project, "the layers were rebuilt on valkey")
+	for _, tgt := range []string{refusedID, liveID} {
+		if err := s.CreateLink(ctx, newer, tgt, "supersedes", 0.9, "llm"); err != nil {
+			t.Fatalf("CreateLink: %v", err)
+		}
+	}
+	rows, err := s.GetByIDs(ctx, []string{refusedID, liveID})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v (%d rows)", err, len(rows))
+	}
+	if _, err := s.InvalidateLink(ctx, newer, refusedID, "supersedes"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	why := map[string]memory.ResolveJustification{
+		refusedID: {EdgeSources: []string{newer}},
+		liveID:    {EdgeSources: []string{newer}},
+	}
+	stamped, stale, err := s.SetResolvedJustified(ctx, rows, why)
+	if err != nil {
+		t.Fatalf("SetResolvedJustified: %v", err)
+	}
+	if len(stamped) != 1 || stamped[0] != liveID {
+		t.Errorf("stamped = %v, want only %s", stamped, liveID)
+	}
+	if len(stale) != 1 || stale[0] != refusedID {
+		t.Errorf("stale = %v, want only %s", stale, refusedID)
+	}
+	if ra := resolvedAt(t, s, ctx, refusedID); ra != nil {
+		t.Errorf("refused row resolved_at = %q, want NULL", *ra)
+	}
+	if ra := resolvedAt(t, s, ctx, liveID); ra == nil {
+		t.Error("live row resolved_at is NULL, want stamped")
+	}
+}
