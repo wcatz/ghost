@@ -231,7 +231,12 @@ type resolveStore interface {
 	// PromoteToGlobal changes project_id only, so a content match alone would
 	// stamp a row the pass's project no longer owns. It returns stamped and
 	// stale as disjoint id lists.
-	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
+	//
+	// SetResolvedJustified is the same writer for a pass that demoted rows on a
+	// deterministic signal: it also re-checks, inside the write transaction,
+	// that the supersedes edge or correction memory that justified each demotion
+	// still holds, and reports the row stale when it does not (#1389).
+	SetResolvedJustified(ctx context.Context, judged []memory.Memory, why map[string]memory.ResolveJustification) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
@@ -437,6 +442,10 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	if err != nil {
 		return res, nil, err
 	}
+	// why records the signal each deterministic demotion rests on, so the write
+	// can re-check it (#1389): the classify call below is seconds to minutes, and
+	// a withdrawal or a deleted correction in that window removes the reason.
+	why := make(map[string]memory.ResolveJustification)
 	for _, l := range links {
 		older, ok := byID[l.TargetID]
 		if !ok {
@@ -444,13 +453,24 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		}
 		res.Superseded++
 		addConfirmed(older)
+		j := why[older.ID]
+		j.EdgeSources = append(j.EdgeSources, l.SourceID)
+		why[older.ID] = j
 	}
 
 	// Mechanism 2: correction pairing. correctionPairTargets already returns
 	// only prefilter-passing loaded candidates, so each is demoted deterministically.
-	for _, m := range correctionPairTargets(loaded, cands) {
+	corrected := make(map[string]bool)
+	for _, p := range correctionPairingsFrom(loaded, cands, loaded) {
+		j := why[p.Target.ID]
+		j.Corrections = append(j.Corrections, p.Correction)
+		why[p.Target.ID] = j
+		if corrected[p.Target.ID] {
+			continue
+		}
+		corrected[p.Target.ID] = true
 		res.Corrected++
-		addConfirmed(m)
+		addConfirmed(p.Target)
 	}
 
 	// Classify the remaining prefilter candidates; deterministically-demoted
@@ -617,7 +637,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 
 	if apply {
 		if len(confirmed) > 0 {
-			stamped, stale, err := store.SetResolvedJudged(ctx, confirmed)
+			stamped, stale, err := store.SetResolvedJustified(ctx, confirmed, why)
 			if err != nil {
 				return res, nil, fmt.Errorf("set resolved: %w", err)
 			}

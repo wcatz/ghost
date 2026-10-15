@@ -5181,6 +5181,59 @@ type judgedRow struct {
 	project string
 }
 
+// ResolveJustification is the deterministic signal a resolve pass read, before
+// its classify call, as the reason to demote one row without asking the
+// classifier (#1389). The stamp is only as good as that signal, and the signal
+// can be withdrawn in the window: a supersedes edge invalidated, a correction
+// memory deleted or rewritten. A row is stamped only while AT LEAST ONE of its
+// signals still holds at write time, checked inside the stamping transaction.
+// The zero value justifies nothing and means "no signal to re-check", which is
+// how a classifier verdict is written: that verdict's own freshness is the
+// content and project CAS.
+type ResolveJustification struct {
+	// EdgeSources are the sources of the live 'supersedes'/'llm' edges that
+	// pointed at the row when the pass read them.
+	EdgeSources []string
+	// Corrections are the correction memories that paired the row, as read: a
+	// pairing holds only while the correction still exists with that content.
+	Corrections []Memory
+}
+
+func (j ResolveJustification) empty() bool {
+	return len(j.EdgeSources) == 0 && len(j.Corrections) == 0
+}
+
+// resolveJustificationHoldsTx reports whether any signal in j still holds for
+// the target, read inside the stamping transaction. A supersedes edge holds
+// while it is live; a correction holds while its row still has the content the
+// pass paired against.
+func resolveJustificationHoldsTx(ctx context.Context, tx *sql.Tx, target string, j ResolveJustification) (bool, error) {
+	for _, src := range j.EdgeSources {
+		var one int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM memory_links
+			WHERE source_id = ? AND target_id = ? AND relation = 'supersedes'
+			  AND source = 'llm' AND invalidated_at IS NULL`, src, target).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("check supersedes edge: %w", err)
+		}
+	}
+	for _, c := range j.Corrections {
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ? AND content = ?`, c.ID, c.Content).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("check correction: %w", err)
+		}
+	}
+	return false, nil
+}
+
 // setResolvedStampTx is the shared body of the resolve writers: one transaction,
 // batches of setResolvedBatchSize, and one history row per row the UPDATE
 // actually changed. It returns the ids it stamped and the ids it found STALE,
@@ -5207,7 +5260,7 @@ type judgedRow struct {
 // resolved, retention-exempt) is neither stamped nor stale, exactly as before:
 // "no longer eligible" and "changed since judged" are different states and only
 // the second is this writer's to report.
-func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow) (stamped, stale []string, err error) {
+func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -5297,9 +5350,42 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 				stale = append(stale, id)
 			}
 		}
+		// #1389: a demotion that rests on a deterministic signal is refused when
+		// that signal was withdrawn during the classify call. The check is here,
+		// inside the transaction that holds the write lock, so no withdrawal can
+		// land between it and the UPDATE; a refused row is stale, like a rewrite.
+		if len(why) > 0 {
+			held := fresh[:0:0]
+			for _, id := range fresh {
+				j := why[id]
+				if j.empty() {
+					held = append(held, id)
+					continue
+				}
+				ok, err := resolveJustificationHoldsTx(ctx, tx, id, j)
+				if err != nil {
+					return nil, nil, err
+				}
+				if ok {
+					held = append(held, id)
+				} else {
+					stale = append(stale, id)
+				}
+			}
+			fresh = held
+		}
 		if len(fresh) == 0 {
 			continue
 		}
+		// The UPDATE binds the rows that passed every check, not the whole batch:
+		// a row refused for its justification still matches the content CAS.
+		pairs = pairs[:0]
+		pairArgs = pairArgs[:0]
+		for _, id := range fresh {
+			pairs = append(pairs, "(?,?,?)")
+			pairArgs = append(pairArgs, id, judged[id].content, judged[id].project)
+		}
+		pairArgs = append(pairArgs, projectID, projectID)
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedJudgedUpdateSQL, strings.Join(pairs, ",")), pairArgs...); err != nil {
 			return nil, nil, fmt.Errorf("set resolved: %w", err)
 		}
@@ -5344,7 +5430,7 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	stamped, _, err := s.setResolvedStampTx(ctx, ids, "", Provenance{}, nil)
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, "", Provenance{}, nil, nil)
 	return len(stamped), err
 }
 
@@ -5387,6 +5473,17 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 // caller that named one id twice with two texts has no single row to judge.
 // A no-op on an empty slice.
 func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped, stale []string, err error) {
+	return s.SetResolvedJustified(ctx, judged, nil)
+}
+
+// SetResolvedJustified is SetResolvedJudged for a pass that demoted some rows on
+// a deterministic signal rather than a verdict (#1389). why maps a row id to the
+// signal it was demoted on; a row with an entry is stamped only while one of its
+// signals still holds, read inside the stamping transaction, and is reported
+// stale otherwise — the same outcome as a row rewritten mid-pass. A row with no
+// entry is written exactly as SetResolvedJudged writes it. A nil or empty why is
+// SetResolvedJudged.
+func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	if len(judged) == 0 {
 		return nil, nil, nil
 	}
@@ -5403,7 +5500,7 @@ func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped
 	// row is REPORTED stale instead of being silently ineligible. The pass's
 	// project rides in the judged map, where it is compared as the CAS's second
 	// field.
-	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want)
+	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want, why)
 }
 
 // MarkResolved stamps resolved_at on the named ids IN projectID and returns the
@@ -5470,7 +5567,7 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 		// guard the next caller forgets.
 		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
-	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil)
+	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil, nil)
 	return stamped, err
 }
 
