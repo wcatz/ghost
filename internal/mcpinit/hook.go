@@ -684,14 +684,16 @@ func shownOnly(projectShown, globalsShown int) sessionTally {
 
 // RenderSessionContext is the context renderer backing the `ghost context`
 // command and opencode's plugin. It produces exactly what the SessionStart hook
-// would emit for the same cwd — project memories, globals, open tasks, recent
-// decisions. To keep opencode's injected context at parity with claude/codex it
-// also mirrors the SessionStart hook's startup side effects: it starts the
-// Obsidian mirror when configured and counts this as a new session. opencode's
-// plugin materializes the result into its instructions so every session opens
-// with project memory (opencode has no stdout-injection surface of its own).
-// An empty cwd resolves to the process working directory; a missing store or
-// unmatched directory with no globals yields an empty string.
+// would emit for the same cwd — the maintenance alert ahead of project
+// memories, globals, open tasks and recent decisions. To keep opencode's
+// injected context at parity with claude/codex it also mirrors the SessionStart
+// hook's startup side effects: it starts the Obsidian mirror when configured and
+// counts this as a new session. opencode's plugin materializes the result into
+// its instructions so every session opens with project memory (opencode has no
+// stdout-injection surface of its own).
+// An empty cwd resolves to the process working directory; a missing store, or an
+// unmatched directory with no globals and no current maintenance alert, yields
+// an empty string.
 func RenderSessionContext(cwd string) string {
 	return RenderSessionContextAt(cwd, nil)
 }
@@ -705,10 +707,12 @@ func RenderSessionContext(cwd string) string {
 // Two things a past reading must not do, and neither is a detail:
 //
 //   - It must not run the startup side effects. The current path starts the
-//     Obsidian mirror and counts this as a new session, because the path it backs
-//     IS a session start. A historical read is a diagnostic a person asked for;
-//     counting it would move the present's session number to answer a question
-//     about the past, and starting a worker for it would be work nobody needs.
+//     Obsidian mirror, counts this as a new session and prints the maintenance
+//     alert (whose marker read self-cleans one older than 30 days), because the
+//     path it backs IS a session start. A historical read is a diagnostic a
+//     person asked for; counting it would move the present's session number to
+//     answer a question about the past, and starting a worker for it would be
+//     work nobody needs.
 //   - It must not fill in the halves that have no history. The learned context is
 //     derived from the memories as they stand, the tasks and decisions tables
 //     record no versions at all, so a block that printed today's of them under a
@@ -745,11 +749,27 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 			}
 		}
 	}
-	// Nothing to surface — don't inject an empty/decorative block.
+	// Parity with the hook's maintenance notification, the last thing this
+	// renderer owed it: a failed unattended consolidation leaves a per-project
+	// marker, and this render is the only session-start surface a host that
+	// cannot consume the hook's stdout injection (opencode) ever sees, so the
+	// alert line the hook prints ahead of the block has to be printed here too.
+	// It is read on the CURRENT path alone — the historical branch returned
+	// above, and a question about the past must not report the present's paused
+	// consolidation. The project it names is the one this render resolved.
+	alert := lifecycleFailureAlert(projectID, project)
+
+	// Nothing to surface — don't inject an empty/decorative block. A maintenance
+	// alert is not decorative: with no block to print, a current failure marker
+	// is still the thing this render exists to carry.
 	if projectID == "" && len(globals) == 0 {
-		return ""
+		return alert
 	}
-	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	if alert == "" {
+		return block
+	}
+	return alert + "\n" + block
 }
 
 // SessionBlockAt renders the block a session start (and `ghost context`) emits for
