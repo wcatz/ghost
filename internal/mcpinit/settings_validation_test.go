@@ -395,3 +395,112 @@ func TestValidateAcceptsAbsentFields(t *testing.T) {
 		}
 	}
 }
+
+// TestRunMergesBOMSettings pins #1379: Claude Code reads a settings.json that
+// starts with a UTF-8 byte-order mark, so init merges into it instead of
+// refusing, keeps the mark at the start of the file and the user's keys, and
+// still takes the one-time .bak of the user's pre-ghost bytes.
+func TestRunMergesBOMSettings(t *testing.T) {
+	home, _ := installEnv(t)
+	seed := "\ufeff{\"model\":\"opus\"}\n"
+	path := writeSettings(t, home, seed)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run refused a BOM-prefixed settings.json: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), "\ufeff{") {
+		t.Errorf("the byte-order mark must stay at the start of the file, got:\n%q", got)
+	}
+	if strings.Count(string(got), "\ufeff") != 1 {
+		t.Errorf("exactly one byte-order mark expected, got:\n%q", got)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimPrefix(got, []byte("\ufeff")), &doc); err != nil {
+		t.Fatalf("merged file is not valid JSON after the mark: %v", err)
+	}
+	if string(doc["model"]) != `"opus"` {
+		t.Errorf("the user's key must survive the merge, got %s", doc["model"])
+	}
+	if _, ok := doc["hooks"]; !ok {
+		t.Error("ghost's hooks were not merged")
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the pre-ghost file must be backed up: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak must hold the user's original bytes, got %q", bak)
+	}
+}
+
+// TestRunBOMSettingsRoundTrip pins the other half of #1379: the mark is
+// preserved only where the file had one. A BOM-free file stays BOM-free, a
+// fresh install writes no mark, and a second run over a BOM file is a fixed
+// point that still holds exactly one mark.
+func TestRunBOMSettingsRoundTrip(t *testing.T) {
+	const bom = "\ufeff"
+
+	t.Run("existing file without a mark", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := writeSettings(t, home, "{\"model\":\"opus\"}\n")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), bom) {
+			t.Errorf("a BOM-free file must stay BOM-free, got:\n%q", got)
+		}
+	})
+
+	t.Run("fresh install", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := filepath.Join(home, ".claude", "settings.json")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), bom) {
+			t.Errorf("a fresh install must write no mark, got:\n%q", got)
+		}
+	})
+
+	t.Run("second run on a marked file", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := writeSettings(t, home, bom+"{\"model\":\"opus\"}\n")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("first Run: %v", err)
+		}
+		first, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("second Run: %v", err)
+		}
+		second, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(first) != string(second) {
+			t.Errorf("second run must be a fixed point:\nfirst:\n%q\nsecond:\n%q", first, second)
+		}
+		if n := strings.Count(string(second), bom); n != 1 || !strings.HasPrefix(string(second), bom) {
+			t.Errorf("want exactly one leading mark, got %d in:\n%q", n, second)
+		}
+	})
+}

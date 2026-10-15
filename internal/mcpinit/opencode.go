@@ -482,6 +482,9 @@ func opencodeMCPCommandIsGhost(resolved, ghostBin string) bool {
 // not read as unparseable here.
 func parseOpencodeConfig(data []byte) (opencodeConfig, error) {
 	var cfg opencodeConfig
+	if err := leadingBOMError(data, "the file"); err != nil {
+		return opencodeConfig{}, err
+	}
 	if err := json.Unmarshal(stripJSONC(data), &cfg); err != nil {
 		return opencodeConfig{}, err
 	}

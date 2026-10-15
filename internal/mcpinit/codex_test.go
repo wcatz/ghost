@@ -3123,3 +3123,46 @@ func TestCodexContractHookWired_FlagForms(t *testing.T) {
 		}
 	}
 }
+
+// TestCodexHooksJSONBOMIsRefusedByName pins #1379: codex parses hooks.json
+// with serde_json, which rejects a leading byte-order mark, so both the init
+// decode and the status reader refuse it with a message that names the mark
+// rather than a bare parse error, and init leaves the file as written.
+func TestCodexHooksJSONBOMIsRefusedByName(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	seed := "\ufeff{\"hooks\":{}}\n"
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("init", func(t *testing.T) {
+		var out bytes.Buffer
+		err := RunCodex(&out, false)
+		if err == nil {
+			t.Fatalf("a BOM-prefixed hooks.json must be refused; output:\n%s", out.String())
+		}
+		if !strings.Contains(err.Error(), "byte-order mark") {
+			t.Errorf("refusal must name the byte-order mark, got: %v", err)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != seed {
+			t.Errorf("a refused file must be left untouched, got:\n%q", got)
+		}
+	})
+	t.Run("status reader", func(t *testing.T) {
+		_, err := loadCodexHooksRules()
+		if err == nil {
+			t.Fatal("the status reader must refuse a BOM-prefixed hooks.json")
+		}
+		if !strings.Contains(err.Error(), "byte-order mark") {
+			t.Errorf("status refusal must name the byte-order mark, got: %v", err)
+		}
+	})
+}
