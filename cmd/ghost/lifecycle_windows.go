@@ -25,3 +25,9 @@ func killPhaseProcess(cmd *exec.Cmd) {
 	}
 	_ = cmd.Process.Kill()
 }
+
+// phaseGroupInhabited is always false on Windows. There is no process group to
+// join or signal, and the deadline's terminatePhaseProcess has already killed
+// the direct child outright — there is no graceful grace period to wait out and
+// nothing left to escalate against.
+func phaseGroupInhabited(_ *exec.Cmd) bool { return false }

@@ -1682,6 +1682,8 @@ A run reports its own preconditions and outcomes on stderr — a reflect skip, t
 
 A run first claims the project's lifecycle lock. Another live run holding it is the only lock outcome that stops the run ("another lifecycle is already running"). A lock that cannot be evaluated — its files cannot be created or written, or the project id is not usable as a file name (for example, longer than the file names built from it allow) — is a warning on stderr, and the phases run unlocked.
 
+Each phase runs in its own process group, so the phase deadline can signal the whole group — a phase spawns CLI harnesses, and signalling only the direct child would orphan them. The escalation `phaseWatchdog` force-kills the group once the 30-second grace period has run out, but only if something is still in it: the criterion is the GROUP, not the phase process, because the phase has no SIGTERM handler and is reaped at once while a harness grandchild that ignored the signal can still be running. An empty group is never signalled, because by then its process group id names nothing in this run and could be reused by an unrelated group on a busy machine. This mechanism is Unix-only: on Windows there is no process group, the deadline kills the phase directly, and no second escalation runs.
+
 ## Development builds: refusing a real store
 
 `GHOST_DEV_FORBID_DATA_DIR` names data directories a build that is **not a
