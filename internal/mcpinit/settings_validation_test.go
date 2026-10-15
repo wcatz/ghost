@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,6 +185,67 @@ func TestRunInstallsWithMissingSettings(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("init must create settings.json: %v", err)
+	}
+}
+
+// TestRunDoesNotBackUpItsOwnSettings pins that the one-time settings.json.bak
+// stays the user's pre-ghost file and never becomes ghost's own output. On a
+// fresh install the first run creates settings.json from nothing, so it has
+// nothing to back up; the SECOND run is the one whose save sees a file on disk
+// — and that file is ghost's own output, which the .bak slot must not take.
+// Because the .bak is never rolled forward, capturing ghost's bytes there
+// would leave a later user edit with nowhere to be kept, so the test also
+// shows a genuine edit is still captured once the slot has been left free.
+func TestRunDoesNotBackUpItsOwnSettings(t *testing.T) {
+	home, _ := installEnv(t)
+	path := filepath.Join(home, ".claude", "settings.json")
+
+	var first bytes.Buffer
+	if err := Run(&first, false); err != nil {
+		t.Fatalf("first Run: %v\n%s", err, first.String())
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("the first init backed something up (Stat err = %v), but settings.json did not exist before it", err)
+	}
+
+	var second bytes.Buffer
+	if err := Run(&second, false); err != nil {
+		t.Fatalf("second Run: %v\n%s", err, second.String())
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		bak, _ := os.ReadFile(path + ".bak")
+		t.Errorf("the second init backed up ITS OWN output:\n%q", bak)
+	}
+
+	// The slot was left free for the user: an edit of their own is captured.
+	doc, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &merged); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	merged["effortLevel"] = json.RawMessage(`"high"`)
+	edited, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited = append(edited, '\n')
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var third bytes.Buffer
+	if err := Run(&third, false); err != nil {
+		t.Fatalf("third Run: %v\n%s", err, third.String())
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("a user edit was not backed up: %v", err)
+	}
+	if !bytes.Equal(bak, edited) {
+		t.Errorf(".bak = %q, want the user's file %q", bak, edited)
 	}
 }
 

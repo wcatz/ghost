@@ -56,6 +56,12 @@ type hookAction struct {
 type settingsFile struct {
 	path string
 	raw  map[string]json.RawMessage
+	// ghostManaged records whether the document AS LOADED held nothing but
+	// what ghost itself writes. It is decided at load, before any step merges
+	// into the in-memory document, so it describes the file still on disk when
+	// save runs; save reads it to keep the one-time .bak for the user's
+	// pre-ghost file instead of capturing ghost's own output.
+	ghostManaged bool
 }
 
 // settingsPath returns the path to ~/.claude/settings.json.
@@ -94,6 +100,7 @@ func loadSettings(path string) (*settingsFile, error) {
 	if s.raw == nil {
 		return nil, fmt.Errorf("%s is null", filepath.Base(path))
 	}
+	s.ghostManaged = s.holdsOnlyGhostManaged()
 	return s, nil
 }
 
@@ -104,8 +111,14 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
 
-	// Backup the pre-merge file, once.
-	if data, err := os.ReadFile(s.path); err == nil {
+	// Backup the pre-merge file, once — unless it holds nothing but ghost's own
+	// output. The .bak is the user's pre-ghost file, and it is never rolled
+	// forward, so capturing ghost's bytes there would fill the slot forever
+	// and the user's own file could never be kept: on a fresh install the first
+	// run creates settings.json, and it is the SECOND run whose save sees a
+	// file to back up — ghost's own output. `ghostManaged` is that case, and
+	// only a file with user content of its own is backed up.
+	if data, err := os.ReadFile(s.path); err == nil && !s.ghostManaged {
 		if err := writeBackupOnce(s.path+".bak", data); err != nil {
 			return err
 		}
@@ -582,6 +595,111 @@ func (s *settingsFile) validate() error {
 		}
 	}
 	return nil
+}
+
+// holdsOnlyGhostManaged reports whether the document as loaded holds nothing
+// but what ghost itself writes: ghost's tool permissions, ghost's lifecycle
+// hooks, and the autoMemoryEnabled flag, with no other key, permission or
+// hook. An empty document counts — it carries nothing of the user's either.
+// save reads it to decide whether settings.json is worth backing up, because
+// the one-time .bak exists for the user's pre-ghost file: a file that holds
+// only ghost's own output has no pre-ghost content to keep, and since the .bak
+// is never rolled forward, capturing ghost's bytes there would fill the slot
+// for good and the user's own file could never be backed up afterwards.
+//
+// Recognising ghost's hooks uses the same ownership rule the reconcile uses
+// (isGhostHookCommand over ghostHookTail), which accepts a ghost binary under
+// any path: an upgrade that moved the binary leaves the file ghost's own
+// output still, so the stale-path repair does not capture it. Whatever is not
+// affirmatively ghost's own makes the answer false, so an unusual shape costs
+// a harmless extra backup rather than a skipped one.
+func (s *settingsFile) holdsOnlyGhostManaged() bool {
+	if s.raw == nil {
+		return false
+	}
+	if len(s.raw) == 0 {
+		return true
+	}
+	for k := range s.raw {
+		switch k {
+		case "permissions", "hooks", "autoMemoryEnabled":
+		default:
+			return false
+		}
+	}
+
+	// permissions must be exactly ghost's list under an allow-only object:
+	// another key (deny, defaultMode) or another permission is the user's.
+	raw, ok := s.raw["permissions"]
+	if !ok {
+		return false
+	}
+	var perms map[string]json.RawMessage
+	if json.Unmarshal(raw, &perms) != nil || perms == nil {
+		return false
+	}
+	for k := range perms {
+		if k != "allow" {
+			return false
+		}
+	}
+	allow, err := s.getPermissions()
+	if err != nil || !sameStringSet(allow, ghostPermissions) {
+		return false
+	}
+
+	// hooks must hold only the events ghost writes, each carrying only ghost's
+	// own command for that event.
+	hooks, present, err := s.hooksMap()
+	if err != nil || !present || len(hooks) == 0 {
+		return false
+	}
+	for event := range hooks {
+		var token string
+		switch event {
+		case "SessionStart":
+			token = "session-start"
+		case "Stop":
+			token = "stop"
+		case "UserPromptSubmit":
+			token = "message-submit"
+		case "PostToolUse":
+			token = "edit"
+		default:
+			return false
+		}
+		cmds, err := s.hookCommands(event)
+		if err != nil || len(cmds) == 0 {
+			return false
+		}
+		for _, cmd := range cmds {
+			if !isGhostHookCommand(cmd, "hook "+token, "") {
+				return false
+			}
+		}
+	}
+
+	v, present := s.getAutoMemoryEnabled()
+	return present && !v
+}
+
+// sameStringSet reports whether a and b hold the same strings, ignoring order
+// and repeats.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // findHookCommand returns the first hook command for event containing
