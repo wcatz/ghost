@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -2104,6 +2105,9 @@ func TestMergeCodexHooksTreatsAWrappedGhostActionAsItsOwn(t *testing.T) {
 			{"sh-c", func(cmd string) string { return `/bin/sh -c "` + cmd + `"` }},
 		} {
 			t.Run(ev.key+"/"+w.label, func(t *testing.T) {
+				if w.label == "sh-c" && runtime.GOOS == "windows" {
+					t.Skip("POSIX-nested shell quoting; sh-c shape exercised on unix runners")
+				}
 				canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
 				wrapped := w.wrap(canonical)
 				seed := []byte(`{
