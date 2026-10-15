@@ -323,7 +323,11 @@ func runUpgrade(args []string) {
 		fetch: selfupdate.LatestRelease,
 		install: func(binary []byte) error {
 			fmt.Printf("Replacing %s...\n", exe)
-			return selfupdate.Replace(exe, binary)
+			note, err := selfupdate.Replace(exe, binary)
+			if note != "" {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", note)
+			}
+			return err
 		},
 		// The verifier is a function of the data directory rather than a path
 		// resolved here, so that the trust-root cache is only located — and, on
