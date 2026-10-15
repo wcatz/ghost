@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -310,15 +311,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 // every bucket's reading of what its rows carry, agree about which store they are
 // talking to.
 func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, []DroppedLoser, error) {
-	query, args := passiveFetchSQL(pol, req, cols)
-	rows, err := s.queryDB().QueryContext(ctx, query, args...)
+	memories, err := s.passiveWindow(ctx, req, pol, cols)
 	if err != nil {
 		return nil, nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
-	}
-	defer func() { _ = rows.Close() }()
-	memories, err := scanPassiveWindow(rows, pol, req.Now)
-	if err != nil {
-		return nil, nil, err
 	}
 	// The replacement of a pinned row holds a slot too, so it has to be in the
 	// window to be given one: a window cut by rank would leave a pinned row that
@@ -335,71 +330,142 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
 }
 
-// scanPassiveWindow reads a policy's population and keeps its window: the top
-// OverFetch rows under the policy's own order. The rows stream out of the index
-// one at a time and are offered to a bounded window, so the bucket is never held
-// and never sorted — the `LIMIT` the fetch used to carry is this window's size,
-// and the `ORDER BY` it used to carry is passiveWindowLess.
+// passiveKeyScanVisited counts the rows the threshold scan has read since the
+// last reset, and it exists so a test can pin the READ COUNT rather than a
+// duration: the property the scan is for is that a bucket's low-ranked tail is
+// never read, and that is a number, not a timing. It is process state rather
+// than a field because the scan is a free function over a cursor and no caller
+// should have to carry a counter it does not read.
+var passiveKeyScanVisited atomic.Int64
+
+// resetPassiveKeyScan resets the read count, for the tests that pin it.
+func resetPassiveKeyScan() { passiveKeyScanVisited.Store(0) }
+
+// passiveKeyScanReads is the read count, for the tests that pin it.
+func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
+
+// passiveWindow is a policy's window: the top OverFetch rows under the policy's
+// own order, kept by a THRESHOLD SCAN rather than by sorting the bucket.
 //
-// The window is a strict functional replacement for the SQL cut, not a
-// re-approximation of it: the same rows in the same order come out of it. The
-// SQL bound its clock through stampLayoutForSQL (whole seconds), so the score is
-// recomputed here against the same truncated instant rather than against Now's
-// sub-second part — otherwise a row's rank could differ by the fraction of a
-// second the two clocks disagree on, which is a reorder nothing downstream could
-// attribute.
+// The scan is exact because of one fact about the rank: every factor of the
+// decay — the category factor, the tier factor and the pin's — is at most 1, so
+// a row's rank is never above its importance (see decayRankingSQL and
+// RetentionDecayFactor). Rows are therefore read in `importance DESC` order,
+// which `idx_memories_project_imp` serves, and no row still unread can outrank
+// the window once the next row's importance falls below the window's k-th rank:
+// an unread row's rank is at most its importance.
 //
-// A row that is OFFERED to the window but loses is dropped here and never
-// reaches the selection. That is the same membership the SQL produced, and the
-// validity predicate already removed the ineligible rows in SQL, so nothing that
-// reaches this loop is a row the window should have refused for eligibility.
-func scanPassiveWindow(rows *sql.Rows, pol SlicePolicy, now time.Time) ([]Memory, error) {
-	clock := now.UTC().Truncate(time.Second)
-	window := make([]passiveRow, 0, pol.OverFetch)
-	for rows.Next() {
-		m, err := scanMemoryRow(rows)
+// Pinned rows are read as their own population and seed the window, because a
+// pin outranks every unpinned row whatever its rank. Once the window is full of
+// pinned rows nothing unpinned can enter it, so the second scan is skipped.
+//
+// The window holds KEYS, not rows: the scan reads only the columns the rank
+// needs, and the full rows are hydrated once, for the window's k rows, so the
+// bucket's content is never read at all.
+func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Memory, error) {
+	pinned, err := s.scanPassiveKeys(ctx, req, pol, cols, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	window := pinned
+	if len(window) < pol.OverFetch {
+		window, err = s.scanPassiveKeys(ctx, req, pol, cols, false, window)
 		if err != nil {
 			return nil, err
 		}
-		age := ageDays(m.CreatedAt, clock)
-		decay := DecayFactor(m.Category, m.Retention, m.Pinned, age)
-		window = insertPassiveWindow(window, passiveRow{
-			mem:   m,
-			age:   age,
-			decay: decay,
-			score: float64(m.Importance) * decay,
-		}, pol.Order, pol.OverFetch)
+	}
+	return s.hydratePassiveWindow(ctx, window, cols)
+}
+
+// scanPassiveKeys is one threshold scan: the pinned population or the unpinned
+// one, read in importance order and offered to the window until the stop
+// condition fires. `window` is the best-first window to seed, so the pinned scan
+// seeds the unpinned one.
+func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, pinned bool, window []passiveRankKey) ([]passiveRankKey, error) {
+	query, args := passiveKeyScanSQL(pol, req, cols, pinned)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("candidates: passive key scan for bucket %q: %w", pol.Bucket, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		key, err := scanPassiveRankKey(rows, req.Now)
+		if err != nil {
+			return nil, err
+		}
+		passiveKeyScanVisited.Add(1)
+		if len(window) >= pol.OverFetch && passiveRankKeyStopsAt(key, window[len(window)-1], pol.Order) {
+			// key and every row after it rank below the window's last place, so
+			// none of them can enter it. Stopping here is what makes the read
+			// O(window) instead of O(bucket).
+			break
+		}
+		window = insertPassiveRankKey(window, key, pol.Order, pol.OverFetch)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]Memory, len(window))
-	for i, r := range window {
-		out[i] = r.mem
-	}
-	return out, nil
+	return window, nil
 }
 
-// insertPassiveWindow places one row into the window, which is held BEST FIRST
-// and capped at capN. A row that belongs past the cap is dropped: the window
-// keeps its length and the row is as far outside it as the SQL's LIMIT left it.
-func insertPassiveWindow(window []passiveRow, r passiveRow, order string, capN int) []passiveRow {
-	at := sort.Search(len(window), func(i int) bool { return passiveWindowLess(r, window[i], order) })
+// scanPassiveRankKey scans one key row and computes its rank. Importance is
+// scanned as the double the column holds rather than through Memory.Importance
+// (a float32), because the tie it breaks must be the tie the SQL ordered on: a
+// value the store holds that float32 cannot name would otherwise rank differently
+// here than it did in the engine.
+func scanPassiveRankKey(rows *sql.Rows, now time.Time) (passiveRankKey, error) {
+	var key passiveRankKey
+	var pinned int
+	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
+		return key, fmt.Errorf("scan passive key: %w", err)
+	}
+	key.pinned = pinned == 1
+	clock := now.UTC().Truncate(time.Second)
+	key.rank = key.importance * DecayFactor(key.category, key.retention, key.pinned, ageDays(key.createdAt, clock))
+	return key, nil
+}
+
+// insertPassiveRankKey places one key into the window, which is held BEST FIRST
+// and capped at capN. A key that belongs past the cap is dropped.
+func insertPassiveRankKey(window []passiveRankKey, key passiveRankKey, order string, capN int) []passiveRankKey {
+	at := sort.Search(len(window), func(i int) bool { return passiveRankKeyLess(key, window[i], order) })
 	if at >= capN {
 		return window
 	}
 	if len(window) >= capN {
 		window = window[:capN-1]
 	}
-	window = append(window, passiveRow{})
+	window = append(window, passiveRankKey{})
 	copy(window[at+1:], window[at:])
-	window[at] = r
+	window[at] = key
 	return window
 }
 
-// passiveWindowLess is the policy's window order, and it is the SQL ORDER BY the
-// fetch used to state, moved into Go so the engine does not sort the bucket. It
-// reports whether a ranks before b.
+// passiveRankKeyStopsAt reports whether the scan may stop at key: whether key
+// and every row after it rank below the window's last place.
+//
+// It is STRICT, and the strictness is the tie-break: an unread row whose
+// importance EQUALS the threshold could still tie the last place on the primary
+// key and win it on importance, created_at or id, so the scan keeps reading
+// while they are equal. Only a strictly lower importance, which forces a
+// strictly lower rank, excludes the rest.
+//
+// The threshold is the policy's PRIMARY key, which is what the bound is about:
+// `decay` ranks on the score, so the comparison is against the window's k-th
+// score; `pinned_importance_updated` ranks on importance first, so it is against
+// the k-th importance. An unread row's primary key is at most its importance
+// (the score's because every decay factor is at most 1, importance's trivially),
+// which is what makes the strict comparison sound.
+func passiveRankKeyStopsAt(key, last passiveRankKey, order string) bool {
+	if order == OrderPinnedImportanceUpdated {
+		return key.importance < last.importance
+	}
+	return key.importance < last.rank
+}
+
+// passiveRankKeyLess is the policy's window order over scan keys, and it is the
+// SQL ORDER BY the fetch used to state, moved into Go so the engine does not
+// sort the bucket. It reports whether a ranks before b.
 //
 // The two policies genuinely differ, which is why the order travels as a value:
 // `decay` ranks on the composite score, and `pinned_importance_updated` on
@@ -409,36 +475,126 @@ func insertPassiveWindow(window []passiveRow, r passiveRow, order string, capN i
 // ranks behind every 0.9 row the bucket holds, so a window of N rows full of
 // better ones never contains it unless the order puts it first.
 //
-// Every key is the SQL key: `score` is the Go mirror of the bound decay
-// expression (DecayFactor), importance and created_at are compared as the store
-// holds them, and `id` is the trailing tie-break the shipped loader lacks. Naming
+// Every key is the SQL key: `rank` is the Go mirror of the bound decay
+// expression over the double the column holds, importance and created_at are
+// compared as the store holds them, and `id` is the trailing tie-break. Naming
 // `id` makes the window a function of the store's contents rather than of the
 // order SQLite happened to produce — what a golden comparison across machines
 // needs — and it can only REORDER rows left tied, never move a row past one it
 // ranked.
-func passiveWindowLess(a, b passiveRow, order string) bool {
-	if a.mem.Pinned != b.mem.Pinned {
-		return a.mem.Pinned
+func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
+	if a.pinned != b.pinned {
+		return a.pinned
 	}
 	if order == OrderPinnedImportanceUpdated {
-		if a.mem.Importance != b.mem.Importance {
-			return a.mem.Importance > b.mem.Importance
+		if a.importance != b.importance {
+			return a.importance > b.importance
 		}
-		if a.mem.UpdatedAt != b.mem.UpdatedAt {
-			return a.mem.UpdatedAt > b.mem.UpdatedAt
+		if a.updatedAt != b.updatedAt {
+			return a.updatedAt > b.updatedAt
 		}
-		return a.mem.ID < b.mem.ID
+		return a.id < b.id
 	}
-	if a.score != b.score {
-		return a.score > b.score
+	if a.rank != b.rank {
+		return a.rank > b.rank
 	}
-	if a.mem.Importance != b.mem.Importance {
-		return a.mem.Importance > b.mem.Importance
+	if a.importance != b.importance {
+		return a.importance > b.importance
 	}
-	if a.mem.CreatedAt != b.mem.CreatedAt {
-		return a.mem.CreatedAt > b.mem.CreatedAt
+	if a.createdAt != b.createdAt {
+		return a.createdAt > b.createdAt
 	}
-	return a.mem.ID < b.mem.ID
+	return a.id < b.id
+}
+
+// passiveRankKey is one row's rank facts, read by the threshold scan before the
+// row is hydrated. It is a key rather than a Memory so the scan never carries a
+// row's content, and it holds importance as the double the column stores so the
+// tie it breaks is the engine's.
+type passiveRankKey struct {
+	id         string
+	pinned     bool
+	importance float64
+	category   string
+	createdAt  string
+	updatedAt  string
+	retention  string
+	rank       float64
+}
+
+// hydratePassiveWindow reads the full rows of the window's keys, in the window's
+// order. It is the one read that carries content, and it is bounded by the
+// window: the bucket's rows are never materialised.
+func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey, cols passiveColumns) ([]Memory, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	marks := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		marks[i] = "?"
+		args[i] = k.id
+	}
+	rows, err := s.queryDB().QueryContext(ctx, "SELECT "+cols.list+" FROM memories WHERE id IN ("+strings.Join(marks, ",")+")", args...)
+	if err != nil {
+		return nil, fmt.Errorf("candidates: passive window hydration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	memories, err := scanMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]Memory, len(memories))
+	for _, m := range memories {
+		byID[m.ID] = m
+	}
+	out := make([]Memory, 0, len(keys))
+	for _, k := range keys {
+		if m, ok := byID[k.id]; ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// passiveKeyScanSQL builds one threshold scan's statement: the rank columns, the
+// population, and the importance order the index serves. It does not limit or
+// order by the policy's own order, because the window is kept in Go
+// (scanPassiveKeys) — this statement only has to hand the rows over in
+// importance order, which is what makes the stop condition sound.
+//
+// The validity predicate stays HERE, in SQL, rather than moving to the scan with
+// the order. The window chooses which rows are kept, so a row whose validity
+// window has closed must not spend one of its slots: judging it before it is
+// offered to the window is what keeps the window full of rows the caller can
+// use. It is GATED on the column existing, because on a store below the validity
+// floor the predicate names columns that are not there and the whole fetch would
+// fail with "no such column: valid_from".
+//
+// The bindings are in TEXT order: the bucket, then the validity stamps when the
+// predicate is present.
+func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns, pinned bool) (string, []any) {
+	where, args := passivePopulationSQL(pol, req, cols)
+	if pinned {
+		where += " AND pinned = 1"
+	} else {
+		where += " AND pinned = 0"
+	}
+	if cols.HasValidity {
+		stamp := req.Now.UTC().Format(stampLayoutForSQL)
+		where += " AND " + validityMatchesSQL()
+		args = append(args, stamp, stamp)
+	}
+	retention := "retention"
+	if !cols.HasTier {
+		retention = "'' AS retention"
+	}
+	query := fmt.Sprintf(`
+		SELECT id, importance, pinned, category, created_at, updated_at, %s
+		FROM memories
+		WHERE %s
+		ORDER BY importance DESC`, retention, where)
+	return query, args
 }
 
 // passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
@@ -519,75 +675,14 @@ func passivePopulationSQL(pol SlicePolicy, req CandidateRequest, cols passiveCol
 	return where, []any{pol.Bucket}
 }
 
-// passiveFetchSQL builds one policy's population read and its bindings. It
-// SELECTS the bucket and binds the bucket, plus the validity stamps when the
-// store has the columns; it does NOT order or limit.
-//
-// The order and the window are decided in Go (see scanPassiveWindow), and that
-// is the whole point of the shape. The policy's rank is a DECAY EXPRESSION over
-// a bound clock, so no index can serve it, and an `ORDER BY` on it made SQLite
-// sort the entire bucket behind a `LIMIT` that then threw almost all of it away
-// — O(project memories) work at every session start for a window of tens of
-// rows. Ranking in Go over the stream turns that into one index pass with a
-// bounded window held, and the top of the window is provably the same rows the
-// full sort's top was, because the rank applied here is the rank the SQL
-// expression stated (see passiveWindowLess).
-//
-// The validity predicate stays HERE, in SQL, rather than moving to the streaming
-// stage with the order. The window chooses which rows are kept, so a row whose
-// validity window has closed must not spend one of its slots: judging it before
-// it is offered to the window is what keeps the window full of rows the caller
-// can use. It is GATED on the column existing, because on a store below the
-// validity floor the predicate names columns that are not there and the whole
-// fetch would fail with "no such column: valid_from". The rows the block then
-// shows are the ones that store has, labelled without a validity window — the
-// block it produced before validity was read.
-//
-// The bindings are in TEXT order: the bucket, then the validity stamps when the
-// predicate is present. The stamps are bound rather than interpolated, so the
-// same clock value the Go ranking and the selection use is the one the window is
-// filtered against.
-func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
-	where, args := passivePopulationSQL(pol, req, cols)
-	if cols.HasValidity {
-		// The clock is bound to the same instant the Go ranking uses, so the
-		// window, the decay score derived from it in selectPassive, and the row
-		// ages the trace reports are all made against the same clock.
-		stamp := req.Now.UTC().Format(stampLayoutForSQL)
-		where += " AND " + validityMatchesSQL()
-		args = append(args, stamp, stamp)
-	}
-
-	// The column list is the shared one every whole-Memory reader selects, rather
-	// than a hand-written copy: the retention change added two columns and a copy
-	// here would have failed at Scan with a count mismatch, which is a loud failure
-	// but still a second statement of what a Memory is. `memoryColumns` is derived
-	// from `memoryColumnNames`, which is the single list.
-	//
-	// The predicate is a FRAGMENT spliced in, not a bind, because it is built from
-	// a policy field and the constant `_global` — never from caller text. The one
-	// caller-supplied value, the bucket, is bound in passivePopulationSQL.
-	//
-	// `ORDER BY importance DESC` is a SCAN HINT, not the ranking: it is the one
-	// order `idx_memories_project_imp` serves without a temp b-tree, so the
-	// population streams out of the index instead of the table. The window order
-	// is applied in Go and can be the opposite of this one, which is why the rows
-	// are not returned in it.
-	query := fmt.Sprintf(`
-		SELECT %s
-		FROM memories
-		WHERE %s
-		ORDER BY importance DESC`, cols.list, where)
-	return query, args
-}
-
-// passivePinnedBeyond counts the pinned rows the window's LIMIT left unread, by
+// passivePinnedBeyond counts the pinned rows the window left unread, by
 // the row's own project (a union bucket reads `_global` rows too, and the cut
-// belongs to the project the rows are shown under). The fetch orders pinned rows
-// first, so a pinned row can only be past the LIMIT when the whole window is
-// pinned; any other window already holds every pinned row the population has, and
-// the count is not run. It asks the same population and the same validity
-// predicate the fetch does, so a row the fetch withholds is not counted as one the
+// belongs to the project the rows are shown under). The threshold scan reads the
+// pinned population first and the window keeps pinned rows ahead of every
+// unpinned one, so a pinned row can only be past the window when the whole window
+// is pinned; any other window already holds every pinned row the population has,
+// and the count is not run. It asks the same population and the same validity
+// predicate the scan does, so a row the scan withholds is not counted as one the
 // window missed.
 func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, fetched []Candidate) (map[string]int, error) {
 	if len(fetched) == 0 || len(fetched) < pol.OverFetch {
@@ -628,20 +723,38 @@ func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, p
 	return beyond, nil
 }
 
+// passiveEligibleCountCap bounds the eligible-count aggregate. The count is
+// HEADER ARITHMETIC — it says how many rows the store holds against the
+// over-fetch's window — and it is the one read on this path the threshold scan
+// cannot bound, because the rows the scan never reads are exactly the ones the
+// count is about. An exact census of a bucket past this many rows costs a table
+// pass at every session start for a number a reader does not act on, so the
+// aggregate stops here and reports the count UNKNOWN (a negative eligible),
+// which leaves the header describing the window — the same answer a count that
+// could not be read gives.
+const passiveEligibleCountCap = 10000
+
 // PassiveEligibleCount is how many rows the policy's bucket holds that the
 // window's fetch could ever draw from, and how many of those the fetch's own
-// validity predicate removes before the LIMIT. Both come from ONE statement over
+// validity predicate removes before the window. Both come from ONE statement over
 // passivePopulationSQL, the population the fetch and the validity probe already
 // share, so the count and the window cannot disagree about which rows are in
 // play and a validity-excluded row is counted once: inside `eligible`, and again
 // as `validityExcluded`, never as a second row. `eligible - validityExcluded` is
-// the number of rows the window could hold if it had no LIMIT.
+// the number of rows the window could hold if it had no bound.
 //
 // A session-start header uses it to say how many rows the store holds against the
 // over-fetch's window, so a bucket larger than the window does not read as if it
 // held only the window, and rows the predicate withheld are reported as withheld
 // rather than ranked out. A store below the validity floor has no predicate:
 // validityExcluded is zero.
+//
+// The aggregate is CAPPED (passiveEligibleCountCap): it reads at most that many
+// rows, and a bucket that fills the cap reports an UNKNOWN count (a negative
+// eligible, the value CountedAgainst reads as "could not be read") rather than
+// paying a full table pass for an exact figure. The cap is well above any bucket
+// whose exact size a header line acts on, and the fallback is the header
+// describing the window, which is what it does when the count fails.
 func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, err error) {
 	cols, err := passiveColumnsFor(s)
 	if err != nil {
@@ -649,19 +762,28 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now t
 	}
 	where, popArgs := passivePopulationSQL(pol, CandidateRequest{Scope: scope, Now: now}, cols)
 	if !cols.HasValidity {
-		err = s.queryDB().QueryRowContext(ctx, "SELECT COUNT(*) FROM memories WHERE "+where, popArgs...).Scan(&eligible)
-		if err != nil {
+		query := "SELECT COUNT(*) FROM (SELECT 1 FROM memories WHERE " + where + " LIMIT ?)"
+		args := append(append([]any{}, popArgs...), passiveEligibleCountCap)
+		if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible); err != nil {
 			return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+		}
+		if eligible >= passiveEligibleCountCap {
+			return -1, 0, nil
 		}
 		return eligible, 0, nil
 	}
 	stamp := now.UTC().Format(stampLayoutForSQL)
-	// The select list's placeholders come first in the statement's text, so the
-	// stamps are bound before the population's bucket.
+	// The inner SELECT's validity placeholders come first in the statement's text,
+	// then the population's bucket, then the cap.
+	inner := "SELECT CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END AS invalid FROM memories WHERE " + where + " LIMIT ?"
 	args := append([]any{stamp, stamp}, popArgs...)
-	query := "SELECT COUNT(*), COALESCE(SUM(CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END), 0) FROM memories WHERE " + where
+	args = append(args, passiveEligibleCountCap)
+	query := "SELECT COUNT(*), COALESCE(SUM(invalid), 0) FROM (" + inner + ")"
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible, &validityExcluded); err != nil {
 		return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+	}
+	if eligible >= passiveEligibleCountCap {
+		return -1, -1, nil
 	}
 	return eligible, validityExcluded, nil
 }
