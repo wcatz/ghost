@@ -1335,6 +1335,101 @@ func TestEnsureHook_AGhostTokenInArgumentPositionIsForeign(t *testing.T) {
 	}
 }
 
+// TestEnsureHook_AQuotedOperatorInAnArgumentStaysForeign pins the other side of
+// the glued-operator read: hookCommandTokens has already reversed the quoting,
+// so a `;`, `&` or `|` that survives INSIDE a token came from a quoted argument
+// — `othertool --note "a;b"`, a grep pattern `'x|y'`, a URL with `&`. That is
+// the user's text and not the shell's operator, so it must not open command
+// position: the ghost binary after it is that command's ARGUMENT, and reading
+// it as ghost's own is the #1358 failure again — init reports the event as
+// already configured, writes nothing, and the hook never runs.
+func TestEnsureHook_AQuotedOperatorInAnArgumentStaysForeign(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	desired := shellQuote(ghostBin) + " hook stop --source claude-code"
+
+	for _, command := range []string{
+		`/usr/local/bin/othertool --note "a;b" ` + ghostBin + ` hook stop --source claude-code`,
+		`grep 'x|y' ` + ghostBin + ` hook stop --source claude-code`,
+		`/usr/local/bin/othertool "https://example.test/?a=1&b=2" ` + ghostBin + ` hook stop --source claude-code`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if isGhostHookCommand(command, "hook stop", desired) {
+				t.Error("a ghost binary after a QUOTED operator was read as ghost's own command")
+			}
+			if _, ok := ghostHookTail(command, "stop", ghostBin); ok {
+				t.Error("ghostHookTail credited a ghost binary after a quoted operator")
+			}
+
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if !strings.Contains(out.String(), "added") {
+				t.Errorf("a foreign command was reported as already configured:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 2 || cmds[0] != command || cmds[1] != desired {
+				t.Errorf("event = %q, want the foreign command untouched and ghost's own hook beside it", cmds)
+			}
+		})
+	}
+}
+
+// TestEnsureHook_AnUnquotedOperatorEndsTheList is the positive side: an
+// UNQUOTED operator is the shell's own, so the word after it starts a command
+// and ghost's binary there is ghost's — `cd /d;ghost …` with no space after the
+// `;` and `cd /d && ghost …` both run ghost, so init must leave them
+// byte-identical and add nothing, or the hook fires twice per session.
+func TestEnsureHook_AnUnquotedOperatorEndsTheList(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	for _, command := range []string{
+		"cd /d;" + ghostBin + " hook stop --source claude-code",
+		"cd /d && " + ghostBin + " hook stop --source claude-code",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if _, ok := ghostHookTail(command, "stop", ghostBin); !ok {
+				t.Error("ghostHookTail did not credit a ghost binary after an unquoted operator")
+			}
+
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if strings.Contains(out.String(), "added") {
+				t.Errorf("a command after an unquoted operator got a second entry:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 1 || cmds[0] != command {
+				t.Errorf("event = %q, want only the untouched command %q", cmds, command)
+			}
+		})
+	}
+}
+
 // TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost pins the prefix
 // walk against a PATH-QUALIFIED wrapper: `/usr/bin/env ghost hook stop …` and
 // `/usr/bin/sudo ghost hook stop …` run ghost just as the bare words do, so the
@@ -1396,10 +1491,10 @@ func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
 		command string
 		// statusWired is whether `ghost mcp status` credits the wrapper's
 		// --source. Its read is token-exact on purpose (a lookalike must never
-		// read as wired), so a wrapper that closes its group right after the
-		// value leaves the shell's `)` or `;` on that token and status does not
-		// credit it. The ownership walk still reads the wrapper as ghost's own,
-		// which is what leaves it byte-identical and adds nothing beside it.
+		// read as wired), so a wrapper that closes its subshell right after the
+		// value leaves the shell's `)` on that token and status does not credit
+		// it. The ownership walk still reads the wrapper as ghost's own, which is
+		// what leaves it byte-identical and adds nothing beside it.
 		statusWired bool
 	}{
 		{"timeout 5 " + ghostBin + " hook stop --source claude-code", true},
@@ -1418,7 +1513,7 @@ func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
 		{"taskset -c 0,1 " + ghostBin + " hook stop --source claude-code", true},
 		{"cd /d\n" + ghostBin + " hook stop --source claude-code", true},
 		{"(cd /d; " + ghostBin + " hook stop --source claude-code)", false},
-		{"{ " + ghostBin + " hook stop --source claude-code; }", false},
+		{"{ " + ghostBin + " hook stop --source claude-code; }", true},
 		{"X=1 timeout -k 5 10 " + ghostBin + " hook stop --source claude-code", true},
 	} {
 		command := tc.command

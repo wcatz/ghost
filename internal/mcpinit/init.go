@@ -1026,20 +1026,27 @@ func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]s
 // so a path-qualified wrapper keeps its command position instead of reading as
 // a foreign command that gains a second entry.
 //
-// Three more shapes leave the following word as a command, and each of them was
-// a wrapper ghost's own hook used to be counted as. A connective glued to a
-// word (`d;`, `cd&&`, `build|tee`) ends the list that word is in, so the next
-// one starts a command — the test codexTokenEndsCommand already applies to
-// ghost's own arguments, in that same safe direction. A group opener (`(` or
-// `{`) opens a command list, so the first word inside it is in command
-// position (`(cd /d; ghost …)`, `{ ghost …; }`). And a word a prefix command
-// owns as its own operand or slot is stepped over
-// (prefixRegionBefore, `timeout -k 5 10 ghost …`).
+// The boundary test is a CONNECTIVE TOKEN, never a token that merely contains a
+// `;`, `&` or `|`: hookCommandTokens has already cut an UNQUOTED operator into a
+// token of its own, so one still inside a token is quoted text — `othertool
+// --note "a;b"`, `'x|y'`, a URL with `&` — and does not open command position,
+// or an argument-position ghost binary after it would be credited and the event
+// left unwired (#1358 review). That is the opposite direction from
+// codexTokenEndsCommand, which stays boundary-on-contains because there a
+// boundary means "do not credit" and the safe direction is to append ghost's
+// canonical rule.
+//
+// Three more shapes leave the following word as a command. A group opener (`(`
+// or `{`) opens a command list, so the first word inside it is in command
+// position (`(cd /d; ghost …)`, `{ ghost …; }`). A word a prefix command owns as
+// its own operand or slot is stepped over (prefixRegionBefore, `timeout -k 5 10
+// ghost …`). And a newline arrives as the `;` token hookCommandTokens
+// normalises it to, so `cd /d` + newline + `ghost …` is a command list too.
 func startsCommand(tokens []string, i int) bool {
 	idx := i - 1
 	for idx >= 0 {
 		tok := tokens[idx]
-		if shellConnectives[tok] || strings.ContainsAny(tok, ";&|") {
+		if shellConnectives[tok] {
 			return true
 		}
 		if tok == "(" || tok == "{" {
@@ -1105,6 +1112,12 @@ func isGhostToken(token, desiredBin string) bool {
 // the tokens read before that point, which are real: a trailing unclosed quote
 // (`ghost hook stop …; echo "oops`) must not cost the reader the valid ghost
 // invocation at the front of the command. Callers use the tokens either way.
+//
+// An operator in a BARE token is the shell's, so it is returned as a token of
+// its own (`splitUnquotedOperators`): `cd /d;ghost …` and `build|tee` separate
+// their commands exactly as the spaced forms do, while a `;`, `&` or `|` inside
+// a QUOTED token survives as the user's text (`--note "a;b"`, a URL with `&`)
+// and never reads as a command boundary (#1358 review).
 func hookCommandTokens(cmd string) ([]string, bool) {
 	var tokens []string
 	// A NEWLINE separates commands in shell exactly as `;` does, so it is
@@ -1118,16 +1131,74 @@ func hookCommandTokens(cmd string) ([]string, bool) {
 		// hand-edited `   /path/ghost hook stop …` must tokenise as the ghost
 		// invocation it is, so the command-position walk reaches its binary.
 		cmd = strings.TrimLeft(cmd, " \t")
+		if cmd == "" {
+			return tokens, false
+		}
+		quoted := cmd[0] == '"' || cmd[0] == '\''
 		token, rest, ok := splitHookCommand(cmd)
 		if !ok {
 			return tokens, false
 		}
-		tokens = append(tokens, token)
+		if quoted {
+			tokens = append(tokens, token)
+		} else {
+			tokens = append(tokens, splitUnquotedOperators(token)...)
+		}
 		if rest == "" {
 			return tokens, true
 		}
 		cmd = rest
 	}
+}
+
+// splitUnquotedOperators cuts the shell operators out of a bare token into
+// tokens of their own, so the command-position walk sees them where the shell
+// would: `d;` is `d` and `;`, `cd&&` is `cd` and `&&`, and a pipe written
+// without space (`build|tee`) separates the same way. Only the caller decides
+// whether a token was quoted; a `;`, `&` or `|` inside a QUOTED token is the
+// user's text (`--note "a;b"`, a grep pattern `'x|y'`, a URL with `&`) and is
+// left whole, because crediting it would read an argument-position ghost binary
+// as ghost's own and leave the event unwired (#1358 review).
+//
+// A `&` glued to a `>` on either side belongs to a redirection (`2>&1`,
+// `&>file`), not to a command boundary: `othertool 2>&1 ghost hook stop …`
+// passes ghost to othertool, so that token is left whole too.
+func splitUnquotedOperators(token string) []string {
+	if !strings.ContainsAny(token, ";&|") {
+		return []string{token}
+	}
+	var (
+		pieces []string
+		word   strings.Builder
+	)
+	flush := func() {
+		if word.Len() > 0 {
+			pieces = append(pieces, word.String())
+			word.Reset()
+		}
+	}
+	for i := 0; i < len(token); i++ {
+		c := token[i]
+		if c != ';' && c != '&' && c != '|' {
+			word.WriteByte(c)
+			continue
+		}
+		if c == '&' && ((i > 0 && token[i-1] == '>') || (i+1 < len(token) && token[i+1] == '>')) {
+			word.WriteByte(c)
+			continue
+		}
+		flush()
+		// A run of the same operator stays one token, so `&&` and `||` read as
+		// the connectives they are.
+		j := i
+		for j+1 < len(token) && token[j+1] == c {
+			j++
+		}
+		pieces = append(pieces, token[i:j+1])
+		i = j
+	}
+	flush()
+	return pieces
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
