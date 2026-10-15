@@ -623,6 +623,10 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			if err != nil {
 				t.Fatalf("save the other source as %s: %v", tc.tiers[1], err)
 			}
+			// Backdate the reused row's stamp so a provenance write is observable:
+			// the save and the replace otherwise run in the same clock second, and
+			// a stamp written to `datetime('now')` would read as unmoved.
+			setUpdatedAt(t, s, a, "2020-01-01 00:00:00")
 			before := getOne(t, s, a)
 
 			// Importance 0.5 with no tags and no scope, so the emission also matches
@@ -660,11 +664,22 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			} else if got.ExpiresAt != nil {
 				t.Errorf("reused row %s expires_at = %q on a %s row: only a session row is scheduled for expiry", a, *got.ExpiresAt, got.Retention)
 			}
-			// A verbatim re-emission is not a re-save, so the raise must not move
-			// the stamp reuseChangesNothing exists to leave alone.
-			if got.UpdatedAt != before.UpdatedAt {
-				t.Errorf("updated_at moved from %q to %q: a verbatim re-emission is not a write (#727), and this pass wrote no other column either",
-					before.UpdatedAt, got.UpdatedAt)
+			// A verbatim re-emission that restates the row ALONE is not a write, so
+			// the raise leaves the stamp it never owned alone (#727). But the
+			// provenance stamp a consuming merge applies IS a write, and it moves
+			// updated_at in the same statement that files its version, because every
+			// writer of the reflect phase must move the column (stampMovingPhases in
+			// history_compact.go). The keep-forever case is the one that consumes
+			// nothing: b is exempt from every set this replace builds, so nothing
+			// wrote to a and its old stamp stands.
+			if tc.tiers[1] == RetentionPersistent {
+				if got.UpdatedAt != before.UpdatedAt {
+					t.Errorf("updated_at moved from %q to %q: the keep-forever source is not consumed, so nothing wrote to the reused row",
+						before.UpdatedAt, got.UpdatedAt)
+				}
+			} else if got.UpdatedAt == before.UpdatedAt {
+				t.Errorf("updated_at stayed %q: the emission absorbed %s, so the reused row is a consolidation successor and the provenance stamp is a write",
+					got.UpdatedAt, b)
 			}
 		})
 	}
