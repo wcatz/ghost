@@ -1051,11 +1051,11 @@ func TestEnsureHook_InstallsItsOwnHookBesideAForeignCommand(t *testing.T) {
 }
 
 // TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn is #1326 end to end for
-// both events and for two wrapper shapes: a leading process (`env X=1 ghost
-// …`) and a `cd … && ghost …` prefix. Each invokes ghost, so init must
-// recognise the event as already wired — the wrapper is left byte-identical,
-// exactly one command stays registered, and a second run is a fixed point with
-// no second copy appended.
+// both events and for three wrapper shapes: a leading process (`env X=1 ghost
+// …`), a `cd … && ghost …` prefix, and leading whitespace. Each invokes ghost,
+// so init must recognise the event as already wired — the wrapper is left
+// byte-identical, exactly one command stays registered, and a second run is a
+// fixed point with no second copy appended.
 func TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn(t *testing.T) {
 	const ghostBin = "/usr/local/bin/ghost"
 	for _, tc := range []struct {
@@ -1067,6 +1067,7 @@ func TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn(t *testing.T) {
 		for _, w := range []struct{ label, command string }{
 			{"env-prefix", "env X=1 " + ghostBin + " " + tc.tail + " --source claude-code"},
 			{"cd-and", "cd /somewhere && " + ghostBin + " " + tc.tail + " --source claude-code"},
+			{"leading-space", "   " + ghostBin + " " + tc.tail + " --source claude-code"},
 		} {
 			t.Run(tc.event+"/"+w.label, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "settings.json")
