@@ -555,7 +555,7 @@ func TestRunPassiveAValidityExclusionOutranksALegThatNeverRan(t *testing.T) {
 }
 
 // TestRunPassiveRefusesACategoryPredicate is the filter the passive fetch cannot
-// honour. `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL`
+// honour. `passiveKeyScanSQL` binds `WHERE project_id = ? AND resolved_at IS NULL`
 // plus scope — there is no category and no tier in its SQL — while the query path
 // WIDENS the window when either is set, precisely so a matching row ranked below
 // the cut stays reachable (that widening is what closed #573).

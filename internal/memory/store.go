@@ -8054,12 +8054,12 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 //
 // A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
 // listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
-// of every window a ranking surface reads, because `passiveFetchSQL` and the query
-// path both bind `resolved_at IS NULL`. So "how many does this project hold" and
+// of every window a ranking surface reads, because the passive key scan (`passiveKeyScanSQL`)
+// and the query path both bind `resolved_at IS NULL`. So "how many does this project hold" and
 // "how many of its rows a window could even consider" are different counts, and a
 // caller that needs the second cannot derive it from the first.
 //
-// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveFetchSQL`,
+// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveKeyScanSQL`,
 // and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
 // whether an exclusion verdict may be rendered as a claim about the requested
 // project: a validity-invalid row of that project's own IS the cause the validity
@@ -8261,92 +8261,105 @@ var memoryColumns = qualifyColumns("")
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {
-		var m Memory
-		var lastAccessed sql.NullString
-		var resolvedAt sql.NullString
-		var tagsJSON string
-		var pinned int
-		var agent, sessionID, sourceRef sql.NullString
-		var confidence sql.NullFloat64
-		var scopeRaw sql.NullString
-		var validFrom, validUntil, verifiedAt sql.NullString
-		var expiresAt sql.NullString
-
-		if err := rows.Scan(
-			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
-			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
-			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
-			&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
-			&validFrom, &validUntil, &verifiedAt,
-			&m.Retention, &expiresAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan memory: %w", err)
+		m, err := scanMemoryRow(rows)
+		if err != nil {
+			return nil, err
 		}
-
-		if lastAccessed.Valid {
-			m.LastAccessed = &lastAccessed.String
-		}
-		if resolvedAt.Valid {
-			m.ResolvedAt = &resolvedAt.String
-		}
-		m.Pinned = pinned == 1
-
-		// NULL provenance reads back as the empty string. There is no
-		// meaningful empty value for an agent, session or reference, so
-		// collapsing NULL to "" costs nothing — while Confidence stays a
-		// pointer, because nil ("no belief recorded") and 0.0 ("rated
-		// worthless") are different claims.
-		if agent.Valid {
-			m.Agent = agent.String
-		}
-		if sessionID.Valid {
-			m.SessionID = sessionID.String
-		}
-		if sourceRef.Valid {
-			m.SourceRef = sourceRef.String
-		}
-		if confidence.Valid {
-			m.Confidence = &confidence.Float64
-		}
-		m.Scope = parseScope(scopeRaw)
-		// Validity columns are read the way they are stored: SQLite holds them
-		// as unconstrained text, and deciding what a value means needs the
-		// request clock, which lives above this layer. NULL stays nil so "no
-		// claim" cannot be confused with a claim about the empty string.
-		if validFrom.Valid {
-			m.ValidFrom = &validFrom.String
-		}
-		if validUntil.Valid {
-			m.ValidUntil = &validUntil.String
-		}
-		if verifiedAt.Valid {
-			m.VerifiedAt = &verifiedAt.String
-		}
-		// Same rule as the validity triple: the expiry is the stored string, and
-		// NULL stays nil because "no expiry is claimed" is the claim that keeps a
-		// row out of a prune's candidate set.
-		if expiresAt.Valid {
-			m.ExpiresAt = &expiresAt.String
-		}
-		// A row whose tier reads empty is a row a query did not select, not a
-		// fourth tier. Resolving it here — once — means no reader downstream has
-		// to know that shape exists, and the one value it resolves to is the one
-		// that costs nothing: a row nobody classified behaves as the corpus
-		// always has.
-		if m.Retention == "" {
-			m.Retention = RetentionProject
-		}
-
-		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
-			m.Tags = []string{}
-		}
-
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("memory rows: %w", err)
 	}
 	return memories, nil
+}
+
+// scanMemoryRow scans ONE row of a statement selecting memoryColumns, so a
+// reader that must not materialise a whole result set can stream it: the passive
+// fetch keeps a bounded window out of the project's population and never holds
+// the bucket. It is the same column order and the same post-processing
+// scanMemories has always applied, split out so the two readers cannot drift.
+func scanMemoryRow(rows *sql.Rows) (Memory, error) {
+	var m Memory
+	var lastAccessed sql.NullString
+	var resolvedAt sql.NullString
+	var tagsJSON string
+	var pinned int
+	var agent, sessionID, sourceRef sql.NullString
+	var confidence sql.NullFloat64
+	var scopeRaw sql.NullString
+	var validFrom, validUntil, verifiedAt sql.NullString
+	var expiresAt sql.NullString
+
+	if err := rows.Scan(
+		&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
+		&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
+		&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
+		&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
+		&validFrom, &validUntil, &verifiedAt,
+		&m.Retention, &expiresAt,
+	); err != nil {
+		return m, fmt.Errorf("scan memory: %w", err)
+	}
+
+	if lastAccessed.Valid {
+		m.LastAccessed = &lastAccessed.String
+	}
+	if resolvedAt.Valid {
+		m.ResolvedAt = &resolvedAt.String
+	}
+	m.Pinned = pinned == 1
+
+	// NULL provenance reads back as the empty string. There is no
+	// meaningful empty value for an agent, session or reference, so
+	// collapsing NULL to "" costs nothing — while Confidence stays a
+	// pointer, because nil ("no belief recorded") and 0.0 ("rated
+	// worthless") are different claims.
+	if agent.Valid {
+		m.Agent = agent.String
+	}
+	if sessionID.Valid {
+		m.SessionID = sessionID.String
+	}
+	if sourceRef.Valid {
+		m.SourceRef = sourceRef.String
+	}
+	if confidence.Valid {
+		m.Confidence = &confidence.Float64
+	}
+	m.Scope = parseScope(scopeRaw)
+	// Validity columns are read the way they are stored: SQLite holds them
+	// as unconstrained text, and deciding what a value means needs the
+	// request clock, which lives above this layer. NULL stays nil so "no
+	// claim" cannot be confused with a claim about the empty string.
+	if validFrom.Valid {
+		m.ValidFrom = &validFrom.String
+	}
+	if validUntil.Valid {
+		m.ValidUntil = &validUntil.String
+	}
+	if verifiedAt.Valid {
+		m.VerifiedAt = &verifiedAt.String
+	}
+	// Same rule as the validity triple: the expiry is the stored string, and
+	// NULL stays nil because "no expiry is claimed" is the claim that keeps a
+	// row out of a prune's candidate set.
+	if expiresAt.Valid {
+		m.ExpiresAt = &expiresAt.String
+	}
+	// A row whose tier reads empty is a row a query did not select, not a
+	// fourth tier. Resolving it here — once — means no reader downstream has
+	// to know that shape exists, and the one value it resolves to is the one
+	// that costs nothing: a row nobody classified behaves as the corpus
+	// always has.
+	if m.Retention == "" {
+		m.Retention = RetentionProject
+	}
+
+	if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
+		m.Tags = []string{}
+	}
+
+	return m, nil
 }
 
 // sanitizeFTS strips FTS5 special operators from text to prevent query injection.
