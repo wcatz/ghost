@@ -167,6 +167,14 @@ const fakeModel = "nomic-embed-text:v1.5"
 // the sandbox config, and both the client and the store read it from there.
 const fakeDimensions = 256
 
+// documentPrefix is the task prefix the configured model puts on the text of a
+// memory about to be stored (see internal/embedding/prefix.go). The stub reads
+// it off the wire to tell a document embed from a query embed. It is written out
+// rather than imported because this harness deliberately depends on the built
+// binary, not on the packages inside it — stubVector below reads the same two
+// literals for the same reason.
+const documentPrefix = "search_document:"
+
 // harnessBinaries are the four CLI harnesses the fakes impersonate. All four
 // are installed because the MCP server's ghost_resolve routes by the CALLING
 // CLIENT's name, and that name is this suite's to choose.
@@ -1026,6 +1034,13 @@ type ollamaStub struct {
 	mu      sync.Mutex
 	inputs  []string
 	failing bool
+	// documentsFail refuses every embed of text that will be STORED, while
+	// query embeds keep succeeding. It is how a test pins the state a search
+	// meets when it outruns the embedding worker — a saved row with no vector —
+	// without racing the worker for it: the refusal is unconditional, so no
+	// retry, however quick, can embed the document, and the vector leg still
+	// runs because the query embed is unaffected.
+	documentsFail bool
 	// probeDelay and embedDelay hold one endpoint each, per request. They model
 	// a machine that is BUSY rather than one whose embedding backend is broken:
 	// a liveness probe and an embed both come back eventually, just not inside
@@ -1043,6 +1058,17 @@ func (s *ollamaStub) slowEndpoint(probe, embed time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.probeDelay, s.embedDelay = probe, embed
+}
+
+// failDocumentEmbeds makes /api/embed refuse every request for a document, for
+// the rest of the sandbox's life. The refusal is unconditional so the state it
+// creates cannot be undone by the embedding worker's retry: a row saved after
+// this call has no vector, however long the test waits. Query embeds are
+// untouched, so the vector leg still runs and is the leg with nothing to say.
+func (s *ollamaStub) failDocumentEmbeds() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.documentsFail = true
 }
 
 // hold waits d, or returns early if the client gave up first.
@@ -1075,11 +1101,16 @@ func newOllamaStub(t *testing.T, model string, dims int) *ollamaStub {
 		stub.mu.Lock()
 		stub.inputs = append(stub.inputs, req.Input)
 		failing := stub.failing
+		refusedDocument := stub.documentsFail && strings.HasPrefix(req.Input, documentPrefix)
 		delay := stub.embedDelay
 		stub.mu.Unlock()
 		hold(r, delay)
 		if failing {
 			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if refusedDocument {
+			http.Error(w, "embedding backend unavailable for stored text", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
