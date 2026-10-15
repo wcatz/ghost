@@ -430,7 +430,15 @@ is for:
 - **A label** — a project's name and path, which are normally full of spaces, and
   which a save stores verbatim from the `project_id` argument — keeps ordinary
   text exactly as written and escapes only what could end the line or close the
-  span it sits in. `My Project` prints as `My Project`.
+  span it sits in. `My Project` prints as `My Project`. The line-ending half of
+  that class is the renderer's whole `isLineBreak` set (LF, VT, FF, CR, FS/GS/RS,
+  NEL, LS, PS) plus the rest of the C0 and C1 control classes, so it and the
+  content fold share one notion of what makes a line. `unicode.IsControl` is Cc
+  only and does not cover the Zl/Zp separators U+2028 and U+2029, which is what
+  let a project name holding one forge a line in the session-start block's own
+  heading until the escape test was widened to the shared set; the write boundary
+  that admits a project's id, name and path refuses those two characters for the
+  same reason.
 
 **3. As a single-line preview.** `ghost_resolve`, `ghost_resolve_mark` and
 `ghost_link_withdraw` name what they touched by the first line of a memory's
