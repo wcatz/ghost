@@ -845,6 +845,17 @@ func decisionStatusError(status string) error {
 	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(decisionStatusValues, ", "))
 }
 
+// decisionRevisitMarker renders the label the injected decision surfaces put
+// beside a decision flagged for reconsideration. It is a delegation to
+// memory.DecisionRevisitMarker and not a second copy of that rule: three
+// surfaces print this label and the docs promise all three print the same one,
+// so the rule sits beside the status vocabulary it reads and every renderer
+// calls it. The dependency runs assemble -> memory, which is why the rule cannot
+// live in a package these two import in the other direction.
+func decisionRevisitMarker(status string) string {
+	return memory.DecisionRevisitMarker(status)
+}
+
 // defaultImportance returns the importance value, defaulting to fallback when nil.
 func defaultImportance(p *float32, fallback float32) float32 {
 	if p == nil {
@@ -4428,8 +4439,9 @@ func (s *Server) registerResources() {
 		Name:        "Ghost Project Decisions",
 		Title:       "Project Decisions",
 		URITemplate: "ghost://project/{project_id}/decisions",
-		Description: "Active architectural and design decisions for a project. " +
-			"Pin this resource to keep decision context visible across compaction.",
+		Description: "Active and revisit architectural and design decisions for a project; a " +
+			"revisit decision is labelled. Pin this resource to keep decision context visible " +
+			"across compaction.",
 		MIMEType: "text/plain",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		rawID, err := parseProjectIDFromURI(req.Params.URI)
@@ -4446,17 +4458,17 @@ func (s *Server) registerResources() {
 			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
 		}
 
-		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
+		decisions, err := s.store.LiveDecisions(ctx, projectID, 20)
 		if err != nil {
 			return nil, fmt.Errorf("list decisions for %q: %w", projectID, err)
 		}
 
 		var text string
 		if len(decisions) == 0 {
-			text = "No active decisions for this project."
+			text = "No live decisions for this project."
 		} else {
 			var sb strings.Builder
-			sb.WriteString("## Active Decisions\n\n")
+			sb.WriteString("## Decisions\n\n")
 			sb.WriteString(dataDelimiterNote + "\n\n")
 			for _, d := range decisions {
 				// Same rule as the Recent Decisions section above, plus the
@@ -4465,8 +4477,9 @@ func (s *Server) registerResources() {
 				// unconditionally, as it always was: an empty rationale reads as
 				// "there is none", and dropping it would change what a pinned
 				// resource shows for every decision recorded without one.
-				fmt.Fprintf(&sb, "- `%s` **%s**: %s (rationale: %s)\n",
-					assemble.Token(d.ID), quoteData(d.Title), quoteData(d.Decision), quoteData(d.Rationale))
+				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s (rationale: %s)\n",
+					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status),
+					quoteData(d.Decision), quoteData(d.Rationale))
 			}
 			text = sb.String()
 		}
@@ -4714,7 +4727,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			sb.WriteString(dataDelimiterNote + "\n\n")
 		}
 
-		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+		decisions, err := s.store.LiveDecisions(ctx, projectID, 5)
 		if err != nil {
 			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
 		}
@@ -4728,8 +4741,8 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 				// lines above have asserted the «...» convention on every one
 				// of them. The id goes through assemble.Token for the reason
 				// Item.Line's does (#791).
-				fmt.Fprintf(&sb, "- `%s` **%s**: %s\n",
-					assemble.Token(d.ID), quoteData(d.Title), quoteData(d.Decision))
+				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s\n",
+					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status), quoteData(d.Decision))
 			}
 		}
 

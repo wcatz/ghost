@@ -75,7 +75,7 @@ type sessionFrame struct {
 	project          string
 	learned          string
 	tasks            [][4]string
-	decisions        [][3]string
+	decisions        [][4]string
 	interactionCount int
 }
 

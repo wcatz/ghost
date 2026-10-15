@@ -633,6 +633,60 @@ func TestCandidatesHonoursTheConfiguredEmbeddingIdentity(t *testing.T) {
 	}
 }
 
+// TestCandidatesMarksARowTheVectorLegCouldNotSee: the leg-consensus gate must
+// not penalise a row the vector leg could never score, and the retriever is the
+// only layer that can tell "not yet embedded" from "embedded but ranked low".
+// A row with no vector at all is unembedded; so is a row whose only vector is
+// stamped with a different identity. A row with a vector in the configured
+// space is not, whatever rank the leg gave it (#1319).
+func TestCandidatesMarksARowTheVectorLegCouldNotSee(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	embedded := createTestMemory(t, store, ctx, "the pool timeout knob is set in the config file")
+	absent := createTestMemory(t, store, ctx, "the pool timeout is read from the environment")
+	foreign := createTestMemory(t, store, ctx, "the pool timeout has a default of five seconds")
+	// The correct identity, the wrong width. VectorIdentity only carries the
+	// dimension when the embedding reports one, so an identity match is not
+	// evidence of a usable vector: the leg compares the blob's own length
+	// against the query and skips this row exactly as it skips the foreign one.
+	wide := createTestMemory(t, store, ctx, "the pool timeout is doubled on retry")
+	if err := store.StoreEmbedding(ctx, embedded, []float32{1, 0, 0}, identityCurrent); err != nil {
+		t.Fatalf("StoreEmbedding(embedded): %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, foreign, []float32{1, 0, 0}, identityStale); err != nil {
+		t.Fatalf("StoreEmbedding(foreign): %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, wide, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
+		t.Fatalf("StoreEmbedding(wide): %v", err)
+	}
+
+	req := candidateRequest("pool timeout", 10, time.Now().UTC())
+	req.ProjectID = "test-proj"
+	req.QueryVec = []float32{1, 0, 0}
+	req.Condition = CondHybrid
+	set, err := store.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	seen := make(map[string]bool, len(set.Rows))
+	for _, c := range set.Rows {
+		seen[c.ID] = true
+	}
+	for _, id := range []string{embedded, absent, foreign, wide} {
+		if !seen[id] {
+			t.Fatalf("candidate %s missing from the set: %v", id, candidateIDs(t, set))
+		}
+	}
+	for _, c := range set.Rows {
+		want := c.ID != embedded
+		if c.Unembedded != want {
+			t.Errorf("candidate %s (embedded=%v) Unembedded = %v, want %v",
+				c.ID, c.ID == embedded, c.Unembedded, want)
+		}
+	}
+}
+
 func containsID(set *CandidateSet, id string) bool {
 	for _, c := range set.Rows {
 		if c.ID == id {

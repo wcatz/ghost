@@ -421,7 +421,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 // which instant it is a reading of, and its closing instruction is the historical
 // one, because "save new discoveries" is an instruction about the present and
 // this block is not about the present.
-func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, globals []sessionMemory, tally sessionTally) string {
+func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, globals []sessionMemory, tally sessionTally) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
 		// Only claim these are the user's preferences when they are. A global
@@ -567,7 +567,15 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			// beside it was quoted, on the surface that reaches EVERY session —
 			// so a title an agent or a reflection pass wrote arrived as prose
 			// above a body that had already declared itself data (#791).
-			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", assemble.Token(d[0]), quoteData(d[1]), quoteData(d[2]))
+			//
+			// d[3] is the decision's status. A revisit decision is live and is
+			// shown, labelled "(revisit)", for the reason the memory rows are:
+			// this is the surface every session is opened with, and a decision
+			// flagged for reconsideration is exactly what a reader coming in
+			// cold should see. The marker sits after the quoted title so the
+			// active row's shape is unchanged.
+			fmt.Fprintf(&sb, "- `%s` **%s**%s: %s\n",
+				assemble.Token(d[0]), quoteData(d[1]), revisitMarker(d[3]), quoteData(d[2]))
 		}
 	}
 
@@ -1006,7 +1014,7 @@ type sessionMemory struct {
 // over-fetched window never held), and a header built from one while the rows
 // came from the other is exactly how a block ended up saying rows were "ranked
 // out" when a stage had withheld them.
-func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	return loadSessionContextFor(cwd, cfg, "")
 }
 
@@ -1014,7 +1022,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 // block's retrieval record carries sessionID, so the audit can judge that call against
 // the text of the session it opened. "" is a caller with no hook payload (`ghost
 // context`, opencode's plugin) and records none, which the audit leaves unjudged.
-func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
@@ -1027,7 +1035,7 @@ func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (pr
 // fixed instant so a block can be measured rather than merely run. Nothing else
 // differs between the two, which is the point of the split — a bench that
 // re-implemented this would be measuring its own copy.
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -1128,21 +1136,24 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		}
 	}
 
-	// Get active decisions
+	// Get live decisions — active or revisit, superseded excluded — active
+	// first. A decision flagged for reconsideration is context a session should
+	// see, and the renderer labels it; the active-first order is what keeps it
+	// from pushing an active decision out of the five-row window.
 	decRows, err := db.Query(`
-		SELECT id, title, decision FROM decisions
-		WHERE project_id = ? AND status = 'active'
-		ORDER BY created_at DESC
+		SELECT id, title, decision, status FROM decisions
+		WHERE project_id = ? AND status != 'superseded'
+		ORDER BY (status = 'revisit'), created_at DESC
 		LIMIT 5
 	`, projectID)
 	if err == nil {
 		defer decRows.Close() //nolint:errcheck
 		for decRows.Next() {
-			var id, title, decision string
-			if err := decRows.Scan(&id, &title, &decision); err != nil {
+			var id, title, decision, status string
+			if err := decRows.Scan(&id, &title, &decision, &status); err != nil {
 				continue
 			}
-			decisions = append(decisions, [3]string{id, truncateUTF8(title, sessionTitleBytes), truncateUTF8(decision, 200)})
+			decisions = append(decisions, [4]string{id, truncateUTF8(title, sessionTitleBytes), truncateUTF8(decision, 200), status})
 		}
 	}
 
@@ -1173,6 +1184,17 @@ func quoteData(s string) string {
 	// One renderer (#911): delimiters neutralised and stored line breaks folded,
 	// so a stored newline cannot start a line shaped like a record.
 	return assemble.Data(s)
+}
+
+// revisitMarker renders the label the Recent Decisions section puts beside a
+// decision flagged for reconsideration, so a live decision that is not active is
+// shown and distinguishable from an active one. It delegates to
+// memory.DecisionRevisitMarker rather than restating the rule, because the
+// docs/mcp.md and docs/cli.md parity this marker exists for is a claim about
+// three surfaces printing one label (docs/cli.md asserts it for the session
+// block too), and two implementations would be two labels.
+func revisitMarker(status string) string {
+	return memory.DecisionRevisitMarker(status)
 }
 
 // truncateUTF8 truncates s to at most maxBytes bytes without breaking
