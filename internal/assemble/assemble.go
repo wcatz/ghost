@@ -926,7 +926,7 @@ func validatePassiveBudget(req Request) error {
 	// A category or tier filter cannot be honoured here, and the seam would rather
 	// refuse it than serve a confident wrong answer.
 	//
-	// `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
+	// `passiveKeyScanSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
 	// scope — there is no category and no retention in its SQL at all, because a
 	// passive block is selected by importance, decay and pin rather than by a
 	// predicate. The query path can afford the same filter because it WIDENS the

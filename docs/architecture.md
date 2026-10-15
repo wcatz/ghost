@@ -247,6 +247,8 @@ That leaves the case neither repair can reach, and it is a real one: a pair that
 
 Its rules are the ones a delete needs. The ids are refs: a full id, or **8 or more characters** of one, because every Ghost report abbreviates to eight and a withdrawal that insisted on the full 32 characters could not be driven from the report that names the wrong edge. One literal-prefix query answers both forms, so a full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim and the id column only *defaults* to hex, so a ref check that insisted on hex would make an imported endpoint unnameable — while the 8-character floor applies to a prefix alone, which names a class of ids rather than one, and is applied by comparing the match with the ref rather than by inspecting the ref's characters. The match is literal and case-insensitively scoped to the project (plus `_global`, which a promotion moves a memory into without touching its links) — except under `_global` itself, where a ref resolves against the whole store's live rows, because a pair whose source was promoted there can bury a memory in any project and both of its endpoints have to be nameable from the one command that can withdraw it; and **an ambiguous ref is a refusal that lists the matches**, never a choice: guessing which memory to unlink is not a decision the tool may make. A pair with no live edge is an error, and the refusal names the target's live edges of BOTH relations (e.g. "no live supersedes or causes link A→B"), because "no live supersedes link A→B" is a dead end and "B is superseded by C and D" is an answer — and a pair whose only edge is a 'causes' one needs that naming to tell an operator what to withdraw. Several pairs may be given in one command, and **the whole request is settled before anything is written** — a request of five pairs with one bad pair withdraws none of them, because withdrawing four and reporting an error about the fifth is a graph state nobody asked for. The edge is found through the project that owns **either** endpoint of it, and `_global` is owned by every project. The target's half is what makes the undo survive a promotion: `ghost_memory_promote` moves a memory into `_global` and keeps its links, so the project that owns the memory being buried must still be able to name the edge burying it — otherwise a promotion quietly deletes the repair for a wrong edge, and the target stays demoted and `resolved_at`-stamped by a claim no command can name. An edge with both endpoints in another project is that project's edge, and a project-scoped command cannot even name its source, so one project still cannot withdraw or learn about another's. This is also what keeps the repair surfaces agreeing with each other and with the ranking: `SupersedePenalties` has no project predicate at all, so it demotes a target for ANY live edge, and the two project-scoped reads now cover every edge with an endpoint in the caller's project or in `_global` — the cases where the ranking and the repair could otherwise disagree about the same edge. The passes that judge and write whole pairs require **both** endpoints rather than either, because judging an edge acts on both of them; a targeted withdrawal, whose subject is the one memory the caller named, is the one read that takes either. The write is the ordinary `InvalidateLink`, so it leaves the `unsupersede` history row, and it is soft: a later pass that still judges the pair a supersession re-creates the edge. Every report ends by naming the step that un-hides the target, and it is the SCOPED one — the `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply` that `internal/followup.ResolveCommand` builds, with the `--only-file` beside it — because withdrawing the edge is half the repair and the resolution it caused keeps the target out of injection until that runs. The UNSCOPED `ghost resolve <project> --reassess --apply` is never printed: it is the project-wide re-judge, so a report naming it would name the one command that does the most harm. The report also prints the target's own first line: an operator withdrawing an edge they believe is wrong has to be able to confirm from the output that it was the right edge.
 
+A pass that fails reports the failure on stderr, and on the detached lifecycle path that stream is `lifecycle.log` — a file in the data directory that a later reading surfaces. The pair prefixes those failures carry, and the pass's own log lines for the same pairs, used to interpolate both stored ids with a bare `%s`, and a stored id is not token-guarded: `ghost import` writes an artifact's id verbatim and the id shape check never asks the guard, so a `ghp_`-shaped 40-character id is a legal stored id and rode out of the pass in the error or the line it caused. Every supersede, reassess and relation failure and log line that names a stored id now renders each one through `memory.RefusalArg("memory_id", …)`, so an ordinary id reads quoted — the renderer's one visible change on prefixes that printed it bare — while a token-shaped or over-256-byte one is withheld behind a placeholder naming the field and the format the guard found, and the line still says which pair or write failed.
+
 ### Scoping a repair, and why the unscoped repair is the wrong tool
 
 `ghost resolve --reassess` re-judges every already-resolved memory in a project, and used as the second half of a supersede repair that is a much larger claim than the operator made. On a real store it proposed un-hiding **143** memories, and an independent judge sampling 40 found about **35%** of them stale: completed changelogs, PR and host status snapshots, notes a newer memory in the same project had already superseded, a description of a retired code path ([#698](https://github.com/wcatz/ghost/issues/698)). The repair that was meant to undo a handful of wrong resolutions proposed undoing dozens of right ones.
@@ -1817,13 +1819,16 @@ Axis interaction rules:
 > renderer that has to say a line was cut. The header's totals are the
 > assembler's too rather than a second census of the store: the shown, ranked-out
 > and withheld counts come from the same retrieval's trace, and "of M total" is
-> the trace plus ONE count (`Store.PassiveEligibleCount`) over the window's own
-> predicates (`passiveWhere`, shared with the fetch), so M is every eligible row
-> the store holds and not the over-fetched window's size. A row a stage withheld
-> is inside the window and so is not counted twice; eligible rows the over-fetch
-> never read are ranked out, because the window is ordered by the ranking and cut
-> at its limit (`BucketTally.CountedAgainst` takes the over-fetch limit for exactly
-> that split). A row the retriever fetched and then removed as a near-duplicate
+> the trace plus ONE count (`Store.PassiveEligibleCount`) over the population the
+> window and the count share (`passivePopulationSQL`), so M is the eligible rows
+> the store holds and not the over-fetched window's size. That count is CAPPED at
+> `passiveEligibleCountCap`: past it the count is UNKNOWN and the header describes
+> the window alone, because an exact census of a bucket that large costs a table
+> pass at every session start for a number no reader acts on. A row a stage
+> withheld is inside the window and so is not counted twice; eligible rows the
+> threshold scan never read are ranked out, because the window is ordered by the
+> ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch
+> limit for exactly that split). A row the retriever fetched and then removed as a near-duplicate
 > loser never enters `CandidateSet.Rows`, but the retriever reports it in
 > `CandidateSet.DroppedLosers` with the ids it lost to, and stage 6 files it as a
 > `dedup` / `near_duplicate` decision (`Decision.Against` names the winner). That
@@ -1837,7 +1842,7 @@ Axis interaction rules:
 > since [#926](https://github.com/wcatz/ghost/issues/926): `ghost_memory_search`'s retrieval collapses its
 > near-duplicate pairs the way the passive policy drops them, so that explain row is
 > reached by a real search and is pinned over it rather than by a hand-built
-> fixture. The fetch's own SQL validity predicate removes closed-window rows before the LIMIT, so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
+> fixture. The passive key scan's own SQL validity predicate removes closed-window rows before the window fills (a row whose window has closed must not spend one of its slots), so `PassiveEligibleCount` returns them too (one statement, the shared `passivePopulationSQL`) and they are withheld, counted once, never beyond the window. The sentence after the counts names which half of the difference
 > is the ranking's and which a stage withheld; when every row was withheld, the
 > block prints `assemble.EmptyNote`, the same sentence `ghost_project_context`
 > prints for that state. It therefore renders and applies
@@ -2028,7 +2033,7 @@ What exists now:
   project and none of them is in the block above" — is about what the project holds,
   names no cause, and `CountMemories` answers it. The ABSTENTION names a cause, so it
   is a claim about which rows that cause explains, and the population it can be about
-  is the WINDOW's: the project's own rows `passiveFetchSQL` could have admitted.
+  is the WINDOW's: the project's own rows the passive key scan could have admitted.
   `projectWindowRowCount` asks exactly that — `CountActiveMemories`, a
   `windowCountCapableStore` assertion, whose predicate is the window's own — and
   where it is zero, or the store cannot answer, the cause belongs to somebody else and
@@ -2171,7 +2176,7 @@ What exists now:
   an empty over-fetched window is `no_memories` (a statement about the window, not
   a census of the store) unless the validity predicate emptied it, in which case it
   is `all_invalid` and carries the exclusion wording: passive validity runs in
-  `passiveFetchSQL` before the `LIMIT` (so an expired row cannot spend the window),
+  `passiveKeyScanSQL` during the scan, before a row can enter the window (so an expired row cannot spend a window slot),
   the store counts what it removed into `CandidateSet.ValidityExcluded`, and
   assemble stage 2 stays the authority and must agree. The passive demotions
   (supersede, then near-duplicate, which drops its losers on `_global`) run after

@@ -321,7 +321,7 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 			for j := i + 1; j < len(res.Links); j++ {
 				res.Links[j].NotAttempted = true
 			}
-			return res, fmt.Errorf("withdraw %s link %s→%s: %w", res.Links[i].Relation, res.Links[i].SourceID, res.Links[i].TargetID, err)
+			return res, fmt.Errorf("withdraw %s link %s→%s: %w", res.Links[i].Relation, memory.RefusalArg("memory_id", res.Links[i].SourceID), memory.RefusalArg("memory_id", res.Links[i].TargetID), err)
 		}
 		if n == 0 {
 			// A concurrent pass withdrew it first. The edge is gone either way,
@@ -333,9 +333,9 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 		res.Withdrawn++
 		if logger != nil {
 			logger.Info("supersede withdrew a named edge",
-				"source", res.Links[i].SourceID, "target", res.Links[i].TargetID,
+				"source", memory.RefusalArg("memory_id", res.Links[i].SourceID), "target", memory.RefusalArg("memory_id", res.Links[i].TargetID),
 				"relation", res.Links[i].Relation,
-				"link_source", res.Links[i].LinkSource, "withdrawn", res.Withdrawn)
+				"link_source", memory.RefusalArg("memory_id", res.Links[i].LinkSource), "withdrawn", res.Withdrawn)
 		}
 	}
 	return res, nil
@@ -420,7 +420,7 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		// for, and "A1B2C3D4 supersedes or causes itself" is a sentence that names a
 		// choice this refusal never made. Saying the two refs are the same memory
 		// IS the whole fact.
-		return link, fmt.Errorf("%s is linked to itself: both refs are memory %s", short(targetID), targetID)
+		return link, fmt.Errorf("%s is linked to itself: both refs are memory %s", short(targetID), memory.RefusalArg("memory_id", targetID))
 	}
 	// The RELATION this pair resolves to, and the reason the loop is ordered
 	// rather than a single scan: an unset Relation means "whichever of the two the
