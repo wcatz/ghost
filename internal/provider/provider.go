@@ -110,6 +110,10 @@ type MemoryStore interface {
 	// content was cut at memory.MaxContentLen even when no field was.
 	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
+	// LiveDecisions is the injected surfaces' read: a project's non-superseded
+	// decisions (active or revisit) newest first, active before revisit, capped
+	// at limit.
+	LiveDecisions(ctx context.Context, projectID string, limit int) ([]memory.Decision, error)
 	// FindLiveDecisionByTitle returns the id of a non-superseded decision in
 	// the project with the same title (trimmed, case-insensitive), or "".
 	FindLiveDecisionByTitle(ctx context.Context, projectID, title string) (string, error)

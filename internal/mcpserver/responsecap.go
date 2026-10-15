@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"fmt"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // This file is the response byte budget for the READ tools that are bounded by
@@ -139,12 +141,10 @@ func capRowsToResponseBudget(framing string, rows []string, budget int, advice s
 // that shows the rest differs by tool — a lower `limit` on all of them, plus the
 // filter or query that narrows this one's population.
 func responseCapNotice(cut, budget int, advice string) string {
-	verb := "rows were"
-	if cut == 1 {
-		verb = "row was"
-	}
-	return fmt.Sprintf("\n(%d %s cut from the end of this answer to stay within the %d-byte response "+
-		"budget, which bounds the answer and not what is stored. %s)\n", cut, verb, budget, advice)
+	// The sentence is shared with the assembler's response-fit post-pass, which
+	// trims a ghost_memory_search answer to the same budget: one builder is how
+	// the search answer and these listings cannot spell the same cut two ways.
+	return "\n" + assemble.CutNotice(cut, budget, advice) + "\n"
 }
 
 // responseCapNoticeFirstKept is the notice for the one over-budget answer the

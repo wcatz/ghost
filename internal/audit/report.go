@@ -771,12 +771,12 @@ func (s SourceReport) attributionNotes() string {
 	var b strings.Builder
 	if s.Detached > 0 {
 		fmt.Fprintf(&b,
-			"    %d verdict(s) were not counted: their call is outside this window, or the store no longer holds it (a history purge, or the call cap)\n",
+			"    %d detached verdict(s) were not counted: their call is outside this window, or the store no longer holds it (a history purge, or the call cap)\n",
 			s.Detached)
 	}
 	if s.Unattributed > 0 {
 		fmt.Fprintf(&b,
-			"    %d verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
+			"    %d unattributed verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
 			s.Unattributed)
 	}
 	if s.Unscoped > 0 {

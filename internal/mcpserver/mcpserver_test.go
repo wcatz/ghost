@@ -921,8 +921,11 @@ func TestAsOfSearchReturnsWhatTheListingWithholdsAtT(t *testing.T) {
 	listing := resultText(callTool(t, session, "ghost_project_context", map[string]any{
 		"project_id": "test-project", "as_of": at,
 	}))
+	// An explicit limit, because the default cap (5) is smaller than the six
+	// validity shapes this fixture saves and the assertion below is about every
+	// row being returned, not about the cap.
 	search := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
-		"project_id": "test-project", "query": "zebra", "as_of": at,
+		"project_id": "test-project", "query": "zebra", "as_of": at, "limit": 10,
 	}))
 	if !strings.Contains(listing, "Validity judged at "+at) {
 		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)
@@ -1688,7 +1691,7 @@ func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
 
 	// Create a project whose hash ID differs from its name, exactly as the
 	// session-start hook does (path-hashed ID + human-readable name).
-	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
@@ -1738,7 +1741,7 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 	srv := New(store, logger, "test")
 
 	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
@@ -1775,6 +1778,111 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 	}
 
 	awaitNotification(t, updated, hashURI)
+}
+
+func TestResourceSubscription_NotifiesContextOnDecisionRecord(t *testing.T) {
+	// A decision writes a companion memory in the same transaction and adds a
+	// ## Recent Decisions entry, so the context resource a client pinned at
+	// session start is stale the moment the call returns (#1271).
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+
+	// A hash ID that differs from the name, as the session-start hook creates.
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/srv/git/myproj", "myproj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	// Subscribe by name, the form a client read the resource with.
+	const contextURI = "ghost://project/myproj/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: contextURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	awaitResourceSubscriptions(t, srv, ctx, updated, contextURI)
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_decision_record",
+		Arguments: map[string]any{
+			"project_id": "myproj",
+			"title":      "Use SQLite over Postgres",
+			"decision":   "Embedded SQLite with FTS5",
+			"rationale":  "Zero external dependencies",
+		},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_decision_record: %v", err)
+	}
+
+	awaitNotification(t, updated, contextURI)
+}
+
+func TestResourceSubscription_NotifiesGlobalOnGlobalDecisionRecord(t *testing.T) {
+	// A decision recorded under _global joins the cross-project rows the
+	// ghost://memories/global resource serves, and ghost_save_global notifies
+	// that resource for the same reason (#1271).
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, memory.GlobalProjectID, "", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const globalURI = "ghost://memories/global"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: globalURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	awaitResourceSubscriptions(t, srv, ctx, updated, globalURI)
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_decision_record",
+		Arguments: map[string]any{
+			"project_id": memory.GlobalProjectID,
+			"title":      "Always use 2-space YAML indentation",
+			"decision":   "Indent YAML block sequences by two spaces",
+			"rationale":  "Matches the surrounding configuration files",
+		},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_decision_record: %v", err)
+	}
+
+	awaitNotification(t, updated, globalURI)
 }
 
 // TestResourceSubscription_RejectsUnknownURI exercises handleSubscribe
@@ -2352,6 +2460,53 @@ func TestSaveGlobal_NotifiesEmbeddingWorker(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for embedding worker notification on ghost_save_global")
+	}
+}
+
+// TestDecisionRecord_NotifiesEmbeddingWorker pins ghost_decision_record to the
+// same write-path rule the three save tools follow: its companion memory is a
+// memory row, so the project must be queued for embedding. RecordDecision calls
+// the store's onSave callback, but no production caller registers one, so the
+// handler's own push onto projectCh is the only notification the worker gets.
+func TestDecisionRecord_NotifiesEmbeddingWorker(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ch := make(chan string, 4)
+	srv.SetEmbedder(&mockEmbedder{}, ch)
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_decision_record",
+		Arguments: map[string]any{
+			"project_id": "test-project",
+			"title":      "Use SQLite over Postgres",
+			"decision":   "Embedded SQLite with FTS5",
+			"rationale":  "Zero external deps, sufficient for single-user",
+		},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_decision_record: %v", err)
+	}
+
+	select {
+	case got := <-ch:
+		if got != "abc123" {
+			t.Errorf("projectCh notified with %q, want %q", got, "abc123")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PARITY GAP: ghost_decision_record did not notify the embedding worker for its companion memory")
 	}
 }
 

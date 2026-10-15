@@ -102,7 +102,7 @@ func TestImportFoldsANearDuplicateIntoTheExistingRow(t *testing.T) {
 	writeTempFile(t, memDir, "project_architecture.md", "---\nname: Architecture\ndescription: notes\ntype: project\n---\n"+nearDupImported)
 	incoming := parsedContent(t, filepath.Join(memDir, "project_architecture.md"))
 
-	imported, err := importFromDir(ctx, store, projectID, memDir, logger)
+	imported, _, _, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestImportFoldsNearDuplicateFilesWithinOneImport(t *testing.T) {
 	writeTempFile(t, memDir, "a_project.md", "---\nname: A\ndescription: notes\ntype: project\n---\n"+nearDupStored)
 	writeTempFile(t, memDir, "b_project.md", "---\nname: B\ndescription: notes\ntype: project\n---\n"+nearDupImported)
 
-	imported, err := importFromDir(ctx, store, projectID, memDir, logger)
+	imported, _, _, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestImportSkipsAByteIdenticalFile(t *testing.T) {
 	}
 	before := memoryByContent(t, store, projectID, stored)
 
-	imported, err := importFromDir(ctx, store, projectID, memDir, logger)
+	imported, _, _, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}

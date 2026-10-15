@@ -342,6 +342,16 @@ type Candidate struct {
 	// relevance cutoff (#954) keeps such a row rather than undo the reservation.
 	// It is set on query-mode rows only and does not need an explain request.
 	KeywordReserved bool
+	// Unembedded says the vector leg could not have retrieved this row: it
+	// carries no embedding the leg could score — no vector at all, one stamped
+	// with a different identity, or one whose width differs from the query's.
+	// It is false whenever the vector leg is not in play (no embedder, no query
+	// vector, a failed leg), because then no row is judged against that leg. The
+	// leg-consensus stage reads it so a row the vector leg could never see is
+	// not penalised for lacking vector agreement (#1319): a row saved moments
+	// ago has no embedding yet, and its silence must not read as a second leg's
+	// dissent.
+	Unembedded bool
 	// Evidence counts the records supporting this memory, read in the SAME
 	// snapshot as the rows. It rides here because the assembler may reach the
 	// store through this one read and no other, so a fact only this read can
@@ -712,7 +722,97 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
 	}
+
+	// A row the vector leg could never have retrieved — no embedding it could
+	// score: no vector at all, one from another identity, or one of another
+	// width — must not read as a row that leg ranked low (#1319). The read is
+	// taken only when the vector leg actually ran and answered, because only
+	// then does the leg-consensus gate ask the question: with the leg skipped
+	// or failed the gate is a pass-through and the field is never read. rows
+	// shares its backing array with set.Rows, so the marks below reach the
+	// returned set.
+	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity, len(req.QueryVec))
+		if err != nil {
+			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
+		}
+		for i := range rows {
+			rows[i].Unembedded = unembedded[rows[i].ID]
+		}
+	}
 	return set, nil
+}
+
+// unembeddedAmong returns the candidates that carry no embedding the vector leg
+// could score: no vector at all, one stamped with a different identity, or one
+// whose width differs from the query's. The three cases are the two filters the
+// scan applies, and they are applied in its order — identity first, then width —
+// because a row the leg saw is a row the leg ranked, and everything else is one
+// it could never have considered.
+//
+// An empty identity means "any recorded vector counts", which is the state of a
+// store with no embedding model configured: the identity filter is dropped, but
+// a row with no vector is still invisible to the leg and is still reported.
+//
+// width is the query's own float32 count, the same value the scan compares a
+// stored blob's length against. It is only reached with a width, because the
+// caller's guard requires the vector leg to have answered, which requires a
+// query vector to embed.
+//
+// It is the rule UnembeddedMemoryIDs applies, narrowed to one retrieval's rows
+// and read from the same snapshot as those rows. Chunked like the edge and
+// evidence reads, because SQLite caps a statement's bound parameters.
+func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string, width int) (map[string]bool, error) {
+	out := make(map[string]bool, len(candidates))
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.ID
+	}
+	head := `SELECT m.id FROM memories m LEFT JOIN memory_embeddings e ON e.memory_id = m.id`
+	var prefix []any
+	if identity != "" {
+		head += ` AND e.model = ?`
+		prefix = append(prefix, identity)
+	}
+	if width > 0 {
+		// The scan's own division: a blob is len/4 float32s, and a blob that is
+		// not a multiple of four is compared at its floor.
+		head += ` AND length(e.embedding)/4 = ?`
+		prefix = append(prefix, width)
+	}
+	for start := 0; start < len(ids); start += edgeChunkIDs {
+		end := min(start+edgeChunkIDs, len(ids))
+		chunk := ids[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, 0, len(prefix)+len(chunk))
+		args = append(args, prefix...)
+		for i, id := range chunk {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := db.QueryContext(ctx, head+
+			` WHERE m.id IN (`+strings.Join(ph, ",")+`) AND e.memory_id IS NULL`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read unembedded rows: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("scan unembedded rows: %w", err)
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("iterate unembedded rows: %w", err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
 }
 
 // totalLegFailure reports an error when every leg that actually ran failed.

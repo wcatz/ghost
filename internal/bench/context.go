@@ -6,9 +6,10 @@ package bench
 // statements about ORDER, and a system can be perfectly good at ordering every
 // row and still be bad at deciding what to put in front of a model. Nothing in
 // this package could see that. NDCG is invariant under moving the last row of a
-// block off the end, so a block carrying ten rows where two would have answered
-// scores the same NDCG as the two-row block while costing a caller five times the
-// tokens — and that tradeoff is the whole of what the context assembler manages.
+// block off the end, so a block carrying five rows where two would have answered
+// scores the same NDCG as the two-row block while costing a caller more than
+// twice the tokens — and that tradeoff is the whole of what the context assembler
+// manages.
 // These metrics are about the block a caller RECEIVES: how much of it is
 // relevant, how much of it should never have been in it, what it cost, and whether
 // it fit.
@@ -48,16 +49,16 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// The budget the tool sends. ghost_memory_search defaults args.limit to 10 and
+// The budget the tool sends. ghost_memory_search defaults args.limit to 5 and
 // caps the complete response at 2*memory.MaxContentLen bytes, and those two
 // numbers are the request ContextRequest builds — a context metric measured
 // against any other budget is a metric about a surface nobody ships. They are
 // named constants rather than literals in the request so the report header and
 // the request cannot be edited apart.
 const (
-	// ContextItems is the tool's default `limit`: ten rows, and the item cap
+	// ContextItems is the tool's default `limit`: five rows, and the item cap
 	// stage 9 applies across the project and `_global` buckets together.
-	ContextItems = 10
+	ContextItems = 5
 	// ContextBytes is the tool's response cap, 2*MaxContentLen. It bounds the
 	// COMPLETE rendered response, which is why the budget table reports the
 	// response-fit trim separately from the item cap: a larger item limit makes
@@ -292,7 +293,7 @@ type BucketShare struct {
 // TopBucket is the mean number of rows an answered query's largest bucket
 // contributed: the sum over answered queries of the dominant bucket's rows, over
 // the answered queries. It is bounded by the item cap, so a block drawn from one
-// bucket approaches 10 and a block spread over two approaches 5 — the reading is
+// bucket approaches 5 and a block spread over two approaches 2.5 — the reading is
 // "how lopsided was this block", a property of the block rather than of the
 // corpus, and the number that moves when diversity changes.
 //

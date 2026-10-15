@@ -2,7 +2,9 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -40,35 +42,78 @@ func beforeHybridHydrate(ids []string) {
 // forever. Clearing the slot re-queues the memory so the linker compares it
 // again in the new space; the re-scan adds current-space edges alongside the
 // old ones rather than replacing them (only supersede invalidates edges, and
-// CreateLink keeps MAX(strength)). The delete runs
-// before the upsert only because it has to read the old model first; the
-// ordering fails safe in both directions, so no transaction SPANS the two
-// statements. Each is its own guarded write transaction (execGuardedWrite), and
-// that is what keeps the granularity: if the upsert then fails, the memory is
-// merely re-queued for a scan it did not need, which the linker repeats
-// idempotently. If the delete fails, this returns before touching the vector, so
-// the state is exactly what it was.
+// CreateLink keeps MAX(strength)). The delete reads the old model and the upsert
+// installs the new one in ONE guarded write transaction (#1258). Run as two, a
+// MarkLinkScanned for the retired vector could commit between them: the row
+// still held the retired bytes at that instant, so the mark's byte check passed,
+// the slot was re-armed after the clear, and the upsert then installed the new
+// model — leaving a slot computed in the retired space that
+// UnscannedEmbeddedMemoryIDs never re-queues. BEGIN IMMEDIATE takes the write
+// lock before either statement, so a concurrent mark is serialised: before this
+// transaction it is cleared by the DELETE, and after it is refused by the mark's
+// own byte check.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
+	_, err := s.storeEmbedding(ctx, memoryID, vec, model, nil)
+	return err
+}
+
+// StoreEmbeddingForContent is StoreEmbedding for a vector computed from a text
+// the caller read earlier: it stores the vector only if the memory's content,
+// read inside the same write transaction, is still that text, and reports
+// whether it did. An edit deletes the row's embedding; the vector of the text it
+// replaced must not be written back over that deletion, or the wrong vector
+// stays current and UnembeddedMemoryIDs never selects the row again (#1159). A
+// refused write (or a memory deleted meanwhile) stores nothing and returns
+// (false, nil), leaving the row pending for the next pass.
+func (s *Store) StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error) {
+	return s.storeEmbedding(ctx, memoryID, vec, model, &content)
+}
+
+func (s *Store) storeEmbedding(ctx context.Context, memoryID string, vec []float32, model string, wantContent *string) (bool, error) {
 	blob := float32sToBytes(vec)
 
-	if _, err := s.execGuardedWrite(ctx, "retire-link-scan", `
+	tx, lock, err := s.beginWrite(ctx, "store-embedding")
+	if err != nil {
+		return false, fmt.Errorf("begin store embedding: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if wantContent != nil {
+		var current string
+		err := tx.QueryRowContext(ctx, `SELECT content FROM memories WHERE id = ?`, memoryID).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("check embedded content: %w", err)
+		}
+		if current != *wantContent {
+			return false, nil
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM link_scans
 		WHERE memory_id = ? AND EXISTS (
 			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND model <> ?
 		)
 	`, memoryID, memoryID, model); err != nil {
-		return fmt.Errorf("invalidate link scan: %w", err)
+		return false, fmt.Errorf("invalidate link scan: %w", err)
 	}
 
-	_, err := s.execGuardedWrite(ctx, "store-embedding", `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_embeddings (memory_id, embedding, model)
 		VALUES (?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model, created_at = datetime('now')
-	`, memoryID, blob, model)
-	if err != nil {
-		return fmt.Errorf("store embedding: %w", err)
+	`, memoryID, blob, model); err != nil {
+		return false, fmt.Errorf("store embedding: %w", err)
 	}
-	return nil
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit store embedding: %w", err)
+	}
+	lock.reportHold("store-embedding", time.Now())
+	return true, nil
 }
 
 // DeleteEmbedding removes the embedding for a memory.
@@ -974,8 +1019,8 @@ func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandida
 // Selecting by fused score alone is what made the window unable to admit a
 // keyword-only hit. RRF weights the vector leg 0.7 and the keyword leg 0.3, so
 // with k=60 the keyword leg's rank-1 row scores 0.3/61 ≈ 0.0049, while the
-// vector leg's 20th row — still comfortably inside the fetched window — scores
-// 0.7/80 ≈ 0.0088. A full vector leg therefore outranked the best keyword
+// vector leg's 10th row — still comfortably inside the fetched window — scores
+// 0.7/70 ≈ 0.01. A full vector leg therefore outranked the best keyword
 // match, every time, and no amount of exact identifier matching could put that
 // memory in the results. That is the case FTS exists for.
 //

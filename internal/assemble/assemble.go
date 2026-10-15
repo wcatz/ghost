@@ -204,8 +204,8 @@ type Request struct {
 	Category  string
 	// Retention is the tier filter (memory's session|project|persistent). Empty is
 	// no filter, and the two are the same thing here: a filter is applied to the
-	// widened candidate set before the window closes, exactly as Category is, so
-	// a row of the requested tier the window cut is still reachable.
+	// widened candidate set before the window closes, exactly as Category and Scope
+	// are, so a row of the requested tier the window cut is still reachable.
 	Retention string
 	Source    Source
 	Budget    Budget
@@ -390,10 +390,11 @@ type Retriever interface {
 // Without a predicate the window is the caller's limit, so a plain search
 // retrieves and returns exactly what it always did.
 //
-// It is named for the predicate rather than for the category because the tier
-// filter uses the same widening for the same reason: a session row ranked just
-// below the cut is exactly the row a `retention: session` search was asking for,
-// and a narrower window would answer the request with a silence.
+// It is named for the predicate rather than for the category because every
+// predicate uses the same widening for the same reason: a session row, or a row
+// of the requested scope, ranked just below the cut is exactly the row the
+// filter was asking for, and a narrower window would answer the request with a
+// silence.
 const predicateFetchWiden = 3
 
 // maxRetrievalWindow bounds how far a predicate's widening may go. The tool
@@ -675,9 +676,9 @@ func windowIsACeiling(req Request) bool {
 func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 
 // retrievalWindow is how wide the retrieval window is. It is the caller's total
-// item budget, widened for a category predicate, and never smaller than the
-// budget: the retriever has to be able to return at least as many rows as the
-// caller will accept, or a closure could never be filled.
+// item budget, widened for a predicate, and never smaller than the budget: the
+// retriever has to be able to return at least as many rows as the caller will
+// accept, or a closure could never be filled.
 func retrievalWindow(req Request) int {
 	if Passive(req) {
 		// A passive window is the policies' own over-fetches and nothing else.
@@ -705,7 +706,7 @@ func retrievalWindow(req Request) int {
 		// any of that.
 		total = maxRetrievalWindow
 	}
-	if req.Category != "" || req.Retention != "" {
+	if req.Category != "" || req.Retention != "" || len(req.Scope) > 0 {
 		widened := total * predicateFetchWiden
 		if widened > maxRetrievalWindow {
 			widened = maxRetrievalWindow
@@ -925,7 +926,7 @@ func validatePassiveBudget(req Request) error {
 	// A category or tier filter cannot be honoured here, and the seam would rather
 	// refuse it than serve a confident wrong answer.
 	//
-	// `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
+	// `passiveKeyScanSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
 	// scope — there is no category and no retention in its SQL at all, because a
 	// passive block is selected by importance, decay and pin rather than by a
 	// predicate. The query path can afford the same filter because it WIDENS the

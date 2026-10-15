@@ -94,6 +94,9 @@ const (
 	// empty result. The retrieval record carries it as a dropped verdict, the
 	// trace as a decision, and explain as an excluded row's reason sentence.
 	reasonRelevanceCutoff = "relevance_cutoff"
+	// reasonLegConsensus is the per-row reason for the query-mode stage that
+	// admits a single-leg row only when its leg ranks it near the top (#1251).
+	reasonLegConsensus = "leg_consensus"
 	// reasonNothingClearedBar is the no-answer step's reason (#955), both as a
 	// per-row reason and as the outcome reason of a block it emptied: the best
 	// vector cosine in the block was below context.no_answer_cosine, so the
@@ -187,9 +190,12 @@ func (p *pipeline) retrievalPartial() bool {
 }
 
 // emptyReason is the reason for a result that admitted no row. The stage that
-// emptied the set names it, and stage 1's own failures are named before any
-// stage is consulted: an absent row is only evidence of absence when the search
-// that failed to find it actually ran.
+// emptied the set names it, and a validity exclusion the retriever's own
+// predicate counted is named ahead of the leg facts: rows were found and
+// withheld, which is the fact the caller acts on, and the leg's state is still
+// on the machine line. Otherwise stage 1's own failures come before any
+// empty-window verdict: an absent row is only evidence of absence when the
+// search that failed to find it actually ran.
 func (p *pipeline) emptyReason() string {
 	if len(p.set.Rows) > 0 {
 		// The response-fit post-pass runs after every stage, so when it removed
@@ -201,6 +207,22 @@ func (p *pipeline) emptyReason() string {
 			return reasonAllOverBudget
 		}
 		return p.removalReason()
+	}
+	// A validity exclusion is a fact about the STORE, and it is named before any
+	// leg fact below. The retriever's predicate found rows and withheld them as
+	// out of date, which is the fact the caller acts on, and once the window is
+	// empty the withheld count is the only evidence the rows existed at all.
+	// Naming a leg instead sends the caller to an embedder that was never the
+	// reason there is no answer; the leg's own state stays on the machine line
+	// (`legs=`), so a missing or broken leg is not lost, only subordinated.
+	//
+	// This is the SAME precedence the `len(p.set.Rows) > 0` branch keeps above,
+	// where a stage that removed rows outranks a leg that never ran. The count is
+	// that removal, done early in SQL rather than by a stage, and both paths —
+	// passive and query — reach it through one check so they cannot spell the
+	// precedence differently.
+	if p.set.ValidityExcluded > 0 {
+		return reasonAllInvalid
 	}
 	// The two retrieval reasons are events, not synonyms, and the ORDER of the
 	// checks is the whole point. `vector_backend_unavailable` is a machine with no
@@ -218,23 +240,6 @@ func (p *pipeline) emptyReason() string {
 		return reasonRetrievalFailed
 	}
 	if p.passive {
-		// The validity predicate runs in SQL on this path, before the window closes,
-		// so a bucket whose every row is outside its window comes back empty with
-		// NO stage having run — and the empty window below would call that
-		// `no_memories`, whose sentence is a census of absence and whose callers
-		// keep the never-saved verdict. It is not the same fact: rows were found and
-		// withheld. The retriever states how many its predicate removed, and a
-		// non-zero count is `all_invalid`, the same reason stage 2 produces when it
-		// is the one dropping them, so every surface reads one reason for one fact.
-		//
-		// It sits BELOW the two leg checks deliberately, which is what the block
-		// above says in its own terms: a leg fact is only reached when no stage
-		// removed rows, and a validity exclusion is a stage's removal — done early,
-		// in SQL, but the same removal. It sits ABOVE `no_memories` for the reason
-		// this branch exists.
-		if p.set.ValidityExcluded > 0 {
-			return reasonAllInvalid
-		}
 		// The last line, and the only one the passive path changes. Reaching here
 		// means no stage removed anything and no leg fact explains the emptiness, so
 		// the window itself is what was empty — and `no_candidates` would claim a
@@ -246,16 +251,13 @@ func (p *pipeline) emptyReason() string {
 		// above.
 		return reasonNoMemories
 	}
-	// The query path's own counterpart, for the reason the passive branch above
-	// gives it in its own terms: since #1053 the keyword leg applies the window
-	// predicate in SQL BEFORE its LIMIT, so a query whose every match lies
-	// outside its window comes back with no candidate and no stage having run.
-	// `no_candidates` is the last reason a caller may read as absence, and this
-	// is not absence — rows were found and withheld as out of date, which is
-	// `all_invalid` everywhere else. The retriever states the count.
-	if p.set.ValidityExcluded > 0 {
-		return reasonAllInvalid
-	}
+	// The query path's reachable last reason. Since #1053 the keyword leg applies
+	// the window predicate in SQL BEFORE its LIMIT, so a query whose every match
+	// lies outside its window comes back with no candidate and no stage having
+	// run; that case is the ValidityExcluded check above, and by the time this
+	// line is reached the queried universe really held nothing. `no_candidates` is
+	// the last reason a caller may read as absence, and it is only reached when
+	// nothing was found to withhold.
 	return reasonNoCandidates
 }
 
@@ -943,12 +945,59 @@ func (p *pipeline) response(res Result) string {
 		}
 		b.WriteString(p.filterCaveat())
 	}
+	// The cut notice sits where the filter caveat would, and only ever on the
+	// answer that suppresses the caveat: a response-fit trim. It is written HERE
+	// and not by the surface because the post-pass measures this function — a
+	// notice the caller appended would be bytes the cap never saw, and the answer
+	// would ship over its budget to disclose that it had been trimmed to fit it.
+	b.WriteString(p.responseCutNotice())
 	// The machine line is last in every case, so a reader working bottom-up
 	// meets the verdict before the prose it qualifies.
 	if res.Machine != "" {
 		b.WriteString("\n" + res.Machine + "\n")
 	}
 	return b.String()
+}
+
+// CutNotice is the parenthesised sentence every response the byte budget cuts
+// ends its body with — the last line of a listing, and for a search answer the
+// line just above the machine-readable verdict line, which stays last. It names
+// how many WHOLE rows went, the budget they were fitted to and the caller's own
+// advice for reaching the rest. It is exported because two renderers emit the
+// same cut: the assembler's response-fit post-pass trims a query answer, and
+// `capResponseParts` trims the five row-rendering listing tools, and one
+// sentence built in one place is how the two cannot spell the same cut two ways.
+func CutNotice(cut, budget int, advice string) string {
+	verb := "rows were"
+	if cut == 1 {
+		verb = "row was"
+	}
+	return fmt.Sprintf("(%d %s cut from the end of this answer to stay within the %d-byte response "+
+		"budget, which bounds the answer and not what is stored. %s)", cut, verb, budget, advice)
+}
+
+// searchFitAdvice is the advice a trimmed query answer carries. It matches the
+// sentence `capResponseParts` gives `ghost_search_all` for the same cut, because
+// both answers are bounded by the same one lever — fewer results — and the same
+// way to narrow: the query.
+const searchFitAdvice = "Ask for fewer results (a lower `limit`) or narrow the query to see the rest."
+
+// responseCutNotice is the cut notice for a query answer the response-fit
+// post-pass trimmed, wrapped in the blank line that separates a block from its
+// commentary. It returns nothing for a passive block, whose surfaces render an
+// abstention or their own bounded listing rather than this field, and nothing
+// for an answer the trim emptied: `reasonAllOverBudget` already names the budget
+// and the action, and a notice over no rows would be a sentence about rows the
+// reader cannot see.
+func (p *pipeline) responseCutNotice() string {
+	if p.passive || len(p.items) == 0 {
+		return ""
+	}
+	cut := p.droppedBy[stageResponseFit]
+	if cut <= 0 {
+		return ""
+	}
+	return "\n\n" + CutNotice(cut, p.req.Budget.MaxBytes, searchFitAdvice)
 }
 
 // filterCaveat is the windowed-answer hint, already wrapped in the blank line
@@ -967,8 +1016,9 @@ func (p *pipeline) filterCaveat() string {
 	// Never after a response-fit trim. That trim removed rows the window
 	// admitted, so the window is not what made the answer short, and the caveat's
 	// advice — raise the limit — admits more rows and makes the response larger,
-	// which is the one move that cannot help. The machine line's `admitted=` still
-	// carries the shortfall.
+	// which is the one move that cannot help. The cut notice takes its place, so
+	// the shortfall is still disclosed in words rather than only in the machine
+	// line's `admitted=`.
 	if p.droppedBy[stageResponseFit] > 0 {
 		return ""
 	}

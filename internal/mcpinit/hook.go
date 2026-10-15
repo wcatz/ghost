@@ -421,7 +421,7 @@ func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 // which instant it is a reading of, and its closing instruction is the historical
 // one, because "save new discoveries" is an instruction about the present and
 // this block is not about the present.
-func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, globals []sessionMemory, tally sessionTally) string {
+func formatSessionContext(projectID, project string, asOf *time.Time, memories []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, globals []sessionMemory, tally sessionTally) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
 		// Only claim these are the user's preferences when they are. A global
@@ -452,6 +452,20 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			it := sessionMemoryToItem(m, asOf)
 			fmt.Fprintf(&gsb, "%s\n", it.Line())
 		}
+	} else if note := tally.globals.WithheldNote(); note != "" {
+		// A wholly-withheld global half: the same shape the project half
+		// renders at its own branch below, for the same reason (#1316, the
+		// global counterpart of #897). The rows were seen and refused — not
+		// absent, and not ranked out — so the section keeps its heading and
+		// says so in the assembler's own words, pointing at the tool that still
+		// shows them with the window they carry. The heading is the bucket
+		// label ALONE: the origin-guidance sentence the shown-rows branch
+		// prints describes whose preferences the SHOWN rows are, and with
+		// nothing shown the only true claim is the bucket's, so it is not
+		// reprinted (claiming these were "the user's own saved cross-project
+		// preferences" would present rows the block never read as
+		// authoritative, the #545 chain).
+		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):**\n%s\n", note)
 	}
 	globalSection := gsb.String()
 
@@ -553,7 +567,15 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			// beside it was quoted, on the surface that reaches EVERY session —
 			// so a title an agent or a reflection pass wrote arrived as prose
 			// above a body that had already declared itself data (#791).
-			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", assemble.Token(d[0]), quoteData(d[1]), quoteData(d[2]))
+			//
+			// d[3] is the decision's status. A revisit decision is live and is
+			// shown, labelled "(revisit)", for the reason the memory rows are:
+			// this is the surface every session is opened with, and a decision
+			// flagged for reconsideration is exactly what a reader coming in
+			// cold should see. The marker sits after the quoted title so the
+			// active row's shape is unchanged.
+			fmt.Fprintf(&sb, "- `%s` **%s**%s: %s\n",
+				assemble.Token(d[0]), quoteData(d[1]), revisitMarker(d[3]), quoteData(d[2]))
 		}
 	}
 
@@ -662,14 +684,16 @@ func shownOnly(projectShown, globalsShown int) sessionTally {
 
 // RenderSessionContext is the context renderer backing the `ghost context`
 // command and opencode's plugin. It produces exactly what the SessionStart hook
-// would emit for the same cwd — project memories, globals, open tasks, recent
-// decisions. To keep opencode's injected context at parity with claude/codex it
-// also mirrors the SessionStart hook's startup side effects: it starts the
-// Obsidian mirror when configured and counts this as a new session. opencode's
-// plugin materializes the result into its instructions so every session opens
-// with project memory (opencode has no stdout-injection surface of its own).
-// An empty cwd resolves to the process working directory; a missing store or
-// unmatched directory with no globals yields an empty string.
+// would emit for the same cwd — the maintenance alert ahead of project
+// memories, globals, open tasks and recent decisions. To keep opencode's
+// injected context at parity with claude/codex it also mirrors the SessionStart
+// hook's startup side effects: it starts the Obsidian mirror when configured and
+// counts this as a new session. opencode's plugin materializes the result into
+// its instructions so every session opens with project memory (opencode has no
+// stdout-injection surface of its own).
+// An empty cwd resolves to the process working directory; a missing store, or an
+// unmatched directory with no globals and no current maintenance alert, yields
+// an empty string.
 func RenderSessionContext(cwd string) string {
 	return RenderSessionContextAt(cwd, nil)
 }
@@ -683,10 +707,12 @@ func RenderSessionContext(cwd string) string {
 // Two things a past reading must not do, and neither is a detail:
 //
 //   - It must not run the startup side effects. The current path starts the
-//     Obsidian mirror and counts this as a new session, because the path it backs
-//     IS a session start. A historical read is a diagnostic a person asked for;
-//     counting it would move the present's session number to answer a question
-//     about the past, and starting a worker for it would be work nobody needs.
+//     Obsidian mirror, counts this as a new session and prints the maintenance
+//     alert (whose marker read self-cleans one older than 30 days), because the
+//     path it backs IS a session start. A historical read is a diagnostic a
+//     person asked for; counting it would move the present's session number to
+//     answer a question about the past, and starting a worker for it would be
+//     work nobody needs.
 //   - It must not fill in the halves that have no history. The learned context is
 //     derived from the memories as they stand, the tasks and decisions tables
 //     record no versions at all, so a block that printed today's of them under a
@@ -723,11 +749,27 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 			}
 		}
 	}
-	// Nothing to surface — don't inject an empty/decorative block.
+	// Parity with the hook's maintenance notification, the last thing this
+	// renderer owed it: a failed unattended consolidation leaves a per-project
+	// marker, and this render is the only session-start surface a host that
+	// cannot consume the hook's stdout injection (opencode) ever sees, so the
+	// alert line the hook prints ahead of the block has to be printed here too.
+	// It is read on the CURRENT path alone — the historical branch returned
+	// above, and a question about the past must not report the present's paused
+	// consolidation. The project it names is the one this render resolved.
+	alert := lifecycleFailureAlert(projectID, project)
+
+	// Nothing to surface — don't inject an empty/decorative block. A maintenance
+	// alert is not decorative: with no block to print, a current failure marker
+	// is still the thing this render exists to carry.
 	if projectID == "" && len(globals) == 0 {
-		return ""
+		return alert
 	}
-	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	if alert == "" {
+		return block
+	}
+	return alert + "\n" + block
 }
 
 // SessionBlockAt renders the block a session start (and `ghost context`) emits for
@@ -992,7 +1034,7 @@ type sessionMemory struct {
 // over-fetched window never held), and a header built from one while the rows
 // came from the other is exactly how a block ended up saying rows were "ranked
 // out" when a stage had withheld them.
-func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	return loadSessionContextFor(cwd, cfg, "")
 }
 
@@ -1000,7 +1042,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 // block's retrieval record carries sessionID, so the audit can judge that call against
 // the text of the session it opened. "" is a caller with no hook payload (`ghost
 // context`, opencode's plugin) and records none, which the audit leaves unjudged.
-func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
@@ -1013,7 +1055,7 @@ func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (pr
 // fixed instant so a block can be measured rather than merely run. Nothing else
 // differs between the two, which is the point of the split — a bench that
 // re-implemented this would be measuring its own copy.
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -1114,21 +1156,24 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		}
 	}
 
-	// Get active decisions
+	// Get live decisions — active or revisit, superseded excluded — active
+	// first. A decision flagged for reconsideration is context a session should
+	// see, and the renderer labels it; the active-first order is what keeps it
+	// from pushing an active decision out of the five-row window.
 	decRows, err := db.Query(`
-		SELECT id, title, decision FROM decisions
-		WHERE project_id = ? AND status = 'active'
-		ORDER BY created_at DESC
+		SELECT id, title, decision, status FROM decisions
+		WHERE project_id = ? AND status != 'superseded'
+		ORDER BY (status = 'revisit'), created_at DESC
 		LIMIT 5
 	`, projectID)
 	if err == nil {
 		defer decRows.Close() //nolint:errcheck
 		for decRows.Next() {
-			var id, title, decision string
-			if err := decRows.Scan(&id, &title, &decision); err != nil {
+			var id, title, decision, status string
+			if err := decRows.Scan(&id, &title, &decision, &status); err != nil {
 				continue
 			}
-			decisions = append(decisions, [3]string{id, truncateUTF8(title, sessionTitleBytes), truncateUTF8(decision, 200)})
+			decisions = append(decisions, [4]string{id, truncateUTF8(title, sessionTitleBytes), truncateUTF8(decision, 200), status})
 		}
 	}
 
@@ -1159,6 +1204,17 @@ func quoteData(s string) string {
 	// One renderer (#911): delimiters neutralised and stored line breaks folded,
 	// so a stored newline cannot start a line shaped like a record.
 	return assemble.Data(s)
+}
+
+// revisitMarker renders the label the Recent Decisions section puts beside a
+// decision flagged for reconsideration, so a live decision that is not active is
+// shown and distinguishable from an active one. It delegates to
+// memory.DecisionRevisitMarker rather than restating the rule, because the
+// docs/mcp.md and docs/cli.md parity this marker exists for is a claim about
+// three surfaces printing one label (docs/cli.md asserts it for the session
+// block too), and two implementations would be two labels.
+func revisitMarker(status string) string {
+	return memory.DecisionRevisitMarker(status)
 }
 
 // truncateUTF8 truncates s to at most maxBytes bytes without breaking

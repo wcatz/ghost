@@ -110,7 +110,7 @@ var opsThatLeaveProjectsAlone = map[string]bool{
 	"store-embedding": true, "delete-embedding": true, "flag-memory": true,
 	"clear-resolved": true, "set-resolved": true, "mark-resolve-kept": true,
 	"mark-supersede-neither": true, "create-link": true, "create-link-autocommit": true,
-	"invalidate-link": true, "mark-link-scanned": true, "retire-link-scan": true,
+	"invalidate-link": true, "mark-link-scanned": true,
 	"create-task": true, "complete-task": true, "update-task": true,
 	"decision-record": true, "supersede-decision": true, "record-retrieval-audits": true,
 	"update-learned-context": true, "set-reflect-signature": true,

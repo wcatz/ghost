@@ -383,7 +383,7 @@ Should be skipped.`)
 	}
 
 	// Call importFromDir directly since ClaudeMemoryDir won't find our temp dir.
-	imported, err := importFromDir(ctx, store, projectID, memDir, logger)
+	imported, _, _, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ Should be skipped.`)
 	// already exists for the project, rather than calling Upsert at all.
 	// This matters because ghost mcp init calls Import unconditionally on
 	// every run and documents itself as safe to re-run.
-	imported2, err := importFromDir(ctx, store, projectID, memDir, logger)
+	imported2, _, _, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

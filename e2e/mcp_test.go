@@ -1099,6 +1099,70 @@ func TestMCPLifecycles(t *testing.T) {
 		}
 	})
 
+	t.Run("scoped search keeps a row the vector leg cannot see", func(t *testing.T) {
+		s := newSandbox(t)
+		// Refuse every document embed for the sandbox's whole life, and do it
+		// before the first save. The rows are then permanently without a vector,
+		// which is the state a search meets when it outruns the embedding
+		// worker. Pinning it here rather than racing the worker is the point:
+		// the outcome cannot depend on which goroutine wins.
+		s.ollama.failDocumentEmbeds()
+		cs := s.mcpSession(t)
+
+		prod := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the pool timeout is 30s in production",
+			"category":   "architecture",
+			"scope":      map[string]any{"environment": "production"},
+		}))
+		dev := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the pool timeout is 5s on the dev pool",
+			"category":   "architecture",
+			"scope":      map[string]any{"environment": "development"},
+		}))
+		unscoped := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the pool timeout knob is set in the config file",
+			"category":   "convention",
+		}))
+
+		// The premise, read off the store: the rows really carry no vector. A
+		// test that skipped this could pass while the vector leg was quietly
+		// ranking the rows it was meant to have no opinion about.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_embeddings WHERE memory_id IN (?, ?, ?)`,
+			prod, dev, unscoped); n != 0 {
+			t.Fatalf("%d embeddings were written for rows the stub refused to embed", n)
+		}
+
+		// The keyword leg is the only leg that found these rows. A row found by
+		// one leg and a row that says nothing about the scoped key both survive
+		// (#1319): the vector leg had no vector to agree or disagree with, so its
+		// silence is not a second leg's dissent.
+		out := call(t, cs, "ghost_memory_search", map[string]any{
+			"project_id": e2eProject,
+			"query":      "pool timeout",
+			"scope":      map[string]any{"environment": "production"},
+		})
+		mustContain(t, "scoped search with no vectors", out, "30s in production")
+		mustContain(t, "scoped search with no vectors", out, "config file")
+		mustNotContain(t, "scoped search with no vectors", out, "5s on the dev pool")
+		// The vector leg ran and answered — it is the leg that had nothing to
+		// say — rather than being skipped, which is what makes this the case
+		// above and not a machine with no embedder.
+		mustContain(t, "scoped search with no vectors", out, "legs=fts:ok,vector:ok")
+
+		// It is not scope alone: the same rows, with no scope asked for, are
+		// still all admitted by the keyword leg.
+		all := call(t, cs, "ghost_memory_search", map[string]any{
+			"project_id": e2eProject,
+			"query":      "pool timeout",
+		})
+		mustContain(t, "search with no vectors", all, "30s in production")
+		mustContain(t, "search with no vectors", all, "config file")
+		mustContain(t, "search with no vectors", all, "5s on the dev pool")
+	})
+
 	t.Run("explain returns the ranking diagnosis", func(t *testing.T) {
 		s := newSandbox(t)
 		cs := s.mcpSession(t)

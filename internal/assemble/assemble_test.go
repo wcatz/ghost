@@ -3,6 +3,7 @@ package assemble
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +235,89 @@ func TestWideningIsBoundedButTheBudgetIsNot(t *testing.T) {
 					r.req.Fetch.Limit, req.Budget.MaxItems)
 			}
 		})
+	}
+}
+
+// TestEveryPredicateWidensTheRetrievalWindow pins the window width for the
+// three filters the published description gives the same treatment: a category,
+// a retention tier and a scope. #709 extended the description to all three and
+// the code only to a category and a tier, so a scope-only search kept a
+// `limit`-wide window and a matching row below the cut was unreachable.
+func TestEveryPredicateWidensTheRetrievalWindow(t *testing.T) {
+	prod := func(r *Request) { r.Scope = map[string]string{"environment": "production"} }
+	tests := []struct {
+		name   string
+		budget int
+		mut    func(*Request)
+		want   int
+	}{
+		{"no predicate keeps the caller's limit", 10, func(*Request) {}, 10},
+		{"a category widens", 10, func(r *Request) { r.Category = "gotcha" }, 30},
+		{"a retention tier widens", 10, func(r *Request) { r.Retention = "session" }, 30},
+		{"a scope widens", 10, prod, 30},
+		{"all three widen once, not three times", 10, func(r *Request) {
+			r.Category, r.Retention = "gotcha", "session"
+			prod(r)
+		}, 30},
+		{"a scope's widening is capped like a category's", 40, prod, maxRetrievalWindow},
+		{"a budget above the cap is not narrowed by a scope", 250, prod, 250},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRetriever{set: setOf(candidate("A1", "proj", "fact", "one", 0.9))}
+			req := baseRequest()
+			req.Budget = Budget{MaxItems: tc.budget}
+			tc.mut(&req)
+
+			run(t, r, req)
+
+			if r.req.Fetch.Limit != tc.want {
+				t.Errorf("retrieval window = %d, want %d", r.req.Fetch.Limit, tc.want)
+			}
+			if r.req.Fetch.FTSTopK != tc.want*2 || r.req.Fetch.VectorTopK != tc.want*2 {
+				t.Errorf("leg depth = fts %d / vector %d, want %d each (window * 2, as every production search fetches)",
+					r.req.Fetch.FTSTopK, r.req.Fetch.VectorTopK, tc.want*2)
+			}
+		})
+	}
+}
+
+// windowedRetriever answers with the head of its set, cut to the fetch limit the
+// request asks for — the bound a real leg's own LIMIT puts on what the assembler
+// can filter. A predicate whose match ranks past that cut is unreachable however
+// the predicate is applied, which is why the window has to widen for it.
+type windowedRetriever struct{ set *memory.CandidateSet }
+
+func (f *windowedRetriever) Candidates(_ context.Context, req memory.CandidateRequest) (*memory.CandidateSet, error) {
+	n := req.Fetch.Limit
+	if n <= 0 || n > len(f.set.Rows) {
+		n = len(f.set.Rows)
+	}
+	return &memory.CandidateSet{Rows: f.set.Rows[:n]}, nil
+}
+
+// TestAScopeOnlySearchReachesPastANarrowWindow is the false negative #573's fix
+// did not cover: more out-of-scope noise than one leg's depth, ranked above the
+// one matching row. A `limit`-wide window never reaches the match, so the answer
+// is empty while the store holds an in-scope memory that answers the query.
+func TestAScopeOnlySearchReachesPastANarrowWindow(t *testing.T) {
+	rows := make([]memory.Candidate, 0, 26)
+	for i := 0; i < 25; i++ {
+		c := candidate("N"+strconv.Itoa(i), "proj", "fact", "database configuration noise", 0.9-float64(i)*0.001)
+		c.Scope = map[string]string{"environment": "staging"}
+		rows = append(rows, c)
+	}
+	rows = append(rows, scopedCandidate("MATCH", map[string]string{"environment": "production"}, 0.1))
+
+	req := baseRequest()
+	req.Budget = Budget{MaxItems: 10}
+	req.Scope = map[string]string{"environment": "production"}
+
+	res := run(t, &windowedRetriever{set: setOf(rows...)}, req)
+
+	if !eq(itemIDs(res.Items), []string{"MATCH"}) {
+		t.Errorf("items = %v, want [MATCH]: a scope filter must reach past the caller's narrow window",
+			itemIDs(res.Items))
 	}
 }
 
@@ -555,7 +639,7 @@ func TestTraceRecordsEveryStage(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
-	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "cutoff", "no_answer", "budget", "render", "response_fit"}
+	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "leg_consensus", "cutoff", "no_answer", "budget", "render", "response_fit"}
 	got := make([]string, 0, len(res.Trace.Stages))
 	for _, st := range res.Trace.Stages {
 		got = append(got, st.Stage)

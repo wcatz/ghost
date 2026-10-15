@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/config"
@@ -675,6 +676,28 @@ func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
 	return strings.Join(names, "."), true
 }
 
+// codexBOM is the UTF-8 byte-order mark a Windows editor or PowerShell writer
+// may leave at the very start of a config file.
+const codexBOM = "\ufeff"
+
+// splitCodexLines splits a config file's body into lines with one leading
+// byte-order mark removed, returning the mark it stripped so the caller can
+// write it back and keep the user's encoding. A TOML parser strips one before
+// it lexes the document, so a BOM-prefixed file is valid codex config; U+FEFF is
+// not whitespace, so a scanner that only trims space cannot normalise a
+// BOM-prefixed header and reads the ghost table as absent — which is how init
+// appended a second table and status called the broken install healthy. Only the
+// LEADING mark is removed: a U+FEFF anywhere else is content, not an encoding
+// mark, and the caller joins its BOM-free lines and re-prepends the mark, so the
+// repaired file keeps the mark at the start where the parser expects it.
+func splitCodexLines(body string) (lines []string, bom string) {
+	if strings.HasPrefix(body, codexBOM) {
+		bom = codexBOM
+		body = body[len(codexBOM):]
+	}
+	return strings.Split(body, "\n"), bom
+}
+
 // findCodexTOMLTable locates the [key] table header in lines and returns the
 // half-open span [start, end) of the table's OWN key lines: everything up to
 // the next table header of any name, minus trailing blank/comment lines so the
@@ -966,6 +989,55 @@ func codexMCPCurrent(vals codexMCPServerValues, ghostBin string) bool {
 	return vals.Command == ghostBin && len(vals.Args) == 1 && vals.Args[0] == "mcp"
 }
 
+// codexConfigHoldsOnlyGhostOutput reports whether a config.toml holds nothing
+// but the block ghost manages: the managed comment, the [mcp_servers.ghost]
+// table, and its own command/args keys, with every other line blank. A file
+// the user added anything to — another table, a sub-table such as
+// [mcp_servers.ghost.env], another key in the ghost table — is not this and
+// must be backed up.
+//
+// The command is recognised as ghost's own by basename, not by this run's
+// resolved path, and the args must be the canonical ["mcp"]: a fresh install
+// writes exactly this block, so after an upgrade moved the binary the
+// stale-path repair finds a file that is still only ghost's output and must
+// not capture it. Drifted ghost output is deliberately NOT this shape — an
+// earlier ghost table with different args carries a value ghost never wrote —
+// and keeps its .bak.
+func codexConfigHoldsOnlyGhostOutput(lines []string) bool {
+	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
+	if !found {
+		return false
+	}
+	for i := 0; i < start; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || (i == start-1 && trimmed == codexMCPServerComment) {
+			continue
+		}
+		return false
+	}
+	for i := end; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return false
+		}
+	}
+	for i := start + 1; i < end; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		key, _, ok := splitCodexAssignment(lines[i])
+		if !ok {
+			return false
+		}
+		switch codexOwnedKeyName(key) {
+		case "command", "args":
+		default:
+			return false
+		}
+	}
+	vals := parseCodexMCPServerBlock(lines[start:end])
+	return isGhostBinaryName(vals.Command) && len(vals.Args) == 1 && vals.Args[0] == "mcp"
+}
+
 // codexMCPServerComment marks the block ghost owns inside a config.toml the
 // user also edits by hand. It is written once, above the table.
 const codexMCPServerComment = "# Ghost persistent memory (managed by `ghost mcp init --client codex`)"
@@ -1151,7 +1223,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	if crlf {
 		eol = "\r\n"
 	}
-	lines := strings.Split(string(existing), "\n")
+	lines, bom := splitCodexLines(string(existing))
 	if crlf {
 		for i, line := range lines {
 			lines[i] = strings.TrimSuffix(line, "\r")
@@ -1240,13 +1312,27 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// every init to work out. Restoring a comments-only .bak costs the user
 	// comments, not data, which is a different trade from the one above. A file
 	// that did not exist before this run returned earlier and never gets here.
-	if len(existing) > 0 {
+	//
+	// The second skip is a file that holds nothing but the block ghost manages.
+	// On the FRESH INSTALL that file is ghost's own output — a config.toml the
+	// earlier run appended its table to from nothing — and the slot is the
+	// user's pre-ghost file, so capturing ghost's bytes there would, because the
+	// backup is never rolled forward, fill it for good and leave the user's own
+	// file with nowhere to be kept. The case that reaches here is the
+	// stale-path repair after an upgrade moved the binary: the block is ghost's,
+	// at the old path, and codexConfigHoldsOnlyGhostOutput recognises it by the
+	// ghost basename rather than by this run's resolved path. A file the user
+	// added anything to — another table, a sub-table, another key in the ghost
+	// table — is not that and is backed up.
+	if len(existing) > 0 && !codexConfigHoldsOnlyGhostOutput(lines) {
 		if err := writeBackupOnce(path+".bak", existing); err != nil {
 			return false, err
 		}
 	}
 
-	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {
+	// The BOM stripped for scanning goes back at the very start, the position a
+	// TOML parser expects it, so the user's file keeps its encoding.
+	if err := writeFileAtomic(path, []byte(bom+strings.Join(out, eol)), 0644); err != nil {
 		return false, fmt.Errorf("write config.toml: %w", err)
 	}
 	if found {
@@ -1296,18 +1382,60 @@ func marshalCodexJSON(v any) string {
 	return string(data) + "\n"
 }
 
-// codexIsGhostHookAction reports whether cmd is the command ghost itself
-// renders for one event: the ghost binary — any path, any quoting — running
-// `hook <eventToken>`. Only such an action is ghost's to rewrite. A rule
-// running some other ghost subcommand, or ghost's hook for a different event,
-// belongs to the user and is left alone.
-func codexIsGhostHookAction(cmd, eventToken string) bool {
+// codexIsGhostHookAction reports whether cmd runs ghost's hook for this event:
+// the same ownership rule the Claude installer applies (ghostHookTail) — a
+// ghost-binary token in COMMAND position, the one this run bakes under whatever
+// name it carries or a "ghost" basename under any path and any quoting,
+// immediately followed by that event's `hook <eventToken>` tail. Every token is
+// read with the quoting splitHookCommand applies to the leading one, and a
+// quoted argument is read inside only behind the command-list gate, so a
+// hand-edited WRAPPER counts as ghost's own: `env X=1 '<bin>' hook
+// session-start`, `cd d && '<bin>' hook stop`, `sh -c "'<bin>' hook …"` all
+// invoke ghost, and a second rule beside them would fire the hook twice per
+// session. A ghost binary that is only an ARGUMENT of another command — inside a
+// quoted argument, or bare in argument position like `echo /opt/bin/ghost hook
+// stop …`, which runs echo — is not ghost's. Only such an action is ghost's to
+// count and to prune; whether it is also ghost's to REWRITE in place is
+// codexLeadingGhostHookAction's narrower question. A command that runs some
+// other binary or some other ghost subcommand belongs to the user and is left
+// alone.
+func codexIsGhostHookAction(cmd, eventToken, ghostBin string) bool {
+	_, ok := ghostHookTail(cmd, eventToken, ghostBin)
+	return ok
+}
+
+// codexLeadingGhostHookAction reports whether cmd is the unwrapped action
+// ghost renders for this event: the binary it bakes — any name, any path, any
+// quoting — in the LEADING position with the `hook <eventToken>` tail right
+// after it. The basename rule also recognises a binary named "ghost" (or its
+// native .exe / .bat/.cmd launcher forms) under any path, so an install made by
+// a differently named binary still repairs an older ghost-named action in
+// place. Only such an action is ghost's to rewrite; a wrapped invocation is
+// recognised and counted by codexIsGhostHookAction but keeps its prefix, the
+// way the Claude side's isStaleGhostHookCommand bound keeps its wrapper.
+func codexLeadingGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	bin, rest, ok := splitHookCommand(cmd)
-	if !ok || !isGhostBinaryName(bin) {
+	if !ok || (!isGhostBinaryName(bin) && !isBakedGhostBinary(bin, ghostBin)) {
 		return false
 	}
 	fields := strings.Fields(rest)
 	return len(fields) >= 2 && fields[0] == "hook" && fields[1] == eventToken
+}
+
+// isBakedGhostBinary reports whether bin is the path this merge renders for
+// ghost, so the rule ghost itself just wrote is recognised as its own (#1249).
+// Without it a binary baked under any other name — /g, a renamed .exe, a
+// .bat/.cmd shim — was invisible to the merge, which appended it again on
+// every pass and never reached a fixed point. The compare is case-insensitive
+// on Windows, where a path's spelling carries no meaning.
+func isBakedGhostBinary(bin, ghostBin string) bool {
+	if ghostBin == "" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(bin, ghostBin)
+	}
+	return bin == ghostBin
 }
 
 // codexObject is one JSON object decoded in document order. A Go map decodes
@@ -1444,6 +1572,57 @@ func codexActionCommand(obj codexObject) (string, bool) {
 	return cmd, cmd != ""
 }
 
+// decodeCodexHooksConfig parses the parts of a hooks.json that both the merge
+// and the pre-flight validation must agree on: the document is a JSON object,
+// a "hooks" member is an object (an explicit null is refused), and each managed
+// event's value is an array (an explicit null is refused the same way, one
+// level down). Sharing this decode is what keeps the pre-flight honest — a
+// document it accepts is a document the merge can act on — and keeps both
+// callers refusing the same shapes with the same parse errors.
+func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
+	if err := leadingBOMError(existing, "hooks.json"); err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(existing, &top); err != nil {
+		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
+	}
+
+	events = map[string]json.RawMessage{}
+	if raw, ok := top["hooks"]; ok {
+		// An explicit null is structurally-invalid-but-present data, not
+		// "absent": json.Unmarshal decodes null into a nil map with no error,
+		// and the assignment in the merge would then panic on it. Refuse it the
+		// way the Claude settings path does, naming the file rather than
+		// treating the user's declaration as an empty object to fill in.
+		if isJSONNull(raw) {
+			return nil, nil, fmt.Errorf("hooks.json: hooks is null")
+		}
+		if err := json.Unmarshal(raw, &events); err != nil {
+			return nil, nil, fmt.Errorf("parse hooks.json hooks: %w", err)
+		}
+	}
+
+	for _, ev := range codexLifecycleEvents {
+		if raw, ok := events[ev.Key]; ok {
+			// An explicit null on a managed event is the same
+			// structurally-invalid-but-present data as a null "hooks" above, one
+			// level down: json.Unmarshal decodes it into a nil []json.RawMessage
+			// with no error, and the merge would then append ghost's canonical
+			// rule as if the event were empty, silently replacing the user's
+			// declaration. Refuse it the same way, naming the file and the event
+			// the way the Claude settings path renders `hooks[%q] is null`.
+			if isJSONNull(raw) {
+				return nil, nil, fmt.Errorf("hooks.json: hooks[%q] is null", ev.Key)
+			}
+			var rules []json.RawMessage
+			if err := json.Unmarshal(raw, &rules); err != nil {
+				return nil, nil, fmt.Errorf("parse hooks.json %s rules: %w", ev.Key, err)
+			}
+		}
+	}
+	return top, events, nil
+}
+
 // mergeCodexHooksConfig overlays ghost's lifecycle rules onto an existing
 // hooks.json: unknown top-level keys, the user's description, foreign events,
 // and every rule that is not ghost's own are preserved verbatim.
@@ -1451,31 +1630,20 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // A rule that carries ghost's own hook action is repaired IN PLACE, one action
 // at a time: ghost's own action is rewritten to what ghost renders for that
 // event, and every other key of that action, the user's other actions and the
-// rule's matcher are the user's and are left where they are. Ghost owns exactly
-// one action per event, so a second copy of it is pruned rather than left to
-// fire twice, and a rule whose every action was such a copy disappears with
-// them. Ghost's canonical rule is appended only when no rule holds its action
-// at all. The result is deterministically rendered, so feeding the output back
-// through this function is a byte-level no-op.
+// rule's matcher are the user's and are left where they are. An action is
+// ghost's own when it runs the binary this call bakes — whatever that binary
+// is named — or one named "ghost" under the launcher extensions, so the rule
+// ghost itself wrote is recognised as its own even under a renamed or shimmed
+// path (#1249). Ghost owns exactly one action per event, so a second copy of
+// it is pruned rather than left to fire twice, and a rule whose every action
+// was such a copy disappears with them. Ghost's canonical rule is appended
+// only when no rule holds its action at all. The result is deterministically
+// rendered, so feeding the output back through this function is a byte-level
+// no-op for every accepted input and every path.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(existing, &top); err != nil {
-		return "", fmt.Errorf("parse hooks.json: %w", err)
-	}
-
-	events := map[string]json.RawMessage{}
-	if raw, ok := top["hooks"]; ok {
-		// An explicit null is structurally-invalid-but-present data, not
-		// "absent": json.Unmarshal decodes null into a nil map with no error,
-		// and the assignment below would then panic on it. Refuse it the way
-		// the Claude settings path does, naming the file rather than treating
-		// the user's declaration as an empty object to fill in.
-		if isJSONNull(raw) {
-			return "", fmt.Errorf("hooks.json: hooks is null")
-		}
-		if err := json.Unmarshal(raw, &events); err != nil {
-			return "", fmt.Errorf("parse hooks.json hooks: %w", err)
-		}
+	top, events, err := decodeCodexHooksConfig(existing)
+	if err != nil {
+		return "", err
 	}
 
 	for _, ev := range codexLifecycleEvents {
@@ -1520,16 +1688,54 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 // in an event's rule list and appends ghost's canonical rule when it sits
 // nowhere. What ghost renders for that action is the whole of it — command,
 // type and timeout — so a stale path, a hand-edited type or a budget from
-// another build are all repaired. Every other rule is carried across byte for
-// byte, every other key of a repaired action stays where it sits, and a rule
-// that is repaired is re-encoded in the key order it was read in.
+// another build are all repaired. An action is ghost's own when it runs a
+// ghost binary before that event's hook tail, a wrapped invocation included
+// (codexIsGhostHookAction, the rule the Claude side shares), but only a
+// leading-token action is rewritten — a wrapper keeps its prefix and its
+// path byte for byte. Every other rule is carried across byte for byte, every
+// other key of a repaired action stays where it sits, and a rule that is
+// repaired is re-encoded in the key order it was read in.
 func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
 	desired := renderCodexHookAction(eventToken, ghostBin)
 	// No +1: capacity arithmetic over an unbounded rule count reads as a
 	// possible size overflow to static analysis, and the append below runs
 	// for at most one event per merge.
+	// Any wrapped ghost action present is never pruned, and its presence
+	// decides the survivor (see below). Pre-scan so the decision does not
+	// depend on rule order.
+	hasSourceCodexWrapper := false
+	for _, r := range rules {
+		ro, ok := decodeCodexObject(r)
+		if !ok {
+			continue
+		}
+		var acts []json.RawMessage
+		if raw := ro.get("hooks"); raw != nil {
+			_ = json.Unmarshal(raw, &acts)
+		}
+		for _, a := range acts {
+			ao, ok := decodeCodexObject(a)
+			if !ok {
+				continue
+			}
+			c, ok := codexActionCommand(ao)
+			if !ok || !codexIsGhostHookAction(c, eventToken, ghostBin) {
+				continue
+			}
+			if !codexLeadingGhostHookAction(c, eventToken, ghostBin) {
+				// Only a wrapper carrying --source matching the codex dialect is
+				// a privileged survivor; a wrapper running another host's source,
+				// or none at all, leaves canonical actions untouched.
+				if codexWrappedActionCarriesSource(c, eventToken, ghostBin) {
+					hasSourceCodexWrapper = true
+				}
+			}
+		}
+	}
+
 	out := make([]json.RawMessage, 0, len(rules))
-	wired := false
+	hasGhost := false
+	canonicalKept := false
 	for _, rule := range rules {
 		obj, ok := decodeCodexObject(rule)
 		if !ok {
@@ -1552,11 +1758,36 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			cmd, ok := codexActionCommand(actionObj)
-			if !ok || !codexIsGhostHookAction(cmd, eventToken) {
+			if !ok || !codexIsGhostHookAction(cmd, eventToken, ghostBin) {
 				kept = append(kept, action)
 				continue
 			}
-			if wired {
+			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
+				// A wrapped action runs ghost but is never pruned and never
+				// rewritten. It is the user's form, optionally carrying other
+				// commands in the same shell expression, and its prefix and
+				// path stay exactly as written. When it runs with the codex
+				// dialect it becomes the preferred survivor (see
+				// hasSourceCodexWrapper); otherwise it is treated as the
+				// user's and only the chained commands it already ran matter.
+				kept = append(kept, action)
+				if codexWrappedActionCarriesSource(cmd, eventToken, ghostBin) {
+					hasSourceCodexWrapper = true
+					hasGhost = true
+				}
+				continue
+			}
+			if hasSourceCodexWrapper {
+				// The event carries a wrapper running the codex dialect, which
+				// is the preferred survivor: prune canonical leading-token
+				// actions (and drop a rule that becomes empty) regardless of
+				// their position, so ghost fires once per event from the user's
+				// form.
+				dropped++
+				hasGhost = true
+				continue
+			}
+			if canonicalKept {
 				dropped++
 				continue
 			}
@@ -1590,7 +1821,8 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 			}
 			kept = append(kept, rewritten)
 			rewrote++
-			wired = true
+			canonicalKept = true
+			hasGhost = true
 		}
 		if rewrote == 0 && dropped == 0 {
 			out = append(out, rule)
@@ -1610,7 +1842,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 		}
 		out = append(out, rebuilt)
 	}
-	if !wired {
+	if !hasGhost {
 		out = append(out, codexRuleRendered(eventToken, ghostBin))
 	}
 	return out, nil
@@ -1632,7 +1864,17 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 	}
 
 	existing, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read hooks.json: %w", err)
+	}
+	// A blank file — 0 bytes, or only whitespace — carries nothing to merge, so
+	// it is written as if it were absent, the way installCodexMCP appends to a
+	// 0-byte config.toml (#1296). The read of a missing file yields nil, so
+	// that case and this one share the install path below.
+	if len(bytes.TrimSpace(existing)) == 0 {
+		existing = nil
+	}
+	if existing == nil {
 		if dryRun {
 			_, _ = fmt.Fprintf(w, "  ~ would install hooks.json (%s)\n", path)
 			return true, nil
@@ -1645,8 +1887,6 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 		}
 		_, _ = fmt.Fprintf(w, "  + installed hooks.json (%s)\n", path)
 		return true, nil
-	} else if err != nil {
-		return false, fmt.Errorf("read hooks.json: %w", err)
 	}
 
 	desired, err := mergeCodexHooksConfig(existing, ghostBin)
@@ -1680,6 +1920,9 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read hooks.json: %w", err)
 	}
+	if err := leadingBOMError(data, "hooks.json"); err != nil {
+		return nil, err
+	}
 	var top struct {
 		Hooks map[string]json.RawMessage `json:"hooks"`
 	}
@@ -1702,13 +1945,68 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	return out, nil
 }
 
+// codexWrappedActionCarriesSource reports whether a wrapped (non-leading) ghost
+// action's tail names --source codex. The merge treats such a wrapper as the
+// wired survivor and prunes canonical actions; one whose source names another
+// host, or omits the flag, is the user's own and is left beside the canonical
+// codex rule, matching codexContractHookWired's exact --source read — so
+// `ghost mcp init` and `ghost mcp status` agree on the same file.
+func codexWrappedActionCarriesSource(cmd, eventToken, ghostBin string) bool {
+	tail, ok := ghostHookTail(cmd, eventToken, ghostBin)
+	if !ok {
+		return false
+	}
+	return codexTailNamesSource(tail, "codex")
+}
+
+// codexTailNamesSource reports whether the arguments ghost itself receives —
+// tail, the tokens after its `hook <event>` invocation — carry an exact --source
+// token equal to wantSource, in either accepted spelling. The scan stops at the
+// first token that ends a command list, because a `--source` behind `&&`, `||`,
+// `;`, `|` or `&` belongs to a command chained after ghost's, not to ghost: a
+// wrapper whose own invocation names no source must not be read as wired on the
+// strength of the next command's flag. A connective glued to a token (`&&tool`,
+// `stop;`) ends the list there too.
+func codexTailNamesSource(tail []string, wantSource string) bool {
+	for i := 0; i < len(tail); i++ {
+		if codexTokenEndsCommand(tail[i]) {
+			return false
+		}
+		if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == wantSource {
+			return true
+		}
+		if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == wantSource {
+			return true
+		}
+	}
+	return false
+}
+
+// codexTokenEndsCommand reports whether tok ends the shell command list it
+// belongs to, as a standalone connective or one glued to a word (`&&tool`,
+// `stop;`, `build|tee`). A token carrying any of `;&|` is treated as a
+// boundary, which is the safe direction: at worst a real flag written without
+// separating space goes unread and ghost's canonical rule is appended, where
+// crediting a chained command's flag would leave ghost silently unwired.
+func codexTokenEndsCommand(tok string) bool {
+	if shellConnectives[tok] {
+		return true
+	}
+	return strings.ContainsAny(tok, ";&|")
+}
+
 // codexContractHookWired is the codex analog of contractHookWired: it walks
 // codex's OWN hooks.json rules (not Claude's settings.json) and reports
-// whether any command invokes `hook <eventToken>` with an exact --source
-// codex token, accepting both "--source X" and "--source=X" flag forms.
-// Token-based, not substring-based — a lookalike like "--source codex-extra"
-// would fail hostevent.Parse at runtime, so it must never read as wired.
-func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource string) bool {
+// whether any command RUNS GHOST and invokes `hook <eventToken>` with an
+// exact --source codex token, accepting both "--source X" and "--source=X"
+// flag forms. Token-based, not substring-based — a lookalike like "--source
+// codex-extra" would fail hostevent.Parse at runtime, so it must never read as
+// wired. Ownership is the same rule the merge applies (ghostHookTail), so the
+// diagnostic and the merge answer the same question about the same file: a
+// hand-edited wrapper that does run ghost reads as wired, and a command that
+// merely ends in the ghost tail — another tool's hook, or a ghost name inside
+// its quoted argument — never does.
+func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, ghostBin string) bool {
 	for _, rule := range rules {
 		var parsed struct {
 			Hooks []struct {
@@ -1719,25 +2017,47 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource stri
 			continue
 		}
 		for _, action := range parsed.Hooks {
-			_, rest, ok := splitHookCommand(action.Command)
+			tail, ok := ghostHookTail(action.Command, eventToken, ghostBin)
 			if !ok {
 				continue
 			}
-			fields := strings.Fields(rest)
-			if len(fields) < 2 || fields[0] != "hook" || fields[1] != eventToken {
-				continue
-			}
-			for i := 2; i < len(fields); i++ {
-				if fields[i] == "--source" && i+1 < len(fields) && fields[i+1] == wantSource {
-					return true
-				}
-				if strings.HasPrefix(fields[i], "--source=") && strings.TrimPrefix(fields[i], "--source=") == wantSource {
-					return true
-				}
+			if codexTailNamesSource(tail, wantSource) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// validateCodexHooksFile loads ~/.codex/hooks.json and validates every part of
+// it `ghost mcp init --client codex` parses, BEFORE step 3 registers the MCP
+// server in config.toml. An absent or blank file is valid: init writes the
+// canonical document into it, as it does for an absent or 0-byte config.toml.
+// A refusal names the file and carries the edit that clears it — repair it or
+// delete it — rather than the generic re-run hint, which a re-run cannot
+// satisfy: the file stays invalid until the user acts on it.
+func validateCodexHooksFile() error {
+	path, err := codexHooksPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read hooks.json: %w", err)
+	}
+	// A blank file — 0 bytes, or only whitespace — carries nothing to merge and
+	// installCodexHooks writes the canonical document over it, the way the
+	// config.toml merge appends to a 0-byte file. It is not a refusal.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	if _, _, err := decodeCodexHooksConfig(data); err != nil {
+		return fmt.Errorf("%w\n  Fix or delete %s, then re-run `ghost mcp init`", err, path)
+	}
+	return nil
 }
 
 // RunCodex installs Ghost's codex integration: the [mcp_servers.ghost] stdio
@@ -1749,6 +2069,17 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource stri
 func RunCodex(w io.Writer, dryRun bool) error {
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
+	}
+
+	// Validate hooks.json before step 3 registers the server, the way Run
+	// validates Claude's settings.json before it registers anything: a file
+	// step 4 cannot wire would otherwise be discovered only after step 3 had
+	// registered the MCP server, leaving codex with a ghost server and no
+	// hooks. Refusing here registers nothing and leaves the file exactly as the
+	// user wrote it. No retryHint: the file stays invalid until it is repaired
+	// or deleted, so a re-run cannot fix it and the hint would misdirect.
+	if err := validateCodexHooksFile(); err != nil {
+		return err
 	}
 
 	// Step 1: Prerequisites — only the ghost binary is required; its resolved
@@ -1820,7 +2151,10 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	if err != nil {
 		return false, "config.toml not found (run ghost mcp init --client codex)"
 	}
-	lines := strings.Split(string(data), "\n")
+	// Read the file the way the merge scans it: one leading byte-order mark is
+	// stripped, so a BOM-prefixed ghost header is seen instead of being read as
+	// an absent table on an install that is actually healthy.
+	lines, _ := splitCodexLines(string(data))
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
 		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, text)
 	}
@@ -1876,7 +2210,7 @@ func StatusCodex(w io.Writer) (bool, error) {
 	} else {
 		allWired := true
 		for _, ev := range codexLifecycleEvents {
-			wired := codexContractHookWired(events[ev.Key], ev.EventToken, string(hostevent.SourceCodex))
+			wired := codexContractHookWired(events[ev.Key], ev.EventToken, string(hostevent.SourceCodex), ghostBin)
 			allWired = allWired && wired
 			check(wired,
 				ev.Key+" hook configured",

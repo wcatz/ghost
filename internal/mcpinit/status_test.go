@@ -2,8 +2,11 @@ package mcpinit
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -269,6 +272,106 @@ func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 	}
 	if strings.Contains(output, "✗ SessionStart hook missing") {
 		t.Errorf("a quoted-path hook command must not be reported missing, got:\n%s", output)
+	}
+}
+
+// TestStatus_ForeignHookIsNotWired: a command that runs another tool but ends
+// in ghost's argument tail is not ghost's hook, so status must report the event
+// missing rather than configured — the same executable ownership rule
+// `ghost mcp init` applies (#1326). The reader used to ignore the binary
+// entirely and match the tail alone, so a foreign command read as a healthy
+// install and no repair was ever surfaced.
+func TestStatus_ForeignHookIsNotWired(t *testing.T) {
+	statusEnv(t)
+	home := os.Getenv("HOME")
+	settingsDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/othertool hook session-start --source claude-code"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/othertool hook stop --source claude-code"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	output := out.String()
+	if strings.Contains(output, "✓ SessionStart hook configured") {
+		t.Errorf("a foreign command carrying ghost's tail must not read as ghost's hook, got:\n%s", output)
+	}
+	if !strings.Contains(output, "✗ SessionStart hook missing") {
+		t.Errorf("expected SessionStart hook to be reported missing, got:\n%s", output)
+	}
+}
+
+// TestStatus_WrappedGhostHookIsWired: a hand-edited wrapper that does run ghost
+// — an assignment prefix, or a directory change joined to the invocation — is
+// ghost's own hook, so status must report it configured, because init leaves
+// such a command in place and writes nothing to repair it. A reader that looked
+// only at the leading token would call it missing and send the operator to a
+// `ghost mcp init` that changes nothing.
+func TestStatus_WrappedGhostHookIsWired(t *testing.T) {
+	statusEnv(t)
+	home := os.Getenv("HOME")
+	settingsDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "env GHOST_QUIET=1 /opt/ghost/bin/ghost hook session-start --source claude-code"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "cd /somewhere && /opt/ghost/bin/ghost hook stop --source claude-code"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "✓ SessionStart hook configured") {
+		t.Errorf("a wrapper that runs ghost is ghost's own hook, got:\n%s", output)
+	}
+	if !strings.Contains(output, "✓ Stop hook configured") {
+		t.Errorf("a wrapper that runs ghost is ghost's own hook, got:\n%s", output)
+	}
+}
+
+// TestStatus_SubshellWrappedGhostHookIsWired: a hook written as a subshell that
+// ends right after the --source value is ghost's own, so status reports it
+// configured, as init does by leaving it alone.
+func TestStatus_SubshellWrappedGhostHookIsWired(t *testing.T) {
+	statusEnv(t)
+	settingsDir := filepath.Join(os.Getenv("HOME"), ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "(cd /d; /opt/ghost/bin/ghost hook stop --source claude-code)"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ Stop hook configured") {
+		t.Errorf("a subshell wrapper that runs ghost must read as configured, got:\n%s", out.String())
 	}
 }
 
@@ -1581,5 +1684,64 @@ func TestStatus_NoOllamaDownDurationWhenAbsent(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Ollama down since") {
 		t.Errorf("expected no Ollama-down line without a marker file, got:\n%s", out.String())
+	}
+}
+
+// TestStatus_OllamaDownDurationSuppressedWhenInconclusive is the regression
+// test for a liveness probe that missed its own deadline. `Inconclusive` is
+// evidence of nothing — the endpoint may be listening and merely slow — so
+// `ghost mcp status` must not turn it into the positive, timed claim
+// "Ollama down since …": that line reads the worker's down marker, which a
+// currently-up-but-busy Ollama can leave stamped for hours, and the probe that
+// is supposed to authorise the claim established no outage at all. The
+// endpoint must be reported as slow or undetermined instead.
+func TestStatus_OllamaDownDurationSuppressedWhenInconclusive(t *testing.T) {
+	statusEnv(t)
+	t.Setenv("PATH", writeStubGhost(t))
+
+	// A handler that never answers. The liveness probe's own deadline expires
+	// with nothing written, which is the Inconclusive verdict — not a refusal.
+	release := make(chan struct{})
+	wedged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	// Defers run LIFO, so the handler is released before Close waits on it.
+	defer wedged.Close()
+	defer close(release)
+
+	model := "nomic-embed-text:v1.5"
+	// Assert the liveness state directly, so the test cannot pass on a
+	// different verdict reached for some other reason.
+	if got := embedding.NewClient(wedged.URL, model, 768).Probe(context.Background()); got != embedding.Inconclusive {
+		t.Fatalf("Probe at an endpoint that never answers = %v, want Inconclusive", got)
+	}
+
+	writeGhostConfigFile(t, fmt.Sprintf(`embedding:
+  ollama_url: %s
+  model: %s
+  dimensions: 768
+  enabled: true
+`, wedged.URL, model))
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+
+	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	stale := time.Now().Add(-5 * time.Hour).UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(ghostDir, embedding.OllamaDownMarkerFilename), []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if strings.Contains(out.String(), "Ollama down since") {
+		t.Errorf("an inconclusive liveness probe must not report a down-duration, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "liveness undetermined") {
+		t.Errorf("expected the expired probe to be reported as undetermined, got:\n%s", out.String())
 	}
 }
