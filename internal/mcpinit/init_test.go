@@ -520,13 +520,12 @@ func TestReconcileHook_LeavesLegacyQuotingUntouchedOnPOSIX(t *testing.T) {
 	}
 }
 
-// TestReconcileHook_LeavesCustomCommandUntouched is #1326 from the reconcile
-// side: a hand-edited command whose leading token is not ghost's is never
-// clobbered — that has always been the policy — but it is also not counted as
-// ghost's hook, because treating it as one hid a missing install behind a
-// success line. It stays exactly as written and ghost's own entry is added
-// beside it.
-func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
+// TestReconcileHook_TreatsAWrappedGhostCommandAsItsOwn pins the wrapped-ghost
+// rule: a command that runs a ghost binary — here a wrapper's leading token
+// followed by `ghost hook session-start` — is ghost's own hook. It is never
+// rewritten, and ghost adds no second entry beside it, because two entries
+// would fire the session-start context twice.
+func TestReconcileHook_TreatsAWrappedGhostCommandAsItsOwn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	sf, err := loadSettings(path)
 	if err != nil {
@@ -541,19 +540,15 @@ func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
-	if action != hookAdded {
-		t.Errorf("action = %v, want hookAdded — ghost's own hook is missing while the custom command stands", action)
+	if action != hookUnchanged {
+		t.Errorf("action = %v, want hookUnchanged — a wrapped ghost invocation already runs ghost's hook", action)
 	}
-	got, _, _ := sf.findHookCommand("SessionStart", "hook session-start")
-	if got != custom {
-		t.Errorf("first command changed to %q, want untouched %q", got, custom)
-	}
-	isDesired, err := sf.hasExactHookCommand("SessionStart", testDesiredCmd)
+	cmds, err := sf.hookCommands("SessionStart")
 	if err != nil {
-		t.Fatalf("hasExactHookCommand: %v", err)
+		t.Fatalf("hookCommands: %v", err)
 	}
-	if !isDesired {
-		t.Error("ghost's own hook was not added beside the custom command")
+	if len(cmds) != 1 || cmds[0] != custom {
+		t.Errorf("event holds %q, want only the untouched wrapper %q", cmds, custom)
 	}
 }
 
@@ -1052,6 +1047,80 @@ func TestEnsureHook_InstallsItsOwnHookBesideAForeignCommand(t *testing.T) {
 				t.Errorf("%s hook leaked into %s", tc.event, tc.other)
 			}
 		})
+	}
+}
+
+// TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn is #1326 end to end for
+// both events and for two wrapper shapes: a leading process (`env X=1 ghost
+// …`) and a `cd … && ghost …` prefix. Each invokes ghost, so init must
+// recognise the event as already wired — the wrapper is left byte-identical,
+// exactly one command stays registered, and a second run is a fixed point with
+// no second copy appended.
+func TestEnsureHook_TreatsAWrappedGhostCommandAsItsOwn(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	for _, tc := range []struct {
+		event, other, tail string
+	}{
+		{"SessionStart", "Stop", "hook session-start"},
+		{"Stop", "SessionStart", "hook stop"},
+	} {
+		for _, w := range []struct{ label, command string }{
+			{"env-prefix", "env X=1 " + ghostBin + " " + tc.tail + " --source claude-code"},
+			{"cd-and", "cd /somewhere && " + ghostBin + " " + tc.tail + " --source claude-code"},
+		} {
+			t.Run(tc.event+"/"+w.label, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "settings.json")
+				sf, err := loadSettings(path)
+				if err != nil {
+					t.Fatalf("loadSettings: %v", err)
+				}
+				if err := sf.addHook(tc.event, hookEntry{Hooks: []hookAction{{Type: "command", Command: w.command}}}); err != nil {
+					t.Fatalf("addHook: %v", err)
+				}
+
+				ensure := ensureStopHook
+				if tc.event == "SessionStart" {
+					ensure = ensureHook
+				}
+
+				var out bytes.Buffer
+				if err := ensure(&out, sf, ghostBin, false); err != nil {
+					t.Fatalf("ensure (first): %v", err)
+				}
+				if strings.Contains(out.String(), "added") {
+					t.Errorf("a wrapped ghost invocation was duplicated instead of recognised:\n%s", out.String())
+				}
+				if !strings.Contains(out.String(), "already configured") {
+					t.Errorf("a wrapped ghost invocation was not reported as configured:\n%s", out.String())
+				}
+				cmds, err := sf.hookCommands(tc.event)
+				if err != nil {
+					t.Fatalf("hookCommands: %v", err)
+				}
+				if len(cmds) != 1 || cmds[0] != w.command {
+					t.Errorf("event holds %q, want only the untouched wrapper %q", cmds, w.command)
+				}
+
+				// A second run is a fixed point: the same single wrapper stands.
+				out.Reset()
+				if err := ensure(&out, sf, ghostBin, false); err != nil {
+					t.Fatalf("ensure (second): %v", err)
+				}
+				if strings.Contains(out.String(), "added") {
+					t.Errorf("the second run appended a second entry:\n%s", out.String())
+				}
+				after, err := sf.hookCommands(tc.event)
+				if err != nil {
+					t.Fatalf("hookCommands (second): %v", err)
+				}
+				if len(after) != 1 || after[0] != w.command {
+					t.Errorf("the second run changed the event to %q", after)
+				}
+				if sf.hasHook(tc.other, tc.tail) {
+					t.Errorf("%s hook leaked into %s", tc.event, tc.other)
+				}
+			})
+		}
 	}
 }
 

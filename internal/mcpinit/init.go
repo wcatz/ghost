@@ -666,8 +666,11 @@ const (
 // own (#1326): another tool's command that merely ends in the same argument
 // tail used to be read as ghost's hook, so init reported the event as already
 // configured and installed nothing — Ghost's own hook then never ran under a
-// success line. A foreign command now stays exactly as written and ghost's own
-// entry is added beside it.
+// success line. A command that does not run ghost stays exactly as written and
+// ghost's own entry is added beside it; one that runs ghost through a prefix —
+// `env X=1 ghost …`, `cd d && ghost …` — is ghost's own hook and gets no second
+// entry, because two would fire it twice. Only a command whose LEADING token is
+// ghost's binary is ever rewritten, by the legacy-quoting or stale-path repair.
 func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
 	return reconcileHookMatcher(sf, event, "", cmdSubstr, desiredCmd, legacyCmd, isWindows)
 }
@@ -745,27 +748,66 @@ func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReco
 	return hookAdded, nil
 }
 
-// isGhostHookCommand reports whether cmd is a hook command ghost owns for the
-// event cmdSubstr names: it carries that event's argument tail, and its leading
-// token is the ghost binary — the one this run writes, under whatever name it
-// carries, or a ghost-named one under any path and any quoting. The same
-// executable test the codex hooks merge applies, and the one the pre-contract
-// migration shares with isStaleGhostHookCommand. Everything else is the user's:
-// a hand-edited wrapper, and another tool whose command merely ends in the
-// same argument tail (#1326).
+// isGhostHookCommand reports whether cmd runs ghost for the event cmdSubstr
+// names, wherever ghost sits in the command: a token that is the ghost binary —
+// the one this run writes, under whatever name it carries, or a ghost-named one
+// under any path and any quoting — immediately followed by that event's
+// `hook <event>` tail. Tokens are read with the same quoting splitHookCommand
+// applies to the leading one.
+//
+// Reading every token, not only the leading one, is what makes a hand-edited
+// wrapper ghost's own hook: `env X=1 /path/ghost hook session-start` and
+// `cd d && ghost hook stop` do invoke ghost, so init leaves them byte-identical
+// and adds nothing beside them — a second entry would fire ghost's hook twice.
+// Another tool whose command merely contains the words `hook session-start`,
+// with no ghost-binary token before them, is not ghost's and still gets ghost's
+// own entry added beside it (#1326).
 func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
-	if !strings.Contains(cmd, cmdSubstr) {
-		return false
-	}
-	bin, _, ok := splitHookCommand(cmd)
+	tokens, ok := hookCommandTokens(cmd)
 	if !ok {
 		return false
 	}
-	if isGhostBinaryName(bin) {
+	desiredBin, _, _ := splitHookCommand(desiredCmd)
+	for i := 0; i+2 < len(tokens); i++ {
+		if !isGhostToken(tokens[i], desiredBin) {
+			continue
+		}
+		if tokens[i+1] == "hook" && "hook "+tokens[i+2] == cmdSubstr {
+			return true
+		}
+	}
+	return false
+}
+
+// isGhostToken reports whether one token of a hook command names a ghost
+// binary: a ghost-named one under any path and any quoting, or the exact binary
+// this run writes under whatever name it carries — the isBakedGhostBinary
+// recognition the Codex merge applies, so a renamed binary stays recognised.
+func isGhostToken(token, desiredBin string) bool {
+	if isGhostBinaryName(token) {
 		return true
 	}
-	desiredBin, _, ok := splitHookCommand(desiredCmd)
-	return ok && isBakedGhostBinary(bin, desiredBin)
+	return desiredBin != "" && isBakedGhostBinary(token, desiredBin)
+}
+
+// hookCommandTokens splits a hook command into its tokens, reversing the
+// Windows double-quoting and POSIX single-quoting shellQuote produces exactly
+// as splitHookCommand does for the leading token: a token is quoted as its
+// first byte says, or bare up to the next space. A command whose quoting never
+// closes is not readable, and reports false.
+func hookCommandTokens(cmd string) ([]string, bool) {
+	var tokens []string
+	for {
+		token, rest, ok := splitHookCommand(cmd)
+		if !ok {
+			return tokens, false
+		}
+		tokens = append(tokens, token)
+		if rest == "" {
+			return tokens, true
+		}
+		cmd = rest
+	}
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
