@@ -6666,11 +6666,19 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
 		                              created_at, memory_id, access_count, last_accessed,
 		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at, scope, scope_captured)
+		                              valid_from, valid_until, verified_at, scope, scope_captured,
+		                              retention, retention_captured)
 		SELECT ?, project_id, category, content, importance, source, tags,
 		       created_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at, scope, 1
+		       valid_from, valid_until, verified_at, scope, 1,
+		       -- The tier is copied with the same captured marker scope has
+		       -- (#1341): the snapshot is the only undo history a replace
+		       -- has, and a tier the restore cannot put back is the lifetime
+		       -- it cannot put back — prunePredicate reaches a session row
+		       -- only through retention AND a derived expires_at, so losing
+		       -- them turned the undo into a permanent, unprunable row.
+		       retention, 1
 		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 		      AND `+retentionExemptSQL+`
 	`, snapshotID, projectID)
@@ -7689,15 +7697,40 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	return preserved, dropped, deleted, appliedByCategory, nil
 }
 
-// RestoreSnapshot restores memories from the most recent snapshot for a project.
-// Returns the number of memories restored.
-func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, error) {
+// RestoreResult is what a restore did, for the caller that reports it.
+//
+// The count alone is not the whole answer, and the missing half is the half a
+// reader would otherwise have to assume: a snapshot taken before schema v26
+// recorded no retention tier, so the restore could not put one back for any of
+// its rows (issue #1341). Reporting the count says an undo was incomplete
+// instead of leaving the operator to find out later, when the row they thought
+// was short-lived turns up in every session's context.
+type RestoreResult struct {
+	// Restored is the number of memories the restore brought back: rows it
+	// rewrote in place plus rows it re-inserted under their old ids.
+	Restored int
+	// UncapturedRetention is the number of rows the snapshot could not supply
+	// a tier for, read from the snapshot itself: rows whose retention_captured
+	// marker is 0 predate the column (or were backfilled by hand), so the
+	// restore left each live row's own tier alone — and a row it re-inserted
+	// took the memories column DEFAULT. Zero on every snapshot this build
+	// writes.
+	UncapturedRetention int
+}
+
+// RestoreSnapshot restores memories from the most recent snapshot for a project,
+// putting back the content, the scope and the retention tier the snapshot
+// recorded, and re-deriving the expiry of a restored session row through
+// sessionExpiry exactly as a save does (#1341). The result carries both the
+// number of memories restored and the number of snapshot rows that predate the
+// retention column, so a caller can report an undo that could not be complete.
+func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
 	if err != nil {
-		return 0, fmt.Errorf("begin tx: %w", err)
+		return RestoreResult{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -7721,11 +7754,34 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		LIMIT 1
 	`, projectID).Scan(&snapshotID)
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("no snapshots found for project %s", RefusalArg(ProjectIdentifierLabel, projectID))
+		return RestoreResult{}, fmt.Errorf("no snapshots found for project %s", RefusalArg(ProjectIdentifierLabel, projectID))
 	}
 	if err != nil {
-		return 0, fmt.Errorf("find snapshot: %w", err)
+		return RestoreResult{}, fmt.Errorf("find snapshot: %w", err)
 	}
+
+	// What the snapshot could not tell the restore, read here so the report
+	// below is a fact rather than a guess about the rows (#1341). The count is
+	// every row of the chosen snapshot whose marker is 0: snapshots are written
+	// by one statement, so a table this build wrote has none, and a whole
+	// snapshot taken before schema v26 reads as all of them. It is deliberately
+	// the SNAPSHOT's count rather than only the rows this run touched — the
+	// sentence it feeds is about the snapshot, and a run that restored nothing
+	// must not read as a snapshot that lost nothing.
+	var uncapturedRetention int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM memory_snapshots
+		WHERE snapshot_id = ? AND retention_captured = 0
+	`, snapshotID).Scan(&uncapturedRetention); err != nil {
+		return RestoreResult{}, fmt.Errorf("count snapshot rows without a recorded tier: %w", err)
+	}
+
+	// The one expiry a session row may be restored with, derived here rather
+	// than stored on the snapshot: expires_at has exactly one source
+	// (sessionExpiry) everywhere else, and a snapshot column would be a second
+	// one. The statement below binds this same value for every session row it
+	// puts back, which is what a save does.
+	sessionExp := sessionExpiry(RetentionSession, time.Now())
 
 	// Remove what the replace created — and only that.
 	//
@@ -7762,10 +7818,10 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		                 AND s.content = memories.content AND s.source = memories.source))
 		  )`, projectID, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("find replace output to remove: %w", err)
+		return RestoreResult{}, fmt.Errorf("find replace output to remove: %w", err)
 	}
 	if err := appendHistoryForIDsTx(ctx, tx, removedIDs, phaseDelete, Provenance{}); err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 	del, err := tx.ExecContext(ctx, `
 		DELETE FROM memories
@@ -7780,7 +7836,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		  )
 	`, projectID, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("remove replace output: %w", err)
+		return RestoreResult{}, fmt.Errorf("remove replace output: %w", err)
 	}
 	removedN, _ := del.RowsAffected()
 
@@ -7828,7 +7884,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		  AND (s.content != m.content OR s.category != m.category
 		       OR s.importance != m.importance OR s.source != m.source)`, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("find rows this restore changes: %w", err)
+		return RestoreResult{}, fmt.Errorf("find rows this restore changes: %w", err)
 	}
 
 	// A row whose CONTENT this restore reverts loses its embedding and its
@@ -7859,11 +7915,11 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		  AND s.content != m.content`
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_embeddings WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
-		return 0, fmt.Errorf("invalidate reverted embedding: %w", err)
+		return RestoreResult{}, fmt.Errorf("invalidate reverted embedding: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM link_scans WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
-		return 0, fmt.Errorf("invalidate reverted link scan: %w", err)
+		return RestoreResult{}, fmt.Errorf("invalidate reverted link scan: %w", err)
 	}
 	updated, err := tx.ExecContext(ctx, `
 		UPDATE memories SET
@@ -7883,15 +7939,37 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		    -- silently unscoped a fact a later reflection had scoped
 		    -- correctly, making the corpus less specific than it was before
 		    -- the replace being undone.
-		    scope = CASE WHEN s.scope_captured = 1 THEN s.scope ELSE memories.scope END
+		    scope = CASE WHEN s.scope_captured = 1 THEN s.scope ELSE memories.scope END,
+		    -- retention reads the marker the same way, and the tier it puts
+		    -- back is the lifetime the undo was missing (#1341): a session
+		    -- row restored without it became a project row nothing could
+		    -- prune, and a tier raise the replace's reuse branch made
+		    -- (raiseReusedRetentionTx) outlived the undo that should have
+		    -- undone it. A row the snapshot cannot speak about keeps the live
+		    -- tier — reverting one to the column DEFAULT would be worse,
+		    -- because the DEFAULT is a claim the snapshot never made — and
+		    -- the caller reports that count.
+		    retention = CASE WHEN s.retention_captured = 1 AND s.retention IS NOT NULL
+		                     THEN s.retention ELSE memories.retention END,
+		    -- The expiry is RE-DERIVED, never copied, because sessionExpiry
+		    -- is the only source of one: a recorded session tier is restored
+		    -- with a fresh now+SessionTTL exactly as a save writes it, and a
+		    -- durable tier is restored with none. A row that was already a
+		    -- session row when the snapshot was taken therefore comes back
+		    -- prunable rather than permanent, which is the property the tier
+		    -- exists to carry.
+		    expires_at = CASE
+		        WHEN s.retention_captured = 0 OR s.retention IS NULL THEN memories.expires_at
+		        WHEN s.retention = 'session' THEN ?
+		        ELSE NULL END
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.project_id = s.project_id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
 		  AND memories.`+retentionExemptSQL+`
-	`, snapshotID)
+	`, sessionExp, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("restore existing rows: %w", err)
+		return RestoreResult{}, fmt.Errorf("restore existing rows: %w", err)
 	}
 	updatedN, _ := updated.RowsAffected()
 
@@ -7910,7 +7988,8 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
 		                      agent, session_id, source_ref, confidence,
-		                      valid_from, valid_until, verified_at, scope)
+		                      valid_from, valid_until, verified_at, scope,
+		                      retention, expires_at)
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
 		       source, importance, tags, created_at, created_at, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
@@ -7923,7 +8002,21 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		       -- alternative is restoring a scope that was never true of that
 		       -- memory, which is worse than restoring none: there is no
 		       -- provenance to tell the two apart afterwards.
-		       CASE WHEN scope_captured = 1 THEN scope ELSE NULL END
+		       CASE WHEN scope_captured = 1 THEN scope ELSE NULL END,
+		       -- And the tier, through its own marker (#1341). A row a
+		       -- pre-v26 snapshot held has no recorded tier, so it comes back
+		       -- at the column DEFAULT: project, kept longer, and never
+		       -- pruned. That is the one honest answer for a row arriving
+		       -- from nowhere — inventing a session tier would schedule a
+		       -- memory for deletion on a clock nobody set, the direction
+		       -- the portable importer refuses too — and the caller reports
+		       -- the count so the incomplete undo is visible.
+		       CASE WHEN retention_captured = 1 AND retention IS NOT NULL
+		            THEN retention ELSE 'project' END,
+		       -- The recorded session tier is restored with a derived expiry,
+		       -- the same sessionExpiry a save writes, because a session row
+		       -- without one is a row no ghost prune could ever reach.
+		       CASE WHEN retention_captured = 1 AND retention = 'session' THEN ? ELSE NULL END
 		FROM memory_snapshots
 		WHERE snapshot_id = ?
 		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))
@@ -7933,22 +8026,22 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		                             AND m.content = memory_snapshots.content
 		                             AND m.source = memory_snapshots.source)))
 		RETURNING id
-	`, snapshotID)
+	`, sessionExp, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("restore snapshot: %w", err)
+		return RestoreResult{}, fmt.Errorf("restore snapshot: %w", err)
 	}
 	var reinserted []string
 	for insertedRows.Next() {
 		var id string
 		if err := insertedRows.Scan(&id); err != nil {
 			insertedRows.Close() //nolint:errcheck
-			return 0, fmt.Errorf("scan restored memory id: %w", err)
+			return RestoreResult{}, fmt.Errorf("scan restored memory id: %w", err)
 		}
 		reinserted = append(reinserted, id)
 	}
 	if err := insertedRows.Err(); err != nil {
 		insertedRows.Close() //nolint:errcheck
-		return 0, fmt.Errorf("iterate restored memories: %w", err)
+		return RestoreResult{}, fmt.Errorf("iterate restored memories: %w", err)
 	}
 	insertedRows.Close() //nolint:errcheck
 	insertedN := int64(len(reinserted))
@@ -7971,11 +8064,11 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// never recorded the support of a row it could not name — and the alternative
 	// would be inventing it.
 	if err := uncarryRestoredSourcesTx(ctx, tx, snapshotID); err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 	if len(reinserted) > 0 {
 		if err := restoreSnapshotEvidenceTx(ctx, tx, snapshotID, reinserted); err != nil {
-			return 0, err
+			return RestoreResult{}, err
 		}
 	}
 
@@ -8002,7 +8095,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		}
 	}
 	if err := appendHistoryForIDsTx(ctx, tx, restored, phaseRestore, Provenance{}); err != nil {
-		return 0, err
+		return RestoreResult{}, err
 	}
 
 	// The snapshot is deliberately kept. Restore is idempotent — re-running
@@ -8010,13 +8103,14 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// failed with "no snapshots found" while burning one of the few retained.
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+		return RestoreResult{}, fmt.Errorf("commit: %w", err)
 	}
 
 	n := int(removedN + updatedN + insertedN)
 	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID,
-		"removed", removedN, "updated", updatedN, "reinserted", insertedN, "count", n)
-	return n, nil
+		"removed", removedN, "updated", updatedN, "reinserted", insertedN, "count", n,
+		"uncaptured_retention", uncapturedRetention)
+	return RestoreResult{Restored: n, UncapturedRetention: uncapturedRetention}, nil
 }
 
 // CountMemories returns the total number of memories for a project.

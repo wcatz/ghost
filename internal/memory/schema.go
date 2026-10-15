@@ -276,7 +276,25 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     -- live row's own scope is left alone. Defaults to 0 so any row that did not
     -- state it — a legacy row, or an unverified hand backfill — is treated as
     -- unknown rather than as a claim that the memory had no scope.
-    scope_captured INTEGER NOT NULL DEFAULT 0
+    scope_captured INTEGER NOT NULL DEFAULT 0,
+    -- The retention tier the memory was captured at, and scope's marker one
+    -- version later (migrateV26, issue #1341): without a recorded tier a
+    -- restore could not put one back, so a restored session row came back as
+    -- the memories column DEFAULT — project, no expiry, and therefore a row
+    -- a prune could never reach — while a tier raise made by the
+    -- replace's reuse branch survived the undo the snapshot exists to
+    -- provide. The restore honours the marker exactly as scope's is honoured: 1
+    -- means "trust the tier below, and re-derive its expiry through
+    -- sessionExpiry as a save does", 0 means "this snapshot cannot speak
+    -- about tiers" (a row from before the column, or an unverified hand
+    -- backfill), so the live row keeps its own tier and the restore reports
+    -- the count rather than assuming an undo that was incomplete. Defaults to
+    -- 0 for the same reason scope_captured does. No expires_at column: the
+    -- expiry is derived from the tier everywhere else too, and a snapshot
+    -- storing one would be a second source for the only value a caller never
+    -- states.
+    retention TEXT,
+    retention_captured INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 

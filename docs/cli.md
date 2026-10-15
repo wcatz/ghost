@@ -217,7 +217,7 @@ ghost reflect myproject --apply
 |---|---|
 | `--tier auto\|cli\|opencode\|sqlite` | Select the consolidation backend. `auto` is the default and routes to the calling harness when available. |
 | `--apply` | Save the consolidated result. |
-| `--restore` | Restore the most recent consolidation snapshot. Only the rows the project still holds are reverted: a memory promoted to `_global` after the snapshot is left alone, because the project no longer owns it. A row whose content the restore reverts is re-queued for re-embedding and re-linking in the same write, because its vector described the text that was reverted away; a row whose content the restore leaves alone keeps its vector. |
+| `--restore` | Restore the most recent consolidation snapshot. Only the rows the project still holds are reverted: a memory promoted to `_global` after the snapshot is left alone, because the project no longer owns it. A row whose content the restore reverts is re-queued for re-embedding and re-linking in the same write, because its vector described the text that was reverted away; a row whose content the restore leaves alone keeps its vector. The retention tier the snapshot recorded is put back too, with a fresh derived expiry for a row restored at the `session` tier; a snapshot taken before the tier column recorded no tier, so the restore leaves the live tier alone and prints a note saying how many rows it could not put one back for. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
 | `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag an input memory no surviving memory explains is re-added verbatim instead of deleted. **Nothing is exempt**: an explicit `obsolete` drop, a rewrite, and a `superseded by <id>` drop are all audited the same way, and a row the model disposed of comes back unless a single output memory carries at least 45% of its tokens. A merge source is audited against the text of its OWN merge, not the whole result. A memory the harness simply never named is carried through unchanged, so a rewrite is not a free change of wording — its replacement has to carry the memory's substance, or the old row survives beside it until a later `ghost resolve` or `ghost supersede` demotes it. The cost of that is a possible duplicate; the alternative is a silent deletion with nobody watching. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
@@ -1532,7 +1532,12 @@ snapshot taken before the fold, and as measured it:
   rows included, not only the rows the fold touched;
 - deletes reflection rows created after the fold;
 - does not bring back the folded rows' embeddings or links, which went with them;
-- leaves the survivor's raised retention tier as it is.
+- puts the survivor's retention tier back as the snapshot recorded it, with a
+  fresh derived expiry when that tier is `session`, so a raise the fold made does
+  not outlive the undo. A snapshot taken before the tier column (schema v26)
+  recorded no tier, so those rows keep the tier they hold and the command prints a
+  note saying how many it could not restore, rather than presenting the revert as
+  complete.
 
 Treat the dry run as the safeguard and the restore as a last resort.
 
