@@ -2234,6 +2234,75 @@ func TestCLIMCPInit(t *testing.T) {
 		})
 	}
 
+	// TestCLIInitAddsGhostsHookBesideAForeignOne is #1326 at the command line,
+	// for both Claude lifecycle events. A settings.json whose entry runs
+	// another tool's command that merely ends in ghost's own argument tail is
+	// not a ghost install, and init used to report it as one: "already
+	// configured" was printed, nothing was written, and Ghost's session context
+	// and stop hook never ran. The foreign command must survive, ghost's own
+	// must actually be in the file afterwards, and the second run must
+	// recognise the hook it just installed rather than appending another.
+	t.Run("a foreign hook is not a ghost install", func(t *testing.T) {
+		s := newSandbox(t)
+		// A store, so the installers that check the database report the truth
+		// rather than the "no Ghost database" line.
+		cs := s.mcpSession(t)
+		call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a note so the installer sees a real store",
+		})
+
+		settings := filepath.Join(s.home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		seeded := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/usr/local/bin/othertool hook session-start"}]}],"Stop":[{"hooks":[{"type":"command","command":"/usr/local/bin/othertool hook stop"}]}]}}`
+		if err := os.WriteFile(settings, []byte(seeded), 0o600); err != nil {
+			t.Fatalf("seed settings: %v", err)
+		}
+
+		first := s.mustRun("mcp", "init", "--client", "claude")
+		mustNotContain(t, "first init claimed the foreign hook was configured", first.stdout, "already configured")
+		mustContain(t, "first init reported adding the hook", first.stdout, "added SessionStart hook")
+
+		read := string(mustReadFile(t, settings))
+		for _, foreign := range []string{
+			"/usr/local/bin/othertool hook session-start",
+			"/usr/local/bin/othertool hook stop",
+		} {
+			mustContain(t, "the foreign hook survived", read, foreign)
+		}
+		for _, own := range []string{
+			"hook session-start --source claude-code",
+			"hook stop --source claude-code",
+		} {
+			if n := countOccurrences(read, own); n != 1 {
+				t.Fatalf("ghost's own %q appears %d times, want 1:\n%s", own, n, read)
+			}
+		}
+
+		// The second run must see the hook the first one installed: the foreign
+		// entries still sort first, so a first-match read would append a second
+		// copy and claim it was already configured.
+		second := s.mustRun("mcp", "init", "--client", "claude")
+		mustContain(t, "second init recognised the hook it installed", second.stdout, "already configured")
+		after := string(mustReadFile(t, settings))
+		for _, own := range []string{
+			"hook session-start --source claude-code",
+			"hook stop --source claude-code",
+		} {
+			if n := countOccurrences(after, own); n != 1 {
+				t.Fatalf("second init left %d copies of %q, want 1:\n%s", n, own, after)
+			}
+		}
+		for _, foreign := range []string{
+			"/usr/local/bin/othertool hook session-start",
+			"/usr/local/bin/othertool hook stop",
+		} {
+			mustContain(t, "the foreign hook survived the second run", after, foreign)
+		}
+	})
+
 	t.Run("status for every client", func(t *testing.T) {
 		s := newSandbox(t)
 		cs := s.mcpSession(t)

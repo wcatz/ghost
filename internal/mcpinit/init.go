@@ -642,6 +642,14 @@ const (
 // non-destructive on re-run. The legacy-quoting match is exact, not
 // substring, so a hand-edited wrapper that happens to also mention cmdSubstr
 // is never rewritten.
+//
+// "Leave a command alone" and "count it as ghost's hook" are different
+// decisions, and only the first one may be made about a command ghost does not
+// own (#1326): another tool's command that merely ends in the same argument
+// tail used to be read as ghost's hook, so init reported the event as already
+// configured and installed nothing — Ghost's own hook then never ran under a
+// success line. A foreign command now stays exactly as written and ghost's own
+// entry is added beside it.
 func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
 	return reconcileHookMatcher(sf, event, "", cmdSubstr, desiredCmd, legacyCmd, isWindows)
 }
@@ -651,21 +659,29 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd str
 // the hook is ADDED; an existing hook keeps whatever matcher it has, so a
 // hand-edited one is never rewritten.
 func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
-	existingCmd, exists, err := sf.findHookCommand(event, cmdSubstr)
+	cmds, err := sf.hookCommands(event)
 	if err != nil {
 		return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
 	}
+
+	// ghost's own command for this event, wherever it sits in the list. The
+	// first command containing the argument tail is another tool's as often as
+	// it is ghost's, and which one sorts first used to decide what a
+	// substring read found — so on the foreign-first shape the reconciled
+	// command was never ghost's at all.
+	existingCmd, exists := "", false
+	for _, cmd := range cmds {
+		if isGhostHookCommand(cmd, cmdSubstr, desiredCmd) {
+			existingCmd, exists = cmd, true
+			break
+		}
+	}
+
+	// No ghost hook here: add one. This covers both an event with no command
+	// carrying the tail and one whose only such command belongs to another
+	// tool, which is left exactly as the user wrote it.
 	if !exists {
-		entry := hookEntry{
-			Matcher: matcher,
-			Hooks: []hookAction{
-				{Type: "command", Command: desiredCmd},
-			},
-		}
-		if err := sf.addHook(event, entry); err != nil {
-			return hookUnchanged, fmt.Errorf("add hook: %w", err)
-		}
-		return hookAdded, nil
+		return addGhostHook(sf, event, matcher, desiredCmd)
 	}
 
 	if existingCmd == desiredCmd {
@@ -693,6 +709,45 @@ func reconcileHookMatcher(sf *settingsFile, event, matcher, cmdSubstr, desiredCm
 	}
 
 	return hookUnchanged, nil
+}
+
+// addGhostHook appends ghost's own hook entry for event. The matcher applies
+// only to the entry being added: an existing entry keeps whatever matcher it
+// has, so a hand-edited one is never rewritten.
+func addGhostHook(sf *settingsFile, event, matcher, desiredCmd string) (hookReconcileAction, error) {
+	entry := hookEntry{
+		Matcher: matcher,
+		Hooks: []hookAction{
+			{Type: "command", Command: desiredCmd},
+		},
+	}
+	if err := sf.addHook(event, entry); err != nil {
+		return hookUnchanged, fmt.Errorf("add hook: %w", err)
+	}
+	return hookAdded, nil
+}
+
+// isGhostHookCommand reports whether cmd is a hook command ghost owns for the
+// event cmdSubstr names: it carries that event's argument tail, and its leading
+// token is the ghost binary — the one this run writes, under whatever name it
+// carries, or a ghost-named one under any path and any quoting. The same
+// executable test the codex hooks merge applies, and the one the pre-contract
+// migration shares with isStaleGhostHookCommand. Everything else is the user's:
+// a hand-edited wrapper, and another tool whose command merely ends in the
+// same argument tail (#1326).
+func isGhostHookCommand(cmd, cmdSubstr, desiredCmd string) bool {
+	if !strings.Contains(cmd, cmdSubstr) {
+		return false
+	}
+	bin, _, ok := splitHookCommand(cmd)
+	if !ok {
+		return false
+	}
+	if isGhostBinaryName(bin) {
+		return true
+	}
+	desiredBin, _, ok := splitHookCommand(desiredCmd)
+	return ok && isBakedGhostBinary(bin, desiredBin)
 }
 
 // isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary

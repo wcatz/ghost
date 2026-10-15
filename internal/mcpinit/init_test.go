@@ -520,6 +520,12 @@ func TestReconcileHook_LeavesLegacyQuotingUntouchedOnPOSIX(t *testing.T) {
 	}
 }
 
+// TestReconcileHook_LeavesCustomCommandUntouched is #1326 from the reconcile
+// side: a hand-edited command whose leading token is not ghost's is never
+// clobbered — that has always been the policy — but it is also not counted as
+// ghost's hook, because treating it as one hid a missing install behind a
+// success line. It stays exactly as written and ghost's own entry is added
+// beside it.
 func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	sf, err := loadSettings(path)
@@ -535,12 +541,19 @@ func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
-	if action != hookUnchanged {
-		t.Errorf("action = %v, want hookUnchanged — a hand-edited command must never be clobbered", action)
+	if action != hookAdded {
+		t.Errorf("action = %v, want hookAdded — ghost's own hook is missing while the custom command stands", action)
 	}
 	got, _, _ := sf.findHookCommand("SessionStart", "hook session-start")
 	if got != custom {
-		t.Errorf("command changed to %q, want untouched %q", got, custom)
+		t.Errorf("first command changed to %q, want untouched %q", got, custom)
+	}
+	isDesired, err := sf.hasExactHookCommand("SessionStart", testDesiredCmd)
+	if err != nil {
+		t.Fatalf("hasExactHookCommand: %v", err)
+	}
+	if !isDesired {
+		t.Error("ghost's own hook was not added beside the custom command")
 	}
 }
 
@@ -940,6 +953,153 @@ func TestMigratePreContractHook_LeavesAForeignCommandAlone(t *testing.T) {
 			}
 			if !isDesired {
 				t.Error("contract-form command not found after migration")
+			}
+		})
+	}
+}
+
+// TestEnsureHook_InstallsItsOwnHookBesideAForeignCommand is #1326 end to end,
+// for both events. A settings entry whose command is another tool's but ends
+// in ghost's own argument tail is not a ghost install: reconcileHook found it
+// by substring, reported "already configured" and wrote nothing, so Ghost's
+// session context and stop hook never ran under a success line. The foreign
+// command must survive untouched, ghost's own must be added beside it, and the
+// second run must recognise the hook it just installed rather than appending
+// another copy of it on every re-run.
+func TestEnsureHook_InstallsItsOwnHookBesideAForeignCommand(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	for _, tc := range []struct {
+		event, other, tail, foreign string
+	}{
+		{
+			event:   "SessionStart",
+			other:   "Stop",
+			tail:    "hook session-start",
+			foreign: "/usr/local/bin/othertool hook session-start",
+		},
+		{
+			event:   "Stop",
+			other:   "SessionStart",
+			tail:    "hook stop",
+			foreign: "/usr/local/bin/othertool hook stop",
+		},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+			if err := sf.addHook(tc.event, hookEntry{Hooks: []hookAction{{Type: "command", Command: tc.foreign}}}); err != nil {
+				t.Fatalf("addHook foreign: %v", err)
+			}
+			want := shellQuote(ghostBin) + " " + tc.tail + " --source claude-code"
+
+			ensure := ensureStopHook
+			if tc.event == "SessionStart" {
+				ensure = ensureHook
+			}
+			countGhost := func() int {
+				t.Helper()
+				cmds, err := sf.hookCommands(tc.event)
+				if err != nil {
+					t.Fatalf("hookCommands: %v", err)
+				}
+				n := 0
+				for _, cmd := range cmds {
+					if cmd == want {
+						n++
+					}
+				}
+				return n
+			}
+
+			var out bytes.Buffer
+			if err := ensure(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensure (first): %v", err)
+			}
+			if strings.Contains(out.String(), "already configured") {
+				t.Errorf("a first run that installed nothing reported the hook as configured:\n%s", out.String())
+			}
+			if intact, err := sf.hasExactHookCommand(tc.event, tc.foreign); err != nil {
+				t.Fatalf("hasExactHookCommand(foreign): %v", err)
+			} else if !intact {
+				t.Error("the foreign command was rewritten")
+			}
+			if n := countGhost(); n != 1 {
+				t.Errorf("ghost's own hook is registered %d times, want 1", n)
+			}
+
+			// A re-run must find the hook the first run installed: the foreign
+			// entry still sorts first, so a substring read alone would append
+			// a second copy and claim it was already configured.
+			out.Reset()
+			if err := ensure(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensure (second): %v", err)
+			}
+			if !strings.Contains(out.String(), "already configured") {
+				t.Errorf("second run should be a no-op, got:\n%s", out.String())
+			}
+			if n := countGhost(); n != 1 {
+				t.Errorf("second run left %d copies of ghost's hook, want 1", n)
+			}
+			if intact, err := sf.hasExactHookCommand(tc.event, tc.foreign); err != nil {
+				t.Fatalf("hasExactHookCommand(foreign, second): %v", err)
+			} else if !intact {
+				t.Error("the second run rewrote the foreign command")
+			}
+			if sf.hasHook(tc.other, tc.tail) {
+				t.Errorf("%s hook leaked into %s", tc.event, tc.other)
+			}
+		})
+	}
+}
+
+// TestEnsureHook_RecognisesTheBinaryItWouldWrite pins the other arm of the
+// ownership rule behind #1326: a ghost binary installed under another name runs
+// ghost's hook just as one called "ghost" does, so init recognises its own
+// command under that name, adds nothing beside it and reports the event
+// configured. An ownership test on the basename alone would install a second
+// entry beside the first, and the hook would fire twice per session.
+func TestEnsureHook_RecognisesTheBinaryItWouldWrite(t *testing.T) {
+	const ghostBin = "/usr/local/bin/g"
+	for _, tc := range []struct {
+		event, other, tail string
+	}{
+		{"SessionStart", "Stop", "hook session-start"},
+		{"Stop", "SessionStart", "hook stop"},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+			own := ghostBin + " " + tc.tail + " --source claude-code"
+			if err := sf.addHook(tc.event, hookEntry{Hooks: []hookAction{{Type: "command", Command: own}}}); err != nil {
+				t.Fatalf("addHook: %v", err)
+			}
+
+			ensure := ensureStopHook
+			if tc.event == "SessionStart" {
+				ensure = ensureHook
+			}
+			var out bytes.Buffer
+			if err := ensure(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			if !strings.Contains(out.String(), "already configured") {
+				t.Errorf("ghost's own command under its installed name was not recognised:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands(tc.event)
+			if err != nil {
+				t.Fatalf("hookCommands: %v", err)
+			}
+			if len(cmds) != 1 {
+				t.Errorf("event holds %d commands, want 1: %q", len(cmds), cmds)
+			}
+			if sf.hasHook(tc.other, tc.tail) {
+				t.Errorf("%s hook leaked into %s", tc.event, tc.other)
 			}
 		})
 	}
