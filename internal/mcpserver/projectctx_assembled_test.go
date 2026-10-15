@@ -1717,7 +1717,7 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 //
 // The two readers do not agree about what a project holds. The passive window is
 // `WHERE (project_id = ? OR project_id = '_global') AND resolved_at IS NULL`
-// (`passiveFetchSQL`), while `CountMemories` is `SELECT COUNT(*) FROM memories
+// (`passiveKeyScanSQL`), while `CountMemories` is `SELECT COUNT(*) FROM memories
 // WHERE project_id = ?` — no `resolved_at` predicate. So a project whose only row
 // `ghost resolve` has withdrawn has an EMPTY window and a count of one.
 //

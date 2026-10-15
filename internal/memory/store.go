@@ -8036,12 +8036,12 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 //
 // A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
 // listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
-// of every window a ranking surface reads, because `passiveFetchSQL` and the query
-// path both bind `resolved_at IS NULL`. So "how many does this project hold" and
+// of every window a ranking surface reads, because the passive key scan (`passiveKeyScanSQL`)
+// and the query path both bind `resolved_at IS NULL`. So "how many does this project hold" and
 // "how many of its rows a window could even consider" are different counts, and a
 // caller that needs the second cannot derive it from the first.
 //
-// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveFetchSQL`,
+// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveKeyScanSQL`,
 // and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
 // whether an exclusion verdict may be rendered as a claim about the requested
 // project: a validity-invalid row of that project's own IS the cause the validity

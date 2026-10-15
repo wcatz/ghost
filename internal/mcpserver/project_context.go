@@ -654,7 +654,7 @@ func projectContextEmptyNote(res assemble.Result) string {
 // projectWindowRowCount is how many of the project's OWN rows a retrieval window
 // could CONSIDER, which is the population the abstention sentence is reconciled
 // against. It is deliberately not the window's admitted population: the validity
-// predicate runs in the window's SQL (`passiveFetchSQL`), so a validity-invalid row
+// predicate runs in the window's SQL (`passiveKeyScanSQL`), so a validity-invalid row
 // of the project is not admitted — yet it is exactly the cause the validity
 // abstention names, and filtering it out here would make the gate inert for the
 // case it was written for. `CountActiveMemories` applies `resolved_at IS NULL` and
@@ -762,7 +762,7 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 		//
 		// The ABSTENTION names a cause, so it is a claim about which rows that cause
 		// explains, and the population it can be about is the WINDOW's: the project's
-		// own rows that `passiveFetchSQL` could have admitted. `n` cannot establish
+		// own rows that the passive key scan could have admitted. `n` cannot establish
 		// that — it has no `resolved_at` predicate, so a project whose every row was
 		// withdrawn reports one and the abstention would then blame it for rows that
 		// are `_global`'s and say "out of date" about a row `ghost resolve` retired

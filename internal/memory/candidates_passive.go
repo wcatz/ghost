@@ -1474,7 +1474,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// store below v10 fails the read with `no such column: valid_from` before the
 	// predicate is ever reached. A store that predates validity has no window for
 	// any row, which is exactly `NULL`. This is a deliberate second mention of the
-	// triple (the first is the predicate in passiveFetchSQL), and
+	// triple (the first is the predicate in passiveKeyScanSQL), and
 	// TestEveryVerifiedAtMentionIsClassified classifies it as the reader it is.
 	names := append([]string(nil), memoryColumnNames...)
 	for i, c := range names {
