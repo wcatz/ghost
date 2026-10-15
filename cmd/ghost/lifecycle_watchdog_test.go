@@ -194,11 +194,13 @@ func recordedPid(harnessPidFile string) int {
 // therefore the test's own, not the watchdog's.
 //
 // The kill is the one the escalation makes, `killPhaseProcess` (the whole group
-// by its id), plus the recorded harness by its pid: the group signal is what
-// reaches a grandchild still in the group, and the pid file is the one record
-// of it that exists when the group signal landed on nothing. The liveness
-// re-check before the direct kill narrows the window in which the kernel could
-// have handed the id to an unrelated process.
+// by its id), behind the same question the escalation asks first — an empty
+// group's id belongs to no run here and on a busy machine can already have been
+// reused — plus the recorded harness by its pid: the group signal is what
+// reaches a grandchild still in the group, and the pid file is the one record of
+// it that exists when the group signal landed on nothing. The liveness re-check
+// before the direct kill narrows the window in which the kernel could have
+// handed the id to an unrelated process.
 //
 // The ASSERTION is registered first so the LIFO order runs it last, after the
 // kill: a group can only be called empty by something that emptied it.
@@ -220,7 +222,14 @@ func registerPhaseSweep(t *testing.T, cmd *exec.Cmd, harnessPidFile string) {
 		}
 	})
 	t.Cleanup(func() {
-		killPhaseProcess(cmd)
+		// Asked, not assumed, for the reason the escalation asks it: a group
+		// that is already empty has no run here behind its id, and on a busy
+		// machine that id can belong to somebody else by now. The recorded
+		// harness is killed either way, because the pid file is the one record
+		// of it that survives the group signal landing on nothing.
+		if phaseGroupInhabited(cmd) {
+			killPhaseProcess(cmd)
+		}
 		if pid := recordedPid(harnessPidFile); pid > 0 && processAlive(pid) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
