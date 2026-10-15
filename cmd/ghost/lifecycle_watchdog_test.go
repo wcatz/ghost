@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,20 +36,40 @@ func newPhaseCmd(timeout time.Duration, script string) (context.Context, context
 // countingKill is the seam on killPhaseProcess: it records the escalation and
 // then performs the real one, so a phase the assertion expects to survive it
 // still dies when it is wrong to have been signalled, and a phase the
-// escalation is right about still ends and cmd.Run returns.
-func countingKill(attempts *int) func(*exec.Cmd) {
+// escalation is right about still ends and the wait returns. The count is
+// atomic because the watchdog writes it from its own goroutine.
+func countingKill(attempts *atomic.Int64) func(*exec.Cmd) {
 	return func(cmd *exec.Cmd) {
-		*attempts++
+		attempts.Add(1)
 		killPhaseProcess(cmd)
 	}
+}
+
+// startPhaseAndWatchdog starts the phase, launches the watchdog once the phase
+// exists, and hands back the wait for it. Start comes first for the reason the
+// phase loop starts the phase first: the watchdog signals the phase's process
+// group, and a goroutine that reads cmd.Process before Start writes it races
+// with Start on the one field the kill is decided by.
+func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd)) *sync.WaitGroup {
+	t.Helper()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the phase: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		phaseWatchdog(ctx, phaseDone, cmd, grace, kill, time.After)
+	}()
+	return &wg
 }
 
 // assertPhaseExitedItself checks that the phase went out on the deadline's
 // SIGTERM rather than being force-killed by the escalation: a process the group
 // SIGKILL landed on reports -1 and one that took the trap reports 0. Go
-// injects the context error into Run's result whenever the Cancel succeeded,
-// whatever the exit code was, so the process state is what says which one
-// happened.
+// injects the context error into the wait's result whenever the Cancel
+// succeeded, whatever the exit code was, so the process state is what says
+// which one happened.
 func assertPhaseExitedItself(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	if code := cmd.ProcessState.ExitCode(); code != 0 {
@@ -70,26 +91,20 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod(t *te
 	ctx, cancel, cmd := newPhaseCmd(timeout, phaseExitsOnTerm)
 	defer cancel()
 
+	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
-	attempts := 0
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		phaseWatchdog(ctx, phaseDone, cmd, grace, countingKill(&attempts))
-	}()
+	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, grace, countingKill(&attempts))
 
-	runErr := cmd.Run()
+	// The deadline interrupted the phase, so the wait reports the context
+	// error whatever the exit code was; what says the phase left on its own
+	// is the exit code below.
+	_ = cmd.Wait()
 	close(phaseDone)
 	wg.Wait()
 
-	// The deadline interrupted the phase, so Run reports the context error
-	// whatever the exit code was; what says the phase left on its own is the
-	// exit code above.
-	_ = runErr
 	assertPhaseExitedItself(t, cmd)
-	if attempts != 0 {
-		t.Errorf("the escalation fired %d time(s) for a phase that had already exited and been reaped", attempts)
+	if n := attempts.Load(); n != 0 {
+		t.Errorf("the escalation fired %d time(s) for a phase that had already exited and been reaped", n)
 	}
 }
 
@@ -108,24 +123,28 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 
 	for i := 0; i < 20; i++ {
 		ctx, cancel, cmd := newPhaseCmd(time.Hour, "exit 0")
+		if err := cmd.Start(); err != nil {
+			cancel()
+			t.Fatalf("run %d: start the phase: %v", i, err)
+		}
 
 		phaseDone := make(chan struct{})
 		started, release := make(chan struct{}), make(chan struct{})
-		attempts := 0
+		var attempts atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			close(started)
 			<-release
-			phaseWatchdog(ctx, phaseDone, cmd, grace, countingKill(&attempts))
+			phaseWatchdog(ctx, phaseDone, cmd, grace, countingKill(&attempts), time.After)
 		}()
 		<-started
 
 		// Both channels closed before the goroutine runs, the same way the
 		// phase loop leaves them when a phase ends before the watchdog
 		// starts.
-		if runErr := cmd.Run(); runErr != nil {
+		if runErr := cmd.Wait(); runErr != nil {
 			cancel()
 			t.Fatalf("run %d: the phase should have exited on its own: %v", i, runErr)
 		}
@@ -134,10 +153,52 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 		close(release)
 		wg.Wait()
 
-		if attempts != 0 {
-			cancel()
-			t.Fatalf("run %d: the escalation fired %d time(s) for a phase that had already ended", i, attempts)
+		if n := attempts.Load(); n != 0 {
+			t.Fatalf("run %d: the escalation fired %d time(s) for a phase that had already ended", i, n)
 		}
+	}
+}
+
+// TestThePhaseWatchdogRechecksThePhaseAfterTheGracePeriod pins the boundary the
+// grace period is a race against: the timer is up AND the phase has ended. The
+// wait after the deadline will return on one or the other, so the escalation
+// has to ask phaseDone once more before it signals — with the re-check removed
+// the wait alone is enough to let a bare kill through, on a group whose phase
+// is already reaped.
+//
+// The timer is injected so the boundary is a state the test sets, not a moment
+// it waits for: `after` parks the watchdog in the wait with the phase still
+// running, and the test then ends the phase and brings the timer up together.
+func TestThePhaseWatchdogRechecksThePhaseAfterTheGracePeriod(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the deadline has already fired
+
+	phaseDone := make(chan struct{})
+	reached := make(chan struct{})
+	graceUp := make(chan time.Time)
+	after := func(time.Duration) <-chan time.Time {
+		close(reached)
+		return graceUp
+	}
+
+	var kills atomic.Int64
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		phaseWatchdog(ctx, phaseDone, &exec.Cmd{}, 0, func(*exec.Cmd) { kills.Add(1) }, after)
+	}()
+
+	// The watchdog is inside the wait, with the phase still running and the
+	// grace timer not yet up. End the phase and bring the timer up together:
+	// whichever of the two the wait returns on, phaseDone is closed by the
+	// time the re-check runs.
+	<-reached
+	close(phaseDone)
+	close(graceUp)
+	<-finished
+
+	if n := kills.Load(); n != 0 {
+		t.Errorf("the escalation fired %d time(s) with the phase already ended and reaped", n)
 	}
 }
 
@@ -154,23 +215,18 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 	ctx, cancel, cmd := newPhaseCmd(timeout, phaseIgnoresTerm)
 	defer cancel()
 
+	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
-	attempts := 0
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		phaseWatchdog(ctx, phaseDone, cmd, grace, countingKill(&attempts))
-	}()
+	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, grace, countingKill(&attempts))
 
-	runErr := cmd.Run()
+	runErr := cmd.Wait()
 	close(phaseDone)
 	wg.Wait()
 
 	if runErr == nil {
 		t.Fatal("the escalation did not end a phase that ignored SIGTERM")
 	}
-	if attempts != 1 {
-		t.Errorf("the escalation fired %d time(s), want exactly 1", attempts)
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("the escalation fired %d time(s), want exactly 1", n)
 	}
 }

@@ -245,10 +245,18 @@ func runLifecycle() {
 		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 
 		phaseDone := make(chan struct{})
-		go phaseWatchdog(ctx, phaseDone, cmd, phaseGracePeriod, killPhaseProcess)
 
 		start := time.Now()
-		runErr := cmd.Run()
+		// The watchdog is started only once the phase EXISTS: it signals the
+		// phase's process group, and a goroutine launched before Start reads
+		// cmd.Process while Start is writing it — a race on the one field the
+		// kill is decided by. It also cannot have anything to escalate before
+		// then, since the deadline's Cancel needs a process to signal.
+		runErr := cmd.Start()
+		if runErr == nil {
+			go phaseWatchdog(ctx, phaseDone, cmd, phaseGracePeriod, killPhaseProcess, time.After)
+			runErr = cmd.Wait()
+		}
 		close(phaseDone)
 		cancel()
 		if runErr != nil {
@@ -523,8 +531,16 @@ const phaseGracePeriod = 30 * time.Second
 // phase that ended before the goroutine parked — both channels closed by the
 // time it ran — took the deadline branch about half the time and killed a dead
 // group the grace period later. So phaseDone is always asked first and without
-// blocking, and it is asked again after the grace period.
-func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd)) {
+// blocking, and the wait after the deadline completes on EITHER phaseDone or
+// the grace period and then asks phaseDone once more before signalling. That
+// re-check is on every path rather than only under the timer, which is what
+// makes it testable: `after` is a parameter (time.After in production) so a
+// test can hold the grace and phaseDone ready at once.
+func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, grace time.Duration, kill func(*exec.Cmd), after func(time.Duration) <-chan time.Time) {
+	// A phase that has already ended is never signalled. This select is
+	// random when both of its cases are ready, and the goroutine does start
+	// after both have closed — the phase completing while the deadline had
+	// already fired — so phaseDone is asked first and without blocking.
 	select {
 	case <-phaseDone:
 		return
@@ -533,19 +549,26 @@ func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd
 
 	select {
 	case <-phaseDone:
+		return
 	case <-ctx.Done():
-		select {
-		case <-phaseDone:
-		case <-time.After(grace):
-			// A phase that has exited and been reaped is never signalled;
-			// the gap between this check and the kill is as small as a
-			// goroutine can make it.
-			select {
-			case <-phaseDone:
-			default:
-				kill(cmd)
-			}
-		}
+	}
+
+	// The deadline fired. The phase has the grace period to be gone on the
+	// SIGTERM it was sent, and one still running after that is force-killed.
+	select {
+	case <-phaseDone:
+	case <-after(grace):
+	}
+	// Ask again whatever woke the wait up: a phase that exited inside the
+	// grace period has been reaped, and its group id can by now name an
+	// unrelated group, so the signal is the one thing that must not follow.
+	// The gap between this check and the signal is as small as a goroutine
+	// can make it, because the re-check and the signal cannot be one
+	// operation.
+	select {
+	case <-phaseDone:
+	default:
+		kill(cmd)
 	}
 }
 
