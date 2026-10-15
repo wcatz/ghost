@@ -676,6 +676,28 @@ func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
 	return strings.Join(names, "."), true
 }
 
+// codexBOM is the UTF-8 byte-order mark a Windows editor or PowerShell writer
+// may leave at the very start of a config file.
+const codexBOM = "\ufeff"
+
+// splitCodexLines splits a config file's body into lines with one leading
+// byte-order mark removed, returning the mark it stripped so the caller can
+// write it back and keep the user's encoding. A TOML parser strips one before
+// it lexes the document, so a BOM-prefixed file is valid codex config; U+FEFF is
+// not whitespace, so a scanner that only trims space cannot normalise a
+// BOM-prefixed header and reads the ghost table as absent — which is how init
+// appended a second table and status called the broken install healthy. Only the
+// LEADING mark is removed: a U+FEFF anywhere else is content, not an encoding
+// mark, and the caller joins its BOM-free lines and re-prepends the mark, so the
+// repaired file keeps the mark at the start where the parser expects it.
+func splitCodexLines(body string) (lines []string, bom string) {
+	if strings.HasPrefix(body, codexBOM) {
+		bom = codexBOM
+		body = body[len(codexBOM):]
+	}
+	return strings.Split(body, "\n"), bom
+}
+
 // findCodexTOMLTable locates the [key] table header in lines and returns the
 // half-open span [start, end) of the table's OWN key lines: everything up to
 // the next table header of any name, minus trailing blank/comment lines so the
@@ -1152,7 +1174,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	if crlf {
 		eol = "\r\n"
 	}
-	lines := strings.Split(string(existing), "\n")
+	lines, bom := splitCodexLines(string(existing))
 	if crlf {
 		for i, line := range lines {
 			lines[i] = strings.TrimSuffix(line, "\r")
@@ -1247,7 +1269,9 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		}
 	}
 
-	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {
+	// The BOM stripped for scanning goes back at the very start, the position a
+	// TOML parser expects it, so the user's file keeps its encoding.
+	if err := writeFileAtomic(path, []byte(bom+strings.Join(out, eol)), 0644); err != nil {
 		return false, fmt.Errorf("write config.toml: %w", err)
 	}
 	if found {
@@ -2057,7 +2081,10 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	if err != nil {
 		return false, "config.toml not found (run ghost mcp init --client codex)"
 	}
-	lines := strings.Split(string(data), "\n")
+	// Read the file the way the merge scans it: one leading byte-order mark is
+	// stripped, so a BOM-prefixed ghost header is seen instead of being read as
+	// an absent table on an install that is actually healthy.
+	lines, _ := splitCodexLines(string(data))
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
 		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, text)
 	}

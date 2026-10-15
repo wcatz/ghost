@@ -167,13 +167,14 @@ func TestHarnessDeadlineSweepsTheProcessGroup(t *testing.T) {
 }
 
 // TestHarnessWaitDelayBoundsAPipeHoldingGrandchild covers the helper the group
-// signal cannot end: one that ignores SIGTERM. Nothing in the group stops it,
-// so the call is bounded by WaitDelay instead — the deadline plus the backstop,
-// not the helper's lifetime.
+// signal cannot end by itself: one that ignores SIGTERM. The grace period is
+// what it is given, and then the whole group is force-killed, so the call is
+// still bounded by the deadline plus the backstop and nothing the harness
+// started outlives the call.
 //
-// The helper is still alive when the call returns, and that is asserted: it is
-// the positive control proving this run measured the backstop rather than a
-// helper that happened to exit.
+// The helper surviving the deadline is what proves this run measured the
+// escalation rather than a helper that happened to exit: the call cannot return
+// before the grace has been waited out, so that is asserted too.
 func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 	// `exec` keeps the trap's disposition — an ignored signal survives exec —
 	// so the process whose pid is recorded is itself the one ignoring SIGTERM.
@@ -192,8 +193,11 @@ func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 	_ = cmd.Wait()
 	elapsed := time.Since(start)
 
-	if !processAlive(grandchild) {
-		t.Fatalf("the helper (pid %d) died before the call returned, so this run did not exercise the backstop", grandchild)
+	if err := waitGone(grandchild, 3*time.Second); err != nil {
+		t.Errorf("a helper (pid %d) that ignored SIGTERM survived the call (%v): the harness's whole group is force-killed after the grace period, so nothing it started may outlive the call", grandchild, err)
+	}
+	if elapsed < harnessWaitDelay {
+		t.Errorf("the call returned after %s, before the %s grace could have run, so this run did not exercise the escalation", elapsed, harnessWaitDelay)
 	}
 	if elapsed > 5*time.Second {
 		t.Errorf("the call was held open for %s by a helper that inherited the child's stdout, want it bounded by the %s backstop", elapsed, harnessWaitDelay)
@@ -244,6 +248,9 @@ printf '%s' '[]'
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the cleanup child was held open by a helper that inherited its stdout, so the call outlived its deadline")
+	}
+	if err := waitGone(helper, 3*time.Second); err != nil {
+		t.Errorf("the cleanup runner's helper (pid %d) survived the call (%v): it takes the shared bound, so its group is force-killed after the grace period too", helper, err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("the cleanup call returned %s after it started, want it bounded by the %s backstop", elapsed, harnessWaitDelay)
