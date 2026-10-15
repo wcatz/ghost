@@ -343,13 +343,14 @@ type Candidate struct {
 	// It is set on query-mode rows only and does not need an explain request.
 	KeywordReserved bool
 	// Unembedded says the vector leg could not have retrieved this row: it
-	// carries no embedding usable by the configured identity — no vector at
-	// all, or one stamped with a different identity. It is false whenever the
-	// vector leg is not in play (no embedder, no query vector, a failed leg),
-	// because then no row is judged against that leg. The leg-consensus stage
-	// reads it so a row the vector leg could never see is not penalised for
-	// lacking vector agreement (#1319): a row saved moments ago has no
-	// embedding yet, and its silence must not read as a second leg's dissent.
+	// carries no embedding the leg could score — no vector at all, one stamped
+	// with a different identity, or one whose width differs from the query's.
+	// It is false whenever the vector leg is not in play (no embedder, no query
+	// vector, a failed leg), because then no row is judged against that leg. The
+	// leg-consensus stage reads it so a row the vector leg could never see is
+	// not penalised for lacking vector agreement (#1319): a row saved moments
+	// ago has no embedding yet, and its silence must not read as a second leg's
+	// dissent.
 	Unembedded bool
 	// Evidence counts the records supporting this memory, read in the SAME
 	// snapshot as the rows. It rides here because the assembler may reach the
@@ -722,15 +723,16 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		rows[i].Evidence = counts[rows[i].ID]
 	}
 
-	// A row the vector leg could never have retrieved — no embedding under the
-	// configured identity — must not read as a row that leg ranked low
-	// (#1319). The read is taken only when the vector leg actually ran and
-	// answered, because only then does the leg-consensus gate ask the
-	// question: with the leg skipped or failed the gate is a pass-through and
-	// the field is never read. rows shares its backing array with set.Rows, so
-	// the marks below reach the returned set.
+	// A row the vector leg could never have retrieved — no embedding it could
+	// score: no vector at all, one from another identity, or one of another
+	// width — must not read as a row that leg ranked low (#1319). The read is
+	// taken only when the vector leg actually ran and answered, because only
+	// then does the leg-consensus gate ask the question: with the leg skipped
+	// or failed the gate is a pass-through and the field is never read. rows
+	// shares its backing array with set.Rows, so the marks below reach the
+	// returned set.
 	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
-		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity)
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity, len(req.QueryVec))
 		if err != nil {
 			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
 		}
@@ -741,18 +743,26 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	return set, nil
 }
 
-// unembeddedAmong returns the candidates that carry no embedding usable by
-// identity: no vector at all, or one stamped with a different identity (a
-// model, dimension or task-prefix change). An empty identity means "any
-// recorded vector counts", so nothing is unembedded — the state of a store
-// with no embedder configured, where the vector leg does not run anyway.
+// unembeddedAmong returns the candidates that carry no embedding the vector leg
+// could score: no vector at all, one stamped with a different identity, or one
+// whose width differs from the query's. The three cases are the two filters the
+// scan applies, and they are applied in its order — identity first, then width —
+// because a row the leg saw is a row the leg ranked, and everything else is one
+// it could never have considered.
+//
+// An empty identity means "any recorded vector counts", which is the state of a
+// store with no embedding model configured: the identity filter is dropped, but
+// a row with no vector is still invisible to the leg and is still reported.
+//
+// width is the query's own float32 count, the same value the scan compares a
+// stored blob's length against. It is only reached with a width, because the
+// caller's guard requires the vector leg to have answered, which requires a
+// query vector to embed.
 //
 // It is the rule UnembeddedMemoryIDs applies, narrowed to one retrieval's rows
-// and taken from the same snapshot: a row with a vector the leg could score is
-// a row the leg saw, whether or not it ranked the row; a row with none is one
-// the leg could never have considered. Chunked like the edge and evidence
-// reads, because SQLite caps a statement's bound parameters.
-func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string) (map[string]bool, error) {
+// and read from the same snapshot as those rows. Chunked like the edge and
+// evidence reads, because SQLite caps a statement's bound parameters.
+func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string, width int) (map[string]bool, error) {
 	out := make(map[string]bool, len(candidates))
 	if len(candidates) == 0 {
 		return out, nil
@@ -766,6 +776,12 @@ func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, id
 	if identity != "" {
 		head += ` AND e.model = ?`
 		prefix = append(prefix, identity)
+	}
+	if width > 0 {
+		// The scan's own division: a blob is len/4 float32s, and a blob that is
+		// not a multiple of four is compared at its floor.
+		head += ` AND length(e.embedding)/4 = ?`
+		prefix = append(prefix, width)
 	}
 	for start := 0; start < len(ids); start += edgeChunkIDs {
 		end := min(start+edgeChunkIDs, len(ids))

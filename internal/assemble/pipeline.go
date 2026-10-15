@@ -1088,13 +1088,13 @@ const (
 // only one retrieval leg found only when that leg ranks it near the top, so
 // single-leg noise clustered just above the relevance floor is dropped. It is a
 // query-mode rule: passive blocks are untouched. A row the vector leg could not
-// see at all — no embedding under the configured identity, which is what a
-// memory saved moments ago looks like before the worker has embedded it — is
-// admitted outright (#1319): it has no vector leg to agree or disagree, so its
-// missing VectorRank is not low consensus. When one leg is unavailable (no
-// embedding endpoint, vector leg down or degraded) both legs are not in play,
-// so the consensus rule cannot apply and the stage is skipped rather than
-// emptying the block.
+// see at all — no vector at all, one from another identity, or one of a width
+// the query does not match, which is what a memory saved moments ago looks like
+// before the worker has embedded it — is admitted outright (#1319): it has no
+// vector leg to agree or disagree, so its missing VectorRank is not low
+// consensus. When one leg is unavailable (no embedding endpoint, vector leg down
+// or degraded) both legs are not in play, so the consensus rule cannot apply and
+// the stage is skipped rather than emptying the block.
 func runLegConsensus(p *pipeline) {
 	in := len(p.rows)
 	if p.passive {
