@@ -921,8 +921,11 @@ func TestAsOfSearchReturnsWhatTheListingWithholdsAtT(t *testing.T) {
 	listing := resultText(callTool(t, session, "ghost_project_context", map[string]any{
 		"project_id": "test-project", "as_of": at,
 	}))
+	// An explicit limit, because the default cap (5) is smaller than the six
+	// validity shapes this fixture saves and the assertion below is about every
+	// row being returned, not about the cap.
 	search := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
-		"project_id": "test-project", "query": "zebra", "as_of": at,
+		"project_id": "test-project", "query": "zebra", "as_of": at, "limit": 10,
 	}))
 	if !strings.Contains(listing, "Validity judged at "+at) {
 		t.Errorf("the listing does not say validity was judged at T:\n%s", listing)

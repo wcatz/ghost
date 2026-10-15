@@ -43,8 +43,9 @@ func ollamaStub(models ...string) *httptest.Server {
 
 // TestCheckOllama exercises the shared Ollama health check: a disabled config
 // prints the informational line with no check result, an unreachable server
-// fails with the pinned fail text, and model presence passes/fails with the
-// pinned message strings.
+// fails with the pinned fail text and a conclusive Unreachable verdict, and
+// model presence passes/fails with the pinned message strings on a Reachable
+// verdict (Ollama itself answered, whether or not the model is installed).
 func TestCheckOllama(t *testing.T) {
 	model := "nomic-embed-text:v1.5"
 
@@ -52,15 +53,17 @@ func TestCheckOllama(t *testing.T) {
 		var out bytes.Buffer
 		var gotOK bool
 		check := func(ok bool, pass, fail string) { gotOK = ok }
-		alive := checkOllama(&out, &config.Config{Embedding: config.EmbeddingConfig{Enabled: false}}, check)
+		reach := checkOllama(&out, &config.Config{Embedding: config.EmbeddingConfig{Enabled: false}}, check)
 		if !strings.Contains(out.String(), "  - embedding disabled in config (FTS-only search)") {
 			t.Errorf("expected disabled line, got:\n%s", out.String())
 		}
 		if gotOK {
 			t.Error("disabled config must not report a passing check")
 		}
-		if alive {
-			t.Error("checkOllama returned alive=true for a disabled config, want false (never probed)")
+		// Nothing was probed, so the verdict must not be Unreachable: a
+		// disabled config can never establish an outage.
+		if reach == embedding.Unreachable {
+			t.Error("checkOllama returned Unreachable for a disabled config, want a verdict that establishes no outage (never probed)")
 		}
 	})
 
@@ -73,15 +76,15 @@ func TestCheckOllama(t *testing.T) {
 		var fail string
 		check := func(b bool, p, f string) { ok, fail = b, f }
 		cfg := &config.Config{Embedding: config.EmbeddingConfig{Enabled: true, OllamaURL: url, Model: model, Dimensions: 768}}
-		alive := checkOllama(&out, cfg, check)
+		reach := checkOllama(&out, cfg, check)
 		if ok {
 			t.Error("unreachable Ollama must fail the check")
 		}
 		if want := "Ollama unreachable at " + url + " — embeddings paused"; fail != want {
 			t.Errorf("fail text = %q, want %q", fail, want)
 		}
-		if alive {
-			t.Error("checkOllama returned alive=true for an unreachable server, want false")
+		if reach != embedding.Unreachable {
+			t.Errorf("checkOllama returned %v for an unreachable server, want Unreachable", reach)
 		}
 	})
 
@@ -93,15 +96,15 @@ func TestCheckOllama(t *testing.T) {
 		var pass string
 		check := func(b bool, p, f string) { ok, pass = b, p }
 		cfg := &config.Config{Embedding: config.EmbeddingConfig{Enabled: true, OllamaURL: srv.URL, Model: model, Dimensions: 768}}
-		alive := checkOllama(&out, cfg, check)
+		reach := checkOllama(&out, cfg, check)
 		if !ok {
 			t.Error("installed model must pass the check")
 		}
 		if want := "Ollama model " + model + " installed"; pass != want {
 			t.Errorf("pass text = %q, want %q", pass, want)
 		}
-		if !alive {
-			t.Error("checkOllama returned alive=false for a reachable server, want true")
+		if reach != embedding.Reachable {
+			t.Errorf("checkOllama returned %v for a reachable server, want Reachable", reach)
 		}
 	})
 
@@ -113,15 +116,15 @@ func TestCheckOllama(t *testing.T) {
 		var fail string
 		check := func(b bool, p, f string) { ok, fail = b, f }
 		cfg := &config.Config{Embedding: config.EmbeddingConfig{Enabled: true, OllamaURL: srv.URL, Model: model, Dimensions: 768}}
-		alive := checkOllama(&out, cfg, check)
+		reach := checkOllama(&out, cfg, check)
 		if ok {
 			t.Error("missing model must fail the check")
 		}
 		if want := "Ollama model " + model + " missing — run: ollama pull " + model; fail != want {
 			t.Errorf("fail text = %q, want %q", fail, want)
 		}
-		if !alive {
-			t.Error("checkOllama returned alive=false for a reachable server with a missing model, want true (Ollama itself answered)")
+		if reach != embedding.Reachable {
+			t.Errorf("checkOllama returned %v for a reachable server with a missing model, want Reachable (Ollama itself answered)", reach)
 		}
 	})
 }
