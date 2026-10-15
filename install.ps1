@@ -680,11 +680,12 @@ function Install-Ghost {
 
     $destExe = Join-Path $Destination 'ghost.exe'
 
-    # Sweep unique asides left by earlier locked runs, best effort.
+    # Sweep unique asides left by earlier locked runs, best effort. A reparse
+    # point carrying that name is left alone: it is not a binary this installer
+    # wrote, and following it would delete whatever it points at.
     try {
-        $asideBase = [System.IO.Path]::GetFileName($destExe) + '.old-'
         Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' } |
+            Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
             ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
     }
     catch { }
@@ -747,9 +748,8 @@ function Install-Ghost {
         }
 
         try {
-            $asideBase = [System.IO.Path]::GetFileName($destExe) + '.old-'
             Get-ChildItem -Path $Destination -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' } |
+                Where-Object { $_.Name -cmatch '\Aghost\.exe\.old-[0-9]+\z' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
                 ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue }
         }
         catch { }
