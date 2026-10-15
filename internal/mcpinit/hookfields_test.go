@@ -130,7 +130,7 @@ func TestUserHookFieldsSurviveInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code") || !contractHookWired(sf, "PostToolUse", "edit", "claude-code") {
+	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code", ghostBin) || !contractHookWired(sf, "PostToolUse", "edit", "claude-code", ghostBin) {
 		t.Error("working-moment hooks were not wired")
 	}
 	if len(after["UserPromptSubmit"]) != 2 || len(after["PostToolUse"]) != 2 {

@@ -265,11 +265,11 @@ func TestAddPermissions_NullPermissionsReturnsError(t *testing.T) {
 // TestAddHook_NeverCalledWithNullHooks documents the invariant that prevents
 // the CodeRabbit-flagged panic: addHook assigns into the "hooks" map
 // unconditionally, so it must never be reached when "hooks" is null. In
-// production the only caller is reconcileHook, which is gated behind
-// findHookCommand's error return — this test proves addHook itself no
+// production the only caller is reconcileHookMatcher, which is gated behind
+// the reader's error return — this test proves addHook itself no
 // longer panics even if that gate is bypassed, since json.Unmarshal of a
 // null root leaves the local map nil and the assignment below would panic
-// without the nil-guard added alongside these findHookCommand changes.
+// without the nil-guard added alongside these reader changes.
 func TestAddHook_NullHooksDoesNotPanic(t *testing.T) {
 	path := tempSettings(t, `{"hooks":null}`)
 	sf, err := loadSettings(path)

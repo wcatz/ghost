@@ -30,10 +30,25 @@ const phaseExitsOnTerm = "trap 'exit 0' TERM; while :; do sleep 0.05; done"
 // escalation is the only thing that ends the group.
 const phaseIgnoresTerm = "trap '' TERM; while :; do sleep 0.05; done"
 
+// phaseWithSweptHarness is the script for the shape a real phase produces on a
+// deadline and the one a re-check on the phase process alone would skip: the
+// phase has no SIGTERM handler of its own to keep, so it dies the moment the
+// deadline's group signal lands and cmd.Wait returns at once, while the CLI
+// harness it spawned — same group, its own stdio so it does not hold the
+// phase's pipes — traps the signal away and survives.
+func phaseWithSweptHarness(harnessPidFile string) string {
+	return fmt.Sprintf(
+		"(trap '' TERM; while :; do sleep 0.05; done) >/dev/null 2>&1 & echo $! > %s; "+
+			"trap 'exit 0' TERM; while :; do sleep 0.05; done", harnessPidFile)
+}
+
 // newPhaseCmd builds a phase exactly the way the phase loop in runLifecycle
 // does — its own process group, SIGTERM to that group as the deadline's
 // Cancel, and a WaitDelay backstop so a test that fails fails quickly rather
-// than hanging on a child nothing kills.
+// than hanging on a child nothing kills. Stdio and ExtraFiles stay unset, so
+// the phase reads the null device and holds no pipe or extra descriptor the
+// test would have to close behind it: a phase that outlives the test is
+// holding nothing open when it does.
 func newPhaseCmd(timeout time.Duration, script string) (context.Context, context.CancelFunc, *exec.Cmd) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
@@ -113,8 +128,14 @@ func readPid(t *testing.T, path string) int {
 }
 
 // processAlive reports whether pid still exists. EPERM means it exists but is
-// not ours to signal, which still counts as alive.
+// not ours to signal, which still counts as alive. A pid of zero or below names
+// no process at all — signal 0 to zero is a question about the caller's OWN
+// group — so a caller holding no pid is told it has nothing alive rather than
+// asking the kernel about itself.
 func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
@@ -132,6 +153,89 @@ func waitGone(pid int, within time.Duration) error {
 	return fmt.Errorf("still running after %s", within)
 }
 
+// waitGroupEmpty polls until nothing is left in the phase's process group.
+// A group outlives its leader by a moment even after a group-wide SIGKILL —
+// the phase's own short `sleep` is reparented and finishes — so a one-shot
+// probe of an emptying group reports one that is still full.
+func waitGroupEmpty(cmd *exec.Cmd, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if !phaseGroupInhabited(cmd) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("still inhabited after %s", within)
+}
+
+// recordedPid reads a pid a phase wrote, or 0 when it wrote none. It is the
+// reader the cleanup path uses, where the file is as likely to be absent as
+// present: a test that aborted before the phase wrote anything still has to
+// sweep, and a helper that ended the test from inside its own teardown would
+// turn a leak into a crash.
+func recordedPid(harnessPidFile string) int {
+	raw, err := os.ReadFile(harnessPidFile)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// registerPhaseSweep ends the phase's whole process group at the end of the
+// test, whether the assertions passed or not. The production escalation is not
+// a substitute and never can be: it runs the grace period first, so a test
+// that is over before that is up — an assertion that failed, a pid file that
+// never appeared, a test this file adds later and forgets — leaves the phase
+// and its harness reparented to init and still burning CPU. The sweep is
+// therefore the test's own, not the watchdog's.
+//
+// The kill is the one the escalation makes, `killPhaseProcess` (the whole group
+// by its id), behind the same question the escalation asks first — an empty
+// group's id belongs to no run here and on a busy machine can already have been
+// reused — plus the recorded harness by its pid: the group signal is what
+// reaches a grandchild still in the group, and the pid file is the one record of
+// it that exists when the group signal landed on nothing. The liveness re-check
+// before the direct kill narrows the window in which the kernel could have
+// handed the id to an unrelated process.
+//
+// The ASSERTION is registered first so the LIFO order runs it last, after the
+// kill: a group can only be called empty by something that emptied it.
+func registerPhaseSweep(t *testing.T, cmd *exec.Cmd, harnessPidFile string) {
+	t.Helper()
+	t.Cleanup(func() {
+		// Polled rather than probed once: a process that was killed a moment
+		// ago is still a live one for as long as it takes init to reap it, and
+		// the question this answers is whether the sweep ended it, not whether
+		// the reap has landed yet.
+		if harnessPidFile != "" {
+			harness := recordedPid(harnessPidFile)
+			if err := waitGone(harness, 3*time.Second); err != nil {
+				t.Errorf("the harness (pid %d) outlived the test's sweep of the phase's group (%v)", harness, err)
+			}
+		}
+		if err := waitGroupEmpty(cmd, 3*time.Second); err != nil {
+			t.Errorf("the phase's process group was not empty when the test ended: the sweep did not empty it (%v)", err)
+		}
+	})
+	t.Cleanup(func() {
+		// Asked, not assumed, for the reason the escalation asks it: a group
+		// that is already empty has no run here behind its id, and on a busy
+		// machine that id can belong to somebody else by now. The recorded
+		// harness is killed either way, because the pid file is the one record
+		// of it that survives the group signal landing on nothing.
+		if phaseGroupInhabited(cmd) {
+			killPhaseProcess(cmd)
+		}
+		if pid := recordedPid(harnessPidFile); pid > 0 && processAlive(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+}
+
 // TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod is
 // the deterministic path: the deadline fires, the phase exits on that SIGTERM
 // inside the grace period, and the group is empty by the time the escalation
@@ -145,6 +249,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseExitsInsideTheGracePeriod(t *te
 	)
 	ctx, cancel, cmd := newPhaseCmd(timeout, phaseExitsOnTerm)
 	defer cancel()
+	registerPhaseSweep(t, cmd, "")
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
@@ -179,6 +284,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 
 	for i := 0; i < 20; i++ {
 		ctx, cancel, cmd := newPhaseCmd(time.Hour, "exit 0")
+		registerPhaseSweep(t, cmd, "")
 		if err := cmd.Start(); err != nil {
 			cancel()
 			t.Fatalf("run %d: start the phase: %v", i, err)
@@ -263,6 +369,11 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 	)
 	ctx, cancel, cmd := newPhaseCmd(timeout, phaseIgnoresTerm)
 	defer cancel()
+	// A phase that ignores SIGTERM is the one thing in this file that outlives
+	// the deadline on its own, so it is the one that must never outlive the
+	// test: an assertion above failing before the escalation's grace is up
+	// would otherwise leave the phase running forever.
+	registerPhaseSweep(t, cmd, "")
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
@@ -281,26 +392,23 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 }
 
 // TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind is the shape a real
-// phase produces on a deadline, and the one a re-check on the phase process
-// alone would skip: the phase has no SIGTERM handler, so it dies the moment the
-// deadline's group signal lands and cmd.Wait returns at once, while the CLI
-// harness it spawned — same group, its own stdio, so it does not hold the
-// phase's pipes — ignores the signal and survives. The phase being reaped is
-// not the group being empty, so the escalation must still reach the harness.
+// phase produces on a deadline: the phase takes the deadline's SIGTERM and
+// cmd.Wait returns at once, while the CLI harness it spawned — same group, its
+// own stdio, so it does not hold the phase's pipes — ignores the signal and
+// survives. The phase being reaped is not the group being empty, so the
+// escalation must still reach the harness, and the group must be empty once it
+// has.
 func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
 	const (
 		timeout = 150 * time.Millisecond
 		grace   = 250 * time.Millisecond
 	)
 	pidFile := filepath.Join(t.TempDir(), "harness.pid")
-	// The grandchild ignores SIGTERM and gets its own stdio, exactly as a CLI
-	// harness does, so it neither dies on the group signal nor holds the
-	// phase's stdout open past the phase's own exit.
-	script := fmt.Sprintf(
-		"(trap '' TERM; while :; do sleep 0.05; done) >/dev/null 2>&1 & echo $! > %s; "+
-			"trap 'exit 0' TERM; while :; do sleep 0.05; done", pidFile)
-	ctx, cancel, cmd := newPhaseCmd(timeout, script)
+	ctx, cancel, cmd := newPhaseCmd(timeout, phaseWithSweptHarness(pidFile))
 	defer cancel()
+	// Registered whatever the assertions below do: the sweep is this test's,
+	// and it runs after them.
+	registerPhaseSweep(t, cmd, pidFile)
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
@@ -323,5 +431,62 @@ func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
 	}
 	if err := waitGone(harness, 3*time.Second); err != nil {
 		t.Errorf("the harness (pid %d) survived the escalation: the phase was reaped but its group was not swept (%v)", harness, err)
+	}
+	// The GROUP, not only the harness the escalation was aimed at: a phase's
+	// short `sleep` children are in the same group, and one still running is a
+	// group the sweep did not finish.
+	if err := waitGroupEmpty(cmd, 3*time.Second); err != nil {
+		t.Errorf("the phase's group was still inhabited after the escalation swept it (%v)", err)
+	}
+}
+
+// TestThePhaseGroupIsSweptWhenTheTestAbortsBeforeTheEscalation is the leak this
+// file used to leave behind, and it is not the sweep test's alone. The
+// production escalation runs the grace period first, so anything that ends a
+// test before that is up — an assertion that failed, a pid file that never
+// appeared, a phase that took the deadline's SIGTERM while its harness ignored
+// it — leaves the harness running, reparented to init and holding every
+// descriptor the test process had. Nothing in production can end it: the
+// deadline only ever asked the group to shut down.
+//
+// So this test runs the same phase and harness with NO watchdog at all, leaves
+// the way a failed assertion leaves (the same door, on the same cleanups), and
+// asserts at the end that the sweep emptied the group.
+func TestThePhaseGroupIsSweptWhenTheTestAbortsBeforeTheEscalation(t *testing.T) {
+	const timeout = 150 * time.Millisecond
+	pidFile := filepath.Join(t.TempDir(), "harness.pid")
+	// The deadline is what ends the phase, so nothing here needs the context
+	// itself: no watchdog is launched, and `cancel` is the only half of the
+	// pair this test uses.
+	_, cancel, cmd := newPhaseCmd(timeout, phaseWithSweptHarness(pidFile))
+	defer cancel()
+	registerPhaseSweep(t, cmd, pidFile)
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the phase: %v", err)
+	}
+	harness := readPid(t, pidFile)
+	if !processAlive(harness) {
+		t.Fatal("the harness was already gone; this case is not covered")
+	}
+
+	// The test is over here: no watchdog was ever launched, so the escalation
+	// cannot run, and the deadline's SIGTERM — which `defer cancel` delivers
+	// once the body returns — ends the phase and is ignored by the harness.
+	//
+	// The subtest stands in for the failing assertion the issue describes. A
+	// failed assertion and a skip leave the test function by the same door
+	// (runtime.Goexit) and run the same cleanups, but a deliberately failing
+	// subtest would fail this test and a skipped one does not: the property
+	// under test is what the cleanups do on the way out, which both leave to
+	// identically.
+	t.Run("an assertion that ends the test before the grace period is up", func(t *testing.T) {
+		t.Skip("this half only has to leave; the sweep has to happen anyway")
+	})
+
+	// Reap the phase, or the group still holds a zombie and the sweep cannot
+	// be seen to have emptied anything.
+	if runErr := cmd.Wait(); runErr == nil {
+		t.Fatal("the phase exited on its own instead of taking the deadline's SIGTERM")
 	}
 }
