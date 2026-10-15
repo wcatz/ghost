@@ -215,8 +215,8 @@ type tagsResponse struct {
 
 // HasModel reports whether the configured model is installed in Ollama. Both
 // the configured name and each installed name are normalised to the spelling
-// Ollama resolves to — registry qualifier dropped, and a missing (or empty)
-// tag filled in as ":latest" — so a fully qualified
+// Ollama resolves to — the leading "registry.ollama.ai/" and "library/"
+// prefixes dropped, and a missing (or empty) tag filled in as ":latest" — so
 // "registry.ollama.ai/library/nomic-embed-text:v1.5" and the bare
 // "nomic-embed-text:v1.5" name the one installed model, and an untagged name
 // (or one left with a trailing colon) matches its ":latest" variant.
@@ -252,17 +252,16 @@ func (c *Client) HasModel(ctx context.Context) (bool, error) {
 }
 
 // resolvedModelName normalises a model name to the spelling Ollama resolves it
-// to before the /api/tags comparison: the registry qualifier is dropped (the
-// last path element is the name), and a name carrying no tag — including one
-// left with a trailing colon — is filled in as ":latest". It mirrors the
-// qualifier handling of ModelFamily, which documents that a fully qualified
-// name is accepted as readily as the bare one, and extends it to the tag so a
-// qualified configuration and a bare listing (or the reverse) name one model.
+// to before the /api/tags comparison: a leading "registry.ollama.ai/" and then
+// a leading "library/" are dropped, any other qualifier is kept — it names a
+// distinct model, so "hf.co/alice/m:q" and "hf.co/bob/m:q" do not collide — and
+// a name carrying no tag, including one left with a trailing colon, is filled
+// in as ":latest". It is deliberately narrower than ModelFamily, which answers
+// a different question: which task prefixes a model's weights require.
 func resolvedModelName(name string) string {
-	if i := strings.LastIndexByte(name, '/'); i >= 0 {
-		name = name[i+1:]
-	}
-	if i := strings.IndexByte(name, ':'); i >= 0 {
+	name = strings.TrimPrefix(name, "registry.ollama.ai/")
+	name = strings.TrimPrefix(name, "library/")
+	if i := strings.LastIndexByte(name, ':'); i >= 0 {
 		if i < len(name)-1 {
 			return name
 		}

@@ -46,6 +46,10 @@ func TestHasModel(t *testing.T) {
 		{"trailing colon model matches latest", "nomic-embed-text:", []string{"nomic-embed-text:latest"}, true},
 		{"bare model matches qualified installed", "nomic-embed-text:v1.5", []string{"registry.ollama.ai/library/nomic-embed-text:v1.5"}, true},
 		{"qualified model wrong tag stays unmatched", "registry.ollama.ai/library/nomic-embed-text:v1.5", []string{"nomic-embed-text:latest"}, false},
+		{"different namespaces do not match", "hf.co/alice/m:q", []string{"hf.co/bob/m:q"}, false},
+		{"a namespace is not dropped", "user/x", []string{"x"}, false},
+		{"same namespaced model matches", "hf.co/user/model:tag", []string{"hf.co/user/model:tag"}, true},
+		{"registry and library prefixes resolve to the bare name", "registry.ollama.ai/library/nomic-embed-text:latest", []string{"nomic-embed-text"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
