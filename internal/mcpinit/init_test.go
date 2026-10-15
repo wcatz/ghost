@@ -1430,6 +1430,60 @@ func TestEnsureHook_AnUnquotedOperatorEndsTheList(t *testing.T) {
 	}
 }
 
+// TestEnsureHook_APrefixSlotOfTheWrongShapeIsForeign pins the shape test on the
+// word a prefix command takes for itself. `timeout` names its command AFTER a
+// DURATION, `taskset` after a mask or list, and `chrt` after a priority, so a
+// word of any other shape is the command itself: `taskset -c 0,1 echo /opt/bin
+// /ghost …`, `timeout -k 5 echo …` and `chrt -f echo …` run echo with ghost as
+// its argument, and crediting them would report the event as already configured
+// while the hook never runs — #1358 again, one word deeper. The wrong shape is
+// the whole test for these rows: the option before each one carries its own
+// operand, so exactly one plain word remains and only a shape-blind slot could
+// accept it. `timeout 5 echo …` is foreign by the slot COUNT as well, since a
+// duration and a command word is one word too many.
+func TestEnsureHook_APrefixSlotOfTheWrongShapeIsForeign(t *testing.T) {
+	const ghostBin = "/usr/local/bin/ghost"
+	desired := shellQuote(ghostBin) + " hook stop --source claude-code"
+
+	for _, command := range []string{
+		"taskset -c 0,1 echo /opt/bin/ghost hook stop --source claude-code",
+		"taskset nothex /opt/bin/ghost hook stop --source claude-code",
+		"timeout 5 echo /opt/bin/ghost hook stop --source claude-code",
+		"timeout -k 5 echo /opt/bin/ghost hook stop --source claude-code",
+		"chrt -f echo /opt/bin/ghost hook stop --source claude-code",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if _, ok := ghostHookTail(command, "stop", ghostBin); ok {
+				t.Error("ghostHookTail credited a ghost binary behind a prefix slot of the wrong shape")
+			}
+
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
+				t.Fatalf("ensureStopHook: %v", err)
+			}
+			if !strings.Contains(out.String(), "added") {
+				t.Errorf("a foreign command was reported as already configured:\n%s", out.String())
+			}
+			cmds, err := sf.hookCommands("Stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cmds) != 2 || cmds[0] != command || cmds[1] != desired {
+				t.Errorf("event = %q, want the foreign command untouched and ghost's own hook beside it", cmds)
+			}
+		})
+	}
+}
+
 // TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost pins the prefix
 // walk against a PATH-QUALIFIED wrapper: `/usr/bin/env ghost hook stop …` and
 // `/usr/bin/sudo ghost hook stop …` run ghost just as the bare words do, so the
@@ -1512,6 +1566,14 @@ func TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised(t *testing.T) {
 		{"taskset 0x3 " + ghostBin + " hook stop --source claude-code", true},
 		{"taskset -c 0,1 " + ghostBin + " hook stop --source claude-code", true},
 		{"cd /d\n" + ghostBin + " hook stop --source claude-code", true},
+		{"sudo --user alice " + ghostBin + " hook stop --source claude-code", true},
+		{"env --unset FOO " + ghostBin + " hook stop --source claude-code", true},
+		{"timeout --signal TERM 5 " + ghostBin + " hook stop --source claude-code", true},
+		{"timeout --kill-after 5s 10 " + ghostBin + " hook stop --source claude-code", true},
+		{"nice --adjustment 10 " + ghostBin + " hook stop --source claude-code", true},
+		{"stdbuf --output L " + ghostBin + " hook stop --source claude-code", true},
+		{"ionice --class 2 --classdata 4 " + ghostBin + " hook stop --source claude-code", true},
+		{"sudo --user=alice " + ghostBin + " hook stop --source claude-code", true},
 		{"(cd /d; " + ghostBin + " hook stop --source claude-code)", false},
 		{"{ " + ghostBin + " hook stop --source claude-code; }", true},
 		{"X=1 timeout -k 5 10 " + ghostBin + " hook stop --source claude-code", true},

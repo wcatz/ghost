@@ -833,30 +833,150 @@ var prefixPositionalSlots = map[string]int{
 }
 
 // prefixOptionOperands lists the options of the prefix commands that consume a
-// separate following word as their operand (`timeout -k 5 10 ghost …`,
-// `stdbuf -o L ghost …`, `ionice -c 2 -n 4 ghost …`, `taskset -c 0,1 ghost …`,
-// `doas -u user ghost …`). It is keyed by command rather than shared, because
-// the same spelling is an operand for one of them and nothing at all for
-// another: `env`'s and `sudo`'s `-i` and `sudo`'s `-e` take none, so a shared
-// table would read `sudo -e ghost …`'s ghost as a flag operand and then treat
-// the real command as somebody else's.
+// separate following word as their operand, in both their short and long
+// spellings (`timeout -k 5 10 ghost …`, `sudo --user alice ghost …`,
+// `env --unset FOO ghost …`, `stdbuf -o L ghost …`, `ionice -c 2 -n 4 ghost …`,
+// `taskset -c 0,1 ghost …`, `doas -u user ghost …`). It is keyed by command
+// rather than shared, because the same spelling is an operand for one of them
+// and nothing at all for another: `env`'s and `sudo`'s `-i` and `sudo`'s `-e`
+// take none, so a shared table would read `sudo -e ghost …`'s ghost as a flag
+// operand and then treat the real command as somebody else's. An option written
+// `--opt=value` is SELF-CONTAINED — it carries its own operand inside the token,
+// so only the exact `--opt` spelling is listed here and isLikelyOption walks the
+// `--opt=value` token as a single word.
 var prefixOptionOperands = map[string]map[string]bool{
-	"timeout": {"-k": true, "-s": true, "--signal": true},
-	"stdbuf":  {"-i": true, "-o": true, "-e": true},
-	"ionice":  {"-c": true, "-n": true, "--class": true, "--class-data": true, "-p": true, "--pid": true},
+	"sudo": {
+		"-u": true, "--user": true, "-g": true, "--group": true,
+		"-U": true, "--other-user": true, "-r": true, "--role": true,
+		"-p": true, "--prompt": true, "-C": true, "--close-from": true,
+		"-c": true, "--login-class": true, "-t": true, "--type": true,
+		"-h": true, "--host": true, "-R": true, "--chroot": true,
+		"-D": true, "--chdir": true, "-T": true, "--command-timeout": true,
+	},
+	"env": {
+		"-u": true, "--unset": true, "-C": true, "--chdir": true,
+		"-S": true, "--split-string": true,
+	},
+	"nice":    {"-n": true, "--adjustment": true},
+	"timeout": {"-k": true, "--kill-after": true, "-s": true, "--signal": true},
+	"stdbuf": {
+		"-i": true, "--input": true, "-o": true, "--output": true,
+		"-e": true, "--error": true,
+	},
+	"ionice": {
+		"-c": true, "--class": true, "-n": true, "--classdata": true,
+		"-p": true, "--pid": true,
+	},
 	"taskset": {"-c": true, "--cpu-list": true, "-p": true, "--pid": true},
 	"doas":    {"-u": true, "--user": true},
+}
+
+// prefixSlotWord reports whether tok is the plain word a prefix command takes
+// for itself before the command it runs, judged by SHAPE and not by position:
+// without the shape test any word would qualify as the slot and the command
+// itself would be swallowed, so `taskset -c 0,1 echo ghost hook stop …` (echo
+// runs) would credit ghost while `taskset 0x3 ghost …` must. timeout's slot is
+// a DURATION, taskset's a CPU mask or list, and chrt's a priority; a command
+// with no slot of its own has no word that qualifies, so a plain word there is
+// the command and belongs to somebody else.
+func prefixSlotWord(base, tok string) bool {
+	switch base {
+	case "timeout":
+		return isDurationWord(tok)
+	case "taskset":
+		return isCPUMaskWord(tok)
+	case "chrt":
+		return isPriorityWord(tok)
+	}
+	return false
+}
+
+// isDurationWord reports whether tok is a timeout DURATION: decimal digits with
+// an optional fraction and an optional unit suffix (`5`, `0.5`, `10s`, `1.5m`,
+// `2h`, `1d`), which is the form timeout accepts before the command it runs.
+func isDurationWord(tok string) bool {
+	i, digits := 0, 0
+	for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(tok) && tok[i] == '.' {
+		i++
+		for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return false
+	}
+	if i == len(tok) {
+		return true
+	}
+	return i == len(tok)-1 && strings.IndexByte("smhd", tok[i]) >= 0
+}
+
+// isCPUMaskWord reports whether tok is a taskset CPU mask, optionally
+// `0x`-prefixed, or a list of them separated by `,` and ranged with `-`
+// (`0x3`, `3f`, `0,1`, `0-3`, `0,2-4`). A separator must sit between two
+// hexadecimal digits, so `echo` and `-c` are not masks.
+func isCPUMaskWord(tok string) bool {
+	s := tok
+	if len(s) > 2 && (s[:2] == "0x" || s[:2] == "0X") {
+		s = s[2:]
+	}
+	if s == "" {
+		return false
+	}
+	digits := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case isHexDigit(c):
+			digits++
+		case c == ',' || c == '-':
+			if i == 0 || i == len(s)-1 || !isHexDigit(s[i-1]) || !isHexDigit(s[i+1]) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+// isPriorityWord reports whether tok is a chrt priority: a plain decimal number
+// (`chrt -f 10 ghost …`).
+func isPriorityWord(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] < '0' || tok[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isHexDigit reports whether c is one of the hexadecimal digits a taskset mask
+// is written with.
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // prefixRegionBefore reports whether the words between the nearest transparent
 // prefix command to the left of idx and idx itself are that command's own — its
 // options with their operands, its assignment words (`timeout 5 X=1 ghost …`)
-// and at most prefixPositionalSlots plain words — and returns the index the
+// and at most prefixPositionalSlots plain words, each of which must have the
+// SHAPE that command's slot takes (prefixSlotWord) — and returns the index the
 // walk should continue from: the word left of that command. It carries the
 // shapes whose own words sit between the command and the invocation it runs
 // (`timeout -k 5 10 ghost …`), which the plain walk cannot classify, and refuses
-// a plain word none of them owns (`echo 5 ghost …`), because there is no prefix
-// command to own it and the ghost binary is then an argument of echo.
+// a plain word none of them owns: a command with no slot (`echo 5 ghost …`
+// leaves the 5 to echo) or a word of the wrong shape (`taskset -c 0,1 echo
+// ghost …` leaves ghost to echo), because the ghost binary is then that
+// command's argument.
 func prefixRegionBefore(tokens []string, idx int) (int, bool) {
 	head, base := -1, ""
 	for j := idx; j >= 0; j-- {
@@ -883,6 +1003,9 @@ func prefixRegionBefore(tokens []string, idx int) (int, bool) {
 			j++
 		case isLikelyOption(tok):
 		default:
+			if !prefixSlotWord(base, tok) {
+				return 0, false
+			}
 			positional++
 		}
 	}
