@@ -349,6 +349,32 @@ func TestStatus_WrappedGhostHookIsWired(t *testing.T) {
 	}
 }
 
+// TestStatus_SubshellWrappedGhostHookIsWired: a hook written as a subshell that
+// ends right after the --source value is ghost's own, so status reports it
+// configured, as init does by leaving it alone.
+func TestStatus_SubshellWrappedGhostHookIsWired(t *testing.T) {
+	statusEnv(t)
+	settingsDir := filepath.Join(os.Getenv("HOME"), ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "(cd /d; /opt/ghost/bin/ghost hook stop --source claude-code)"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ Stop hook configured") {
+		t.Errorf("a subshell wrapper that runs ghost must read as configured, got:\n%s", out.String())
+	}
+}
+
 // TestStatus_ReportsInaccessibleDatabase verifies that a database which cannot
 // be stat'd for a reason other than absence (e.g. a permission error) is
 // surfaced as a failed check instead of being reported as a fresh install.

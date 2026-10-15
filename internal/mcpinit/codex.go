@@ -1384,18 +1384,21 @@ func marshalCodexJSON(v any) string {
 
 // codexIsGhostHookAction reports whether cmd runs ghost's hook for this event:
 // the same ownership rule the Claude installer applies (ghostHookTail) — a
-// ghost-binary token, the one this run bakes under whatever name it carries or
-// a "ghost" basename under any path and any quoting, immediately followed by
-// that event's `hook <eventToken>` tail. Every token is read with the quoting
-// splitHookCommand applies to the leading one, and a quoted argument is read
-// inside only behind the command-list gate, so a hand-edited WRAPPER counts as
-// ghost's own: `env X=1 '<bin>' hook session-start`, `cd d && '<bin>' hook
-// stop`, `sh -c "'<bin>' hook …"` all invoke ghost, and a second rule beside
-// them would fire the hook twice per session. Only such an action is ghost's
-// to count and to prune; whether it is also ghost's to REWRITE in place is
-// codexLeadingGhostHookAction's narrower question. A command that names ghost
-// only inside another tool's argument, or runs some other binary or some other
-// ghost subcommand, belongs to the user and is left alone.
+// ghost-binary token in COMMAND position, the one this run bakes under whatever
+// name it carries or a "ghost" basename under any path and any quoting,
+// immediately followed by that event's `hook <eventToken>` tail. Every token is
+// read with the quoting splitHookCommand applies to the leading one, and a
+// quoted argument is read inside only behind the command-list gate, so a
+// hand-edited WRAPPER counts as ghost's own: `env X=1 '<bin>' hook
+// session-start`, `cd d && '<bin>' hook stop`, `sh -c "'<bin>' hook …"` all
+// invoke ghost, and a second rule beside them would fire the hook twice per
+// session. A ghost binary that is only an ARGUMENT of another command — inside a
+// quoted argument, or bare in argument position like `echo /opt/bin/ghost hook
+// stop …`, which runs echo — is not ghost's. Only such an action is ghost's to
+// count and to prune; whether it is also ghost's to REWRITE in place is
+// codexLeadingGhostHookAction's narrower question. A command that runs some
+// other binary or some other ghost subcommand belongs to the user and is left
+// alone.
 func codexIsGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	_, ok := ghostHookTail(cmd, eventToken, ghostBin)
 	return ok
