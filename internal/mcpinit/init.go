@@ -812,6 +812,29 @@ var transparentPrefixes = map[string]bool{
 	"sudo": true, "nice": true, "command": true, "env": true,
 }
 
+// prefixOptionTakesOperand names the short options, common to the transparent
+// prefix commands above, that consume a separate following word as an operand
+// (`sudo -u user`, `nice -n 10`, `env -u FOO`, `sudo -g group`). Options
+// without operands (`-i`, `-E`, `-S`) are walked as single tokens by
+// isLikelyOption and do NOT need an entry here.
+var prefixOptionTakesOperand = map[string]bool{
+	"-u": true, "-g": true, "-U": true, "-r": true, "-p": true, "-n": true,
+	"-C": true, "-S": true, "-o": true, "-O": true,
+}
+
+// shellOptionTakesOperand is the same question for shell flags (`bash -o
+// posix` → `posix`).
+var shellOptionTakesOperand = map[string]bool{
+	"-o": true, "--option": true, "-O": true,
+}
+
+// isLikelyOption reports whether a token is a command option: a single-dash
+// (or long-dash) word, never a flagless command word. Used both for shells and
+// for the transparent prefix commands.
+func isLikelyOption(w string) bool {
+	return len(w) > 1 && strings.HasPrefix(w, "-")
+}
+
 // shellInterpreters name the commands that run a later argument as a command
 // list, and carriesCommandArgument reports whether the words before a token
 // say the token is one: a shell's own command-list flag — a single-dash flag
@@ -837,9 +860,35 @@ func carriesCommandArgument(tokens []string, i int) bool {
 	}
 	prev := tokens[i-1]
 	if isShellCommandListFlag(prev) {
-		return i > 1 && shellInterpreters[hookCommandBase(tokens[i-2])]
+		return shellBehind(tokens, i)
 	}
 	return shellInterpreters[hookCommandBase(prev)]
+}
+
+// shellBehind reports whether a known shell name precedes its own command-list
+// flag, even when the shell carries its own options before that flag
+// (`sh -e -c "…"`, `bash -o posix -c "…"`, `bash --posix -c "…"`). Without
+// this walk the options cancel the recognition and init appends a second
+// entry beside a wrapper that already runs ghost (#1339 reviewer finding).
+func shellBehind(tokens []string, i int) bool {
+	idx := i - 2
+	for idx >= 0 {
+		tok := tokens[idx]
+		if shellInterpreters[hookCommandBase(tok)] {
+			return true
+		}
+		if isLikelyOption(tok) {
+			idx--
+			continue
+		}
+		// operand of an option-taking flag sitting immediately to the left
+		if idx > 0 && shellOptionTakesOperand[tokens[idx-1]] {
+			idx -= 2
+			continue
+		}
+		return false
+	}
+	return false
 }
 
 // isShellCommandListFlag reports whether word is a single-dash flag ending in
@@ -892,15 +941,32 @@ func ghostTailOver(tokens []string, eventToken, ghostBin string, depth int) ([]s
 // ghost …`) — so the scan walks back until something else appears and `echo
 // sudo ghost hook stop` still runs `echo` (#1339).
 func startsCommand(tokens []string, i int) bool {
-	for j := i - 1; j >= 0; j-- {
-		prev := tokens[j]
-		if shellConnectives[prev] {
+	idx := i - 1
+	for idx >= 0 {
+		tok := tokens[idx]
+		if shellConnectives[tok] {
 			return true
 		}
-		if isAssignmentWord(prev) || transparentPrefixes[prev] {
+		if isAssignmentWord(tok) {
+			idx--
 			continue
 		}
-		if prev == "-i" && j > 0 && tokens[j-1] == "env" {
+		if transparentPrefixes[tok] {
+			idx--
+			continue
+		}
+		if tok == "-i" && idx > 0 && tokens[idx-1] == "env" {
+			idx--
+			continue
+		}
+		if isLikelyOption(tok) {
+			idx--
+			continue
+		}
+		// operand of an option-taking short flag sitting immediately to the
+		// left (e.g. `sudo -u user ghost`: `user` at idx, `-u` left)
+		if idx > 0 && prefixOptionTakesOperand[tokens[idx-1]] {
+			idx -= 2
 			continue
 		}
 		return false

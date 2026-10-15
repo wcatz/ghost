@@ -1154,6 +1154,9 @@ func TestEnsureHook_AnimatesAQuotedInvocationAndAFailSoftCommand(t *testing.T) {
 	}{
 		{"sh-c-quoted", shell + ` -c "` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"bash-qlc", `bash -lc "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"sh-e", shell + ` -e -c "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"bash-o-posix", `bash -o posix -c "` + ghostBin + ` hook stop --source claude-code"`, true},
+		{"bash-posix", `bash --posix -c "` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-exec-assignment", shell + ` -c "exec ` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-env-assignment", shell + ` -c "env X=1 ` + ghostBin + ` hook stop --source claude-code"`, true},
 		{"sh-c-joined-directory", shell + ` -c "cd /d && exec ` + ghostBin + ` hook stop --source claude-code"`, true},
@@ -1302,9 +1305,12 @@ func TestEnsureHook_RecognisesTransparentPrefixesInsideAShellScript(t *testing.T
 		{"env-i-assignment", "env -i X=1"},
 		{"env-assignment", "env X=1"},
 		{"nice", "nice"},
+		{"nice-n", "nice -n 10"},
 		{"command", "command"},
 		{"exec", "exec"},
 		{"sudo-env-assignment", "sudo env X=1"},
+		{"sudo-u", "sudo -u user"},
+		{"env-u", "env -u FOO"},
 		{"env-then-nice", "env X=1 nice"},
 	} {
 		t.Run("recognised:"+tc.label, func(t *testing.T) {
@@ -1346,6 +1352,7 @@ func TestEnsureHook_RecognisesTransparentPrefixesInsideAShellScript(t *testing.T
 		{"othertool-sudo", "othertool sudo"},
 		{"othertool-env-assignment", "othertool env X=1"},
 		{"othertool-i", "othertool -i"},
+		{"othertool-n", "othertool -n 10"},
 		{"assignment-then-othertool", "X=1 othertool"},
 	} {
 		t.Run("foreign:"+tc.label, func(t *testing.T) {
