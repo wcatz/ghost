@@ -1467,9 +1467,10 @@ func codexActionCommand(obj codexObject) (string, bool) {
 // decodeCodexHooksConfig parses the parts of a hooks.json that both the merge
 // and the pre-flight validation must agree on: the document is a JSON object,
 // a "hooks" member is an object (an explicit null is refused), and each managed
-// event's value is an array. Sharing this decode is what keeps the pre-flight
-// honest — a document it accepts is a document the merge can act on — and keeps
-// both callers refusing the same shapes with the same parse errors.
+// event's value is an array (an explicit null is refused the same way, one
+// level down). Sharing this decode is what keeps the pre-flight honest — a
+// document it accepts is a document the merge can act on — and keeps both
+// callers refusing the same shapes with the same parse errors.
 func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
 	if err := json.Unmarshal(existing, &top); err != nil {
 		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
@@ -1492,6 +1493,16 @@ func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMes
 
 	for _, ev := range codexLifecycleEvents {
 		if raw, ok := events[ev.Key]; ok {
+			// An explicit null on a managed event is the same
+			// structurally-invalid-but-present data as a null "hooks" above, one
+			// level down: json.Unmarshal decodes it into a nil []json.RawMessage
+			// with no error, and the merge would then append ghost's canonical
+			// rule as if the event were empty, silently replacing the user's
+			// declaration. Refuse it the same way, naming the file and the event
+			// the way the Claude settings path renders `hooks[%q] is null`.
+			if isJSONNull(raw) {
+				return nil, nil, fmt.Errorf("hooks.json: hooks[%q] is null", ev.Key)
+			}
 			var rules []json.RawMessage
 			if err := json.Unmarshal(raw, &rules); err != nil {
 				return nil, nil, fmt.Errorf("parse hooks.json %s rules: %w", ev.Key, err)
