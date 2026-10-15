@@ -285,7 +285,9 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     -- replace's reuse branch survived the undo the snapshot exists to
     -- provide. The restore honours the marker exactly as scope's is honoured: 1
     -- means "trust the tier below, and re-derive its expiry through
-    -- sessionExpiry as a save does", 0 means "this snapshot cannot speak
+    -- sessionExpiry as a save does" (except a row whose tier never moved and
+    -- already carries an expiry, which keeps it so a second restore changes
+    -- nothing), 0 means "this snapshot cannot speak
     -- about tiers" (a row from before the column, or an unverified hand
     -- backfill), so the live row keeps its own tier and the restore reports
     -- the count rather than assuming an undo that was incomplete. Defaults to
