@@ -85,6 +85,7 @@ internal/memory/                    SQLite store, FTS5, vectors, links, schema
 internal/obsidian/                  One-way Markdown vault exporter/sync
 internal/portable/                  Portable JSONL artifact: read (export) and
                                     write (import) of the portable record format
+internal/procgroup/                 Shared process-group set/signal/kill helpers
 internal/procstat/                  Cross-platform process liveness/start time
 internal/provider/                  MemoryStore and LLMProvider interfaces
 internal/reflection/                Tiered memory consolidation

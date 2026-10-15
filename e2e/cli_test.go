@@ -1707,11 +1707,12 @@ func TestCLIExportImport(t *testing.T) {
 	// The _global PROJECT is exported — it is a project like any other — but
 	// Ghost's own builtin seeds are deliberately excluded from the artifact:
 	// their ids are per-install, so an imported copy could never reconcile and
-	// would leave a permanent duplicate of Ghost's shipped rules. The exclusion
-	// is on (project AND source), so a user's OWN _global memory is still the
-	// only copy of itself and is exported normally. Both halves are asserted,
-	// because "the seeds are gone" and "the user lost their globals" are
-	// opposite failures of the same filter.
+	// would leave a permanent duplicate of Ghost's shipped rules.
+	// The exclusion is on the seed's own content, so a user's OWN _global memory
+	// is still the only copy of itself and is exported normally — even one whose
+	// source is `builtin`, which `ghost import --trust-provenance` stores
+	// verbatim. Both halves are asserted, because "the seeds are gone" and "the
+	// user lost their globals" are opposite failures of the same filter.
 	if n := countRecordsFor(records, "memory", "_global"); n != 0 {
 		t.Fatalf("the artifact holds %d _global memories; Ghost's builtin seeds must not be exported", n)
 	}

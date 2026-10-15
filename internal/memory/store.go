@@ -378,6 +378,24 @@ var defaultSeedMemories = []seedGlobalMemory{
 	},
 }
 
+// shippedSeedContents returns the content of every memory Ghost ships and
+// writes itself on open.
+//
+// It is how a reader recognises one of Ghost's own seeds without asking the
+// store: `SeedGlobalMemories` writes each seed under a per-install random id, so
+// the id is no help, and the content sentence is what actually identifies the
+// row. The portable export uses it to leave the seeds out of an artifact, and
+// keying that exclusion on the CONTENT rather than on `source = 'builtin'` is
+// what keeps a user's own row — which may legally carry that source — in the
+// artifact.
+func shippedSeedContents() []string {
+	out := make([]string, 0, len(defaultSeedMemories))
+	for _, seed := range defaultSeedMemories {
+		out = append(out, seed.Content)
+	}
+	return out
+}
+
 // SeedGlobalMemories ensures the _global project exists and inserts any
 // missing seed memories. Seeds are pinned and source='builtin' so they
 // survive consolidation without being presented as user-authored. Idempotent —
