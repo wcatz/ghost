@@ -943,6 +943,9 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 // The ordinary case rides in the same test on purpose: RefusalArg is exactly %q
 // for a value the guard does not recognise, so a renderer that withheld
 // everything would keep the token out AND stop naming the project it merged.
+// It also pins what the change did to the ordinary output: the self-merge
+// refusal already quoted the id with %q and is byte-identical, while the
+// `Merging …` line printed each id bare and now quotes it.
 func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
 	const key = "AKIAIOSFODNN7EXAMPLE" // an AWS access key ID, per internal/secret
 	newStore := func(t *testing.T) *memory.Store {
@@ -956,6 +959,9 @@ func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
 		s := memory.NewStore(db, logger)
 		if err := s.EnsureProject(context.Background(), key, "/tmp/tok", "token-name"); err != nil {
 			t.Fatalf("EnsureProject token: %v", err)
+		}
+		if err := s.EnsureProject(context.Background(), "old-proj", "/tmp/old", "old-name"); err != nil {
+			t.Fatalf("EnsureProject old: %v", err)
 		}
 		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
 			t.Fatalf("EnsureProject new: %v", err)
@@ -997,6 +1003,19 @@ func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
 		}
 		if !strings.Contains(line, `"new-proj"`) {
 			t.Errorf("the merging line stopped naming the survivor:\n%s", line)
+		}
+	})
+
+	t.Run("the merging line quotes an ordinary id, where it used to print it bare", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		if err := runProjectMergeCore(context.Background(), store, &out, "old-name", "new-name"); err != nil {
+			t.Fatalf("runProjectMergeCore: %v", err)
+		}
+		want := "Merging \"old-name\" (\"old-proj\") into \"new-name\" (\"new-proj\")\n" +
+			"merged: all records from \"old-name\" now belong to \"new-name\"\n"
+		if got := out.String(); got != want {
+			t.Errorf("output = %q, want %q", got, want)
 		}
 	})
 
