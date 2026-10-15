@@ -210,6 +210,18 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 		}
 
 		result, err := tier.Consolidate(ctx, input)
+		// A cancelled caller must not fall through to the next tier. With a
+		// cancellable root context (a maintenance command's SIGINT/SIGTERM
+		// handling) this is the ordinary case rather than a corner: the LLM
+		// tier fails with context.Canceled when the command is asked to stop,
+		// and reading that as a tier failure would run the mechanical tier and,
+		// with --apply, rewrite the corpus for a run the operator stopped. It
+		// is checked after EVERY tier, so a mechanical tier that never consults
+		// the context cannot hand a result to a caller that has already given
+		// up either.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ReflectionResult{}, ctxErr
+		}
 		if err != nil {
 			// safeTierError, not err: a reader refusal quotes the rejected
 			// operation line back, and for a merge or a rewrite that line ends in
