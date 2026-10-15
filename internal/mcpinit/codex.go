@@ -1297,15 +1297,35 @@ func marshalCodexJSON(v any) string {
 	return string(data) + "\n"
 }
 
-// codexIsGhostHookAction reports whether cmd is the command ghost itself
-// renders for this event: the binary it bakes — any name, any path, any
-// quoting — running `hook <eventToken>`. The basename rule also recognises a
-// binary named "ghost" (or its native .exe / .bat/.cmd launcher forms) under
-// any path, so an install made by a differently named binary still repairs an
-// older ghost-named rule in place. Only such an action is ghost's to rewrite.
-// A rule running some other binary, some other ghost subcommand, or ghost's
-// hook for a different event, belongs to the user and is left alone.
+// codexIsGhostHookAction reports whether cmd runs ghost's hook for this event:
+// the same ownership rule the Claude installer applies (ghostHookTail) — a
+// ghost-binary token, the one this run bakes under whatever name it carries or
+// a "ghost" basename under any path and any quoting, immediately followed by
+// that event's `hook <eventToken>` tail. Every token is read with the quoting
+// splitHookCommand applies to the leading one, and a quoted argument is read
+// inside only behind the command-list gate, so a hand-edited WRAPPER counts as
+// ghost's own: `env X=1 '<bin>' hook session-start`, `cd d && '<bin>' hook
+// stop`, `sh -c "'<bin>' hook …"` all invoke ghost, and a second rule beside
+// them would fire the hook twice per session. Only such an action is ghost's
+// to count and to prune; whether it is also ghost's to REWRITE in place is
+// codexLeadingGhostHookAction's narrower question. A command that names ghost
+// only inside another tool's argument, or runs some other binary or some other
+// ghost subcommand, belongs to the user and is left alone.
 func codexIsGhostHookAction(cmd, eventToken, ghostBin string) bool {
+	_, ok := ghostHookTail(cmd, eventToken, ghostBin)
+	return ok
+}
+
+// codexLeadingGhostHookAction reports whether cmd is the unwrapped action
+// ghost renders for this event: the binary it bakes — any name, any path, any
+// quoting — in the LEADING position with the `hook <eventToken>` tail right
+// after it. The basename rule also recognises a binary named "ghost" (or its
+// native .exe / .bat/.cmd launcher forms) under any path, so an install made by
+// a differently named binary still repairs an older ghost-named action in
+// place. Only such an action is ghost's to rewrite; a wrapped invocation is
+// recognised and counted by codexIsGhostHookAction but keeps its prefix, the
+// way the Claude side's isStaleGhostHookCommand bound keeps its wrapper.
+func codexLeadingGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	bin, rest, ok := splitHookCommand(cmd)
 	if !ok || (!isGhostBinaryName(bin) && !isBakedGhostBinary(bin, ghostBin)) {
 		return false
@@ -1566,9 +1586,13 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 // in an event's rule list and appends ghost's canonical rule when it sits
 // nowhere. What ghost renders for that action is the whole of it — command,
 // type and timeout — so a stale path, a hand-edited type or a budget from
-// another build are all repaired. Every other rule is carried across byte for
-// byte, every other key of a repaired action stays where it sits, and a rule
-// that is repaired is re-encoded in the key order it was read in.
+// another build are all repaired. An action is ghost's own when it runs a
+// ghost binary before that event's hook tail, a wrapped invocation included
+// (codexIsGhostHookAction, the rule the Claude side shares), but only a
+// leading-token action is rewritten — a wrapper keeps its prefix and its
+// path byte for byte. Every other rule is carried across byte for byte, every
+// other key of a repaired action stays where it sits, and a rule that is
+// repaired is re-encoded in the key order it was read in.
 func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
 	desired := renderCodexHookAction(eventToken, ghostBin)
 	// No +1: capacity arithmetic over an unbounded rule count reads as a
@@ -1604,6 +1628,15 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 			}
 			if wired {
 				dropped++
+				continue
+			}
+			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
+				// A wrapper that runs ghost is ghost's to COUNT — no second
+				// rule is appended beside it — but not to rewrite: the prefix
+				// and the path inside it are the user's, exactly as the
+				// Claude side leaves a wrapped hook untouched.
+				kept = append(kept, action)
+				wired = true
 				continue
 			}
 			fresh, err := json.Marshal(desired.Command)
@@ -1758,11 +1791,16 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 
 // codexContractHookWired is the codex analog of contractHookWired: it walks
 // codex's OWN hooks.json rules (not Claude's settings.json) and reports
-// whether any command invokes `hook <eventToken>` with an exact --source
-// codex token, accepting both "--source X" and "--source=X" flag forms.
-// Token-based, not substring-based — a lookalike like "--source codex-extra"
-// would fail hostevent.Parse at runtime, so it must never read as wired.
-func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource string) bool {
+// whether any command RUNS GHOST and invokes `hook <eventToken>` with an
+// exact --source codex token, accepting both "--source X" and "--source=X"
+// flag forms. Token-based, not substring-based — a lookalike like "--source
+// codex-extra" would fail hostevent.Parse at runtime, so it must never read as
+// wired. Ownership is the same rule the merge applies (ghostHookTail), so the
+// diagnostic and the merge answer the same question about the same file: a
+// hand-edited wrapper that does run ghost reads as wired, and a command that
+// merely ends in the ghost tail — another tool's hook, or a ghost name inside
+// its quoted argument — never does.
+func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, ghostBin string) bool {
 	for _, rule := range rules {
 		var parsed struct {
 			Hooks []struct {
@@ -1773,19 +1811,15 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource stri
 			continue
 		}
 		for _, action := range parsed.Hooks {
-			_, rest, ok := splitHookCommand(action.Command)
+			tail, ok := ghostHookTail(action.Command, eventToken, ghostBin)
 			if !ok {
 				continue
 			}
-			fields := strings.Fields(rest)
-			if len(fields) < 2 || fields[0] != "hook" || fields[1] != eventToken {
-				continue
-			}
-			for i := 2; i < len(fields); i++ {
-				if fields[i] == "--source" && i+1 < len(fields) && fields[i+1] == wantSource {
+			for i := 0; i < len(tail); i++ {
+				if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == wantSource {
 					return true
 				}
-				if strings.HasPrefix(fields[i], "--source=") && strings.TrimPrefix(fields[i], "--source=") == wantSource {
+				if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == wantSource {
 					return true
 				}
 			}
@@ -1972,7 +2006,7 @@ func StatusCodex(w io.Writer) (bool, error) {
 	} else {
 		allWired := true
 		for _, ev := range codexLifecycleEvents {
-			wired := codexContractHookWired(events[ev.Key], ev.EventToken, string(hostevent.SourceCodex))
+			wired := codexContractHookWired(events[ev.Key], ev.EventToken, string(hostevent.SourceCodex), ghostBin)
 			allWired = allWired && wired
 			check(wired,
 				ev.Key+" hook configured",
