@@ -362,7 +362,7 @@ func ReportStaleIntegrations(w io.Writer) {
 			if rules, rerr := loadCodexHooksRules(); rerr == nil {
 				wired = true
 				for _, ev := range codexLifecycleEvents {
-					if !codexContractHookWired(rules[ev.Key], ev.EventToken, "codex") {
+					if !codexContractHookWired(rules[ev.Key], ev.EventToken, "codex", bin) {
 						wired = false
 						break
 					}
