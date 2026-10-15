@@ -42,6 +42,17 @@ type PortableProject struct {
 //     keyed by the content hash, plus the negative audit evidence the verdict
 //     was judged with when there was any (#880). Ghost recomputes it, and a
 //     stale one would mark a memory it has never classified as reviewed.
+//   - memory_history. The change log is not a derived value, so nothing
+//     rebuilds it: an imported memory starts a fresh one, holding only the
+//     single `import` row ImportMemory writes in the same transaction as the
+//     insert, and `ghost history` on a restored memory shows just that row.
+//     Carrying the versions would be a format change of its own; `ghost
+//     backup` is the copy that keeps them.
+//   - memory_flags. An agent's append-only `wrong`/`stale` claim about a
+//     memory is not here either, and nothing recomputes an objection somebody
+//     made: a restored memory carries no flags, so the resolve and reflect
+//     passes lose the count they were handed. That is a format change of its
+//     own again, and `ghost backup` is the copy that keeps them.
 //
 // Every other column is here, including the ones Memory does not expose:
 // access_count, last_accessed, the validity triple (valid_from, valid_until,
@@ -302,11 +313,16 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 	// open — it writes exactly these rows by content — so a restored store ends up
 	// with one copy, written by Ghost, not two.
 	//
-	// The exclusion is on the seed (project AND source), not on the project: a
-	// user's own memory filed under _global is the only copy of itself and has no
-	// other way in.
-	const seedExclusion = ` AND NOT (project_id = '_global' AND source = 'builtin')`
+	// The exclusion is on the seed's CONTENT, the way SeedGlobalMemories
+	// recognises its own rows — a row in the reserved global project whose content
+	// is one of the shipped sentences, shippedSeedContents — and never on its
+	// source. `builtin` is a legal memories.source for a user's own row (`ghost
+	// import --trust-provenance` stores an artifact's source verbatim), and such a
+	// row is the only copy of itself: an exclusion written as project AND source
+	// dropped it from every artifact while the export still reported success and
+	// exited 0.
 	var args []any
+	var where string
 	if len(projectIDs) > 0 {
 		// One "?" per id and the ids themselves only ever in args: the query
 		// text is assembled from placeholders alone, never from a value.
@@ -315,10 +331,22 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		query += " WHERE project_id IN (" + strings.Join(placeholders, ",") + ")" + seedExclusion
+		where = " WHERE project_id IN (" + strings.Join(placeholders, ",") + ")"
 	} else {
-		query += " WHERE 1 = 1" + seedExclusion
+		where = " WHERE 1 = 1"
 	}
+	// The seed contents ride as parameters for the same reason the project ids do:
+	// the query text carries only placeholders. A build with no shipped seeds
+	// generates no clause rather than an `IN ()`, which SQLite rejects.
+	if seedContents := shippedSeedContents(); len(seedContents) > 0 {
+		placeholders := make([]string, len(seedContents))
+		for i, content := range seedContents {
+			placeholders[i] = "?"
+			args = append(args, content)
+		}
+		where += ` AND NOT (project_id = '_global' AND content IN (` + strings.Join(placeholders, ",") + `))`
+	}
+	query += where
 	// Ordered by id for the same byte-reproducibility reason as the projects.
 	query += " ORDER BY id"
 

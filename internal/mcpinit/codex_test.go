@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -733,6 +734,146 @@ func TestRunCodex_TOMLHeaderSpellings(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLLeadingBOM covers a config.toml whose first line starts with
+// a UTF-8 byte-order mark, which a Windows editor leaves there. Codex's TOML
+// lexer strips one before it reads the document, so such a file is valid codex
+// config, but U+FEFF is not whitespace: a scanner that only trims space cannot
+// normalise a BOM-prefixed header, so init read the ghost table as absent and
+// appended a SECOND one (a duplicate-key document TOML rejects) while status
+// read the same way and called the broken install healthy. The merge strips one
+// leading BOM before scanning and writes it back, so the repair lands in place
+// and the user's file keeps its encoding.
+func TestRunCodex_TOMLLeadingBOM(t *testing.T) {
+	const bom = "\ufeff"
+
+	t.Run("table header", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := bom + "[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"args = [\"mcp\"]\n" +
+			"\n" +
+			"[profiles.ci]\n" +
+			"model = \"gpt-5-mini\"\n"
+		// The BOM stays at the very start of the file, where the TOML parser
+		// expects it; only the two owned keys are rewritten.
+		want := bom + codexMCPServerComment + "\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = " + codexTOMLString(ghostBin) + "\n" +
+			"args = [\"mcp\"]\n" +
+			"\n" +
+			"[profiles.ci]\n" +
+			"model = \"gpt-5-mini\"\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if !strings.HasPrefix(string(got), bom) {
+			t.Errorf("the byte-order mark should be preserved on write, got:\n%q", got)
+		}
+		if !strings.Contains(out.String(), "+ repaired the ghost MCP server entry") {
+			t.Errorf("expected a repair, got:\n%s", out.String())
+		}
+
+		// A second run over the repaired file is a fixed point.
+		var again bytes.Buffer
+		if err := RunCodex(&again, false); err != nil {
+			t.Fatalf("RunCodex (second run): %v", err)
+		}
+		gotAgain, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotAgain) != string(got) {
+			t.Errorf("second run changed the file:\nbefore:\n%q\nafter:\n%q", got, gotAgain)
+		}
+
+		var status bytes.Buffer
+		if _, err := StatusCodex(&status); err != nil {
+			t.Fatalf("StatusCodex: %v", err)
+		}
+		if !strings.Contains(status.String(), "✓ ghost MCP server registered in config.toml") {
+			t.Errorf("status should see the repaired table as registered, got:\n%s", status.String())
+		}
+	})
+
+	// The BOM must not hide the other two guards: a dotted or inline definition
+	// would otherwise be appended beside, and an unparseable header would get a
+	// second table written next to it.
+	t.Run("dotted key", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		seed := bom + "mcp_servers.ghost = { command = \"/bin/ghost\", args = [\"mcp\"] }\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != seed {
+			t.Errorf("a dotted definition must be left unchanged, got:\n%s", got)
+		}
+		if !strings.Contains(out.String(), "dotted or inline key") {
+			t.Errorf("expected a dotted-key warning, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("ambiguous header", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		seed := bom + "[[mcp_servers.ghost]]\ncommand = \"/bin/ghost\"\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != seed {
+			t.Errorf("an unparseable header must be left unchanged, got:\n%s", got)
+		}
+		if !strings.Contains(out.String(), "left unchanged") {
+			t.Errorf("expected a warning that the file was left unchanged, got:\n%s", out.String())
+		}
+	})
+}
+
 // TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone covers headers that name ghost
 // but cannot be parsed with confidence, or that use a structure ghost does not
 // manage. init must leave such a file alone: reading it as "absent" would append
@@ -804,7 +945,9 @@ func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
 func countCodexGhostHeaders(content string) int {
 	n := 0
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
+		// Strip a byte-order mark the line may carry: only the file's first
+		// line has one, but a repair can prepend a comment above it.
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "\ufeff")
 		if !strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
@@ -1200,6 +1343,50 @@ func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
 	}
 	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), "[mcp_servers.ghost]") {
 		t.Errorf("the registration did not happen (err %v):\n%q", err, b)
+	}
+}
+
+// TestRunCodex_TOMLDoesNotBackUpItsOwnOutput pins the other skip, beside the
+// empty-file one: a config.toml holding nothing but the block ghost manages is
+// ghost's own output, so a repair of it takes no .bak. The shape that reaches
+// the repair path is the block an earlier init wrote with a command a later
+// upgrade moved — the stale-path repair — and the .bak slot is the user's
+// pre-ghost file, which ghost's own bytes must never fill, because the backup
+// is never rolled forward and the user's file would then have nowhere to go.
+// A ghost table carrying anything ghost did not write — different args, a
+// sub-table, another table — keeps its .bak, pinned by the tests around this
+// one.
+func TestRunCodex_TOMLDoesNotBackUpItsOwnOutput(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := codexMCPServerComment + "\n" +
+		"[mcp_servers.ghost]\n" +
+		"command = '/old/install/ghost'\n" +
+		"args = [\"mcp\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	// The repair ran: the stale command is replaced with this run's binary.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), codexTOMLString(ghostBin)) {
+		t.Fatalf("the stale-path repair did not run:\n%s", got)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		bak, _ := os.ReadFile(path + ".bak")
+		t.Errorf("a repair of ghost's own output left a .bak:\n%q", bak)
 	}
 }
 
@@ -2080,6 +2267,436 @@ func TestMergeCodexHooksRepairsGhostsOwnActionFields(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksTreatsAWrappedGhostActionAsItsOwn is #1345's core
+// reproduction: a hand-edited wrapper that RUNS ghost's hook for the event —
+// an assignment prefix, a `cd … &&` prefix, a quoted argument carrying the
+// whole invocation — is ghost's OWN action under the same ownership rule the
+// Claude installer applies (ghostHookTail), so no second rule is appended
+// beside it and the wrapper is left byte-identical. Codex runs every matching
+// hook, so a duplicate SessionStart rule fires ghost's context twice per
+// session.
+func TestMergeCodexHooksTreatsAWrappedGhostActionAsItsOwn(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"SessionStart", "session-start"},
+		{"Stop", "stop"},
+		{"SessionEnd", "session-end"},
+	} {
+		for _, w := range []struct {
+			label string
+			wrap  func(cmd string) string
+		}{
+			{"assignment-prefix", func(cmd string) string { return "GHOST_X=1 " + cmd }},
+			{"cd-and", func(cmd string) string { return "cd /somewhere && " + cmd }},
+			{"sh-c", func(cmd string) string { return `/bin/sh -c "` + cmd + `"` }},
+		} {
+			t.Run(ev.key+"/"+w.label, func(t *testing.T) {
+				if w.label == "sh-c" && runtime.GOOS == "windows" {
+					t.Skip("POSIX-nested shell quoting; sh-c shape exercised on unix runners")
+				}
+				canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+				wrapped := w.wrap(canonical)
+				seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(wrapped) + `}]}
+    ]
+  }
+}`)
+
+				got, err := mergeCodexHooksConfig(seed, ghostBin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig: %v", err)
+				}
+				rules := codexMergedEvent(t, []byte(got), ev.key)
+				if len(rules) != 1 {
+					t.Fatalf("a wrapped ghost action must not gain a second rule, got %d rules:\n%s", len(rules), got)
+				}
+				cmds := codexRuleCommands(rules[0])
+				if len(cmds) != 1 || cmds[0] != wrapped {
+					t.Errorf("the wrapped action must be left byte-identical, got %v", cmds)
+				}
+
+				// Fixed point: merging the merged document changes no byte.
+				again, err := mergeCodexHooksConfig([]byte(got), ghostBin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+				}
+				if again != got {
+					t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(again)-len(got), got, again)
+				}
+			})
+		}
+	}
+}
+
+// TestMergeCodexHooksAddsItsRuleBesideAForeignCommand pins the other half of
+// #1345: a wrapper that does NOT run ghost stays the user's and still gets
+// ghost's rule beside it. A ghost binary named inside another tool's quoted
+// ARGUMENT is not a command that runs, and neither is a ghost name the shell
+// hands to echo — reading either as ghost's own is the #1326 false positive
+// that left a foreign wrapper in place only by accident.
+func TestMergeCodexHooksAddsItsRuleBesideAForeignCommand(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"SessionStart", "session-start"},
+		{"Stop", "stop"},
+		{"SessionEnd", "session-end"},
+	} {
+		for _, foreign := range []struct{ label, command string }{
+			{"foreign-tool", "/usr/local/bin/othertool hook " + ev.token + " --source codex"},
+			{"argument-position", "echo /opt/bin/ghost hook " + ev.token + " --source codex"},
+			{"quoted-argument", `/usr/local/bin/othertool --note "ghost hook ` + ev.token + ` --source codex"`},
+			{"echoed-inside-sh-c", `/bin/sh -c "echo ghost hook ` + ev.token + ` --source codex"`},
+		} {
+			t.Run(ev.key+"/"+foreign.label, func(t *testing.T) {
+				seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(foreign.command) + `}]}
+    ]
+  }
+}`)
+
+				got, err := mergeCodexHooksConfig(seed, ghostBin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig: %v", err)
+				}
+				rules := codexMergedEvent(t, []byte(got), ev.key)
+				if len(rules) != 2 {
+					t.Fatalf("a foreign command must survive beside ghost's own rule, got %d rules:\n%s", len(rules), got)
+				}
+				if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != foreign.command {
+					t.Errorf("the foreign action must be carried across byte for byte, got %v", cmds)
+				}
+				want := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+				if cmds := codexRuleCommands(rules[1]); len(cmds) != 1 || cmds[0] != want {
+					t.Errorf("ghost's own rule should be appended, got %v", cmds)
+				}
+
+				again, err := mergeCodexHooksConfig([]byte(got), ghostBin)
+				if err != nil {
+					t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+				}
+				if again != got {
+					t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(again)-len(got), got, again)
+				}
+			})
+		}
+	}
+}
+
+// TestMergeCodexHooksNeverRewritesAWrappedAction pins the repair bound that
+// makes recognising a wrapper safe: only a command whose LEADING token is a
+// ghost binary is eligible for the in-place rewrite, so a wrapper around a
+// ghost path this run would not render is kept byte-identical rather than
+// pointed at the baked binary. The user's prefix and their choice of path are
+// both theirs to keep.
+func TestMergeCodexHooksNeverRewritesAWrappedAction(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	stale := shellQuote("/usr/local/bin/ghost") + " hook stop --source codex"
+	wrapped := "GHOST_X=1 " + stale
+	seed := []byte(`{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(wrapped) + `}]}
+    ]
+  }
+}`)
+
+	got, err := mergeCodexHooksConfig(seed, ghostBin)
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig: %v", err)
+	}
+	rules := codexMergedEvent(t, []byte(got), "Stop")
+	if len(rules) != 1 {
+		t.Fatalf("the wrapped action should stand alone, got %d rules:\n%s", len(rules), got)
+	}
+	if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != wrapped {
+		t.Errorf("a wrapped action with a stale path must be left byte-identical, got %v", cmds)
+	}
+
+	again, err := mergeCodexHooksConfig([]byte(got), ghostBin)
+	if err != nil {
+		t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+	}
+	if again != got {
+		t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(again)-len(got), got, again)
+	}
+}
+
+// TestRunCodex_HooksWrappedGhostRuleIsNeverDuplicated is #1345's installer-level
+// reproduction end to end: seed hooks.json with a hand-edited wrapper that runs
+// ghost's SessionStart hook and run the installer. The wrapper is recognised as
+// ghost's own, so the installer reports the hooks as already wired, appends
+// no second rule, and leaves the file byte-identical — a duplicate
+// SessionStart rule fires ghost's context twice per session.
+func TestRunCodex_HooksWrappedGhostRuleIsNeverDuplicated(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	if err := os.MkdirAll(filepath.Dir(codexHooksJSON(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := shellQuote(ghostBin) + " hook session-start --source codex"
+	wrapped := "GHOST_X=1 " + canonical
+	rendered := renderCodexHooksConfig(ghostBin)
+	seed := strings.Replace(rendered, jsonString(canonical), jsonString(wrapped), 1)
+	if seed == rendered {
+		t.Fatal("the seeded hooks.json must differ from the canonical document")
+	}
+	if err := os.WriteFile(codexHooksJSON(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ hooks already wired") {
+		t.Errorf("run 1 must recognise the wrapped rule as ghost's own:\n%s", out.String())
+	}
+
+	data, err := os.ReadFile(codexHooksJSON(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != seed {
+		t.Errorf("the wrapped rule must be left byte-identical:\nseed:\n%s\ngot:\n%s", seed, data)
+	}
+	rules := codexMergedEvent(t, data, "SessionStart")
+	if len(rules) != 1 || len(codexRuleCommands(rules[0])) != 1 || codexRuleCommands(rules[0])[0] != wrapped {
+		t.Errorf("SessionStart must hold only the wrapped command, got %+v", rules)
+	}
+
+	// Run 2 is a fixed point too.
+	out.Reset()
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex (second): %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ hooks already wired") {
+		t.Errorf("run 2 must stay a fixed point:\n%s", out.String())
+	}
+}
+
+// TestStatusCodex_WrappedHooksAreWired pins the status side of #1345: the
+// wiring check asks the same ownership rule the merge applies (ghostHookTail),
+// so a hand-edited wrapper that runs ghost reads as wired, and a foreign
+// command that merely ends in the ghost tail never does. A reader that matched
+// the tail alone reported a wrapper as missing and sent the operator to an
+// init that rewrote nothing, over a file init reported as already wired.
+func TestStatusCodex_WrappedHooksAreWired(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	if err := os.MkdirAll(filepath.Dir(codexHooksJSON(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	rendered := renderCodexHooksConfig(ghostBin)
+	for _, token := range []string{"session-start", "stop", "session-end"} {
+		canonical := shellQuote(ghostBin) + " hook " + token + " --source codex"
+		rendered = strings.Replace(rendered, jsonString(canonical), jsonString("GHOST_X=1 "+canonical), 1)
+	}
+	if err := os.WriteFile(codexHooksJSON(home), []byte(rendered), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var install bytes.Buffer
+	if err := RunCodex(&install, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	if !strings.Contains(install.String(), "✓ hooks already wired") {
+		t.Errorf("the wrapped hooks must read as wired on install:\n%s", install.String())
+	}
+
+	var out bytes.Buffer
+	healthy, err := StatusCodex(&out)
+	if err != nil {
+		t.Fatalf("StatusCodex: %v", err)
+	}
+	if !healthy {
+		t.Errorf("StatusCodex: healthy = false over wrapped wiring, want true:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "✗") {
+		t.Errorf("a wrapped ghost rule must not read as missing:\n%s", out.String())
+	}
+}
+
+// TestMergeCodexHooksPrefersTheWrappedSurvivor pins the #1345 self-heal in
+// both orders: a wrapper that carries its own command beside ghost's hook wins
+// over a canonical ghost rule, whether it sits before or after it. Unwrapped
+// (canonical) actions that came second were pruned already; what must not
+// happen is a wrapper being pruned and its chained command lost with it.
+func TestMergeCodexHooksPrefersTheWrappedSurvivor(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, order := range []string{"canonical-first", "wrapper-first"} {
+		t.Run(order, func(t *testing.T) {
+			for _, ev := range []struct{ key, token string }{
+				{"SessionStart", "session-start"},
+				{"Stop", "stop"},
+				{"SessionEnd", "session-end"},
+			} {
+				t.Run(ev.key, func(t *testing.T) {
+					canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+					wrapped := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/other-tool"
+					var first, second string
+					if order == "canonical-first" {
+						first, second = canonical, wrapped
+					} else {
+						first, second = wrapped, canonical
+					}
+					seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(first) + `}]},
+      {"hooks": [{"type": "command", "command": ` + jsonString(second) + `}]}
+    ]
+  }
+}`)
+
+					got, err := mergeCodexHooksConfig(seed, ghostBin)
+					if err != nil {
+						t.Fatalf("mergeCodexHooksConfig: %v", err)
+					}
+					rules := codexMergedEvent(t, []byte(got), ev.key)
+					if len(rules) != 1 {
+						t.Fatalf("preferred survivor must stand alone, got %d rules:\n%s", len(rules), got)
+					}
+					cmds := codexRuleCommands(rules[0])
+					if len(cmds) != 1 || cmds[0] != wrapped {
+						t.Fatalf("the wrapper must survive byte-identical, got %v", cmds)
+					}
+
+					ghostFires := 0
+					for _, c := range cmds {
+						if strings.Contains(c, "hook "+ev.token+" --source codex") {
+							ghostFires++
+						}
+					}
+					if ghostFires != 1 {
+						t.Errorf("ghost must fire exactly once, got %d actions", ghostFires)
+					}
+
+					again, err := mergeCodexHooksConfig([]byte(got), ghostBin)
+					if err != nil {
+						t.Fatalf("mergeCodexHooksConfig (second pass): %v", err)
+					}
+					if again != got {
+						t.Errorf("pass 2 diverged by %+d bytes:\nfirst:\n%s\nsecond:\n%s", len(again)-len(got), got, again)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestMergeCodexHooksKeepsEveryWrappedAction pins the corollary for the new
+// rule: when no canonical ghost action is present, every wrapped rule that
+// runs ghost is carried across and nothing is pruned — a wrapper is never
+// removed, even if another wrapper runs ghost beside it.
+func TestMergeCodexHooksKeepsEveryWrappedAction(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"Stop", "stop"},
+	} {
+		w1 := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/first-tool"
+		w2 := "GHOST_X=1 " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+		seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(w1) + `}]},
+      {"hooks": [{"type": "command", "command": ` + jsonString(w2) + `}]}
+    ]
+  }
+}`)
+		got, err := mergeCodexHooksConfig(seed, ghostBin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules := codexMergedEvent(t, []byte(got), ev.key)
+		if len(rules) != 2 {
+			t.Fatalf("both wrapped actions must survive, got %d:\n%s", len(rules), got)
+		}
+		got1 := codexRuleCommands(rules[0])[0]
+		got2 := codexRuleCommands(rules[1])[0]
+		if got1 != w1 || got2 != w2 {
+			t.Fatalf("both wrappers must stay byte-identical:\ngot: %v %v", got1, got2)
+		}
+		if again, err := mergeCodexHooksConfig([]byte(got), ghostBin); err != nil || again != got {
+			t.Fatalf("not a fixed point: %v", err)
+		}
+	}
+}
+
+// TestMergeCodexHooksReadsOnlyGhostsOwnArguments pins the reviewer finding on
+// the wrapped-survivor read: the --source token that decides whether a wrapper
+// is wired must belong to ghost's own invocation, so the scan stops at the
+// first shell connective. A --source codex on a command chained behind && or ;
+// is another tool's and must never suppress the canonical codex rule.
+func TestMergeCodexHooksReadsOnlyGhostsOwnArguments(t *testing.T) {
+	const ghostBin = "/new/ghost"
+	for _, ev := range []struct{ key, token string }{
+		{"SessionStart", "session-start"},
+		{"Stop", "stop"},
+		{"SessionEnd", "session-end"},
+	} {
+		t.Run(ev.key, func(t *testing.T) {
+			canonical := shellQuote(ghostBin) + " hook " + ev.token + " --source codex"
+
+			// A --source codex after the ghost invocation belongs to the
+			// chained command, so the wrapper is not ghost's wired survivor
+			// and the canonical rule must be appended beside it.
+			chained := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " && /usr/local/bin/tool --source codex"
+			seed := []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(chained) + `}]}
+    ]
+  }
+}`)
+			got, err := mergeCodexHooksConfig(seed, ghostBin)
+			if err != nil {
+				t.Fatalf("mergeCodexHooksConfig: %v", err)
+			}
+			rules := codexMergedEvent(t, []byte(got), ev.key)
+			if len(rules) != 2 {
+				t.Fatalf("a --source of a chained command must not count: ghost's rule should be appended, got %d rules:\n%s", len(rules), got)
+			}
+			if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != chained {
+				t.Errorf("the wrapper must survive byte-identical, got %v", cmds)
+			}
+			if cmds := codexRuleCommands(rules[1]); len(cmds) != 1 || cmds[0] != canonical {
+				t.Errorf("ghost's own codex rule should be appended beside the wrapper, got %v", cmds)
+			}
+
+			// The day's positive control: a --source codex that IS ghost's own
+			// still makes the wrapper the sole survivor.
+			own := "cd /d && " + shellQuote(ghostBin) + " hook " + ev.token + " --source codex && /usr/local/bin/other-tool"
+			seed = []byte(`{
+  "hooks": {
+    "` + ev.key + `": [
+      {"hooks": [{"type": "command", "command": ` + jsonString(own) + `}]}
+    ]
+  }
+}`)
+			got, err = mergeCodexHooksConfig(seed, ghostBin)
+			if err != nil {
+				t.Fatalf("mergeCodexHooksConfig: %v", err)
+			}
+			rules = codexMergedEvent(t, []byte(got), ev.key)
+			if len(rules) != 1 {
+				t.Fatalf("ghost's own --source must keep the wrapper as sole survivor, got %d rules:\n%s", len(rules), got)
+			}
+			if cmds := codexRuleCommands(rules[0]); len(cmds) != 1 || cmds[0] != own {
+				t.Errorf("the wrapper must survive byte-identical, got %v", cmds)
+			}
+			if again, err := mergeCodexHooksConfig([]byte(got), ghostBin); err != nil || again != got {
+				t.Errorf("not a fixed point: %v", err)
+			}
+		})
+	}
+}
+
 // TestAuditCodexHooksNull pins #1219: a hooks.json whose "hooks" value is the
 // JSON literal null must be refused, not merged into. json.Unmarshal decodes
 // null into a nil map with no error, so without the isJSONNull guard the
@@ -2097,6 +2714,49 @@ func TestAuditCodexHooksNull(t *testing.T) {
 
 	if _, err := mergeCodexHooksConfig([]byte(`{"description":"my hooks","hooks":null}`), "/new/ghost"); err == nil {
 		t.Fatal("a null hooks value must be refused, not silently overwritten with ghost's rules")
+	}
+}
+
+// TestAuditCodexHooksNullEventValue pins #1247: the top-level guard stops at the
+// top level, but a managed event's value being the JSON literal null is the same
+// structurally-invalid-but-present data one level down. json.Unmarshal decodes
+// null into a nil []json.RawMessage with no error, so without a guard the merge
+// hands that nil slice to mergeCodexEventRules, which appends ghost's canonical
+// rule as if the event were empty — the user's explicit null is silently
+// replaced. The guard runs in the shared decode, so the install pre-flight and
+// the merge refuse the same shape with the same error, as the top-level guard
+// does.
+func TestAuditCodexHooksNullEventValue(t *testing.T) {
+	_, err := mergeCodexHooksConfig([]byte(`{"description":"my hooks","hooks":{"SessionStart":null}}`), "/new/ghost")
+	if err == nil {
+		t.Fatal("a null event value must be refused, not silently replaced with ghost's rule")
+	}
+	if !strings.Contains(err.Error(), "hooks.json") {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("refusal must name the event, got: %v", err)
+	}
+}
+
+// TestMergeCodexHooksLeavesAnUnmanagedEventNull pins the SCOPE of the #1247
+// guard: it covers only the events ghost manages. An explicit null on an event
+// ghost does not touch is the user's data and is carried through verbatim, as
+// any foreign event is, so the guard does not start refusing a file init has
+// always been able to merge for every managed event.
+func TestMergeCodexHooksLeavesAnUnmanagedEventNull(t *testing.T) {
+	got, err := mergeCodexHooksConfig([]byte(`{"hooks":{"PreToolUse":null}}`), "/new/ghost")
+	if err != nil {
+		t.Fatalf("an unmanaged event's null must not be refused: %v", err)
+	}
+	var top struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(got), &top); err != nil {
+		t.Fatalf("parse merged hooks.json: %v", err)
+	}
+	if raw, ok := top.Hooks["PreToolUse"]; !ok || !isJSONNull(raw) {
+		t.Errorf("an unmanaged event's null must survive the merge verbatim, got: %q", raw)
 	}
 }
 
@@ -2126,6 +2786,52 @@ func TestRunCodex_NullHooksIsRefused(t *testing.T) {
 	}
 	if string(got) != seed {
 		t.Errorf("a refused merge must leave the file untouched:\ngot:\n%s", got)
+	}
+}
+
+// TestRunCodex_NullEventValueRefused pins the install path for #1247: a managed
+// event whose value is an explicit null is refused by the pre-flight — the same
+// shared decode the merge uses — naming the file and the event, before step 3
+// registers the MCP server, with the file left exactly as written. It covers
+// `{"hooks":{"SessionStart":null}}`, the shape the top-level guard does not
+// reach.
+func TestRunCodex_NullEventValueRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = `{"description":"my hooks","hooks":{"SessionStart":null}}`
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := RunCodex(&out, true)
+	if err == nil {
+		t.Fatal("a null event value must be refused, not merged into")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("refusal must name the event, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Fix or delete") {
+		t.Errorf("refusal must carry the edit that clears it, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "to retry") {
+		t.Errorf("refusal must not carry the generic re-run hint, got: %v", err)
+	}
+	if _, statErr := os.Stat(codexConfigToml(home)); !os.IsNotExist(statErr) {
+		t.Errorf("a refused hooks.json must leave config.toml unregistered (stat err %v)", statErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused file must be left untouched, got:\n%s", got)
 	}
 }
 
@@ -2392,6 +3098,7 @@ func TestCodexContractHookWired_FlagForms(t *testing.T) {
 		return []json.RawMessage{raw}
 	}
 
+	const ghostBin = "/opt/bin/ghost"
 	cases := []struct {
 		cmd  string
 		want bool
@@ -2401,10 +3108,61 @@ func TestCodexContractHookWired_FlagForms(t *testing.T) {
 		{"'/opt/bin/ghost' hook stop", false},
 		{"'/opt/bin/ghost' hook stop --source claude-code", false},
 		{"'/opt/bin/ghost' hook stop --source codex-extra", false},
+		{"env X=1 '/opt/bin/ghost' hook stop --source codex", true},
+		{"cd /d && '/opt/bin/ghost' hook stop --source codex", true},
+		{"cd /d && '/opt/bin/ghost' hook stop && /usr/local/bin/tool --source codex", false},
+		{"cd /d && '/opt/bin/ghost' hook stop --source codex && /usr/local/bin/tool", true},
+		{`/bin/sh -c "'/opt/bin/ghost' hook stop --source codex"`, true},
+		{"'/opt/bin/othertool' hook stop --source codex", false},
+		{`/usr/local/bin/othertool --note "ghost hook stop --source codex"`, false},
+		{`/bin/sh -c "echo ghost hook stop --source codex"`, false},
 	}
 	for _, tc := range cases {
-		if got := codexContractHookWired(rule(tc.cmd), "stop", "codex"); got != tc.want {
+		if got := codexContractHookWired(rule(tc.cmd), "stop", "codex", ghostBin); got != tc.want {
 			t.Errorf("codexContractHookWired(%q) = %v, want %v", tc.cmd, got, tc.want)
 		}
 	}
+}
+
+// TestCodexHooksJSONBOMIsRefusedByName pins #1379: codex parses hooks.json
+// with serde_json, which rejects a leading byte-order mark, so both the init
+// decode and the status reader refuse it with a message that names the mark
+// rather than a bare parse error, and init leaves the file as written.
+func TestCodexHooksJSONBOMIsRefusedByName(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	seed := "\ufeff{\"hooks\":{}}\n"
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("init", func(t *testing.T) {
+		var out bytes.Buffer
+		err := RunCodex(&out, false)
+		if err == nil {
+			t.Fatalf("a BOM-prefixed hooks.json must be refused; output:\n%s", out.String())
+		}
+		if !strings.Contains(err.Error(), "byte-order mark") {
+			t.Errorf("refusal must name the byte-order mark, got: %v", err)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != seed {
+			t.Errorf("a refused file must be left untouched, got:\n%q", got)
+		}
+	})
+	t.Run("status reader", func(t *testing.T) {
+		_, err := loadCodexHooksRules()
+		if err == nil {
+			t.Fatal("the status reader must refuse a BOM-prefixed hooks.json")
+		}
+		if !strings.Contains(err.Error(), "byte-order mark") {
+			t.Errorf("status refusal must name the byte-order mark, got: %v", err)
+		}
+	})
 }

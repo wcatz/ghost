@@ -664,8 +664,12 @@ func (m *mockStore) GetMemoryContent(_ context.Context, id string) (string, erro
 	return content, nil
 }
 
-func (m *mockStore) StoreEmbedding(_ context.Context, memoryID string, vec []float32, model string) error {
+func (m *mockStore) StoreEmbeddingForContent(_ context.Context, memoryID string, vec []float32, model, content string) (bool, error) {
 	m.mu.Lock()
+	if m.memories[memoryID] != content {
+		m.mu.Unlock()
+		return false, nil
+	}
 	m.embeddings[memoryID] = vec
 	m.embModel[memoryID] = model
 	notify := m.embedded
@@ -677,7 +681,7 @@ func (m *mockStore) StoreEmbedding(_ context.Context, memoryID string, vec []flo
 		default:
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // panicOnceStore wraps mockStore and panics exactly once — on the first

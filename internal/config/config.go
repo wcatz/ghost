@@ -120,15 +120,19 @@ const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 // ContextConfig.RelevanceCutoff.
 //
 // The number is chosen from the `ghost bench --cutoff-sweep` table in
-// docs/benchmarks.md, and the trade it makes is explicit rather than tuned: on
-// the graded corpus it admits 308 of the 310 baseline graded-relevant rows
-// (the ship floor is 304), holds the answerable result rate at 1.000, raises
-// context precision from 0.141 to 0.148 and lowers the estimated token cost per
-// answer from about 297 to about 280. 0.64 (306 relevant) and 0.65 (305) also
-// clear the floor but leave a margin of two rows and one; the floor is the
-// hard constraint and a ship that clears it barely is a ship one corpus edit
-// from failing it, so the default keeps the four-row margin rather than the
-// last few points of precision.
+// docs/benchmarks.md, and the trade it makes is explicit rather than tuned: at
+// the 10-item budget that shipped when it was chosen, on the graded corpus it
+// admitted 308 of the 310 baseline graded-relevant rows (the ship floor is 304),
+// held the answerable result rate at 1.000, raised context precision from 0.141
+// to 0.148 and lowered the estimated token cost per answer from about 297 to
+// about 280. 0.64 (306 relevant) and 0.65 (305) also cleared the floor but left
+// a margin of two rows and one; the floor is the hard constraint and a ship that
+// cleared it barely is a ship one corpus edit from failing it, so the default
+// kept the four-row margin rather than the last few points of precision. At the
+// current 5-item budget the item cap already removes the low-Base tail the
+// cutoff was tuned to cut, so it binds nothing on that corpus (the sweep is
+// flat); the default is unchanged and still applies to a caller who raises
+// `limit`.
 const DefaultRelevanceCutoff float64 = 0.63
 
 // DefaultNoAnswerCosine is the compiled value of context.no_answer_cosine, the

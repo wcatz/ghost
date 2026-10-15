@@ -465,7 +465,7 @@ type flagCapableStore interface {
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
-// the methods ghost_resolve needs (ResolveCandidates, SetResolvedJudged, the
+// the methods ghost_resolve needs (ResolveCandidates, SetResolvedJustified, the
 // supersedes-link read for deterministic demotion with GetByIDs for the link
 // endpoints' scopes, and the KEEP-verdict cache). These aren't part of
 // provider.MemoryStore, so s.store is type-asserted to this interface at call
@@ -473,7 +473,7 @@ type flagCapableStore interface {
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
-	SetResolvedJudged(ctx context.Context, judged []memory.Memory) (stamped, stale []string, err error)
+	SetResolvedJustified(ctx context.Context, judged []memory.Memory, why map[string]memory.ResolveJustification) (stamped, stale []string, err error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
@@ -843,6 +843,17 @@ func decisionStatusError(status string) error {
 		}
 	}
 	return fmt.Errorf("invalid status %s — must be one of: %s", memory.RefusalArg("status", status), strings.Join(decisionStatusValues, ", "))
+}
+
+// decisionRevisitMarker renders the label the injected decision surfaces put
+// beside a decision flagged for reconsideration. It is a delegation to
+// memory.DecisionRevisitMarker and not a second copy of that rule: three
+// surfaces print this label and the docs promise all three print the same one,
+// so the rule sits beside the status vocabulary it reads and every renderer
+// calls it. The dependency runs assemble -> memory, which is why the rule cannot
+// live in a package these two import in the other direction.
+func decisionRevisitMarker(status string) string {
+	return memory.DecisionRevisitMarker(status)
 }
 
 // defaultImportance returns the importance value, defaulting to fallback when nil.
@@ -1483,7 +1494,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	msg := fmt.Sprintf("Memory updated (id: %s): %s", args.MemoryID, strings.Join(changed, ", "))
+	msg := fmt.Sprintf("Memory updated (id: %s): %s", assemble.Token(args.MemoryID), strings.Join(changed, ", "))
 	// The same advisory the two save tools carry (#674), and on the same
 	// reasoning: an update that rewrites a memory into a repository fact is the
 	// same durable-knowledge mistake, and this response reports a real stored id
@@ -1555,7 +1566,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	// project's rows reach.
 	s.notifyMemoryRow(ctx, resolvedProjectID)
 	s.notifyMemoryRow(ctx, memory.GlobalProjectID)
-	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
+	return fmt.Sprintf("Memory promoted to global scope (id: %s).", assemble.Token(memoryID)), nil
 }
 
 // withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
@@ -2019,7 +2030,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 		Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 			fmt.Sprintf("Memory %s was already deleted; its %d recorded version(s) of text and the "+
 				"reflection snapshot holding it were removed. The memory itself is not restored.",
-				memoryID, outcome.Rows), outcome)}},
+				assemble.Token(memoryID), outcome.Rows), outcome)}},
 	}, nil, nil
 }
 
@@ -2059,7 +2070,7 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Retention string `json:"retention,omitempty" jsonschema:"Filter results to one retention tier: session (true for this conversation only; expired session rows are what 'ghost prune' removes), project (the default \u2014 persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). Omit it for every tier. Applied before the result window closes, so a matching row ranked below the window still takes a slot."`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
-		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
+		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 5)"`
 		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. A validity window is the one field the change log does not version, so the window a row shows is the row's window today: nothing is dropped as expired or not yet valid on a past read, and the answer states that the bounds are today's. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
 		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list. Every SCORING number is the one the ranking used, read from a record the ranking path writes as it runs: status_factor and decay_factor are the multipliers that ranking actually applied, and for a candidate the window cut before it applied them decay_factor is the one it would have applied, measured against the ranking's own clock. Per memory: FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor and age, supersede and near-duplicate penalties, which project the row belongs to and whether it matched the searched one, the scope verdict and the scope key set the narrowing compared (capped at 16 named, with scope_keys_compared_total giving the real length), the row's validity state, its stored confidence, the reason each excluded candidate was left out, the id of the specific other memory behind every window-scoped demotion (superseded_by, near_duplicate_of), and keyword_reserved / took_slot_from / displaced_by for a row the keyword reservation admitted past the score cut. In query mode a near-duplicate loser is REMOVED by the retriever rather than only demoted: it appears as an excluded row carrying the reason removed as a near-duplicate, with near_duplicate_penalty 1 because the removal IS the verdict and near_duplicate_of naming the representative it lost to. Stage 5 separates a live contradiction the same way: the row it withholds is an excluded row whose reason is the sentence \"withheld by the conflicts stage: the memory contradicts X, the row that stage kept\", naming the row or rows it directly contradicts (contradiction_separated is the reason token recorded on the trace and in the retrieval record, never in this payload), and the kept row's formatted line carries conflicts_with= with the withheld row's id. Stage 7's per-category share is a PASSIVE-READ rule and never touches this payload: a query is a relevance question and the ranking is the whole answer to it, so the row that answered it must not move behind another row because of what it is ABOUT, while a digest asks no question and hands a model everything worth knowing, where breadth is the point. On a passive read the share moves — behind the window, never out of the block — a row whose category had filled more than half the slots, so the next-ranked rows of other categories take them, and reads it back if the other categories run out; the trace and the retrieval record carry that as diversity_deferred (diversity_backfilled when it came back). Fields the ranking does not act on report 0 rather than an invented contribution: confidence_contribution, provenance_contribution and validity_penalty are always 0 (an expired or not-yet-valid memory is excluded with its reason rather than ranked lower), provenance_weight is \"off\", and the notes say why. The payload is a projection of the same run the formatted answer comes from, for the same arguments (scope, category, retention, limit, validity, the byte cap): a row is included exactly when that answer lists it, and an excluded row carries the reason the stage that withheld it gave. Every stored string in it (content snippet, ids, project, scope keys and values, leg errors) is rendered as the formatted answer renders it: content inside «...» delimiters, ids and scope text as quoted tokens. Unlike the formatted answer it writes no retrieval record, and a retrieval leg that failed while another answered is reported in the notes instead of as an error (a run where every applicable leg failed is still the retrieval error). The payload is bounded at 150 candidate rows; one that reached the budget carries a truncation object saying how many candidates it omitted, and only excluded candidates are ever dropped, so every row in the answer is present. floor_dropped is about the VECTOR leg: it means the similarity floor cut that row's vector contribution, which for a row the keyword leg also matched leaves it in the answer with a keyword-only rrf_score — check fts_rank to tell that from a row the floor removed outright, and only the latter has rrf_score 0. When the floor removed it outright it also carries status_factor 1.0, because no demotion was applied to a row nothing scored; row_project says whose row it is. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it is refused with as_of, which ranks nothing."`
 	}
@@ -2122,7 +2133,7 @@ func (s *Server) registerTools() {
 			return nil, nil, invalidCategory(args.Category)
 		}
 		if args.Limit <= 0 {
-			args.Limit = 10
+			args.Limit = 5
 		}
 		if args.Limit > 100 {
 			args.Limit = 100
@@ -2434,9 +2445,9 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		msg := fmt.Sprintf("Memory saved (id: %s)", id)
+		msg := fmt.Sprintf("Memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
-			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", assemble.Token(id), assemble.Token(duplicateOf), score)
 		}
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
@@ -2448,7 +2459,7 @@ func (s *Server) registerTools() {
 		if args.Pin {
 			msg += " — pinned, so consolidation will not rewrite it"
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", assemble.Token(duplicateOf))
 			}
 		}
 		// And the same for the fields a fold hands the target, for the same reason:
@@ -2456,7 +2467,7 @@ func (s *Server) registerTools() {
 		// answering. COALESCE in the store means only what is named here moved.
 		if duplicateOf != "" {
 			if moved := fields.foldNotice(prov); moved != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", assemble.Token(duplicateOf), moved)
 			}
 		}
 		// Advisory only: the write has already happened and the id above is
@@ -2474,7 +2485,7 @@ func (s *Server) registerTools() {
 		if args.Retention != "" {
 			msg += fmt.Sprintf(" — retention %s", retention)
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
 		msg += repoFactHint(args.Content, args.Category)
@@ -2536,9 +2547,21 @@ func (s *Server) registerTools() {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							_, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							imported, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
 							refusedFiles = append(refusedFiles, refused...)
 							failedFiles = append(failedFiles, failed...)
+							// The imported rows are memory rows, so queue the
+							// project for embedding exactly as the save tools do.
+							// Only a run that wrote at least one row is queued, and
+							// the push is non-blocking like theirs. The store-level
+							// onSave hook is unwired in production, so this push is
+							// the worker's only notification.
+							if imported > 0 && s.projectCh != nil {
+								select {
+								case s.projectCh <- args.ProjectID:
+								default: // non-blocking
+								}
+							}
 							break
 						}
 					}
@@ -2881,7 +2904,7 @@ func (s *Server) registerTools() {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: purgeErasedText(
 						fmt.Sprintf("Memory %s was deleted, and its recorded history and any reflection "+
-							"snapshot that could have restored the row were removed.", args.MemoryID), outcome)}},
+							"snapshot that could have restored the row were removed.", assemble.Token(args.MemoryID)), outcome)}},
 				}, nil, nil
 			}
 			if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{PurgeHistory: true, ProjectID: resolvedProjectID}); err != nil {
@@ -2895,7 +2918,7 @@ func (s *Server) registerTools() {
 						"recorded history and any reflection snapshot that could have restored the row were "+
 						"removed. Text an older Ghost version already freed into the file's free space, a copy "+
 						"in a backup taken before this, or another machine's store, is out of reach.",
-					args.MemoryID)}},
+					assemble.Token(args.MemoryID))}},
 			}, nil, nil
 		}
 		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{ProjectID: resolvedProjectID}); err != nil {
@@ -3091,16 +3114,16 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
+		msg := fmt.Sprintf("Global memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
-			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", assemble.Token(id), assemble.Token(duplicateOf), score)
 		}
 		// The fold's message names the fields the claim moved onto the target
 		// rather than only the copy's id; see ghost_memory_save for why, and
 		// writeFields.foldNotice for the COALESCE half of it.
 		if duplicateOf != "" {
 			if moved := fields.foldNotice(prov); moved != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", assemble.Token(duplicateOf), moved)
 			}
 		}
 		// The same advisory the project save carries, and for the same reason:
@@ -3112,7 +3135,7 @@ func (s *Server) registerTools() {
 		if args.Retention != "" {
 			msg += fmt.Sprintf(" — retention %s", retention)
 			if duplicateOf != "" {
-				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
 		msg += repoFactHint(args.Content, args.Category)
@@ -3182,7 +3205,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("create task: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
-		msg := fmt.Sprintf("Task created (id: %s)", id)
+		msg := fmt.Sprintf("Task created (id: %s)", assemble.Token(id))
 		if titleTruncated {
 			msg += truncationWarningAt("task title", maxTitleLen, taskTruncationAdvice)
 		}
@@ -3678,7 +3701,7 @@ func (s *Server) registerTools() {
 
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
-			decisionID, memoryID, supersedeNote)
+			assemble.Token(decisionID), assemble.Token(memoryID), supersedeNote)
 		msg += sameTitleAdvice
 		// A decision routed to a project of its own while a same-named project
 		// kept the name (#613) has to say so, for the reason the save result
@@ -3968,7 +3991,7 @@ func (s *Server) registerTools() {
 			verb = "Deleted"
 		}
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
+		fmt.Fprintf(&sb, "%s %s (%s):\n", verb, assemble.Label(summary.ProjectName), assemble.Token(summary.ProjectID))
 		fmt.Fprintf(&sb, "  memories:     %d\n", summary.Memories)
 		fmt.Fprintf(&sb, "  memory_links: %d\n", summary.MemoryLinks)
 		fmt.Fprintf(&sb, "  tasks:        %d\n", summary.Tasks)
@@ -4066,7 +4089,7 @@ func (s *Server) registerTools() {
 			// and a retry appends a SECOND objection — so the refusal states both
 			// halves: what happened, and what not to do about it.
 			return nil, nil, fmt.Errorf("ghost_memory_flag: memory %s was flagged, but the count could not be read back — do NOT retry, a retry appends a second flag: %w",
-				args.MemoryID, err)
+				assemble.Token(args.MemoryID), err)
 		}
 		// Count and id only. The reason deliberately does not come back: this
 		// result lands in the same agent context the reason came from, and echoing
@@ -4416,8 +4439,9 @@ func (s *Server) registerResources() {
 		Name:        "Ghost Project Decisions",
 		Title:       "Project Decisions",
 		URITemplate: "ghost://project/{project_id}/decisions",
-		Description: "Active architectural and design decisions for a project. " +
-			"Pin this resource to keep decision context visible across compaction.",
+		Description: "Active and revisit architectural and design decisions for a project; a " +
+			"revisit decision is labelled. Pin this resource to keep decision context visible " +
+			"across compaction.",
 		MIMEType: "text/plain",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		rawID, err := parseProjectIDFromURI(req.Params.URI)
@@ -4434,17 +4458,17 @@ func (s *Server) registerResources() {
 			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
 		}
 
-		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
+		decisions, err := s.store.LiveDecisions(ctx, projectID, 20)
 		if err != nil {
-			return nil, fmt.Errorf("list decisions for %q: %w", projectID, err)
+			return nil, fmt.Errorf("list decisions for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 
 		var text string
 		if len(decisions) == 0 {
-			text = "No active decisions for this project."
+			text = "No live decisions for this project."
 		} else {
 			var sb strings.Builder
-			sb.WriteString("## Active Decisions\n\n")
+			sb.WriteString("## Decisions\n\n")
 			sb.WriteString(dataDelimiterNote + "\n\n")
 			for _, d := range decisions {
 				// Same rule as the Recent Decisions section above, plus the
@@ -4453,8 +4477,9 @@ func (s *Server) registerResources() {
 				// unconditionally, as it always was: an empty rationale reads as
 				// "there is none", and dropping it would change what a pinned
 				// resource shows for every decision recorded without one.
-				fmt.Fprintf(&sb, "- `%s` **%s**: %s (rationale: %s)\n",
-					assemble.Token(d.ID), quoteData(d.Title), quoteData(d.Decision), quoteData(d.Rationale))
+				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s (rationale: %s)\n",
+					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status),
+					quoteData(d.Decision), quoteData(d.Rationale))
 			}
 			text = sb.String()
 		}
@@ -4663,7 +4688,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		var err error
 		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
 		if err != nil {
-			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
+			return "", fmt.Errorf("get memories for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		own, globals = projectContextSplit(memories.Items)
 		var ownLine string
@@ -4702,9 +4727,9 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			sb.WriteString(dataDelimiterNote + "\n\n")
 		}
 
-		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+		decisions, err := s.store.LiveDecisions(ctx, projectID, 5)
 		if err != nil {
-			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+			return "", fmt.Errorf("list decisions for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if len(decisions) > 0 {
 			sb.WriteString("\n\n## Recent Decisions\n\n")
@@ -4716,14 +4741,14 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 				// lines above have asserted the «...» convention on every one
 				// of them. The id goes through assemble.Token for the reason
 				// Item.Line's does (#791).
-				fmt.Fprintf(&sb, "- `%s` **%s**: %s\n",
-					assemble.Token(d.ID), quoteData(d.Title), quoteData(d.Decision))
+				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s\n",
+					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status), quoteData(d.Decision))
 			}
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, projectID)
 		if err != nil {
-			return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
+			return "", fmt.Errorf("get learned context for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if learned != "" {
 			sb.WriteString("\n\n## Learned Context\n\n")

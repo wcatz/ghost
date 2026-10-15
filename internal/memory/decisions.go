@@ -911,6 +911,38 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	}
 	defer rows.Close() //nolint:errcheck
 
+	return scanDecisions(rows)
+}
+
+// LiveDecisions returns a project's live decisions — active or revisit,
+// superseded ones excluded — newest first, with active decisions sorted above
+// revisit ones. The order is applied before the window closes, so a revisit row
+// never pushes an active one out of the `limit` the caller asked for. It is the
+// read the injected decision surfaces use, so a decision flagged for
+// reconsideration is shown and labelled rather than hidden, and it is the same
+// "not superseded" reading FindLiveDecisionByTitle and LiveDecisionSuccessor
+// share.
+func (s *Store) LiveDecisions(ctx context.Context, projectID string, limit int) ([]Decision, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, title, decision, alternatives, rationale, status,
+	                 COALESCE(superseded_by, '') AS superseded_by, tags, created_at, updated_at
+	          FROM decisions
+	          WHERE project_id = ? AND status != 'superseded'
+	          ORDER BY (status = 'revisit'), created_at DESC
+	          LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list live decisions: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	return scanDecisions(rows)
+}
+
+// scanDecisions reads the decision row shape both ListDecisions and
+// LiveDecisions select, so the two cannot drift in how a stored row is decoded.
+func scanDecisions(rows *sql.Rows) ([]Decision, error) {
 	var decisions []Decision
 	for rows.Next() {
 		var d Decision
@@ -924,6 +956,29 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 		decisions = append(decisions, d)
 	}
 	return decisions, rows.Err()
+}
+
+// DecisionRevisitMarker renders the label the injected decision surfaces put
+// beside a decision flagged for reconsideration.
+//
+// It lives HERE, beside the status vocabulary that decides it, because three
+// surfaces print that label and the docs promise all three print the SAME one
+// (docs/mcp.md, docs/cli.md): a live decision that is not active is context a
+// reader should see, so it must be distinguishable from an active one, and two
+// copies of the rule would be two rules — the copy nobody edited would be the
+// copy that ships the label the docs no longer describe. The dependency runs
+// assemble -> memory, so a function the renderers in internal/assemble,
+// internal/mcpserver and internal/mcpinit all delegate to cannot live below
+// them; that is the arrangement assemble.Token already uses for SafeToken.
+//
+// An active (or any unrecognised) status adds nothing, so an ordinary row's
+// shape is unchanged and only the row that needs marking carries the marker,
+// directly after its quoted title.
+func DecisionRevisitMarker(status string) string {
+	if status == "revisit" {
+		return " (revisit)"
+	}
+	return ""
 }
 
 // FindLiveDecisionByTitle returns the id of the newest decision in the project

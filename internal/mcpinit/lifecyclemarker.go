@@ -722,8 +722,26 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	p = renderMarkerProject(p)
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
-		p, at.Format(time.RFC3339), strings.Join(m.PhasesFailed, ", "),
+		p, at.Format(time.RFC3339), renderMarkerPhases(m.PhasesFailed),
 		renderMarkerError(m.Error), p)
+}
+
+// renderMarkerPhases renders the marker's failed-phase list for the alert, the
+// third free-text field on that line beside the project and the error. Each
+// entry is read from the marker file verbatim, so each is rendered as a token:
+// a corrupt, hand-edited or older-build marker whose entry holds a line break
+// would otherwise forge a line above the block's own «...» explainer — a second
+// `## Ghost context:` heading or a fake `Use project_id:` instruction — the
+// same class of caller text the two renderers beside this one exist for.
+// assemble.Token writes an ordinary phase name byte for byte and quotes
+// anything outside its bare set, so a line break prints as the Go escape `\n`
+// and cannot start a line.
+func renderMarkerPhases(phases []string) string {
+	rendered := make([]string, len(phases))
+	for i, p := range phases {
+		rendered[i] = assemble.Token(p)
+	}
+	return strings.Join(rendered, ", ")
 }
 
 // renderMarkerError renders the marker's error for the alert. The error is the

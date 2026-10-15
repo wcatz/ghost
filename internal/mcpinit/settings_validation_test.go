@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,148 @@ func TestRunInstallsWithMissingSettings(t *testing.T) {
 	}
 }
 
+// TestRunDoesNotBackUpItsOwnSettings pins that the one-time settings.json.bak
+// stays the user's pre-ghost file and never becomes ghost's own output. On a
+// fresh install the first run creates settings.json from nothing, so it has
+// nothing to back up; the SECOND run is the one whose save sees a file on disk
+// — and that file is ghost's own output, which the .bak slot must not take.
+// Because the .bak is never rolled forward, capturing ghost's bytes there
+// would leave a later user edit with nowhere to be kept, so the test also
+// shows a genuine edit is still captured once the slot has been left free.
+func TestRunDoesNotBackUpItsOwnSettings(t *testing.T) {
+	home, _ := installEnv(t)
+	path := filepath.Join(home, ".claude", "settings.json")
+
+	var first bytes.Buffer
+	if err := Run(&first, false); err != nil {
+		t.Fatalf("first Run: %v\n%s", err, first.String())
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("the first init backed something up (Stat err = %v), but settings.json did not exist before it", err)
+	}
+
+	var second bytes.Buffer
+	if err := Run(&second, false); err != nil {
+		t.Fatalf("second Run: %v\n%s", err, second.String())
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		bak, _ := os.ReadFile(path + ".bak")
+		t.Errorf("the second init backed up ITS OWN output:\n%q", bak)
+	}
+
+	// The slot was left free for the user: an edit of their own is captured.
+	doc, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &merged); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	merged["effortLevel"] = json.RawMessage(`"high"`)
+	edited, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited = append(edited, '\n')
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var third bytes.Buffer
+	if err := Run(&third, false); err != nil {
+		t.Fatalf("third Run: %v\n%s", err, third.String())
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("a user edit was not backed up: %v", err)
+	}
+	if !bytes.Equal(bak, edited) {
+		t.Errorf(".bak = %q, want the user's file %q", bak, edited)
+	}
+}
+
+// TestRunBacksUpSettingsThatAreNotPurelyGhosts pins the other side of the skip:
+// a settings.json that differs from ghost's own output by anything at all keeps
+// its one-time .bak. Each case starts from the file a clean run writes, changes
+// one thing, and runs init again; the .bak must hold exactly that edited file.
+func TestRunBacksUpSettingsThatAreNotPurelyGhosts(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(t *testing.T, doc map[string]any)
+	}{
+		{"user top-level key", func(t *testing.T, doc map[string]any) {
+			doc["effortLevel"] = "high"
+		}},
+		{"foreign hook entry", func(t *testing.T, doc map[string]any) {
+			hooks := doc["hooks"].(map[string]any)
+			hooks["SessionStart"] = append(hooks["SessionStart"].([]any), map[string]any{
+				"matcher": "",
+				"hooks":   []any{map[string]any{"type": "command", "command": "other-tool start"}},
+			})
+		}},
+		{"extra permission", func(t *testing.T, doc map[string]any) {
+			perms := doc["permissions"].(map[string]any)
+			perms["allow"] = append(perms["allow"].([]any), "Bash(ls:*)")
+		}},
+		{"deny key", func(t *testing.T, doc map[string]any) {
+			doc["permissions"].(map[string]any)["deny"] = []any{"Bash(rm:*)"}
+		}},
+		{"autoMemoryEnabled true", func(t *testing.T, doc map[string]any) {
+			doc["autoMemoryEnabled"] = true
+		}},
+		{"ghost hook entry with a timeout", func(t *testing.T, doc map[string]any) {
+			entry := doc["hooks"].(map[string]any)["Stop"].([]any)[0].(map[string]any)
+			entry["hooks"].([]any)[0].(map[string]any)["timeout"] = 30
+		}},
+		{"ghost hook command with a tool tail", func(t *testing.T, doc map[string]any) {
+			entry := doc["hooks"].(map[string]any)["Stop"].([]any)[0].(map[string]any)
+			action := entry["hooks"].([]any)[0].(map[string]any)
+			action["command"] = action["command"].(string) + " && other-tool"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := installEnv(t)
+			path := filepath.Join(home, ".claude", "settings.json")
+
+			var first bytes.Buffer
+			if err := Run(&first, false); err != nil {
+				t.Fatalf("first Run: %v\n%s", err, first.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(data, &doc); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(t, doc)
+			edited, err := json.MarshalIndent(doc, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited = append(edited, '\n')
+			if err := os.WriteFile(path, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var second bytes.Buffer
+			if err := Run(&second, false); err != nil {
+				t.Fatalf("second Run: %v\n%s", err, second.String())
+			}
+			bak, err := os.ReadFile(path + ".bak")
+			if err != nil {
+				t.Fatalf("no .bak was written for a file that is not purely ghost's: %v", err)
+			}
+			if !bytes.Equal(bak, edited) {
+				t.Errorf(".bak = %q, want the edited file %q", bak, edited)
+			}
+		})
+	}
+}
+
 // TestRunInstallsWithValidSettings is the whole-command happy path: a
 // well-formed file is installed into, keeping the user's entries and adding
 // ghost's.
@@ -251,4 +394,113 @@ func TestValidateAcceptsAbsentFields(t *testing.T) {
 			t.Errorf("settings without a read event were refused: %v (doc %s)", err, doc)
 		}
 	}
+}
+
+// TestRunMergesBOMSettings pins #1379: Claude Code reads a settings.json that
+// starts with a UTF-8 byte-order mark, so init merges into it instead of
+// refusing, keeps the mark at the start of the file and the user's keys, and
+// still takes the one-time .bak of the user's pre-ghost bytes.
+func TestRunMergesBOMSettings(t *testing.T) {
+	home, _ := installEnv(t)
+	seed := "\ufeff{\"model\":\"opus\"}\n"
+	path := writeSettings(t, home, seed)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run refused a BOM-prefixed settings.json: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), "\ufeff{") {
+		t.Errorf("the byte-order mark must stay at the start of the file, got:\n%q", got)
+	}
+	if strings.Count(string(got), "\ufeff") != 1 {
+		t.Errorf("exactly one byte-order mark expected, got:\n%q", got)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimPrefix(got, []byte("\ufeff")), &doc); err != nil {
+		t.Fatalf("merged file is not valid JSON after the mark: %v", err)
+	}
+	if string(doc["model"]) != `"opus"` {
+		t.Errorf("the user's key must survive the merge, got %s", doc["model"])
+	}
+	if _, ok := doc["hooks"]; !ok {
+		t.Error("ghost's hooks were not merged")
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the pre-ghost file must be backed up: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak must hold the user's original bytes, got %q", bak)
+	}
+}
+
+// TestRunBOMSettingsRoundTrip pins the other half of #1379: the mark is
+// preserved only where the file had one. A BOM-free file stays BOM-free, a
+// fresh install writes no mark, and a second run over a BOM file is a fixed
+// point that still holds exactly one mark.
+func TestRunBOMSettingsRoundTrip(t *testing.T) {
+	const bom = "\ufeff"
+
+	t.Run("existing file without a mark", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := writeSettings(t, home, "{\"model\":\"opus\"}\n")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), bom) {
+			t.Errorf("a BOM-free file must stay BOM-free, got:\n%q", got)
+		}
+	})
+
+	t.Run("fresh install", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := filepath.Join(home, ".claude", "settings.json")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), bom) {
+			t.Errorf("a fresh install must write no mark, got:\n%q", got)
+		}
+	})
+
+	t.Run("second run on a marked file", func(t *testing.T) {
+		home, _ := installEnv(t)
+		path := writeSettings(t, home, bom+"{\"model\":\"opus\"}\n")
+		var out bytes.Buffer
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("first Run: %v", err)
+		}
+		first, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+		if err := Run(&out, false); err != nil {
+			t.Fatalf("second Run: %v", err)
+		}
+		second, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(first) != string(second) {
+			t.Errorf("second run must be a fixed point:\nfirst:\n%q\nsecond:\n%q", first, second)
+		}
+		if n := strings.Count(string(second), bom); n != 1 || !strings.HasPrefix(string(second), bom) {
+			t.Errorf("want exactly one leading mark, got %d in:\n%q", n, second)
+		}
+	})
 }

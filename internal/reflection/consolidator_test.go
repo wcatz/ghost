@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -56,6 +57,42 @@ func TestTieredConsolidator_AllFail(t *testing.T) {
 	_, err := tc.Consolidate(context.Background(), ReflectionInput{})
 	if err == nil {
 		t.Fatal("expected error when all tiers fail")
+	}
+}
+
+// TestTieredConsolidatorDoesNotFallThroughACancelledCaller pins that a
+// cancelled caller is fatal rather than a tier failure. The LLM tier reports
+// context.Canceled when the command is asked to stop, and reading that as a
+// tier failure would run the mechanical tier and, with --apply, rewrite the
+// corpus for a run the operator stopped. The error is the cancellation, not the
+// fallback's success, which is what proves the fallback never ran.
+func TestTieredConsolidatorDoesNotFallThroughACancelledCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	llm := &stubConsolidator{name: "llm", available: true, err: context.Canceled}
+	fallback := &stubConsolidator{name: "sqlite", available: true, mechanical: true, result: ReflectionResult{LearnedContext: "mechanical"}}
+
+	tc := NewTieredConsolidator([]Consolidator{llm, fallback}, slog.Default())
+	_, err := tc.Consolidate(ctx, ReflectionInput{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Consolidate returned %v, want the cancellation rather than a fall-through", err)
+	}
+}
+
+// TestTieredConsolidatorRefusesAMechanicalResultFromACancelledCaller is the
+// other half: the mechanical tier never consults the context, so a result it
+// returns after the caller gave up must still be refused. Without the check
+// after EVERY tier, a bare mechanical selection would hand back a result — and
+// the apply path would rewrite the corpus.
+func TestTieredConsolidatorRefusesAMechanicalResultFromACancelledCaller(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sqlite := &stubConsolidator{name: "sqlite", available: true, mechanical: true, result: ReflectionResult{LearnedContext: "mechanical"}}
+
+	tc := NewTieredConsolidator([]Consolidator{sqlite}, slog.Default())
+	_, err := tc.Consolidate(ctx, ReflectionInput{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Consolidate returned %v, want the cancellation rather than a result", err)
 	}
 }
 
