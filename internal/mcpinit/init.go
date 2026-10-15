@@ -51,6 +51,24 @@ func Run(w io.Writer, dryRun bool) error {
 		return err
 	}
 
+	// A refusal from the data-directory resolution stops init outright (#1321).
+	// Step 2's scratch root and step 9's import both resolve the directory
+	// through the same guard and both downgrade a failure there to a
+	// "(continuing)" warning, so an install whose data directory was refused
+	// still registered the client, wrote settings, printed "Done!" and exited
+	// 0 — a script branching on the exit code could not tell the install's
+	// data-directory step had been refused. Resolving the directory once, here,
+	// makes the refusal the run's outcome and leaves nothing half-wired, and it
+	// is before the steps so no other failure is promoted: every OTHER scratch
+	// or per-project failure keeps its best-effort warning, and only the
+	// guard's refusal is fatal. config.DataDirPath is a pure query that creates
+	// nothing (#721) — asking it here cannot leave the phantom directory the
+	// guard exists to prevent, and DataDirPath is the one place the guard runs,
+	// so no refusal can reach this run another way.
+	if _, err := config.DataDirPath(); err != nil {
+		return fmt.Errorf("data directory: %w", err)
+	}
+
 	// Step 1: Prerequisites. No retryHint here: a missing binary is an
 	// install-first problem that re-running init cannot fix, and the
 	// claude-missing error carries its own next-step guidance (alternative
