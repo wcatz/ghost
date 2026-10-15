@@ -1601,7 +1601,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 	// Any wrapped ghost action present is never pruned, and its presence
 	// decides the survivor (see below). Pre-scan so the decision does not
 	// depend on rule order.
-	hasWrapper := false
+	hasSourceCodexWrapper := false
 	for _, r := range rules {
 		ro, ok := decodeCodexObject(r)
 		if !ok {
@@ -1621,7 +1621,12 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			if !codexLeadingGhostHookAction(c, eventToken, ghostBin) {
-				hasWrapper = true
+				// Only a wrapper carrying --source matching the codex dialect is
+				// a privileged survivor; a wrapper running another host's source,
+				// or none at all, leaves canonical actions untouched.
+				if codexWrappedActionCarriesSource(c, eventToken, ghostBin) {
+					hasSourceCodexWrapper = true
+				}
 			}
 		}
 	}
@@ -1657,19 +1662,25 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 			}
 			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
 				// A wrapped action runs ghost but is never pruned and never
-				// rewritten: its prefix, its path and any chained command are
-				// the user's to keep. It is what the canonical ghost rule
-				// yields to — see hasWrapper — so a wrapper survives even
-				// when a canonical copy precedes it.
+				// rewritten. It is the user's form, optionally carrying other
+				// commands in the same shell expression, and its prefix and
+				// path stay exactly as written. When it runs with the codex
+				// dialect it becomes the preferred survivor (see
+				// hasSourceCodexWrapper); otherwise it is treated as the
+				// user's and only the chained commands it already ran matter.
 				kept = append(kept, action)
-				hasGhost = true
+				if codexWrappedActionCarriesSource(cmd, eventToken, ghostBin) {
+					hasSourceCodexWrapper = true
+					hasGhost = true
+				}
 				continue
 			}
-			if hasWrapper {
-				// The event carries a wrapper, which is the preferred
-				// survivor: prune canonical leading-token actions (and drop a
-				// rule that becomes empty) regardless of their position, so
-				// ghost fires once per event from the user's form.
+			if hasSourceCodexWrapper {
+				// The event carries a wrapper running the codex dialect, which
+				// is the preferred survivor: prune canonical leading-token
+				// actions (and drop a rule that becomes empty) regardless of
+				// their position, so ghost fires once per event from the user's
+				// form.
 				dropped++
 				hasGhost = true
 				continue
@@ -1827,6 +1838,28 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 		out[ev.Key] = rules
 	}
 	return out, nil
+}
+
+// codexWrappedActionCarriesSource reports whether a wrapped (non-leading) ghost
+// action's tail names --source codex. The merge treats such a wrapper as the
+// wired survivor and prunes canonical actions; one whose source names another
+// host, or omits the flag, is the user's own and is left beside the canonical
+// codex rule, matching codexContractHookWired's exact --source read — so
+// `ghost mcp init` and `ghost mcp status` agree on the same file.
+func codexWrappedActionCarriesSource(cmd, eventToken, ghostBin string) bool {
+	tail, ok := ghostHookTail(cmd, eventToken, ghostBin)
+	if !ok {
+		return false
+	}
+	for i := 0; i < len(tail); i++ {
+		if tail[i] == "--source" && i+1 < len(tail) && tail[i+1] == "codex" {
+			return true
+		}
+		if strings.HasPrefix(tail[i], "--source=") && strings.TrimPrefix(tail[i], "--source=") == "codex" {
+			return true
+		}
+	}
+	return false
 }
 
 // codexContractHookWired is the codex analog of contractHookWired: it walks
