@@ -12,24 +12,28 @@ import (
 )
 
 // TestNoToolResultPrintsAStoredIDOutsideTheRenderer is the structural half of
-// #1377: over every non-test source file in this package, a stored memory id
-// passed bare to a formatting call fails a build.
+// #1377: over every non-test source file in this package, a stored id or a
+// project's name passed bare to a formatting call fails a build.
 //
-// The rule it enforces is the one the work changed: an id that reaches a tool
-// result goes through assemble.Token (or shortID where a listing abbreviates, or
-// memory.RefusalArg / memory.ProjectArg in a refusal). It is structural rather
-// than behavioural because the defect the issue found is a HANDLER printing an
-// id, and a behavioural test can only cover the handlers somebody remembered to
-// write a case for — the next handler that prints a caller-addressed id is the
-// one this holds.
+// The rule it enforces is the one the work changed: an id or a project name that
+// reaches a tool result goes through assemble.Token (or shortID where a listing
+// abbreviates, or memory.RefusalArg / memory.ProjectArg in a refusal, or
+// assemble.Label for a name). It is structural rather than behavioural because
+// the defect the issue found is a HANDLER printing a stored value, and a
+// behavioural test can only cover the handlers somebody remembered to write a
+// case for — the next handler that prints a caller-addressed id is the one this
+// holds.
 //
 // The operands it recognises are the identifiers and selectors this package
-// uses for an id it did not itself mint: `id`, `duplicateOf`, `memoryID`,
-// `memoryIDs`, `decisionID`, `args.MemoryID` and `args.MemoryIDs`. That set is
-// the honest limit of a scan with no type checker, and it is deliberately the
-// expressions a stored id is spelled with HERE: a value that is not one of them
-// is out of scope, and the set grows with a new spelling rather than the guard
-// being widened to guess.
+// uses for a stored value: the local id spellings (`id`, `duplicateOf`,
+// `memoryID`, `memoryIDs`, `decisionID`, `taskID`, `projectID`,
+// `resolvedProjectID`, `requestedProjectID`), an id field on any receiver
+// (`p.ID`, `x.ID`, `summary.ProjectID`, `l.SourceID`, `args.TaskID`,
+// `args.MemoryID`) and a project's name field (`summary.ProjectName`). That set
+// is the honest limit of a scan with no type checker, and it is deliberately the
+// expressions a stored value is spelled with HERE: a value that is not one of
+// them is out of scope, and the set grows with a new spelling rather than the
+// guard being widened to guess.
 //
 // A verb is not consulted. Any verb prints a bare string, and `%q` is no safer
 // than `%s` — it leaves a printable non-ASCII rune as itself — so the question is
@@ -64,9 +68,9 @@ func TestNoToolResultPrintsAStoredIDOutsideTheRenderer(t *testing.T) {
 			for _, arg := range operands {
 				switch {
 				case idGuardOperand(arg):
-					t.Errorf("%s: a formatting call prints a stored memory id bare; route it "+
-						"through assemble.Token (or shortID / memory.RefusalArg) so a line break "+
-						"or a « cannot forge a line in the answer: %s",
+					t.Errorf("%s: a formatting call prints a stored id or project name bare; route it "+
+						"through assemble.Token or assemble.Label (or shortID / memory.RefusalArg) so a "+
+						"line break or a « cannot forge a line in the answer: %s",
 						fset.Position(arg.Pos()), idGuardRender(arg))
 				case idGuardRenders(arg):
 					rendered++
@@ -141,28 +145,35 @@ func idGuardLiteral(expr ast.Expr) (string, bool) {
 }
 
 // idGuardOperand reports whether expr is one of the spellings this package gives
-// a stored memory id.
+// a stored id or a project's name. The set is the identifiers and selectors a
+// stored value is written with HERE: an id inside a formatting call is either a
+// local (`id`, `duplicateOf`, `memoryID`, `taskID`, `decisionID`, `projectID`,
+// `resolvedProjectID`, `requestedProjectID`) or a field on some receiver
+// (`p.ID`, `x.ID`, `summary.ProjectID`, `l.SourceID`, `args.TaskID`,
+// `args.MemoryID`) — and a project's name is the one NAME field that is a label
+// rather than quoted free text, so it is here too.
 func idGuardOperand(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		switch e.Name {
-		case "id", "duplicateOf", "memoryID", "memoryIDs", "decisionID":
+		case "id", "duplicateOf", "memoryID", "memoryIDs", "decisionID", "taskID",
+			"projectID", "resolvedProjectID", "requestedProjectID":
 			return true
 		}
 	case *ast.SelectorExpr:
-		if pkg, ok := e.X.(*ast.Ident); ok && pkg.Name == "args" {
-			switch e.Sel.Name {
-			case "MemoryID", "MemoryIDs":
-				return true
-			}
+		switch {
+		case e.Sel.Name == "ID" || strings.HasSuffix(e.Sel.Name, "ID"):
+			return true
+		case e.Sel.Name == "ProjectName":
+			return true
 		}
 	}
 	return false
 }
 
 // idGuardRenders reports whether expr is a renderer call over a stored id: the
-// two key renderers take the value first, the two refusal renderers take a label
-// first and the value second.
+// key renderers take the value first, the two refusal renderers take a label
+// first and the value second. Label covers a project's name.
 func idGuardRenders(expr ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
@@ -177,7 +188,7 @@ func idGuardRenders(expr ast.Expr) bool {
 		return false
 	}
 	switch {
-	case pkg.Name == "assemble" && (sel.Sel.Name == "Token" || sel.Sel.Name == "ShortID"):
+	case pkg.Name == "assemble" && (sel.Sel.Name == "Token" || sel.Sel.Name == "ShortID" || sel.Sel.Name == "Label" || sel.Sel.Name == "Data"):
 		return len(call.Args) == 1 && idGuardOperand(call.Args[0])
 	case pkg.Name == "memory" && (sel.Sel.Name == "RefusalArg" || sel.Sel.Name == "ProjectArg"):
 		return len(call.Args) == 2 && idGuardOperand(call.Args[1])

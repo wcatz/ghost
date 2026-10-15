@@ -3991,7 +3991,7 @@ func (s *Server) registerTools() {
 			verb = "Deleted"
 		}
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
+		fmt.Fprintf(&sb, "%s %s (%s):\n", verb, assemble.Label(summary.ProjectName), assemble.Token(summary.ProjectID))
 		fmt.Fprintf(&sb, "  memories:     %d\n", summary.Memories)
 		fmt.Fprintf(&sb, "  memory_links: %d\n", summary.MemoryLinks)
 		fmt.Fprintf(&sb, "  tasks:        %d\n", summary.Tasks)
@@ -4460,7 +4460,7 @@ func (s *Server) registerResources() {
 
 		decisions, err := s.store.LiveDecisions(ctx, projectID, 20)
 		if err != nil {
-			return nil, fmt.Errorf("list decisions for %q: %w", projectID, err)
+			return nil, fmt.Errorf("list decisions for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 
 		var text string
@@ -4688,7 +4688,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		var err error
 		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
 		if err != nil {
-			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
+			return "", fmt.Errorf("get memories for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		own, globals = projectContextSplit(memories.Items)
 		var ownLine string
@@ -4729,7 +4729,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 
 		decisions, err := s.store.LiveDecisions(ctx, projectID, 5)
 		if err != nil {
-			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+			return "", fmt.Errorf("list decisions for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if len(decisions) > 0 {
 			sb.WriteString("\n\n## Recent Decisions\n\n")
@@ -4748,7 +4748,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 
 		learned, err := s.store.GetLearnedContext(ctx, projectID)
 		if err != nil {
-			return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
+			return "", fmt.Errorf("get learned context for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if learned != "" {
 			sb.WriteString("\n\n## Learned Context\n\n")
