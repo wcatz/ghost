@@ -2673,7 +2673,7 @@ func (s *Server) registerTools() {
 			// `limit: 3` request.
 			rows, globalLine := s.projectContextGlobalRows(ctx, args.Limit, nil, nil, "")
 			var text string
-			if parts := responseSection(0, globalSectionHeading, itemLines(rows), globalLine); len(parts) > 0 {
+			if parts := responseSection(0, globalSectionHeading, itemLines(rows), itemPins(rows), globalLine); len(parts) > 0 {
 				// The section body ends in a newline, so replacing that final
 				// newline with the blank line before the sentence reproduces
 				// projectContextWithNotRegistered byte for byte.
@@ -2728,8 +2728,8 @@ func (s *Server) registerTools() {
 				// adds: it reads the same rows, renders the same fields through the
 				// same `memoryLines`, and says which instant it read.
 				own, globals := splitMemoriesByProject(live)
-				parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, memoryLines(own, asOf), "")...)
-				parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, memoryLines(globals, asOf), "")...)
+				parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, memoryLines(own, asOf), nil, "")...)
+				parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, memoryLines(globals, asOf), nil, "")...)
 			}
 			if note := set.UnknownNote(); note != "" {
 				parts = append(parts, responsePart{text: "\n" + note + "\n"})

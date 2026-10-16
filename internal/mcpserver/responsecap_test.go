@@ -20,7 +20,7 @@ func bulkyContent(i int, noun string) string {
 
 // dumpedCut is the number a trimmed answer's notice reports, or -1 when the
 // answer carries no notice at all.
-var dumpedCut = regexp.MustCompile(`\((\d+) rows? (?:was|were) cut from the end of this answer`)
+var dumpedCut = regexp.MustCompile(`\((\d+) rows? (?:was|were) cut from (?:the end of )?this answer`)
 
 func cutCount(t *testing.T, out string) int {
 	t.Helper()
