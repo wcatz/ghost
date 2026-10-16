@@ -40,21 +40,25 @@ func TestBenchRegressionFloors(t *testing.T) {
 	}{
 		// Observed on the v3 dataset (549 memories / 220 paraphrase-heavy
 		// graded queries, committed embedding fixture): fts 0.759/0.702,
-		// vector 0.814/0.766, hybrid 0.831/0.765 — the rows
+		// vector 0.814/0.766, hybrid 0.832/0.766 — the rows
 		// docs/benchmarks.md publishes. Floors sit just below those, the
 		// tightest being hybrid recall@10 with 0.013 of headroom.
 		//
 		// #965 re-floored these against a corrected LABEL SET, not a changed
 		// ranking: 16 queries had a gain added or raised and two
 		// byte-identical corpus rows were dropped, so the measurement moved
-		// and each floor moved with it. The floors are written to three
+		// and each floor moved with it. #1400 is the same kind of change on a
+		// smaller scale: q_decay_rules left one of its two answers ungraded,
+		// so grading that near-duplicate at the same gain the other already
+		// carried moved the hybrid row to 0.832/0.766 and the hybrid floors
+		// with it. The floors are written to three
 		// decimals so that every row keeps exactly the margin it already
 		// carried (observed minus floor, NDCG@10 / recall@10: fts 0.019 /
 		// 0.027, vector 0.020 / 0.014, hybrid 0.018 / 0.013); two decimals
 		// would have loosened five of the six.
 		{CondFTS, 0.740, 0.675},
 		{CondVector, 0.794, 0.752},
-		{CondHybrid, 0.813, 0.752},
+		{CondHybrid, 0.814, 0.753},
 	}
 	for _, f := range floors {
 		res := r[f.cond]
@@ -77,8 +81,8 @@ func TestBenchRegressionFloors(t *testing.T) {
 	// The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a thin point
 	// estimate, which fails on a 0.001 dataset edit while the interval still
 	// excludes zero. The intervals are logged because they are the result: on the
-	// committed v3 dataset hybrid beats vector by +0.0175 [+0.0029, +0.0325] and
-	// fts by +0.0722 [+0.0504, +0.0951].
+	// committed v3 dataset hybrid beats vector by +0.0178 [+0.0033, +0.0327] and
+	// fts by +0.0731 [+0.0512, +0.0958].
 	for _, leg := range []string{CondVector, CondFTS} {
 		ci, err := CompareFusion(r[CondHybrid], r[leg])
 		if err != nil {

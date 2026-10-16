@@ -168,8 +168,8 @@ func TestFusionGateDecision(t *testing.T) {
 	}{
 		// The measured interval over the committed v3 dataset, so "measured" in
 		// the case name is a fact the test can be held to: TestBenchRegressionFloors
-		// logs +0.0175 [+0.0029, +0.0325] from the same code and the same seed pair.
-		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0175, Lo: 0.0029, Hi: 0.0325, Queries: 220}, true},
+		// logs +0.0178 [+0.0033, +0.0327] from the same code and the same seed pair.
+		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0178, Lo: 0.0033, Hi: 0.0327, Queries: 220}, true},
 		{"point estimate dipped below zero, the interval still excludes a real loss",
 			PairDiff{Leg: CondVector, Mean: -0.001, Lo: -0.015, Hi: 0.010, Queries: 220}, true},
 		{"a consistent loss inside the tolerance", PairDiff{Leg: CondFTS, Mean: -0.015, Lo: -0.019, Hi: -0.008, Queries: 220}, true},
