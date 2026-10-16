@@ -889,13 +889,13 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 				memories.Trace.PinnedCut[memory.GlobalProjectID])
 			globalLine = ""
 		}
-		parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, itemLines(own), ownLine)...)
+		parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, itemLines(own), itemPins(own), ownLine)...)
 		// The tool's Global section is the `_global` half of its own window and
 		// NO second read: `limit` already capped the whole block, and a second
 		// read at the Global section's own cap would return more rows than the
 		// caller asked for. The resource, whose caps are per-section, does run
 		// one — see buildProjectContext.
-		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(globals), foldedOwn+globalLine)...)
+		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(globals), itemPins(globals), foldedOwn+globalLine)...)
 	}
 
 	learned, err := s.store.GetLearnedContext(ctx, projectID)
