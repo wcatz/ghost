@@ -3982,6 +3982,45 @@ func applyViewFromContext(ctx context.Context) (*applyView, bool) {
 	return view, ok && view != nil
 }
 
+// CheckUpsertArguments is every refusal UpsertWithOptions makes from its
+// arguments alone, before it takes the lock or opens a transaction. It is the
+// SAME predicate the upsert asks first, exported so a caller that has to open a
+// project before the write — the MCP save tools — can ask it before opening
+// that project: a refused save must leave no empty project, and no checkout
+// binding, behind it. What the upsert can still refuse after this answer is nil
+// needs a row the store already holds in that project (the fold-time window
+// check), so it cannot fire on a project the caller has just opened.
+func CheckUpsertArguments(content string, tags []string, opts UpsertOptions) error {
+	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
+		return err
+	}
+	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
+		return err
+	}
+	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
+	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
+	// The scope is caller-supplied text printed outside the data delimiters on
+	// every listing, so it passes the same token guard as the content and is
+	// bounded at write time (scope_guard.go).
+	if err := checkScope(opts.Scope); err != nil {
+		return err
+	}
+	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
+		return err
+	}
+	// Same place, same reason, and for the same caller: a tier the vocabulary
+	// does not hold is a typo, and the refusal costs nothing and writes nothing.
+	// It has to happen before the FTS probe rather than after it, because a fold
+	// returns an existing id and writes a linked copy — a tier the fold dropped
+	// on the way would be a protection the caller was promised and did not get.
+	_, err := NormalizeRetention(opts.Retention)
+	return err
+}
+
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
 	// Before the lock, the transaction, and the FTS probe: a refused value
@@ -3989,32 +4028,10 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// caller's transaction this error rolls that caller's work back too, which
 	// is the correct outcome — the secret is not stored, and the caller's
 	// caller is told why.
-	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
+	if err := CheckUpsertArguments(content, tags, opts); err != nil {
 		return "", "", 0, err
 	}
-	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
-		return "", "", 0, err
-	}
-	if err := checkReservedSourceRef(opts.Provenance.SourceRef); err != nil {
-		return "", "", 0, err
-	}
-	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
-		return "", "", 0, err
-	}
-	// The scope is caller-supplied text printed outside the data delimiters on
-	// every listing, so it passes the same token guard as the content and is
-	// bounded at write time (scope_guard.go).
-	if err := checkScope(opts.Scope); err != nil {
-		return "", "", 0, err
-	}
-	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
-		return "", "", 0, err
-	}
-	// Same place, same reason, and for the same caller: a tier the vocabulary
-	// does not hold is a typo, and the refusal costs nothing and writes nothing.
-	// It has to happen before the FTS probe rather than after it, because a fold
-	// returns an existing id and writes a linked copy — a tier the fold dropped
-	// on the way would be a protection the caller was promised and did not get.
+	// Already judged valid by the check above; normalized here for its value.
 	retention, err := NormalizeRetention(opts.Retention)
 	if err != nil {
 		return "", "", 0, err
