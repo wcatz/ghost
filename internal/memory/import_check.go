@@ -139,8 +139,9 @@ func CheckImportedProject(p PortableProject) error {
 	// session's digest and returned by ghost_project_list. repo_remote is not part
 	// of this guard and does not need to be: NormalizeRepoRemote reduces it to the
 	// host and the path, dropping the userinfo, the query string and the fragment —
-	// the three positions a clone URL carries an inline token in — so the value
-	// stored carries no token from a URL.
+	// the three positions a clone URL usually carries an inline token in — so the
+	// value stored carries no token from those positions. A token written into the
+	// URL path itself is not removed, and nothing guards the column against one.
 	return rejectSecretFields(
 		secretField{"name", p.Name},
 		secretField{"path", p.Path},

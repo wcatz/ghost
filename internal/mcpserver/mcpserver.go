@@ -224,8 +224,9 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// normalizes it to the id, and the repository route passes the same value three
 	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
 	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, the
-	// query string and the fragment, the three positions a clone URL carries an
-	// inline token in, so the value stored carries no token from a URL.
+	// query string and the fragment, the three positions a clone URL usually
+	// carries an inline token in, so the value stored carries no token from those
+	// positions (a token written into the URL path itself is not removed).
 	//
 	// The credential guard is asked FIRST, and that ordering is the difference
 	// between naming a value and relocating a secret. `CheckImportedProject` ends in
