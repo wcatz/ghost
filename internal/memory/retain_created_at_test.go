@@ -427,3 +427,93 @@ func TestAReuseIsNotRelabelledByANamedSourceItDoesNotConsume(t *testing.T) {
 		t.Errorf("history has %d version(s), want the save's own 1: a reuse that consumed nothing recorded a version", len(hist))
 	}
 }
+
+// A version filed by a stamp-moving writer carries the updated_at the writer left
+// on the row, whatever the clock read when the history INSERT ran. The writer
+// moves the column in one statement and files the version in a later one, and
+// SQLite evaluates datetime('now') per statement, so a second boundary between
+// the two split them (#1416). A trigger that pins updated_at to a fixed past
+// value after the writer's own statement makes the two statements disagree
+// about the clock without waiting for a boundary.
+func TestAStampMovingVersionCarriesTheUpdatedAtItsWriterLeft(t *testing.T) {
+	const pinned = "2021-02-03 04:05:06"
+	pin := func(t *testing.T, s *Store) {
+		t.Helper()
+		for _, ev := range []string{"INSERT", "UPDATE"} {
+			if _, err := s.db.Exec(`CREATE TRIGGER pin_stamp_` + ev + ` AFTER ` + ev + ` ON memories
+				WHEN NEW.updated_at <> '` + pinned + `'
+				BEGIN UPDATE memories SET updated_at = '` + pinned + `' WHERE id = NEW.id; END`); err != nil {
+				t.Fatalf("create trigger: %v", err)
+			}
+		}
+	}
+	unpin := func(t *testing.T, s *Store) {
+		t.Helper()
+		for _, ev := range []string{"INSERT", "UPDATE"} {
+			if _, err := s.db.Exec(`DROP TRIGGER pin_stamp_` + ev); err != nil {
+				t.Fatalf("drop trigger: %v", err)
+			}
+		}
+	}
+	check := func(t *testing.T, s *Store, id, phase string) {
+		t.Helper()
+		vs, err := s.MemoryHistory(context.Background(), id, 10)
+		if err != nil || len(vs) == 0 {
+			t.Fatalf("MemoryHistory: %v (%d versions)", err, len(vs))
+		}
+		newest := vs[len(vs)-1]
+		if newest.Phase != phase {
+			t.Fatalf("newest phase = %q, want %q", newest.Phase, phase)
+		}
+		if got := readUpdatedAt(t, s, id); got != pinned {
+			t.Fatalf("row updated_at = %q, want the pinned %q", got, pinned)
+		}
+		if newest.RecordedAt != pinned {
+			t.Errorf("%s version recorded_at = %q, want the row's updated_at %q", phase, newest.RecordedAt, pinned)
+		}
+	}
+
+	t.Run("save", func(t *testing.T) {
+		s := testStore(t)
+		pin(t, s)
+		id, _, _, err := s.UpsertWithOptions(context.Background(), testProject, "fact", "a saved fact", "mcp", 0.5, nil, UpsertOptions{})
+		if err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		check(t, s, id, phaseSave)
+	})
+	t.Run("update", func(t *testing.T) {
+		s := testStore(t)
+		id, _, _, err := s.UpsertWithOptions(context.Background(), testProject, "fact", "before the edit", "mcp", 0.5, nil, UpsertOptions{})
+		if err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		pin(t, s)
+		next := "after the edit"
+		if err := s.UpdateMemory(context.Background(), testProject, id, &next, nil, nil, nil); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		check(t, s, id, phaseUpdate)
+	})
+	t.Run("reflect", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const content = "the queue backend is redis lists"
+		reused, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", content, "mcp", 0.5, nil, UpsertOptions{})
+		if err != nil {
+			t.Fatalf("save reused: %v", err)
+		}
+		other, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "a stale note the merge folds in", "mcp", 0.5, nil, UpsertOptions{})
+		if err != nil {
+			t.Fatalf("save other: %v", err)
+		}
+		pin(t, s)
+		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: content, Importance: 0.5, ReplacesIDs: []string{reused, other},
+		}}, "", nil); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		check(t, s, reused, phaseReflect)
+		unpin(t, s)
+	})
+}

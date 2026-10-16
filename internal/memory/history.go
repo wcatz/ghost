@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -374,12 +375,22 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
+	// A stamp-moving phase's version carries the updated_at its writer left on the
+	// row, read by this same statement. The column default would read the clock
+	// again, and SQLite evaluates datetime('now') once per statement, so a second
+	// boundary between the writer's UPDATE and this INSERT filed the version one
+	// second after the row it records. Every other phase keeps the clock: it did
+	// not move the stamp, so there is nothing to agree with.
+	recordedAt := "datetime('now')"
+	if slices.Contains(stampMovingPhases, e.phase) {
+		recordedAt = "updated_at"
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_history
 			(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
-			 content, category, importance, resolved_at, source)
+			 content, category, importance, resolved_at, source, recorded_at)
 		SELECT id, project_id, ?, ?, ?, ?, ?, `+historyContentExpr()+`,
-		       category, importance, resolved_at, source
+		       category, importance, resolved_at, source, `+recordedAt+`
 		FROM memories WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return fmt.Errorf("append %s history: %w", e.phase, err)
