@@ -191,6 +191,12 @@ type SlicePolicy struct {
 type DroppedLoser struct {
 	Candidate
 	LostTo []string
+	// StandIns are the ids among LostTo the removal chose over this row only
+	// because they are LATER (the query path's chronology rule, earlierRowLoses):
+	// by rank this row would have been kept and they removed. Each stands in for
+	// it, so a later admission stage judges a stand-in by this row's evidence as
+	// well as its own (assemble's standInEvidence). Empty for a rank verdict.
+	StandIns []string
 }
 
 // CandidateSet is one retrieval's rows plus the facts about how they were
@@ -633,7 +639,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// The near-duplicate verdicts are read once more, by the removal itself: the
 	// loser leaves the set here rather than being ranked last, and it reports
 	// what it removed so the assembler can file the verdict (#926).
-	kept, removed, lostTo := cand.dropNearDuplicates(ctx, selected, p, req.Now)
+	kept, removed, lostTo, standIns := cand.dropNearDuplicates(ctx, selected, p, req.Now)
 	selected = kept
 	droppedIDs := make([]string, len(removed))
 	for i, m := range removed {
@@ -655,8 +661,9 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// The survivors are partitioned by MEMBERSHIP, never by index: position
 	// picks the loser, but the demotion rules FLIP that decision when the
 	// positioned loser is pinned or retention-exempt and the winner is not
-	// (demoteResults' protected rule), so a protected tail row can beat the
-	// window's own representative. A slice at len(selected) would then keep the
+	// (demoteResults' protected rule), and the removal flips it again when the
+	// positioned loser is the later row (earlierRowLoses), so a protected or a
+	// later tail row can beat the window's own representative. A slice at len(selected) would then keep the
 	// loser in Rows while filing it as dropped, and cut the real winner out of
 	// the answer with no verdict anywhere — both the row-accounting loss and
 	// the contradiction DroppedLosers exists to prevent. Each half keeps its
@@ -664,7 +671,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// are untouched by this pass.
 	if len(tail) > 0 {
 		combined := append(append([]Memory{}, selected...), tail...)
-		keptAll, passLosers, lostToPass := cand.dropNearDuplicates(ctx, combined, p, req.Now)
+		keptAll, passLosers, lostToPass, standInsPass := cand.dropNearDuplicatesOver(ctx, combined, len(selected), p, req.Now)
 		if len(passLosers) > 0 {
 			inWindow := make(map[string]bool, len(selected))
 			for _, m := range selected {
@@ -684,6 +691,12 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 				removed = append(removed, m)
 				droppedIDs = append(droppedIDs, m.ID)
 				lostTo[m.ID] = lostToPass[m.ID]
+				if ids := standInsPass[m.ID]; len(ids) > 0 {
+					if standIns == nil {
+						standIns = make(map[string][]string)
+					}
+					standIns[m.ID] = ids
+				}
 			}
 		}
 	}
@@ -702,10 +715,17 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// read over a window it never saw. Filing them here, before the explain
 	// buckets are built, is what lets stage 6 put each one in the trace, the
 	// retrieval record and explain with its reason.
+	//
+	// A loser carries the same admission facts a kept row does (the keyword
+	// reservation here, the embedding state below), because a stand-in for it is
+	// judged by its evidence (DroppedLoser.StandIns).
 	for _, m := range removed {
+		c := candidateOf(m, scores, fts, vec, req.Now)
+		c.KeywordReserved = window.Reserved[m.ID]
 		set.DroppedLosers = append(set.DroppedLosers, DroppedLoser{
-			Candidate: candidateOf(m, scores, fts, vec, req.Now),
+			Candidate: c,
 			LostTo:    lostTo[m.ID],
+			StandIns:  standIns[m.ID],
 		})
 	}
 
@@ -777,12 +797,23 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// shares its backing array with set.Rows, so the marks below reach the
 	// returned set.
 	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
-		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity, len(req.QueryVec))
+		judged := rows
+		if len(set.DroppedLosers) > 0 {
+			judged = make([]Candidate, 0, len(rows)+len(set.DroppedLosers))
+			judged = append(judged, rows...)
+			for _, l := range set.DroppedLosers {
+				judged = append(judged, l.Candidate)
+			}
+		}
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), judged, identity, len(req.QueryVec))
 		if err != nil {
 			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
 		}
 		for i := range rows {
 			rows[i].Unembedded = unembedded[rows[i].ID]
+		}
+		for i := range set.DroppedLosers {
+			set.DroppedLosers[i].Unembedded = unembedded[set.DroppedLosers[i].ID]
 		}
 	}
 	return set, nil
