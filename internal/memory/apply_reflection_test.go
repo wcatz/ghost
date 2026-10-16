@@ -423,10 +423,14 @@ func TestApplyReflectionPromotionInheritsSourceScope(t *testing.T) {
 }
 
 // TestApplyReflectionPromotionRefusedOnScopeConflict: a candidate whose sources
-// disagree on scope is not promoted. There is no single scope to promote under,
-// so the candidate is kept project-scoped rather than widened into every project.
-// The project emission does not claim the sources, so the project replace runs —
-// the ordering the promotion has to resolve its scope across.
+// disagree on scope is neither promoted nor written into the project. There is
+// no single scope to promote under, and an unscoped write-back would replace the
+// scoped sources with one unscoped row — the silent widening one level in — so
+// the merge is refused outright, counted as a dropped cross-project emission, and
+// both sources are held through the project replace.
+//
+// The project emission does not claim the sources, so the project replace runs
+// and would delete them as unaccounted rows if the refusal did not keep them.
 func TestApplyReflectionPromotionRefusedOnScopeConflict(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -447,14 +451,17 @@ func TestApplyReflectionPromotionRefusedOnScopeConflict(t *testing.T) {
 	}
 
 	projectMems := []Memory{{Category: "fact", Content: "an unrelated project fact", Source: "reflection", Importance: 0.4}}
-	_, promoted, kept, _, _, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
+	_, promoted, kept, _, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
 		{Category: "fact", Content: "a cross-project fact", Source: "reflection", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
 	}, "", true, nil)
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if promoted != 0 || len(kept) != 1 {
-		t.Fatalf("result promoted=%d kept=%d, want 0/1 — a candidate whose sources disagree must stay project-scoped", promoted, len(kept))
+	if promoted != 0 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/0 — a candidate whose sources disagree is dropped, not kept", promoted, len(kept))
+	}
+	if globalDropped.Changed != 1 {
+		t.Errorf("globalDropped = %+v, want one changed drop for the refused candidate", globalDropped)
 	}
 
 	globals, err := s.GetAll(ctx, "_global", -1)
@@ -469,9 +476,67 @@ func TestApplyReflectionPromotionRefusedOnScopeConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAll project: %v", err)
 	}
-	if !containsMemoryContent(project, "a cross-project fact") {
-		t.Errorf("project = %+v, want the kept candidate", project)
+	if containsMemoryContent(project, "a cross-project fact") {
+		t.Errorf("project = %+v, want no unscoped merged row written", project)
 	}
+	assertMemoryScope(t, project, "production fact", map[string]string{"environment": "production"})
+	assertMemoryScope(t, project, "staging fact", map[string]string{"environment": "staging"})
+}
+
+// TestApplyReflectionPromotionRefusedOnScopeMix: a candidate whose sources MIX
+// scoped and unscoped rows is refused exactly as a disagreement is. There is no
+// single scope it could carry — unscoped would widen the scoped source, scoped
+// would narrow the unscoped one — so the merge is dropped and its sources are
+// kept. The project replace would otherwise delete both as unaccounted.
+func TestApplyReflectionPromotionRefusedOnScopeMix(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	scoped, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped: %v", err)
+	}
+	unscoped, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "everywhere fact", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create unscoped: %v", err)
+	}
+
+	projectMems := []Memory{{Category: "fact", Content: "an unrelated project fact", Source: "reflection", Importance: 0.4}}
+	_, promoted, kept, _, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
+		{Category: "fact", Content: "a cross-project fact", Source: "reflection", Importance: 0.6, ReplacesIDs: []string{scoped, unscoped}},
+	}, "", true, nil)
+	if err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	if promoted != 0 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/0 — a scoped/unscoped mix is refused like a disagreement", promoted, len(kept))
+	}
+	if globalDropped.Changed != 1 {
+		t.Errorf("globalDropped = %+v, want one changed drop for the refused candidate", globalDropped)
+	}
+
+	globals, err := s.GetAll(ctx, "_global", -1)
+	if err != nil {
+		t.Fatalf("GetAll global: %v", err)
+	}
+	if len(globals) != 0 {
+		t.Errorf("_global = %+v, want no promotion for a mixed candidate", globals)
+	}
+
+	project, err := s.GetAll(ctx, testProject, -1)
+	if err != nil {
+		t.Fatalf("GetAll project: %v", err)
+	}
+	if containsMemoryContent(project, "a cross-project fact") {
+		t.Errorf("project = %+v, want no unscoped merged row written", project)
+	}
+	assertMemoryScope(t, project, "production fact", map[string]string{"environment": "production"})
+	assertMemoryScope(t, project, "everywhere fact", nil)
 }
 
 func containsMemoryContent(memories []Memory, content string) bool {
@@ -481,6 +546,24 @@ func containsMemoryContent(memories []Memory, content string) bool {
 		}
 	}
 	return false
+}
+
+// assertMemoryScope fails unless memories holds exactly one row with content and
+// its scope equals want (nil means unscoped). A refused candidate must leave its
+// sources in place, scopes and all, so this pins both halves of that: the row is
+// still there, and it still says what it said.
+func assertMemoryScope(t *testing.T, memories []Memory, content string, want map[string]string) {
+	t.Helper()
+	for _, m := range memories {
+		if m.Content != content {
+			continue
+		}
+		if !ScopeEquals(m.Scope, want) {
+			t.Errorf("%q scope = %v, want %v", content, m.Scope, want)
+		}
+		return
+	}
+	t.Errorf("%q not found in %+v — a refused candidate must keep its sources", content, memories)
 }
 
 // TestApplyReflectionFoldsParaphrasesIntoOneGlobalRow is the #544 regression at
