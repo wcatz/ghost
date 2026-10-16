@@ -495,11 +495,14 @@ func TestImportMemoryDefaultsAbsentTimestampsAndImportance(t *testing.T) {
 }
 
 // TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne: a memory
-// saved without an importance is stored as 0 — `Store.Create` binds the field
-// with no default — and exported as `"importance":0`. Re-importing that must
-// store 0 again, not the column's 0.5: promoting it is a silent rewrite of the
-// artifact's own content, which is the one thing the format promises not to do.
-// Only a record that states no importance at all takes the default.
+// written through `Store.Create` — the one writer that binds the field with no
+// default, and which no production path calls — holds 0 and exports it as
+// `"importance":0`. Re-importing that must store 0 again, not the column's
+// default: promoting it is a silent rewrite of the artifact's own content,
+// which is the one thing the format promises not to do. Only a record that
+// states no importance at all takes the default. The save tools never write
+// this row (ghost_memory_save stores 0.7 when the caller states nothing and
+// ghost_save_global stores 0.8), but a hand-edited artifact can carry one.
 func TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne(t *testing.T) {
 	store := portableTestStore(t)
 	ctx := context.Background()
