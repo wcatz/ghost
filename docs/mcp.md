@@ -457,7 +457,15 @@ holds a slot too; an unpinned one is sunk below it and reserves nothing. A keep-
 (`retention: persistent`) row is marked the same way but is never sunk or moved by the
 edge. A withdrawn edge, an edge between conflicting scopes, and a superseder not on the
 page mark nothing.
-`ghost_memory_search` does not draw this marker.
+`ghost_memory_search` draws the same marker under the same rules: a returned row with a
+live `supersedes` edge from another row of the same answer carries
+**`[superseded by a newer note]`** and **`superseded_by=`**. On a search it is a marker
+only: the order, the near-duplicate removal and every stage's verdict are unchanged
+(the longer line counts toward the response byte budget, so at that ceiling the
+response fit can cut one more bottom row), the
+superseded row is still sunk below its superseder by the search demotion as before (a
+keep-forever one is marked and not moved), and
+with `explain: true` every row's `rank` stays its relevance rank.
 
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory

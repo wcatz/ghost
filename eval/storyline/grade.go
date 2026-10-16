@@ -239,6 +239,8 @@ func lureRefused(res *Result, older, newer Record) Check {
 type searchRow struct {
 	ID       string
 	Resolved bool
+	// Line is the row's whole line, which the marker check reads at its field.
+	Line string
 }
 
 // searchRowRe reads one formatted search row: the shared item line
@@ -252,14 +254,15 @@ func parseSearchRows(raw string) []searchRow {
 	var out []searchRow
 	for _, m := range searchRowRe.FindAllStringSubmatch(raw, -1) {
 		meta, _, _ := strings.Cut(m[2], "«")
-		out = append(out, searchRow{ID: m[1], Resolved: strings.Contains(meta, "[resolved]")})
+		out = append(out, searchRow{ID: m[1], Resolved: strings.Contains(meta, "[resolved]"), Line: m[0]})
 	}
 	return out
 }
 
 // probeChecks grades one probe against the rows it returned: search-finds (Want
 // is returned), search-ranks (Want is above every Over record that is returned)
-// and search-excludes (no Absent record is returned).
+// search-excludes (no Absent record is returned) and search-marks (a Marked
+// record returned together with Want carries the replaced marker at its field).
 //
 // site is the name the lines are keyed under: the probe's own name for an
 // end-state probe, qualified by its session for a stage probe.
@@ -300,6 +303,25 @@ func probeChecks(res *Result, p Probe, site, raw string, ran bool) []Check {
 		default:
 			out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf(
 				"%s is returned at rank %d (resolved=%v) and %s is not returned at all", k, at+1, rows[at].Resolved, want.Key)})
+		}
+	}
+	for _, k := range p.Marked {
+		name := "search-marks:" + site + ":" + k
+		at, there := rank[res.idOf(k)]
+		switch {
+		case !ran:
+			out = append(out, Check{Name: name, Passed: false, Detail: "the probe did not run"})
+		case !there:
+			out = append(out, Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not returned", k)})
+		case !found:
+			// The marker names a row on the same page; with Want absent there is
+			// nothing for it to point at, and search-finds already fails.
+			out = append(out, Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is returned without %s, so there is no replacement on the page to name", k, want.Key)})
+		case carriesReplacedMarker(rows[at].Line):
+			out = append(out, Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s (rank %d) is marked as replaced, with %s at rank %d", k, at+1, want.Key, wantAt+1)})
+		default:
+			out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%s (rank %d) is returned with %s (rank %d) and nothing on its line marks it as replaced", k, at+1, want.Key, wantAt+1)})
 		}
 	}
 	for _, k := range p.Absent {

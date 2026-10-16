@@ -80,12 +80,13 @@ type Item struct {
 	ContradictedBy []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
 	// replaced this one through a live `supersedes` edge. It is set on a passive
-	// read only (markSuperseded), for a pinned row and an unpinned one alike: a
+	// read and a query read alike (markSuperseded), pinned row or not: a
 	// live edge switches the lexical guess (MaybeReplacedBy) off for its pair, and
 	// a convention or a preference is never resolved, so without it the edge would
-	// leave the row with less on its line than the guess it replaced. A pinned
-	// row is also ordered behind its superseder; an unpinned one is sunk by the
-	// retriever's demotion, and a keep-forever one is marked but never moved. A superseder that is not in the answer is not named. A
+	// leave the row with less on its line than the guess it replaced. On a
+	// passive read a pinned row is also ordered behind its superseder; every
+	// other superseded row is sunk by the retriever's demotion, and a keep-forever
+	// one is marked but never moved. A superseder that is not in the answer is not named. A
 	// non-empty list renders SupersededMarker and `superseded_by=`.
 	SupersededBy []string
 	// MaybeReplacedBy lists the ids of the rows in the SAME rendered answer that

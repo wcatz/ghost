@@ -561,6 +561,14 @@ func SupersededConvention() Storyline {
 				Expect:  []string{"release-calver"},
 				Carries: []AnswerCheck{{Name: "current-tag", Any: []string{"YYYY.MM.N"}}},
 				Avoids:  []AnswerCheck{{Name: "old-tag", Any: []string{"vMAJOR.MINOR.PATCH"}}},
+				// Before the lifecycle, only the lexical guess relates the pair.
+				Probes: []Probe{{
+					Name:   "tag-form",
+					Query:  "release tag form make release",
+					Want:   "release-calver",
+					Over:   []string{"release-semver"},
+					Marked: []string{"release-semver"},
+				}},
 				// The project's lifecycle runs once this session ends.
 				Lifecycle: true,
 			},
@@ -571,6 +579,15 @@ func SupersededConvention() Storyline {
 				Expect:  []string{"release-calver"},
 				Carries: []AnswerCheck{{Name: "current-tag", Any: []string{"YYYY.MM.N"}}},
 				Avoids:  []AnswerCheck{{Name: "old-tag", Any: []string{"vMAJOR.MINOR.PATCH"}}},
+				// After it, a live supersedes edge has switched the guess off for
+				// the pair, and the search must still say the old tag is replaced.
+				Probes: []Probe{{
+					Name:   "tag-form-linked",
+					Query:  "release tag form make release",
+					Want:   "release-calver",
+					Over:   []string{"release-semver"},
+					Marked: []string{"release-semver"},
+				}},
 			},
 		},
 		Judge: "Did the session use the current release convention (%s: %s) rather than the one it replaced?",
