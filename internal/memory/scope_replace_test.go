@@ -322,6 +322,538 @@ func TestRestoreSnapshotBringsScopeBack(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualRewriteInheritsScope verifies that a single-source
+// rewrite inherits the source's scope. This is the fix for #1391: the fresh
+// INSERT branch of ReplaceNonManual must read the source rows' scope rather
+// than using the emission's (which is nil from reflection).
+func TestReplaceNonManualRewriteInheritsScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a source memory with a specific scope.
+	srcID, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production db port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+
+	// Rewrite it (single source). The emission has NO scope (as from reflection).
+	// The successor should inherit the source's scope.
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "production db port is 5433 (rewritten)",
+			Importance:  0.6,
+			ReplacesIDs: []string{srcID},
+			// Scope is nil - exactly what reflection produces
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var rewritten *Memory
+	for i := range all {
+		if all[i].Content == "production db port is 5433 (rewritten)" {
+			rewritten = &all[i]
+			break
+		}
+	}
+	if rewritten == nil {
+		t.Fatalf("rewritten memory not found: %+v", all)
+	}
+	if rewritten.Scope["environment"] != "production" {
+		t.Errorf("rewrite scope = %v, want environment=production — single-source rewrite must inherit source scope", rewritten.Scope)
+	}
+}
+
+// TestReplaceNonManualMergeInheritsScope verifies that a merge inherits the
+// scope when all sources agree. This is the fix for #1391.
+func TestReplaceNonManualMergeInheritsScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create two source memories with the SAME scope.
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "prod port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "staging port is 8443",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	// Merge them. The emission has NO scope.
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "ports: prod 5432; staging 8443",
+			Importance:  0.6,
+			ReplacesIDs: []string{src1, src2},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var merged *Memory
+	for i := range all {
+		if all[i].Content == "ports: prod 5432; staging 8443" {
+			merged = &all[i]
+			break
+		}
+	}
+	if merged == nil {
+		t.Fatalf("merged memory not found: %+v", all)
+	}
+	if merged.Scope["environment"] != "production" {
+		t.Errorf("merge scope = %v, want environment=production — merge with agreeing sources must inherit scope", merged.Scope)
+	}
+}
+
+// TestReplaceNonManualMergeDisagreeingScope verifies that a merge with
+// disagreeing scopes does NOT silently widen the scope. Per #1391, the
+// expected behavior is that the merge is not performed (sources stay unmerged)
+// or only shared keys are kept. The current implementation will drop the
+// emission (via the corpus guard) when sources disagree on scope.
+func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create two source memories with DIFFERENT scopes.
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "prod port is 5432",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "staging port is 8443",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	// Merge them - the emission has NO scope.
+	// The corpus guard should drop this emission because the sources
+	// have conflicting scopes and we can't silently widen.
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "ports: prod 5432; staging 8443",
+			Importance:  0.6,
+			ReplacesIDs: []string{src1, src2},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// The emission should be dropped due to scope conflict
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to scope conflict, but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{src1, src2})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	foundProd, foundStaging := false, false
+	for _, r := range rows {
+		if r.Content == "prod port is 5432" {
+			foundProd = true
+		}
+		if r.Content == "staging port is 8443" {
+			foundStaging = true
+		}
+	}
+	if !foundProd || !foundStaging {
+		t.Errorf("sources were modified: %+v", rows)
+	}
+}
+
+// TestReplaceNonManualMergeMixedScopeOrderAB verifies that a merge with
+// one unscoped and one scoped source is dropped regardless of order.
+// This is the fix for the order-dependency bug: sources [unscoped A, scoped B]
+// in order [A,B] used to write the merge with B's scope; now it drops in
+// both orders.
+func TestReplaceNonManualMergeMixedScopeOrderAB(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create an unscoped source and a scoped source.
+	unscoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "unscoped fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		// No scope = applies everywhere
+	})
+	if err != nil {
+		t.Fatalf("create unscoped: %v", err)
+	}
+	scoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped: %v", err)
+	}
+
+	// Order: unscoped first, then scoped (used to succeed with scoped scope)
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "merged fact",
+			Importance:  0.6,
+			ReplacesIDs: []string{unscoped, scoped},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to mixed scopes (order AB), but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{unscoped, scoped})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualMergeMixedScopeOrderBA verifies that a merge with
+// one unscoped and one scoped source is dropped regardless of order.
+// This is the fix for the order-dependency bug: sources [scoped B, unscoped A]
+// in order [B,A] used to drop; now both orders drop consistently.
+func TestReplaceNonManualMergeMixedScopeOrderBA(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a scoped source and an unscoped source.
+	scoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "production fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped: %v", err)
+	}
+	unscoped, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "unscoped fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		// No scope = applies everywhere
+	})
+	if err != nil {
+		t.Fatalf("create unscoped: %v", err)
+	}
+
+	// Order: scoped first, then unscoped
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "merged fact",
+			Importance:  0.6,
+			ReplacesIDs: []string{scoped, unscoped},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to mixed scopes (order BA), but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist
+	rows, err := s.GetByIDs(ctx, []string{scoped, unscoped})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualReuseDisagreeingScope verifies that a multi-source
+// emission that would reuse an existing row is also dropped when sources
+// disagree on scope. The reuse branch now applies the same "never silently
+// change scope" rule: if the emission's sources have conflicting scopes,
+// the emission is dropped and both sources remain unchanged.
+func TestReplaceNonManualReuseDisagreeingScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a source that will be reused (byte-identical content).
+	reuseSrc, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "reused content",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create reuseSrc: %v", err)
+	}
+
+	// Create another source with different scope.
+	otherSrc, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "other fact",
+		Source:     "mcp",
+		Importance: 0.5,
+		Scope:      map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create otherSrc: %v", err)
+	}
+
+	// Try to merge them into the reused content (byte-identical to reuseSrc).
+	// This would take the reuse branch but sources disagree on scope.
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{
+			Category:    "fact",
+			Content:     "reused content", // byte-identical to reuseSrc
+			Importance:  0.6,              // different importance
+			ReplacesIDs: []string{reuseSrc, otherSrc},
+			// Scope is nil
+		},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// The emission should be dropped due to scope conflict
+	if dropped.Changed == 0 {
+		t.Errorf("expected emission to be dropped due to scope conflict in reuse branch, but dropped.Changed = %d", dropped.Changed)
+	}
+
+	// Both sources should still exist unchanged
+	rows, err := s.GetByIDs(ctx, []string{reuseSrc, otherSrc})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	foundReuse, foundOther := false, false
+	for _, r := range rows {
+		if r.Content == "reused content" {
+			foundReuse = true
+			if r.Importance != 0.5 {
+				t.Errorf("reuseSrc importance changed: got %f, want 0.5", r.Importance)
+			}
+			if r.Scope["environment"] != "production" {
+				t.Errorf("reuseSrc scope changed: got %v, want production", r.Scope)
+			}
+		}
+		if r.Content == "other fact" {
+			foundOther = true
+			if r.Scope["environment"] != "staging" {
+				t.Errorf("otherSrc scope changed: got %v, want staging", r.Scope)
+			}
+		}
+	}
+	if !foundReuse || !foundOther {
+		t.Errorf("sources were modified or missing: %+v", rows)
+	}
+}
+
+// TestReplaceNonManualScopeReadErrorAbortsReplace: a scope column that will
+// not decode is a READ failure, not a scope conflict. A conflict is a refusal
+// the caller can act on — the emission is dropped and its sources kept — but a
+// broken value has no such meaning, and counting it as a drop would make one
+// corrupt row a silent refusal that recurs on every later run under a reason
+// that describes a concurrent edit. The replace must fail the way
+// inheritedClaims and inheritedRetention do.
+func TestReplaceNonManualScopeReadErrorAbortsReplace(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	src, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a source whose scope column will be corrupted",
+		Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+
+	// A value json.Unmarshal rejects, as a hand-edited or half-written row
+	// would hold.
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET scope = ? WHERE id = ?`, "{not json", src); err != nil {
+		t.Fatalf("corrupt scope: %v", err)
+	}
+
+	_, _, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "a merged successor", Importance: 0.6, ReplacesIDs: []string{src}},
+	}, "", nil)
+	if err == nil {
+		t.Fatal("ReplaceNonManual returned nil for a corrupt scope column — a read failure must fail the replace, not count as a dropped emission")
+	}
+
+	// The source is still there: the failed replace rolled back.
+	rows, err := s.GetByIDs(ctx, []string{src})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs after failed replace: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualReuseAgreesOnScope is the positive half of the reuse
+// check: when the reused row's scope matches the one the emission's sources
+// agreed on, the reuse proceeds and the merge lands.
+func TestReplaceNonManualReuseAgreesOnScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	reused, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the shared fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create reused: %v", err)
+	}
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact one", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact two", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the shared fact", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Total() != 0 {
+		t.Fatalf("dropped = %+v, want no refusal when the reused row agrees on scope", dropped)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{reused})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	if rows[0].Scope["environment"] != "production" {
+		t.Errorf("reused row scope = %v, want production", rows[0].Scope)
+	}
+	// The two sources were merged into the reused row and removed.
+	if _, err := s.GetByIDs(ctx, []string{src1, src2}); err != nil {
+		t.Fatalf("GetByIDs sources: %v", err)
+	}
+}
+
+// TestReplaceNonManualReuseDisagreesOnScope is the reuse-branch counterpart of
+// the fresh-INSERT scope rule. takeReusableRow picks the row an emission
+// updates in place by CONTENT, and it need not be one of the emission's
+// sources: a merge can land on a same-text row consolidation never named. The
+// reuse UPDATE writes scope through COALESCE, so the reused row would keep ITS
+// OWN scope — here unscoped — while the sources agreed on production, silently
+// widening a production fact to every environment. The emission must be
+// refused and both rows left exactly as they are.
+func TestReplaceNonManualReuseDisagreesOnScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The row the merge will reuse: same text as the emission, and unscoped.
+	reused, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the shared fact", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create reused: %v", err)
+	}
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact one", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact two", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the shared fact", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Changed == 0 {
+		t.Errorf("dropped = %+v, want the reuse emission refused over the scope disagreement", dropped)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{reused, src1, src2})
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("GetByIDs: %v, len=%d, want all three rows kept", err, len(rows))
+	}
+	for _, r := range rows {
+		switch r.ID {
+		case reused:
+			if len(r.Scope) != 0 {
+				t.Errorf("reused row scope = %v, want unscoped — the refused merge wrote over it", r.Scope)
+			}
+			if r.Importance != 0.5 {
+				t.Errorf("reused row importance = %v, want 0.5 unchanged", r.Importance)
+			}
+		case src1, src2:
+			if r.Scope["environment"] != "production" {
+				t.Errorf("source %s scope = %v, want production unchanged", r.ID, r.Scope)
+			}
+		}
+	}
+}
+
 // TestRestoreSnapshotRewritesScopeOnExistingRow: restore updates rows that
 // still exist by matching snapshot to memory id. That UPDATE has to carry
 // scope too, or a restore into a row whose scope was edited in the meantime
