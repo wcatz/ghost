@@ -2407,17 +2407,36 @@ func (s *Server) registerTools() {
 		// so a contradictory window, an unreadable stamp or an out-of-range
 		// confidence is a tool error the caller can act on rather than a row
 		// reading as a claim nobody meant.
-		//
-		// Three refusals come later, from the store, because the checks belong to
-		// the column rather than to this tool: an over-long source_ref, a
-		// credential-shaped one, and a scope that is over its bounds or holds a
-		// token (memory.checkScope). A first save to an unknown project therefore
-		// registers the project and then fails, leaving an empty project behind —
-		// the same residue the credential guard has always left on this path, and
-		// no more of it than that, since none of them has written a memory.
 		fields, err := resolveWriteFields(args.validityArgs)
 		if err != nil {
 			return nil, nil, err
+		}
+		scope, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+		// Resolved once: provenanceFor can consult process ancestry, and the
+		// duplicate message below needs the same agent the row was written with.
+		prov := fields.provenance(provenanceFor(req))
+		opts := memory.UpsertOptions{
+			Provenance: prov,
+			Scope:      scope,
+			Validity:   fields.Validity,
+			Pin:        args.Pin,
+			Retention:  retention,
+		}
+		// Every refusal the store would make from these arguments — the token
+		// guard on the content, tags, source_ref and scope, the reserved and
+		// over-long source_ref, the scope bounds — is asked HERE, before
+		// ensureProjectFor, through the store's own predicate. Opening the project
+		// first left a refused save's project behind with no memory in it, and
+		// inside a git checkout that empty project also took the checkout's
+		// binding, so every later session start there named it. What the upsert
+		// can still refuse after this needs a row the project already holds, so
+		// it cannot fire on a project this call opens. The answer is worded as
+		// the store's refusal always was.
+		if err := memory.CheckUpsertArguments(args.Content, tags, opts); err != nil {
+			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 
 		// Pass "" for path: MCP callers name projects rather than describing
@@ -2433,20 +2452,7 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = canonical
 
-		scope, err := optScope(args.Scope, "scope")
-		if err != nil {
-			return nil, nil, err
-		}
-		// Resolved once: provenanceFor can consult process ancestry, and the
-		// duplicate message below needs the same agent the row was written with.
-		prov := fields.provenance(provenanceFor(req))
-		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
-			Provenance: prov,
-			Scope:      scope,
-			Validity:   fields.Validity,
-			Pin:        args.Pin,
-			Retention:  retention,
-		})
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -3100,22 +3106,29 @@ func (s *Server) registerTools() {
 		args.Content, globalTruncated = memory.ClampContent(args.Content)
 
 		// Before EnsureProject, for the reason the save path validates first: a
-		// save that fails its own arguments must not leave a project behind.
+		// save that fails its own arguments must not leave a project behind. That
+		// includes the store's own refusals (the token guard on the content, tags
+		// and source_ref, the reserved and over-long source_ref), asked here
+		// through the store's predicate rather than after _global is opened.
 		fields, err := resolveWriteFields(args.validityArgs)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-			return nil, nil, fmt.Errorf("ensure global project: %w", err)
-		}
 		// Resolved once: provenanceFor can consult process ancestry, and the
 		// duplicate message below needs the same agent the row was written with.
 		prov := fields.provenance(provenanceFor(req))
-		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
+		opts := memory.UpsertOptions{
 			Provenance: prov,
 			Validity:   fields.Validity,
 			Retention:  retention,
-		})
+		}
+		if err := memory.CheckUpsertArguments(args.Content, tags, opts); err != nil {
+			return nil, nil, fmt.Errorf("save failed: %w", err)
+		}
+		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+			return nil, nil, fmt.Errorf("ensure global project: %w", err)
+		}
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -3561,6 +3574,15 @@ func (s *Server) registerTools() {
 		}
 		if tags, err = validateTags(tags); err != nil {
 			return nil, nil, err
+		}
+		// The store's refusals of these arguments (the token guard on the title,
+		// decision, rationale, alternatives and tags) are asked before the project
+		// is opened, through the store's own predicate, so a refused decision
+		// leaves no empty project and no checkout binding behind. The values are
+		// the clamped and bounded ones RecordDecision receives, and the answer is
+		// worded as the store's refusal always was.
+		if err := memory.CheckDecisionArguments(args.Title, args.Decision, args.Rationale, alternatives, tags); err != nil {
+			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		// Resolve the project through the same path a save uses, so the first
 		// decision on a project the store has never seen opens it instead of
