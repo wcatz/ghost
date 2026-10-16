@@ -1234,6 +1234,27 @@ that passes prints `PASS (unexpected: listed known-failing)`, so a fix shows up
 as an entry to delete. `TestKnownFailingNamesAreRealChecks` refuses an entry that
 names no check its storyline grades.
 
+### Default-install arcs
+
+Six more arcs (`eval/storyline/default_install.go`) probe change shapes the
+truth-change arcs do not. All but the last run no lifecycle between sessions, so
+the session after each change, and the search at its start, read what the save
+path and the read side alone left behind:
+
+| storyline | project | the change | lifecycle between sessions |
+|---|---|---|---|
+| `retired-dependency` | `parcel-notify` | the mail provider is removed in session 2 and nothing replaces it | none |
+| `reverted-change` | `heron-jobs` | the job backend moves in session 2 and is reverted in session 3 | none |
+| `prose-only-change` | `lumen-web` | the lint toolchain is swapped, told in plain lowercase words only | none |
+| `recategorised-replacement` | `kestrel-api` | a cache fact is replaced by a decision in session 2 | none |
+| `repeated-tuning` | `sparrow-ingest` | one rate limit is set and then changed three times | none |
+| `superseded-convention` | `wren-cli` | a release convention is replaced in session 2 | after session 3 |
+
+`prose-only-change` grades the save path's documented known limit (a plain
+lowercase word outside backticks is never a value token), so its session-3
+failures are listed as known with that reason; the other arcs' known failures are
+findings.
+
 ## Reporting rules (all phases)
 
 1. Harness, datasets, and judge prompts live in this repo.
