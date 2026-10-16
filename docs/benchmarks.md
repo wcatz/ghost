@@ -1197,6 +1197,7 @@ block render as `GHOST_INJECTION_SESSION_SCOPE`. The lines they add:
 | `search-finds:<probe>` | `ghost_memory_search` returns the probe's record |
 | `search-ranks:<probe>:<key>` | the replacement ranks above the record it replaced, when that one is returned at all |
 | `search-excludes:<probe>:<key>` | a record scoped elsewhere is not returned under the probe's scope |
+| `search-marks:<probe>:<key>` | a replaced record the probe returns together with its replacement carries `[maybe replaced by a newer note]` or `[superseded by a newer note]` at its field (opt-in per probe; `superseded-convention` asks it at sessions 3 and 4, before and after its lifecycle) |
 
 A probe on a stage (`session-N:<name>`) runs at that session's start, after an
 embedding drain; one on the storyline runs against the end state. Probes grade

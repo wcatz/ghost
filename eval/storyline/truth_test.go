@@ -126,7 +126,10 @@ func TestParseSearchRowsReadsRowsNotTheVerdict(t *testing.T) {
 		"- [fact] `BBB` (0.7 scope{environment=staging} source=mcp) «a fact»\n\n" +
 		"[ghost:outcome=answerable reason=floor_met candidates=2 admitted=2]\n"
 	got := parseSearchRows(raw)
-	want := []searchRow{{ID: "AAA", Resolved: true}, {ID: "BBB"}}
+	want := []searchRow{
+		{ID: "AAA", Resolved: true, Line: "- [dependency] `AAA` (0.8 [resolved] tags:[\"x\"] source=mcp) «go.mod pins (v4)»"},
+		{ID: "BBB", Line: "- [fact] `BBB` (0.7 scope{environment=staging} source=mcp) «a fact»"},
+	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("parseSearchRows = %+v, want %+v", got, want)
 	}
@@ -160,6 +163,52 @@ func TestProbeChecksGradeRankAndExclusion(t *testing.T) {
 	missing := byName(probeChecks(res, p, "x", "- [fact] `S` (0.7) «b»\n", true))
 	if missing["search-finds:x"] || missing["search-ranks:x:pool-staging"] {
 		t.Errorf("an answer without the replacement graded %v", missing)
+	}
+}
+
+// TestProbeChecksGradeTheReplacedMarker: a Marked record returned together with
+// the probe's Want must carry the replaced marker at its field, the lexical
+// guess's or the recorded relation's; an unmarked line fails, a marker inside a
+// tag is not the marker, and a Marked record returned without Want, or not
+// returned at all, has nothing on the page to be named by.
+func TestProbeChecksGradeTheReplacedMarker(t *testing.T) {
+	s := SupersededConvention()
+	res := &Result{Story: s, Sessions: []Session{
+		{Saved: map[string]string{"release-semver": "OLD"}},
+		{Saved: map[string]string{"release-calver": "NEW"}},
+	}}
+	p := Probe{Name: "x", Query: "q", Want: "release-calver", Over: []string{"release-semver"}, Marked: []string{"release-semver"}}
+	const name = "search-marks:x:release-semver"
+	grade := func(raw string, ran bool) bool {
+		for _, c := range probeChecks(res, p, "x", raw, ran) {
+			if c.Name == name {
+				return c.Passed
+			}
+		}
+		t.Fatalf("no %s line", name)
+		return false
+	}
+	newer := "- [convention] `NEW` (0.7 source=mcp) «calver»\n"
+	cases := []struct {
+		name string
+		raw  string
+		ran  bool
+		want bool
+	}{
+		{"superseded marker", newer + "- [convention] `OLD` (0.7 [superseded by a newer note] source=mcp superseded_by=`NEW`) «semver»\n", true, true},
+		{"lexical guess", newer + "- [convention] `OLD` (0.7 [maybe replaced by a newer note] source=mcp maybe_replaced_by=`NEW`) «semver»\n", true, true},
+		{"unmarked", newer + "- [convention] `OLD` (0.7 source=mcp) «semver»\n", true, false},
+		{"marker words in a tag", newer + "- [convention] `OLD` (0.7 tags:[\"[superseded by a newer note]\"] source=mcp) «semver»\n", true, false},
+		{"replacement absent", "- [convention] `OLD` (0.7 source=mcp) «semver»\n", true, true},
+		{"old row absent", newer, true, true},
+		{"probe did not run", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := grade(tc.raw, tc.ran); got != tc.want {
+				t.Errorf("%s passed = %v, want %v", name, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -335,8 +335,9 @@ type Candidate struct {
 	// convention or a preference, so this is the only signal the edge leaves. Only
 	// a PINNED, non-exempt row's name moves anything else: a pin guarantees a slot and not a
 	// rank above the row that replaced it, so such a row is ordered directly
-	// behind its superseder and the superseder is reserved too. Empty on every
-	// query-mode read.
+	// behind its superseder and the superseder is reserved too. On a query read
+	// it names the same superseders among the edge scope (querySupersededBy),
+	// for the marker only.
 	SupersededBy []string
 	// MaybeReplacedBy is the ids of the rows in the same set that look like this
 	// row's replacement (lexicalReplacements): a newer row of the same project,
@@ -740,6 +741,13 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 			for i := range scoped {
 				scoped[i].MaybeReplacedBy = repl[scoped[i].ID]
 			}
+		}
+	}
+	// The pairs a live `supersedes` edge has switched the guess off for, named so
+	// the line still says the row was replaced (querySupersededBy). Marker only.
+	if named := cand.querySupersededBy(ctx, rows[:len(scope)]); len(named) > 0 {
+		for i := range scope {
+			rows[i].SupersededBy = named[rows[i].ID]
 		}
 	}
 

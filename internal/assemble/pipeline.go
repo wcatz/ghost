@@ -1813,12 +1813,15 @@ func (p *pipeline) markConflicts() {
 	}
 }
 
-// markSuperseded sets Item.SupersededBy on each row of a passive read, pinned or
-// not, whose superseder is still in the answer. The retriever names the
-// superseders (it owns the edge rules); this keeps only the ones the reader can
-// see, and runs from fitResponse beside markConflicts for the same reason: a
-// response-fit drop can remove the superseder after the stages are done. A query
-// read is never marked here (the retriever names nothing on one).
+// markSuperseded sets Item.SupersededBy on each row, pinned or not, whose
+// superseder is still in the answer. The retriever names the superseders (it
+// owns the edge rules); this keeps only the ones the reader can see, and runs
+// from fitResponse beside markConflicts for the same reason: a response-fit drop
+// can remove the superseder after the stages are done. It runs on both modes,
+// like markMaybeReplaced: a live edge switches the lexical guess off for its pair
+// on a query read too, so a search answer is marked as the session start is. It
+// marks only: no stage reads Item.SupersededBy, so the order, the explain rank
+// and what is withheld are what they were without it.
 func (p *pipeline) markSuperseded() {
 	present := make(map[string]bool, len(p.items))
 	for _, it := range p.items {
@@ -1832,9 +1835,6 @@ func (p *pipeline) markSuperseded() {
 	}
 	for i := range p.items {
 		p.items[i].SupersededBy = nil
-		if !p.passive {
-			continue
-		}
 		for _, id := range named[p.items[i].ID] {
 			if present[id] {
 				p.items[i].SupersededBy = append(p.items[i].SupersededBy, id)
