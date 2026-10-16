@@ -1222,15 +1222,21 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 // by project name subscribes under the name form, while callers here typically
 // hold the resolved hash ID (or read it straight from the DB row). Since MCP
 // delivers resources/updated by exact URI match, we emit on both the hash ID
-// and the project name. Best-effort — the ListProjects lookup error is swallowed.
+// and the project name, each in the percent-encoded form projectResourceURI
+// builds — the form the resource template matches and a client reads with.
+// Best-effort — the ListProjects lookup error is swallowed.
 func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix string) {
 	emitted := map[string]bool{}
 	emit := func(id string) {
-		if id == "" || emitted[id] {
+		if id == "" {
 			return
 		}
-		emitted[id] = true
-		s.notifyResourceUpdated(ctx, "ghost://project/"+id+"/"+suffix)
+		uri := projectResourceURI(id, suffix)
+		if emitted[uri] {
+			return
+		}
+		emitted[uri] = true
+		s.notifyResourceUpdated(ctx, uri)
 	}
 	emit(projectID)
 	// projectID may be either the hash ID or the name depending on the call
@@ -4045,9 +4051,9 @@ func (s *Server) registerTools() {
 			// form. Emit both aliases directly from the summary instead,
 			// since DeleteProject already resolved and returned them.
 			for _, suffix := range []string{"context", "tasks", "decisions"} {
-				s.notifyResourceUpdated(ctx, "ghost://project/"+summary.ProjectID+"/"+suffix)
+				s.notifyResourceUpdated(ctx, projectResourceURI(summary.ProjectID, suffix))
 				if summary.ProjectName != summary.ProjectID {
-					s.notifyResourceUpdated(ctx, "ghost://project/"+summary.ProjectName+"/"+suffix)
+					s.notifyResourceUpdated(ctx, projectResourceURI(summary.ProjectName, suffix))
 				}
 			}
 		}
@@ -4957,8 +4963,10 @@ func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble
 	})
 }
 
-// parseProjectIDFromURI extracts and URL-decodes the project_id segment from
-// a ghost:// resource URI (e.g. "ghost://project/my%20proj/context" → "my proj").
+// parseProjectIDFromURI extracts the project_id segment from a ghost:// resource
+// URI and percent-decodes it exactly once (e.g. "ghost://project/my%20proj/context"
+// → "my proj", "ghost://project/team%2Fapi/context" → "team/api"). It is the
+// inverse of projectResourceURI.
 //
 // All three refusals name the URI through `memory.ProjectArg` (#839), which is a
 // wider fix than it looks: the URI is the caller's project argument in the form
@@ -4973,15 +4981,57 @@ func parseProjectIDFromURI(rawURI string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid resource URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
 	}
-	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		return "", fmt.Errorf("resource URI missing project_id: %s", memory.RefusalArg("resource URI", rawURI))
+	// The segment is split out of the path AS SENT and decoded exactly once.
+	// u.Path is already decoded, so splitting it turns an encoded '/' into a
+	// separator (team%2Fapi read project "team") and decoding a segment of it
+	// again decodes twice. RawPath is the path as sent whenever that differs
+	// from Go's default encoding of Path; when it is empty the two agree, and
+	// EscapedPath returns that encoding.
+	escaped := u.RawPath
+	if escaped == "" {
+		escaped = u.EscapedPath()
 	}
-	projectID, err := url.PathUnescape(parts[0])
+	segment, _, _ := strings.Cut(strings.TrimPrefix(escaped, "/"), "/")
+	projectID, err := url.PathUnescape(segment)
 	if err != nil {
 		return "", fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
 	}
+	if projectID == "" {
+		return "", fmt.Errorf("resource URI missing project_id: %s", memory.RefusalArg("resource URI", rawURI))
+	}
 	return projectID, nil
+}
+
+// projectResourceURI builds ghost://project/{project_id}/{suffix} the way an
+// RFC 6570 simple-string expansion of the registered template does: every byte
+// of the id outside the unreserved set (ALPHA, DIGIT, "-", ".", "_", "~") is
+// percent-encoded with uppercase hex, so a '/', a space or a reserved character
+// stays inside the one segment and the result is a URI the template matches and
+// parseProjectIDFromURI reads back as projectID. Notifications are built here
+// because MCP delivers resources/updated by exact string match: the URI pushed
+// must be the URI a client read and subscribed with. An id made only of
+// unreserved characters, which is every hash id and most names, encodes to
+// itself, so those URIs are unchanged. url.PathEscape is not this encoding: it
+// leaves sub-delims such as ':' '@' '+' '=' raw, which the template rejects.
+func projectResourceURI(projectID, suffix string) string {
+	const upperHex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.WriteString("ghost://project/")
+	for i := 0; i < len(projectID); i++ {
+		c := projectID[i]
+		switch {
+		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9',
+			c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(upperHex[c>>4])
+			b.WriteByte(upperHex[c&0x0F])
+		}
+	}
+	b.WriteByte('/')
+	b.WriteString(suffix)
+	return b.String()
 }
 
 // truncateUTF8 cuts s to at most maxBytes bytes without splitting a
