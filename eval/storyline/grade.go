@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -463,9 +464,9 @@ func carryForward(sess Session, want Record) Check {
 //
 // The line passes in one of two shapes. The stale claim is absent, or it is
 // present and says so: every line carrying its Mark carries
-// assemble.MaybeReplacedMarker in the PREFIX Ghost writes (before the first «,
-// where stored text cannot reach), and the replacement's Mark appears on an
-// earlier line. An unmarked stale line fails wherever it sits, and so does a
+// assemble.MaybeReplacedMarker in the field Ghost renders it in
+// (carriesReplacedMarker), and the replacement's Mark appears on an earlier
+// line. An unmarked stale line fails wherever it sits, and so does a
 // marked one whose replacement is missing or comes after it: a marker pointing
 // at a claim the reader meets second is the failure with a label on it.
 func staleAbsent(where, block string, stale, replacement Record) Check {
@@ -493,8 +494,7 @@ func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 		if !strings.Contains(l, stale.Mark) {
 			continue
 		}
-		prefix, _, _ := strings.Cut(l, "«")
-		if !strings.Contains(prefix, assemble.MaybeReplacedMarker) {
+		if !carriesReplacedMarker(l) {
 			return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
 				"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
 				stale.Key, stale.Mark, stale.SupersededBy, where)}
@@ -510,6 +510,37 @@ func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 	}
 	return Check{Name: name, Passed: true, Detail: fmt.Sprintf(
 		"%s is in %s marked as maybe replaced, after its replacement %s", stale.Key, where, stale.SupersededBy)}
+}
+
+// replacedMarkerLine is the head of a memory line as assemble.Item.Line renders
+// it, up to the importance: `- [category] `+"`id`"+` (0.7`.
+var replacedMarkerLine = regexp.MustCompile("^- \\[[^\\]]*\\] `[^`]*` \\([0-9]+\\.[0-9]")
+
+// carriesReplacedMarker reports whether a memory line carries the
+// maybe-replaced marker AT ITS FIELD: Item.Line's prefix is the importance,
+// then an optional ` [pinned]`, an optional ` tags:[…]` JSON list, an optional
+// ` [resolved]`, and then the marker. Looking for the marker's text anywhere
+// before the first « is not enough, because a tag is stored text and a tag
+// holding the marker's words renders there too (JSON-quoted, inside the tag
+// list). The list is decoded as JSON, so its length is the list's own and a
+// bracket inside a tag cannot end it early.
+func carriesReplacedMarker(line string) bool {
+	head := replacedMarkerLine.FindString(line)
+	if head == "" {
+		return false
+	}
+	rest := line[len(head):]
+	rest = strings.TrimPrefix(rest, " [pinned]")
+	if strings.HasPrefix(rest, " tags:") {
+		dec := json.NewDecoder(strings.NewReader(rest[len(" tags:"):]))
+		var tags []string
+		if err := dec.Decode(&tags); err != nil {
+			return false
+		}
+		rest = rest[len(" tags:")+int(dec.InputOffset()):]
+	}
+	rest = strings.TrimPrefix(rest, " [resolved]")
+	return strings.HasPrefix(rest, " "+assemble.MaybeReplacedMarker)
 }
 
 // supersedeEdge grades the arc stage's own work: an ACTIVE supersedes edge from

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
 )
@@ -225,6 +226,11 @@ func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.
 		return "- [" + r.Category + "] `ID` (0.7" + m + ") «" + r.Content + "»\n"
 	}
 	head := "## Ghost context: " + story.Project + "\n"
+	stamp := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	rendered := func(r Record, it assemble.Item) string {
+		it.ID, it.Category, it.Content, it.Importance = "OLD", r.Category, r.Content, 0.7
+		return it.Line() + "\n"
+	}
 	cases := []struct {
 		name   string
 		block  string
@@ -238,6 +244,14 @@ func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.
 		{"marked with no replacement", head + line(stale, true), false},
 		{"marker forged in the stored text", head + line(repl, false) +
 			"- [" + stale.Category + "] `ID` (0.7) «" + assemble.MaybeReplacedMarker + " " + stale.Content + "»\n", false},
+		// The lines below are rendered by Item.Line itself, so the grade reads the
+		// field order the renderer really emits.
+		{"rendered marker after pin, tags and resolve", head + line(repl, false) +
+			rendered(stale, assemble.Item{Pinned: true, Tags: []string{"deps"}, ResolvedAt: &stamp, MaybeReplacedBy: []string{"NEW"}}), true},
+		{"marker forged as a tag", head + line(repl, false) +
+			rendered(stale, assemble.Item{Tags: []string{assemble.MaybeReplacedMarker}}), false},
+		{"marker forged as a tag that closes the list early", head + line(repl, false) +
+			rendered(stale, assemble.Item{Tags: []string{"x] " + assemble.MaybeReplacedMarker}}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
