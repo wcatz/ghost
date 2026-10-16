@@ -898,7 +898,15 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// a live `supersedes` edge keeps its slot but is ordered directly behind its
 	// superseder, and the superseder is reserved too, because a cap that cut it
 	// would leave the pinned row standing alone on a page that says it was replaced.
-	supersededBy := s.passivePinnedSupersededBy(ctx, eligible)
+	//
+	// Every superseded row is NAMED (Candidate.SupersededBy), pinned or not, so the
+	// assembler can mark it on its line: a live edge switches the lexical guess off
+	// for its pair and resolve never retires a convention or a preference, so the
+	// name is the only signal left. Only the PINNED subset drives the reservation
+	// and the arrangement; an unpinned superseded row reserves nothing and is sunk
+	// by the demotion, as it always was.
+	named := s.passiveSupersededBy(ctx, eligible)
+	supersededBy := passivePinnedOnly(named, eligible)
 	chosen, rest, floor := passiveSelect(eligible, pol)
 	chosen, rest = passiveReserve(chosen, rest, supersededBy)
 	chosen, removed := s.passiveDemote(ctx, chosen, pol, now)
@@ -911,7 +919,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	out := make([]Candidate, 0, len(scored))
 	for _, r := range append(chosen, rest...) {
 		c := passiveCandidate(r, fetchedBy)
-		c.SupersededBy = supersededBy[r.mem.ID]
+		c.SupersededBy = named[r.mem.ID]
 		c.FloorReserved = floor[r.mem.ID]
 		out = append(out, c)
 	}
@@ -922,38 +930,46 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	return out, losers, nil
 }
 
-// passivePinnedSupersededBy reads, for each PINNED eligible row, the ids of the
-// eligible rows that supersede it. The edge rules are the demotion's own
-// (supersedePenaltyRows: the scope exemption, and a persistent-retention target
-// is never sunk), so a row is named here exactly when the demotion would sink it.
-// A failed read is logged and means no row is named, which leaves the pins first
-// and unmarked — the order before the marker existed.
-func (s *Store) passivePinnedSupersededBy(ctx context.Context, rows []passiveRow) map[string][]string {
+// passiveSupersededBy reads, for each eligible row, pinned or not, the ids of the
+// eligible rows that supersede it, sorted. The edge rules are the demotion's own
+// (supersedePenaltyRows: a live edge only, the scope exemption, and a
+// persistent-retention target is never sunk), so a row is named here exactly
+// when the demotion would sink it. A failed read is logged and means no row is
+// named, which leaves the pins first and every row unmarked — the order and the
+// lines before the marker existed.
+func (s *Store) passiveSupersededBy(ctx context.Context, rows []passiveRow) map[string][]string {
 	ids := make([]string, len(rows))
 	protected := make(map[string]bool, len(rows))
-	pinned := make(map[string]bool, len(rows))
 	for i, r := range rows {
 		ids[i] = r.mem.ID
 		if RetentionExempt(r.mem) {
 			protected[r.mem.ID] = true
 		}
-		if r.mem.Pinned {
-			pinned[r.mem.ID] = true
-		}
 	}
 	against, err := supersedePenaltyRows(ctx, s.queryDB(), ids, protected)
 	if err != nil {
-		s.logger.Warn("candidates: passive supersede lookup for pinned rows failed", "error", err)
+		s.logger.Warn("candidates: passive supersede lookup failed", "error", err)
 		return nil
 	}
 	out := map[string][]string{}
 	for target, sources := range against {
-		if !pinned[target] {
-			continue
-		}
 		sorted := append([]string(nil), sources...)
 		sort.Strings(sorted)
 		out[target] = sorted
+	}
+	return out
+}
+
+// passivePinnedOnly is the subset of a passiveSupersededBy map whose targets are
+// PINNED rows: the one input the slot reservation (passiveReserve) and the
+// arrangement (passiveArrange) read. Naming an unpinned row must not widen the
+// reservation, so the two maps are kept apart.
+func passivePinnedOnly(named map[string][]string, rows []passiveRow) map[string][]string {
+	out := map[string][]string{}
+	for _, r := range rows {
+		if srcs, ok := named[r.mem.ID]; ok && r.mem.Pinned {
+			out[r.mem.ID] = srcs
+		}
 	}
 	return out
 }

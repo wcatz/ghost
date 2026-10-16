@@ -1,0 +1,125 @@
+package memory
+
+import (
+	"context"
+	"testing"
+)
+
+// The tests below cover Candidate.SupersededBy on an UNPINNED passive row. A
+// convention or a preference is never resolved (the standing-category guardrail
+// on resolve), so after the lifecycle links a replaced one the supersedes edge is
+// the only signal left: the lexical replacement guess is switched off for a pair
+// the edge joins, and the row must still be named on its line. The slot rules are
+// untouched: only a pinned row and its superseder are reserved.
+
+// TestAnUnpinnedSupersededRowIsNamedByItsSuperseder is the defect: the edge
+// sank the old row and named nothing, so the block rendered it unmarked.
+func TestAnUnpinnedSupersededRowIsNamedByItsSuperseder(t *testing.T) {
+	st := pinSlotStore(t, 3,
+		pinSlotRow{id: "old_conv", project: "proj", category: "convention", importance: 0.8},
+		pinSlotRow{id: "new_conv", project: "proj", category: "convention", importance: 0.8})
+	if err := st.CreateLink(context.Background(), "new_conv", "old_conv", "supersedes", 1, "llm"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	for name, pol := range map[string]SlicePolicy{"session": pinSessionPolicy(), "union": pinUnionPolicy()} {
+		t.Run(name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			c, ok := pinCandidateByID(set, "old_conv")
+			if !ok {
+				t.Fatalf("the superseded row is not in the set: %v", passiveIDs(set))
+			}
+			if len(c.SupersededBy) != 1 || c.SupersededBy[0] != "new_conv" {
+				t.Errorf("SupersededBy = %v, want [new_conv]: an unpinned superseded row is named by its superseder", c.SupersededBy)
+			}
+			if n, _ := pinCandidateByID(set, "new_conv"); len(n.SupersededBy) != 0 {
+				t.Errorf("the superseder is named as superseded: %v", n.SupersededBy)
+			}
+		})
+	}
+}
+
+// TestAnUnpinnedSupersededRowReservesNoSlot: naming an unpinned row does not
+// widen the pin's reservation. The superseder ranks last among 60 rows at 0.9, so
+// the cap cuts it, and it stays cut: only a PINNED row's superseder is pulled in.
+// The order of the set is the order with no edge at all except for the demotion
+// the edge has always applied.
+func TestAnUnpinnedSupersededRowReservesNoSlot(t *testing.T) {
+	st := pinSlotStore(t, 60,
+		pinSlotRow{id: "old_conv", project: "proj", category: "fact", importance: 0.1},
+		pinSlotRow{id: "new_conv", project: "proj", category: "fact", importance: 0.05})
+	before := map[string][]string{}
+	pols := map[string]SlicePolicy{"session": pinSessionPolicy(), "union": pinUnionPolicy()}
+	for name, pol := range pols {
+		set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+		if err != nil {
+			t.Fatalf("Candidates: %v", err)
+		}
+		before[name] = firstN(passiveIDs(set), pol.ItemCap)
+	}
+	if err := st.CreateLink(context.Background(), "new_conv", "old_conv", "supersedes", 1, "llm"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	for name, pol := range pols {
+		t.Run(name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			head := firstN(passiveIDs(set), pol.ItemCap)
+			if containsStr(head, "new_conv") {
+				t.Errorf("the superseder of an unpinned row took a reserved slot: %v", head)
+			}
+			if len(head) != len(before[name]) {
+				t.Fatalf("head length moved: %v -> %v", before[name], head)
+			}
+			for i := range head {
+				if head[i] != before[name][i] {
+					t.Errorf("the admitted head moved at %d: %v -> %v", i, before[name], head)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestAWithdrawnOrScopeConflictingSupersedeNamesNothing: the naming reads the
+// demotion's own edge rules, so an invalidated edge (supersede withdraws by
+// invalidating) and an edge between two conflicting scopes name nothing, exactly
+// as neither sinks the row.
+func TestAWithdrawnOrScopeConflictingSupersedeNamesNothing(t *testing.T) {
+	st := pinSlotStore(t, 3,
+		pinSlotRow{id: "old_wd", project: "proj", category: "convention", importance: 0.8},
+		pinSlotRow{id: "new_wd", project: "proj", category: "convention", importance: 0.8},
+		pinSlotRow{id: "old_sc", project: "proj", category: "convention", importance: 0.8},
+		pinSlotRow{id: "new_sc", project: "proj", category: "convention", importance: 0.8})
+	ctx := context.Background()
+	for _, l := range [][2]string{{"new_wd", "old_wd"}, {"new_sc", "old_sc"}} {
+		if err := st.CreateLink(ctx, l[0], l[1], "supersedes", 1, "llm"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+	}
+	if n, err := st.InvalidateLink(ctx, "new_wd", "old_wd", "supersedes"); err != nil || n != 1 {
+		t.Fatalf("InvalidateLink = %d, %v", n, err)
+	}
+	for id, env := range map[string]string{"new_sc": "development", "old_sc": "production"} {
+		if _, err := st.db.Exec(`UPDATE memories SET scope = ? WHERE id = ?`, `{"environment":"`+env+`"}`, id); err != nil {
+			t.Fatalf("scope %s: %v", id, err)
+		}
+	}
+	set, err := st.Candidates(ctx, passiveRequest("proj", pinUnionPolicy()))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	for _, id := range []string{"old_wd", "old_sc"} {
+		c, ok := pinCandidateByID(set, id)
+		if !ok {
+			t.Fatalf("%s is not in the set: %v", id, passiveIDs(set))
+		}
+		if len(c.SupersededBy) != 0 {
+			t.Errorf("%s SupersededBy = %v, want none", id, c.SupersededBy)
+		}
+	}
+}
