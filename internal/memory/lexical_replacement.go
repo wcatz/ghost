@@ -316,6 +316,18 @@ func scopesEqual(a, b map[string]string) bool {
 // nothing saying the other exists. A demotion that sank the newer row would rank
 // the claim it replaced above it, on readers that render no marker at all.
 func replacementPairsWithin(ctx context.Context, db Queryer, rows []Memory, now time.Time) (map[[2]string]bool, error) {
+	repl, err := replacementsWithin(ctx, db, rows, now)
+	if err != nil {
+		return nil, err
+	}
+	return replacementPairKeys(repl), nil
+}
+
+// replacementsWithin is lexicalReplacements over rows and the live explicit
+// edges among them, keeping the direction (older id -> its replacements) that
+// replacementPairsWithin flattens away. The removal needs the direction to
+// know which row of a pair is the replacement.
+func replacementsWithin(ctx context.Context, db Queryer, rows []Memory, now time.Time) (map[string][]string, error) {
 	if len(rows) < 2 {
 		return nil, nil
 	}
@@ -329,9 +341,13 @@ func replacementPairsWithin(ctx context.Context, db Queryer, rows []Memory, now 
 	if err != nil {
 		return nil, err
 	}
-	repl := lexicalReplacements(cands, edges, now)
+	return lexicalReplacements(cands, edges, now), nil
+}
+
+// replacementPairKeys keys every pair of repl both ways round.
+func replacementPairKeys(repl map[string][]string) map[[2]string]bool {
 	if len(repl) == 0 {
-		return nil, nil
+		return nil
 	}
 	out := make(map[[2]string]bool, 2*len(repl))
 	for older, newer := range repl {
@@ -340,7 +356,7 @@ func replacementPairsWithin(ctx context.Context, db Queryer, rows []Memory, now 
 			out[[2]string{n, older}] = true
 		}
 	}
-	return out, nil
+	return out
 }
 
 // explicitEdgesWithin is the live `supersedes` and `contradicts` edges whose
@@ -400,6 +416,51 @@ func withoutReplacementPairs(pairs []demotionPairs, repl map[[2]string]bool) []d
 		kept = append(kept, pr)
 	}
 	return kept
+}
+
+// withoutReplacingLosers drops the near-duplicate verdicts whose LOSER is the
+// lexical replacement of some row of the same retrieval (a newer row in repl).
+// withoutReplacementPairs spares a pair whose two rows replace each other; this
+// spares a loser that replaces a THIRD row. Removing it would take the newer
+// claim out and leave the row it replaced in the answer with no marker, so the
+// reader would get the replaced claim as current.
+func withoutReplacingLosers(pairs []demotionPairs, repl map[string][]string) []demotionPairs {
+	if len(repl) == 0 {
+		return pairs
+	}
+	replacer := make(map[string]bool, len(repl))
+	for _, newer := range repl {
+		for _, n := range newer {
+			replacer[n] = true
+		}
+	}
+	kept := make([]demotionPairs, 0, len(pairs))
+	for _, pr := range pairs {
+		if replacer[pr.loser] {
+			continue
+		}
+		kept = append(kept, pr)
+	}
+	return kept
+}
+
+// replacementRemovalVetoes is the lexical half of what the query path's
+// near-duplicate removal (dropNearDuplicates) vetoes, read over ALL the rows it
+// was handed rather than the verdicts' endpoints, because the third row a loser
+// replaces is usually no party to the verdict. It drops the verdicts whose two rows are a replacement pair
+// (withoutReplacementPairs) and those whose loser replaces any row there
+// (withoutReplacingLosers). On a failed read it returns the verdicts unfiltered
+// with the error, and the caller stops the removal.
+func replacementRemovalVetoes(ctx context.Context, db Queryer, pairs []demotionPairs, rows []Memory, now time.Time) ([]demotionPairs, error) {
+	if len(pairs) == 0 {
+		return pairs, nil
+	}
+	repl, err := replacementsWithin(ctx, db, rows, now)
+	if err != nil {
+		return pairs, err
+	}
+	pairs = withoutReplacementPairs(pairs, replacementPairKeys(repl))
+	return withoutReplacingLosers(pairs, repl), nil
 }
 
 // exemptReplacementPairs is the near-duplicate stage's exemption for a lexical

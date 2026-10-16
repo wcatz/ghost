@@ -212,10 +212,6 @@ func RevertedChange() Storyline {
 				Over:  []string{"jobs-asynq"},
 			},
 		},
-		KnownFailing: map[string]string{
-			"search-finds:session-4:job-backend":            "near-duplicate removal drops the revert note in favour of the original it restates (folded as its duplicate at save), although the revert note is the reverted claim's replacement",
-			"search-ranks:session-4:job-backend:jobs-asynq": "with the revert note removed, the reverted claim ranks first and unmarked, and the original is marked as replaced by the reverted claim",
-		},
 		Judge: "Did the session use the backend the revert restored (%s: %s) rather than the reverted one?",
 	}
 }
@@ -301,11 +297,9 @@ func ProseOnlyChange() Storyline {
 		// word outside backticks is never a value token). The final-block line is
 		// not: it is superseded-convention's defect, seen after the arc's lifecycle.
 		KnownFailing: map[string]string{
-			"distinct-save:lint-biome":                    "known limit: a change told in plain lowercase words has no value token, so the save path folds the replacement into the claim it replaces and strengthens it",
-			"stale-original:session-3":                    "known limit: the read side's replacement guess reads value tokens only, so the strengthened old convention is the first line of the block, unmarked",
-			"search-finds:session-3:pre-push":             "known limit: near-duplicate removal drops the replacement in favour of the strengthened claim it replaces",
-			"search-ranks:session-3:pre-push:lint-eslint": "known limit: the old convention is the only matching row returned, unmarked",
-			"stale-original:final-block":                  "a superseded convention is never resolved and the block renders a row superseded by a live edge with no marker, so after the lifecycle the old convention is shown as current",
+			"distinct-save:lint-biome":   "known limit: a change told in plain lowercase words has no value token, so the save path folds the replacement into the claim it replaces and strengthens it",
+			"stale-original:session-3":   "known limit: the read side's replacement guess reads value tokens only, so the strengthened old convention is the first line of the block, unmarked",
+			"stale-original:final-block": "a superseded convention is never resolved and the block renders a row superseded by a live edge with no marker, so after the lifecycle the old convention is shown as current",
 		},
 		Judge: "Did the session use the current toolchain (%s: %s) rather than the one it replaced?",
 	}

@@ -647,8 +647,9 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// The survivors are partitioned by MEMBERSHIP, never by index: position
 	// picks the loser, but the demotion rules FLIP that decision when the
 	// positioned loser is pinned or retention-exempt and the winner is not
-	// (demoteResults' protected rule), so a protected tail row can beat the
-	// window's own representative. A slice at len(selected) would then keep the
+	// (demoteResults' protected rule), and the removal flips it again when the
+	// positioned loser is the later row (earlierRowLoses), so a protected or a
+	// later tail row can beat the window's own representative. A slice at len(selected) would then keep the
 	// loser in Rows while filing it as dropped, and cut the real winner out of
 	// the answer with no verdict anywhere — both the row-accounting loss and
 	// the contradiction DroppedLosers exists to prevent. Each half keeps its
