@@ -438,7 +438,7 @@ otherwise remove whichever ranked lower — the replacement, on a query in the o
 before the pair was named, so both rows stay. The same edge does not demote either row on
 `ghost_search_all`, `ghost_project_context` or the session-start block either, so on no
 surface does a replacement rank lower for reading like the claim it replaced; a restatement
-is still demoted. A row whose
+is still demoted or removed. A row whose
 replacement is not in the answer carries neither field. A note that changes only a plain word —
 a tool or a name with no digit, path or capital (`eslint` → `biome`, `alice` → `robert`) — is
 never marked: that is the known limit of the lexical guess, since the same swap is how two
