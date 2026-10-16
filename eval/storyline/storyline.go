@@ -519,7 +519,10 @@ func validateRecord(r Record, seen map[string]bool) error {
 // the three arcs the usefulness measurement needs (a correction that must not
 // be repeated, a fact learned in one repository and needed in another, and a
 // fact whose validity window has closed), and the four truth-change arcs in
-// truth.go (a rename, a regressed fix, a version upgrade and a scoped setting).
+// truth.go (a rename, a regressed fix, a version upgrade and a scoped setting),
+// and the six default-install arcs in default_install.go (a retired dependency,
+// a reverted change, a plain-word change, a replacement in another category,
+// repeated tuning of one setting and a superseded convention).
 // The service-migration, on-call and
 // config-clutter candidates from the design are follow-ups, and each is a
 // Storyline literal here rather than a new mechanism.
@@ -527,6 +530,8 @@ func storylines() []Storyline {
 	return []Storyline{
 		ReversedDecision(), CorrectionReplay(), OpsFact(), StaleFact(),
 		RenamedEndpoint(), RegressedFix(), VersionUpgrade(), ScopedSetting(),
+		RetiredDependency(), RevertedChange(), ProseOnlyChange(),
+		RecategorisedReplacement(), RepeatedTuning(), SupersededConvention(),
 	}
 }
 
