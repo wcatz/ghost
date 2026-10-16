@@ -4175,7 +4175,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// claim it replaces as a 'duplicate' and strengthened the stale row
 			// (see statesDifferentValue). Skipped rather than ending the scan,
 			// so a compatible candidate ranked below it can still take the fold.
-			if statesDifferentValue(content, candContent) {
+			// A note saying the candidate's subject is gone (retires) is not a
+			// second wording of it either, and it holds no value the candidate
+			// lacks, so the value guard alone folded it into the claim it
+			// retires and strengthened that claim.
+			if statesDifferentValue(content, candContent) || retires(content, candContent) {
 				continue
 			}
 			sim := mergeScore(newTokens, candTokens)
@@ -4275,8 +4279,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				}
 				// And the same value guard, for the default fold: "port 80" as a
 				// fact and "port 81" as a gotcha clear the 0.7 bar too, and a fold
-				// would strengthen the old value and link the new one to it.
-				if statesDifferentValue(content, candContent) {
+				// would strengthen the old value and link the new one to it. A
+				// retirement of the candidate is refused the same way.
+				if statesDifferentValue(content, candContent) || retires(content, candContent) {
 					continue
 				}
 				j := jaccard(newTokens, candTokens)
@@ -8893,8 +8898,9 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
 // reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
 // save-time and reflection-time dedup agree on what "duplicate" means for
-// same-length restatements — except for a pair that swaps a value, which the
-// save path refuses (statesDifferentValue) and reflection's tier does not.
+// same-length restatements — except for a pair that swaps a value or a note
+// that retires the other, which the save path refuses (statesDifferentValue,
+// retires) and reflection's tier does not.
 //
 // Save-time dedup deliberately goes *further* than reflection's tier via the
 // overlap leg below: Upsert sees one candidate against a live corpus and its
