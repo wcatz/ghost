@@ -1181,6 +1181,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		SubscribeHandler:   s.handleSubscribe,
 		UnsubscribeHandler: s.handleUnsubscribe,
 	})
+	s.mcp.AddReceivingMiddleware(withholdResourceReadURI)
 
 	s.registerTools()
 	s.registerResources()
