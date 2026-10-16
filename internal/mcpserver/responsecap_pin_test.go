@@ -118,6 +118,17 @@ func TestProjectContextByteCutKeepsAPinnedGlobalRow(t *testing.T) {
 	if p := pinnedCutCount(out); p != -1 {
 		t.Errorf("no pinned row was cut, but the answer reports %d: %s", p, tail(out, 400))
 	}
+	// The kept pinned row renders AFTER the cut rows, so "from the end" would be
+	// false: the notice says unpinned rows went first instead.
+	if strings.Contains(out, "cut from the end of this answer") {
+		t.Errorf("the notice says the rows were cut from the end, but a kept row follows them: %s", tail(out, 400))
+	}
+	if !strings.Contains(out, fmt.Sprintf("%d rows were cut from this answer, unpinned rows first, to stay within the 16000-byte response budget", cut)) {
+		t.Errorf("the notice does not say unpinned rows were cut first: %s", tail(out, 400))
+	}
+	if !strings.Contains(out, projectContextCutAdvice) {
+		t.Errorf("the pin-aware notice lost the advice: %s", tail(out, 400))
+	}
 }
 
 // TestProjectContextByteCutKeepsAPinnedProjectRow: a pinned project row is kept
@@ -197,6 +208,9 @@ func TestProjectContextByteCutWithoutAPinIsUnchanged(t *testing.T) {
 	}
 	if cutCount(t, out) != n-countItemLines(out) || pinnedCutCount(out) != -1 {
 		t.Errorf("the plain cut notice is wrong: %s", tail(out, 400))
+	}
+	if !strings.Contains(out, "cut from the end of this answer") {
+		t.Errorf("a pin-free cut must keep the end-first wording: %s", tail(out, 400))
 	}
 	if !strings.HasPrefix(out, memorySectionHeading+"\n\n- [") {
 		t.Errorf("the answer must open with the Memories section and its first row: %q", out[:min(200, len(out))])

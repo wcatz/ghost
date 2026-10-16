@@ -121,7 +121,7 @@ func capResponseParts(parts []responsePart, budget int, advice string) (string, 
 		if parts[at].pinned {
 			pinnedCut++
 		}
-		notice := responseCapNotice(cut, budget, advice) + responseCapPinnedNotice(pinnedCut, budget)
+		notice := responseCapNoticeFor(cut, budget, advice, len(pinned) > 0) + responseCapPinnedNotice(pinnedCut, budget)
 		kept := trimmedParts(parts, cutSet)
 		if textsLen(kept)+len(notice) <= budget {
 			return strings.Join(kept, "") + notice, cut
@@ -208,6 +208,24 @@ func responseCapNotice(cut, budget int, advice string) string {
 	return "\n" + assemble.CutNotice(cut, budget, advice) + "\n"
 }
 
+// responseCapNoticeFor is the cut notice for an answer that holds a pinned row,
+// or the plain end-first notice when it holds none. A pinned row is the protected
+// one, so it is always kept, and it may render AFTER the rows that were cut — the
+// `## Global` section comes last — so "from the end" would be false. The
+// pin-aware sentence says unpinned rows went first instead, and keeps the rest of
+// the shared sentence. A pin-free answer is byte-identical to the shared notice.
+func responseCapNoticeFor(cut, budget int, advice string, pinned bool) string {
+	if !pinned {
+		return responseCapNotice(cut, budget, advice)
+	}
+	verb := "rows were"
+	if cut == 1 {
+		verb = "row was"
+	}
+	return fmt.Sprintf("\n(%d %s cut from this answer, unpinned rows first, to stay within the %d-byte response "+
+		"budget, which bounds the answer and not what is stored. %s)\n", cut, verb, budget, advice)
+}
+
 // responseCapNoticeFirstKept is the notice for the one over-budget answer the
 // pass still returns: the protected row — the first row, or the first pinned row
 // when a row is pinned — is larger than the budget and is kept whole rather than
@@ -224,9 +242,13 @@ func responseCapNoticeFirstKept(cut, budget int, pinned bool) string {
 		if cut == 1 {
 			verb = "row was"
 		}
-		return fmt.Sprintf("\n(%d %s cut from the end of this answer, and the %s alone is larger than the "+
+		where := "from the end of this answer,"
+		if pinned {
+			where = "from this answer, unpinned rows first,"
+		}
+		return fmt.Sprintf("\n(%d %s cut %s and the %s alone is larger than the "+
 			"%d-byte response budget, so it is shown in full rather than dropped; no listing argument makes one "+
-			"row smaller.)\n", cut, verb, which, budget)
+			"row smaller.)\n", cut, verb, where, which, budget)
 	}
 	return fmt.Sprintf("\n(The %s alone is larger than the %d-byte response budget, so it is shown in full "+
 		"rather than dropped; no listing argument makes one row smaller.)\n", which, budget)
