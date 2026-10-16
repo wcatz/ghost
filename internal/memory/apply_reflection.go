@@ -73,7 +73,10 @@ func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
 // promoted and were written back into the project instead. The caller needs
 // them, not just a count: a summary that reports how many rows the project now
 // holds cannot be built from an integer when it also has to say which rows those
-// are.
+// are. A candidate whose sources disagree on scope is neither promoted nor kept:
+// there is no scope to promote under, and writing it project-scoped with none
+// would widen the scoped sources it replaced, so it is counted in globalDropped
+// and its sources are preserved instead.
 //
 // projectDropped and globalDropped count the emissions each half refused, by
 // reason (EmissionDrops): the ones whose claimed row changed or was deleted
@@ -168,22 +171,44 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// whatever the sources said. Resolved here so the promotion half is held to
 	// the same rule as the project half: an agreement is carried onto the
 	// promoted row, and a disagreement (or a scoped/unscoped mix) is not a scope
-	// to promote under, so the candidate is kept project-scoped rather than
-	// widened into every project. A read or decode failure is not a refusal and
-	// fails the apply, exactly as the project half propagates it.
-	globalScope := make([]map[string]string, len(globalMems))
-	globalConflict := make([]bool, len(globalMems))
-	for i, m := range globalMems {
+	// to promote under, so the candidate is refused.
+	//
+	// A refusal keeps its sources, exactly as the project half's does
+	// (keepRefusedSources): the merge is void, so NONE of its sources may be
+	// taken, and they are marked in the shared view ReplaceNonManual seeds its
+	// concurrent map from — else the replace deletes every one of them as
+	// unaccounted and the knowledge is gone with them. The candidate itself is
+	// written nowhere and counted as a dropped global emission: writing it into
+	// the project with no scope would replace its scoped sources with an unscoped
+	// row, the same silent widening one level in, and promoting it would widen
+	// across every project.
+	//
+	// A read or decode failure is not a refusal and fails the apply, exactly as
+	// the project half propagates it.
+	candidateIDs := make(map[string]bool, len(globalGuard.candidates))
+	for _, c := range globalGuard.candidates {
+		candidateIDs[c.id] = true
+	}
+	promotable := make([]Memory, 0, len(globalMems))
+	globalScope := make([]map[string]string, 0, len(globalMems))
+	for _, m := range globalMems {
 		sc, scopeErr := inheritedScope(txCtx, tx, projectID, m)
 		if scopeErr != nil {
 			if !errors.Is(scopeErr, errScopeConflict) {
 				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("resolve cross-project scope: %w", scopeErr)
 			}
-			globalConflict[i] = true
+			for _, id := range m.ReplacesIDs {
+				if candidateIDs[id] {
+					view.concurrent[id] = true
+				}
+			}
+			globalDropped.record(false, 0)
 			continue
 		}
-		globalScope[i] = sc
+		promotable = append(promotable, m)
+		globalScope = append(globalScope, sc)
 	}
+	globalMems = promotable
 
 	if len(projectMems) > 0 {
 		var projectDrop EmissionDrops
@@ -221,17 +246,6 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			}
 		} else {
 			for i, m := range globalMems {
-				if globalConflict[i] {
-					// No single scope to promote under: keep the candidate
-					// project-scoped instead of writing it into _global unscoped,
-					// where it would apply in every project and environment.
-					keptMems = append(keptMems, m)
-					appliedByCategory[m.Category]++
-					if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{m}); err != nil {
-						return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("keep conflicting candidate project-scoped: %w", err)
-					}
-					continue
-				}
 				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m, globalScope[i])
 				if candidateErr != nil {
 					return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, candidateErr
