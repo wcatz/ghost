@@ -521,11 +521,20 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	// diagnostic of one, so counting it would put calls that delivered no answer
 	// in that denominator. It matches what explain did before it became a
 	// projection of this run: it never reached the sink.
+	// The display order, and nothing else: the verdict above was decided on the
+	// relevance order and stays as it was (displayReplacements). Only Items and
+	// Response take the new order. explain's rank and the retrieval record's
+	// kept-row order are read from the relevance order, so both stay a record of
+	// what retrieval decided rather than of how the page was shown.
+	relevance := res
+	if err == nil {
+		p.displayReplacements(&res)
+	}
 	if err == nil && req.Explain {
-		res.Explain = p.explainProjection(res)
+		res.Explain = p.explainProjection(relevance)
 	}
 	if err == nil && !req.Explain && !req.convertsToError(res) {
-		emit(ctx, req.Record, req, res)
+		emit(ctx, req.Record, req, relevance)
 	}
 	return res, err
 }

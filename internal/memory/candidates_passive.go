@@ -901,7 +901,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	supersededBy := s.passivePinnedSupersededBy(ctx, eligible)
 	chosen, rest, floor := passiveSelect(eligible, pol)
 	chosen, rest = passiveReserve(chosen, rest, supersededBy)
-	chosen, removed := s.passiveDemote(ctx, chosen, pol)
+	chosen, removed := s.passiveDemote(ctx, chosen, pol, now)
 	// A demotion is a reorder and sinks a superseded row; the final arrangement
 	// puts the reserved rows back at the head, in the order the demotion left them,
 	// each superseded pin directly behind its superseder.
@@ -1223,7 +1223,7 @@ func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) ([]passiveR
 //
 // The second result is the rows a DropDemotedLosers policy removed, each with the
 // winners it lost to, read from the same edge verdicts the removal was decided on.
-func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SlicePolicy) ([]passiveRow, []passiveLoser) {
+func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SlicePolicy, now time.Time) ([]passiveRow, []passiveLoser) {
 	if len(rows) < 2 {
 		return rows, nil
 	}
@@ -1322,6 +1322,19 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 			}
 			pairs = keptPairs
 		}
+	}
+	// The lexical replacement veto is a DROP rule for the same reason, and the
+	// query path's (dropNearDuplicates): a removal here takes one row of the pair
+	// out before the read that names the pair, so the block would hold one of the
+	// two claims with nothing saying the other exists.
+	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
+		mems := make([]Memory, len(rows))
+		for i, r := range rows {
+			mems[i] = r.mem
+		}
+		var repl map[[2]string]bool
+		repl, err = replacementPairsWithin(ctx, s.queryDB(), mems, now)
+		pairs = withoutReplacementPairs(pairs, repl)
 	}
 	penalty, against := demotionVerdicts(pairs)
 	if err != nil {

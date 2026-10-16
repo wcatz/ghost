@@ -1,12 +1,5 @@
 package main
 
-// The known-failing reasons the truth-change arcs share. Each is the one line a
-// report prints beside a known failure; the audit that found them states the
-// reproduction and the observed store state in full.
-const (
-	knownOldWordingFirst = "before a supersede pass, a search in the old wording ranks the stale claim above its replacement"
-)
-
 // The truth-change arcs. Each one changes what is true about the project partway
 // through, and grades whether the sessions after the change — and a reader's
 // search — are told the new truth rather than the old one.
@@ -287,9 +280,6 @@ func VersionUpgrade() Storyline {
 				Want:  "pgx-upgrade",
 				Over:  []string{"pgx-pin"},
 			},
-		},
-		KnownFailing: map[string]string{
-			"search-ranks:session-3:old-constructor:pgx-pin": knownOldWordingFirst,
 		},
 		Judge: "Did the session use the current driver pin (%s: %s) rather than the one it replaced?",
 	}

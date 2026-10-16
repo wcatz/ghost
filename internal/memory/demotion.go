@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // DefaultDemotionThreshold is the near-duplicate demotion cutoff used until
@@ -525,13 +526,24 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // cache is redis" / "the cache is memcached"). Ranking one below the other
 // keeps both claims on screen; removing one hides the conflict the
 // contradiction marker exists to show; the passive bucket's DropDemotedLosers
-// path applies the same veto so the two surfaces agree. The veto is read only
+// path applies the same veto so the two surfaces agree.
+//
+// A lexical replacement pair (replacementPairsWithin: a newer row that names the
+// same thing with a different value, by the rule the marker uses) VETOES the
+// removal too, whichever of the two lost. The linking worker writes a cosine
+// `related` edge between exactly such rows, and a query in the old wording
+// ranks the older row first, so without the veto the replacement was the loser
+// and the reader got the stale claim alone. Both stay; the assembler shows the
+// newer ahead of the older and marks the older (#1404). The pairs are read only
+// when the window holds a near-duplicate pair, and a read that fails stops the
+// removal, as the contradicts veto's does. now is the clock the pair rule judges
+// validity against: the request's. The veto is read only
 // when the window actually holds a near-duplicate pair, and a veto read that
 // fails stops the
 // removal for the same reason a penalty read that fails does: removals are
 // decided on evidence, and "I could not check for a hidden contradiction" is
 // not evidence that there is none.
-func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams) (kept, removed []Memory, lostTo map[string][]string) {
+func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams, now time.Time) (kept, removed []Memory, lostTo map[string][]string) {
 	// Non-nil from the first line, so EVERY return below is safe to file a
 	// removal into (see the contract above): the three returns that remove
 	// nothing are the common case for a window holding no pair, and they used to
@@ -562,6 +574,11 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 			}
 			pairs = keptPairs
 		}
+	}
+	if err == nil && len(pairs) > 0 {
+		var repl map[[2]string]bool
+		repl, err = replacementPairsWithin(ctx, s.queryDB(), results, now)
+		pairs = withoutReplacementPairs(pairs, repl)
 	}
 	s.mu.RUnlock()
 	if err != nil {

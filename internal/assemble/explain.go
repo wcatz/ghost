@@ -179,6 +179,9 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 	// and is identified by the pairing instead. That pairing comes from the
 	// trace's own record when the facts did not carry it, so near_duplicate_of
 	// is never empty on a row the retriever removed.
+	if older, ok := p.movedAhead[m.ID]; ok {
+		row.MovedAheadOf = Token(older)
+	}
 	if l, ok := p.losers[m.ID]; ok && len(row.NearDuplicateOf) == 0 {
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(l.LostTo))
 	}
