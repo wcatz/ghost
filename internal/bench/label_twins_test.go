@@ -5,10 +5,9 @@ import "testing"
 // nearDuplicatePairs are the corpus row pairs that restate ONE claim. #965 kept
 // them as deliberate near-duplicate fixtures rather than dropping a row, and its
 // labelling rule followed from that: because the two answer the same question,
-// they must be graded the same. Three of the corpus's pairs are one claim
-// written twice; the fourth row of each pair exists only as a distractor and the
-// relation is not lexical, so the pairs are named here rather than derived from
-// a similarity threshold.
+// they must be graded the same. The relation is not lexical and no similarity
+// threshold derives it, so the three pairs are named here by hand. Any other
+// graded row on one of these queries is a distractor, not a twin.
 var nearDuplicatePairs = [][2]string{
 	{"grafana_port", "grafana_ingress_port"},
 	{"arc_runners", "arc_self_hosted"},
