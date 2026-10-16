@@ -294,6 +294,14 @@ func CheckImportedMemory(m PortableMemory) error {
 	// them — so without this the table becomes the one place a credential survives,
 	// in an append-only store the next `ghost export` re-emits and only the purge's
 	// explicit DELETE reaches. The field is named per record, never the value.
+	//
+	// An evidence id is the row's primary key in `memory_provenance`, so it is
+	// judged here too: a whitespace-only one, one carrying a control or line-break character,
+	// one past MaxImportedIDLen, or one an earlier entry of the SAME memory already
+	// used. The last is what made a dry run report a create the apply refused on
+	// `UNIQUE constraint failed: memory_provenance.id`. Each refusal names the
+	// entry by position and never the id, which is the value being refused.
+	seenEvidenceIDs := make(map[string]struct{}, len(m.Evidence))
 	for i, e := range m.Evidence {
 		if !IsValidEvidenceKind(e.Kind) {
 			return fmt.Errorf("evidence record %d has invalid kind %s — must be one of: observed, imported, verified, legacy", i, RefusalArg("kind", e.Kind))
@@ -305,6 +313,25 @@ func CheckImportedMemory(m PortableMemory) error {
 		); err != nil {
 			return err
 		}
+		// An empty id is not refused: the importer mints one for it, so it is also
+		// left out of the repeat check. A whitespace-only id is not empty to that
+		// rule, would be stored raw, and is refused.
+		if e.ID != "" && strings.TrimSpace(e.ID) == "" {
+			return fmt.Errorf("evidence[%d].id must not be whitespace only — leave it empty and one is minted", i)
+		}
+		if len(e.ID) > MaxImportedIDLen {
+			return fmt.Errorf("evidence[%d].id must be at most %d bytes, got %d — it names a row, not a document", i, MaxImportedIDLen, len(e.ID))
+		}
+		if unprintableInIdentifier(e.ID, false) != "" {
+			return fmt.Errorf("evidence[%d].id must hold no control character, line separator, backtick or «» — the offending id is not shown, because it is the value being refused", i)
+		}
+		if e.ID == "" {
+			continue
+		}
+		if _, dup := seenEvidenceIDs[e.ID]; dup {
+			return fmt.Errorf("evidence[%d].id repeats the id of an earlier evidence record of this memory — evidence ids are unique, so the apply would refuse the row", i)
+		}
+		seenEvidenceIDs[e.ID] = struct{}{}
 	}
 	return nil
 }
