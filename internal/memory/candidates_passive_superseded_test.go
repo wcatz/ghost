@@ -42,12 +42,12 @@ func TestAnUnpinnedSupersededRowIsNamedByItsSuperseder(t *testing.T) {
 }
 
 // TestAnUnpinnedSupersededRowReservesNoSlot: naming an unpinned row does not
-// widen the pin's reservation. The superseder ranks last among 60 rows at 0.9, so
-// the cap cuts it, and it stays cut: only a PINNED row's superseder is pulled in.
-// The order of the set is the order with no edge at all except for the demotion
-// the edge has always applied.
+// widen the pin's reservation. Both rows rank last among 30 rows at 0.9, inside
+// the over-fetch window (so the retriever does name the superseder) but behind
+// the cap, and the superseder stays cut: only a PINNED row's superseder is
+// reserved. The admitted head is the head with no edge at all.
 func TestAnUnpinnedSupersededRowReservesNoSlot(t *testing.T) {
-	st := pinSlotStore(t, 60,
+	st := pinSlotStore(t, 30,
 		pinSlotRow{id: "old_conv", project: "proj", category: "fact", importance: 0.1},
 		pinSlotRow{id: "new_conv", project: "proj", category: "fact", importance: 0.05})
 	before := map[string][]string{}
@@ -67,6 +67,9 @@ func TestAnUnpinnedSupersededRowReservesNoSlot(t *testing.T) {
 			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
 			if err != nil {
 				t.Fatalf("Candidates: %v", err)
+			}
+			if c, _ := pinCandidateByID(set, "old_conv"); len(c.SupersededBy) != 1 {
+				t.Fatalf("the fixture must put both rows in the window, so the superseder is named: %v", c.SupersededBy)
 			}
 			head := firstN(passiveIDs(set), pol.ItemCap)
 			if containsStr(head, "new_conv") {
