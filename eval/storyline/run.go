@@ -218,7 +218,43 @@ type Run struct {
 	FakeHarness bool
 	// Timeout bounds one harness call and one arc stage. Zero means defaultTimeout.
 	Timeout time.Duration
-	Out     io.Writer
+	// StageGap is the least wall-clock time between the last record one stage
+	// saved and the first record the next stage saves (the opening records count
+	// as the stage before the first). A real session starts minutes after the last
+	// one ended, while a scripted run saves the next stage's records well inside
+	// the same second, and created_at has second granularity: two rows created in
+	// one second carry no chronology, so the read side cannot say which replaced
+	// the other (it refuses a tie, as the supersede pass does). main sets it to
+	// stageGap; zero, the default, waits for nothing, which is what the unit tests
+	// run with. Only the time still owed is slept, so a run whose sessions take
+	// longer than the gap (any real harness) pays nothing.
+	StageGap time.Duration
+	Out      io.Writer
+
+	// lastStageSave is when the most recent stage's last record was saved.
+	lastStageSave time.Time
+}
+
+// stageGap is the gap main runs with: one second is the stamp's granularity, and
+// the margin covers a wall clock that steps between two reads of it.
+const stageGap = 1100 * time.Millisecond
+
+// awaitStageGap sleeps out whatever is left of StageGap since the previous
+// stage's last save, so the next save cannot share its created_at second.
+func (r *Run) awaitStageGap(ctx context.Context) error {
+	if r.StageGap <= 0 || r.lastStageSave.IsZero() {
+		return nil
+	}
+	wait := r.StageGap - time.Since(r.lastStageSave)
+	if wait <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
 }
 
 const (
@@ -259,6 +295,9 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		// reverse an opening record, and the grade resolves the edge through both
 		// keys. See Result.Opening.
 		res.Opening[rec.Key] = id
+	}
+	if len(r.Story.Opening) > 0 {
+		r.lastStageSave = time.Now()
 	}
 	if err := r.Ghost.Bind(ctx, r.Story.Project, r.WorkDir); err != nil {
 		return nil, fmt.Errorf("bind %s to %s: %w", r.Story.Project, r.WorkDir, err)
@@ -311,6 +350,11 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			return nil, fmt.Errorf("stage %d session: %w", i+1, err)
 		}
 		sess := Session{Index: i, Block: block, Prompt: prompt, Answer: answer, Saved: map[string]string{}, Probes: probes}
+		if len(stage.Records) > 0 {
+			if err := r.awaitStageGap(ctx); err != nil {
+				return nil, fmt.Errorf("stage %d gap: %w", i+1, err)
+			}
+		}
 		for _, rec := range stage.Records {
 			id, err := r.save(ctx, rec)
 			if err != nil {
@@ -318,6 +362,9 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			}
 			sess.Saved[rec.Key] = id
 			order = append(order, id)
+		}
+		if len(stage.Records) > 0 {
+			r.lastStageSave = time.Now()
 		}
 		res.Sessions = append(res.Sessions, sess)
 		_, _ = fmt.Fprintf(r.Out, "stage %d/%d: %d injected bytes, %d answer bytes, %d record(s) recorded\n",

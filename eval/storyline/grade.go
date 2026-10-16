@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // Check is one graded property of a finished run: a name a report can key on, a
@@ -71,7 +73,7 @@ func grade(res *Result) []Check {
 			}
 			stales := supersededBefore(s, i)
 			for _, stale := range stales {
-				out = append(out, staleAbsentAs("stale-original:"+staleSite(sessionName(sess.Index), stale, len(stales)), sessionName(sess.Index), sess.Block, stale))
+				out = append(out, staleAbsentAs("stale-original:"+staleSite(sessionName(sess.Index), stale, len(stales)), sessionName(sess.Index), sess.Block, stale, mustRecord(s, stale.SupersededBy)))
 			}
 			for _, old := range expiredBefore(s, i) {
 				out = append(out, expiredWithheld(sessionName(sess.Index), sess.Block, old))
@@ -105,7 +107,7 @@ func grade(res *Result) []Check {
 	// report cares about: what the NEXT session of this project would be told.
 	finalStale := supersededBefore(s, len(s.Stages))
 	for _, stale := range finalStale {
-		out = append(out, staleAbsentAs("stale-original:"+staleSite("final-block", stale, len(finalStale)), "final-block", res.FinalBlock, stale))
+		out = append(out, staleAbsentAs("stale-original:"+staleSite("final-block", stale, len(finalStale)), "final-block", res.FinalBlock, stale, mustRecord(s, stale.SupersededBy)))
 	}
 	for _, old := range expiredBefore(s, len(s.Stages)) {
 		out = append(out, expiredWithheld("final-block", res.FinalBlock, old))
@@ -458,19 +460,56 @@ func carryForward(sess Session, want Record) Check {
 // marking it as old. Mark matching is a deliberately narrow test — it cannot see
 // a paraphrase of the stale claim, which is what the opt-in judge is for — but
 // what it does see is exactly the rendered row, which is the real failure mode.
-func staleAbsent(where, block string, stale Record) Check {
-	return staleAbsentAs("stale-original:"+where, where, block, stale)
+//
+// The line passes in one of two shapes. The stale claim is absent, or it is
+// present and says so: every line carrying its Mark carries
+// assemble.MaybeReplacedMarker in the PREFIX Ghost writes (before the first «,
+// where stored text cannot reach), and the replacement's Mark appears on an
+// earlier line. An unmarked stale line fails wherever it sits, and so does a
+// marked one whose replacement is missing or comes after it: a marker pointing
+// at a claim the reader meets second is the failure with a label on it.
+func staleAbsent(where, block string, stale, replacement Record) Check {
+	return staleAbsentAs("stale-original:"+where, where, block, stale, replacement)
 }
 
 // staleAbsentAs is staleAbsent with the line's name given separately from the
 // block it reads, for a site that names each of several superseded records.
-func staleAbsentAs(name, where, block string, stale Record) Check {
+func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 	if !strings.Contains(block, stale.Mark) {
 		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not in %s", stale.Key, where)}
 	}
-	return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
-		"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
-		stale.Key, stale.Mark, stale.SupersededBy, where)}
+	lines := strings.Split(block, "\n")
+	first := -1
+	if replacement.Mark != "" {
+		for i, l := range lines {
+			if strings.Contains(l, replacement.Mark) {
+				first = i
+				break
+			}
+		}
+	}
+	marked := true
+	for i, l := range lines {
+		if !strings.Contains(l, stale.Mark) {
+			continue
+		}
+		prefix, _, _ := strings.Cut(l, "«")
+		if !strings.Contains(prefix, assemble.MaybeReplacedMarker) {
+			return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
+				stale.Key, stale.Mark, stale.SupersededBy, where)}
+		}
+		if first < 0 || first >= i {
+			marked = false
+		}
+	}
+	if !marked {
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+			"%s (%s) is in %s marked as maybe replaced, but its replacement %s (%s) does not appear before it",
+			stale.Key, stale.Mark, where, stale.SupersededBy, replacement.Mark)}
+	}
+	return Check{Name: name, Passed: true, Detail: fmt.Sprintf(
+		"%s is in %s marked as maybe replaced, after its replacement %s", stale.Key, where, stale.SupersededBy)}
 }
 
 // supersedeEdge grades the arc stage's own work: an ACTIVE supersedes edge from
