@@ -1123,3 +1123,46 @@ func TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice(t *tes
 		}
 	}
 }
+
+// TestAnExportWithBoundAndCharacterScopeRefusalsGivesBothPieces: a batch with one
+// over-bound scope and one character-broken scope gets one sentence that names
+// both repairs, rather than the later branch overwriting the earlier.
+func TestAnExportWithBoundAndCharacterScopeRefusalsGivesBothPieces(t *testing.T) {
+	store, db := exportTestStore(t)
+	ins := `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	         VALUES (?, 'p1', 'gotcha', ?, 'mcp', '[]', ?, datetime('now'), datetime('now'))`
+	plantExportRow(t, db, ins, "m-long", "a plain note", `{"environment":"`+strings.Repeat("v", memory.MaxScopeValueLen+1)+`"}`)
+	plantExportRow(t, db, ins, "m-blank", "another plain note", `{"environment":"  "}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+	for _, want := range []string{"a shorter scope", "containing no blank, NUL, control or line-separator characters"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report lacks %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestAnExportOfACharacterBrokenValueUnderATokenShapedKeyDoesNotPrintTheKey: the
+// key is screened before a value's character rule names it, so a key shaped like
+// a token never reaches the report.
+func TestAnExportOfACharacterBrokenValueUnderATokenShapedKeyDoesNotPrintTheKey(t *testing.T) {
+	key := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3)
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-tokkey-nul", `{"`+key+`":"a\u0000b"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+	if err == nil {
+		t.Error("the export of a row under a token-shaped key exited 0")
+	}
+	if strings.Contains(report, key) || strings.Contains(report, key[:12]) {
+		t.Errorf("the report printed the key:\n%s", report)
+	}
+}

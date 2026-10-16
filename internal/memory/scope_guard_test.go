@@ -455,3 +455,21 @@ func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
 		})
 	}
 }
+
+// TestACharacterRefusalNeverPrintsATokenShapedKey: a value that breaks a character
+// rule is refused by naming its key, so a token-shaped key must be screened first
+// and no part of it may appear in the error.
+func TestACharacterRefusalNeverPrintsATokenShapedKey(t *testing.T) {
+	key := scopeToken()
+	for name, value := range map[string]string{"NUL": "a\x00b", "blank": "  ", "newline": "a\nb"} {
+		t.Run(name, func(t *testing.T) {
+			err := checkScope(map[string]string{key: value})
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), key[:12]) {
+				t.Errorf("the refusal printed the key: %v", err)
+			}
+		})
+	}
+}

@@ -114,18 +114,21 @@ func checkScope(scope map[string]string) error {
 			return &ScopeBoundError{Kind: ScopeValueTooLong, Key: k, Limit: MaxScopeValueLen, Got: len(v)}
 		}
 	}
-	// Character rules: blank, NUL, invalid UTF-8, control, line-break (U+2028, U+2029, U+0085).
+	// Key character rules by position, then the token guard over every key, and
+	// only then the value character rules: a value refusal names its key, so the
+	// key must already have been screened or a token-shaped key would be printed.
 	for i, k := range keys {
 		if err := validateScopeKeyValue(fmt.Sprintf("scope_key[%d]", i), k, ""); err != nil {
-			return err
-		}
-		v := scope[k]
-		if err := validateScopeKeyValue(fmt.Sprintf("scope[%s]", SafeToken(k)), v, k); err != nil {
 			return err
 		}
 	}
 	for i, k := range keys {
 		if err := rejectSecret(fmt.Sprintf("scope_key[%d]", i), k); err != nil {
+			return err
+		}
+	}
+	for _, k := range keys {
+		if err := validateScopeKeyValue(fmt.Sprintf("scope[%s]", SafeToken(k)), scope[k], k); err != nil {
 			return err
 		}
 	}

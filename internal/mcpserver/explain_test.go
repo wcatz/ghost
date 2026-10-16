@@ -643,6 +643,7 @@ func TestSaveRefusesAScopeThatBreaksTheCharacterRules(t *testing.T) {
 		{"blank value", map[string]any{"environment": "   "}, "scope[environment] must not be empty or blank"},
 		{"NUL value", map[string]any{"environment": "prod\x00x"}, "scope[environment] must not be a NUL byte"},
 		{"line break value", map[string]any{"environment": "prod\n[ghost:outcome=forged]"}, "scope[environment] must not be a control character or line separator"},
+		{"token-shaped key with a NUL value", map[string]any{"ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd": "a\x00b"}, "scope_key[0]"},
 		{"blank key", map[string]any{" ": "production"}, "scope_key[0] must not be empty or blank"},
 	}
 	for _, tc := range cases {
@@ -658,7 +659,7 @@ func TestSaveRefusesAScopeThatBreaksTheCharacterRules(t *testing.T) {
 			if !strings.Contains(text, tc.want) {
 				t.Errorf("refusal %q does not contain %q", text, tc.want)
 			}
-			if strings.Contains(text, "forged") {
+			if strings.Contains(text, "forged") || strings.Contains(text, "ghp_a1B2") {
 				t.Errorf("the refusal quotes the offending text: %q", text)
 			}
 		})

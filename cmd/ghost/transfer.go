@@ -974,7 +974,9 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			// already names, with the scope kept inside the bounds this time.
 			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		}
-		if hasScopeChar && !hasSecret {
+		if hasScope && hasScopeChar && !hasSecret {
+			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes) containing no blank, NUL, control or line-separator characters", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
+		} else if hasScopeChar && !hasSecret {
 			// A scope with invalid characters is not fixed by a different id either.
 			// No tool edits a stored scope, so the repair is the delete-and-save the
 			// sentence already names, with the scope cleaned of blank, NUL, control
