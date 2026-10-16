@@ -311,12 +311,16 @@ func historyRemovableRowSQL(outer string) string {
 //   - phaseUpdate — one writer, UpdateMemoryWithOptions, whose UPDATE ends
 //     `tags = ?, updated_at = datetime('now')` (store.go), with the version
 //     appended in the same transaction.
-//   - phaseReflect — three writers, all in ReplaceNonManual: the reusePreservesAge
-//     branch and the default reuse branch, each an UPDATE ending
-//     `updated_at = datetime('now')`, and the fresh INSERT, which omits the column
-//     and takes the default. One append for all three at the end, in the same
-//     transaction. The reuseChangesNothing branch (#727) files no version at all,
-//     so it is not a writer of this phase.
+//   - phaseReflect — four writers, all in ReplaceNonManual's reuse loop: the
+//     reusePreservesAge branch and the default reuse branch, each an UPDATE ending
+//     `updated_at = datetime('now')`; the fresh INSERT, which omits the column
+//     and takes the default; and markReusedSuccessorSourceTx, the provenance stamp
+//     a reuse that absorbs a consumed source applies, whose UPDATE sets `source`
+//     and `updated_at = datetime('now')` in one statement. One append for all of
+//     them at the end, in the same transaction. The reuseChangesNothing branch
+//     (#727) files no version of its own; when the stamp turns it into a write the
+//     pass adds it to the same reflected set, and the stamp moves the column, so
+//     that branch is either no writer of this phase or one of these four.
 //
 // Every OTHER phase files a version without touching a live memory's stamp, and
 // five of the nine CHANGE a column this table records, which is what makes the list

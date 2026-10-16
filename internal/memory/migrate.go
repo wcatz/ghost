@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 25
+const schemaVersion = 26
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -88,6 +88,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV23,
 	migrateV24,
 	migrateV25,
+	migrateV26,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1902,6 +1903,42 @@ END`,
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("v25 vector epoch validity: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV26 adds memory_snapshots.retention and its retention_captured marker,
+// scope's pair one version later (#1341). The snapshot table recorded no tier,
+// so a restore put none back: a session row came back as the column DEFAULT —
+// project, no expiry, unprunable forever — and a tier raise the replace's reuse
+// branch had made (raiseReusedRetentionTx) survived the undo the snapshot exists
+// to provide.
+//
+// The two columns are added separately, for the reason migrateV14 states for
+// scope's: the ALTER is the same statement a hand migration would run, and a
+// row it leaves behind must read as "no tier was recorded" rather than as a
+// claim the memory was a project memory. retention_captured therefore defaults
+// to 0 and every row this step covers keeps it that way — including the rows of
+// a table an operator widened by hand, whose retention column the step did not
+// write and no restore may believe.
+func migrateV26(tx *sql.Tx) error {
+	hasRetention, err := columnExists(tx, "memory_snapshots", "retention")
+	if err != nil {
+		return err
+	}
+	if !hasRetention {
+		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN retention TEXT`); err != nil {
+			return fmt.Errorf("add memory_snapshots.retention: %w", err)
+		}
+	}
+	hasCaptured, err := columnExists(tx, "memory_snapshots", "retention_captured")
+	if err != nil {
+		return err
+	}
+	if !hasCaptured {
+		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN retention_captured INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add memory_snapshots.retention_captured: %w", err)
 		}
 	}
 	return nil

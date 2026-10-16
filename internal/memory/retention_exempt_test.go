@@ -114,7 +114,7 @@ func TestRestoreCannotRewriteARowThatBecamePersistentAfterTheSnapshot(t *testing
 	if err != nil {
 		t.Fatalf("RestoreSnapshot: %v", err)
 	}
-	if restored == 0 {
+	if restored.Restored == 0 {
 		t.Skip("the store kept no snapshot to restore from, so this run proves nothing about the restore path")
 	}
 	after := getOne(t, s, id)
