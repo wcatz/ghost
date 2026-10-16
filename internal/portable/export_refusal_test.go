@@ -191,6 +191,19 @@ func storeReachableGrounds(cred string) []ground {
 			},
 		},
 		{
+			// A row an older build stored: its remote still carries a query-string
+			// token, which the current writer would have stripped. Nothing
+			// rewrites it, so the exporter must name it and leave it out.
+			kind: TypeProject, id: "p-secret-remote", wantField: "repo_remote", credential: true,
+			plant: func(t *testing.T, db *sql.DB) {
+				plantExportProject(t, db, "p-secret-remote", "fine", "/src/remote")
+				if _, err := db.Exec(`UPDATE projects SET repo_remote = ? WHERE id = ?`,
+					"github.com/o/r?token="+cred, "p-secret-remote"); err != nil {
+					t.Fatalf("plant a legacy remote: %v", err)
+				}
+			},
+		},
+		{
 			kind: TypeProject, id: "p-secret-path", wantField: "path", credential: true,
 			plant: func(t *testing.T, db *sql.DB) {
 				plantExportProject(t, db, "p-secret-path", "fine", "/src/"+cred)

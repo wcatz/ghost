@@ -80,7 +80,7 @@ func TestEveryProjectCreationRouteRefusesAShapeTheImporterRefuses(t *testing.T) 
 				// The refusal has to be the IMPORTER's, so the same row is judged
 				// the same way everywhere it is judged. A copy of the rule here
 				// would be a second rule, and this is the assertion that says so.
-				refusedRec := createdProject(tc.id, tc.path, tc.name)
+				refusedRec := createdProject(tc.id, tc.path, tc.name, "")
 				if err := CheckImportedProject(refusedRec); err == nil {
 					t.Errorf("%s refused the project, but CheckImportedProject accepts it: the write boundary "+
 						"and the importer disagree", r.name)

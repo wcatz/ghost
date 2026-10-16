@@ -136,12 +136,25 @@ func CheckImportedProject(p PortableProject) error {
 	// name or path holds a credential is writing a record that will be refused on
 	// import, and refusing it at export is the only place the operator learns
 	// before they need the backup. Both fields are replayed into every later
-	// session's digest and returned by ghost_project_list. repo_remote is not
-	// guarded, and was never going to be: NormalizeRepoRemote strips the userinfo,
-	// so it cannot carry a password.
+	// session's digest and returned by ghost_project_list. repo_remote is guarded
+	// too: it is replayed into every session's digest and written into every
+	// export, so a token in it travels exactly as one in the name would.
+	// NormalizeRepoRemote strips the userinfo (on every branch, scheme-less
+	// spellings included), the query string and the fragment before a write, so
+	// those positions never reach the column from a current build. This guard is
+	// the backstop for ANY token position, including the path, which
+	// normalisation cannot recognise and leaves alone. The store's creating
+	// INSERT arms ask it; the refresh and bind routes do not, so import and
+	// export are where it always holds. It is also what covers a row an older
+	// build stored: no migration rewrites such a row in place, but it is refused
+	// here on import and, because `ghost export` asks this same predicate, named
+	// and left out of the artifact. The value judged is the one the record
+	// carries, un-normalised, so a legacy `?token=…` is seen (an artifact whose
+	// remote carries a token is refused rather than silently stripped).
 	return rejectSecretFields(
 		secretField{"name", p.Name},
 		secretField{"path", p.Path},
+		secretField{"repo_remote", p.RepoRemote},
 	)
 }
 
@@ -452,7 +465,8 @@ func CheckImportedDecision(d Decision) error {
 	return rejectSecretList("tags", d.Tags)
 }
 
-// createdProject assembles the project record a WRITE is about to store, so
+// createdProject assembles the project record a WRITE is about to store (repoRemote
+// is the already-normalised remote, which the creation routes hold), so
 // `CheckImportedProject` judges the stored shape rather than the caller's spelling
 // of it (#824).
 //
@@ -466,11 +480,11 @@ func CheckImportedDecision(d Decision) error {
 // creation routes — `ensureProjectLocked` and `ResolveOrCreateRepoProject` —
 // build the same record and must be judged by the same call, and a second
 // hand-assembled copy is exactly the drift this file exists to prevent.
-func createdProject(id, path, name string) PortableProject {
+func createdProject(id, path, name, repoRemote string) PortableProject {
 	if path == "" {
 		path = id
 	}
-	return PortableProject{ID: id, Name: name, Path: path}
+	return PortableProject{ID: id, Name: name, Path: path, RepoRemote: repoRemote}
 }
 
 // MaxImportedIDLen is the byte cap on a memory id a portable artifact may carry.
