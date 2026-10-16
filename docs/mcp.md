@@ -20,7 +20,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_resolve_mark` | Stamp `resolved_at` on memories you name |
 | Memory | `ghost_link_withdraw` | Withdraw one named wrong `supersedes` edge |
 | Project | `ghost_project_delete` | Permanently delete a project and its child records; applying is allowed only with the exact project id the dry run printed |
-| Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
+| Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources). On first contact, when the project holds no memories, it imports Claude Code auto-memory files as `source=onboarding` rows and notifies the project's context resource, so it is not annotated read-only |
 | Context | `ghost_list_projects` | List known projects and their IDs |
 | Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
 | Tasks | `ghost_task_create` | Create a durable task; `priority` is 0-4 (default 2), and a value outside that range is refused by name rather than reset to the default |
