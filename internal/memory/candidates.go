@@ -325,11 +325,18 @@ type Candidate struct {
 	// removes, and it is why the cap is keyed on the retriever's answer rather
 	// than re-derived from the row.
 	FetchedBy string
-	// SupersededBy is, for a PINNED passive row, the ids of the rows in the same
-	// window that supersede it through a live `supersedes` edge. A pin guarantees a
-	// slot and not a rank above the row that replaced it, so such a row is ordered
-	// directly behind its superseder and the assembler says so on its line. Empty
-	// for every other row and on every query-mode read.
+	// SupersededBy is, for a passive row, pinned or not, the ids of the rows in
+	// the same window that supersede it through a live `supersedes` edge, read
+	// with the demotion's own edge rules (supersedePenaltyRows) except that a
+	// keep-forever (retention-exempt) target, which the demotion never sinks, is
+	// named too: a marker withholds nothing. The assembler marks the row on its line
+	// when a named superseder is on the page: a live edge switches the lexical
+	// guess (MaybeReplacedBy) off for its pair, and resolve never retires a
+	// convention or a preference, so this is the only signal the edge leaves. Only
+	// a PINNED, non-exempt row's name moves anything else: a pin guarantees a slot and not a
+	// rank above the row that replaced it, so such a row is ordered directly
+	// behind its superseder and the superseder is reserved too. Empty on every
+	// query-mode read.
 	SupersededBy []string
 	// MaybeReplacedBy is the ids of the rows in the same set that look like this
 	// row's replacement (lexicalReplacements): a newer row of the same project,

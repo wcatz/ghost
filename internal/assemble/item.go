@@ -79,10 +79,14 @@ type Item struct {
 	// what the line renders of it.
 	ContradictedBy []string
 	// SupersededBy lists the ids of the rows in the SAME rendered answer that
-	// replaced this one through a live `supersedes` edge. It is set only for a
-	// pinned row on a passive read (markSuperseded): a pin guarantees a slot and
-	// not a rank above the row that replaced it, so the row is ordered behind its
-	// superseder and says so. A superseder that is not in the answer is not named.
+	// replaced this one through a live `supersedes` edge. It is set on a passive
+	// read only (markSuperseded), for a pinned row and an unpinned one alike: a
+	// live edge switches the lexical guess (MaybeReplacedBy) off for its pair, and
+	// a convention or a preference is never resolved, so without it the edge would
+	// leave the row with less on its line than the guess it replaced. A pinned
+	// row is also ordered behind its superseder; an unpinned one is sunk by the
+	// retriever's demotion, and a keep-forever one is marked but never moved. A superseder that is not in the answer is not named. A
+	// non-empty list renders SupersededMarker and `superseded_by=`.
 	SupersededBy []string
 	// MaybeReplacedBy lists the ids of the rows in the SAME rendered answer that
 	// look like this row's replacement: newer, the same project and scope, a
@@ -107,6 +111,14 @@ type Item struct {
 // does), not anywhere before the first «.
 const MaybeReplacedMarker = "[maybe replaced by a newer note]"
 
+// SupersededMarker is the bracketed field a line carries when a row on the same
+// page replaced it through a live `supersedes` edge (Item.SupersededBy). Unlike
+// MaybeReplacedMarker it is not a guess: Ghost related the two rows. It sits at
+// the same field, so the explicit relation never shows less than the lexical
+// guess it switches off, and the same caution applies: a tag can hold its words,
+// so a check must find it at its field.
+const SupersededMarker = "[superseded by a newer note]"
+
 // Line renders the shared item prefix: the one line shape both surfaces emit for
 // a memory, so a reader comparing search output with an injected block sees the
 // same fields in the same place. Each surface keeps its own framing around it.
@@ -124,6 +136,11 @@ func (i Item) Line() string {
 	resolved := ""
 	if i.ResolvedAt != nil {
 		resolved = " [resolved]"
+	}
+	// The explicit relation's marker comes first: it is a fact Ghost recorded,
+	// the lexical guess beside it is about another row.
+	if len(i.SupersededBy) > 0 {
+		resolved += " " + SupersededMarker
 	}
 	if len(i.MaybeReplacedBy) > 0 {
 		resolved += " " + MaybeReplacedMarker

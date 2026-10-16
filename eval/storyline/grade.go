@@ -464,11 +464,13 @@ func carryForward(sess Session, want Record) Check {
 //
 // The line passes in one of two shapes. The stale claim is absent, or it is
 // present and says so: every line carrying its Mark carries
-// assemble.MaybeReplacedMarker in the field Ghost renders it in
-// (carriesReplacedMarker), and the replacement's Mark appears on an earlier
-// line. An unmarked stale line fails wherever it sits, and so does a
-// marked one whose replacement is missing or comes after it: a marker pointing
-// at a claim the reader meets second is the failure with a label on it.
+// assemble.MaybeReplacedMarker (the lexical guess) or assemble.SupersededMarker
+// (a live supersedes edge, which switches the guess off for its pair) in the
+// field Ghost renders them in (carriesReplacedMarker), and the replacement's
+// Mark appears on an earlier line. An unmarked stale line fails wherever it
+// sits, and so does a marked one whose replacement is missing or comes after
+// it: a marker pointing at a claim the reader meets second is the failure with
+// a label on it.
 func staleAbsent(where, block string, stale, replacement Record) Check {
 	return staleAbsentAs("stale-original:"+where, where, block, stale, replacement)
 }
@@ -517,9 +519,10 @@ func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 var replacedMarkerLine = regexp.MustCompile("^- \\[[^\\]]*\\] `[^`]*` \\([0-9]+\\.[0-9]")
 
 // carriesReplacedMarker reports whether a memory line carries the
-// maybe-replaced marker AT ITS FIELD: Item.Line's prefix is the importance,
-// then an optional ` [pinned]`, an optional ` tags:[…]` JSON list, an optional
-// ` [resolved]`, and then the marker. Looking for the marker's text anywhere
+// maybe-replaced or the superseded marker AT ITS FIELD: Item.Line's prefix is
+// the importance, then an optional ` [pinned]`, an optional ` tags:[…]` JSON
+// list, an optional ` [resolved]`, and then the marker (the superseded one first
+// when a line carries both). Looking for the marker's text anywhere
 // before the first « is not enough, because a tag is stored text and a tag
 // holding the marker's words renders there too (JSON-quoted, inside the tag
 // list). The list is decoded as JSON, so its length is the list's own and a
@@ -540,7 +543,8 @@ func carriesReplacedMarker(line string) bool {
 		rest = rest[len(" tags:")+int(dec.InputOffset()):]
 	}
 	rest = strings.TrimPrefix(rest, " [resolved]")
-	return strings.HasPrefix(rest, " "+assemble.MaybeReplacedMarker)
+	return strings.HasPrefix(rest, " "+assemble.MaybeReplacedMarker) ||
+		strings.HasPrefix(rest, " "+assemble.SupersededMarker)
 }
 
 // supersedeEdge grades the arc stage's own work: an ACTIVE supersedes edge from
