@@ -407,7 +407,7 @@ A row that a NEWER row on the same page looks like the replacement of carries
 **`maybe_replaced_by=`** naming those rows (same rendering and bound as
 `conflicts_with=`). It is a lexical guess and is worded as one: the two rows have the same
 project and the same scope, a text similar enough that the save path would have folded
-them, one value in common (the thing both are about: `go.mod`, `Redis`, `TTL`) and
+them were they in one category (the bar is the same whatever their categories), one value in common (the thing both are about: `go.mod`, `Redis`, `TTL`) and
 another that differs (a version, a path, a name), no plain word swapped in the same place
 (`auth-service` / `billing-service`, `staging` / `reporting`, `make test` / `make lint` are
 two parallel facts, not a replacement), and nothing relates them yet — no live
