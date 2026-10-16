@@ -269,7 +269,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	set.Edges, set.EdgesStatus = edges, status
 
 	// The replacements no lifecycle has related yet (lexicalReplacements), read
-	// against the edges just loaded so an explicit relation wins. A failed edge
+	// against the edges just loaded so an explicit relation wins. They are NAMED
+	// here and ordered by the assembler (arrangeReplacements, just before stage
+	// 9), the one place that knows the cap and which rows a stage reserved. A failed edge
 	// read leaves the set as it was, unordered and unmarked: the guess must not be
 	// made when the edge that would overrule it cannot be seen.
 	if status.Status != edgesErr {
@@ -280,7 +282,6 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 				for i := range run {
 					run[i].MaybeReplacedBy = repl[run[i].ID]
 				}
-				copy(run, arrangeLexicalReplacements(run, repl))
 			}
 			at += n
 		}
@@ -898,7 +899,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// superseder, and the superseder is reserved too, because a cap that cut it
 	// would leave the pinned row standing alone on a page that says it was replaced.
 	supersededBy := s.passivePinnedSupersededBy(ctx, eligible)
-	chosen, rest := passiveSelect(eligible, pol)
+	chosen, rest, floor := passiveSelect(eligible, pol)
 	chosen, rest = passiveReserve(chosen, rest, supersededBy)
 	chosen, removed := s.passiveDemote(ctx, chosen, pol)
 	// A demotion is a reorder and sinks a superseded row; the final arrangement
@@ -911,6 +912,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	for _, r := range append(chosen, rest...) {
 		c := passiveCandidate(r, fetchedBy)
 		c.SupersededBy = supersededBy[r.mem.ID]
+		c.FloorReserved = floor[r.mem.ID]
 		out = append(out, c)
 	}
 	var losers []DroppedLoser
@@ -1102,12 +1104,18 @@ type passiveRow struct {
 //
 // Without a two-pass reservation the whole window is selected and the tail is
 // empty: there is no selection to leave anything out of.
-func passiveSelect(rows []passiveRow, pol SlicePolicy) (chosen, rest []passiveRow) {
+//
+// floor names the rows the behavioural floor reserved (Candidate.FloorReserved).
+func passiveSelect(rows []passiveRow, pol SlicePolicy) (chosen, rest []passiveRow, floor map[string]bool) {
 	if !pol.TwoPass || pol.BehaviorFloor <= 0 {
-		return rows, nil
+		return rows, nil, nil
 	}
 	poolCap := passivePoolCap(pol, len(rows))
-	picked := passiveTwoPass(rows, pol, poolCap)
+	picked, floorN := passiveTwoPass(rows, pol, poolCap)
+	floor = make(map[string]bool, floorN)
+	for _, r := range picked[:floorN] {
+		floor[r.mem.ID] = true
+	}
 	// The tail is what the pool left behind, in the policy's order. It is
 	// returned UNDEMOTED on purpose: the demotions below are decided over the
 	// selected set (that is the window the shipped loaders use), and applying them
@@ -1119,7 +1127,7 @@ func passiveSelect(rows []passiveRow, pol SlicePolicy) (chosen, rest []passiveRo
 			rest = append(rest, r)
 		}
 	}
-	return picked, rest
+	return picked, rest, floor
 }
 
 // passivePoolCap is how many rows the two-pass selection admits: twice the item
@@ -1152,7 +1160,9 @@ func containsPassiveRow(rows []passiveRow, id string) bool {
 	return false
 }
 
-func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) []passiveRow {
+// passiveTwoPass returns the pool and how many of its leading rows the
+// behavioural floor reserved.
+func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) ([]passiveRow, int) {
 	behavioral := make(map[string]bool, len(pol.BehaviorCategories))
 	for _, c := range pol.BehaviorCategories {
 		behavioral[c] = true
@@ -1189,6 +1199,7 @@ func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) []passiveRo
 		counts[rows[best].mem.Category]++
 		picked = append(picked, rows[best])
 	}
+	floorN := len(picked)
 	for _, r := range rows {
 		if len(picked) >= poolCap {
 			break
@@ -1198,7 +1209,7 @@ func passiveTwoPass(rows []passiveRow, pol SlicePolicy, poolCap int) []passiveRo
 			picked = append(picked, r)
 		}
 	}
-	return picked
+	return picked, floorN
 }
 
 // passiveDemote applies the two reorders the session-start path has always

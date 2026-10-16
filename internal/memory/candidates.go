@@ -336,10 +336,15 @@ type Candidate struct {
 	// the same scope and a similar text that names the same thing with a
 	// different value, with no
 	// live `supersedes` or `contradicts` edge between the two. It is a lexical
-	// guess, newest first. A passive read also orders those rows ahead of this one
-	// (arrangeLexicalReplacements); a query read only names them, because there
-	// the order is the relevance answer. Empty when no row qualifies.
+	// guess, newest first. On a passive read the assembler also orders those rows
+	// ahead of this one (assemble's arrangeReplacements); a query read only names
+	// them, because there the order is the relevance answer. Empty when no row
+	// qualifies.
 	MaybeReplacedBy []string
+	// FloorReserved says the passive two-pass selection's behavioural floor
+	// reserved this row a slot. The assembler's replacement arrangement never
+	// displaces such a row to make room. Passive reads only.
+	FloorReserved bool
 	// Base is the fused score the window was cut on, after status demotion.
 	// Decay is the category-and-age multiplier, and Score is the product the
 	// decay order ranked on. Supersede and near-duplicate demotion is a

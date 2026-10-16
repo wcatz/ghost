@@ -98,8 +98,13 @@ type Item struct {
 // MaybeReplacedMarker is the bracketed field a line carries when a newer row on
 // the same page looks like its replacement. It is worded as what it is, a guess
 // read off the text: Ghost has not related the two rows, and the reader decides
-// which one is current. It sits where `[resolved]` does, in the prefix Ghost
-// writes and outside the «...» data, so stored text cannot forge it.
+// which one is current. It sits at a FIELD of the prefix, directly after
+// `[resolved]` (or the tags, the pin or the importance when those are absent),
+// outside the «...» data. Its words alone are not proof of it: a tag is stored
+// text printed in the same prefix, so a tag can hold the same words. A reader
+// sees such a tag JSON-quoted inside `tags:[…]`, and a check that wants the
+// marker must find it at this field (eval/storyline's carriesReplacedMarker
+// does), not anywhere before the first «.
 const MaybeReplacedMarker = "[maybe replaced by a newer note]"
 
 // Line renders the shared item prefix: the one line shape both surfaces emit for

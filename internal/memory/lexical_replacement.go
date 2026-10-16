@@ -3,6 +3,7 @@ package memory
 import (
 	"sort"
 	"time"
+	"unicode"
 )
 
 // lexicalReplacements names, for each row of one retrieval, the LATER rows of
@@ -43,7 +44,7 @@ import (
 //   - chronology by created_at, the stamp a fold never moves (updated_at moves
 //     on every strengthening and access). The stamps must differ and both must
 //     be readable. A tie, or an unreadable stamp, makes no pair, which also
-//     keeps the relation acyclic for arrangeLexicalReplacements.
+//     keeps the relation acyclic for the assembler that orders the pairs.
 //
 // A row is no party to a pair when it is resolved (its `[resolved]` marker
 // already says it is retired), when its validity window is closed or not yet
@@ -65,6 +66,7 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 		created time.Time
 		tokens  map[string]bool
 		values  map[string]bool
+		fields  []valueField
 	}
 	parties := make([]party, 0, len(rows))
 	for i := range rows {
@@ -84,7 +86,14 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 		if len(tokens) == 0 {
 			continue
 		}
-		parties = append(parties, party{c: c, created: created, tokens: tokens, values: valueTokens(c.Content)})
+		fields := valueFields(c.Content)
+		values := map[string]bool{}
+		for _, f := range fields {
+			if f.value {
+				values[f.word] = true
+			}
+		}
+		parties = append(parties, party{c: c, created: created, tokens: tokens, values: values, fields: fields})
 	}
 	if len(parties) < 2 {
 		return nil
@@ -118,6 +127,9 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 			if !sharesValue(a.values, b.values) || !lacksValue(a.values, b.values) || !lacksValue(b.values, a.values) {
 				continue
 			}
+			if subjectSwapped(a.fields, b.fields) {
+				continue
+			}
 			older, newer := a, b
 			if b.created.Before(a.created) {
 				older, newer = b, a
@@ -139,6 +151,94 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 		out[id] = newer
 	}
 	return out
+}
+
+// subjectSwapped reports whether two texts differ, somewhere, by ONE plain word
+// standing in the other's place: "auth-service" for "billing-service", "staging"
+// for "reporting", `make test` for `make lint`. The two word sequences are
+// aligned on their longest common subsequence, and each run of words between two
+// aligned ones is a change. A change of exactly one word on each side, where
+// neither word is value-SHAPED (no digit, path or identifier mark, inner capital
+// or name) and both are content words (at least four letters, not on the short
+// list of function words below), names a different subject in the same
+// sentence frame. That is two parallel facts, both live, not a replacement.
+//
+// A replacement changes values in that frame (a version, a path, a name) and
+// rewords around them, and a rewording is an insertion ("pins" → "now pins") or
+// a run of several words ("the code imports" → "every import moved to"), never a
+// single plain word swapped in place. A word inside a code span counts by its
+// shape, so `make test` → `make lint` is a swapped step, not a new value: it can
+// be a change of procedure or a second step beside the first, the text cannot
+// say which, and an unmarked pair is the safe reading.
+func subjectSwapped(a, b []valueField) bool {
+	n, m := len(a), len(b)
+	// lcs[i][j] is the common-subsequence length of a[i:] and b[j:].
+	lcs := make([][]int, n+1)
+	for i := range lcs {
+		lcs[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if a[i].word == b[j].word {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else {
+				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+			}
+		}
+	}
+	i, j := 0, 0
+	si, sj := 0, 0 // start of the current change on each side
+	flush := func() bool {
+		if i-si != 1 || j-sj != 1 {
+			return false
+		}
+		return subjectWord(a[si]) && subjectWord(b[sj])
+	}
+	for i < n && j < m {
+		switch {
+		case a[i].word == b[j].word:
+			if flush() {
+				return true
+			}
+			i++
+			j++
+			si, sj = i, j
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			i++
+		default:
+			j++
+		}
+	}
+	i, j = n, m
+	return flush()
+}
+
+// subjectWord reports whether a word is a plain content word: not value-shaped,
+// at least four letters, and not a function word. Short and function words are
+// grammar ("is" → "was", "then" → "also"), and swapping one is a rewording.
+func subjectWord(f valueField) bool {
+	if f.shaped {
+		return false
+	}
+	letters := 0
+	for _, r := range f.word {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	return letters >= 4 && !functionWords[f.word]
+}
+
+// functionWords are the four-letter-and-longer words that carry grammar rather
+// than a subject, so a swap of one is rewording.
+var functionWords = map[string]bool{
+	"also": true, "been": true, "does": true, "from": true, "have": true, "into": true,
+	"just": true, "longer": true, "more": true, "much": true, "must": true, "never": true,
+	"only": true, "once": true, "should": true, "since": true, "still": true, "than": true,
+	"that": true, "then": true, "there": true, "these": true, "they": true, "this": true,
+	"those": true, "under": true, "until": true, "were": true, "what": true, "when": true,
+	"where": true, "which": true, "while": true, "will": true, "with": true, "would": true,
+	"always": true, "after": true, "before": true, "every": true,
 }
 
 // sharesValue reports whether two value-token sets hold a token in common.
@@ -163,55 +263,4 @@ func scopesEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
-}
-
-// arrangeLexicalReplacements orders each row's replacements (lexicalReplacements)
-// ahead of it, for a passive read whose order is importance times decay rather
-// than relevance. A replacement that sits BEHIND its older row is moved up to
-// directly ahead of it, and the rows in between shift down by one. Moving the
-// newer row up, rather than sinking the older one, is what keeps the older row
-// inside a slice cap whenever it was: it is marked, not withheld.
-//
-// A pinned row never moves, and no row is moved ahead of one. A pin is a slot
-// guarantee, and a guess is not an explicit `supersedes` edge, which is the only
-// relation the passive order lets reorder a pin (passiveArrange, with the
-// replacement reserved a slot). A lexical guess gets the treatment a newer
-// `contradicts` partner of a pinned row gets: the row is marked and keeps its
-// place.
-//
-// A chain (v4, v5, v6) is arranged newest first: placing a row first places its
-// replacements, each of which places its own, and created_at strictly increases
-// along every step, so the recursion ends. Rows are otherwise kept in their
-// input order. The input is not modified.
-func arrangeLexicalReplacements(rows []Candidate, repl map[string][]string) []Candidate {
-	if len(repl) == 0 || len(rows) < 2 {
-		return rows
-	}
-	at := make(map[string]int, len(rows))
-	for i := range rows {
-		at[rows[i].ID] = i
-	}
-	out := make([]Candidate, 0, len(rows))
-	placed := make([]bool, len(rows))
-	var place func(i int)
-	place = func(i int) {
-		if placed[i] {
-			return
-		}
-		if !rows[i].Pinned {
-			for _, id := range repl[rows[i].ID] {
-				j, ok := at[id]
-				if !ok || j <= i || placed[j] || rows[j].Pinned {
-					continue
-				}
-				place(j)
-			}
-		}
-		placed[i] = true
-		out = append(out, rows[i])
-	}
-	for i := range rows {
-		place(i)
-	}
-	return out
 }

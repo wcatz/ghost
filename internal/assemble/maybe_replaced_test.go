@@ -301,3 +301,84 @@ func TestItemLineRendersMaybeReplacedBy(t *testing.T) {
 		t.Errorf("an unmarked row renders the marker: %q", l)
 	}
 }
+
+// capRows is a project bucket of five rows under passiveRequest's 3-row cap:
+// the older row sits inside the cap and its replacement behind it.
+func capRows(mod func(rows []memory.Candidate)) []memory.Candidate {
+	ids := []string{"r1", "old", "r3", "r4", "new"}
+	rows := make([]memory.Candidate, len(ids))
+	for i, id := range ids {
+		c := projectCandidate(id, 0.9-0.1*float64(i))
+		c.FetchedBy = "proj"
+		rows[i] = c
+	}
+	rows[1].MaybeReplacedBy = []string{"new"}
+	if mod != nil {
+		mod(rows)
+	}
+	return rows
+}
+
+// TestRunPassiveReplacementTakesOnlyAnUnreservedSlot: a replacement pulled from
+// behind the cap may displace one row, the lowest-ranked one inside the cap that
+// nothing reserved, and no other row crosses the cap. Shifting every row down
+// instead would cut the last row inside the cap whatever chose it.
+func TestRunPassiveReplacementTakesOnlyAnUnreservedSlot(t *testing.T) {
+	cases := []struct {
+		name   string
+		mod    func(rows []memory.Candidate)
+		want   []string
+		marked bool
+	}{
+		{"the lowest unreserved row gives up its slot", nil, []string{"r1", "new", "old"}, true},
+		{"a floor pick keeps its slot", func(rows []memory.Candidate) { rows[2].FloorReserved = true },
+			[]string{"new", "old", "r3"}, true},
+		{"a pinned row keeps its slot", func(rows []memory.Candidate) { rows[2].Pinned = true },
+			[]string{"new", "old", "r3"}, true},
+		{"no unreserved row: nothing moves and nothing is marked", func(rows []memory.Candidate) {
+			rows[0].Pinned = true
+			rows[2].FloorReserved = true
+		}, []string{"r1", "old", "r3"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := run(t, &fakeRetriever{set: passiveSet(capRows(tc.mod)...)}, passiveRequest())
+			got := itemIDs(res.Items)
+			if !eq(got, tc.want) {
+				t.Fatalf("answer %v, want %v", got, tc.want)
+			}
+			old := itemByID(t, res.Items, "old")
+			if marked := len(old.MaybeReplacedBy) > 0; marked != tc.marked {
+				t.Errorf("older row marked = %v (%v), want %v", marked, old.MaybeReplacedBy, tc.marked)
+			}
+		})
+	}
+}
+
+// TestRunPassiveReplacementInsideTheCapShiftsNoRowOut: with both rows inside
+// the cap the replacement moves up and the rows between stay on the page.
+func TestRunPassiveReplacementInsideTheCapShiftsNoRowOut(t *testing.T) {
+	rows := capRows(nil)
+	rows[1].MaybeReplacedBy = []string{"r3"}
+	res := run(t, &fakeRetriever{set: passiveSet(rows...)}, passiveRequest())
+	if got := itemIDs(res.Items); !eq(got, []string{"r1", "r3", "old"}) {
+		t.Errorf("answer %v, want [r1 r3 old]", got)
+	}
+}
+
+// TestRunPassiveReplacementLeavesADiversityAdmittedRowItsSlot: stage 7 brought
+// the gotcha into the window in place of a third fact; the replacement may not
+// take that slot back.
+func TestRunPassiveReplacementLeavesADiversityAdmittedRowItsSlot(t *testing.T) {
+	mk := func(id, cat string, score float64) memory.Candidate {
+		c := candidate(id, "proj", cat, "a project memory "+id, score)
+		c.FetchedBy = "proj"
+		return c
+	}
+	f1, old, f3, g1, newer := mk("f1", "fact", 0.9), mk("old", "fact", 0.8), mk("f3", "fact", 0.7), mk("g1", "gotcha", 0.6), mk("new", "fact", 0.5)
+	old.MaybeReplacedBy = []string{"new"}
+	res := run(t, &fakeRetriever{set: passiveSet(f1, old, f3, g1, newer)}, passiveRequest())
+	if got := itemIDs(res.Items); !eq(got, []string{"new", "old", "g1"}) {
+		t.Errorf("answer %v, want [new old g1]: the row stage 7 admitted keeps its slot", got)
+	}
+}

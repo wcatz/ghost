@@ -10,18 +10,9 @@ func lexRow(id, created, content string) Candidate {
 	return Candidate{Memory: Memory{ID: id, ProjectID: "p", Category: "dependency", CreatedAt: created, Content: content}}
 }
 
-func lexIDs(rows []Candidate) []string {
-	out := make([]string, len(rows))
-	for i, r := range rows {
-		out[i] = r.ID
-	}
-	return out
-}
-
-// TestLexicalReplacementsArrangesAChainNewestFirst: three pins of one module,
-// ranked oldest first, come back newest first, and each older row names every
-// newer row that replaces it, newest first.
-func TestLexicalReplacementsArrangesAChainNewestFirst(t *testing.T) {
+// TestLexicalReplacementsNamesAChainNewestFirst: three pins of one module, and
+// each older row names every newer row that replaces it, newest first.
+func TestLexicalReplacementsNamesAChainNewestFirst(t *testing.T) {
 	rows := []Candidate{
 		lexRow("v4", "2026-09-01 10:00:00", "go.mod pins github.com/jackc/pgx/v4 at v4.18.1 and the pool is built with pgxpool.Connect."),
 		lexRow("other", "2026-09-02 10:00:00", "The ledger nightly job reconciles every account against the bank feed."),
@@ -38,9 +29,6 @@ func TestLexicalReplacementsArrangesAChainNewestFirst(t *testing.T) {
 	}
 	if _, ok := repl["other"]; ok {
 		t.Errorf("an unrelated row is paired: %v", repl)
-	}
-	if got := lexIDs(arrangeLexicalReplacements(rows, repl)); !reflect.DeepEqual(got, []string{"v6", "v5", "v4", "other"}) {
-		t.Errorf("arranged %v, want [v6 v5 v4 other]", got)
 	}
 }
 
@@ -63,21 +51,42 @@ func TestLexicalReplacementsNeedsADistinctChronology(t *testing.T) {
 	}
 }
 
-// TestArrangeLexicalReplacementsNeverMovesAPin: a pinned row keeps its place
-// whichever side of the pair it is on.
-func TestArrangeLexicalReplacementsNeverMovesAPin(t *testing.T) {
-	rows := []Candidate{lexRow("old", "", ""), lexRow("x", "", ""), lexRow("new", "", "")}
-	repl := map[string][]string{"old": {"new"}}
-	rows[2].Pinned = true
-	if got := lexIDs(arrangeLexicalReplacements(rows, repl)); !reflect.DeepEqual(got, []string{"old", "x", "new"}) {
-		t.Errorf("a pinned replacement moved: %v", got)
+// TestLexicalReplacementsKeepsParallelFactsApart: two live notes in one sentence
+// frame about two different subjects share a value and change another, which is
+// exactly a value swap to the similarity and value rules. The plain word that
+// names the subject differs in place (auth/billing, staging/reporting, the make
+// target), so they are not a replacement. The replacements below them reword
+// around their values instead, and still pair.
+func TestLexicalReplacementsKeepsParallelFactsApart(t *testing.T) {
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name, older, newer string
+		pair               bool
+	}{
+		{"different service", "auth-service runs on node-3 and listens on port 8080 behind Nginx",
+			"billing-service runs on node-7 and listens on port 8080 behind Nginx", false},
+		{"different database", "The staging database is Postgres 15 hosted in us-east",
+			"The reporting database is Postgres 16 hosted in us-east", false},
+		// Decided as NOT a pair: `make lint` in place of `make test` can be a
+		// changed procedure or a second step beside the first, and the text cannot
+		// say which. A code-span word counts by its shape, and a plain word swapped
+		// in place is a different step; an unmarked pair is the safe reading.
+		{"different make target", "Run `make build` then `make test` before PRs",
+			"Run `make build` then `make lint` before PRs", false},
+		{"pgx upgrade", "go.mod pins github.com/jackc/pgx/v4 at v4.18.1; the pool is built with pgxpool.Connect and the code imports pgx/v4 everywhere.",
+			"go.mod now pins github.com/jackc/pgx/v5 at v5.6.0; the pool is built with pgxpool.New and every import moved to pgx/v5.", true},
+		{"reversed store", "Per-session state lives in Redis: the bootstrap sets SESSION_STORE=redis and every session key carries a 3600s TTL.",
+			"Per-session state lives in Postgres, not Redis: the bootstrap sets SESSION_STORE=postgres and rows in the public.sessions table are the sessions.", true},
+		{"terraform upgrade", "The infra repo pins Terraform 1.5.7 in .terraform-version; CI runs terraform plan on every PR.",
+			"The infra repo now pins Terraform 1.6.2 in .terraform-version; CI runs terraform plan on every PR.", true},
 	}
-	rows[2].Pinned, rows[0].Pinned = false, true
-	if got := lexIDs(arrangeLexicalReplacements(rows, repl)); !reflect.DeepEqual(got, []string{"old", "x", "new"}) {
-		t.Errorf("a row moved ahead of a pinned one: %v", got)
-	}
-	rows[0].Pinned = false
-	if got := lexIDs(arrangeLexicalReplacements(rows, repl)); !reflect.DeepEqual(got, []string{"new", "old", "x"}) {
-		t.Errorf("arranged %v, want [new old x]", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []Candidate{lexRow("old", "2026-09-01 10:00:00", tc.older), lexRow("new", "2026-09-10 10:00:00", tc.newer)}
+			got := lexicalReplacements(rows, nil, now)
+			if paired := reflect.DeepEqual(got["old"], []string{"new"}); paired != tc.pair {
+				t.Errorf("paired = %v (%v), want %v", paired, got, tc.pair)
+			}
+		})
 	}
 }
