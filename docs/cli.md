@@ -509,7 +509,7 @@ The block's own line about the pair states the **decision**, never a write, beca
 
 A classify call that dies is **per call**, not per pass. A project's live edges are judged eight pairs to a harness call, so an 87-edge project is eleven calls, and a transport failure in the seventh used to throw the other ten away: every pair moved to `unjudged`, and the re-run paid for all eleven again. The chunks that answered are now applied like any other verdicts — those are complete, parsed, number-indexed answers, and nothing downstream needs the whole set at once, since a cycle is asked as one question and lives in one chunk — so the `unjudged` rows name only the pairs the failed call carried, and the non-zero exit still asks for the re-run. A cycle the failed call carried is reported as a **missing verdict** (the first outcome above), never as one that stood: no call answered about it, so both its edges are still live and the block says so. A reply whose verdict count does not match the pairs asked about is not a partial answer — the mapping from reply to pair is exactly what is in doubt — so nothing is applied there and every open pair is `unjudged`.
 
-`--withdraw` is the repair for an edge the rules still accept. `--reassess` withdraws what the current rubric rejects, so a pair that is wrong for a reason no rubric can see — the newer note is not a replacement of the older one at all — keeps its edge and buries its target, because a classifier asked about it has not made a mistake by its own lights. `--withdraw` removes the edge you name, on your say-so, with no harness call and nothing billed. All three withdrawal paths are dry-run by default and a **`supersedes`** withdrawal writes the `unsupersede` history row — a `causes` one does not, and draws no resolve follow-up either, because a `causes` claim never held its target down. Only the two commands you named do it: the ordinary pass writes links and reports a denied `supersedes` edge instead of removing it (see *Reclassification* above), and under `--apply` it prints that report rather than the two things the repair modes print — the per-edge row and the resolve follow-up, which exists because a withdrawal orphans the `resolved_at` the edge stamped on its target, and a withheld withdrawal orphans nothing. The follow-up a real withdrawal prints is a **scoped** `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply`, with the same id list written as a `--only-file` beside it (an id holding a comma is not nameable by `--only`, which splits on commas, so it is carried by the file alone and the report says how many such ids there were; an id holding a newline is reachable through neither form, and the report says that memory stays resolved until the row is rewritten; a `#` on an `--only-file` line is a comment only when it follows whitespace, so an annotated `<id>   # note` still works while `<id>#note` is one id — it never prints the unscoped repair, which would re-judge the whole project) — because the withdrawal is only half the repair and the `resolved_at` the edge caused keeps the target out of ranked injection until that runs. Prefer the scoped form: an unscoped repair re-judges every resolved memory in the project.
+`--withdraw` is the repair for an edge the rules still accept. `--reassess` withdraws what the current rubric rejects, so a pair that is wrong for a reason no rubric can see — the newer note is not a replacement of the older one at all — keeps its edge and buries its target, because a classifier asked about it has not made a mistake by its own lights. `--withdraw` removes the edge you name, on your say-so, with no harness call and nothing billed. All three withdrawal paths are dry-run by default and a **`supersedes`** withdrawal writes the `unsupersede` history row — a `causes` one does not, and draws no resolve follow-up either, because a `causes` claim never held its target down. Only the two commands you named do it: the ordinary pass writes links and reports a denied `supersedes` edge instead of removing it (see *Reclassification* above), and under `--apply` it prints that report rather than the two things the repair modes print — the per-edge row and the resolve follow-up, which exists because a withdrawal orphans the `resolved_at` the edge stamped on its target, and a withheld withdrawal orphans nothing. The follow-up a real withdrawal prints is a **scoped** `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply`, with the same id list written as a `--only-file` beside it (an id holding a comma is not nameable by `--only`, which splits on commas, so it is carried by the file alone and the report says how many such ids there were; an id holding a newline is reachable through neither form, and the report says that memory stays resolved until the row is rewritten; a `#` on an `--only-file` line starts a comment when it begins the line or follows whitespace, so an annotated `<id>   # note` still works while `<id>#note` is one id — it never prints the unscoped repair, which would re-judge the whole project) — because the withdrawal is only half the repair and the `resolved_at` the edge caused keeps the target out of ranked injection until that runs. Prefer the scoped form: an unscoped repair re-judges every resolved memory in the project.
 
 A ref is a full memory id, or an unambiguous **8-or-more-character prefix** of one, because every Ghost report abbreviates to eight characters. A full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim, and the id column only *defaults* to hex — while the 8-character floor applies to a prefix, which names a class of ids rather than one. A prefix naming two memories is refused with the matches listed rather than guessed at. A pair with no live link in **either** relation is an error, and the message names the target's live edges. Several pairs may be given at once, and the whole request is settled before anything is written — one bad pair out of five withdraws none of them.
 
@@ -727,7 +727,7 @@ Every backup also writes `<snapshot>.manifest.json` beside the snapshot, and the
 ```json
 {
   "manifest_version": 1,
-  "schema_version": 18,
+  "schema_version": 25,
   "created_at": "2026-09-26T15:32:07Z",
   "database": "ghost.db.backup-20260926T153207Z",
   "bytes": 204800,
@@ -789,7 +789,7 @@ The first line is the verdict, and there are three of them:
 verified ~/.local/share/ghost/ghost.db.backup-20260926T153207Z: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
   sha256           ok       matches the manifest's sha256 9f86d081884c…
   integrity check  ok       SQLite reports the file is structurally sound
-  schema version   ok       the file is at schema v22, this Ghost reads v22
+  schema version   ok       the file is at schema v25, this Ghost reads v25
   row counts       ok       the file holds the 1 project, 4 memories, 1 link, 1 task and 1 decision the manifest records
 ```
 
@@ -799,12 +799,12 @@ A file with **no manifest** beside it is not refused, and does not get the word 
 checked ~/.local/share/ghost/ghost.db.pre-migrate-1758800000: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
   sha256           skipped  no manifest to compare against
   integrity check  ok       SQLite reports the file is structurally sound
-  schema version   ok       the file is at schema v21 and this Ghost reads v22 — it is restorable, and the next open migrates it
+  schema version   ok       the file is at schema v24 and this Ghost reads v25 — it is restorable, and the next open migrates it
   row counts       skipped  no manifest to compare against; the file holds 1 project, 4 memories, 1 link, 1 task and 1 decision
   (no manifest at ~/.local/share/ghost/ghost.db.pre-migrate-1758800000.manifest.json, so the hash and the recorded counts were not checked)
 ```
 
-Both outputs above are what the command prints, verbatim, including the column widths.
+Both outputs above show the format and the column widths the command prints; the schema numbers are the ones of the build that wrote this page, and a build reads its own.
 
 Note the `schema version` line: a pre-migration copy is **always** at a lower version than the build that wrote it, because that is what "before the migration" means. So this case is not an accident of the example, and it is why an older file passes. `OpenDB` refuses a file from a newer Ghost outright, so that direction is a real failure and the message says to upgrade; an older file is what every restore of a pre-migration copy produces, and the next ordinary open migrates it.
 
@@ -957,7 +957,7 @@ A dry run is not a separate code path: every record goes through the same valida
 - Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
 
   ```text
-  error: the database at ~/.local/share/ghost/ghost.db is at schema v21 and this Ghost reads v22
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v24 and this Ghost reads v25
          — start a session, or run ghost mcp init, to migrate it before exporting it or
          previewing an import into it
   ```
