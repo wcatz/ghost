@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,11 @@ type Check struct {
 	// and FailedNames skip it, so an advisory column can disagree with the
 	// deterministic grade without flipping a verdict or an exit code.
 	Advisory bool
+	// Known marks a failed check the storyline lists in KnownFailing: reported,
+	// and not gating, because the failure is a filed finding rather than news.
+	// UnexpectedPass marks a listed check that passed, which is news too.
+	Known          bool
+	UnexpectedPass bool
 }
 
 // grade is the whole deterministic grade, and it reads three sources and no
@@ -62,12 +69,27 @@ func grade(res *Result) []Check {
 			for _, key := range stages[i].Expect {
 				out = append(out, carryForward(sess, mustRecord(s, key)))
 			}
-			for _, stale := range supersededBefore(s, i) {
-				out = append(out, staleAbsent(sessionName(sess.Index), sess.Block, stale))
+			stales := supersededBefore(s, i)
+			for _, stale := range stales {
+				out = append(out, staleAbsentAs("stale-original:"+staleSite(sessionName(sess.Index), stale, len(stales)), sessionName(sess.Index), sess.Block, stale))
 			}
 			for _, old := range expiredBefore(s, i) {
 				out = append(out, expiredWithheld(sessionName(sess.Index), sess.Block, old))
 			}
+		}
+		if !res.WithoutGhost {
+			for _, key := range stages[i].Withheld {
+				out = append(out, withheld(sessionName(sess.Index), sess.Block, mustRecord(s, key)))
+			}
+			for _, p := range stages[i].Probes {
+				raw, ran := sess.Probes[p.Name]
+				out = append(out, probeChecks(res, p, sessionName(sess.Index)+":"+p.Name, raw, ran)...)
+			}
+		}
+		// Under the fake harness the answer is a fixed string, so an answer line
+		// would grade the fake. Those runs grade the block and the store only.
+		if res.FakeHarness {
+			continue
 		}
 		for _, c := range stages[i].Carries {
 			out = append(out, answerCarries(sess, c))
@@ -77,22 +99,224 @@ func grade(res *Result) []Check {
 		}
 	}
 	if res.WithoutGhost {
-		return out
+		return applyKnown(s, out)
 	}
 	// The final block is graded on its own, because it is the one a reader of the
 	// report cares about: what the NEXT session of this project would be told.
-	for _, stale := range supersededBefore(s, len(s.Stages)) {
-		out = append(out, staleAbsent("final-block", res.FinalBlock, stale))
+	finalStale := supersededBefore(s, len(s.Stages))
+	for _, stale := range finalStale {
+		out = append(out, staleAbsentAs("stale-original:"+staleSite("final-block", stale, len(finalStale)), "final-block", res.FinalBlock, stale))
 	}
 	for _, old := range expiredBefore(s, len(s.Stages)) {
 		out = append(out, expiredWithheld("final-block", res.FinalBlock, old))
 	}
 	for _, pair := range reversals(s) {
 		out = append(out, supersedeEdge(res, pair))
-		out = append(out, reversalLive(res, pair))
-		out = append(out, finalBlockCarries(res, pair.newer))
+		// In a chain (a fix that later regressed) the middle record is itself
+		// superseded, so "must stay live" and "the final block carries it" are
+		// asked of the chain's head only; the middle one is graded stale instead.
+		if pair.newer.SupersededBy == "" {
+			out = append(out, reversalLive(res, pair))
+			out = append(out, finalBlockCarries(res, pair.newer))
+		}
+		out = append(out, distinctSave(res, pair))
+	}
+	for _, l := range s.Lures {
+		out = append(out, lureRefused(res, mustRecord(s, l.Older), mustRecord(s, l.Newer)))
+	}
+	for _, p := range s.Probes {
+		raw, ran := res.Probes[p.Name]
+		out = append(out, probeChecks(res, p, p.Name, raw, ran)...)
+	}
+	return applyKnown(s, out)
+}
+
+// staleSite names a stale-original line. One superseded record per site keeps
+// the name the line has always had; a site with several names each record, so
+// every line has a name of its own for a report, a summary and KnownFailing to
+// key on.
+func staleSite(where string, stale Record, n int) string {
+	if n > 1 {
+		return where + ":" + stale.Key
+	}
+	return where
+}
+
+// applyKnown turns the storyline's KnownFailing list into verdicts: a listed
+// check that failed is Known (reported, not gating), and a listed check that
+// passed is an UnexpectedPass, reported so the entry can be deleted.
+func applyKnown(s Storyline, checks []Check) []Check {
+	for i, c := range checks {
+		why, ok := s.KnownFailing[c.Name]
+		if !ok || c.Advisory {
+			continue
+		}
+		if c.Passed {
+			checks[i].UnexpectedPass = true
+			checks[i].Detail += " (listed as known-failing: " + why + ")"
+			continue
+		}
+		checks[i].Known = true
+		checks[i].Detail += " (known: " + why + ")"
+	}
+	return checks
+}
+
+// withheld is a delivery line for a record that must not be in a block for a
+// reason the storyline names (Stage.Withheld): a record scoped elsewhere.
+func withheld(where, block string, r Record) Check {
+	name := "withheld:" + where + ":" + r.Key
+	if !strings.Contains(block, r.Mark) {
+		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not in %s", r.Key, where)}
+	}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+		"%s (%s%s) is in %s, which is rendered for a session it does not apply to", r.Key, r.Mark, scopeNote(r.Scope), where)}
+}
+
+func scopeNote(scope map[string]string) string {
+	if len(scope) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(scope))
+	for k := range scope {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+scope[k])
+	}
+	return ", scoped " + strings.Join(parts, ",")
+}
+
+// distinctSave grades the save path on a reversal: the newer record must not
+// have been filed as a near-duplicate of the claim it replaces. A 'duplicate'
+// link says the two rows are one claim in two wordings, which is the opposite
+// of what a replacement is, and it is read off the store's own links.
+func distinctSave(res *Result, pair reversal) Check {
+	name := "distinct-save:" + pair.newer.Key
+	newer, older := res.idOf(pair.newer.Key), res.idOf(pair.older.Key)
+	if newer == "" || older == "" {
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("no id reached the grade for %s/%s", pair.newer.Key, pair.older.Key)}
+	}
+	for _, l := range res.State.Links {
+		if l.Relation != "duplicate" || l.Invalidated {
+			continue
+		}
+		if (l.Source == newer && l.Target == older) || (l.Source == older && l.Target == newer) {
+			return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%s was saved as a likely duplicate of %s, the claim it replaces", pair.newer.Key, pair.older.Key)}
+		}
+	}
+	return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not linked as a duplicate of %s", pair.newer.Key, pair.older.Key)}
+}
+
+// lureRefused grades a lure: no active supersedes edge from the newer record to
+// the older one may exist, and the older one must not have been resolved. The
+// fake classifier calls the pair SUPERSEDES, so only Ghost's own guards can have
+// kept it apart.
+func lureRefused(res *Result, older, newer Record) Check {
+	name := "lure-refused:" + newer.Key
+	n, o := res.idOf(newer.Key), res.idOf(older.Key)
+	if n == "" || o == "" {
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("no id reached the grade for %s/%s", newer.Key, older.Key)}
+	}
+	for _, l := range res.State.Links {
+		if l.Source == n && l.Target == o && l.Relation == "supersedes" && !l.Invalidated {
+			return Check{Name: name, Passed: false, Detail: fmt.Sprintf("%s supersedes %s although both still hold", newer.Key, older.Key)}
+		}
+	}
+	if st, ok := res.State.Stamps[o]; ok && st.ResolvedAt != "" {
+		return Check{Name: name, Passed: false, Detail: fmt.Sprintf("%s was resolved at %s although it still holds", older.Key, st.ResolvedAt)}
+	}
+	return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s and %s are both live and unlinked by supersedes", newer.Key, older.Key)}
+}
+
+// searchRow is one row of a ghost_memory_search answer, in rank order.
+type searchRow struct {
+	ID       string
+	Resolved bool
+}
+
+// searchRowRe reads one formatted search row: the shared item line
+// assemble.Item.Line renders, "- [category] `id` (importance [resolved] …) «…»".
+var searchRowRe = regexp.MustCompile(`(?m)^- \[[^\]]+\] ` + "`" + `([^` + "`" + `]+)` + "`" + ` \(([^\n]*)$`)
+
+// parseSearchRows reads the ranked rows of a search answer. Only the row lines
+// are read — never the outcome line — so the probe grades what was returned,
+// not what the tool says about it.
+func parseSearchRows(raw string) []searchRow {
+	var out []searchRow
+	for _, m := range searchRowRe.FindAllStringSubmatch(raw, -1) {
+		meta, _, _ := strings.Cut(m[2], "«")
+		out = append(out, searchRow{ID: m[1], Resolved: strings.Contains(meta, "[resolved]")})
 	}
 	return out
+}
+
+// probeChecks grades one probe against the rows it returned: search-finds (Want
+// is returned), search-ranks (Want is above every Over record that is returned)
+// and search-excludes (no Absent record is returned).
+//
+// site is the name the lines are keyed under: the probe's own name for an
+// end-state probe, qualified by its session for a stage probe.
+func probeChecks(res *Result, p Probe, site, raw string, ran bool) []Check {
+	rows := parseSearchRows(raw)
+	rank := map[string]int{}
+	for i, r := range rows {
+		if _, ok := rank[r.ID]; !ok {
+			rank[r.ID] = i
+		}
+	}
+	var out []Check
+	want := mustRecord(res.Story, p.Want)
+	wantID := res.idOf(p.Want)
+	wantAt, found := rank[wantID]
+	name := "search-finds:" + site
+	switch {
+	case !ran:
+		out = append(out, Check{Name: name, Passed: false, Detail: "the probe did not run"})
+	case wantID == "":
+		out = append(out, Check{Name: name, Passed: false, Detail: "no id reached the grade for " + p.Want})
+	case found:
+		out = append(out, Check{Name: name, Passed: true, Detail: fmt.Sprintf("%q returns %s at rank %d of %d", p.Query, want.Key, wantAt+1, len(rows))})
+	default:
+		out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf("%q does not return %s (%d rows)", p.Query, want.Key, len(rows))})
+	}
+	for _, k := range p.Over {
+		name := "search-ranks:" + site + ":" + k
+		at, there := rank[res.idOf(k)]
+		switch {
+		case !there:
+			out = append(out, Check{Name: name, Passed: found, Detail: fmt.Sprintf("%s is not returned; %s returned: %v", k, want.Key, found)})
+		case found && wantAt < at:
+			out = append(out, Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s (rank %d) is above %s (rank %d)", want.Key, wantAt+1, k, at+1)})
+		case found:
+			out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%s (rank %d, resolved=%v) is above %s (rank %d), the record that replaced it", k, at+1, rows[at].Resolved, want.Key, wantAt+1)})
+		default:
+			out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%s is returned at rank %d (resolved=%v) and %s is not returned at all", k, at+1, rows[at].Resolved, want.Key)})
+		}
+	}
+	for _, k := range p.Absent {
+		name := "search-excludes:" + site + ":" + k
+		r := mustRecord(res.Story, k)
+		if at, there := rank[res.idOf(k)]; there {
+			out = append(out, Check{Name: name, Passed: false, Detail: fmt.Sprintf(
+				"%q%s returns %s (%s%s) at rank %d", p.Query, probeScope(p), k, r.Mark, scopeNote(r.Scope), at+1)})
+			continue
+		}
+		out = append(out, Check{Name: name, Passed: ran, Detail: fmt.Sprintf("%s is not returned", k)})
+	}
+	return out
+}
+
+func probeScope(p Probe) string {
+	if len(p.Scope) == 0 {
+		return ""
+	}
+	return " (scope" + strings.TrimPrefix(scopeNote(p.Scope), ", scoped") + ")"
 }
 
 // expiredBefore is every record whose valid_until had passed by the time session
@@ -235,7 +459,12 @@ func carryForward(sess Session, want Record) Check {
 // a paraphrase of the stale claim, which is what the opt-in judge is for — but
 // what it does see is exactly the rendered row, which is the real failure mode.
 func staleAbsent(where, block string, stale Record) Check {
-	name := "stale-original:" + where
+	return staleAbsentAs("stale-original:"+where, where, block, stale)
+}
+
+// staleAbsentAs is staleAbsent with the line's name given separately from the
+// block it reads, for a site that names each of several superseded records.
+func staleAbsentAs(name, where, block string, stale Record) Check {
 	if !strings.Contains(block, stale.Mark) {
 		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not in %s", stale.Key, where)}
 	}
@@ -389,6 +618,12 @@ func writeReportAs(dir, file string, res *Result, model string) (string, error) 
 	fmt.Fprintf(&b, "- model: %s\n", model)
 	fmt.Fprintf(&b, "- work dir: %s\n", res.WorkDir)
 	fmt.Fprintf(&b, "- judged: %v\n", res.Judged)
+	if res.FakeHarness {
+		b.WriteString("- harness: fake (oracle classifier; answer lines not graded)\n")
+	}
+	if known := res.KnownNames(); len(known) > 0 {
+		fmt.Fprintf(&b, "- known-failing checks that failed: %s\n", strings.Join(known, ", "))
+	}
 	if failed := res.FailedNames(); len(failed) > 0 {
 		fmt.Fprintf(&b, "- failed checks: %s\n", strings.Join(failed, ", "))
 	}
@@ -412,6 +647,17 @@ func writeReportAs(dir, file string, res *Result, model string) (string, error) 
 		fmt.Fprintf(&b, "\n## stage: ghost supersede --apply\n\n```\n%s```\n", res.Supersede)
 		fmt.Fprintf(&b, "\n## stage: ghost resolve --apply\n\n```\n%s```\n", res.Resolve)
 		fmt.Fprintf(&b, "\n## final injection (%d bytes)\n\n```\n%s```\n", len(res.FinalBlock), res.FinalBlock)
+		for i, st := range res.Story.Stages {
+			if i >= len(res.Sessions) {
+				break
+			}
+			for _, p := range st.Probes {
+				fmt.Fprintf(&b, "\n## probe %s:%s: ghost_memory_search %q%s\n\n```\n%s\n```\n", sessionName(i), p.Name, p.Query, probeScope(p), strings.TrimSpace(res.Sessions[i].Probes[p.Name]))
+			}
+		}
+		for _, p := range res.Story.Probes {
+			fmt.Fprintf(&b, "\n## probe %s: ghost_memory_search %q%s\n\n```\n%s\n```\n", p.Name, p.Query, probeScope(p), strings.TrimSpace(res.Probes[p.Name]))
+		}
 	}
 	if res.Judged {
 		fmt.Fprintf(&b, "\n## judge\n\n```\n%s\n```\n", strings.TrimSpace(res.Verdict))
@@ -433,6 +679,12 @@ func (c Check) verdict() string {
 	}
 	if c.Advisory {
 		v += " (advisory)"
+	}
+	if c.Known {
+		v += " (known)"
+	}
+	if c.UnexpectedPass {
+		v += " (unexpected: listed known-failing)"
 	}
 	return v
 }

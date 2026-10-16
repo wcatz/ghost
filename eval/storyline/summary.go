@@ -23,6 +23,10 @@ type armTally struct {
 	// "the mistake was repeated".
 	avoidFailed int
 	hasAvoids   bool
+	// hasCarries is false when no answer-carries line was graded at all — a
+	// -fake-harness run, whose answers are not graded — so the column says n/a
+	// rather than reading as a run that carried nothing.
+	hasCarries bool
 	// judged and judgeYes are the advisory paraphrase column.
 	judged, judgeYes int
 	// judgeUnread counts runs whose judge gave no readable verdict or failed; they
@@ -42,6 +46,7 @@ func tally(arm string, results []*Result, errored, noReport int) armTally {
 		for _, c := range res.Checks {
 			switch {
 			case strings.HasPrefix(c.Name, "answer-carries:"):
+				t.hasCarries = true
 				carries++
 				if c.Passed {
 					carriesOK++
@@ -161,7 +166,10 @@ func formatSummary(cells []cell, runs int) string {
 				continue
 			}
 			t := tally(arm, results, errored, noReport)
-			avoid, judge, delivered := "n/a", "n/a", t.ratio(t.delivered)
+			carried, avoid, judge, delivered := "n/a", "n/a", "n/a", t.ratio(t.delivered)
+			if t.hasCarries {
+				carried = t.ratio(t.carried)
+			}
 			if t.hasAvoids {
 				avoid = t.ratio(t.avoidFailed)
 			}
@@ -186,7 +194,7 @@ func formatSummary(cells []cell, runs int) string {
 				runsCol += fmt.Sprintf(" (%d report not written)", t.noReport)
 			}
 			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n",
-				arm, runsCol, t.ratio(t.carried), avoid, judge, delivered, t.blockSizes())
+				arm, runsCol, carried, avoid, judge, delivered, t.blockSizes())
 		}
 		b.WriteString("\n")
 	}

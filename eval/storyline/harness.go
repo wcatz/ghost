@@ -75,3 +75,12 @@ func stagePrompt(script, block string) string {
 	b.WriteString(block)
 	return b.String()
 }
+
+// fixedAgent answers every session with the same sentence and calls nothing. It
+// is the session half of -fake-harness: the grade then reads the block and the
+// store only, so what a session would have said is not part of the measurement.
+type fixedAgent struct{}
+
+func (fixedAgent) Ask(context.Context, string) (string, error) {
+	return "fake harness: this session was not answered by a model.", nil
+}

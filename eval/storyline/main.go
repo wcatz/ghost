@@ -28,6 +28,7 @@ type config struct {
 	authFile   string
 	resultsDir string
 	timeout    time.Duration
+	fake       bool
 }
 
 func main() {
@@ -44,6 +45,7 @@ func main() {
 	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "optional path to an opencode auth.json copied into the scratch data dir so sandboxed sessions authenticate")
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/storyline/results", "directory for the run report")
 	flag.DurationVar(&cfg.timeout, "timeout", defaultTimeout, "max time for one session or one arc stage")
+	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake opencode whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
@@ -96,6 +98,9 @@ func run(cfg config) error {
 			return err
 		}
 	}
+	if cfg.fake && cfg.judge {
+		return fmt.Errorf("-judge asks a model, and -fake-harness runs without one")
+	}
 	if cfg.runs < 1 {
 		return fmt.Errorf("-runs must be at least 1, got %d", cfg.runs)
 	}
@@ -138,6 +143,13 @@ func run(cfg config) error {
 	if err := buildGhost(ctx, repoDir, bin); err != nil {
 		return err
 	}
+	var fakeBin string
+	if cfg.fake {
+		fakeBin = filepath.Join(buildDir, "fakeharness")
+		if err := buildFakeHarness(ctx, repoDir, fakeBin); err != nil {
+			return err
+		}
+	}
 
 	arms := []string{armWithGhost}
 	if cfg.without {
@@ -150,7 +162,7 @@ func run(cfg config) error {
 		for n := 1; n <= cfg.runs; n++ {
 			for _, arm := range arms {
 				c := cell{story: story, arm: arm, run: n}
-				c.res, c.err = runCell(ctx, cfg, sandboxRoot, bin, model, story, arm, n)
+				c.res, c.err = runCell(ctx, cfg, sandboxRoot, bin, fakeBin, model, story, arm, n)
 				if c.err != nil {
 					fmt.Printf("%s %s run %d: ERROR: %v\n", story.Key, arm, n, c.err)
 				} else {
@@ -193,7 +205,7 @@ func run(cfg config) error {
 // runCell is one run of one arm in its own scratch tree: its own data dir, its
 // own work dir, its own ghost mcp process. Both arms get the same sandbox, the
 // same environment and the same model; they differ in Run.WithoutGhost alone.
-func runCell(ctx context.Context, cfg config, sandboxRoot, bin, model string, story Storyline, arm string, n int) (*Result, error) {
+func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model string, story Storyline, arm string, n int) (*Result, error) {
 	scratch, err := os.MkdirTemp(sandboxRoot, fmt.Sprintf("storyline-%s-%s-%d-*", story.Key, arm, n))
 	if err != nil {
 		return nil, fmt.Errorf("create scratch dir: %w", err)
@@ -209,6 +221,14 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, model string, st
 		return nil, err
 	}
 	env := scratchEnv(scratch, model)
+	if cfg.fake {
+		dir, err := installFakeHarness(scratch, fakeBin, story)
+		if err != nil {
+			return nil, err
+		}
+		env = prependPath(env, dir)
+		fmt.Printf("fake harness: %s (oracle: %d pair(s))\n", dir, len(oraclePairs(story)))
+	}
 
 	// The session-start block resolves a project from a DIRECTORY, and the
 	// directory it resolves is the one the storyline's project is bound to. The
@@ -237,13 +257,18 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, model string, st
 	if cfg.judge {
 		judge = newAgent(model)
 	}
+	agent := newAgent(model)
+	if cfg.fake {
+		agent = fixedAgent{}
+	}
 	r := &Run{
 		Story:        story,
 		WorkDir:      workDir,
 		Ghost:        ghost,
-		Agent:        newAgent(model),
+		Agent:        agent,
 		Judge:        judge,
 		WithoutGhost: arm == armWithoutGhost,
+		FakeHarness:  cfg.fake,
 		Timeout:      cfg.timeout,
 		Out:          os.Stdout,
 	}

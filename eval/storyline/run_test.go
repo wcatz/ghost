@@ -72,7 +72,7 @@ func (f *fakeGhost) Save(_ context.Context, project string, rec Record) (string,
 // that is what the store's own render does today: the block carries no superseded
 // marker. A fake that dropped the stale claim would pass stale-original by
 // construction, which is the finding this module exists to report.
-func (f *fakeGhost) Context(_ context.Context, workDir string) (string, error) {
+func (f *fakeGhost) Context(_ context.Context, workDir string, _ map[string]string) (string, error) {
 	f.calls = append(f.calls, "context "+workDir)
 	if f.ctxErr != nil {
 		return "", f.ctxErr
@@ -88,6 +88,22 @@ func (f *fakeGhost) Context(_ context.Context, workDir string) (string, error) {
 func (f *fakeGhost) Settle(_ context.Context) error {
 	f.calls = append(f.calls, "settle")
 	return f.setErr
+}
+
+func (f *fakeGhost) Drain(_ context.Context) error {
+	f.calls = append(f.calls, "drain")
+	return nil
+}
+
+// Search answers a probe with every saved record as a search row, in seed
+// order, so a probe's grade can be exercised without a store.
+func (f *fakeGhost) Search(_ context.Context, project, query string, _ map[string]string) (string, error) {
+	f.calls = append(f.calls, "search "+query)
+	var b strings.Builder
+	for i, s := range f.saved {
+		fmt.Fprintf(&b, "- [%s] `ID%04d` (0.7) «%s»\n", s.rec.Category, i+1, s.rec.Content)
+	}
+	return b.String(), nil
 }
 
 func (f *fakeGhost) Supersede(_ context.Context, project string) (string, error) {

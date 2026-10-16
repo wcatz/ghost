@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -149,4 +150,83 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), errb.String(), nil
+}
+
+// buildFakeHarness compiles eval/storyline/fakeharness, the deterministic
+// stand-in for the harness CLIs, from the checkout under test.
+func buildFakeHarness(ctx context.Context, repoDir, out string) error {
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./eval/storyline/fakeharness")
+	cmd.Dir = repoDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("go build ./eval/storyline/fakeharness: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// fakeHarnessNames are the four harness CLIs Ghost can route to. All four are
+// installed, so a call that reaches the wrong one fails loudly in the fake
+// instead of finding a real binary further down PATH.
+var fakeHarnessNames = []string{"opencode", "claude", "codex", "goose"}
+
+// oraclePairs is the fake classifier's answer key, built from the storyline:
+// every annotated reversal, and every lure. Nothing else is a supersession.
+func oraclePairs(s Storyline) []map[string]string {
+	var out []map[string]string
+	for _, p := range reversals(s) {
+		out = append(out, map[string]string{"older_mark": p.older.Mark, "newer_mark": p.newer.Mark, "replaced": p.older.Mark})
+	}
+	for _, l := range s.Lures {
+		older, newer := mustRecord(s, l.Older), mustRecord(s, l.Newer)
+		out = append(out, map[string]string{"older_mark": older.Mark, "newer_mark": newer.Mark, "replaced": older.Mark})
+	}
+	return out
+}
+
+// installFakeHarness copies the fake into the run's own scratch tree under each
+// harness name, with the storyline's oracle beside it, and returns the
+// directory to put first on PATH. The fake logs every call there, so a kept
+// scratch tree shows exactly which phases reached it.
+func installFakeHarness(scratch, fakeBin string, s Storyline) (string, error) {
+	dir := filepath.Join(scratch, "fakebin")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(fakeBin)
+	if err != nil {
+		return "", fmt.Errorf("read fake harness: %w", err)
+	}
+	for _, name := range fakeHarnessNames {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o700); err != nil {
+			return "", fmt.Errorf("install fake %s: %w", name, err)
+		}
+	}
+	oracle, err := json.MarshalIndent(oraclePairs(s), "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "oracle.json"), oracle, 0o600); err != nil {
+		return "", fmt.Errorf("write oracle: %w", err)
+	}
+	return dir, nil
+}
+
+// prependPath puts dir first on the environment's PATH, replacing the entry
+// rather than adding a second one (duplicate keys resolve inconsistently
+// across readers, the reason scratchEnv drops before it adds).
+func prependPath(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	path := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			path = strings.TrimPrefix(kv, "PATH=")
+			continue
+		}
+		out = append(out, kv)
+	}
+	if path == "" {
+		return append(out, "PATH="+dir)
+	}
+	return append(out, "PATH="+dir+string(os.PathListSeparator)+path)
 }

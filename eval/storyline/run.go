@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,10 +56,21 @@ type Ghost interface {
 	// Context renders the session-start injection block for a working directory:
 	// the real `ghost context`, which is what the opencode plugin hands a session
 	// and what the SessionStart hook renders for the same cwd.
-	Context(ctx context.Context, workDir string) (string, error)
+	//
+	// scope is the session scope the block is selected under (nil for none),
+	// handed to the render as GHOST_INJECTION_SESSION_SCOPE, the setting a host
+	// uses to say which environment a session works in.
+	Context(ctx context.Context, workDir string, scope map[string]string) (string, error)
 	// Settle waits until the store has caught up with the seeds (embeddings
 	// drained) before the arc stages read it, then releases the write session.
 	Settle(ctx context.Context) error
+	// Drain is Settle without the release: the wait a mid-arc lifecycle needs
+	// before supersede reads vectors, with the write session kept open for the
+	// stages still to come.
+	Drain(ctx context.Context) error
+	// Search runs ghost_memory_search for the project and returns its formatted
+	// answer; the grade reads the rows out of it and never the verdict line.
+	Search(ctx context.Context, project, query string, scope map[string]string) (string, error)
 	// Supersede and Resolve are the two arc stages, run against the run's own
 	// project. Each returns the command's stdout, which the report keeps.
 	Supersede(ctx context.Context, project string) (string, error)
@@ -78,6 +90,8 @@ type Session struct {
 	// Saved maps the record keys this stage wrote to the ids the store gave them,
 	// in seed order.
 	Saved map[string]string
+	// Probes holds each of this stage's probes' raw search answers, by name.
+	Probes map[string]string
 }
 
 // Result is a completed run: every session, the arc stages' raw output, the end
@@ -108,6 +122,12 @@ type Result struct {
 	// the session block replaced by an empty one. Only the answer lines are graded
 	// (see grade), and the arm's verdict is a measurement, not a finding.
 	WithoutGhost bool
+	// FakeHarness marks a run whose sessions were answered by a fixed string and
+	// whose classifier was the oracle fake (-fake-harness): the answer lines are
+	// not graded, because they would grade the fake.
+	FakeHarness bool
+	// Probes holds each probe's raw search answer, keyed by probe name.
+	Probes map[string]string
 }
 
 // Arm names the arm a result came from, for reports and summaries.
@@ -131,7 +151,7 @@ func (r *Result) Passed() bool {
 		return false
 	}
 	for _, c := range r.Checks {
-		if !c.Passed && !c.Advisory {
+		if !c.Passed && !c.Advisory && !c.Known {
 			return false
 		}
 	}
@@ -142,7 +162,18 @@ func (r *Result) Passed() bool {
 func (r *Result) FailedNames() []string {
 	var out []string
 	for _, c := range r.Checks {
-		if !c.Passed && !c.Advisory {
+		if !c.Passed && !c.Advisory && !c.Known {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// KnownNames lists the checks that failed and are listed as known-failing.
+func (r *Result) KnownNames() []string {
+	var out []string
+	for _, c := range r.Checks {
+		if !c.Passed && c.Known {
 			out = append(out, c.Name)
 		}
 	}
@@ -183,6 +214,8 @@ type Run struct {
 	// empty block, not a missing hook. The arc stages and the end-state reads are
 	// skipped, because no session of the arm is told what they produce.
 	WithoutGhost bool
+	// FakeHarness is recorded on the Result; see Result.FakeHarness.
+	FakeHarness bool
 	// Timeout bounds one harness call and one arc stage. Zero means defaultTimeout.
 	Timeout time.Duration
 	Out     io.Writer
@@ -208,7 +241,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	if r.Timeout <= 0 {
 		r.Timeout = defaultTimeout
 	}
-	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost}
+	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost, FakeHarness: r.FakeHarness}
 
 	// The project's own history first, then the location its sessions stand in.
 	// Both happen before the first block is rendered: a project with no recorded
@@ -242,10 +275,32 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		if !r.WithoutGhost {
 			var err error
 			block, err = r.call(ctx, func(c context.Context) (string, error) {
-				return r.Ghost.Context(c, r.WorkDir)
+				return r.Ghost.Context(c, r.WorkDir, stage.SessionScope)
 			})
 			if err != nil {
 				return nil, fmt.Errorf("stage %d injection: %w", i+1, err)
+			}
+		}
+		var probes map[string]string
+		if !r.WithoutGhost && len(stage.Probes) > 0 {
+			// A real session starts minutes after the last one ended, not
+			// milliseconds, so its search reads a store whose embeddings have
+			// caught up. Without the wait the vector leg would miss the newest
+			// rows and the probe would grade the embedding worker's latency.
+			if err := r.callDo(ctx, r.Ghost.Drain); err != nil {
+				return nil, fmt.Errorf("stage %d probe drain: %w", i+1, err)
+			}
+			for _, p := range stage.Probes {
+				out, err := r.call(ctx, func(c context.Context) (string, error) {
+					return r.Ghost.Search(c, r.Story.Project, p.Query, p.Scope)
+				})
+				if err != nil {
+					return nil, fmt.Errorf("stage %d probe %s: %w", i+1, p.Name, err)
+				}
+				if probes == nil {
+					probes = map[string]string{}
+				}
+				probes[p.Name] = out
 			}
 		}
 		prompt := stagePrompt(stage.Script, block)
@@ -255,7 +310,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("stage %d session: %w", i+1, err)
 		}
-		sess := Session{Index: i, Block: block, Prompt: prompt, Answer: answer, Saved: map[string]string{}}
+		sess := Session{Index: i, Block: block, Prompt: prompt, Answer: answer, Saved: map[string]string{}, Probes: probes}
 		for _, rec := range stage.Records {
 			id, err := r.save(ctx, rec)
 			if err != nil {
@@ -267,6 +322,13 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		res.Sessions = append(res.Sessions, sess)
 		_, _ = fmt.Fprintf(r.Out, "stage %d/%d: %d injected bytes, %d answer bytes, %d record(s) recorded\n",
 			i+1, len(r.Story.Stages), len(block), len(answer), len(stage.Records))
+		// The last stage's lifecycle is the arc's own, below, so a Lifecycle
+		// flag there would only run it twice.
+		if stage.Lifecycle && !r.WithoutGhost && i < len(r.Story.Stages)-1 {
+			if err := r.midArcLifecycle(ctx, res, order, i); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if !r.WithoutGhost {
@@ -296,6 +358,35 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	return res, nil
 }
 
+// midArcLifecycle is the lifecycle a host's Stop hook runs between two sessions:
+// restamp the chronology so far, wait for the embeddings, then supersede and
+// resolve. Its output goes into the same report sections as the arc's own,
+// headed by the stage it followed.
+func (r *Run) midArcLifecycle(ctx context.Context, res *Result, order []string, i int) error {
+	if err := r.Ghost.Restamp(ctx, order); err != nil {
+		return fmt.Errorf("stage %d lifecycle restamp: %w", i+1, err)
+	}
+	if err := r.callDo(ctx, r.Ghost.Drain); err != nil {
+		return fmt.Errorf("stage %d lifecycle drain: %w", i+1, err)
+	}
+	sup, err := r.call(ctx, func(c context.Context) (string, error) {
+		return r.Ghost.Supersede(c, r.Story.Project)
+	})
+	if err != nil {
+		return fmt.Errorf("stage %d lifecycle supersede: %w", i+1, err)
+	}
+	resOut, err := r.call(ctx, func(c context.Context) (string, error) {
+		return r.Ghost.Resolve(c, r.Story.Project)
+	})
+	if err != nil {
+		return fmt.Errorf("stage %d lifecycle resolve: %w", i+1, err)
+	}
+	res.Supersede += fmt.Sprintf("--- after stage %d ---\n%s", i+1, sup)
+	res.Resolve += fmt.Sprintf("--- after stage %d ---\n%s", i+1, resOut)
+	_, _ = fmt.Fprintf(r.Out, "stage %d/%d: lifecycle ran (supersede, resolve)\n", i+1, len(r.Story.Stages))
+	return nil
+}
+
 // arcStages is everything after the last session in the Ghost arm: restamp,
 // settle, the two arc stages, and the end state the store checks grade.
 func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error {
@@ -314,6 +405,9 @@ func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error 
 	if err != nil {
 		return fmt.Errorf("supersede: %w", err)
 	}
+	if res.Supersede != "" {
+		sup = res.Supersede + "--- after the last stage ---\n" + sup
+	}
 	res.Supersede = sup
 
 	// Resolve runs after supersede and before the end state is read: an edge the
@@ -324,12 +418,30 @@ func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error 
 	if err != nil {
 		return fmt.Errorf("resolve: %w", err)
 	}
+	if res.Resolve != "" {
+		resOut = res.Resolve + "--- after the last stage ---\n" + resOut
+	}
 	res.Resolve = resOut
 
 	if res.FinalBlock, err = r.call(ctx, func(c context.Context) (string, error) {
-		return r.Ghost.Context(c, r.WorkDir)
+		return r.Ghost.Context(c, r.WorkDir, r.Story.FinalScope)
 	}); err != nil {
 		return fmt.Errorf("final injection: %w", err)
+	}
+	// The probes are what a reader of the project would search for once the
+	// arc is over, so they run against the same end state the final block was
+	// rendered from.
+	for _, p := range r.Story.Probes {
+		out, err := r.call(ctx, func(c context.Context) (string, error) {
+			return r.Ghost.Search(c, r.Story.Project, p.Query, p.Scope)
+		})
+		if err != nil {
+			return fmt.Errorf("probe %s: %w", p.Name, err)
+		}
+		if res.Probes == nil {
+			res.Probes = map[string]string{}
+		}
+		res.Probes[p.Name] = out
 	}
 	if res.State, err = r.callState(ctx); err != nil {
 		return fmt.Errorf("graded state: %w", err)
@@ -475,8 +587,12 @@ func (g *binaryGhost) Bind(ctx context.Context, project, workDir string) error {
 	return err
 }
 
-func (g *binaryGhost) Context(ctx context.Context, workDir string) (string, error) {
-	out, errOut, err := runGhost(ctx, g.env, g.bin, "context", "--cwd", workDir)
+func (g *binaryGhost) Context(ctx context.Context, workDir string, scope map[string]string) (string, error) {
+	env := g.env
+	if v := sessionScopeEnv(scope); v != "" {
+		env = append(append([]string{}, g.env...), "GHOST_INJECTION_SESSION_SCOPE="+v)
+	}
+	out, errOut, err := runGhost(ctx, env, g.bin, "context", "--cwd", workDir)
 	if err != nil {
 		return "", err
 	}
@@ -484,6 +600,38 @@ func (g *binaryGhost) Context(ctx context.Context, workDir string) (string, erro
 		_, _ = fmt.Fprintf(g.log, "ghost context stderr: %s\n", strings.TrimSpace(errOut))
 	}
 	return out, nil
+}
+
+// sessionScopeEnv renders a scope as GHOST_INJECTION_SESSION_SCOPE's value,
+// key=value pairs joined by commas, in key order so the same scope is always
+// the same string. Empty for no scope.
+func sessionScopeEnv(scope map[string]string) string {
+	keys := make([]string, 0, len(scope))
+	for k := range scope {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+scope[k])
+	}
+	return strings.Join(parts, ",")
+}
+
+// Search runs the real ghost_memory_search. The write session is closed by
+// Settle, so a probe after the arc opens a fresh `ghost mcp` process; abort
+// closes it.
+func (g *binaryGhost) Search(ctx context.Context, project, query string, scope map[string]string) (string, error) {
+	if g.mcp == nil {
+		if err := g.start(ctx); err != nil {
+			return "", err
+		}
+	}
+	args := map[string]any{"project_id": project, "query": query, "limit": 10}
+	if len(scope) > 0 {
+		args["scope"] = scope
+	}
+	return g.mcp.callText(ctx, "ghost_memory_search", args)
 }
 
 func (g *binaryGhost) Supersede(ctx context.Context, project string) (string, error) {
@@ -533,6 +681,9 @@ func saveCall(project string, rec Record) (string, map[string]any) {
 	if rec.ValidUntil != "" {
 		args["valid_until"] = rec.ValidUntil
 	}
+	if len(rec.Scope) > 0 {
+		args["scope"] = rec.Scope
+	}
 	if rec.Global {
 		return "ghost_save_global", args
 	}
@@ -563,12 +714,20 @@ func (g *binaryGhost) Save(ctx context.Context, project string, rec Record) (str
 // a model failure. An unreachable Ollama fails here, loudly, instead.
 func (g *binaryGhost) Settle(ctx context.Context) error {
 	if g.mcp != nil {
-		defer g.mcp.close()
+		defer func() {
+			g.mcp.close()
+			g.mcp = nil
+		}()
 	}
 	if err := g.waitForEmbeddings(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+// Drain waits for the embeddings and leaves the write session open.
+func (g *binaryGhost) Drain(ctx context.Context) error {
+	return g.waitForEmbeddings(ctx)
 }
 
 func (g *binaryGhost) waitForEmbeddings(ctx context.Context) error {
