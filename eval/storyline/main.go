@@ -270,6 +270,7 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 		WithoutGhost: arm == armWithoutGhost,
 		FakeHarness:  cfg.fake,
 		Timeout:      cfg.timeout,
+		StageGap:     stageGap,
 		Out:          os.Stdout,
 	}
 	return r.Execute(ctx)

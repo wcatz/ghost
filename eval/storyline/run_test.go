@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeGhost is the Ghost a unit test runs against. It records every call in
@@ -514,4 +515,33 @@ func checkNamed(res *Result, name string) Check {
 		}
 	}
 	return Check{Name: name, Detail: "no check with this name was graded"}
+}
+
+// TestAwaitStageGapSleepsOnlyWhatIsStillOwed: the gap that keeps two stages'
+// saves out of one created_at second is measured from the previous stage's last
+// save, so a run whose session already took longer than the gap waits for
+// nothing, and a run with no gap (every unit test) never sleeps.
+func TestAwaitStageGapSleepsOnlyWhatIsStillOwed(t *testing.T) {
+	ctx := context.Background()
+	r := &Run{StageGap: 80 * time.Millisecond, lastStageSave: time.Now()}
+	start := time.Now()
+	if err := r.awaitStageGap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(start); waited < 60*time.Millisecond {
+		t.Errorf("waited %s, want most of the 80ms gap", waited)
+	}
+	r.lastStageSave = time.Now().Add(-time.Second)
+	start = time.Now()
+	if err := r.awaitStageGap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(start); waited > 40*time.Millisecond {
+		t.Errorf("waited %s for a gap already elapsed", waited)
+	}
+	r = &Run{lastStageSave: time.Now()}
+	start = time.Now()
+	if err := r.awaitStageGap(ctx); err != nil || time.Since(start) > 40*time.Millisecond {
+		t.Errorf("a zero gap slept %s (err %v)", time.Since(start), err)
+	}
 }

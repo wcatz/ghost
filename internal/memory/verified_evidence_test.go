@@ -543,6 +543,10 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// whether the row is inside its window before the passive demotions run
 		// (#893). A reader of the hydrated struct: no SQL, no write.
 		"candidates_passive.go:passiveEligible": true,
+		// lexicalReplacements asks ValidityState the same question, so a row stage 2
+		// would withhold is never one side of a lexical replacement pair. A reader
+		// of the hydrated struct: no SQL, no write.
+		"lexical_replacement.go:lexicalReplacements": true,
 	}
 
 	found := scanVerifiedAtMentions(t)

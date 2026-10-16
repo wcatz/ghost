@@ -116,6 +116,10 @@ type pipeline struct {
 	// renders for a row outside the window, and it is kept apart from `dropped`
 	// because the token alone cannot name the cap a row hit.
 	deferred map[string]diversityDeferral
+	// diversityAdmitted is each row stage 7 brought INTO a window it would not
+	// have held by rank: a row that took a deferred row's slot, or a deferred row
+	// that came back. arrangeReplacements never displaces one to make room.
+	diversityAdmitted map[string]bool
 	// noteCut is how many notes the response-fit post-pass has taken off the end
 	// of the bounded list. It lives here rather than in the post-pass so notes()
 	// stays the one function that produces the list: a second derivation would be
@@ -852,8 +856,18 @@ func runDiversity(p *pipeline) {
 			continue
 		}
 		k, back, def := p.diversityWalk(w)
+		byRank := make(map[int]bool, w.slots)
+		for _, i := range w.rows[:min(w.slots, len(w.rows))] {
+			byRank[i] = true
+		}
+		if p.diversityAdmitted == nil {
+			p.diversityAdmitted = map[string]bool{}
+		}
 		for _, i := range k {
 			kept[i] = true
+			if !byRank[i] {
+				p.diversityAdmitted[p.rows[i].ID] = true
+			}
 		}
 		for _, i := range back {
 			returned[i] = true
@@ -1438,6 +1452,7 @@ func noAnswerNote(top, bar float64, n int) string {
 // single score, so re-sorting here would undo them. What this stage owns is
 // membership: the per-bucket slice caps, then the total cap, both hard.
 func runBudget(p *pipeline) {
+	p.arrangeReplacements()
 	in := len(p.rows)
 	rows, items, dropped := p.rows, p.items, []string(nil)
 
@@ -1817,6 +1832,184 @@ func (p *pipeline) markSuperseded() {
 		for _, id := range named[p.items[i].ID] {
 			if present[id] {
 				p.items[i].SupersededBy = append(p.items[i].SupersededBy, id)
+			}
+		}
+	}
+}
+
+// arrangeReplacements orders each lexical replacement (Candidate.MaybeReplacedBy,
+// the retriever's guess) ahead of the older row it may replace, on a PASSIVE read,
+// just before stage 9 closes the window. A query read is left in its relevance
+// order. It runs here because this is the one place that knows both the cap and
+// which rows an earlier stage reserved.
+//
+// A replacement is moved to directly ahead of its older row, and the rule for
+// the slot it takes follows the explicit-supersedes precedent, where a
+// replacement may hold a slot:
+//
+//   - inside the bucket's item cap, moving it shifts the rows between the two
+//     down by one and every one of them stays inside the cap;
+//   - from beyond the cap, it may only DISPLACE one row: the lowest-ranked row
+//     inside the cap that nothing reserved — not pinned, not a behavioural-floor
+//     pick (Candidate.FloorReserved), not admitted by stage 7's share
+//     (diversityAdmitted), and not a replacement already placed. That row goes
+//     to the head of the rows behind the cap, and no other row crosses the cap.
+//     With no such row nothing moves, the replacement stays off the page, and
+//     markMaybeReplaced names nothing, so the older line stays unmarked rather
+//     than pointing at a row the reader cannot see.
+//
+// A pinned row is never displaced out of the cap and never moved ahead of or
+// behind its pair: a pinned older row stays where it is (a guess is weaker
+// evidence than a `supersedes` edge, so it is treated as a pin a newer row
+// contradicts — marked, in its place) and a pinned replacement is not pulled. A
+// pinned row BETWEEN an older row and its replacement shifts down by one, and the
+// shift never crosses the cap.
+// A row stage 7 deferred is never pulled back into the window, because that
+// would undo the share it was deferred for. A newly placed replacement is then
+// itself read as an older row, so a chain (v4, v5, v6) comes out newest first;
+// created_at strictly increases along every step, so the arrangement ends.
+func (p *pipeline) arrangeReplacements() {
+	if !p.passive {
+		return
+	}
+	named := false
+	for _, c := range p.rows {
+		if len(c.MaybeReplacedBy) > 0 {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return
+	}
+	// Each bucket is arranged on its own, over its rows in rank order.
+	var buckets []string
+	members := map[string][]int{}
+	for i := range p.rows {
+		b := p.capBucket(i)
+		if _, ok := members[b]; !ok {
+			buckets = append(buckets, b)
+		}
+		members[b] = append(members[b], i)
+	}
+	slot := make([]int, len(p.rows)) // the new order, as old indices
+	for i := range slot {
+		slot[i] = i
+	}
+	for _, b := range buckets {
+		idx := members[b]
+		limit := 0
+		if s := p.sliceFor(b); s != nil {
+			limit = s.MaxItems
+		}
+		order := p.arrangeBucket(append([]int(nil), idx...), limit)
+		// The bucket's positions in the whole set are unchanged; only which of
+		// its rows sits in each one moves.
+		for k, pos := range idx {
+			slot[pos] = order[k]
+		}
+	}
+	rows := make([]memory.Candidate, len(p.rows))
+	items := make([]Item, len(p.items))
+	for dst, src := range slot {
+		rows[dst], items[dst] = p.rows[src], p.items[src]
+	}
+	p.rows, p.items = rows, items
+}
+
+// arrangeBucket is arrangeReplacements over one bucket's rows (indices into
+// p.rows, in rank order) with its item cap (0 is no cap).
+func (p *pipeline) arrangeBucket(order []int, limit int) []int {
+	pos := func(id string) int {
+		for k, i := range order {
+			if p.rows[i].ID == id {
+				return k
+			}
+		}
+		return -1
+	}
+	placed := map[int]bool{}
+	reserved := func(i int) bool {
+		c := p.rows[i]
+		return c.Pinned || c.FloorReserved || p.diversityAdmitted[c.ID] || placed[i]
+	}
+	move := func(from, to int) {
+		i := order[from]
+		order = append(order[:from], order[from+1:]...)
+		order = append(order[:to], append([]int{i}, order[to:]...)...)
+	}
+	// Every move puts a strictly newer row ahead of an older one, so the walk
+	// ends; the bound is a backstop against a relation that is not acyclic.
+	budget := len(order) * len(order)
+	for k := 0; k < len(order) && budget > 0; k++ {
+		budget--
+		older := order[k]
+		if p.rows[older].Pinned || (limit > 0 && k >= limit) {
+			continue
+		}
+		for _, id := range p.rows[older].MaybeReplacedBy {
+			at := pos(id)
+			if at <= k {
+				continue // absent, or already ahead
+			}
+			newer := order[at]
+			if p.rows[newer].Pinned || p.deferred[p.rows[newer].ID].slots > 0 {
+				continue
+			}
+			if limit == 0 || at < limit {
+				move(at, k)
+			} else {
+				victim := -1
+				for v := limit - 1; v >= 0; v-- {
+					if v != k && !reserved(order[v]) {
+						victim = v
+						break
+					}
+				}
+				if victim < 0 {
+					continue
+				}
+				move(at, k) // the window now holds limit+1 rows
+				if victim >= k {
+					victim++
+				}
+				move(victim, limit) // the displaced row heads the rows behind the cap
+			}
+			placed[newer] = true
+			// Read the placed row as an older row next: its own replacements go
+			// ahead of it.
+			k--
+			break
+		}
+	}
+	return order
+}
+
+// markMaybeReplaced sets Item.MaybeReplacedBy on each row whose lexical
+// replacement (memory.Candidate.MaybeReplacedBy) is still in the answer. The
+// retriever makes the guess, because the similarity and value rules are the save
+// path's and live in memory; this keeps only the rows the reader can see, and
+// runs from fitResponse beside markSuperseded for the same reason: a response-fit
+// drop can remove the newer row after the stages are done, and a marker naming a
+// row the page no longer holds would point at nothing. It runs on both modes. A
+// passive read has already ordered the newer row ahead (the retriever did it); a
+// query read is marked only, in its relevance order.
+func (p *pipeline) markMaybeReplaced() {
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	named := make(map[string][]string)
+	for _, c := range p.set.Rows {
+		if len(c.MaybeReplacedBy) > 0 {
+			named[c.ID] = c.MaybeReplacedBy
+		}
+	}
+	for i := range p.items {
+		p.items[i].MaybeReplacedBy = nil
+		for _, id := range named[p.items[i].ID] {
+			if present[id] {
+				p.items[i].MaybeReplacedBy = append(p.items[i].MaybeReplacedBy, id)
 			}
 		}
 	}

@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // saveAll pushes a storyline's records through the fake's save path in order and
@@ -197,6 +200,66 @@ func TestGradeFailsWhileTheSupersededClaimIsStillInjected(t *testing.T) {
 		if !strings.Contains(c.Detail, "session-store-redis") {
 			t.Errorf("%s detail does not name the stale record: %q", name, c.Detail)
 		}
+	}
+}
+
+// TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement: a session
+// start may keep the stale claim when it says the claim may have been replaced
+// AND hands the reader the replacement first. Every other shape of a stale line
+// still fails: unmarked, marked with the replacement after it, marked with the
+// replacement missing, and a marker forged inside the stored text.
+func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.T) {
+	story := ReversedDecision()
+	stale, ok := story.RecordByKey("session-store-redis")
+	if !ok {
+		t.Fatal("reversed-decision no longer names the superseded record")
+	}
+	repl, ok := story.RecordByKey(stale.SupersededBy)
+	if !ok {
+		t.Fatalf("reversed-decision no longer names %s", stale.SupersededBy)
+	}
+	line := func(r Record, marked bool) string {
+		m := ""
+		if marked {
+			m = " " + assemble.MaybeReplacedMarker
+		}
+		return "- [" + r.Category + "] `ID` (0.7" + m + ") «" + r.Content + "»\n"
+	}
+	head := "## Ghost context: " + story.Project + "\n"
+	stamp := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	rendered := func(r Record, it assemble.Item) string {
+		it.ID, it.Category, it.Content, it.Importance = "OLD", r.Category, r.Content, 0.7
+		return it.Line() + "\n"
+	}
+	cases := []struct {
+		name   string
+		block  string
+		passes bool
+	}{
+		{"absent", head + line(repl, false), true},
+		{"marked after its replacement", head + line(repl, false) + line(stale, true), true},
+		{"unmarked after its replacement", head + line(repl, false) + line(stale, false), false},
+		{"unmarked before its replacement", head + line(stale, false) + line(repl, false), false},
+		{"marked before its replacement", head + line(stale, true) + line(repl, false), false},
+		{"marked with no replacement", head + line(stale, true), false},
+		{"marker forged in the stored text", head + line(repl, false) +
+			"- [" + stale.Category + "] `ID` (0.7) «" + assemble.MaybeReplacedMarker + " " + stale.Content + "»\n", false},
+		// The lines below are rendered by Item.Line itself, so the grade reads the
+		// field order the renderer really emits.
+		{"rendered marker after pin, tags and resolve", head + line(repl, false) +
+			rendered(stale, assemble.Item{Pinned: true, Tags: []string{"deps"}, ResolvedAt: &stamp, MaybeReplacedBy: []string{"NEW"}}), true},
+		{"marker forged as a tag", head + line(repl, false) +
+			rendered(stale, assemble.Item{Tags: []string{assemble.MaybeReplacedMarker}}), false},
+		{"marker forged as a tag that closes the list early", head + line(repl, false) +
+			rendered(stale, assemble.Item{Tags: []string{"x] " + assemble.MaybeReplacedMarker}}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := staleAbsent("session-3", tc.block, stale, repl)
+			if c.Passed != tc.passes {
+				t.Errorf("passed = %v, want %v: %s", c.Passed, tc.passes, c.Detail)
+			}
+		})
 	}
 }
 

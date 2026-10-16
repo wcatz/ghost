@@ -4,8 +4,7 @@ package main
 // report prints beside a known failure; the audit that found them states the
 // reproduction and the observed store state in full.
 const (
-	knownOldWordingFirst   = "before a supersede pass, a search in the old wording ranks the stale claim above its replacement"
-	knownSessionStartStale = "with no lifecycle between sessions, the session start lists the replaced claim, unmarked, ahead of its replacement"
+	knownOldWordingFirst = "before a supersede pass, a search in the old wording ranks the stale claim above its replacement"
 )
 
 // The truth-change arcs. Each one changes what is true about the project partway
@@ -290,7 +289,6 @@ func VersionUpgrade() Storyline {
 			},
 		},
 		KnownFailing: map[string]string{
-			"stale-original:session-3":                       knownSessionStartStale,
 			"search-ranks:session-3:old-constructor:pgx-pin": knownOldWordingFirst,
 		},
 		Judge: "Did the session use the current driver pin (%s: %s) rather than the one it replaced?",

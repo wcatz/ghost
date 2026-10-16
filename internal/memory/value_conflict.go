@@ -97,6 +97,28 @@ func hasUnitOf(set map[string]bool, n string) bool {
 // TestStatesDifferentValue).
 func valueTokens(s string) map[string]bool {
 	out := map[string]bool{}
+	for _, f := range valueFields(s) {
+		if f.value {
+			out[f.word] = true
+		}
+	}
+	return out
+}
+
+// valueField is one word of a text as valueTokens reads it, in text order:
+// the lowercased word, whether it is a value token, and whether its SHAPE makes
+// it one (a digit, an inner path or identifier mark, an inner capital, a name
+// away from a sentence start) rather than only its place inside a code span.
+type valueField struct {
+	word          string
+	value, shaped bool
+}
+
+// valueFields is valueTokens' reading of s, word by word and in order, list
+// markers and empty words dropped. valueTokens is its set of value words;
+// lexicalReplacements also aligns two texts' sequences (subjectSwapped).
+func valueFields(s string) []valueField {
+	var out []valueField
 	segments := strings.Split(s, "`")
 	sentenceStart, lineStart := true, true
 	for si, seg := range segments {
@@ -121,10 +143,8 @@ func valueTokens(s string) map[string]bool {
 				if tok == "" {
 					continue
 				}
-				if !code && !isValueToken(tok) && (starts || !isName(tok)) {
-					continue
-				}
-				out[strings.ToLower(tok)] = true
+				shaped := isValueToken(tok) || (!starts && isName(tok))
+				out = append(out, valueField{word: strings.ToLower(tok), value: code || shaped, shaped: shaped})
 			}
 		}
 	}

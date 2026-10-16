@@ -643,9 +643,7 @@ func ReversedDecision() Storyline {
 		},
 		// This arc runs its lifecycle after the last session only, which is the
 		// default install's shape (automatic lifecycle phases are off), so
-		// session 3 is graded on what the save path alone left behind.
-		KnownFailing: map[string]string{
-			"stale-original:session-3": knownSessionStartStale,
-		},
+		// session 3 is graded on what the save path and the read side alone left
+		// behind: the reversal first, the original marked as maybe replaced.
 	}
 }

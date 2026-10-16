@@ -402,6 +402,34 @@ edge whose endpoints' scopes conflict (`memory.ScopesConflict`: `environment=pro
 against `environment=development`) — that is two true claims about two places, so it is
 not a conflict and is neither separated nor marked.
 
+A row that a NEWER row on the same page looks like the replacement of carries
+**`[maybe replaced by a newer note]`** directly after where `[resolved]` would sit, and
+**`maybe_replaced_by=`** naming those rows (same rendering and bound as
+`conflicts_with=`). It is a lexical guess and is worded as one: the two rows have the same
+project and the same scope, a text similar enough that the save path would have folded
+them, one value in common (the thing both are about: `go.mod`, `Redis`, `TTL`) and
+another that differs (a version, a path, a name), no plain word swapped in the same place
+(`auth-service` / `billing-service`, `staging` / `reporting`, `make test` / `make lint` are
+two parallel facts, not a replacement), and nothing relates them yet — no live
+`supersedes` or `contradicts` edge, and neither is resolved. Only those two relations
+exclude a pair: a cosine `related` edge, which the linking worker writes between exactly
+such rows, does not. That is the state a default install leaves a change of truth in until
+a supersede pass runs. The older row is marked, never withheld. On
+`ghost_project_context`, the session-start block and the project resource the replacement
+is also ordered ahead of it: inside the bucket's item cap it moves up and the rows between
+stay on the page; from behind the cap it may take only the slot of the lowest-ranked row
+inside the cap that nothing reserved (a pinned row, a behavioural-floor pick, a row the
+category share admitted), and with no such row it stays off the page and the older row is
+not marked. A pinned row is never displaced out of the cap and never moved ahead of or behind its
+pair: a pinned older row is marked and keeps its place. On `ghost_memory_search` the
+order is the relevance answer and is left alone, so the line is marked only. A row whose
+replacement is not in the answer carries neither field. A note that changes only a plain word —
+a tool or a name with no digit, path or capital (`eslint` → `biome`, `alice` → `robert`) — is
+never marked: that is the known limit of the lexical guess, since the same swap is how two
+parallel facts about different subjects read. The marker's words in a tag are
+not the marker: a tag prints JSON-quoted inside `tags:[…]`, and the marker is the field
+after it.
+
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
 rows were quoted before this existed, and the block's exact recorded shape is a
