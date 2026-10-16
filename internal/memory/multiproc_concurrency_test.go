@@ -83,7 +83,12 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 			wg.Add(1)
 			go func(h, w int) {
 				defer wg.Done()
-				content := fmt.Sprintf("concurrent fact h=%d w=%d about sqlite wal checkpointing", h, w)
+				// The writer's label is two letters, not numbers: a save that
+				// differs from another only in a number states a different value
+				// and is never folded (statesDifferentValue), and these saves have
+				// to keep reaching the fold path — the strengthen UPDATE, the copy
+				// and the link — under contention, not only the plain insert.
+				content := fmt.Sprintf("concurrent fact %c%c about sqlite wal checkpointing", 'a'+h, 'a'+w)
 				id, _, _, err := store.Upsert(ctx, testProject, "fact", content, "manual", 0.5, []string{"concurrency"})
 				mu.Lock()
 				defer mu.Unlock()

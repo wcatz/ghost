@@ -32,6 +32,8 @@ func TestStatesDifferentValue(t *testing.T) {
 			true},
 		{"changed number", "The database pool is capped at max_conns=24.", "The database pool is capped at max_conns=180.", true},
 		{"two units on one number", "the cache holds 16gb", "the cache holds 16mb", true},
+		{"swapped store name", "Per-session state lives in Redis.", "Per-session state lives in Postgres.", true},
+		{"swapped host name", "The production deploy target is Fly.io in region iad", "The production deploy target is Hetzner Compose in region fsn1", true},
 
 		{"identical", "cache TTL is 300 seconds", "cache TTL is 300 seconds", false},
 		{"unit written two ways", "cache TTL is 300s", "the cache TTL is set to 300 seconds in config", false},
@@ -42,6 +44,8 @@ func TestStatesDifferentValue(t *testing.T) {
 			"Ollama embedding worker sweeps the unembedded memories every two minutes for cluster projects", false},
 		{"reworded prose, same values", "The pool is built with pgxpool.New in go.mod v5.6.0.", "pgxpool.New builds the pool; go.mod is at v5.6.0", false},
 		{"capitalised sentence start is not a value", "The cache key is the request path", "Cache key is the request path, per the router", false},
+		{"capital after a colon is a sentence start", "Note: the cache key is the request path", "Remember: the cache key is the request path", false},
+		{"same name, reworded", "Sessions live in Redis with a TTL", "We keep sessions in Redis, with a TTL", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

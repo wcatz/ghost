@@ -79,22 +79,43 @@ func hasUnitOf(set map[string]bool, n string) bool {
 //     letters or digits around it (a path, a module, a host, KEY=value; the
 //     floor keeps "e.g" and "a/b" out), or
 //   - an upper-case letter after its first rune (camelCase "ingestHandler",
-//     ALL-CAPS "TTL").
+//     ALL-CAPS "TTL"), or
+//   - a capital first letter AWAY from a sentence start (the first word, or a
+//     word after '.', '!', '?' or ':'): a name, "Redis" against "Postgres".
+//     At a sentence start a capital is grammar, so "The cache …" against
+//     "Cache …" is not two values.
 //
-// A plain capitalised word is not a value: a sentence-initial "The" or a
-// restatement that starts "Cache …" where the other starts "The cache …" would
-// otherwise refuse every reworded fact. A hyphen alone is not either, so
-// "per-session" and "shipment-event" stay words.
+// A hyphen alone is not a value, so "per-session" and "shipment-event" stay
+// words.
 func valueTokens(s string) map[string]bool {
 	out := map[string]bool{}
+	sentenceStart := true
 	for _, raw := range strings.Fields(s) {
 		tok := strings.Trim(raw, "\"'`«»“”‘’()[]{}<>.,;:!?*")
-		if tok == "" || !isValueToken(tok) {
+		starts := sentenceStart
+		// The next word starts a sentence after a terminal mark or a colon,
+		// whatever this token turned out to be.
+		closed := strings.TrimRight(raw, "\"'`»”’)]}*")
+		sentenceStart = closed != "" && strings.ContainsAny(closed[len(closed)-1:], ".!?:")
+		if tok == "" {
+			continue
+		}
+		if !isValueToken(tok) && (starts || !isName(tok)) {
 			continue
 		}
 		out[strings.ToLower(tok)] = true
 	}
 	return out
+}
+
+// isName reports whether tok is a capitalised word: "Redis", "Postgres",
+// "Hetzner". Asked only away from a sentence start, where a capital is a name
+// and not grammar.
+func isName(tok string) bool {
+	for _, r := range tok {
+		return unicode.IsUpper(r)
+	}
+	return false
 }
 
 func isValueToken(tok string) bool {
