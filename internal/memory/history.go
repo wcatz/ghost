@@ -887,7 +887,65 @@ const purgedTextMarker = "[purged]"
 // different requests and conflating them would destroy knowledge nobody asked to
 // lose. What it does reach is every copy of the text the database kept, so
 // nothing is left that a restore or a reader can bring back; see purgeHistoryTx.
+//
+// It names the memory by id alone and decides nothing about the row; a caller
+// that read the memory as deleted — ghost_memory_delete and `ghost history purge`
+// both do — uses PurgeDeletedMemoryHistoryInProject, which re-decides that inside
+// the purge.
 func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeOutcome, error) {
+	return s.purgeMemoryHistory(ctx, "", memoryID)
+}
+
+// PurgeDeletedMemoryHistoryInProject is PurgeMemoryHistory for a memory the
+// caller holds to be deleted and its project's, and both are decided inside the
+// purge's own transaction rather than taken from the caller's earlier read.
+// Read before it, they left a window (#1191): a deleted row is not gone for
+// good — `ghost reflect --restore` reinstates it under its own id, and a promote
+// can then move it to _global — so a purge that checked the tombstone on the
+// pool erased the history of a live row while reporting it already deleted, and
+// a project-scoped call could erase a _global memory's history. It refuses, and
+// writes nothing, when the id has a live row (as "not found in project" when
+// that row is another project's) and when the newest history row was filed
+// under another project. Ids are rendered through RefusalArg.
+func (s *Store) PurgeDeletedMemoryHistoryInProject(ctx context.Context, projectID, memoryID string) (PurgeOutcome, error) {
+	if projectID == "" {
+		return PurgeOutcome{}, fmt.Errorf("purge history: project_id is required")
+	}
+	return s.purgeMemoryHistory(ctx, projectID, memoryID)
+}
+
+// purgeDeletedOwnerTx is the scoped purge's decision, read through the purge's
+// transaction: the id must have no live row, and its newest history row — the
+// tombstone — must be projectID's.
+func purgeDeletedOwnerTx(ctx context.Context, tx *sql.Tx, projectID, memoryID string) error {
+	var owner string
+	err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, memoryID).Scan(&owner)
+	switch {
+	case err == nil && owner != projectID:
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", memoryID), RefusalArg("project_id", projectID))
+	case err == nil:
+		return fmt.Errorf("memory %s is live again (restored since it was deleted), so it was not purged as a deleted memory and nothing was erased; delete it to erase it with its history",
+			RefusalArg("memory_id", memoryID))
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("lookup memory: %w", err)
+	}
+	err = tx.QueryRowContext(ctx,
+		`SELECT project_id FROM memory_history WHERE memory_id = ? ORDER BY rowid DESC LIMIT 1`,
+		memoryID).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("memory %s not found, and no recorded history to purge", RefusalArg("memory_id", memoryID))
+	case err != nil:
+		return fmt.Errorf("read memory history: %w", err)
+	case owner != projectID:
+		return fmt.Errorf("memory %s not found in project %s",
+			RefusalArg("memory_id", memoryID), RefusalArg("project_id", projectID))
+	}
+	return nil
+}
+
+func (s *Store) purgeMemoryHistory(ctx context.Context, projectID, memoryID string) (PurgeOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -896,6 +954,11 @@ func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeO
 		return PurgeOutcome{}, fmt.Errorf("begin purge history: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if projectID != "" {
+		if err := purgeDeletedOwnerTx(ctx, tx, projectID, memoryID); err != nil {
+			return PurgeOutcome{}, err
+		}
+	}
 	n, err := purgeHistoryTx(ctx, tx, memoryID)
 	if err != nil {
 		return PurgeOutcome{}, err
