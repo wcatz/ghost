@@ -117,6 +117,8 @@ func newEncodedURIFixture(t *testing.T) *encodedURIFixture {
 		// Sub-delims the template rejects raw, which url.PathEscape would
 		// leave unencoded.
 		{"a:b@c+d", "/srv/a:b@c+d", "subdelims"},
+		// An id and a name that BOTH need encoding, for the two-alias rule.
+		{"/srv/u/my repo", "/srv/u/my repo", "my repo"},
 	} {
 		if err := store.EnsureProject(ctx, p.id, p.path, p.name); err != nil {
 			t.Fatalf("EnsureProject(%q): %v", p.id, err)
@@ -247,6 +249,33 @@ func TestResourceSubscription_EncodedIDNotifiesAReadableURI(t *testing.T) {
 		// must name the project that was written.
 		if text := f.read(t, c.encoded); !strings.Contains(text, c.marker) {
 			t.Errorf("re-read of notified %q does not show the write:\n%s", c.encoded, text)
+		}
+	}
+}
+
+// A write notifies under both aliases, and each alias is encoded on its own:
+// the id and the name here both carry characters the template rejects raw.
+func TestResourceSubscription_EncodedNameAndIDBothNotified(t *testing.T) {
+	f := newEncodedURIFixture(t)
+	ctx := context.Background()
+
+	const idURI = "ghost://project/%2Fsrv%2Fu%2Fmy%20repo/context"
+	const nameURI = "ghost://project/my%20repo/context"
+	for _, uri := range []string{idURI, nameURI} {
+		if err := f.session.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+			t.Fatalf("Subscribe(%q): %v", uri, err)
+		}
+	}
+	awaitResourceSubscriptions(t, f.srv, ctx, f.updated, idURI, nameURI)
+
+	callTool(t, f.session, "ghost_memory_save", map[string]any{
+		"project_id": "/srv/u/my repo", "content": "memory twoaliasmarker", "category": "fact",
+	})
+	awaitNotification(t, f.updated, idURI)
+	awaitOnly(t, f.updated, nameURI)
+	for _, uri := range []string{idURI, nameURI} {
+		if text := f.read(t, uri); !strings.Contains(text, "twoaliasmarker") {
+			t.Errorf("re-read of notified %q does not show the write:\n%s", uri, text)
 		}
 	}
 }
