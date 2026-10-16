@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // The project resources and the recall_project and record_decision templates
@@ -189,28 +190,49 @@ func TestProjectResourcesAndTemplates_SuccessPathsUnchanged(t *testing.T) {
 }
 
 // The resource-not-found data carries the URI, and the URI carries the project
-// argument — which is routinely a clone URL with a token in it. The data must
-// withhold it exactly as the message does.
+// argument — which is routinely a clone URL with a token in it. When the message
+// withholds the id, the data is omitted rather than echoing it.
 func TestProjectResources_NotFoundDataWithholdsATokenShapedID(t *testing.T) {
 	_, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
 
 	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
-	for _, id := range []string{
-		token,
-		"https%3A%2F%2Fx-oauth%3A" + token + "%40github.com%2Fo%2Fr",
+	for _, tc := range []struct{ name, id string }{
+		{"bare token", token},
+		{"clone URL with a token", "https%3A%2F%2Fx-oauth%3A" + token + "%40github.com%2Fo%2Fr"},
+		// Not a token, but longer than the echo bound, so the message withholds
+		// it by its length and the data must not carry it either.
+		{"over the echo bound", strings.Repeat("a", memory.ArgEchoMaxBytes+1)},
 	} {
-		uri := "ghost://project/" + id + "/tasks"
-		_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: uri})
-		wire := wireErrorOf(t, uri, err)
-		if strings.Contains(wire.Message, token) {
-			t.Errorf("message echoes the token: %q", wire.Message)
-		}
-		if strings.Contains(string(wire.Data), token) {
-			t.Errorf("data echoes the token: %s", wire.Data)
-		}
-		if _, ok := dataURI(t, wire); !ok {
-			t.Errorf("data lost its uri member when the value was withheld: %s", wire.Data)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			uri := "ghost://project/" + tc.id + "/tasks"
+			_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: uri})
+			wire := wireErrorOf(t, uri, err)
+			if wire.Code != jsonrpc.CodeInvalidParams || !strings.HasPrefix(wire.Message, "Resource not found") {
+				t.Errorf("not the resource-not-found error: code %d, %q", wire.Code, wire.Message)
+			}
+			if strings.Contains(wire.Message, token) || strings.Contains(wire.Message, tc.id) {
+				t.Errorf("message echoes the withheld id: %q", wire.Message)
+			}
+			if strings.Contains(string(wire.Data), token) || strings.Contains(string(wire.Data), tc.id) {
+				t.Errorf("data echoes the withheld id: %s", wire.Data)
+			}
+			if len(wire.Data) != 0 {
+				t.Errorf("data is present when the id was withheld: %s", wire.Data)
+			}
+		})
+	}
+}
+
+// Over the wire the SDK refuses a bad escape before the handler is reached, so
+// the bad-encoding refusal is pinned on the parser directly.
+func TestParseProjectIDFromURI_BadEncodingIsInvalidParams(t *testing.T) {
+	_, err := parseProjectIDFromURI("ghost://project/%zz/tasks")
+	var wire *jsonrpc.Error
+	if !errors.As(err, &wire) {
+		t.Fatalf("error %v (%T) is not a JSON-RPC error", err, err)
+	}
+	if wire.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("code = %d, want %d (invalid params): %q", wire.Code, jsonrpc.CodeInvalidParams, wire.Message)
 	}
 }

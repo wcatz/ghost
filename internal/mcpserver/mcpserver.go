@@ -5010,26 +5010,22 @@ func invalidParamsError(err error) error {
 // data.
 //
 // The URI carries the project argument, which is routinely a clone URL with a
-// token in it, so the data's uri goes through the same token guard and echo
-// bound as the message (#839): when memory.RefusalArg would withhold the decoded
-// id, the uri member holds that placeholder instead of the URI.
+// token in it, so the data takes the same token guard and echo bound as the
+// message (#839): when memory.RefusalArg would withhold the decoded id, data is
+// omitted rather than carrying the URI or a placeholder that is not a URI, and
+// the message names the id by the withheld placeholder.
 func projectResourceNotFound(uri, rawID string) error {
 	shown := memory.RefusalArg("project_id", rawID)
-	dataURI := uri
-	if shown != strconv.Quote(rawID) {
-		placeholder, err := strconv.Unquote(shown)
-		if err != nil {
-			placeholder = "<project_id withheld>"
-		}
-		dataURI = placeholder
-	}
-	notFound := mcp.ResourceNotFoundError(dataURI)
+	notFound := mcp.ResourceNotFoundError(uri)
 	var wire *jsonrpc.Error
 	if !errors.As(notFound, &wire) {
 		return notFound
 	}
 	out := *wire
 	out.Message = wire.Message + ": project " + shown + " not found"
+	if shown != strconv.Quote(rawID) {
+		out.Data = nil
+	}
 	return &out
 }
 
