@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1780,10 +1781,9 @@ func TestNormalizeRepoRemoteDropsQueryAndFragment(t *testing.T) {
 }
 
 // TestATokenInARemoteQueryIsNotStoredOnImportOrProjectCreation covers both
-// write paths the finding named. The store's own creation route and the
-// portable importer both normalize a remote before storing it, so a token
-// carried in a clone URL's query string must reach neither the row nor the
-// export that replays it.
+// write paths the finding named. The store's own creation route normalizes a
+// remote before storing it, so a token in a clone URL's query string never
+// reaches the row; the importer refuses the token-shaped value instead.
 func TestATokenInARemoteQueryIsNotStoredOnImportOrProjectCreation(t *testing.T) {
 	ctx := context.Background()
 	token := syntheticToken()
@@ -1808,16 +1808,15 @@ func TestATokenInARemoteQueryIsNotStoredOnImportOrProjectCreation(t *testing.T) 
 	}
 
 	// The import path, whose artifact is the value that travels between machines.
+	// It judges the remote as the artifact carries it, before normalising, so a
+	// token-shaped remote is refused outright rather than stripped and stored.
 	dst := portableTestStore(t)
-	wasCreated, err := dst.ImportProject(ctx, PortableProject{ID: "p2", Path: "/src/p2", Name: "two", RepoRemote: remote}, true)
-	if err != nil {
-		t.Fatalf("ImportProject: %v", err)
+	if _, err := dst.ImportProject(ctx, PortableProject{ID: "p2", Path: "/src/p2", Name: "two", RepoRemote: remote}, true); !errors.Is(err, ErrSecretContent) {
+		t.Fatalf("ImportProject err = %v, want ErrSecretContent", err)
 	}
-	if !wasCreated {
-		t.Fatal("ImportProject reported no create for a project that was absent")
-	}
-	if got := projectRemote(t, dst, "p2"); strings.Contains(got, token) || strings.ContainsAny(got, "?#") {
-		t.Errorf("the import path stored a token-bearing remote: %q", got)
+	var n int
+	if err := dst.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = 'p2'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("a refused import left %d row(s), err %v", n, err)
 	}
 }
 
@@ -1825,4 +1824,83 @@ func TestATokenInARemoteQueryIsNotStoredOnImportOrProjectCreation(t *testing.T) 
 // tests assert it does not reach a stored column, never that it is detected.
 func syntheticToken() string {
 	return "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
+}
+
+// TestNormalizeRepoRemoteDropsUserinfoOnEveryBranch: userinfo is not part of
+// repository identity and is where a clone URL most often carries a token, so
+// no spelling may keep it — the scheme-less ones included, which are the ones
+// a human types and which used to fall through to the scp or bare branch with
+// the userinfo intact. The rows after the blank comment must not change.
+func TestNormalizeRepoRemoteDropsUserinfoOnEveryBranch(t *testing.T) {
+	tok := syntheticToken()
+	for _, tc := range []struct{ in, want string }{
+		// Scheme-less userinfo: the finding's two spellings and their variants.
+		{"git@github.com/owner/repo", "github.com/owner/repo"},
+		{"git@github.com/owner/repo.git", "github.com/owner/repo"},
+		{"x-token-auth:" + tok + "@bitbucket.org/w/r.git", "bitbucket.org/w/r"},
+		{"user:" + tok + "@github.com/owner/repo", "github.com/owner/repo"},
+		{"user:p@ss@github.com/owner/repo", "github.com/owner/repo"},
+		{tok + "@github.com/owner/repo", "github.com/owner/repo"},
+		// With a scheme, a password containing "@" is still all userinfo.
+		{"https://user:p@ss@github.com/owner/repo", "github.com/owner/repo"},
+		// Ordinary spellings, unchanged.
+		{"https://github.com/owner/repo", "github.com/owner/repo"},
+		{"https://github.com/owner/repo.git", "github.com/owner/repo"},
+		{"https://user:" + tok + "@github.com/owner/repo.git", "github.com/owner/repo"},
+		{"ssh://git@github.com/owner/repo.git", "github.com/owner/repo"},
+		{"ssh://git@github.com:22/owner/repo.git", "github.com/owner/repo"},
+		{"git@github.com:owner/repo.git", "github.com/owner/repo"},
+		{"GitHub.com/Owner/Repo", "github.com/Owner/Repo"},
+		{"github.com/owner/repo", "github.com/owner/repo"},
+		// An "@" past the host belongs to the path and is kept.
+		{"https://github.com/owner/repo@v1", "github.com/owner/repo@v1"},
+	} {
+		if got := NormalizeRepoRemote(tc.in); got != tc.want {
+			t.Errorf("NormalizeRepoRemote(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if got := NormalizeRepoRemote(tc.in); strings.Contains(got, tok) {
+			t.Errorf("NormalizeRepoRemote(%q) kept the token: %q", tc.in, got)
+		}
+	}
+}
+
+// TestATokenInARemotePathIsRefusedOnImportAndCreation: the path is the one
+// position normalisation cannot recognise, so the credential guard judges the
+// remote with the name and path. Both write routes refuse, and a refusal
+// stores nothing.
+func TestATokenInARemotePathIsRefusedOnImportAndCreation(t *testing.T) {
+	ctx := context.Background()
+	remote := "https://github.com/wcatz/" + syntheticToken()
+	count := func(t *testing.T, s *Store) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = 'p1'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if err := CheckImportedProject(PortableProject{ID: "p1", Path: "/src/p1", Name: "one", RepoRemote: remote}); !errors.Is(err, ErrSecretContent) {
+		t.Errorf("CheckImportedProject accepted a token-shaped repo_remote: %v", err)
+	}
+
+	imp := portableTestStore(t)
+	if _, err := imp.ImportProject(ctx, PortableProject{ID: "p1", Path: "/src/p1", Name: "one", RepoRemote: remote}, true); !errors.Is(err, ErrSecretContent) {
+		t.Errorf("ImportProject err = %v, want ErrSecretContent", err)
+	}
+	if n := count(t, imp); n != 0 {
+		t.Errorf("a refused import left %d project row(s)", n)
+	}
+
+	created := portableTestStore(t)
+	err := created.EnsureProjectWithRepo(ctx, "p1", "/src/p1", "one", remote)
+	if !errors.Is(err, ErrSecretContent) {
+		t.Errorf("EnsureProjectWithRepo err = %v, want ErrSecretContent", err)
+	}
+	if err != nil && strings.Contains(err.Error(), syntheticToken()) {
+		t.Errorf("the refusal repeated the token: %v", err)
+	}
+	if n := count(t, created); n != 0 {
+		t.Errorf("a refused creation left %d project row(s)", n)
+	}
 }

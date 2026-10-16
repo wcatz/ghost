@@ -222,11 +222,16 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// The record is the caller's argument in all three fields, which is what both
 	// branches below store: the non-remote route passes path="" and the store
 	// normalizes it to the id, and the repository route passes the same value three
-	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
-	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, the
-	// query string and the fragment, the three positions a clone URL usually
-	// carries an inline token in, so the value stored carries no token from those
-	// positions (a token written into the URL path itself is not removed).
+	// times (see ensureProjectForWithRemote). `repo_remote` is guarded by the
+	// store's own creation routes, which hand the normalized remote to the same
+	// predicate on the arm that INSERTs; this call has no remote to judge. What
+	// `NormalizeRepoRemote` strips before any write is the userinfo (on every
+	// spelling, scheme-less ones included), the query string and the fragment. A
+	// token in the URL path is not recognisable as one and is left to that
+	// predicate, which is the backstop for any position on the INSERT arms and
+	// always on import and export (the refresh and bind routes do not judge it). A
+	// remote an older build stored is not rewritten in place; the predicate refuses
+	// it on import and leaves it out of an export.
 	//
 	// The credential guard is asked FIRST, and that ordering is the difference
 	// between naming a value and relocating a secret. `CheckImportedProject` ends in

@@ -662,7 +662,7 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 		}
 		return false, err
 	}
-	if err := CheckImportedProject(createdProject(id, dir, name)); err != nil {
+	if err := CheckImportedProject(createdProject(id, dir, name, repoRemote)); err != nil {
 		return false, fmt.Errorf("create project: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -921,7 +921,7 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 		// lands in. Once the answer is a project that is not there, the subprocess
 		// has already paid for itself. `path` was normalized from "" to the id
 		// above, so `createdProject` judges the record as it would be stored.
-		if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+		if err := CheckImportedProject(createdProject(id, path, name, repoRemote)); err != nil {
 			return "", nil, fmt.Errorf("create project: %w", err)
 		}
 		canonical, err = s.createRepoProjectTx(ctx, tx, id, path, name, repoRemote)
@@ -1730,7 +1730,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		return fmt.Errorf("check project before create: %w", err)
 	}
 	if held == 0 {
-		if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+		if err := CheckImportedProject(createdProject(id, path, name, repoRemote)); err != nil {
 			return fmt.Errorf("create project: %w", err)
 		}
 	}
