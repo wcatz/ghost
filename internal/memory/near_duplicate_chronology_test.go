@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -273,5 +274,72 @@ func TestDropNearDuplicatesLaterRowRankedFirstIsUnchanged(t *testing.T) {
 	kept, removed, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, b, a), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{b}; !eqStrings(got, want) {
 		t.Errorf("kept %v (removed %v), want %v", got, memIDs(removed), want)
+	}
+}
+
+// TestDropNearDuplicatesNeverFlipsASupersedesPair is the "stale note
+// re-asserted" shape: S supersedes R, but R carries the later created_at
+// (supersede orders by updated_at first). The supersede demotion has already
+// sunk R below S, so R is the rank loser of the `related` edge the linker
+// writes between them. Turning that verdict round by chronology would remove
+// the superseder and keep the retired row. A live supersedes edge is the
+// explicit relation and decides the pair, so the rank verdict stands.
+func TestDropNearDuplicatesNeverFlipsASupersedesPair(t *testing.T) {
+	for _, relation := range []string{"supersedes", "contradicts"} {
+		t.Run(relation, func(t *testing.T) {
+			s := testStore(t)
+			sup := addStamped(t, s, testProject, demotePgxV4, 0.8, 20, nil)
+			retired := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 24, nil)
+			linkAt(t, s, sup, retired, "related")
+			linkAt(t, s, sup, retired, relation)
+
+			kept, removed, _, standIns := s.dropNearDuplicates(context.Background(), hydrate(t, s, sup, retired), DefaultSearchParams(), dropNow)
+			if idSet(kept)[retired] && !idSet(kept)[sup] {
+				t.Errorf("kept %v (removed %v): the %s pair was turned round by chronology", memIDs(kept), memIDs(removed), relation)
+			}
+			if len(standIns) != 0 {
+				t.Errorf("standIns = %v, want none for a %s pair", standIns, relation)
+			}
+		})
+	}
+}
+
+// TestCandidatesFilesALoserWithItsReservationAndEmbeddingState: the removed
+// near-duplicate losers carry the same admission facts as the kept rows, so a
+// stand-in judged by a loser's evidence sees a keyword reservation and a
+// missing embedding. Here the loser is a keyword-reserved, unembedded row.
+func TestCandidatesFilesALoserWithItsReservationAndEmbeddingState(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	reserved := createTestMemory(t, store, ctx, "quasar calibration is a manual step")
+	var dual []string
+	for i := range 12 {
+		id := createTestMemory(t, store, ctx, fmt.Sprintf("the quasar calibration notes file %d covers stage %d", i, i))
+		if err := store.StoreEmbedding(ctx, id, []float32{0.99, 0.14}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		dual = append(dual, id)
+	}
+	setCreatedAtDaysAgo(t, store, reserved, 1)
+	if err := store.CreateLink(ctx, reserved, dual[0], "related", 0.95, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	set := explainedCandidates(t, store, ctx, "test-proj", "quasar calibration", []float32{1, 0}, 10, nil)
+	if r := set.RankFacts[reserved]; r == nil || !r.KeywordReserved {
+		t.Fatalf("precondition: %s must be keyword-reserved, fact %+v", reserved, r)
+	}
+	var loser *DroppedLoser
+	for i := range set.DroppedLosers {
+		if set.DroppedLosers[i].ID == reserved {
+			loser = &set.DroppedLosers[i]
+		}
+	}
+	if loser == nil {
+		t.Fatalf("precondition: %s must be a removed near-duplicate loser, losers %+v", reserved, set.DroppedLosers)
+	}
+	if !loser.KeywordReserved {
+		t.Errorf("loser %s: KeywordReserved = false, want true", reserved)
+	}
+	if !loser.Unembedded {
+		t.Errorf("loser %s: Unembedded = false, want true", reserved)
 	}
 }

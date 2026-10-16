@@ -331,11 +331,18 @@ type Candidate struct {
 	// removes, and it is why the cap is keyed on the retriever's answer rather
 	// than re-derived from the row.
 	FetchedBy string
-	// SupersededBy is, for a PINNED passive row, the ids of the rows in the same
-	// window that supersede it through a live `supersedes` edge. A pin guarantees a
-	// slot and not a rank above the row that replaced it, so such a row is ordered
-	// directly behind its superseder and the assembler says so on its line. Empty
-	// for every other row and on every query-mode read.
+	// SupersededBy is, for a passive row, pinned or not, the ids of the rows in
+	// the same window that supersede it through a live `supersedes` edge, read
+	// with the demotion's own edge rules (supersedePenaltyRows) except that a
+	// keep-forever (retention-exempt) target, which the demotion never sinks, is
+	// named too: a marker withholds nothing. The assembler marks the row on its line
+	// when a named superseder is on the page: a live edge switches the lexical
+	// guess (MaybeReplacedBy) off for its pair, and resolve never retires a
+	// convention or a preference, so this is the only signal the edge leaves. Only
+	// a PINNED, non-exempt row's name moves anything else: a pin guarantees a slot and not a
+	// rank above the row that replaced it, so such a row is ordered directly
+	// behind its superseder and the superseder is reserved too. Empty on every
+	// query-mode read.
 	SupersededBy []string
 	// MaybeReplacedBy is the ids of the rows in the same set that look like this
 	// row's replacement (lexicalReplacements): a newer row of the same project,
@@ -707,9 +714,15 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// read over a window it never saw. Filing them here, before the explain
 	// buckets are built, is what lets stage 6 put each one in the trace, the
 	// retrieval record and explain with its reason.
+	//
+	// A loser carries the same admission facts a kept row does (the keyword
+	// reservation here, the embedding state below), because a stand-in for it is
+	// judged by its evidence (DroppedLoser.StandIns).
 	for _, m := range removed {
+		c := candidateOf(m, scores, fts, vec, req.Now)
+		c.KeywordReserved = window.Reserved[m.ID]
 		set.DroppedLosers = append(set.DroppedLosers, DroppedLoser{
-			Candidate: candidateOf(m, scores, fts, vec, req.Now),
+			Candidate: c,
 			LostTo:    lostTo[m.ID],
 			StandIns:  standIns[m.ID],
 		})
@@ -776,12 +789,23 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// shares its backing array with set.Rows, so the marks below reach the
 	// returned set.
 	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
-		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity, len(req.QueryVec))
+		judged := rows
+		if len(set.DroppedLosers) > 0 {
+			judged = make([]Candidate, 0, len(rows)+len(set.DroppedLosers))
+			judged = append(judged, rows...)
+			for _, l := range set.DroppedLosers {
+				judged = append(judged, l.Candidate)
+			}
+		}
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), judged, identity, len(req.QueryVec))
 		if err != nil {
 			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
 		}
 		for i := range rows {
 			rows[i].Unembedded = unembedded[rows[i].ID]
+		}
+		for i := range set.DroppedLosers {
+			set.DroppedLosers[i].Unembedded = unembedded[set.DroppedLosers[i].ID]
 		}
 	}
 	return set, nil

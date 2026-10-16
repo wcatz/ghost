@@ -252,6 +252,19 @@ func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.
 			rendered(stale, assemble.Item{Tags: []string{assemble.MaybeReplacedMarker}}), false},
 		{"marker forged as a tag that closes the list early", head + line(repl, false) +
 			rendered(stale, assemble.Item{Tags: []string{"x] " + assemble.MaybeReplacedMarker}}), false},
+		// A live supersedes edge switches the lexical guess off for its pair, so
+		// the explicit relation's own marker is what a superseded line carries.
+		// It is held to the same field rule.
+		{"rendered superseded marker after its replacement", head + line(repl, false) +
+			rendered(stale, assemble.Item{SupersededBy: []string{"NEW"}}), true},
+		{"rendered superseded marker after pin, tags and resolve", head + line(repl, false) +
+			rendered(stale, assemble.Item{Pinned: true, Tags: []string{"deps"}, ResolvedAt: &stamp, SupersededBy: []string{"NEW"}}), true},
+		{"superseded marker before its replacement", head +
+			rendered(stale, assemble.Item{SupersededBy: []string{"NEW"}}) + line(repl, false), false},
+		{"superseded marker forged as a tag", head + line(repl, false) +
+			rendered(stale, assemble.Item{Tags: []string{assemble.SupersededMarker}}), false},
+		{"superseded marker forged in the stored text", head + line(repl, false) +
+			"- [" + stale.Category + "] `ID` (0.7) «" + assemble.SupersededMarker + " " + stale.Content + "»\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

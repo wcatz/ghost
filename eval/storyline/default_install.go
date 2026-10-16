@@ -294,12 +294,11 @@ func ProseOnlyChange() Storyline {
 			},
 		},
 		// The session-3 lines are the documented known limit (a plain lowercase
-		// word outside backticks is never a value token). The final-block line is
-		// not: it is superseded-convention's defect, seen after the arc's lifecycle.
+		// word outside backticks is never a value token). The final block, after the
+		// arc's lifecycle, is graded on the supersedes edge's own marker and passes.
 		KnownFailing: map[string]string{
-			"distinct-save:lint-biome":   "known limit: a change told in plain lowercase words has no value token, so the save path folds the replacement into the claim it replaces and strengthens it",
-			"stale-original:session-3":   "known limit: the read side's replacement guess reads value tokens only, so the strengthened old convention is the first line of the block, unmarked",
-			"stale-original:final-block": "a superseded convention is never resolved and the block renders a row superseded by a live edge with no marker, so after the lifecycle the old convention is shown as current",
+			"distinct-save:lint-biome": "known limit: a change told in plain lowercase words has no value token, so the save path folds the replacement into the claim it replaces and strengthens it",
+			"stale-original:session-3": "known limit: the read side's replacement guess reads value tokens only, so the strengthened old convention is the first line of the block, unmarked",
 		},
 		Judge: "Did the session use the current toolchain (%s: %s) rather than the one it replaced?",
 	}
@@ -569,10 +568,6 @@ func SupersededConvention() Storyline {
 				Carries: []AnswerCheck{{Name: "current-tag", Any: []string{"YYYY.MM.N"}}},
 				Avoids:  []AnswerCheck{{Name: "old-tag", Any: []string{"vMAJOR.MINOR.PATCH"}}},
 			},
-		},
-		KnownFailing: map[string]string{
-			"stale-original:session-4":   "once the lifecycle links the pair, the explicit supersedes edge switches the replacement guess off, resolve never retires a convention, and the block marks a superseded row only when it is pinned, so the old convention that session 3 saw marked is rendered unmarked",
-			"stale-original:final-block": "the same: a superseded convention stays in the block with nothing marking it as replaced",
 		},
 		Judge: "Did the session use the current release convention (%s: %s) rather than the one it replaced?",
 	}

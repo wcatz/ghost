@@ -446,6 +446,19 @@ parallel facts about different subjects read. The marker's words in a tag are
 not the marker: a tag prints JSON-quoted inside `tags:[…]`, and the marker is the field
 after it.
 
+Once a supersede pass has related the two rows with a live `supersedes` edge, the guess
+is switched off for that pair, and a `convention` or `preference` is never resolved, so
+the edge is what marks the older row instead. On `ghost_project_context`, the
+session-start block and the project resource, a row with a live `supersedes` edge from a
+row on the same page carries **`[superseded by a newer note]`** at the same field, and
+**`superseded_by=`** naming that row, pinned or not. It is not a guess: Ghost recorded the
+relation. A pinned superseded row is also ordered directly behind its superseder, which
+holds a slot too; an unpinned one is sunk below it and reserves nothing. A keep-forever
+(`retention: persistent`) row is marked the same way but is never sunk or moved by the
+edge. A withdrawn edge, an edge between conflicting scopes, and a superseder not on the
+page mark nothing.
+`ghost_memory_search` does not draw this marker.
+
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
 rows were quoted before this existed, and the block's exact recorded shape is a
