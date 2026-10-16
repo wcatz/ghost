@@ -36,6 +36,7 @@ func TestImportReadsARecordTheExporterCanWrite(t *testing.T) {
 	evidence := make([]memory.PortableEvidence, 0, evidenceRows)
 	for i := 0; i < evidenceRows; i++ {
 		evidence = append(evidence, memory.PortableEvidence{
+			ID:        fmt.Sprintf("ev-%d", i),
 			Kind:      "observed",
 			Agent:     "opencode",
 			SessionID: fmt.Sprintf("session-%d", i),

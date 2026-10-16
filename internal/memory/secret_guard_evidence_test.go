@@ -137,7 +137,7 @@ func TestImportedEvidenceIsGuardedLikeTheMemoryRow(t *testing.T) {
 			Content:   "an ordinary imported fact",
 			Source:    "onboarding",
 			Evidence: []PortableEvidence{{
-				Kind: "observed", Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/runbook.md",
+				ID: "ev-ordinary", Kind: "observed", Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/runbook.md",
 			}},
 		}, ImportOptions{Apply: true}); err != nil {
 			t.Fatalf("ImportMemory refused ordinary evidence: %v", err)
