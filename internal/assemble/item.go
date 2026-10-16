@@ -84,7 +84,23 @@ type Item struct {
 	// not a rank above the row that replaced it, so the row is ordered behind its
 	// superseder and says so. A superseder that is not in the answer is not named.
 	SupersededBy []string
+	// MaybeReplacedBy lists the ids of the rows in the SAME rendered answer that
+	// look like this row's replacement: newer, the same project and scope, a
+	// similar text that states a different value, and no explicit `supersedes`,
+	// `contradicts` or resolve relating the two (memory.Candidate.MaybeReplacedBy,
+	// the retriever's lexical guess). It is set in one place (markMaybeReplaced),
+	// after the last stage that can remove a row, and names only rows still on the
+	// page. A non-empty list renders MaybeReplacedMarker and the ids; the row is
+	// marked, never withheld, because the guess is lexical and can be wrong.
+	MaybeReplacedBy []string
 }
+
+// MaybeReplacedMarker is the bracketed field a line carries when a newer row on
+// the same page looks like its replacement. It is worded as what it is, a guess
+// read off the text: Ghost has not related the two rows, and the reader decides
+// which one is current. It sits where `[resolved]` does, in the prefix Ghost
+// writes and outside the «...» data, so stored text cannot forge it.
+const MaybeReplacedMarker = "[maybe replaced by a newer note]"
 
 // Line renders the shared item prefix: the one line shape both surfaces emit for
 // a memory, so a reader comparing search output with an injected block sees the
@@ -104,6 +120,9 @@ func (i Item) Line() string {
 	if i.ResolvedAt != nil {
 		resolved = " [resolved]"
 	}
+	if len(i.MaybeReplacedBy) > 0 {
+		resolved += " " + MaybeReplacedMarker
+	}
 	// The legacy-seed correction is scoped to the global project, because that
 	// is the only row it is about: a project row holding the shipped sentence is
 	// the user's own material, and labelling it builtin would misattribute it and
@@ -120,7 +139,7 @@ func (i Item) Line() string {
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin + conflicts + ContradictedByLabel(i.ContradictedBy) +
-		SupersededByLabel(i.SupersededBy) +
+		SupersededByLabel(i.SupersededBy) + MaybeReplacedByLabel(i.MaybeReplacedBy) +
 		") " + Data(i.Content)
 }
 
@@ -172,6 +191,12 @@ func boundedIDLabel(name string, ids []string) string {
 		label += " (+" + strconv.Itoa(more) + " more)"
 	}
 	return label
+}
+
+// MaybeReplacedByLabel renders the rows that look like a memory's replacement,
+// with the same bound as ConflictsLabel, or "" when none is in this answer.
+func MaybeReplacedByLabel(ids []string) string {
+	return boundedIDLabel(" maybe_replaced_by=", ids)
 }
 
 // SupersededByLabel renders the rows that replaced a memory, as they are

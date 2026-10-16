@@ -1822,6 +1822,36 @@ func (p *pipeline) markSuperseded() {
 	}
 }
 
+// markMaybeReplaced sets Item.MaybeReplacedBy on each row whose lexical
+// replacement (memory.Candidate.MaybeReplacedBy) is still in the answer. The
+// retriever makes the guess, because the similarity and value rules are the save
+// path's and live in memory; this keeps only the rows the reader can see, and
+// runs from fitResponse beside markSuperseded for the same reason: a response-fit
+// drop can remove the newer row after the stages are done, and a marker naming a
+// row the page no longer holds would point at nothing. It runs on both modes. A
+// passive read has already ordered the newer row ahead (the retriever did it); a
+// query read is marked only, in its relevance order.
+func (p *pipeline) markMaybeReplaced() {
+	present := make(map[string]bool, len(p.items))
+	for _, it := range p.items {
+		present[it.ID] = true
+	}
+	named := make(map[string][]string)
+	for _, c := range p.set.Rows {
+		if len(c.MaybeReplacedBy) > 0 {
+			named[c.ID] = c.MaybeReplacedBy
+		}
+	}
+	for i := range p.items {
+		p.items[i].MaybeReplacedBy = nil
+		for _, id := range named[p.items[i].ID] {
+			if present[id] {
+				p.items[i].MaybeReplacedBy = append(p.items[i].MaybeReplacedBy, id)
+			}
+		}
+	}
+}
+
 // breakdownLeads reports whether the per-stage removal breakdown heads the note
 // list, which is the only place notes() puts it. It leads because the
 // response-fit pass cuts notes from the TAIL, so the breakdown is the last one

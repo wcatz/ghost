@@ -364,27 +364,28 @@ func globalOriginGuidance(globals []sessionMemory) string {
 // assembler's stage 2.
 func sessionMemoryToItem(m sessionMemory, asOf *time.Time) assemble.Item {
 	it := assemble.Item{
-		ID:             m.ID,
-		Category:       m.Category,
-		Content:        m.Content,
-		Tags:           m.Tags,
-		Importance:     m.Importance,
-		Pinned:         m.Pinned,
-		CreatedAt:      m.CreatedAt,
-		Scope:          m.Scope,
-		ProjectID:      m.ProjectID,
-		Source:         m.Source,
-		ResolvedAt:     m.ResolvedAt,
-		ValidFrom:      m.ValidFrom,
-		ValidUntil:     m.ValidUntil,
-		VerifiedAt:     m.VerifiedAt,
-		ValidityState:  m.ValidityState,
-		Confidence:     m.Confidence,
-		Agent:          m.Agent,
-		SourceRef:      m.SourceRef,
-		ConflictsWith:  m.ConflictsWith,
-		SupersededBy:   m.SupersededBy,
-		ContradictedBy: m.ContradictedBy,
+		ID:              m.ID,
+		Category:        m.Category,
+		Content:         m.Content,
+		Tags:            m.Tags,
+		Importance:      m.Importance,
+		Pinned:          m.Pinned,
+		CreatedAt:       m.CreatedAt,
+		Scope:           m.Scope,
+		ProjectID:       m.ProjectID,
+		Source:          m.Source,
+		ResolvedAt:      m.ResolvedAt,
+		ValidFrom:       m.ValidFrom,
+		ValidUntil:      m.ValidUntil,
+		VerifiedAt:      m.VerifiedAt,
+		ValidityState:   m.ValidityState,
+		Confidence:      m.Confidence,
+		Agent:           m.Agent,
+		SourceRef:       m.SourceRef,
+		ConflictsWith:   m.ConflictsWith,
+		SupersededBy:    m.SupersededBy,
+		ContradictedBy:  m.ContradictedBy,
+		MaybeReplacedBy: m.MaybeReplacedBy,
 	}
 	// For historical reads, judge the window at T. The passive path already has
 	// the state set from the assembler's stage 2.
@@ -1014,6 +1015,10 @@ type sessionMemory struct {
 	// ContradictedBy is the assembler's marker for a pinned row that newer rows
 	// contradict (assemble.Item.ContradictedBy), carried through unchanged.
 	ContradictedBy []string
+	// MaybeReplacedBy is the assembler's marker for a row a newer row in the same
+	// block looks like the replacement of (assemble.Item.MaybeReplacedBy), carried
+	// through unchanged.
+	MaybeReplacedBy []string
 }
 
 // cfg is the caller's already-loaded configuration: the session-start path

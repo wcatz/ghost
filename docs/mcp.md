@@ -402,6 +402,21 @@ edge whose endpoints' scopes conflict (`memory.ScopesConflict`: `environment=pro
 against `environment=development`) — that is two true claims about two places, so it is
 not a conflict and is neither separated nor marked.
 
+A row that a NEWER row on the same page looks like the replacement of carries
+**`[maybe replaced by a newer note]`** beside where `[resolved]` would sit, and
+**`maybe_replaced_by=`** naming those rows (same rendering and bound as
+`conflicts_with=`). It is a lexical guess and is worded as one: the two rows have the same
+project and the same scope, a text similar enough that the save path would have folded
+them, one value in common (the thing both are about: `go.mod`, `Redis`, `TTL`) and
+another that differs (a version, a path, a name), and nothing relates them yet —
+no live `supersedes` or `contradicts` edge, and neither is resolved. That is the state a
+default install leaves a change of truth in until a supersede pass runs. The older row is
+marked, never withheld. On `ghost_project_context`, the session-start block and the
+project resource the replacement is also ordered ahead of it (a pinned row is marked and
+keeps its place); on `ghost_memory_search` the order is the relevance answer and is left
+alone, so the line is marked only. A row whose replacement is not in the answer carries
+neither field.
+
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
 rows were quoted before this existed, and the block's exact recorded shape is a

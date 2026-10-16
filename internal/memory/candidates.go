@@ -331,6 +331,15 @@ type Candidate struct {
 	// directly behind its superseder and the assembler says so on its line. Empty
 	// for every other row and on every query-mode read.
 	SupersededBy []string
+	// MaybeReplacedBy is the ids of the rows in the same set that look like this
+	// row's replacement (lexicalReplacements): a newer row of the same project,
+	// the same scope and a similar text that names the same thing with a
+	// different value, with no
+	// live `supersedes` or `contradicts` edge between the two. It is a lexical
+	// guess, newest first. A passive read also orders those rows ahead of this one
+	// (arrangeLexicalReplacements); a query read only names them, because there
+	// the order is the relevance answer. Empty when no row qualifies.
+	MaybeReplacedBy []string
 	// Base is the fused score the window was cut on, after status demotion.
 	// Decay is the category-and-age multiplier, and Score is the product the
 	// decay order ranked on. Supersede and near-duplicate demotion is a
@@ -705,6 +714,21 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	scope := edgeScopeIDs(rows, req.Fetch.Limit)
 	edges, status := cand.loadCandidateEdges(ctx, scope)
 	set.Edges, set.EdgesStatus = edges, status
+
+	// The replacements no lifecycle has related yet, NAMED and not reordered: the
+	// order of a query answer is its relevance verdict (the cutoff reads the top
+	// row, the leg-consensus stage each leg's first place), so a guess about
+	// chronology may annotate it and must not rearrange it. Asked over the rows
+	// the edges were read for, and not at all when that read failed, so an
+	// explicit relation always gets to overrule it.
+	if status.Status != edgesErr {
+		scoped := rows[:len(scope)]
+		if repl := lexicalReplacements(scoped, edges, req.Now); len(repl) > 0 {
+			for i := range scoped {
+				scoped[i].MaybeReplacedBy = repl[scoped[i].ID]
+			}
+		}
+	}
 
 	// The evidence counts, read on the same snapshot as everything above it: a
 	// count taken after the transaction closed could describe a save the rows in

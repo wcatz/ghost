@@ -204,6 +204,10 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		return nil, err
 	}
 	var rows []Candidate
+	// Each bucket's rows are one contiguous run of the set, in the bucket's own
+	// order; the replacement arrangement below works inside a run, never across
+	// two, because each run is cut by its own cap.
+	var runs []int
 	for _, pol := range req.Passive {
 		fetched, losers, err := s.passiveBucket(ctx, req, pol, cols)
 		if err != nil {
@@ -241,6 +245,7 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 			set.PinnedBeyond[project] += n
 		}
 		rows = append(rows, fetched...)
+		runs = append(runs, len(fetched))
 	}
 	set.Rows = rows
 	// Widened is deliberately LEFT FALSE, which is what it means here rather than
@@ -262,6 +267,24 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	scope := edgeScopeIDs(rows, len(rows))
 	edges, status := s.loadCandidateEdges(ctx, scope)
 	set.Edges, set.EdgesStatus = edges, status
+
+	// The replacements no lifecycle has related yet (lexicalReplacements), read
+	// against the edges just loaded so an explicit relation wins. A failed edge
+	// read leaves the set as it was, unordered and unmarked: the guess must not be
+	// made when the edge that would overrule it cannot be seen.
+	if status.Status != edgesErr {
+		at := 0
+		for _, n := range runs {
+			run := rows[at : at+n]
+			if repl := lexicalReplacements(run, edges, req.Now); len(repl) > 0 {
+				for i := range run {
+					run[i].MaybeReplacedBy = repl[run[i].ID]
+				}
+				copy(run, arrangeLexicalReplacements(run, repl))
+			}
+			at += n
+		}
+	}
 
 	// The evidence counts, or ZERO of them on a store with no provenance table.
 	// Nothing ranks on these counts — stage 4's multiplier is pinned at 1.0 — so the
