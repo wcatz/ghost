@@ -21,10 +21,11 @@ const DefaultDemotionThreshold = 0.90
 //
 // It is the raw edge verdict over ids, with no lexical replacement exemption:
 // that exemption needs the rows' text and stamps, which an id list does not
-// carry. Every reader in the tree that ranks rows (GetTopMemories,
-// demoteNearDuplicates, passiveDemote, dropNearDuplicates) holds the rows and
-// applies it through exemptReplacementPairs; a new reader must too, or a cosine
-// edge ranks a replacement below the claim it replaced there.
+// carry. Every reader in the tree that ranks rows holds the rows and applies
+// it: GetTopMemories, demoteNearDuplicates and passiveDemote through
+// exemptReplacementPairs, and dropNearDuplicates through replacementPairsWithin
+// and withoutReplacementPairs directly. A new reader must too, or a cosine edge
+// ranks a replacement below the claim it replaced there.
 //
 // 'duplicate' edges are exempt from the strength threshold — Upsert already
 // gated them at upsertMergeThreshold, so their strength is a Jaccard score,
