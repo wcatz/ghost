@@ -449,7 +449,6 @@ func TestImportDoesNotStoreAnEmptyStampOnACarriedRecord(t *testing.T) {
 		Content:   "a fact whose carried record left both stamps empty",
 		Source:    "onboarding",
 		Evidence: []PortableEvidence{{
-			ID:         "ev-empty-stamps",
 			Kind:       "observed",
 			Agent:      "claude-code",
 			ObservedAt: &empty,

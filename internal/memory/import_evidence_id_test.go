@@ -23,8 +23,7 @@ func TestImportedEvidenceIDIsJudgedOnDryRunAndApply(t *testing.T) {
 		want string
 	}{
 		{"repeated", evid("d", "d"), "evidence[1].id repeats"},
-		{"blank", evid(""), "evidence[0].id must not be blank"},
-		{"whitespace only", evid("ok", "  "), "evidence[1].id must not be blank"},
+		{"whitespace only", evid("ok", "  "), "evidence[1].id must not be whitespace only"},
 		{"newline", evid("a\nb"), "evidence[0].id must hold no control"},
 		{"nul", evid("a\x00b"), "evidence[0].id must hold no control"},
 		{"c1 next line", evid("a\u0085b"), "evidence[0].id must hold no control"},
@@ -94,5 +93,26 @@ func TestImportedEvidenceDistinctIDsStillRoundTrip(t *testing.T) {
 	var n int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_provenance WHERE id IN ('ev-one','ev-two')`).Scan(&n); err != nil || n != 2 {
 		t.Fatalf("carried evidence ids = %d, err %v, want 2", n, err)
+	}
+}
+
+// An empty evidence id is minted by the importer, so two of them are not a repeat.
+func TestImportedEmptyEvidenceIDsAreMintedDistinct(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	m := PortableMemory{
+		ID: "evidid0000000000000000000000AD", ProjectID: testProject,
+		Category: "fact", Content: "an ordinary imported fact", Source: "onboarding",
+		Evidence: []PortableEvidence{{Kind: "observed"}, {Kind: "observed"}},
+	}
+	for _, apply := range []bool{false, true} {
+		created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
+		if err != nil || !created {
+			t.Fatalf("apply=%v: created=%v err=%v", apply, created, err)
+		}
+	}
+	var n, d int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT id) FROM memory_provenance WHERE memory_id = ? AND kind = 'observed'`, m.ID).Scan(&n, &d); err != nil || n != 2 || d != 2 {
+		t.Fatalf("rows=%d distinct=%d err=%v, want 2 and 2", n, d, err)
 	}
 }

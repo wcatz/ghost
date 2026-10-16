@@ -75,7 +75,7 @@ func TestSecondHopDoesNotReinflateWhenOnlyTheArrivalIsStamped(t *testing.T) {
 		Content: "a fact whose check lives only in the column",
 		Source:  "onboarding", VerifiedAt: &verified,
 		Evidence: []PortableEvidence{
-			{ID: "ev-1", Kind: "observed", Agent: "claude-code", ObservedAt: &verified},
+			{Kind: "observed", Agent: "claude-code", ObservedAt: &verified},
 		},
 	}, ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("hop 1 ImportMemory: %v", err)
@@ -123,8 +123,8 @@ func TestImportStillStampsTheArrivalWhenNoCarriedRecordIsVerified(t *testing.T) 
 		Content: "an artifact whose observations are all unstamped",
 		Source:  "onboarding", VerifiedAt: &verified,
 		Evidence: []PortableEvidence{
-			{ID: "ev-2", Kind: "observed", Agent: "claude-code", ObservedAt: &verified},
-			{ID: "ev-3", Kind: "observed", Agent: "codex", ObservedAt: &verified},
+			{Kind: "observed", Agent: "claude-code", ObservedAt: &verified},
+			{Kind: "observed", Agent: "codex", ObservedAt: &verified},
 		},
 	}, ImportOptions{Apply: true})
 	if err != nil {
@@ -163,7 +163,7 @@ func TestImportStampsTheArrivalWhenCarriedStampsAreEmptyStrings(t *testing.T) {
 		Content: "an artifact whose carried stamp is the empty string",
 		Source:  "onboarding", VerifiedAt: &verified,
 		Evidence: []PortableEvidence{
-			{ID: "ev-4", Kind: "observed", Agent: "claude-code", ObservedAt: &verified, VerifiedAt: &empty},
+			{Kind: "observed", Agent: "claude-code", ObservedAt: &verified, VerifiedAt: &empty},
 		},
 	}, ImportOptions{Apply: true})
 	if err != nil {
