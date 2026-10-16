@@ -183,6 +183,10 @@ func TestRetires(t *testing.T) {
 		{"conditional behaviour", "Session keys live in Redis under SESSION_PREFIX.",
 			"A session key under SESSION_PREFIX was deleted when the TTL expired.", false, false},
 		{"restatement", retireOriginal, retireOrigReword, false, false},
+		// The active voice is a documented limit: the bare verb is a change-log
+		// verb with any object, so it is left off the list on purpose.
+		{"active voice", "Order emails go out through SendGrid via SENDGRID_API_KEY.",
+			"We removed SendGrid and deleted SENDGRID_API_KEY.", false, false},
 		// The anchor: no shared value token, no retirement. The plain-word limit.
 		{"plain words only", "we send order emails through the mail provider",
 			"the mail provider was removed and order emails are no longer sent", false, true},

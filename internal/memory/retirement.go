@@ -36,10 +36,13 @@ import "strings"
 // wording must still fold into the first. That test reads the phrase alone,
 // with no anchor or plan test, so it is the stricter of the two readings.
 //
-// KNOWN LIMITS, the safe direction for both: a retirement that names its
-// subject only in plain lowercase words, or only by a capitalised word at a
-// sentence start ("Redis was removed"), shares no value token and is not
-// detected, which is the value guard's own plain-word limit; and a sentence
+// KNOWN LIMITS, the safe direction for all of them: a retirement in the active
+// voice ("We removed SendGrid", "dropped Memcached") is not detected, because
+// the bare verbs are left off the list (see retirementPhrases); a retirement
+// that names its subject only in plain lowercase words, or only by a
+// capitalised word at a sentence start ("Redis was removed"), shares no value
+// token and is not detected, which is the value guard's own plain-word limit;
+// and a sentence
 // that also carries a plan word, a negation, or the subject in another
 // sentence is not read as one. A missed retirement is two rows a supersede or
 // reflect pass can still relate; a false one refuses a fold (two rows instead

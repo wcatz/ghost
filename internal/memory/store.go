@@ -8898,8 +8898,9 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
 // reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
 // save-time and reflection-time dedup agree on what "duplicate" means for
-// same-length restatements — except for a pair that swaps a value, which the
-// save path refuses (statesDifferentValue) and reflection's tier does not.
+// same-length restatements — except for a pair that swaps a value or a note
+// that retires the other, which the save path refuses (statesDifferentValue,
+// retires) and reflection's tier does not.
 //
 // Save-time dedup deliberately goes *further* than reflection's tier via the
 // overlap leg below: Upsert sees one candidate against a live corpus and its

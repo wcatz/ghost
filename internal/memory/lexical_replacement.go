@@ -11,7 +11,8 @@ import (
 
 // lexicalReplacements names, for each row of one retrieval, the LATER rows of
 // the same retrieval that look like its replacement: a newer note about the same
-// subject that states a different value of it. It is the read-side counterpart
+// subject that states a different value of it, or that says it is gone
+// (retires). It is the read-side counterpart
 // of the save path's value guard (statesDifferentValue). A save that swaps a
 // value is no longer folded into the claim it replaces, so the store holds the
 // two as unlinked rows, and with no lifecycle pass between sessions (the
