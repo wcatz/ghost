@@ -495,8 +495,8 @@ func TestImportMemoryDefaultsAbsentTimestampsAndImportance(t *testing.T) {
 }
 
 // TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne: a memory
-// written through `Store.Create` — the one writer that binds the field with no
-// default, and which no production path calls — holds 0 and exports it as
+// written through `Store.Create` — a writer that binds the field with no default
+// and that no production path calls — holds 0 and exports it as
 // `"importance":0`. Re-importing that must store 0 again, not the column's
 // default: promoting it is a silent rewrite of the artifact's own content,
 // which is the one thing the format promises not to do. Only a record that
