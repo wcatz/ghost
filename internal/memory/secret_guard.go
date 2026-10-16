@@ -268,11 +268,12 @@ func rejectSecretList(field string, values []string) error {
 //     contradicts its own detail is the failure this whole comment is written
 //     against.
 //
-//     The project name and path are the real gap and they are structural: a save
-//     calls EnsureProjectWithRepo BEFORE the guard, so covering them means
-//     deciding whether a project may be created before its name is known to be
-//     safe — a behaviour change on every save, for a field an operator sets
-//     once. Not taken here.
+//     The project name and path are the real gap. The MCP writers now run the
+//     content, tag, source_ref and scope guards before they open the project
+//     (CheckUpsertArguments, CheckDecisionArguments), so a refused write creates
+//     no project; but the name, path and repo_remote themselves are not
+//     token-guarded on any path. Guarding them is a behaviour change on every
+//     save, for a field an operator sets once. Not taken here.
 //
 //     The tags were on this list too, on the claim that they are not returned by
 //     search and not quoted into a harness prompt. That claim was false and I

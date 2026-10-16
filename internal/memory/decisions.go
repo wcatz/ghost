@@ -42,25 +42,7 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	// (the decisions row and the companion memory built from the same three
 	// fields), so a refusal that landed after the first INSERT would have to be
 	// undone by the rollback anyway — cheaper and clearer to never start.
-	// alternatives is checked as a list because ghost_decisions_list renders it
-	// back to the agent, which makes an entry as replayable as the rationale.
-	if err := rejectSecretFields(
-		secretField{"title", title},
-		secretField{"decision", decision},
-		secretField{"rationale", rationale},
-	); err != nil {
-		return "", "", false, err
-	}
-	if err := rejectSecretList("alternatives", alternatives); err != nil {
-		return "", "", false, err
-	}
-	// And the tags, which are not a lesser field for being short: a decision's
-	// tag list is marshalled into BOTH the decisions row and the companion memory
-	// row built from the same three fields, and that companion is an ordinary
-	// memory — assembled into every search row and quoted into the next reflect
-	// prompt. So a token pasted as a tag here is exposed on exactly the two paths
-	// the guard above exists for.
-	if err := rejectSecretList("tags", tags); err != nil {
+	if err := CheckDecisionArguments(title, decision, rationale, alternatives, tags); err != nil {
 		return "", "", false, err
 	}
 	s.mu.Lock()
@@ -132,6 +114,34 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	}
 
 	return decisionID, memoryID, cut, nil
+}
+
+// CheckDecisionArguments is every refusal RecordDecision makes from its
+// arguments alone. It is the SAME predicate RecordDecision asks first, exported
+// so ghost_decision_record can ask it before it opens the project the decision
+// is written to: a refused decision must leave no empty project, and no checkout
+// binding, behind it.
+//
+// alternatives is checked as a list because ghost_decisions_list renders it
+// back to the agent, which makes an entry as replayable as the rationale.
+func CheckDecisionArguments(title, decision, rationale string, alternatives, tags []string) error {
+	if err := rejectSecretFields(
+		secretField{"title", title},
+		secretField{"decision", decision},
+		secretField{"rationale", rationale},
+	); err != nil {
+		return err
+	}
+	if err := rejectSecretList("alternatives", alternatives); err != nil {
+		return err
+	}
+	// And the tags, which are not a lesser field for being short: a decision's
+	// tag list is marshalled into BOTH the decisions row and the companion memory
+	// row built from the same three fields, and that companion is an ordinary
+	// memory — assembled into every search row and quoted into the next reflect
+	// prompt. So a token pasted as a tag here is exposed on exactly the two paths
+	// the guard above exists for.
+	return rejectSecretList("tags", tags)
 }
 
 // decisionCompanionContent is the text RecordDecision writes into the companion
