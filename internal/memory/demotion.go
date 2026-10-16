@@ -170,14 +170,23 @@ func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pro
 // DropDemotedLosers branch (see docs/invariants.md for that divergence). The
 // relevance rank is reported unchanged: only which row of the pair leaves, and
 // the id it lost to, change.
-func earlierRowLoses(pairs []demotionPairs, rows []Memory, protected map[string]bool) []demotionPairs {
+//
+// rows[window:] is a tail the window was extended by (dropNearDuplicatesOver):
+// a verdict is never turned round to remove a window row in favour of a tail
+// row. It is dropped and both rows stay, because the tail can be cut by the
+// item budget and the answer would then hold neither row of the pair.
+func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected map[string]bool) []demotionPairs {
 	if len(pairs) == 0 {
 		return pairs
 	}
 	created := make(map[string]time.Time, len(rows))
-	for _, m := range rows {
+	inTail := make(map[string]bool, len(rows))
+	for i, m := range rows {
 		if at, ok := ParseStamp(m.CreatedAt); ok {
 			created[m.ID] = at
+		}
+		if i >= window {
+			inTail[m.ID] = true
 		}
 	}
 	out := make([]demotionPairs, 0, len(pairs))
@@ -186,6 +195,9 @@ func earlierRowLoses(pairs []demotionPairs, rows []Memory, protected map[string]
 		wc, wok := created[pr.winner]
 		if lok && wok && lc.After(wc) {
 			if protected[pr.winner] && !protected[pr.loser] {
+				continue
+			}
+			if inTail[pr.loser] && !inTail[pr.winner] {
 				continue
 			}
 			pr.loser, pr.winner = pr.winner, pr.loser
@@ -613,7 +625,7 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // (withoutReplacingLosers, through replacementRemovalVetoes): removing it would
 // leave the row it replaced unmarked, as though it were current.
 //
-// A lexical replacement pair (replacementPairsWithin: a newer row that names the
+// A lexical replacement pair (replacementsWithin: a newer row that names the
 // same thing with a different value, by the rule the marker uses) VETOES the
 // removal too, whichever of the two lost. The linking worker writes a cosine
 // `related` edge between exactly such rows, and a query in the old wording
@@ -629,6 +641,18 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // decided on evidence, and "I could not check for a hidden contradiction" is
 // not evidence that there is none.
 func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams, now time.Time) (kept, removed []Memory, lostTo map[string][]string) {
+	return s.dropNearDuplicatesOver(ctx, results, len(results), p, now)
+}
+
+// dropNearDuplicatesOver is dropNearDuplicates over a window followed by a
+// tail: results[:window] is the window and results[window:] the hydrated tail
+// the second pass appends. The one rule that reads the split is the
+// chronology's (earlierRowLoses): it never turns a verdict round to remove a
+// window row in favour of a tail row. The tail sits behind the window in the
+// answer and the item budget can cut it, so that trade could leave neither row
+// of the pair; the verdict is dropped instead and both rows stay, which is never
+// less than the answer held before the rule.
+func (s *Store) dropNearDuplicatesOver(ctx context.Context, results []Memory, window int, p SearchParams, now time.Time) (kept, removed []Memory, lostTo map[string][]string) {
 	// Non-nil from the first line, so EVERY return below is safe to file a
 	// removal into (see the contract above): the three returns that remove
 	// nothing are the common case for a window holding no pair, and they used to
@@ -647,7 +671,7 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 	s.mu.RLock()
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 	if err == nil {
-		pairs = earlierRowLoses(pairs, results, protected)
+		pairs = earlierRowLoses(pairs, results, window, protected)
 	}
 	if err == nil && len(pairs) > 0 {
 		var contradicted map[string]bool

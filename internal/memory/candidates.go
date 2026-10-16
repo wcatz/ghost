@@ -657,7 +657,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// are untouched by this pass.
 	if len(tail) > 0 {
 		combined := append(append([]Memory{}, selected...), tail...)
-		keptAll, passLosers, lostToPass := cand.dropNearDuplicates(ctx, combined, p, req.Now)
+		keptAll, passLosers, lostToPass := cand.dropNearDuplicatesOver(ctx, combined, len(selected), p, req.Now)
 		if len(passLosers) > 0 {
 			inWindow := make(map[string]bool, len(selected))
 			for _, m := range selected {
