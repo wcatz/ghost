@@ -23,9 +23,10 @@ const DefaultDemotionThreshold = 0.90
 // that exemption needs the rows' text and stamps, which an id list does not
 // carry. Every reader in the tree that ranks rows holds the rows and applies
 // it: GetTopMemories, demoteNearDuplicates and passiveDemote through
-// exemptReplacementPairs, and dropNearDuplicates through replacementPairsWithin
-// and withoutReplacementPairs directly. A new reader must too, or a cosine edge
-// ranks a replacement below the claim it replaced there.
+// exemptReplacementPairs, and dropNearDuplicates through
+// replacementRemovalVetoes, which reads the pairs over the whole window. A new
+// reader must too, or a cosine edge ranks a replacement below the claim it
+// replaced there.
 //
 // 'duplicate' edges are exempt from the strength threshold — Upsert already
 // gated them at upsertMergeThreshold, so their strength is a Jaccard score,
@@ -81,7 +82,9 @@ func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, protec
 
 // nearDuplicatePenaltyRows is the near-duplicate edge set as one loser/winner
 // verdict per edge, with the scope exemption and the rank and pinning rules
-// applied. It is the one place that decides which member of a pair loses, so the
+// applied. It is the one place that decides which member of a pair loses (the
+// query path's removal then turns a verdict round by chronology,
+// earlierRowLoses, on the verdicts this returns, never on a second read), so the
 // penalty a caller demotes by and the ids explain attributes that demotion to
 // cannot come from two different reads: a re-derived attribution could name a
 // different loser than the demotion chose, and the explanation would then
@@ -150,10 +153,103 @@ func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pro
 	return pairs, nil
 }
 
+// earlierRowLoses is the chronology rule of a near-duplicate REMOVAL: the later
+// of two rows about one subject is never removed in favour of the earlier one.
+// nearDuplicatePenaltyRows picks the loser by rank (and protection), and a
+// later restatement often ranks below the row it restates, because the earlier
+// row carries the strengthening of every fold into it. When the positioned loser
+// was created strictly after its winner the verdict is turned round, so the
+// earlier row is the one that leaves. created_at is the stamp read, the one a
+// fold never moves; a tie or an unreadable stamp leaves the rank verdict as it
+// was. When turning it round would remove a protected row in favour of an
+// unprotected one, the rank verdict stands: the pair is still a near-duplicate,
+// and keeping both would hand the reader a duplicate answer. A turned-round
+// verdict is marked (demotionPairs.flipped) so that a veto of its loser falls
+// back to the rank verdict (vetoLosers), and the caller reports the survivor as
+// a STAND-IN for the row it displaced (DroppedLoser.StandIns), which the
+// assembler's admission stages then judge by that row's evidence too.
+//
+// It is the query path's removal rule only (dropNearDuplicates, both passes).
+// The reorder-only readers keep the rank verdict, and so does passiveDemote's
+// DropDemotedLosers branch (see docs/invariants.md for that divergence). The
+// relevance rank is reported unchanged: only which row of the pair leaves, and
+// the id it lost to, change.
+//
+// A pair joined by a live `supersedes` or `contradicts` edge (explicit, in
+// either direction) is never turned round: the explicit relation decides it,
+// as it does for lexicalReplacements. The rank such a pair arrives in is the
+// order after the supersede demotion, which has already sunk the superseded row,
+// and a superseded row can carry the later created_at (supersede orients by
+// updated_at first, so a stale note re-asserted is the superseded one); turning
+// the verdict round there would remove the superseder and keep the retired row.
+//
+// rows[window:] is a tail the window was extended by (dropNearDuplicatesOver):
+// a verdict is never turned round to remove a window row in favour of a tail
+// row, and the rank verdict stands, because the tail can be cut by the item
+// budget and the answer would then hold neither row of the pair.
+func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected map[string]bool, explicit []LinkEdge) []demotionPairs {
+	if len(pairs) == 0 {
+		return pairs
+	}
+	related := make(map[[2]string]bool, 2*len(explicit))
+	for _, e := range explicit {
+		related[[2]string{e.From, e.To}] = true
+		related[[2]string{e.To, e.From}] = true
+	}
+	created := make(map[string]time.Time, len(rows))
+	inTail := make(map[string]bool, len(rows))
+	for i, m := range rows {
+		if at, ok := ParseStamp(m.CreatedAt); ok {
+			created[m.ID] = at
+		}
+		if i >= window {
+			inTail[m.ID] = true
+		}
+	}
+	out := make([]demotionPairs, 0, len(pairs))
+	for _, pr := range pairs {
+		lc, lok := created[pr.loser]
+		wc, wok := created[pr.winner]
+		if lok && wok && lc.After(wc) && (!protected[pr.winner] || protected[pr.loser]) && (!inTail[pr.loser] || inTail[pr.winner]) && !related[[2]string{pr.loser, pr.winner}] {
+			pr.loser, pr.winner = pr.winner, pr.loser
+			pr.flipped = true
+		}
+		out = append(out, pr)
+	}
+	return out
+}
+
 // demotionPairs is the per-edge outcome both near-duplicate statements agree on:
 // the id that loses and the id it lost to.
 type demotionPairs struct {
 	loser, winner string
+	// flipped marks a verdict earlierRowLoses turned round: the rank verdict is
+	// the same pair with loser and winner swapped, and a veto of the flipped
+	// loser falls back to it (vetoLosers).
+	flipped bool
+}
+
+// vetoLosers keeps the verdicts vetoed does not refuse. A refused verdict that
+// earlierRowLoses turned round falls back to the rank verdict it was turned
+// round from, unless that one is refused too: the veto protects the row it
+// names, and the pair is still a near-duplicate, so the other row of it is
+// removed as the rank decided rather than the answer holding both.
+func vetoLosers(pairs []demotionPairs, vetoed func(demotionPairs) bool) []demotionPairs {
+	kept := make([]demotionPairs, 0, len(pairs))
+	for _, pr := range pairs {
+		if !vetoed(pr) {
+			kept = append(kept, pr)
+			continue
+		}
+		if !pr.flipped {
+			continue
+		}
+		rank := demotionPairs{loser: pr.winner, winner: pr.loser}
+		if !vetoed(rank) {
+			kept = append(kept, rank)
+		}
+	}
+	return kept
 }
 
 // contradictingIDs reports which of ids a live `contradicts` edge joins to
@@ -527,8 +623,8 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 
 // dropNearDuplicates is demoteNearDuplicates' removal counterpart, and the
 // query path's half of #926: the verdicts are the same read over the same
-// window, decided by the same rules and stamped into the trace the same way,
-// but the losing row LEAVES the set instead of sinking to the bottom of it —
+// window and stamped into the trace the same way, but the losing row LEAVES the
+// set instead of sinking to the bottom of it —
 // so a window spent on a restatement is a window slot returned to the next
 // distinct row (hydrateTail backfills the gap the removal leaves).
 //
@@ -560,7 +656,16 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // contradiction marker exists to show; the passive bucket's DropDemotedLosers
 // path applies the same veto so the two surfaces agree.
 //
-// A lexical replacement pair (replacementPairsWithin: a newer row that names the
+// Two rules differ from the reorder, because a removal is a membership decision
+// and the reorder is not. The later of two rows is never removed in favour of
+// the earlier one (earlierRowLoses: the verdict is turned round on created_at,
+// before the vetoes below, so they judge the row that would actually leave, and
+// a veto of that row falls back to the rank verdict rather than keeping both). And
+// a loser that is the lexical replacement of ANY row of the window stays
+// (withoutReplacingLosers, through replacementRemovalVetoes): removing it would
+// leave the row it replaced unmarked, as though it were current.
+//
+// A lexical replacement pair (replacementsWithin: a newer row that names the
 // same thing with a different value, by the rule the marker uses) VETOES the
 // removal too, whichever of the two lost. The linking worker writes a cosine
 // `related` edge between exactly such rows, and a query in the old wording
@@ -575,7 +680,22 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 // removal for the same reason a penalty read that fails does: removals are
 // decided on evidence, and "I could not check for a hidden contradiction" is
 // not evidence that there is none.
-func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams, now time.Time) (kept, removed []Memory, lostTo map[string][]string) {
+func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p SearchParams, now time.Time) (kept, removed []Memory, lostTo, standIns map[string][]string) {
+	return s.dropNearDuplicatesOver(ctx, results, len(results), p, now)
+}
+
+// dropNearDuplicatesOver is dropNearDuplicates over a window followed by a
+// tail: results[:window] is the window and results[window:] the hydrated tail
+// the second pass appends. The one rule that reads the split is the
+// chronology's (earlierRowLoses): it never turns a verdict round to remove a
+// window row in favour of a tail row. The tail sits behind the window in the
+// answer and the item budget can cut it, so that trade could leave neither row
+// of the pair; the rank verdict stands instead, as it did before the rule.
+//
+// standIns maps each removed id to the later rows a turned-round verdict kept
+// in its place (sorted, absent for a rank verdict); the caller files it on
+// DroppedLoser.StandIns.
+func (s *Store) dropNearDuplicatesOver(ctx context.Context, results []Memory, window int, p SearchParams, now time.Time) (kept, removed []Memory, lostTo, standIns map[string][]string) {
 	// Non-nil from the first line, so EVERY return below is safe to file a
 	// removal into (see the contract above): the three returns that remove
 	// nothing are the common case for a window holding no pair, and they used to
@@ -583,7 +703,7 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 	// removals into the FIRST pass's map.
 	lostTo = make(map[string][]string)
 	if len(results) < 2 {
-		return results, nil, lostTo
+		return results, nil, lostTo, nil
 	}
 	ids := make([]string, len(results))
 	protected := make(map[string]bool, len(results))
@@ -594,28 +714,26 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 	s.mu.RLock()
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 	if err == nil && len(pairs) > 0 {
-		var contradicted map[string]bool
-		contradicted, err = contradictingIDs(ctx, s.queryDB(), ids)
-		if err == nil && len(contradicted) > 0 {
-			keptPairs := make([]demotionPairs, 0, len(pairs))
-			for _, pr := range pairs {
-				if contradicted[pr.loser] {
-					continue
-				}
-				keptPairs = append(keptPairs, pr)
-			}
-			pairs = keptPairs
+		var explicit []LinkEdge
+		explicit, err = explicitEdgesWithin(ctx, s.queryDB(), ids)
+		if err == nil {
+			pairs = earlierRowLoses(pairs, results, window, protected, explicit)
 		}
 	}
 	if err == nil && len(pairs) > 0 {
-		var repl map[[2]string]bool
-		repl, err = replacementPairsWithin(ctx, s.queryDB(), results, now)
-		pairs = withoutReplacementPairs(pairs, repl)
+		var contradicted map[string]bool
+		contradicted, err = contradictingIDs(ctx, s.queryDB(), ids)
+		if err == nil && len(contradicted) > 0 {
+			pairs = vetoLosers(pairs, func(pr demotionPairs) bool { return contradicted[pr.loser] })
+		}
+	}
+	if err == nil && len(pairs) > 0 {
+		pairs, err = replacementRemovalVetoes(ctx, s.queryDB(), pairs, results, now)
 	}
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Warn("near-duplicate drop: lookup failed", "error", err)
-		return results, nil, lostTo
+		return results, nil, lostTo, nil
 	}
 	penalty, against := demotionVerdicts(pairs)
 	// Stamped exactly as nearDuplicateVerdicts stamps it, for the same reason:
@@ -630,7 +748,7 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 		}
 	}
 	if len(penalty) == 0 {
-		return results, nil, lostTo
+		return results, nil, lostTo, nil
 	}
 	kept = make([]Memory, 0, len(results))
 	for _, m := range results {
@@ -641,5 +759,17 @@ func (s *Store) dropNearDuplicates(ctx context.Context, results []Memory, p Sear
 		kept = append(kept, m)
 	}
 	lostTo = against
-	return kept, removed, lostTo
+	for _, pr := range pairs {
+		if !pr.flipped {
+			continue
+		}
+		if standIns == nil {
+			standIns = make(map[string][]string)
+		}
+		standIns[pr.loser] = append(standIns[pr.loser], pr.winner)
+	}
+	for id := range standIns {
+		sort.Strings(standIns[id])
+	}
+	return kept, removed, lostTo, standIns
 }
