@@ -453,8 +453,10 @@ session-start block and the project resource, a row with a live `supersedes` edg
 row on the same page carries **`[superseded by a newer note]`** at the same field, and
 **`superseded_by=`** naming that row, pinned or not. It is not a guess: Ghost recorded the
 relation. A pinned superseded row is also ordered directly behind its superseder, which
-holds a slot too; an unpinned one is sunk below it and reserves nothing. A withdrawn edge,
-an edge between conflicting scopes, and a superseder not on the page mark nothing.
+holds a slot too; an unpinned one is sunk below it and reserves nothing. A keep-forever
+(`retention: persistent`) row is marked the same way but is never sunk or moved by the
+edge. A withdrawn edge, an edge between conflicting scopes, and a superseder not on the
+page mark nothing.
 `ghost_memory_search` does not draw this marker.
 
 The project context block is the one surface where the explanation is conditional,

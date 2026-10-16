@@ -56,3 +56,37 @@ func TestAnUnpinnedSupersededConventionIsMarkedOnTheSessionStart(t *testing.T) {
 		t.Errorf("the superseded convention does not name its superseder: %q", oldLine)
 	}
 }
+
+// TestAKeepForeverSupersededConventionIsMarkedOnTheSessionStart: a
+// `retention=persistent` row is never sunk by the edge, but the edge still
+// switches the lexical guess off, so its line must still carry the marker.
+func TestAKeepForeverSupersededConventionIsMarkedOnTheSessionStart(t *testing.T) {
+	path := pinSession(t, 3,
+		pinSessionRow{id: "old-conv01", category: "convention", importance: 0.8,
+			content: "Release tags follow semver: tag vMAJOR.MINOR.PATCH from main and run make release to publish."},
+		pinSessionRow{id: "new-conv01", category: "convention", importance: 0.8,
+			content: "Release tags follow calendar versioning now: tag YYYY.MM.N from main and run make release to publish."})
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	for _, q := range []string{
+		`UPDATE memories SET retention = 'persistent' WHERE id = 'old-conv01'`,
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('new-conv01', 'old-conv01', 'supersedes', 1, 'llm')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_ = db.Close()
+	got := renderSessionStart(t, path)
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "follow semver") {
+			if !strings.HasPrefix(l, "- [convention] `old-conv01` (0.8 "+assemble.SupersededMarker) || !strings.Contains(l, "superseded_by=`new-conv01`") {
+				t.Errorf("the keep-forever superseded convention is not marked: %q", l)
+			}
+			return
+		}
+	}
+	t.Fatalf("the keep-forever convention is not on the block. Got:\n%s", got)
+}

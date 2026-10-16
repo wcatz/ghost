@@ -902,9 +902,13 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	// Every superseded row is NAMED (Candidate.SupersededBy), pinned or not, so the
 	// assembler can mark it on its line: a live edge switches the lexical guess off
 	// for its pair and resolve never retires a convention or a preference, so the
-	// name is the only signal left. Only the PINNED subset drives the reservation
-	// and the arrangement; an unpinned superseded row reserves nothing and is sunk
-	// by the demotion, as it always was.
+	// name is the only signal left. A keep-forever (retention-exempt) row is named
+	// too, because the guess is off for it just the same, but the name is for the
+	// marker ONLY. The demotion is never sunk by it (passiveDemote reads its own
+	// edges with the exemption), and passivePinnedOnly leaves it out, so only a
+	// PINNED, non-exempt superseded row drives the reservation and the arrangement;
+	// every other superseded row reserves nothing and is sunk by the demotion, or
+	// for an exempt one left in place, as it always was.
 	named := s.passiveSupersededBy(ctx, eligible)
 	supersededBy := passivePinnedOnly(named, eligible)
 	chosen, rest, floor := passiveSelect(eligible, pol)
@@ -932,21 +936,19 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 
 // passiveSupersededBy reads, for each eligible row, pinned or not, the ids of the
 // eligible rows that supersede it, sorted. The edge rules are the demotion's own
-// (supersedePenaltyRows: a live edge only, the scope exemption, and a
-// persistent-retention target is never sunk), so a row is named here exactly
-// when the demotion would sink it. A failed read is logged and means no row is
-// named, which leaves the pins first and every row unmarked — the order and the
-// lines before the marker existed.
+// (supersedePenaltyRows: a live edge only, the scope exemption) EXCEPT the
+// persistent-retention exemption: a keep-forever target is never sunk, but it is
+// named here, because a live edge switches the lexical guess off for its pair
+// and a marker withholds nothing. The name is for the marker only; the slot
+// rules read passivePinnedOnly, which leaves an exempt row out. A failed read is
+// logged and means no row is named, which leaves the pins first and every row
+// unmarked — the order and the lines before the marker existed.
 func (s *Store) passiveSupersededBy(ctx context.Context, rows []passiveRow) map[string][]string {
 	ids := make([]string, len(rows))
-	protected := make(map[string]bool, len(rows))
 	for i, r := range rows {
 		ids[i] = r.mem.ID
-		if RetentionExempt(r.mem) {
-			protected[r.mem.ID] = true
-		}
 	}
-	against, err := supersedePenaltyRows(ctx, s.queryDB(), ids, protected)
+	against, err := supersedePenaltyRows(ctx, s.queryDB(), ids, nil)
 	if err != nil {
 		s.logger.Warn("candidates: passive supersede lookup failed", "error", err)
 		return nil
@@ -961,13 +963,15 @@ func (s *Store) passiveSupersededBy(ctx context.Context, rows []passiveRow) map[
 }
 
 // passivePinnedOnly is the subset of a passiveSupersededBy map whose targets are
-// PINNED rows: the one input the slot reservation (passiveReserve) and the
-// arrangement (passiveArrange) read. Naming an unpinned row must not widen the
-// reservation, so the two maps are kept apart.
+// PINNED rows the demotion would sink (not retention-exempt): the one input the
+// slot reservation (passiveReserve) and the arrangement (passiveArrange) read.
+// Naming an unpinned or a keep-forever row must not widen the reservation or
+// move a row, so the two maps are kept apart, and this subset is exactly the map
+// the pinned path read before every row was named.
 func passivePinnedOnly(named map[string][]string, rows []passiveRow) map[string][]string {
 	out := map[string][]string{}
 	for _, r := range rows {
-		if srcs, ok := named[r.mem.ID]; ok && r.mem.Pinned {
+		if srcs, ok := named[r.mem.ID]; ok && r.mem.Pinned && !RetentionExempt(r.mem) {
 			out[r.mem.ID] = srcs
 		}
 	}

@@ -85,7 +85,7 @@ type Item struct {
 	// a convention or a preference is never resolved, so without it the edge would
 	// leave the row with less on its line than the guess it replaced. A pinned
 	// row is also ordered behind its superseder; an unpinned one is sunk by the
-	// retriever's demotion. A superseder that is not in the answer is not named. A
+	// retriever's demotion, and a keep-forever one is marked but never moved. A superseder that is not in the answer is not named. A
 	// non-empty list renders SupersededMarker and `superseded_by=`.
 	SupersededBy []string
 	// MaybeReplacedBy lists the ids of the rows in the SAME rendered answer that
