@@ -197,7 +197,7 @@ func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected
 	for _, pr := range pairs {
 		lc, lok := created[pr.loser]
 		wc, wok := created[pr.winner]
-		if lok && wok && lc.After(wc) && !(protected[pr.winner] && !protected[pr.loser]) && !(inTail[pr.loser] && !inTail[pr.winner]) {
+		if lok && wok && lc.After(wc) && (!protected[pr.winner] || protected[pr.loser]) && (!inTail[pr.loser] || inTail[pr.winner]) {
 			pr.loser, pr.winner = pr.winner, pr.loser
 			pr.flipped = true
 		}
