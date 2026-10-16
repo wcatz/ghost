@@ -284,17 +284,37 @@ func TestResourceSubscription_ProjectDeleteNotifiesEncodedURI(t *testing.T) {
 	f := newEncodedURIFixture(t)
 	ctx := context.Background()
 
-	const uri = "ghost://project/%2Fsrv%2Fu%2Frepo/context"
-	if err := f.session.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
-		t.Fatalf("Subscribe: %v", err)
+	// The delete notifies under both aliases: the encoded id and the name.
+	const idURI = "ghost://project/%2Fsrv%2Fu%2Frepo/context"
+	const nameURI = "ghost://project/repo/context"
+	for _, uri := range []string{idURI, nameURI} {
+		if err := f.session.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+			t.Fatalf("Subscribe %s: %v", uri, err)
+		}
 	}
-	awaitResourceSubscriptions(t, f.srv, ctx, f.updated, uri)
+	awaitResourceSubscriptions(t, f.srv, ctx, f.updated, idURI, nameURI)
 
 	res := callTool(t, f.session, "ghost_project_delete", map[string]any{"project": "/srv/u/repo", "apply": true})
 	if res.IsError {
 		t.Fatalf("ghost_project_delete: %s", resultText(res))
 	}
-	awaitOnly(t, f.updated, uri)
+	want := map[string]bool{idURI: true, nameURI: true}
+	for len(want) > 0 {
+		select {
+		case got := <-f.updated:
+			if !want[got] {
+				t.Fatalf("unexpected notification %q; still waiting for %v", got, want)
+			}
+			delete(want, got)
+		case <-time.After(notificationWait):
+			t.Fatalf("no resources/updated notification for %v within %s", want, notificationWait)
+		}
+	}
+	select {
+	case got := <-f.updated:
+		t.Errorf("unexpected extra notification %q", got)
+	case <-time.After(subscriptionQuiet):
+	}
 }
 
 // The global bucket keeps its literal URI: encoding must not move the one
