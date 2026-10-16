@@ -623,10 +623,10 @@ var valueChecks = []struct {
 		return cfg.Search.MinSimilarity
 	}},
 	// linking.threshold is the cosine a `related` edge requires, so the same
-	// [0,1] range applies. Nothing in production reads it today, but an
-	// out-of-range value is a typo in the same way, and refusing it here is
-	// what keeps the day a caller does read it from finding a NaN threshold in
-	// the config.
+	// [0,1] range applies. The MCP server's linking worker reads it
+	// (cmd/ghost/mcp.go passes it to linking.NewWorker), and a link is created
+	// only when a candidate's score clears it, so refusing a NaN, infinite or
+	// out-of-range value here keeps it out of link creation.
 	{"linking.threshold", func(cfg *Config) error {
 		if v := cfg.Linking.Threshold; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("linking.threshold: a cosine is in [0,1], got %v", cfg.Linking.Threshold)

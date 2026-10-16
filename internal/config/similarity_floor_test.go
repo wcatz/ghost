@@ -74,9 +74,9 @@ func TestAUsableSearchFloorIsAccepted(t *testing.T) {
 }
 
 // linking.threshold is the same class of value — a cosine in [0, 1] — and gets
-// the same refusal on both paths, even though nothing in production reads it
-// today: the day a caller does read it, a NaN threshold must not be sitting in
-// the config waiting.
+// the same refusal on both paths. The linking worker reads it to decide which
+// related edges to create, so a NaN or out-of-range threshold must never reach
+// it.
 func TestAnUnusableLinkingThresholdFromAFileIsALoadError(t *testing.T) {
 	for _, bad := range badUnitFloats {
 		isolateConfig(t)
