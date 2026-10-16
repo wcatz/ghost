@@ -2542,8 +2542,17 @@ func (s *Server) registerTools() {
 		Title:       "Get Project Context",
 		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start — the hook already injects a condensed, category-priority selection (behavioral categories such as gotcha/convention/preference/decision bias the slot budget). Use when switching projects mid-session or after saving 3+ memories to see updated context. Pass as_of (RFC 3339) to read the project as it stood at that instant instead, for replaying what a past session was given.",
 		Annotations: &mcp.ToolAnnotations{
-			ReadOnlyHint:  true,
-			OpenWorldHint: boolPtr(false),
+			// NOT read-only. On first contact, when the project holds no memories,
+			// this tool imports Claude Code auto-memory files as memory rows, and
+			// those rows are served by every passive surface afterwards. That is a
+			// change to what Ghost knows, unlike the audit row ghost_memory_search
+			// appends, which no other surface observes. Not destructive either, and
+			// that is stated explicitly because the spec defaults destructiveHint to
+			// true once readOnlyHint is false: the import adds rows and overwrites or
+			// deletes nothing. Not idempotent: a first call can import and a second
+			// call does not.
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args contextArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" {
@@ -2570,7 +2579,8 @@ func (s *Server) registerTools() {
 		args.ProjectID = resolved
 
 		// First-contact import: if project has zero memories, try importing
-		// from Claude Code's auto-memory files (read-only, one-time). A historical
+		// from Claude Code's auto-memory files (one-time; Claude's files are only
+		// read, but the store is written). A historical
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
@@ -2594,6 +2604,14 @@ func (s *Server) registerTools() {
 								case s.projectCh <- args.ProjectID:
 								default: // non-blocking
 								}
+							}
+							// The same rows change what the project's context
+							// resource serves, so a run that wrote any notifies its
+							// subscribers as a save does. A run that wrote nothing
+							// (no files, all refused or failed, all already present)
+							// changed nothing and stays silent.
+							if imported > 0 {
+								s.notifyMemoryRow(ctx, args.ProjectID)
 							}
 							break
 						}

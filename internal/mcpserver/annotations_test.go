@@ -45,15 +45,15 @@ func TestToolAnnotationsPinned(t *testing.T) {
 	want := map[string]wantAnnotations{
 		// Read-only: nothing a user would confirm. DestructiveHint and
 		// IdempotentHint are meaningless alongside readOnly and stay unset.
-		"ghost_memory_search":   {readOnly: true, why: "reads; its audit row is bookkeeping, see the comment at the annotation"},
-		"ghost_project_context": {readOnly: true, why: "readOnlyHint is owned by a separate issue and is not changed here"},
-		"ghost_memories_list":   {readOnly: true, why: "lists rows"},
-		"ghost_search_all":      {readOnly: true, why: "reads"},
-		"ghost_task_list":       {readOnly: true, why: "lists rows"},
-		"ghost_health":          {readOnly: true, why: "reports statistics"},
-		"ghost_list_projects":   {readOnly: true, why: "lists rows"},
-		"ghost_decisions_list":  {readOnly: true, why: "lists rows"},
+		"ghost_memory_search":  {readOnly: true, why: "reads; its audit row is bookkeeping, see the comment at the annotation"},
+		"ghost_memories_list":  {readOnly: true, why: "lists rows"},
+		"ghost_search_all":     {readOnly: true, why: "reads"},
+		"ghost_task_list":      {readOnly: true, why: "lists rows"},
+		"ghost_health":         {readOnly: true, why: "reports statistics"},
+		"ghost_list_projects":  {readOnly: true, why: "lists rows"},
+		"ghost_decisions_list": {readOnly: true, why: "lists rows"},
 		// Writers that add a row per call: a repeat is another row, so not idempotent.
+		"ghost_project_context": {why: "a first-contact run imports Claude auto-memory rows into an empty project"},
 		"ghost_memory_save":     {why: "a repeat stores a second row and raises the first row's importance"},
 		"ghost_save_global":     {why: "a repeat stores a second row and raises the first row's importance"},
 		"ghost_task_create":     {why: "a repeat creates a second task"},
