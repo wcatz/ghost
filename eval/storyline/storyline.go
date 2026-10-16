@@ -72,7 +72,10 @@ type Record struct {
 // line. Want is the record the search must lead to, Over the records that may
 // be returned but must rank BELOW Want (the claim Want replaced), and Absent the
 // records the search must not return at all (a record scoped elsewhere when the
-// probe carries a scope).
+// probe carries a scope). Marked is the records whose row, when the search
+// returns it together with Want, must carry the replaced marker at its field
+// (the lexical guess's or the recorded relation's): the claim Want replaced,
+// read by an agent that searched before acting.
 type Probe struct {
 	Name   string
 	Query  string
@@ -80,6 +83,7 @@ type Probe struct {
 	Want   string
 	Over   []string
 	Absent []string
+	Marked []string
 }
 
 // Lure is a pair a fallible classifier would call a supersession although both
@@ -428,7 +432,7 @@ func (s Storyline) validateTruthChecks() error {
 	}
 	for i, st := range s.Stages {
 		for _, p := range st.Probes {
-			for _, k := range append(append([]string{p.Want}, p.Over...), p.Absent...) {
+			for _, k := range append(append(append([]string{p.Want}, p.Over...), p.Absent...), p.Marked...) {
 				if at, ok := s.stageOf(k); ok && at >= i {
 					return fmt.Errorf("storyline %s: stage %d probe %s names %q, which does not exist yet when the probe runs", s.Key, i+1, p.Name, k)
 				}
@@ -447,7 +451,7 @@ func (s Storyline) validateTruthChecks() error {
 		if err := validScope(p.Scope); err != nil {
 			return fmt.Errorf("storyline %s: probe %s scope: %w", s.Key, p.Name, err)
 		}
-		keys := append(append([]string{p.Want}, p.Over...), p.Absent...)
+		keys := append(append(append([]string{p.Want}, p.Over...), p.Absent...), p.Marked...)
 		for _, k := range keys {
 			if _, ok := s.RecordByKey(k); !ok {
 				return fmt.Errorf("storyline %s: probe %s names no record %q", s.Key, p.Name, k)
