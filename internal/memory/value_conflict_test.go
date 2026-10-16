@@ -33,6 +33,9 @@ func TestStatesDifferentValue(t *testing.T) {
 		{"changed number", "The database pool is capped at max_conns=24.", "The database pool is capped at max_conns=180.", true},
 		{"two units on one number", "the cache holds 16gb", "the cache holds 16mb", true},
 		{"swapped store name", "Per-session state lives in Redis.", "Per-session state lives in Postgres.", true},
+		{"swapped make target in backticks", "deploy via `make deploy-prod` target", "deploy via `make deploy-stg` target", true},
+		// Deliberate: a version with one more component is a different pin.
+		{"one more version component", "the client pins protobuf v1.2 for the codec", "the client pins protobuf v1.2.0 for the codec", true},
 		{"swapped host name", "The production deploy target is Fly.io in region iad", "The production deploy target is Hetzner Compose in region fsn1", true},
 
 		{"identical", "cache TTL is 300 seconds", "cache TTL is 300 seconds", false},
@@ -45,7 +48,22 @@ func TestStatesDifferentValue(t *testing.T) {
 		{"reworded prose, same values", "The pool is built with pgxpool.New in go.mod v5.6.0.", "pgxpool.New builds the pool; go.mod is at v5.6.0", false},
 		{"capitalised sentence start is not a value", "The cache key is the request path", "Cache key is the request path, per the router", false},
 		{"capital after a colon is a sentence start", "Note: the cache key is the request path", "Remember: the cache key is the request path", false},
+		{"list markers start sentences", "- Always run tests before push\n- Never skip hooks", "- Prefer running tests before push\n- Never skip hooks", false},
+		{"heading then a line", "## Setup\nRun the installer before the tests", "## Setup\nRun the installer once, before the tests", false},
+		{"numbered list markers", "1. Build the image\n2. Push the image", "1) Build the image\n2) Push the image", false},
+		{"trailing slash on a path", "the store lives in internal/memory/ in this repo", "the store lives in internal/memory in this repo", false},
+		{"digit-grouping comma", "the queue holds 1,000 jobs at most", "the queue holds 1000 jobs at most", false},
+		{"same backticked span", "deploy via `make deploy-prod` target", "deploy with the `make deploy-prod` target", false},
+		// A known limit of a lexical rule: a swapped plain lowercase word outside
+		// backticks is not a value, so these still fold.
+		{"known limit: swapped lowercase name", "the service uses pgx for the pool", "the service uses sqlx for the pool", false},
 		{"same name, reworded", "Sessions live in Redis with a TTL", "We keep sessions in Redis, with a TTL", false},
+	}
+	// The markers and the words a heading and a line start with are never values.
+	for _, s := range []string{"## Setup\nRun the installer before the tests", "- Always run tests\n* Never skip\n+ Keep\n3. Push"} {
+		if v := valueTokens(s); len(v) != 0 {
+			t.Errorf("valueTokens(%q) = %v, want none", s, v)
+		}
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

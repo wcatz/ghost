@@ -72,7 +72,9 @@ func hasUnitOf(set map[string]bool, n string) bool {
 // splits on every non-alphanumeric rune, which is exactly what erases the shape
 // of a version, a path or an identifier. Surrounding punctuation is trimmed
 // first, so a sentence-final "everywhere." or a "Redis:" before a clause is a
-// word and not a dotted identifier. A token is a value when it carries
+// word and not a dotted identifier, a trailing '/' is dropped so
+// "internal/memory/" is "internal/memory", and a digit-grouping comma is part of
+// its number, so "1,000" is "1000". A token is a value when it carries
 //
 //   - a digit (a version, a port, a count, a commit hash), or
 //   - an inner '.', '/', '_', '=', ':', '@', '#' or '\' with at least three
@@ -80,32 +82,92 @@ func hasUnitOf(set map[string]bool, n string) bool {
 //     floor keeps "e.g" and "a/b" out), or
 //   - an upper-case letter after its first rune (camelCase "ingestHandler",
 //     ALL-CAPS "TTL"), or
-//   - a capital first letter AWAY from a sentence start (the first word, or a
-//     word after '.', '!', '?' or ':'): a name, "Redis" against "Postgres".
-//     At a sentence start a capital is grammar, so "The cache …" against
-//     "Cache …" is not two values.
+//   - a capital first letter AWAY from a sentence start: a name, "Redis"
+//     against "Postgres". A sentence starts at the beginning of the text, at
+//     every line, after a leading list or heading marker ("-", "*", "+", "1.",
+//     "1)", "#", "##" …, never values themselves) and after '.', '!', '?' or
+//     ':'. There a capital is grammar, so "The cache …" against "Cache …" and
+//     "## Setup" against nothing are not values, or
+//   - a place inside a backticked span: "`make deploy-prod`" is code, so every
+//     word of it is a value whatever its case.
 //
 // A hyphen alone is not a value, so "per-session" and "shipment-event" stay
-// words.
+// words, and neither is a plain lowercase word outside backticks: "uses pgx" and
+// "uses sqlx" are the same sentence to this rule (a documented limit, pinned by
+// TestStatesDifferentValue).
 func valueTokens(s string) map[string]bool {
 	out := map[string]bool{}
-	sentenceStart := true
-	for _, raw := range strings.Fields(s) {
-		tok := strings.Trim(raw, "\"'`«»“”‘’()[]{}<>.,;:!?*")
-		starts := sentenceStart
-		// The next word starts a sentence after a terminal mark or a colon,
-		// whatever this token turned out to be.
-		closed := strings.TrimRight(raw, "\"'`»”’)]}*")
-		sentenceStart = closed != "" && strings.ContainsAny(closed[len(closed)-1:], ".!?:")
-		if tok == "" {
-			continue
+	segments := strings.Split(s, "`")
+	sentenceStart, lineStart := true, true
+	for si, seg := range segments {
+		// An odd segment is inside a span, unless it is the unclosed tail.
+		code := si%2 == 1 && si < len(segments)-1
+		for li, line := range strings.Split(seg, "\n") {
+			if li > 0 {
+				sentenceStart, lineStart = true, true
+			}
+			for _, raw := range strings.Fields(line) {
+				if lineStart && !code && isListMarker(raw) {
+					continue
+				}
+				lineStart = false
+				tok := strings.Trim(raw, "\"'«»“”‘’()[]{}<>.,;:!?*")
+				tok = groupedDigits(strings.TrimRight(tok, "/"))
+				starts := sentenceStart
+				// The next word starts a sentence after a terminal mark or a
+				// colon, whatever this token turned out to be.
+				closed := strings.TrimRight(raw, "\"'»”’)]}*")
+				sentenceStart = closed != "" && strings.ContainsAny(closed[len(closed)-1:], ".!?:")
+				if tok == "" {
+					continue
+				}
+				if !code && !isValueToken(tok) && (starts || !isName(tok)) {
+					continue
+				}
+				out[strings.ToLower(tok)] = true
+			}
 		}
-		if !isValueToken(tok) && (starts || !isName(tok)) {
-			continue
-		}
-		out[strings.ToLower(tok)] = true
 	}
 	return out
+}
+
+// isListMarker reports whether a line's first field is a list or heading
+// marker: "-", "*", "+", a run of '#', or a number followed by '.' or ')'.
+func isListMarker(f string) bool {
+	switch f {
+	case "-", "*", "+":
+		return true
+	}
+	if strings.Trim(f, "#") == "" {
+		return true
+	}
+	if len(f) < 2 || (f[len(f)-1] != '.' && f[len(f)-1] != ')') {
+		return false
+	}
+	for _, r := range f[:len(f)-1] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// groupedDigits drops a digit-grouping comma — one between a digit and exactly
+// three digits that end the group — so "1,000" and "1000" are one number. A
+// comma anywhere else is kept.
+func groupedDigits(t string) string {
+	if !strings.Contains(t, ",") {
+		return t
+	}
+	isDigit := func(i int) bool { return i >= 0 && i < len(t) && t[i] >= '0' && t[i] <= '9' }
+	var b strings.Builder
+	for i := 0; i < len(t); i++ {
+		if t[i] == ',' && isDigit(i-1) && isDigit(i+1) && isDigit(i+2) && isDigit(i+3) && !isDigit(i+4) {
+			continue
+		}
+		b.WriteByte(t[i])
+	}
+	return b.String()
 }
 
 // isName reports whether tok is a capitalised word: "Redis", "Postgres",
