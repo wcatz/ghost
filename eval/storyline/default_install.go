@@ -380,10 +380,6 @@ func RecategorisedReplacement() Storyline {
 				Over:  []string{"cache-memcached"},
 			},
 		},
-		KnownFailing: map[string]string{
-			"stale-original:session-3":                            "the read side's replacement guess holds a pair across categories to the save path's cross-category fold bar (token Jaccard >= 0.7), which a replacement that rewords does not clear, so the old fact is unmarked; the same texts in one category are marked",
-			"search-ranks:session-3:lookup-cache:cache-memcached": "with no replacement pair across categories, search neither moves the decision ahead of the fact it replaced nor marks the fact",
-		},
 		Judge: "Did the session use the current cache (%s: %s) rather than the one it replaced?",
 	}
 }

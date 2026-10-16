@@ -29,9 +29,19 @@ import (
 //     stricter than scopesConflict, which lets a scoped row and an unscoped one
 //     stand together; a value that holds in one environment does not retire the
 //     general claim.
-//   - similarity at the save path's own fold bar: mergeScore > 0 within one
-//     category (the same-category probe), token Jaccard >=
-//     upsertCrossCategoryThreshold across categories (the cross-category probe).
+//   - similarity at the save path's same-category fold bar, mergeScore > 0,
+//     WHATEVER the two rows' categories. A replacement is often filed under
+//     another category than the claim it replaces (a decision replacing a
+//     fact), and a category says how a note was filed, not what it is about.
+//     The save path's cross-category bar (token Jaccard >=
+//     upsertCrossCategoryThreshold) is NOT used here: it exists to keep
+//     paraphrases of one rule from splitting across categories, and a
+//     replacement that rewords around its values never clears it, so every
+//     such pair went unmarked. The value, shared-value, retirement and
+//     subjectSwapped tests below are what keep two different claims apart, in
+//     one category or across two. Standing categories (convention, preference)
+//     are parties like any other: resolve's exemption for them is a rule about
+//     a write, and this guess writes nothing and withholds nothing.
 //   - statesDifferentValue: each side holds a value token the other lacks,
 //     OR the newer row RETIRES the older one (retires): it says, in one
 //     sentence that names a value token of the older row, that the thing is
@@ -128,11 +138,8 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 			if a.created.Equal(b.created) || explicit[[2]string{a.c.ID, b.c.ID}] {
 				continue
 			}
-			if a.c.Category == b.c.Category {
-				if mergeScore(a.tokens, b.tokens) <= 0 {
-					continue
-				}
-			} else if jaccard(a.tokens, b.tokens) < upsertCrossCategoryThreshold {
+			// One bar whatever the categories (see the similarity bullet above).
+			if mergeScore(a.tokens, b.tokens) <= 0 {
 				continue
 			}
 			older, newer := a, b

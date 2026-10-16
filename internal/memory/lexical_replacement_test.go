@@ -134,3 +134,138 @@ func BenchmarkLexicalReplacementsWorstCase(b *testing.B) {
 		lexicalReplacements(rows, nil, now)
 	}
 }
+
+// The recategorised-replacement storyline's pair, word for word: the cache is
+// saved as a fact, and the team's change to it as a decision, the category an
+// agent records a choice in.
+const (
+	cacheMemcachedFact = "Lookup responses are cached in Memcached: internal/cache dials memcached-01.corp.example:11211 and every entry lives 300s."
+	cacheRistrettoDec  = "Decision: lookup responses are cached in-process with ristretto instead of Memcached; internal/cache keeps a 64 MB budget per pod, entries still live 300s, and memcached-01 is being shut down."
+)
+
+func lexRowIn(id, category, created, content string) Candidate {
+	c := lexRow(id, created, content)
+	c.Category = category
+	return c
+}
+
+// TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory: a decision
+// that replaces a fact was never paired, because a pair across categories was
+// held to the save path's cross-category FOLD bar (token Jaccard >= 0.7), which
+// exists to keep paraphrases of one rule from splitting across categories and
+// which a replacement that rewords does not clear. The category says how a note
+// was filed, not what it is about, so the pair is judged by the bar a pair in
+// one category is judged by. The same texts in one category are the control:
+// they paired before the change and still do.
+func TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory(t *testing.T) {
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name, olderCat, newerCat, older, newer string
+	}{
+		{"fact replaced by a decision", "fact", "decision", cacheMemcachedFact, cacheRistrettoDec},
+		{"same texts in one category", "fact", "fact", cacheMemcachedFact, cacheRistrettoDec},
+		// The direction is the stamps', never the categories': the newer row is
+		// the replacement whichever category it was filed in.
+		{"decision replaced by a fact", "decision", "fact", cacheRistrettoDec, cacheMemcachedFact},
+		{"dependency replaced by a gotcha", "dependency", "gotcha",
+			"go.mod pins github.com/jackc/pgx/v4 at v4.18.1; the pool is built with pgxpool.Connect and the code imports pgx/v4 everywhere.",
+			"Watch out: go.mod now pins github.com/jackc/pgx/v5 at v5.6.0, so pgxpool.Connect is gone; the pool is built with pgxpool.New and every import moved to pgx/v5."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ot, nt := tokenizeContent(tc.older), tokenizeContent(tc.newer)
+			if tc.olderCat != tc.newerCat && jaccard(ot, nt) >= upsertCrossCategoryThreshold {
+				t.Fatalf("fixture Jaccard %.2f clears the cross-category fold bar; the test would not reach the defect", jaccard(ot, nt))
+			}
+			if mergeScore(ot, nt) <= 0 {
+				t.Fatalf("fixture does not clear the same-category bar; the test would assert nothing")
+			}
+			rows := []Candidate{
+				lexRowIn("old", tc.olderCat, "2026-09-01 10:00:00", tc.older),
+				lexRowIn("new", tc.newerCat, "2026-09-10 10:00:00", tc.newer),
+			}
+			if got := lexicalReplacements(rows, nil, now); !reflect.DeepEqual(got, map[string][]string{"old": {"new"}}) {
+				t.Errorf("%s (%s) then %s (%s): pairs %v, want old replaced by new", tc.olderCat, tc.older, tc.newerCat, tc.newer, got)
+			}
+		})
+	}
+}
+
+// TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule: lifting the
+// category bar lifts nothing else. A cross-category paraphrase that changes no
+// value is a restatement, not a replacement; two parallel facts about different
+// subjects in one frame stay apart; two environments' values are two settings;
+// and an explicit edge wins. Every fixture clears the similarity bar, so the named rule is the one
+// keeping it apart.
+func TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule(t *testing.T) {
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	restate := "Decision: keep caching lookup responses in Memcached; internal/cache dials memcached-01.corp.example:11211 and entries live 300s."
+	cases := []struct {
+		name         string
+		older, newer Candidate
+		edges        []LinkEdge
+		want         map[string][]string
+	}{
+		{name: "paraphrase, no value changed",
+			older: lexRowIn("old", "fact", "2026-09-01 10:00:00", cacheMemcachedFact),
+			newer: lexRowIn("new", "decision", "2026-09-10 10:00:00", restate)},
+		{name: "parallel facts about two services",
+			older: lexRowIn("old", "architecture", "2026-09-01 10:00:00", "auth-service runs on node-3 and listens on port 8080 behind Nginx"),
+			newer: lexRowIn("new", "fact", "2026-09-10 10:00:00", "billing-service runs on node-7 and listens on port 8080 behind Nginx")},
+		{name: "scopes differ",
+			older: func() Candidate {
+				c := lexRowIn("old", "fact", "2026-09-01 10:00:00", cacheMemcachedFact)
+				c.Scope = map[string]string{"env": "staging"}
+				return c
+			}(),
+			newer: lexRowIn("new", "decision", "2026-09-10 10:00:00", cacheRistrettoDec)},
+		{name: "explicit supersedes edge",
+			older: lexRowIn("old", "fact", "2026-09-01 10:00:00", cacheMemcachedFact),
+			newer: lexRowIn("new", "decision", "2026-09-10 10:00:00", cacheRistrettoDec),
+			edges: []LinkEdge{{From: "new", To: "old", Relation: "supersedes"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if mergeScore(tokenizeContent(tc.older.Content), tokenizeContent(tc.newer.Content)) <= 0 {
+				t.Fatalf("fixture does not clear the similarity bar; the test would assert nothing")
+			}
+			got := lexicalReplacements([]Candidate{tc.older, tc.newer}, tc.edges, now)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("pairs %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLexicalReplacementsPairsAStandingCategoryRow: convention and preference
+// are standing categories, which resolve never retires. That exemption is a rule
+// about a WRITE (resolve marks nothing in them); the replacement guess writes
+// nothing and withholds nothing, so a standing row is a party to a pair like any
+// other, in either direction, and the reader sees it marked beside the note that
+// may replace it. The superseded-convention storyline's pair, a convention
+// replaced by a convention, already paired; this pins the pair across
+// categories.
+func TestLexicalReplacementsPairsAStandingCategoryRow(t *testing.T) {
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	semver := "Release tags follow semver: tag `vMAJOR.MINOR.PATCH` from main and run `make release` to publish."
+	calver := "Release tags follow calendar versioning now: tag `YYYY.MM.N` from main and run `make release` to publish."
+	cases := []struct{ name, olderCat, newerCat, older, newer string }{
+		{"convention replaced by a decision", "convention", "decision", semver, calver},
+		{"fact replaced by a preference", "fact", "preference", cacheMemcachedFact, strings.TrimPrefix(cacheRistrettoDec, "Decision: ")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ot, nt := tokenizeContent(tc.older), tokenizeContent(tc.newer)
+			if jaccard(ot, nt) >= upsertCrossCategoryThreshold || mergeScore(ot, nt) <= 0 {
+				t.Fatalf("fixture Jaccard %.2f / mergeScore %.2f: it must sit between the two bars", jaccard(ot, nt), mergeScore(ot, nt))
+			}
+			rows := []Candidate{
+				lexRowIn("old", tc.olderCat, "2026-09-01 10:00:00", tc.older),
+				lexRowIn("new", tc.newerCat, "2026-09-10 10:00:00", tc.newer),
+			}
+			if got := lexicalReplacements(rows, nil, now); !reflect.DeepEqual(got, map[string][]string{"old": {"new"}}) {
+				t.Errorf("pairs %v, want old replaced by new", got)
+			}
+		})
+	}
+}
