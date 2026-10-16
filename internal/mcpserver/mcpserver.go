@@ -14,10 +14,12 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/assemble"
@@ -4525,9 +4527,11 @@ func (s *Server) registerResources() {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
 		// Refused for the reason the matching list tool refuses it: the empty
-		// sentence below would describe a project that does not exist.
+		// sentence below would describe a project that does not exist. The
+		// refusal is the SDK's resource-not-found error, not a plain one; see
+		// projectResourceNotFound.
 		if projectID == "" {
-			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+			return nil, projectResourceNotFound(req.Params.URI, rawID)
 		}
 
 		decisions, err := s.store.LiveDecisions(ctx, projectID, 20)
@@ -4583,9 +4587,11 @@ func (s *Server) registerResources() {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
 		// Refused for the reason the matching list tool refuses it: the empty
-		// sentence below would describe a project that does not exist.
+		// sentence below would describe a project that does not exist. The
+		// refusal is the SDK's resource-not-found error, not a plain one; see
+		// projectResourceNotFound.
 		if projectID == "" {
-			return nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", rawID))
+			return nil, projectResourceNotFound(req.Params.URI, rawID)
 		}
 
 		var sb strings.Builder
@@ -4645,7 +4651,7 @@ func (s *Server) registerPrompts() {
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		rawID := req.Params.Arguments["project_id"]
 		if rawID == "" {
-			return nil, fmt.Errorf("project_id argument is required")
+			return nil, invalidParamsError(errors.New("project_id argument is required"))
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
@@ -4709,7 +4715,7 @@ func (s *Server) registerPrompts() {
 		projectID := req.Params.Arguments["project_id"]
 		topic := req.Params.Arguments["topic"]
 		if projectID == "" || topic == "" {
-			return nil, fmt.Errorf("project_id and topic arguments are required")
+			return nil, invalidParamsError(errors.New("project_id and topic arguments are required"))
 		}
 		// This prompt never RESOLVES its project — it hands the argument straight
 		// to `ghost_decision_record` and lets that call decide — so it is not one
@@ -4980,7 +4986,7 @@ func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble
 func parseProjectIDFromURI(rawURI string) (string, error) {
 	u, err := url.Parse(rawURI)
 	if err != nil {
-		return "", fmt.Errorf("invalid resource URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
+		return "", invalidParamsError(fmt.Errorf("invalid resource URI %s: %w", memory.RefusalArg("resource URI", rawURI), err))
 	}
 	// The segment is split out of the path AS SENT and decoded exactly once.
 	// u.Path is already decoded, so splitting it turns an encoded '/' into a
@@ -4995,12 +5001,51 @@ func parseProjectIDFromURI(rawURI string) (string, error) {
 	segment, _, _ := strings.Cut(strings.TrimPrefix(escaped, "/"), "/")
 	projectID, err := url.PathUnescape(segment)
 	if err != nil {
-		return "", fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.RefusalArg("resource URI", rawURI), err)
+		return "", invalidParamsError(fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.RefusalArg("resource URI", rawURI), err))
 	}
 	if projectID == "" {
-		return "", fmt.Errorf("resource URI missing project_id: %s", memory.RefusalArg("resource URI", rawURI))
+		return "", invalidParamsError(fmt.Errorf("resource URI missing project_id: %s", memory.RefusalArg("resource URI", rawURI)))
 	}
 	return projectID, nil
+}
+
+// invalidParamsError puts err on the wire as JSON-RPC -32602 (invalid params)
+// with err's text as the message. A plain Go error returned from a resource or
+// template handler goes out with code 0, which is outside every JSON-RPC error
+// class, so a client cannot tell a bad argument from an internal failure; the
+// SDK's own refusals of an unmatched URI or an unknown template name already
+// use -32602. Use it only for a refusal of the caller's arguments — a failed
+// store read stays a plain error.
+func invalidParamsError(err error) error {
+	return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: err.Error()}
+}
+
+// projectResourceNotFound is the refusal of a ghost://project/{project_id}/...
+// read whose project Ghost has never registered: the SDK's resource-not-found
+// error (mcp.ResourceNotFoundError, so its code follows the SDK, -32602 by
+// default), with the informative sentence appended to its "Resource not found"
+// message and the URI in its data. The *jsonrpc.Error is returned as is,
+// never wrapped: the wire encoding keeps a wrapped error's code but drops its
+// data.
+//
+// The URI carries the project argument, which is routinely a clone URL with a
+// token in it, so the data takes the same token guard and echo bound as the
+// message (#839): when memory.RefusalArg would withhold the decoded id, data is
+// omitted rather than carrying the URI or a placeholder that is not a URI, and
+// the message names the id by the withheld placeholder.
+func projectResourceNotFound(uri, rawID string) error {
+	shown := memory.RefusalArg("project_id", rawID)
+	notFound := mcp.ResourceNotFoundError(uri)
+	var wire *jsonrpc.Error
+	if !errors.As(notFound, &wire) {
+		return notFound
+	}
+	out := *wire
+	out.Message = wire.Message + ": project " + shown + " not found"
+	if shown != strconv.Quote(rawID) {
+		out.Data = nil
+	}
+	return &out
 }
 
 // projectResourceURI builds ghost://project/{project_id}/{suffix} the way an
