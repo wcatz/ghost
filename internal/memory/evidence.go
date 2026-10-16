@@ -492,12 +492,23 @@ func IsValidEvidenceKind(kind string) bool { return validEvidenceKinds[kind] }
 // interpreted — the record is what the file said, including a kind this build
 // never writes (`legacy`, from a store seeded by the migration) and an
 // observation Ghost has no writer for.
+//
+// An id the table already holds is not kept, because it is the primary key and
+// belongs to the row that has it: the record takes a minted id exactly as one
+// with no id does. Nothing refers to an evidence id, so the only thing a refusal
+// would protect is the key, and it would cost the whole memory. The dry run
+// returns before it reaches this insert; it agrees with the apply because this
+// insert can no longer fail on the id, including when the holder is another
+// memory of the same artifact, which a dry run has not written. A memory already in the store
+// never reaches here (its presence is a skip), so re-importing an artifact does
+// not mint a second copy of its evidence.
 func importEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, e PortableEvidence) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_provenance
 			(id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
-		VALUES (COALESCE(NULLIF(?, ''), hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, memoryID, e.Kind,
+		VALUES (CASE WHEN ? != '' AND NOT EXISTS (SELECT 1 FROM memory_provenance WHERE id = ?)
+			THEN ? ELSE hex(randomblob(16)) END, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, e.ID, e.ID, memoryID, e.Kind,
 		nullIfEmpty(e.Agent), nullIfEmpty(e.SessionID), nullIfEmpty(e.SourceRef),
 		e.Confidence, boundStamp(e.ObservedAt), boundStamp(e.VerifiedAt),
 	); err != nil {

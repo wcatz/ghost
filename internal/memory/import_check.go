@@ -311,9 +311,13 @@ func CheckImportedMemory(m PortableMemory) error {
 	// An evidence id is the row's primary key in `memory_provenance`, so it is
 	// judged here too: a whitespace-only one, one carrying a control or line-break character,
 	// one past MaxImportedIDLen, or one an earlier entry of the SAME memory already
-	// used. The last is what made a dry run report a create the apply refused on
-	// `UNIQUE constraint failed: memory_provenance.id`. Each refusal names the
-	// entry by position and never the id, which is the value being refused.
+	// used. The insert would mint a fresh id for a repeat (importEvidenceTx keeps an
+	// id only while no row holds it), so the repeat is not refused to protect the
+	// key: two records of one memory naming one id is a hand edit whose intent the
+	// importer cannot tell, and saying so beats silently renaming one of them. An id
+	// held by a DIFFERENT memory is minted instead, because nothing about this
+	// record is ambiguous. Each refusal names the entry by position and never the
+	// id, which is the value being refused.
 	seenEvidenceIDs := make(map[string]struct{}, len(m.Evidence))
 	for i, e := range m.Evidence {
 		if !IsValidEvidenceKind(e.Kind) {
@@ -342,7 +346,7 @@ func CheckImportedMemory(m PortableMemory) error {
 			continue
 		}
 		if _, dup := seenEvidenceIDs[e.ID]; dup {
-			return fmt.Errorf("evidence[%d].id repeats the id of an earlier evidence record of this memory — evidence ids are unique, so the apply would refuse the row", i)
+			return fmt.Errorf("evidence[%d].id repeats the id of an earlier evidence record of this memory, which is ambiguous — give each evidence record its own id, or leave them empty and one is minted for each", i)
 		}
 		seenEvidenceIDs[e.ID] = struct{}{}
 	}
