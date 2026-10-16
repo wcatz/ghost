@@ -12,9 +12,19 @@ import "strings"
 // which is the failure repository identity exists to prevent.
 //
 // Canonical form is `<lowercase host>/<owner>/<repo>`: no scheme, no user, no
-// port, no trailing `.git`. Only the host is lower-cased — owner and repo keep
-// their original case, since a path that differs in case is a different string
-// on disk and guessing would invent a match nobody asserted.
+// port, no trailing `.git`, no query string and no fragment. Only the host is
+// lower-cased — owner and repo keep their original case, since a path that
+// differs in case is a different string on disk and guessing would invent a
+// match nobody asserted.
+//
+// Dropping the query string and the fragment is also what keeps a token out of
+// `projects.repo_remote`. A clone URL is one of the places an inline token
+// travels — in the userinfo (already stripped below), in a `?token=…` query
+// parameter, or in a `#…` fragment — and this column is replayed into every
+// later session's digest and written into every export, so a value that carried
+// one would travel with it. The query and fragment are not part of repository
+// identity, so removing them loses no identity and every write of the column
+// passes through this one function.
 //
 // Returns "" for anything that is not a recognizable remote, so callers read
 // "" as "no repository" rather than as a repository with an empty name.
@@ -28,6 +38,17 @@ func NormalizeRepoRemote(raw string) string {
 	// filesystem detection, so a second checkout silently fails to resolve.
 	if isFilesystemPath(s) {
 		return ""
+	}
+
+	// A query string and a fragment are not part of repository identity, and
+	// both are positions a clone URL can carry an inline token in. Drop them
+	// before any form is parsed, so no route — scheme-with-userinfo, scp, or a
+	// bare host/path — can carry one into the stored column, and so an "@" in a
+	// query is never mistaken for userinfo. This is the single function every
+	// write of projects.repo_remote passes through; see the function comment for
+	// why that matters.
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
 	}
 
 	// scheme://[user@]host/path — the most explicit form.

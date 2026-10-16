@@ -136,9 +136,11 @@ func CheckImportedProject(p PortableProject) error {
 	// name or path holds a credential is writing a record that will be refused on
 	// import, and refusing it at export is the only place the operator learns
 	// before they need the backup. Both fields are replayed into every later
-	// session's digest and returned by ghost_project_list. repo_remote is not
-	// guarded, and was never going to be: NormalizeRepoRemote strips the userinfo,
-	// so it cannot carry a password.
+	// session's digest and returned by ghost_project_list. repo_remote is not part
+	// of this guard and does not need to be: NormalizeRepoRemote reduces it to the
+	// host and the path, dropping the userinfo, the query string and the fragment —
+	// the three positions a clone URL carries an inline token in — so the value
+	// stored carries no token from a URL.
 	return rejectSecretFields(
 		secretField{"name", p.Name},
 		secretField{"path", p.Path},

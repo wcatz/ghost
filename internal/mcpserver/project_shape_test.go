@@ -417,7 +417,8 @@ func TestABoundPathThePredicateRefusesStillAcceptsASaveAddressedByThatPath(t *te
 // So the guard is asked twice, at the two points where the argument can become an
 // answer, and both refusals are credential refusals that name the field and never
 // the value. The repository refusal needs no such treatment: it names a
-// `NormalizeRepoRemote`d remote, which has no userinfo to strip back out.
+// `NormalizeRepoRemote`d remote, which has no userinfo, query string or fragment to
+// strip back out.
 func TestACredentialShapedProjectIDIsNeverEchoedBackByTheResolveItself(t *testing.T) {
 	// Two projects sharing the token as their NAME, which is what
 	// `basenameCandidates` matches on and what makes the reference ambiguous.

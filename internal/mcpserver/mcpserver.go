@@ -171,7 +171,8 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// sentences travel on to the tool's answer, so a credential-shaped argument
 	// that happens to be ambiguous would put the token into the one answer that
 	// says Ghost never stores credentials. The repository refusal names a
-	// `NormalizeRepoRemote`d remote, which has no userinfo, so it needs no guard.
+	// `NormalizeRepoRemote`d remote, which carries no userinfo, query string or
+	// fragment, so it needs no guard.
 	// This is the same hole the read and update paths still have and this diff
 	// does not close (#839).
 	resolvedID, _, err := s.store.ResolveProject(ctx, projectID)
@@ -222,8 +223,9 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// branches below store: the non-remote route passes path="" and the store
 	// normalizes it to the id, and the repository route passes the same value three
 	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
-	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, so it
-	// cannot carry a password.
+	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, the
+	// query string and the fragment, the three positions a clone URL carries an
+	// inline token in, so the value stored carries no token from a URL.
 	//
 	// The credential guard is asked FIRST, and that ordering is the difference
 	// between naming a value and relocating a secret. `CheckImportedProject` ends in

@@ -2618,8 +2618,8 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // is what makes the guarantee total instead of per-handler.
 //
 // The repository refusal in the same function does not come through here: it names
-// a NormalizeRepoRemote'd remote, which has had its userinfo stripped, so there is
-// no credential left in it to withhold.
+// a NormalizeRepoRemote'd remote, which has had its userinfo, query string and
+// fragment stripped, so there is no credential left in it to withhold.
 func ambiguousProject(input, reason string) error {
 	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, input), reason)
 }
