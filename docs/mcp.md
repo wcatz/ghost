@@ -123,6 +123,7 @@ header line states; the per-project report is named in the same line.
   ⚠ search: 2 of its 30 scored verdict(s) are degraded — judged against a partly-read transcript (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls
   project_context: no rows — this source has recorded no calls
+  working_moment: no rows — this source has recorded no calls
   "ignored" means the agent's own words never mentioned the memory, and "restated by wording" is a token-overlap heuristic; neither is a relevance or usefulness score
 ```
 
@@ -262,15 +263,15 @@ Each row reports the numbers the ranking recorded (`fts_rank`, `vector_rank`, `v
 
   The same rule holds on an **empty** block, and that is where it was wrong longest: a project with no memories of its own was told its rows had been retired on a store whose cross-project rows had also aged out, with the same "call `ghost_memories_list`" pointer to a browse that returns nothing for it. It now gets the ordinary empty-project answer instead — and, in the other direction, a project whose rows are all *withdrawn* (`ghost resolve` and `ghost resolve --mark` stamp `resolved_at`, and the context block does not read resolved rows) is no longer reported as one that has never been saved anything, nor as one whose rows "were withheld as out of date". It says how many it holds and that none is in the block, which is the same sentence a capped or deduplicated project gets.
 - **A project name Ghost has never seen still gets the cross-project rows.** The tool and the resource resolve the name first, and an unknown one resolves to nothing — so there is no project section to show. The `## Global (applies to all projects)` section does not depend on a project, and it is still rendered, followed by the sentence saying the project is not registered. You used to get those rows under `## Memories`; they are under the heading that is true of them. The first session in a new project is exactly when those preferences and conventions are worth having.
-- **Not part of the assembled rows**, and unchanged by any of the above: the learned-context summary, the resource's `## Recent Decisions`, and the `as_of` reading. An `as_of` request is a historical read rather than a current assembly — ranked from the change log rather than from the current tables, still honouring `limit`, still split into `## Memories` and `## Global` the same way, and returning the wording each memory held at that instant with the halves that have no history (learned context, decisions, tasks) omitted rather than shown as they are now. Each row's validity window is judged at that instant, through `memory.ValidityAt`: a memory whose window had closed or not yet opened then is withheld, and one valid then is shown as valid even if its window has closed since. `ghost_memory_search` with `as_of` does NOT judge the window at all, which is the deliberate difference: the bounds it would judge are the present's, because the change log versions no validity, so nothing is dropped for one and the bounds a row shows render with no verdict on them. Both notes lead with the same borrowed-bounds sentence, and only the listing's goes on to claim a verdict at T. The answer states this with `memory.AsOfBorrowedWindowNote`, which leads with the same borrowed-bounds sentence `ghost_project_context`'s `as_of` branch and `ghost context --as-of` print and then records that no verdict was drawn from them — so a window shown on a past answer reads as the window the row holds today and not as a window it held then. `as_of` for a project name Ghost has never registered is **refused**, and the answer names the instant: a past reading of a project that does not exist is not a reading of anything, and answering it from the present would hand back today's rows to a caller who asked for a past one with nothing in the payload saying so.
+- **Not part of the assembled rows**, and unchanged by any of the above: the learned-context summary, the resource's `## Recent Decisions`, and the `as_of` reading. An `as_of` request is a historical read rather than a current assembly — ranked from the change log rather than from the current tables, still honouring `limit`, still split into `## Memories` and `## Global` the same way, and returning the wording each memory held at that instant with the halves that have no history (learned context, decisions, tasks) omitted rather than shown as they are now. Each row's validity window is judged at that instant, through `memory.ValidityAt`: a memory whose window had closed or not yet opened then is withheld, and one valid then is shown as valid even if its window has closed since. `ghost_memory_search` with `as_of` does NOT judge the window at all, which is the deliberate difference: the bounds it would judge are the present's, because the change log versions no validity, so nothing is dropped for one and the bounds a row shows render with no verdict on them. Both notes lead with the same borrowed-bounds sentence, and only the listing's goes on to claim a verdict at T. The answer states this with `memory.AsOfBorrowedWindowNote`, which leads with the same borrowed-bounds sentence `ghost_project_context`'s `as_of` branch and `ghost context --as-of` print and then records that no verdict was drawn from them — so a window shown on a past answer reads as the window the row holds today and not as a window it held then. `as_of` for a project name Ghost has never registered is answered with the not-registered sentence **and no rows** — a normal result rather than an error, where the present-tense call appends the cross-project section: a past reading of a project that does not exist is not a reading of anything, and answering it from the present would hand back today's rows to a caller who asked for a past one with nothing in the payload saying so.
 
 ## Resources
 
 | Resource | Contents |
 |---|---|
-| `ghost://project/{project}/context` | Bounded project memory and learned context (assembled, so it withholds a memory whose validity window has closed) |
-| `ghost://project/{project}/decisions` | Project decision records, active and revisit, active first and a revisit one labelled `(revisit)` (a project Ghost has never registered fails the read with `project "…" not found`) |
-| `ghost://project/{project}/tasks` | Project tasks (a project Ghost has never registered fails the read with `project "…" not found`) |
+| `ghost://project/{project_id}/context` | Bounded project memory and learned context (assembled, so it withholds a memory whose validity window has closed) |
+| `ghost://project/{project_id}/decisions` | Project decision records, active and revisit, active first and a revisit one labelled `(revisit)` (a project Ghost has never registered fails the read with `project "…" not found`) |
+| `ghost://project/{project_id}/tasks` | Project tasks (a project Ghost has never registered fails the read with `project "…" not found`) |
 | `ghost://memories/global` | Top 15 global memories shared across projects (assembled, so it withholds a memory whose validity window has closed, reports an empty window as withheld rather than as never saved, and records the read under `source=project_context`) |
 
 Clients that support MCP resource subscriptions can pin these resources to survive context compaction. Resource URIs accept the project name or the resolved project ID, depending on the client. `ghost_decision_record` notifies the project's `decisions` **and** its `context` — the decision's companion memory and its `## Recent Decisions` entry both change that block — under both URI forms, and a decision recorded under `_global` also notifies `ghost://memories/global`, exactly as `ghost_save_global` does for its own write.
@@ -446,11 +447,12 @@ is for:
 `ghost_link_withdraw` name what they touched by the first line of a memory's
 content, capped at 70 characters. That is not delimited — it is a preview, and
 labelling it as data would misrepresent what it is — but it is cut at the first
-line break of either kind, LF or CR, so a memory's content cannot forge a line
-there either. The CR half is not pedantry: a lone carriage return is enough on
-its own, since a terminal reads it as "return to column 0 and overwrite", so a
-memory whose content was `legitimate claim\roverwrite this` would otherwise
-render a preview showing only `overwrite this`.
+line break of any kind, the same `isLineBreak` set the content fold and the label
+escape use (LF, VT, FF, CR, FS/GS/RS, NEL, LS, PS), so a memory's content cannot
+forge a line there either. The CR half is not pedantry: a lone carriage return is
+enough on its own, since a terminal reads it as "return to column 0 and
+overwrite", so a memory whose content was `legitimate claim\roverwrite this`
+would otherwise render a preview showing only `overwrite this`.
 
 Routes 2 and 3 are also what protect a store which already holds such a value:
 written before a write-boundary refusal landed, restored from a snapshot an older
