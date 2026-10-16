@@ -92,6 +92,24 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 	_, _ = fmt.Fprintf(stderr, "ghost hook: fail-open (%s: %v)\n", stage, err)
 }
 
+// openTranscript opens the transcript a hook payload named, after refusing
+// anything that is not a regular file. The path comes from the payload rather
+// than from Ghost, and a FIFO there would block the open until a writer appears
+// — a hang in a hook documented to fail open. A directory, device or socket is
+// refused for the same reason: the stat runs first, so a non-regular path is
+// never opened. It is the guard ReadBackupManifest applies, for the same
+// reason. A symlink is followed, and its target must be regular.
+func openTranscript(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (%s)", info.Mode().Type())
+	}
+	return os.Open(path)
+}
+
 // runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
 // — only on stop events (nudge=true) — the save-nudge reminder. The nudge is a
 // non-blocking {"decision":"approve"} emitted for every host that reaches the
@@ -131,7 +149,7 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		logFailOpen(stderr, "unknown source "+string(p.HostSource()), fmt.Errorf("no capability entry"))
 		return
 	}
-	f, err := os.Open(p.TranscriptPath)
+	f, err := openTranscript(p.TranscriptPath)
 	if err != nil {
 		logFailOpen(stderr, "open transcript", err)
 		return
@@ -194,7 +212,7 @@ func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
 		logFailOpen(stderr, "build the audit token hasher", err)
 		return nil
 	}
-	f, err := os.Open(p.TranscriptPath)
+	f, err := openTranscript(p.TranscriptPath)
 	if err != nil {
 		logFailOpen(stderr, "open transcript for the audit", err)
 		return nil
