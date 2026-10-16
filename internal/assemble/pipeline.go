@@ -696,6 +696,37 @@ func runDedup(p *pipeline) {
 	p.trace.record(stageDedup, in+len(dropped), in, dropped, notes...)
 }
 
+// standInEvidence is the removed rows a kept row STANDS IN for: the
+// near-duplicate losers stage 6 recorded whose removal chose this row only
+// because it is later (DroppedLoser.StandIns), followed through a chain of
+// such removals. By rank the removed row would have been the one kept, so the
+// admission stages after dedup (leg consensus, the relevance cutoff) must not
+// judge the stand-in weaker than the row it displaced: they admit it when they
+// would admit any of these rows. The rows' own evidence is reported unchanged.
+func (p *pipeline) standInEvidence(id string) []memory.DroppedLoser {
+	var out []memory.DroppedLoser
+	seen := map[string]bool{id: true}
+	frontier := []string{id}
+	for len(frontier) > 0 {
+		cur := frontier[0]
+		frontier = frontier[1:]
+		for _, l := range p.losers {
+			if seen[l.ID] {
+				continue
+			}
+			for _, sid := range l.StandIns {
+				if sid == cur {
+					seen[l.ID] = true
+					out = append(out, l)
+					frontier = append(frontier, l.ID)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (p *pipeline) droppedAlready(id string) bool {
 	_, ok := p.dropped[id]
 	return ok
@@ -1114,6 +1145,21 @@ const (
 // consensus. When one leg is unavailable (no embedding endpoint, vector leg down
 // or degraded) both legs are not in play, so the consensus rule cannot apply and
 // the stage is skipped rather than emptying the block.
+// legConsensusAdmits is the leg-consensus rule on one row's own evidence:
+// keyword-reserved, found by both legs, or found by one leg that ranked it
+// within that leg's ceiling.
+func legConsensusAdmits(c memory.Candidate) bool {
+	switch {
+	case c.KeywordReserved, c.FTSRank >= 0 && c.VectorRank >= 0:
+		return true
+	case c.FTSRank == -1 && c.VectorRank >= 0 && c.VectorRank <= maxSingleLegVectorRank:
+		return true
+	case c.VectorRank == -1 && c.FTSRank >= 0 && c.FTSRank <= maxSingleLegFTSRank:
+		return true
+	}
+	return false
+}
+
 func runLegConsensus(p *pipeline) {
 	in := len(p.rows)
 	if p.passive {
@@ -1170,12 +1216,15 @@ func runLegConsensus(p *pipeline) {
 		// emptied still carries its best row. A pin is a slot guarantee (#936)
 		// and a keyword-reserved row was admitted through the reservation, so
 		// cutting it would undo the reservation.
-		kept := i == 0 || c.Pinned || c.KeywordReserved || bothLegs
-		if !kept && c.FTSRank == -1 && c.VectorRank >= 0 && c.VectorRank <= maxSingleLegVectorRank {
-			kept = true
-		}
-		if !kept && c.VectorRank == -1 && c.FTSRank >= 0 && c.FTSRank <= maxSingleLegFTSRank {
-			kept = true
+		kept := i == 0 || c.Pinned || bothLegs || legConsensusAdmits(c)
+		// A stand-in for a removed near-duplicate is admitted on the removed
+		// row's evidence too (standInEvidence): the removal kept it in that
+		// row's place, so a gate that dropped it would lose the pair entirely.
+		for _, d := range p.standInEvidence(c.ID) {
+			if kept {
+				break
+			}
+			kept = d.Unembedded || d.Pinned || legConsensusAdmits(d.Candidate)
 		}
 		if kept {
 			keptRows = append(keptRows, c)
@@ -1242,6 +1291,17 @@ func runLegConsensus(p *pipeline) {
 // request and a disabled cutoff are both complete no-ops that record the stage
 // as a pass-through, so a passive block and an off-state query are byte-identical
 // to a pipeline whose stage was absent.
+// standsInAboveFloor reports whether any removed row a stand-in replaces would
+// itself clear the cutoff, so the stand-in is kept in its place.
+func standsInAboveFloor(displaced []memory.DroppedLoser, floor float64) bool {
+	for _, d := range displaced {
+		if d.Pinned || d.KeywordReserved || d.Base >= floor {
+			return true
+		}
+	}
+	return false
+}
+
 func runCutoff(p *pipeline) {
 	in := len(p.rows)
 	share := p.req.RelevanceCutoff
@@ -1284,7 +1344,8 @@ func runCutoff(p *pipeline) {
 	for i := range p.rows {
 		c := p.rows[i]
 		switch {
-		case i == 0 || c.Pinned || c.KeywordReserved || c.Base >= floor:
+		case i == 0 || c.Pinned || c.KeywordReserved || c.Base >= floor,
+			standsInAboveFloor(p.standInEvidence(c.ID), floor):
 			keptRows = append(keptRows, c)
 			keptItems = append(keptItems, p.items[i])
 			continue

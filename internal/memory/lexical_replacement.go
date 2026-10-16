@@ -408,14 +408,7 @@ func withoutReplacementPairs(pairs []demotionPairs, repl map[[2]string]bool) []d
 	if len(repl) == 0 {
 		return pairs
 	}
-	kept := make([]demotionPairs, 0, len(pairs))
-	for _, pr := range pairs {
-		if repl[[2]string{pr.loser, pr.winner}] {
-			continue
-		}
-		kept = append(kept, pr)
-	}
-	return kept
+	return vetoLosers(pairs, func(pr demotionPairs) bool { return repl[[2]string{pr.loser, pr.winner}] })
 }
 
 // withoutReplacingLosers drops the near-duplicate verdicts whose LOSER is the
@@ -434,14 +427,7 @@ func withoutReplacingLosers(pairs []demotionPairs, repl map[string][]string) []d
 			replacer[n] = true
 		}
 	}
-	kept := make([]demotionPairs, 0, len(pairs))
-	for _, pr := range pairs {
-		if replacer[pr.loser] {
-			continue
-		}
-		kept = append(kept, pr)
-	}
-	return kept
+	return vetoLosers(pairs, func(pr demotionPairs) bool { return replacer[pr.loser] })
 }
 
 // replacementRemovalVetoes is the lexical half of what the query path's

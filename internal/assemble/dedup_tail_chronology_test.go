@@ -13,7 +13,8 @@ import (
 // earlier one) also runs on the window-plus-tail pass. There it would remove a
 // window row in favour of a later tail row that ranks behind another tail row,
 // and the item budget then cuts that tail row: the answer would hold neither
-// row of the pair. The subject must survive in one of them.
+// row of the pair. The verdict falls back to the rank verdict instead: the
+// window row stays and the tail row is the recorded loser.
 func TestQueryModeCollapseNeverTradesAWindowRowForACutTailRow(t *testing.T) {
 	ctx := context.Background()
 	db, err := memory.OpenDB(":memory:")
@@ -51,7 +52,13 @@ func TestQueryModeCollapseNeverTradesAWindowRowForACutTailRow(t *testing.T) {
 
 	res := run(t, s, collapseRequest())
 	ids := itemIDs(res.Items)
-	if !hasID(ids, windowA) && !hasID(ids, tailC) {
-		t.Errorf("items = %v: neither row of the pair (%s, %s) is in the answer; losers %+v", ids, windowA, tailC, collectLosers(t, res))
+	if !hasID(ids, windowA) {
+		t.Errorf("items = %v: the window row %s must stay; losers %+v", ids, windowA, collectLosers(t, res))
+	}
+	// Not keep-both: the pair falls back to the rank verdict, so the tail row
+	// is the recorded loser, against the window row.
+	losers := collectLosers(t, res)
+	if len(losers) != 1 || losers[0].ID != tailC || len(losers[0].Against) != 1 || losers[0].Against[0] != windowA {
+		t.Errorf("losers = %+v, want exactly %s removed against %s (the rank verdict)", losers, tailC, windowA)
 	}
 }

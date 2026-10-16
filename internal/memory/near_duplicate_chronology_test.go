@@ -79,7 +79,7 @@ func TestDropNearDuplicatesKeepsTheRevertNoteThatReplacesTheRevertedClaim(t *tes
 		}
 	}
 
-	kept, removed, lostTo := s.dropNearDuplicates(context.Background(), rows, DefaultSearchParams(), dropNow)
+	kept, removed, lostTo, standIns := s.dropNearDuplicates(context.Background(), rows, DefaultSearchParams(), dropNow)
 	k := idSet(kept)
 	if !k[reverted] {
 		t.Fatalf("kept %v, removed %v: the revert note %s was removed in favour of the original it restates", memIDs(kept), memIDs(removed), reverted)
@@ -92,6 +92,9 @@ func TestDropNearDuplicatesKeepsTheRevertNoteThatReplacesTheRevertedClaim(t *tes
 	}
 	if got := lostTo[river]; len(got) != 1 || got[0] != reverted {
 		t.Errorf("lostTo[river] = %v, want [%s]", got, reverted)
+	}
+	if got := standIns[river]; len(got) != 1 || got[0] != reverted {
+		t.Errorf("standIns[river] = %v, want [%s]: the revert note was kept in the original's place by the chronology rule", got, reverted)
 	}
 	// The relevance order of the survivors is untouched.
 	if got, want := memIDs(kept), []string{asynq, reverted}; !eqStrings(got, want) {
@@ -110,7 +113,7 @@ func TestDropNearDuplicatesRemovesTheEarlierRowOfARestatement(t *testing.T) {
 	x := addStamped(t, s, testProject, "The staging cluster drains its queue before every deploy.", 0.6, 22, nil)
 	linkAt(t, s, a, b, "related")
 
-	kept, removed, lostTo := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b, x), DefaultSearchParams(), dropNow)
+	kept, removed, lostTo, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b, x), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{b, x}; !eqStrings(got, want) {
 		t.Errorf("kept %v, want %v: the later restatement was removed in favour of the earlier", got, want)
 	}
@@ -149,7 +152,7 @@ func TestDropNearDuplicatesKeepsALoserThatReplacesAThirdRow(t *testing.T) {
 		t.Fatalf("precondition: Y and Z must pair with nothing else, got %v", repl)
 	}
 
-	kept, removed, _ := s.dropNearDuplicates(context.Background(), rows, DefaultSearchParams(), dropNow)
+	kept, removed, _, _ := s.dropNearDuplicates(context.Background(), rows, DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{z, y, x}; !eqStrings(got, want) {
 		t.Errorf("kept %v (removed %v), want %v: the replacement of a row in the answer was removed", got, memIDs(removed), want)
 	}
@@ -167,7 +170,7 @@ func TestDropNearDuplicatesStillCollapsesARestatementCluster(t *testing.T) {
 	linkAt(t, s, b, c, "related")
 	linkAt(t, s, a, c, "related")
 
-	kept, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b, c), DefaultSearchParams(), dropNow)
+	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b, c), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{c}; !eqStrings(got, want) {
 		t.Errorf("kept %v, want only the newest restatement %v", got, want)
 	}
@@ -181,16 +184,18 @@ func TestDropNearDuplicatesTiedStampsFallBackToRank(t *testing.T) {
 	b := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 20, nil)
 	linkAt(t, s, a, b, "related")
 
-	kept, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b), DefaultSearchParams(), dropNow)
+	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{a}; !eqStrings(got, want) {
 		t.Errorf("kept %v, want the higher-ranked row %v", got, want)
 	}
 }
 
-// TestDropNearDuplicatesNeverRemovesAProtectedEarlierRow: the earlier row is
-// pinned. Protection keeps it, and the chronology keeps the later one, so both
-// stay rather than either rule giving way.
-func TestDropNearDuplicatesNeverRemovesAProtectedEarlierRow(t *testing.T) {
+// TestDropNearDuplicatesKeepsTheRankVerdictWhenTheEarlierRowIsProtected: the
+// earlier row is pinned, so the chronology rule may not remove it. The pair is
+// still a near-duplicate, so the verdict falls back to the rank (and
+// protection) verdict, which removes the later row, rather than the answer
+// holding both.
+func TestDropNearDuplicatesKeepsTheRankVerdictWhenTheEarlierRowIsProtected(t *testing.T) {
 	for _, order := range []string{"earlier-first", "later-first"} {
 		t.Run(order, func(t *testing.T) {
 			s := testStore(t)
@@ -204,14 +209,55 @@ func TestDropNearDuplicatesNeverRemovesAProtectedEarlierRow(t *testing.T) {
 			if order == "later-first" {
 				ids = []string{b, a}
 			}
-			kept, removed, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, ids...), DefaultSearchParams(), dropNow)
-			if !idSet(kept)[a] {
-				t.Errorf("kept %v: the pinned row %s was removed", memIDs(kept), a)
+			kept, removed, _, standIns := s.dropNearDuplicates(context.Background(), hydrate(t, s, ids...), DefaultSearchParams(), dropNow)
+			if got, want := memIDs(kept), []string{a}; !eqStrings(got, want) {
+				t.Errorf("kept %v (removed %v), want only the pinned row %v", got, memIDs(removed), want)
 			}
-			if !idSet(kept)[b] {
-				t.Errorf("kept %v (removed %v): the later row %s was removed in favour of the earlier", memIDs(kept), memIDs(removed), b)
+			if len(standIns) != 0 {
+				t.Errorf("standIns = %v, want none: the verdict is the rank verdict", standIns)
 			}
 		})
+	}
+}
+
+// TestDropNearDuplicatesFallsBackToTheRankVerdictWhenTheFlippedLoserIsContradicted:
+// a is the earlier, higher-ranked row and carries a live contradicts edge to z;
+// b is its later restatement. The chronology rule would remove a, the
+// contradicts veto refuses that, and the pair falls back to the rank verdict:
+// b is removed, as it was before the chronology rule, rather than the answer
+// holding both restatements.
+func TestDropNearDuplicatesFallsBackToTheRankVerdictWhenTheFlippedLoserIsContradicted(t *testing.T) {
+	s := testStore(t)
+	a := addStamped(t, s, testProject, demotePgxV4, 0.8, 20, nil)
+	z := addStamped(t, s, testProject, "The staging cluster drains its queue before every deploy.", 0.75, 21, nil)
+	b := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 24, nil)
+	linkAt(t, s, a, b, "related")
+	linkAt(t, s, a, z, "contradicts")
+
+	kept, removed, lostTo, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, z, b), DefaultSearchParams(), dropNow)
+	if got, want := memIDs(kept), []string{a, z}; !eqStrings(got, want) {
+		t.Errorf("kept %v (removed %v), want %v", got, memIDs(removed), want)
+	}
+	if got := lostTo[b]; len(got) != 1 || got[0] != a {
+		t.Errorf("lostTo[%s] = %v, want [%s]", b, got, a)
+	}
+}
+
+// TestDropNearDuplicatesDropsAPairWhenBothVerdictsAreVetoed: both rows of the
+// pair carry a contradicts edge, so neither direction may remove one, and both
+// stay.
+func TestDropNearDuplicatesDropsAPairWhenBothVerdictsAreVetoed(t *testing.T) {
+	s := testStore(t)
+	a := addStamped(t, s, testProject, demotePgxV4, 0.8, 20, nil)
+	z := addStamped(t, s, testProject, "The staging cluster drains its queue before every deploy.", 0.75, 21, nil)
+	b := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 24, nil)
+	linkAt(t, s, a, b, "related")
+	linkAt(t, s, a, z, "contradicts")
+	linkAt(t, s, b, z, "contradicts")
+
+	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, z, b), DefaultSearchParams(), dropNow)
+	if got, want := memIDs(kept), []string{a, z, b}; !eqStrings(got, want) {
+		t.Errorf("kept %v, want %v", got, want)
 	}
 }
 
@@ -224,7 +270,7 @@ func TestDropNearDuplicatesLaterRowRankedFirstIsUnchanged(t *testing.T) {
 	b := addStamped(t, s, testProject, demotePgxV4Again, 0.8, 24, nil)
 	linkAt(t, s, a, b, "related")
 
-	kept, removed, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, b, a), DefaultSearchParams(), dropNow)
+	kept, removed, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, b, a), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{b}; !eqStrings(got, want) {
 		t.Errorf("kept %v (removed %v), want %v", got, memIDs(removed), want)
 	}

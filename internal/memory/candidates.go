@@ -191,6 +191,12 @@ type SlicePolicy struct {
 type DroppedLoser struct {
 	Candidate
 	LostTo []string
+	// StandIns are the ids among LostTo the removal chose over this row only
+	// because they are LATER (the query path's chronology rule, earlierRowLoses):
+	// by rank this row would have been kept and they removed. Each stands in for
+	// it, so a later admission stage judges a stand-in by this row's evidence as
+	// well as its own (assemble's standInEvidence). Empty for a rank verdict.
+	StandIns []string
 }
 
 // CandidateSet is one retrieval's rows plus the facts about how they were
@@ -625,7 +631,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// The near-duplicate verdicts are read once more, by the removal itself: the
 	// loser leaves the set here rather than being ranked last, and it reports
 	// what it removed so the assembler can file the verdict (#926).
-	kept, removed, lostTo := cand.dropNearDuplicates(ctx, selected, p, req.Now)
+	kept, removed, lostTo, standIns := cand.dropNearDuplicates(ctx, selected, p, req.Now)
 	selected = kept
 	droppedIDs := make([]string, len(removed))
 	for i, m := range removed {
@@ -657,7 +663,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// are untouched by this pass.
 	if len(tail) > 0 {
 		combined := append(append([]Memory{}, selected...), tail...)
-		keptAll, passLosers, lostToPass := cand.dropNearDuplicatesOver(ctx, combined, len(selected), p, req.Now)
+		keptAll, passLosers, lostToPass, standInsPass := cand.dropNearDuplicatesOver(ctx, combined, len(selected), p, req.Now)
 		if len(passLosers) > 0 {
 			inWindow := make(map[string]bool, len(selected))
 			for _, m := range selected {
@@ -677,6 +683,12 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 				removed = append(removed, m)
 				droppedIDs = append(droppedIDs, m.ID)
 				lostTo[m.ID] = lostToPass[m.ID]
+				if ids := standInsPass[m.ID]; len(ids) > 0 {
+					if standIns == nil {
+						standIns = make(map[string][]string)
+					}
+					standIns[m.ID] = ids
+				}
 			}
 		}
 	}
@@ -699,6 +711,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		set.DroppedLosers = append(set.DroppedLosers, DroppedLoser{
 			Candidate: candidateOf(m, scores, fts, vec, req.Now),
 			LostTo:    lostTo[m.ID],
+			StandIns:  standIns[m.ID],
 		})
 	}
 
