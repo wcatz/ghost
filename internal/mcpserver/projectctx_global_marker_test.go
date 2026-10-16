@@ -388,11 +388,15 @@ func TestTheProjectContextSplitMovesRowsWithoutChangingTheBlock(t *testing.T) {
 	ctx := context.Background()
 
 	// One row of the project's own, so the block has both populations and the
-	// headings are both required to be present.
+	// headings are both required to be present. It outranks the globals, so the
+	// cap cuts globals rather than this row: the numbered globals are distinct
+	// claims (each states a different number), so no save folds into another and
+	// nothing demotes them below a default-importance project row.
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "ghost_memory_save",
 		Arguments: map[string]any{
 			"project_id": "vproj", "content": "the only row of this project's own", "category": "preference",
+			"importance": 0.9,
 		},
 	}); err != nil {
 		t.Fatalf("ghost_memory_save: %v", err)

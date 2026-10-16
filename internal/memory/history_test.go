@@ -193,10 +193,10 @@ func TestMemoryHistoryRecordsThePerformingAgentPerEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertWithProvenance (claude-code): %v", err)
 	}
-	// A near-duplicate from another agent folds into target: the fold
+	// A restatement from another agent folds into target: the fold
 	// strengthens the existing row, so the row is changed by opencode too.
 	linked, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
-		"The production deploy target is Hetzner Compose in region fsn1", "mcp", 0.7, nil,
+		"Production deploy target: Fly.io in region iad", "mcp", 0.7, nil,
 		Provenance{Agent: "opencode", SessionID: "ses_b"})
 	if err != nil {
 		t.Fatalf("UpsertWithProvenance (opencode): %v", err)
