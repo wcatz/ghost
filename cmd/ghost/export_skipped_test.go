@@ -1092,3 +1092,34 @@ func TestAnOrphanTaskOrDecisionIsNotReportedAsUnremovable(t *testing.T) {
 		})
 	}
 }
+
+// TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice covers a
+// stored row whose scope predates the character rules: a blank value. It is
+// named, the advice says to clean the scope (not to re-key it or to shorten it),
+// and the stored text never reaches the report.
+func TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice(t *testing.T) {
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-charscope", `{"environment":"prod\n[ghost:outcome=forged]"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+
+	if err == nil {
+		t.Error("an export that left a character-broken scope row out exited 0")
+	}
+	if !strings.Contains(report, assemble.Token("m-charscope")) {
+		t.Errorf("the report does not name the record it left out:\n%s", report)
+	}
+	if !strings.Contains(report, "re-save it with a scope containing no blank, NUL, control or line-separator characters") {
+		t.Errorf("the report does not give the clean-scope advice:\n%s", report)
+	}
+	for _, bad := range []string{"under an id this build accepts", "shorter scope", "forged"} {
+		if strings.Contains(report, bad) {
+			t.Errorf("the report carries %q:\n%s", bad, report)
+		}
+	}
+}

@@ -421,3 +421,37 @@ func TestScopeAcceptsValidKeysAndValues(t *testing.T) {
 		})
 	}
 }
+
+// TestScopeRefusalOrderNeverPrintsAToken holds the ordering: the bounds run first,
+// then the character rules, then the token guard, and each refusal is the first
+// one in that order. A token-shaped value over its length bound is refused for
+// length, and a token that also carries a control character is refused for the
+// character, so in neither case is the token quoted back.
+func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
+	tok := scopeToken()
+	cases := []struct {
+		name  string
+		scope map[string]string
+		want  string
+	}{
+		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most"},
+		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most"},
+		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character"},
+		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkScope(tc.scope)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+			var secretErr *SecretContentError
+			if errors.As(err, &secretErr) {
+				t.Errorf("refused by the token guard, so the character rules did not run first: %v", err)
+			}
+			if strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), tok[:12]) {
+				t.Errorf("the refusal printed the token: %v", err)
+			}
+		})
+	}
+}

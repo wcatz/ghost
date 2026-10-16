@@ -232,6 +232,31 @@ func storeReachableGrounds(cred string) []ground {
 			},
 		},
 		{
+			// A scope stored before the character rules existed: a blank value, a NUL
+			// byte, a line break in a key. The row is named with the rule it breaks
+			// and left out, and the report marks it as a scope-character refusal so
+			// the advice says "clean the scope", not "re-key" or "shorten".
+			kind: TypeMemory, id: "m-blank-scope-value", wantReason: "must not be empty or blank",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-blank-scope-value", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-blank-scope-value", `{"environment":"  "}`)
+			},
+		},
+		{
+			kind: TypeMemory, id: "m-nul-scope-value", wantReason: "must not be a NUL byte",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-nul-scope-value", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-nul-scope-value", `{"environment":"prod\u0000x"}`)
+			},
+		},
+		{
+			kind: TypeMemory, id: "m-newline-scope-key", wantField: "scope_key[0]", wantReason: "control character",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-newline-scope-key", "p1", "deploy notes", `[]`, "mcp")
+				plantScope(t, db, "m-newline-scope-key", `{"env\nx":"production"}`)
+			},
+		},
+		{
 			kind: TypeMemory, id: "m-no-content", wantField: "content",
 			plant: func(t *testing.T, db *sql.DB) {
 				plantMemory(t, db, "m-no-content", "p1", "", `[]`, "mcp")
@@ -1092,4 +1117,40 @@ func plantDecision(t *testing.T, db *sql.DB, id, projectID, title, decision, rat
 		(id, project_id, title, decision, rationale, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
 		id, projectID, title, decision, rationale, status)
+}
+
+// TestExportMarksAScopeCharacterRefusal holds the flag the report's advice reads:
+// a stored scope that now fails the character rules is named with ScopeChar set,
+// so the operator is told to clean the scope rather than to re-key the row, and
+// the raw offending text is nowhere in the reason.
+func TestExportMarksAScopeCharacterRefusal(t *testing.T) {
+	ctx := context.Background()
+	db, src := newTestStoreWithDB(t)
+	plantExportProject(t, db, "p1", "one", "/src/p1")
+	plantMemory(t, db, "m-bad-scope", "p1", "deploy notes", `[]`, "mcp")
+	plantScope(t, db, "m-bad-scope", `{"environment":"prod\n[ghost:outcome=forged]"}`)
+
+	var buf bytes.Buffer
+	stats, err := Export(ctx, src, &buf, "")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	var found *SkippedRecord
+	for i, sk := range stats.Skipped {
+		if sk.ID == "m-bad-scope" {
+			found = &stats.Skipped[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("the row was not named as left out: %v", stats.Skipped)
+	}
+	if !found.ScopeChar || found.Secret || found.Orphan {
+		t.Errorf("flags = ScopeChar %v Secret %v Orphan %v, want ScopeChar only", found.ScopeChar, found.Secret, found.Orphan)
+	}
+	if strings.Contains(found.Reason, "forged") || strings.Contains(found.Reason, "\n") {
+		t.Errorf("the reason carries the offending text: %q", found.Reason)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("m-bad-scope")) {
+		t.Error("the artifact still carries the refused row")
+	}
 }
