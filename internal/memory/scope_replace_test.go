@@ -698,6 +698,162 @@ func TestReplaceNonManualReuseDisagreeingScope(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualScopeReadErrorAbortsReplace: a scope column that will
+// not decode is a READ failure, not a scope conflict. A conflict is a refusal
+// the caller can act on — the emission is dropped and its sources kept — but a
+// broken value has no such meaning, and counting it as a drop would make one
+// corrupt row a silent refusal that recurs on every later run under a reason
+// that describes a concurrent edit. The replace must fail the way
+// inheritedClaims and inheritedRetention do.
+func TestReplaceNonManualScopeReadErrorAbortsReplace(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	src, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a source whose scope column will be corrupted",
+		Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+
+	// A value json.Unmarshal rejects, as a hand-edited or half-written row
+	// would hold.
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET scope = ? WHERE id = ?`, "{not json", src); err != nil {
+		t.Fatalf("corrupt scope: %v", err)
+	}
+
+	_, _, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "a merged successor", Importance: 0.6, ReplacesIDs: []string{src}},
+	}, "", nil)
+	if err == nil {
+		t.Fatal("ReplaceNonManual returned nil for a corrupt scope column — a read failure must fail the replace, not count as a dropped emission")
+	}
+
+	// The source is still there: the failed replace rolled back.
+	rows, err := s.GetByIDs(ctx, []string{src})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs after failed replace: %v, len=%d", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualReuseAgreesOnScope is the positive half of the reuse
+// check: when the reused row's scope matches the one the emission's sources
+// agreed on, the reuse proceeds and the merge lands.
+func TestReplaceNonManualReuseAgreesOnScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	reused, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the shared fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create reused: %v", err)
+	}
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact one", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact two", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the shared fact", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Total() != 0 {
+		t.Fatalf("dropped = %+v, want no refusal when the reused row agrees on scope", dropped)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{reused})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs: %v, len=%d", err, len(rows))
+	}
+	if rows[0].Scope["environment"] != "production" {
+		t.Errorf("reused row scope = %v, want production", rows[0].Scope)
+	}
+	// The two sources were merged into the reused row and removed.
+	if _, err := s.GetByIDs(ctx, []string{src1, src2}); err != nil {
+		t.Fatalf("GetByIDs sources: %v", err)
+	}
+}
+
+// TestReplaceNonManualReuseDisagreesOnScope is the reuse-branch counterpart of
+// the fresh-INSERT scope rule. takeReusableRow picks the row an emission
+// updates in place by CONTENT, and it need not be one of the emission's
+// sources: a merge can land on a same-text row consolidation never named. The
+// reuse UPDATE writes scope through COALESCE, so the reused row would keep ITS
+// OWN scope — here unscoped — while the sources agreed on production, silently
+// widening a production fact to every environment. The emission must be
+// refused and both rows left exactly as they are.
+func TestReplaceNonManualReuseDisagreesOnScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The row the merge will reuse: same text as the emission, and unscoped.
+	reused, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the shared fact", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create reused: %v", err)
+	}
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact one", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact two", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	var dropped EmissionDrops
+	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the shared fact", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Changed == 0 {
+		t.Errorf("dropped = %+v, want the reuse emission refused over the scope disagreement", dropped)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{reused, src1, src2})
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("GetByIDs: %v, len=%d, want all three rows kept", err, len(rows))
+	}
+	for _, r := range rows {
+		switch r.ID {
+		case reused:
+			if len(r.Scope) != 0 {
+				t.Errorf("reused row scope = %v, want unscoped — the refused merge wrote over it", r.Scope)
+			}
+			if r.Importance != 0.5 {
+				t.Errorf("reused row importance = %v, want 0.5 unchanged", r.Importance)
+			}
+		case src1, src2:
+			if r.Scope["environment"] != "production" {
+				t.Errorf("source %s scope = %v, want production unchanged", r.ID, r.Scope)
+			}
+		}
+	}
+}
+
 // TestRestoreSnapshotRewritesScopeOnExistingRow: restore updates rows that
 // still exist by matching snapshot to memory id. That UPDATE has to carry
 // scope too, or a restore into a row whose scope was edited in the meantime

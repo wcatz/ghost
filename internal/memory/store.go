@@ -7061,25 +7061,34 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 	return NormalizeRetention(m.Retention)
 }
 
+// errScopeConflict marks the refusal inheritedScope makes when the rows it
+// reads cannot agree on one scope: they state different scopes, or a mix of
+// scoped and unscoped rows. It is a refusal of the EMISSION — the callers drop
+// it and keep its sources — and it is deliberately distinct from a read or
+// decode failure, which is returned unwrapped and aborts the replace the way
+// inheritedClaims and inheritedRetention propagate theirs. A refusal the caller
+// can act on (keep the sources and report the drop) and a failure it cannot are
+// not one error.
+var errScopeConflict = errors.New("scope conflict")
+
 // inheritedScope computes the scope a consolidation successor should inherit
 // from the rows it replaces. It follows the same "inherits rather than invents"
 // principle as inheritedClaims and inheritedRetention.
 //
 // Rules:
 //   - If the emission states a scope, it wins (the emission is explicit).
-//   - Otherwise, read the scope from each source in ReplacesIDs order.
-//   - If all scoped sources agree on every key, return that scope.
-//   - If sources disagree on any key, or only some sources are scoped, return
-//     an error to signal the corpus guard to drop the emission rather than
-//     silently widening scope.
-//   - If no source has a scope, return nil (applies everywhere).
+//   - Otherwise, read the scope from each source named in ReplacesIDs.
+//   - If the scoped sources all agree, return that scope.
+//   - If they disagree, or a scoped source mixes with an unscoped one, return
+//     an error wrapping errScopeConflict so the caller refuses the emission and
+//     keeps its sources rather than silently widening scope.
+//   - If no source is scoped, return nil (applies everywhere).
 //
-// This ensures a single-source rewrite keeps the source's scope, a merge with
-// agreeing sources keeps the shared scope, and a merge with conflicting scopes
-// or a mix of scoped and unscoped sources is dropped (the sources stay
-// unmerged). The decision is ORDER-INDEPENDENT: we track whether we saw any
-// scoped source and any unscoped source, and if both are present it is a
-// conflict regardless of the order ReplacesIDs lists them.
+// The decision is ORDER-INDEPENDENT: scoped and unscoped rows are tallied
+// independently, so a mix is a conflict whichever way ReplacesIDs lists them.
+// A single-source rewrite therefore keeps the source's scope, a merge with
+// agreeing sources keeps the shared scope, and a merge that cannot agree is
+// refused.
 func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (map[string]string, error) {
 	// If the emission explicitly states a scope, it wins.
 	if m.Scope != nil {
@@ -7126,31 +7135,18 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 		}
 
 		// We have a previous agreed scope; check if this source agrees.
-		if !scopeEqual(agreedScope, sourceScope) {
-			return nil, fmt.Errorf("scope conflict: source %s disagrees with previous sources", id)
+		if !ScopeEquals(agreedScope, sourceScope) {
+			return nil, fmt.Errorf("%w: source %s disagrees with sources already read", errScopeConflict, RefusalArg("memory_id", id))
 		}
 		// They agree; continue checking other sources.
 	}
 
 	// If we saw both scoped and unscoped sources, it's a conflict.
 	if haveAgreed && haveUnscoped {
-		return nil, fmt.Errorf("scope conflict: mix of scoped and unscoped sources")
+		return nil, fmt.Errorf("%w: sources mix scoped and unscoped rows", errScopeConflict)
 	}
 
 	return agreedScope, nil
-}
-
-// scopeEqual returns true if two scope maps have the same keys and values.
-func scopeEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // sourceRetentionTx folds the tiers of the given source rows into the one life
@@ -7534,7 +7530,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
 	// behaviour above exactly.
 	guard := newFedGuard(candidates, fed, concurrent)
-	// Build a candidatesByID map for scope conflict handling in the drop loop.
+	// candidatesByID backs the scope refusals below: a refused emission's
+	// sources are kept, and knowing which named rows are real candidates lets
+	// the replace mark exactly those.
 	candidatesByID := make(map[string]replaceCandidate, len(candidates))
 	for _, c := range candidates {
 		candidatesByID[c.id] = c
@@ -7550,31 +7548,28 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	for id := range concurrent {
 		moved[id] = true
 	}
+	// keepRefusedSources keeps every source an emission named, and every row
+	// carrying its text, exactly as they are: excluded from the reuse map so no
+	// later emission updates them in place, and from the delete set so the
+	// refused emission's knowledge is not removed with it. A scope refusal is
+	// permanent, not a transient concurrent edit like the corpus guard's, but
+	// the keep-the-sources effect is the same: a disagreement is never resolved
+	// by writing over one side.
+	keepRefusedSources := func(m Memory) {
+		for _, replaced := range m.ReplacesIDs {
+			if _, stored := candidatesByID[replaced]; stored {
+				concurrent[replaced] = true
+			}
+		}
+		for _, c := range candidates {
+			if c.content == m.Content {
+				concurrent[c.id] = true
+			}
+		}
+	}
 	overflowKept := make(map[string]bool)
 	for i, m := range memories {
 		dropEmission[i] = guard.drop(m)
-		// Check for scope conflicts: if sources have disagreeing scopes, or only
-		// some are scoped, drop the emission to avoid silently widening scope.
-		if !dropEmission[i] && len(m.ReplacesIDs) > 0 {
-			if _, err := inheritedScope(ctx, tx, projectID, m); err != nil {
-				dropEmission[i] = true
-				// Mark sources as concurrent so they survive this replace
-				// (excluded from reusable and deleteIDs). A scope conflict is
-				// permanent, not a transient concurrent edit, but the same
-				// "keep the sources" logic applies.
-				for _, replaced := range m.ReplacesIDs {
-					if _, stored := candidatesByID[replaced]; stored {
-						concurrent[replaced] = true
-					}
-				}
-				// Also mark any row carrying the emission's text as concurrent.
-				for _, c := range candidates {
-					if c.content == m.Content {
-						concurrent[c.id] = true
-					}
-				}
-			}
-		}
 		// A merge whose decision links alone would not fit in a source_ref is not
 		// written: truncating the list is the silent supersede miss, and failing
 		// the pass would re-propose the same merge forever. Its sources and any
@@ -7595,34 +7590,31 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				}
 			}
 		}
-		// A refusal about a FOLDED cross-project candidate belongs to the half
-		// that produced it, not to the project replace that happens to evaluate
-		// it: ApplyReflection subtracted both halves' drops from different
-		// summary components, and a candidate counted as kept project-scoped
-		// that was refused is a line that contradicts the applied total beside
-		// it. Only meaningful while this replace is one half of an apply.
-		if dropEmission[i] && shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
-			view.crossProjectDropped.record(overflowed[i], overflowLinks[i])
-		}
-	}
-	for i, d := range dropEmission {
-		if d {
-			dropped.record(overflowed[i], overflowLinks[i])
-		}
 	}
 
-	// Report the survivors so the caller can avoid recording a skip
-	// fingerprint that would absorb them into the next no-op gate. A row held
-	// alive only by an overflow drop is excluded: nothing can be merged out of
-	// it (the merge that would have does not fit), so calling it a survivor
-	// asked the caller to hold the project open forever for a refusal that
-	// resolves itself no sooner (#1228).
-	preserved = make([]string, 0, len(concurrent))
-	for id := range concurrent {
-		if overflowKept[id] && !moved[id] {
+	// The scope each surviving emission inherits from the rows it stands in
+	// for, resolved ONCE so the conflict guard, the reuse check below and the
+	// writes all read the same answer. inheritedScope returns the emission's own
+	// scope when it states one — reflection never does, but a direct caller may
+	// — and otherwise folds its sources. A conflict refuses the emission and
+	// keeps its sources; any other error is a read or decode failure and fails
+	// the replace, exactly as inheritedClaims and inheritedRetention propagate
+	// theirs rather than counting a broken source as a refusal.
+	emittedScope := make([]map[string]string, len(memories))
+	for i, m := range memories {
+		if dropEmission[i] {
 			continue
 		}
-		preserved = append(preserved, id)
+		sc, err := inheritedScope(ctx, tx, projectID, m)
+		if err != nil {
+			if !errors.Is(err, errScopeConflict) {
+				return nil, EmissionDrops{}, 0, nil, err
+			}
+			dropEmission[i] = true
+			keepRefusedSources(m)
+			continue
+		}
+		emittedScope[i] = sc
 	}
 
 	// Content -> reusable rows. Concurrent rows are excluded: they are kept
@@ -7653,10 +7645,72 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			reusable[m.Content] = rest
 		}
 	}
+	// A reuse updates an existing row in place, and its UPDATE writes the scope
+	// through COALESCE — so the row keeps ITS OWN scope. takeReusableRow picks
+	// that row by CONTENT, and it need not be one of the emission's sources: a
+	// merge can land on a same-text row consolidation never named. When the
+	// inherited scope disagrees with the reused row's scope, the merge would
+	// leave the reused row's scope in place instead of the one the sources
+	// agreed on, which is the silent scope change the fresh INSERT now refuses.
+	// Hold reuse to the same rule: refuse the emission and keep both rows. An
+	// emission that states its own scope is skipped, because a stated scope is
+	// what the reuse UPDATE applies, and one that names no source has nothing
+	// to disagree with.
+	for i, m := range memories {
+		if dropEmission[i] || m.Scope != nil || len(m.ReplacesIDs) == 0 {
+			continue
+		}
+		stored, ok := reuseFor[i]
+		if !ok {
+			continue
+		}
+		if ScopeEquals(emittedScope[i], parseScope(stored.scope)) {
+			continue
+		}
+		dropEmission[i] = true
+		delete(reuseFor, i)
+		concurrent[stored.id] = true
+		keepRefusedSources(m)
+	}
+
+	for i, d := range dropEmission {
+		if d {
+			dropped.record(overflowed[i], overflowLinks[i])
+			// A refusal about a FOLDED cross-project candidate belongs to the
+			// half that produced it, not to the project replace that happens to
+			// evaluate it: ApplyReflection subtracted both halves' drops from
+			// different summary components, and a candidate counted as kept
+			// project-scoped that was refused is a line that contradicts the
+			// applied total beside it. Only meaningful while this replace is one
+			// half of an apply.
+			if shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
+				view.crossProjectDropped.record(overflowed[i], overflowLinks[i])
+			}
+		}
+	}
+
+	// Report the survivors so the caller can avoid recording a skip
+	// fingerprint that would absorb them into the next no-op gate. A row held
+	// alive only by an overflow drop is excluded: nothing can be merged out of
+	// it (the merge that would have does not fit), so calling it a survivor
+	// asked the caller to hold the project open forever for a refusal that
+	// resolves itself no sooner (#1228).
+	preserved = make([]string, 0, len(concurrent))
+	for id := range concurrent {
+		if overflowKept[id] && !moved[id] {
+			continue
+		}
+		preserved = append(preserved, id)
+	}
 
 	var deleteIDs []string
 	for _, unmatched := range reusable {
 		for _, c := range unmatched {
+			// A row a scope refusal marked concurrent after the reuse map was
+			// built is kept, exactly as one excluded before it was built.
+			if concurrent[c.id] {
+				continue
+			}
 			deleteIDs = append(deleteIDs, c.id)
 		}
 	}
@@ -7828,14 +7882,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 		// The scope, inherited from the source rows. If the emission states a
-		// scope it wins; otherwise we read the sources. Conflicts were already
-		// checked in the drop loop; if we reach here, scope is guaranteed to be
-		// computable without conflict.
-		scope, err := inheritedScope(ctx, tx, projectID, m)
-		if err != nil {
-			// This should not happen since conflicts are caught in the drop loop.
-			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("unexpected scope conflict in fresh INSERT: %w", err)
-		}
+		// scope it wins; otherwise it is the scope its sources agreed on,
+		// resolved above where a disagreement refused the emission. Read from
+		// the slice rather than resolved here so the conflict guard, the reuse
+		// check and this write cannot disagree about the answer.
+		scope := emittedScope[i]
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, scope,
