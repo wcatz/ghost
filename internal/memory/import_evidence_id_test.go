@@ -116,3 +116,91 @@ func TestImportedEmptyEvidenceIDsAreMintedDistinct(t *testing.T) {
 		t.Fatalf("rows=%d distinct=%d err=%v, want 2 and 2", n, d, err)
 	}
 }
+
+// An evidence id already stored on ANOTHER memory is the primary key of that
+// row, so the importer mints a fresh id for the incoming record instead of
+// failing the insert. The dry run reports the create the apply then makes, the
+// first memory's row keeps its id, and re-importing the artifact is a skip.
+func TestImportedEvidenceIDHeldByAnotherMemoryIsMinted(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	mk := func(id, content string) PortableMemory {
+		return PortableMemory{
+			ID: id, ProjectID: testProject, Category: "fact", Content: content, Source: "onboarding",
+			Evidence: []PortableEvidence{{ID: "ev-1", Kind: "observed"}},
+		}
+	}
+	a := mk("evidid0000000000000000000000BA", "the first memory")
+	b := mk("evidid0000000000000000000000BB", "the second memory")
+	if created, _, _, err := s.ImportMemory(ctx, a, ImportOptions{Apply: true}); err != nil || !created {
+		t.Fatalf("seed memory A: created=%v err=%v", created, err)
+	}
+	if err := CheckImportedMemory(b); err != nil {
+		t.Fatalf("CheckImportedMemory refused B, a judgement about the record alone: %v", err)
+	}
+	for _, apply := range []bool{false, true} {
+		created, _, _, err := s.ImportMemory(ctx, b, ImportOptions{Apply: apply})
+		if err != nil || !created {
+			t.Fatalf("apply=%v: created=%v err=%v, want a create on both paths", apply, created, err)
+		}
+	}
+	owner := func(id string) string {
+		var got string
+		if err := s.db.QueryRowContext(ctx, `SELECT memory_id FROM memory_provenance WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("owner of %q: %v", id, err)
+		}
+		return got
+	}
+	if got := owner("ev-1"); got != a.ID {
+		t.Fatalf("ev-1 now belongs to %s, want memory A to keep it", got)
+	}
+	count := func(memoryID string) int {
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_provenance WHERE memory_id = ? AND kind = 'observed'`, memoryID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(b.ID); n != 1 {
+		t.Fatalf("B carries %d observed evidence rows, want its 1 record under a minted id", n)
+	}
+	// Re-importing the same artifact is idempotent: both memories exist, so both
+	// are skipped, with no failure and no extra evidence.
+	for _, m := range []PortableMemory{a, b} {
+		for _, apply := range []bool{false, true} {
+			created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
+			if err != nil || created {
+				t.Fatalf("re-import %s apply=%v: created=%v err=%v, want a skip", m.ID, apply, created, err)
+			}
+		}
+	}
+	if n := count(a.ID); n != 1 {
+		t.Fatalf("A has %d observed rows after the re-import, want 1", n)
+	}
+	if n := count(b.ID); n != 1 {
+		t.Fatalf("B has %d observed rows after the re-import, want 1", n)
+	}
+}
+
+// Two memories of one artifact that share an evidence id: the dry run writes
+// nothing, so only the apply can see the second collide, and it must not fail.
+func TestImportedEvidenceIDSharedWithinOneArtifactIsMinted(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"evidid0000000000000000000000CA", "evidid0000000000000000000000CB"} {
+		m := PortableMemory{
+			ID: id, ProjectID: testProject, Category: "fact", Content: "content of " + id, Source: "onboarding",
+			Evidence: []PortableEvidence{{ID: "shared-ev", Kind: "observed"}},
+		}
+		for _, apply := range []bool{false, true} {
+			created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
+			if err != nil || !created {
+				t.Fatalf("%s apply=%v: created=%v err=%v", id, apply, created, err)
+			}
+		}
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT memory_id) FROM memory_provenance WHERE kind = 'observed' AND memory_id LIKE 'evidid%000C%'`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("memories with evidence = %d, err %v, want 2", n, err)
+	}
+}
