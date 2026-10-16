@@ -8,7 +8,7 @@ import (
 
 // The fallback keeps the GHOST_* environment, and the environment parsers for
 // context.relevance_cutoff and context.no_answer_cosine read any float. Load
-// refuses an out-of-range value through checkContextValues, so the MCP server
+// refuses an out-of-range value through checkValueChecks, so the MCP server
 // falls back — and without the same check there, the fallback re-read the bad
 // value and every ghost_memory_search failed in the assembler's request check.
 // The fallback replaces each bad value with its compiled default and says so.
@@ -60,7 +60,7 @@ func TestFallbackConfigReplacesEveryOutOfRangeContextValue(t *testing.T) {
 	t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", "5")
 
 	cfg := FallbackConfig()
-	if err := checkContextValues(cfg); err != nil {
+	if err := checkValueChecks(cfg); err != nil {
 		t.Errorf("FallbackConfig still carries an out-of-range context value: %v", err)
 	}
 	if cfg.Context.RelevanceCutoff != DefaultRelevanceCutoff || cfg.Context.NoAnswerCosine != DefaultNoAnswerCosine {
@@ -117,10 +117,10 @@ func TestFallbackConfigKeepsInRangeContextValues(t *testing.T) {
 }
 
 // Every key decodeFallback checks has a reset, and the reset writes a value the
-// same check accepts. A key added to contextChecks without one fails here rather
+// same check accepts. A key added to valueChecks without one fails here rather
 // than leaving the fallback to carry the bad value.
-func TestContextChecksEachResetToAValueTheirCheckAccepts(t *testing.T) {
-	for _, c := range contextChecks {
+func TestValueChecksEachResetToAValueTheirCheckAccepts(t *testing.T) {
+	for _, c := range valueChecks {
 		if c.reset == nil {
 			t.Errorf("%s has no reset: the fallback would detect a bad value and keep it", c.key)
 			continue
@@ -131,6 +131,8 @@ func TestContextChecksEachResetToAValueTheirCheckAccepts(t *testing.T) {
 			RelevanceCutoff: math.NaN(),
 			NoAnswerCosine:  math.NaN(),
 		}
+		cfg.Search.MinSimilarity = math.NaN()
+		cfg.Linking.Threshold = math.NaN()
 		if err := c.check(cfg); err == nil {
 			t.Errorf("%s: the check accepted NaN, so this test cannot see its reset", c.key)
 			continue

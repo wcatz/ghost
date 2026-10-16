@@ -506,7 +506,7 @@ func Load() (*Config, error) {
 	if err := checkScopeValues(cfg); err != nil {
 		return nil, err
 	}
-	if err := checkContextValues(cfg); err != nil {
+	if err := checkValueChecks(cfg); err != nil {
 		return nil, err
 	}
 	if err := checkEmbeddingValues(cfg); err != nil {
@@ -532,21 +532,23 @@ func checkEmbeddingValues(cfg *Config) error {
 	return nil
 }
 
-// checkContextValues refuses a context.abstain_cosine no cosine can be, on the
-// FILE path as well as the environment one.
+// checkValueChecks refuses a float key documented as a value in [0, 1] that
+// holds something else, on the FILE path as well as the environment one.
 //
-// cosineValue already refuses these for the environment, and koanf's YAML parser
-// resolves the same spellings — `.inf`, `-.inf`, `.nan` — into the float32 field
-// without complaint, so the env check alone would leave the worst of it unguarded
-// on the path a hand-edited config actually takes. They are worth refusing for
-// what they do downstream rather than for being unreadable: an infinite floor is
-// a relevance verdict no row's cosine can clear, so every answer outside the
-// keyword arm would come back `weak` with nothing in it to tell that from a
-// measured verdict; NaN compares false against 0 and so reads as no threshold at
-// all, telling a user who set a floor that there is none; and a negative value is
-// satisfied by the worst row in the corpus, which is the opposite of a floor.
-func checkContextValues(cfg *Config) error {
-	for _, check := range contextChecks {
+// The environment parsers for the context floors refuse these for themselves,
+// and koanf's YAML parser resolves the same spellings — `.inf`, `-.inf`,
+// `.nan` — into the float field without complaint, so the env check alone would
+// leave the worst of it unguarded on the path a hand-edited config actually
+// takes. They are worth refusing for what they do downstream rather than for
+// being unreadable: an infinite floor is a verdict no row's cosine can clear, so
+// every answer outside the keyword arm would come back `weak` with nothing in it
+// to tell that from a measured verdict, and the vector-leg floor would keep no
+// candidate at all and leave hybrid search answering from the keyword arm alone;
+// NaN compares false against 0 and so reads as no threshold at all, telling a
+// user who set a floor that there is none; and a negative value is satisfied by
+// the worst row in the corpus, which is the opposite of a floor.
+func checkValueChecks(cfg *Config) error {
+	for _, check := range valueChecks {
 		if err := check.check(cfg); err != nil {
 			return err
 		}
@@ -554,14 +556,14 @@ func checkContextValues(cfg *Config) error {
 	return nil
 }
 
-// contextChecks is checkContextValues one key at a time, in the order Load
-// reports them. decodeFallback walks it too, so a bad value in the environment
-// is replaced key by key rather than only the first one the check reaches.
-// Each entry carries the reset that writes its key's compiled default back and
+// valueChecks is checkValueChecks one key at a time, in the order Load reports
+// them. decodeFallback walks it too, so a bad value in the environment is
+// replaced key by key rather than only the first one the check reaches. Each
+// entry carries the reset that writes its key's compiled default back and
 // returns the value it wrote, so a key added here cannot be checked by the
 // fallback without also being reset by it
-// (TestContextChecksEachResetToAValueTheirCheckAccepts).
-var contextChecks = []struct {
+// (TestValueChecksEachResetToAValueTheirCheckAccepts).
+var valueChecks = []struct {
 	key   string
 	check func(*Config) error
 	reset func(*Config) any
@@ -603,6 +605,36 @@ var contextChecks = []struct {
 		// bar as unset, so the model tie can still turn it off.
 		cfg.Context.NoAnswerCosine = defaultConfig().Context.NoAnswerCosine
 		return cfg.Context.NoAnswerCosine
+	}},
+	// The vector-leg floor is a cosine in [0,1] where 0 preserves the
+	// historical behavior of dropping only non-positive cosines. It is applied
+	// INSIDE the leg, before fusion, so a floor no cosine can clear drops every
+	// vector candidate and hybrid search answers from the keyword arm alone —
+	// the search surface still answers, so nothing tells the caller the vector
+	// leg is gone. NaN compares false against 0 and would read as no floor at
+	// all, telling a user who set one that there is none.
+	{"search.min_similarity", func(cfg *Config) error {
+		if v := cfg.Search.MinSimilarity; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+			return fmt.Errorf("search.min_similarity: a cosine floor is in [0,1] where 0 is off, got %v", cfg.Search.MinSimilarity)
+		}
+		return nil
+	}, func(cfg *Config) any {
+		cfg.Search.MinSimilarity = defaultConfig().Search.MinSimilarity
+		return cfg.Search.MinSimilarity
+	}},
+	// linking.threshold is the cosine a `related` edge requires, so the same
+	// [0,1] range applies. The MCP server's linking worker reads it
+	// (cmd/ghost/mcp.go passes it to linking.NewWorker), and a link is created
+	// only when a candidate's score clears it, so refusing a NaN, infinite or
+	// out-of-range value here keeps it out of link creation.
+	{"linking.threshold", func(cfg *Config) error {
+		if v := cfg.Linking.Threshold; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+			return fmt.Errorf("linking.threshold: a cosine is in [0,1], got %v", cfg.Linking.Threshold)
+		}
+		return nil
+	}, func(cfg *Config) any {
+		cfg.Linking.Threshold = defaultConfig().Linking.Threshold
+		return cfg.Linking.Threshold
 	}},
 }
 
@@ -830,13 +862,13 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		return nil, false
 	}
 	explicitBar := k.Exists(noAnswerKey)
-	// The environment survives into this path, and its parsers for the two
-	// float context keys read any float, so a value Load refuses would reach
-	// the assembler, which refuses every search request that carries it. Each
-	// bad value is replaced with its compiled default. A rejected bar counts
-	// as unset, so the model tie below decides its default as it does for a
-	// bar nobody set.
-	for _, c := range contextChecks {
+	// The environment survives into this path, and its parsers for the
+	// environment-settable float keys read any float, so a value Load refuses
+	// would reach the store or the assembler, which refuses every search
+	// request that carries it. Each bad value is replaced with its compiled
+	// default. A rejected bar counts as unset, so the model tie below decides
+	// its default as it does for a bar nobody set.
+	for _, c := range valueChecks {
 		err := c.check(cfg)
 		if err == nil {
 			continue
