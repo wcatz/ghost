@@ -301,10 +301,11 @@ func scopesEqual(a, b map[string]string) bool {
 // The live `supersedes` and `contradicts` edges among the rows are read here so
 // an explicit relation still wins exactly as it does for the marker.
 //
-// It exists for the near-duplicate REMOVAL, which runs before the read that
-// names the pairs: a removal that took one row of a pair out first would leave
-// nothing for the marker to name, and the reader would get one of the two claims
-// with nothing saying the other exists.
+// It exists for the near-duplicate stage, which runs before the read that names
+// the pairs. A removal that took one row of a pair out first would leave nothing
+// for the marker to name, and the reader would get one of the two claims with
+// nothing saying the other exists. A demotion that sank the newer row would rank
+// the claim it replaced above it, on readers that render no marker at all.
 func replacementPairsWithin(ctx context.Context, db Queryer, rows []Memory, now time.Time) (map[[2]string]bool, error) {
 	if len(rows) < 2 {
 		return nil, nil
@@ -390,4 +391,56 @@ func withoutReplacementPairs(pairs []demotionPairs, repl map[[2]string]bool) []d
 		kept = append(kept, pr)
 	}
 	return kept
+}
+
+// exemptReplacementPairs is the near-duplicate stage's exemption for a lexical
+// replacement pair, shared by every reader that removes or demotes: the
+// verdicts whose two rows are such a pair are dropped (withoutReplacementPairs),
+// judged by replacementPairsWithin and so by the one rule the marker uses.
+//
+// Only the endpoints of the verdicts reach the rule, and only those of a verdict
+// whose two rows share a project: every condition lexicalReplacements tests is a
+// condition on the two rows of a pair (project, scope, stamps, the explicit edge
+// between them, similarity, the swapped subject), so the subset gives each
+// verdict the answer the whole window would, and a pair across projects is never
+// a replacement. That bounds the cost on a cross-project read
+// (ghost_search_all): no verdict, no read; otherwise at most two rows per
+// same-project verdict, and one indexed edge read over them.
+//
+// On a failed read it returns the verdicts UNFILTERED with the error, so each
+// caller picks its own direction: a removal stops (it is decided on evidence),
+// a demotion goes ahead as it did before the exemption existed (it only
+// reorders, and both rows stay).
+func exemptReplacementPairs(ctx context.Context, db Queryer, pairs []demotionPairs, rows []Memory, now time.Time) ([]demotionPairs, error) {
+	if len(pairs) == 0 {
+		return pairs, nil
+	}
+	project := make(map[string]string, len(rows))
+	for _, m := range rows {
+		project[m.ID] = m.ProjectID
+	}
+	party := make(map[string]bool, 2*len(pairs))
+	for _, pr := range pairs {
+		lp, lok := project[pr.loser]
+		wp, wok := project[pr.winner]
+		if !lok || !wok || lp != wp {
+			continue
+		}
+		party[pr.loser], party[pr.winner] = true, true
+	}
+	if len(party) < 2 {
+		return pairs, nil
+	}
+	subset := make([]Memory, 0, len(party))
+	for _, m := range rows {
+		if party[m.ID] {
+			subset = append(subset, m)
+			delete(party, m.ID)
+		}
+	}
+	repl, err := replacementPairsWithin(ctx, db, subset, now)
+	if err != nil {
+		return pairs, err
+	}
+	return withoutReplacementPairs(pairs, repl), nil
 }

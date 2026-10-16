@@ -4740,10 +4740,20 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 			ids[i] = m.ID
 			protected[m.ID] = m.Pinned || RetentionExempt(m)
 		}
-		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
+		// DemotionPenalties' edge read, then the lexical replacement exemption
+		// every demotion reader applies (exemptReplacementPairs): without it a
+		// cosine edge between a claim and its replacement sank the replacement,
+		// and the cut below then dropped it from the list while the claim it
+		// replaced stayed. A failed exemption read demotes as before.
+		pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 		if err != nil {
 			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
 		} else {
+			kept, xerr := exemptReplacementPairs(ctx, s.queryDB(), pairs, results, time.Now().UTC())
+			if xerr != nil {
+				s.logger.Debug("get top memories: replacement pair lookup failed, demoting without the exemption", "error", xerr)
+			}
+			penalty, _ := demotionVerdicts(kept)
 			results = StableDemote(results, func(m Memory) string { return m.ID }, penalty)
 		}
 		results = results[:min(limit, len(results))]

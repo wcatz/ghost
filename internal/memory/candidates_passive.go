@@ -1323,18 +1323,28 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 			pairs = keptPairs
 		}
 	}
-	// The lexical replacement veto is a DROP rule for the same reason, and the
-	// query path's (dropNearDuplicates): a removal here takes one row of the pair
-	// out before the read that names the pair, so the block would hold one of the
-	// two claims with nothing saying the other exists.
-	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
+	// The lexical replacement exemption applies on BOTH branches. On the drop
+	// branch a removal takes one row of the pair out before the read that names
+	// the pair, so the block would hold one of the two claims with nothing saying
+	// the other exists, and a failed read stops the removal, as the query path's
+	// (dropNearDuplicates) does. On the reorder branch (a project bucket over its
+	// cap) a demotion would push the newer row behind the cap, where
+	// arrangeReplacements brings it back only into an unreserved slot; a failed
+	// read there demotes as before, because the reorder keeps both rows.
+	if err == nil && len(pairs) > 0 {
 		mems := make([]Memory, len(rows))
 		for i, r := range rows {
 			mems[i] = r.mem
 		}
-		var repl map[[2]string]bool
-		repl, err = replacementPairsWithin(ctx, s.queryDB(), mems, now)
-		pairs = withoutReplacementPairs(pairs, repl)
+		var exemptErr error
+		pairs, exemptErr = exemptReplacementPairs(ctx, s.queryDB(), pairs, mems, now)
+		if exemptErr != nil {
+			if pol.DropDemotedLosers {
+				err = exemptErr
+			} else {
+				s.logger.Warn("candidates: passive replacement pair lookup failed, demoting without the exemption", "error", exemptErr)
+			}
+		}
 	}
 	penalty, against := demotionVerdicts(pairs)
 	if err != nil {

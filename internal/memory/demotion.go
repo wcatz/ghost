@@ -19,6 +19,13 @@ const DefaultDemotionThreshold = 0.90
 // near-duplicate edges instead of 'supersedes' edges: 'related' edges at or
 // above threshold, plus Upsert's own 'duplicate' edges.
 //
+// It is the raw edge verdict over ids, with no lexical replacement exemption:
+// that exemption needs the rows' text and stamps, which an id list does not
+// carry. Every reader in the tree that ranks rows (GetTopMemories,
+// demoteNearDuplicates, passiveDemote, dropNearDuplicates) holds the rows and
+// applies it through exemptReplacementPairs; a new reader must too, or a cosine
+// edge ranks a replacement below the claim it replaced there.
+//
 // 'duplicate' edges are exempt from the strength threshold — Upsert already
 // gated them at upsertMergeThreshold, so their strength is a Jaccard score,
 // not the higher cosine threshold 'related' edges use. Without including them,
@@ -453,7 +460,8 @@ func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string, protect
 
 // demoteResults applies both targeted, window-scoped demotions to a search
 // result set: a superseded memory sinks below its superseder, and the
-// lower-ranked member of a near-duplicate pair sinks below the other. Both are
+// lower-ranked member of a near-duplicate pair sinks below the other unless the
+// two are a lexical replacement pair. Both are
 // membership-preserving (they only reorder), mirroring GetTopMemories'
 // injection ranking so the MCP search path and session injection agree.
 func (s *Store) demoteResults(ctx context.Context, results []Memory, p SearchParams) []Memory {
@@ -466,6 +474,15 @@ func (s *Store) demoteResults(ctx context.Context, results []Memory, p SearchPar
 // reorder the fuseAndRank search paths still apply (and what injection agrees
 // with); the assembler's retriever does better than reorder there — it removes
 // the loser, via dropNearDuplicates below.
+//
+// A lexical replacement pair is exempt (exemptReplacementPairs), as it is from
+// the removal: these paths (ghost_search_all, plain bench) render with no
+// assembler, so a replacement the edge sank would sit below the claim it
+// replaced with nothing on the line saying so. The verdicts are stamped into the
+// trace AFTER the exemption, so explain reports the penalty that ranked. A
+// failed exemption read demotes as before: the reorder keeps both rows either
+// way. The clock the pair rule judges validity against is the wall clock, the
+// one fuseAndRank's decay reads.
 func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p SearchParams) []Memory {
 	if len(results) < 2 {
 		return results
@@ -477,11 +494,25 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 		protected[m.ID] = m.Pinned || RetentionExempt(m)
 	}
 	s.mu.RLock()
-	penalty, err := nearDuplicateVerdicts(ctx, s.queryDB(), ids, protected, s.demotionThreshold, p.trace)
+	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
+	var exemptErr error
+	if err == nil {
+		pairs, exemptErr = exemptReplacementPairs(ctx, s.queryDB(), pairs, results, time.Now().UTC())
+	}
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("near-duplicate demote: lookup failed", "error", err)
 		return results
+	}
+	if exemptErr != nil {
+		s.logger.Debug("near-duplicate demote: replacement pair lookup failed, demoting without the exemption", "error", exemptErr)
+	}
+	penalty, against := demotionVerdicts(pairs)
+	for _, id := range ids {
+		if t := p.trace.row(id); t != nil {
+			t.NearDuplicatePenalty = penalty[id]
+			t.NearDuplicateOf = against[id]
+		}
 	}
 	if len(penalty) == 0 {
 		return results
