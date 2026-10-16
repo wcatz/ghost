@@ -1009,8 +1009,9 @@ type sessionMemory struct {
 	// rows this one directly contradicts that stage 5 withheld, so they are not
 	// in the block (assemble.Item.ConflictsWith).
 	ConflictsWith []string
-	// SupersededBy is the assembler's marker for a pinned row whose replacement is
-	// in the same block (assemble.Item.SupersededBy), carried through unchanged.
+	// SupersededBy is the assembler's marker for a row, pinned or not, whose
+	// replacement through a live `supersedes` edge is in the same block
+	// (assemble.Item.SupersededBy), carried through unchanged.
 	SupersededBy []string
 	// ContradictedBy is the assembler's marker for a pinned row that newer rows
 	// contradict (assemble.Item.ContradictedBy), carried through unchanged.
