@@ -202,6 +202,8 @@ Events currently used by the host adapters include:
 
 Supported source tokens include `claude-code`, `opencode`, `codex`, and `goose`. A missing or unknown source fails open with one diagnostic line and exit status `0`; it does not silently route through another host. Re-run `ghost mcp init` to repair legacy wiring.
 
+A stop or session-end payload names its transcript by path, and Ghost opens that path only after confirming it is a regular file: a FIFO, device, socket or directory is logged with one fail-open line and skipped unopened. Opening a FIFO for reading blocks until a writer appears, which would hang a hook that is documented to fail open.
+
 `ghost hook` is normally called by an MCP client or lifecycle adapter, not by hand.
 
 ## Memory maintenance
