@@ -180,7 +180,7 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
-		reason, secret, scope, orphan := "", false, false, false
+		reason, secret, scope, scopeChar, orphan := "", false, false, false, false
 		switch {
 		case orphaned(m.ProjectID):
 			reason, orphan = orphanReason, true
@@ -188,11 +188,12 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			err := memory.CheckImportedMemory(m)
 			reason, secret = exportRefusal(err)
 			var bound *memory.ScopeBoundError
-			var scopeChar *memory.ScopeKeyValueError
-			scope = errors.As(err, &bound) || errors.As(err, &scopeChar)
+			var sch *memory.ScopeKeyValueError
+			scope = errors.As(err, &bound)
+			scopeChar = errors.As(err, &sch)
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, Orphan: orphan})
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, ScopeChar: scopeChar, Orphan: orphan})
 			continue
 		}
 		keptMemories = append(keptMemories, m)
@@ -329,6 +330,10 @@ type SkippedRecord struct {
 	// Scope marks a record refused for a scope that breaks a bound. The id is not
 	// the problem, so the report points at the scope instead of at re-keying.
 	Scope bool
+	// ScopeChar marks a record refused for a scope that breaks a character-class
+	// rule (blank, NUL, invalid UTF-8, control character, line separator). The
+	// repair is to clean the scope, not shorten it.
+	ScopeChar bool
 	// Orphan marks a child left out only because its PROJECT was left out. The
 	// record's own bytes were never judged and its id is fine, so the report
 	// advises fixing the project and re-exporting, and gives the child none of
@@ -385,7 +390,7 @@ func exportRefusal(err error) (reason string, secret bool) {
 	}
 	var scopeChar *memory.ScopeKeyValueError
 	if errors.As(err, &scopeChar) {
-		return "ghost import refuses it: " + scopeChar.Error(), false
+		return scopeCharReason(scopeChar), false
 	}
 	var refused *memory.SecretContentError
 	if errors.As(err, &refused) {
@@ -393,6 +398,26 @@ func exportRefusal(err error) (reason string, secret bool) {
 			refused.Field), true
 	}
 	return "ghost import refuses it: " + err.Error(), false
+}
+
+// scopeCharReason is the importer's own sentence for a scope character-class
+// violation, plus the key a value sits under when the violation is in a value:
+// the sentence says what characters are forbidden, not the size bounds. The key
+// is rendered through memory.SafeToken; a credential-shaped key is withheld.
+func scopeCharReason(e *memory.ScopeKeyValueError) string {
+	reason := "ghost import refuses it: " + e.Error()
+	// The key is embedded in the field name of the error (scope[key] for values).
+	// Extract it from the field.
+	field := e.Field
+	if strings.HasPrefix(field, "scope[") && strings.HasSuffix(field, "]") {
+		key := field[6 : len(field)-1]
+		if _, shaped := secret.Detect(key); shaped {
+			reason += " (one scope value; its key is not shown)"
+		} else {
+			reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(key))
+		}
+	}
+	return reason
 }
 
 // scopeBoundReason is the importer's own sentence for a scope bound, plus the key
