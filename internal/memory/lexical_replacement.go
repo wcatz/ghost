@@ -19,8 +19,9 @@ import (
 // default install) nothing else relates them. The passive order is importance
 // times decay, which can put the retired claim first.
 //
-// A pair is the pair the save path would have FOLDED but refused because the
-// value differs, and that NAMES THE SAME THING. Every similarity and value test
+// A pair is the pair the save path's same-category bar would have FOLDED but
+// refused because the value differs, whatever the two rows' categories, and
+// that NAMES THE SAME THING. Every similarity and value test
 // is one the save path already makes, so nothing here is a new metric; the one
 // addition is the shared value token below, read from the same valueTokens:
 //
