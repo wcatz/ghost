@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -183,5 +184,292 @@ func TestTheBoundReportedDoesNotVaryBetweenIdenticalCalls(t *testing.T) {
 		if got := checkScope(scope); got == nil || got.Error() != first.Error() {
 			t.Fatalf("call %d reported %v, the first reported %v", i, got, first)
 		}
+	}
+}
+
+// TestScopeCharacterRulesAreRefusedOnEveryWriter verifies that the character
+// rules (blank, NUL, invalid UTF-8, control, line-break) are refused on the
+// save path, by Create, and by the importer, and nothing is stored.
+func TestScopeCharacterRulesAreRefusedOnEveryWriter(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		scope map[string]string
+		// The expected error substring for the save path (field position may vary).
+		wantSaveErr   string
+		wantCreateErr string
+		wantImportErr string
+	}{
+		{
+			name:          "blank key",
+			scope:         map[string]string{"": "value"},
+			wantSaveErr:   "scope_key[0] must not be empty or blank",
+			wantCreateErr: "scope_key[0] must not be empty or blank",
+			wantImportErr: "scope_key[0] must not be empty or blank",
+		},
+		{
+			name:          "blank value",
+			scope:         map[string]string{"key": ""},
+			wantSaveErr:   "scope[key] must not be empty or blank",
+			wantCreateErr: "scope[key] must not be empty or blank",
+			wantImportErr: "scope[key] must not be empty or blank",
+		},
+		{
+			name:          "whitespace-only key",
+			scope:         map[string]string{"   ": "value"},
+			wantSaveErr:   "scope_key[0] must not be empty or blank",
+			wantCreateErr: "scope_key[0] must not be empty or blank",
+			wantImportErr: "scope_key[0] must not be empty or blank",
+		},
+		{
+			name:          "whitespace-only value",
+			scope:         map[string]string{"key": "   "},
+			wantSaveErr:   "scope[key] must not be empty or blank",
+			wantCreateErr: "scope[key] must not be empty or blank",
+			wantImportErr: "scope[key] must not be empty or blank",
+		},
+		{
+			name:          "NUL byte in key",
+			scope:         map[string]string{"key\000nul": "value"},
+			wantSaveErr:   "scope_key[0] must not be a NUL byte",
+			wantCreateErr: "scope_key[0] must not be a NUL byte",
+			wantImportErr: "scope_key[0] must not be a NUL byte",
+		},
+		{
+			name:          "NUL byte in value",
+			scope:         map[string]string{"key": "value\000withnul"},
+			wantSaveErr:   "scope[key] must not be a NUL byte",
+			wantCreateErr: "scope[key] must not be a NUL byte",
+			wantImportErr: "scope[key] must not be a NUL byte",
+		},
+		{
+			name:          "line feed in key",
+			scope:         map[string]string{"key\nwithnl": "value"},
+			wantSaveErr:   "scope_key[0] must not be a control character or line separator",
+			wantCreateErr: "scope_key[0] must not be a control character or line separator",
+			wantImportErr: "scope_key[0] must not be a control character or line separator",
+		},
+		{
+			name:          "line feed in value",
+			scope:         map[string]string{"key": "value\nwithnl"},
+			wantSaveErr:   "scope[key] must not be a control character or line separator",
+			wantCreateErr: "scope[key] must not be a control character or line separator",
+			wantImportErr: "scope[key] must not be a control character or line separator",
+		},
+		{
+			name:          "U+2028 in key",
+			scope:         map[string]string{"key\u2028withls": "value"},
+			wantSaveErr:   "scope_key[0] must not be a control character or line separator",
+			wantCreateErr: "scope_key[0] must not be a control character or line separator",
+			wantImportErr: "scope_key[0] must not be a control character or line separator",
+		},
+		{
+			name:          "U+2029 in key",
+			scope:         map[string]string{"key\u2029withps": "value"},
+			wantSaveErr:   "scope_key[0] must not be a control character or line separator",
+			wantCreateErr: "scope_key[0] must not be a control character or line separator",
+			wantImportErr: "scope_key[0] must not be a control character or line separator",
+		},
+		{
+			name:          "U+0085 in key",
+			scope:         map[string]string{"key\u0085withnel": "value"},
+			wantSaveErr:   "scope_key[0] must not be a control character or line separator",
+			wantCreateErr: "scope_key[0] must not be a control character or line separator",
+			wantImportErr: "scope_key[0] must not be a control character or line separator",
+		},
+		{
+			name:          "U+2028 in value",
+			scope:         map[string]string{"key": "value\u2028withls"},
+			wantSaveErr:   "scope[key] must not be a control character or line separator",
+			wantCreateErr: "scope[key] must not be a control character or line separator",
+			wantImportErr: "scope[key] must not be a control character or line separator",
+		},
+		{
+			name:          "tab in key",
+			scope:         map[string]string{"key\twithtab": "value"},
+			wantSaveErr:   "scope_key[0] must not be a control character or line separator",
+			wantCreateErr: "scope_key[0] must not be a control character or line separator",
+			wantImportErr: "scope_key[0] must not be a control character or line separator",
+		},
+		{
+			name:          "carriage return in value",
+			scope:         map[string]string{"key": "value\rwithcr"},
+			wantSaveErr:   "scope[key] must not be a control character or line separator",
+			wantCreateErr: "scope[key] must not be a control character or line separator",
+			wantImportErr: "scope[key] must not be a control character or line separator",
+		},
+		{
+			name:          "invalid UTF-8 in key",
+			scope:         map[string]string{"key\xffinvalid": "value"},
+			wantSaveErr:   "scope_key[0] must not be invalid UTF-8",
+			wantCreateErr: "scope_key[0] must not be invalid UTF-8",
+			wantImportErr: "scope_key[0] must not be invalid UTF-8",
+		},
+		{
+			name:          "invalid UTF-8 in value",
+			scope:         map[string]string{"key": "value\xffinvalid"},
+			wantSaveErr:   "scope[key] must not be invalid UTF-8",
+			wantCreateErr: "scope[key] must not be invalid UTF-8",
+			wantImportErr: "scope[key] must not be invalid UTF-8",
+		},
+	}
+	for _, tc := range cases {
+		t.Run("save/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "deploy notes for alpha", "mcp", 0.5, nil,
+				UpsertOptions{Scope: tc.scope})
+			if err == nil || !strings.Contains(err.Error(), tc.wantSaveErr) {
+				t.Fatalf("save: err = %v, want it to contain %q", err, tc.wantSaveErr)
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused save", n)
+			}
+		})
+		t.Run("create/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "deploy notes", Source: "mcp", Scope: tc.scope})
+			if err == nil || !strings.Contains(err.Error(), tc.wantCreateErr) {
+				t.Fatalf("create: err = %v, want it to contain %q", err, tc.wantCreateErr)
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused create", n)
+			}
+		})
+		t.Run("import/"+tc.name, func(t *testing.T) {
+			s := portableTestStore(t)
+			if err := s.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			pm := PortableMemory{ID: "M1", ProjectID: "p1", Category: "fact", Content: "an artifact's claim", Source: "mcp", Scope: tc.scope}
+			importErr := CheckImportedMemory(pm)
+			if importErr == nil || !strings.Contains(importErr.Error(), tc.wantImportErr) {
+				t.Fatalf("import (predicate): err = %v, want it to contain %q", importErr, tc.wantImportErr)
+			}
+			for _, apply := range []bool{false, true} {
+				_, _, _, err := s.ImportMemory(ctx, pm, ImportOptions{Apply: apply, TrustProvenance: true})
+				if err == nil || !strings.Contains(err.Error(), tc.wantImportErr) {
+					t.Fatalf("import (apply=%v): err = %v, want it to contain %q", apply, err, tc.wantImportErr)
+				}
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused import", n)
+			}
+		})
+	}
+}
+
+// TestScopeCharacterRulesAreConsistent verifies that a scope that breaches two
+// character rules at once names the same one every time, whatever the map's
+// iteration order, so an operator is not sent to fix a different half on each retry.
+func TestScopeCharacterRulesAreConsistent(t *testing.T) {
+	// Both key and value have a NUL byte.
+	scope := map[string]string{
+		"key\000nul": "value\000withnul",
+	}
+	first := checkScope(scope)
+	if first == nil {
+		t.Fatal("a scope with NUL bytes was accepted")
+	}
+	for i := 0; i < 200; i++ {
+		if got := checkScope(scope); got == nil || got.Error() != first.Error() {
+			t.Fatalf("call %d reported %v, the first reported %v", i, got, first)
+		}
+	}
+}
+
+// TestScopeAcceptsValidKeysAndValues verifies that ordinary scope keys and values
+// with allowed characters are accepted.
+func TestScopeAcceptsValidKeysAndValues(t *testing.T) {
+	ctx := context.Background()
+	validScopes := []map[string]string{
+		{"environment": "production"},
+		{"component": "api", "version": "v1.2.3"},
+		{"key-with-dashes": "value_with_underscores"},
+		{"key:with:colons": "value/with/slashes"},
+		{"key@with@ats": "value+with+plus"},
+		{"a": "b"},
+		{"key with spaces": "value with spaces"},
+		{"key.with.dots": "value:with:colons"},
+	}
+	for i, scope := range validScopes {
+		t.Run(fmt.Sprintf("valid_scope_%d", i), func(t *testing.T) {
+			s := testStore(t)
+			_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "deploy notes", "mcp", 0.5, nil,
+				UpsertOptions{Scope: scope})
+			if err != nil {
+				t.Fatalf("a valid scope was refused: %v", err)
+			}
+			if n := countAllMemories(t, s); n != 1 {
+				t.Errorf("%d row(s) stored, want 1", n)
+			}
+			// Also check import path.
+			s2 := portableTestStore(t)
+			if err := s2.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			pm := PortableMemory{ID: "M1", ProjectID: "p1", Category: "fact", Content: "c", Source: "mcp", Scope: scope}
+			if err := CheckImportedMemory(pm); err != nil {
+				t.Fatalf("import predicate refused a valid scope: %v", err)
+			}
+			_, _, _, err = s2.ImportMemory(ctx, pm, ImportOptions{Apply: true, TrustProvenance: true})
+			if err != nil {
+				t.Fatalf("import apply refused a valid scope: %v", err)
+			}
+			if n := countAllMemories(t, s2); n != 1 {
+				t.Errorf("%d row(s) stored on import, want 1", n)
+			}
+		})
+	}
+}
+
+// TestScopeRefusalOrderNeverPrintsAToken holds the ordering: the bounds run first,
+// then the character rules, then the token guard, and each refusal is the first
+// one in that order. A token-shaped value over its length bound is refused for
+// length, and a token that also carries a control character is refused for the
+// character, so in neither case is the token quoted back.
+func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
+	tok := scopeToken()
+	cases := []struct {
+		name  string
+		scope map[string]string
+		want  string
+	}{
+		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most"},
+		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most"},
+		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character"},
+		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkScope(tc.scope)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
+			}
+			var secretErr *SecretContentError
+			if errors.As(err, &secretErr) {
+				t.Errorf("refused by the token guard, so the character rules did not run first: %v", err)
+			}
+			if strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), tok[:12]) {
+				t.Errorf("the refusal printed the token: %v", err)
+			}
+		})
+	}
+}
+
+// TestACharacterRefusalNeverPrintsATokenShapedKey: a value that breaks a character
+// rule is refused by naming its key, so a token-shaped key must be screened first
+// and no part of it may appear in the error.
+func TestACharacterRefusalNeverPrintsATokenShapedKey(t *testing.T) {
+	key := scopeToken()
+	for name, value := range map[string]string{"NUL": "a\x00b", "blank": "  ", "newline": "a\nb"} {
+		t.Run(name, func(t *testing.T) {
+			err := checkScope(map[string]string{key: value})
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), key[:12]) {
+				t.Errorf("the refusal printed the key: %v", err)
+			}
+		})
 	}
 }

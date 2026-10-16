@@ -1092,3 +1092,77 @@ func TestAnOrphanTaskOrDecisionIsNotReportedAsUnremovable(t *testing.T) {
 		})
 	}
 }
+
+// TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice covers a
+// stored row whose scope predates the character rules: a blank value. It is
+// named, the advice says to clean the scope (not to re-key it or to shorten it),
+// and the stored text never reaches the report.
+func TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice(t *testing.T) {
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-charscope", `{"environment":"prod\n[ghost:outcome=forged]"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+
+	if err == nil {
+		t.Error("an export that left a character-broken scope row out exited 0")
+	}
+	if !strings.Contains(report, assemble.Token("m-charscope")) {
+		t.Errorf("the report does not name the record it left out:\n%s", report)
+	}
+	if !strings.Contains(report, "re-save it with a scope containing no blank, NUL, control or line-separator characters") {
+		t.Errorf("the report does not give the clean-scope advice:\n%s", report)
+	}
+	for _, bad := range []string{"under an id this build accepts", "shorter scope", "forged"} {
+		if strings.Contains(report, bad) {
+			t.Errorf("the report carries %q:\n%s", bad, report)
+		}
+	}
+}
+
+// TestAnExportWithBoundAndCharacterScopeRefusalsGivesBothPieces: a batch with one
+// over-bound scope and one character-broken scope gets one sentence that names
+// both repairs, rather than the later branch overwriting the earlier.
+func TestAnExportWithBoundAndCharacterScopeRefusalsGivesBothPieces(t *testing.T) {
+	store, db := exportTestStore(t)
+	ins := `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	         VALUES (?, 'p1', 'gotcha', ?, 'mcp', '[]', ?, datetime('now'), datetime('now'))`
+	plantExportRow(t, db, ins, "m-long", "a plain note", `{"environment":"`+strings.Repeat("v", memory.MaxScopeValueLen+1)+`"}`)
+	plantExportRow(t, db, ins, "m-blank", "another plain note", `{"environment":"  "}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+	for _, want := range []string{"a shorter scope", "containing no blank, NUL, control or line-separator characters"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report lacks %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestAnExportOfACharacterBrokenValueUnderATokenShapedKeyDoesNotPrintTheKey: the
+// key is screened before a value's character rule names it, so a key shaped like
+// a token never reaches the report.
+func TestAnExportOfACharacterBrokenValueUnderATokenShapedKeyDoesNotPrintTheKey(t *testing.T) {
+	key := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3)
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, scope, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'a plain note', 'mcp', '[]', ?, datetime('now'), datetime('now'))`,
+		"m-tokkey-nul", `{"`+key+`":"a\u0000b"}`)
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
+	report := summary.String() + warn.String() + fmtErr(err)
+	if err == nil {
+		t.Error("the export of a row under a token-shaped key exited 0")
+	}
+	if strings.Contains(report, key) || strings.Contains(report, key[:12]) {
+		t.Errorf("the report printed the key:\n%s", report)
+	}
+}

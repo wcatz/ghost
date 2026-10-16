@@ -859,7 +859,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasOrphan bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -894,6 +894,9 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		}
 		if sk.Scope {
 			hasScope = true
+		}
+		if sk.ScopeChar {
+			hasScopeChar = true
 		}
 	}
 	// The credential advice is printed FIRST and separately, because it is not an
@@ -971,12 +974,26 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			// already names, with the scope kept inside the bounds this time.
 			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		}
+		if hasScope && hasScopeChar && !hasSecret {
+			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes) containing no blank, NUL, control or line-separator characters", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
+		} else if hasScopeChar && !hasSecret {
+			// A scope with invalid characters is not fixed by a different id either.
+			// No tool edits a stored scope, so the repair is the delete-and-save the
+			// sentence already names, with the scope cleaned of blank, NUL, control
+			// and line-separator characters.
+			phrase = "delete the row and re-save it with a scope containing no blank, NUL, control or line-separator characters"
+		}
 		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
 			return err
 		}
 	}
 	if hasScope && hasSecret {
 		if _, err := fmt.Fprintf(out, "  A scope over its bound is a separate fix: delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes).\n", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen); err != nil {
+			return err
+		}
+	}
+	if hasScopeChar && hasSecret {
+		if _, err := fmt.Fprintf(out, "  A scope with invalid characters is a separate fix: delete the row and re-save it with a scope containing no blank, NUL, control or line-separator characters.\n"); err != nil {
 			return err
 		}
 	}
