@@ -125,6 +125,20 @@ func TestResourceReadURIWithheldMessage(t *testing.T) {
 		t.Errorf("error = (%d, %q), want the placeholder and the wrapped code", wire.Code, wire.Message)
 	}
 
+	// A message that quotes the URI, the shape of url.Parse's own errors. The URI
+	// holds a '"', so its %q form escapes it and the raw URI is not a substring of
+	// the message: only the quoted-form replacement can withhold this copy.
+	quotedURI := "ghost://project/" + token + `"x%zz/tasks`
+	quoted := func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		return nil, fmt.Errorf("parse %q: invalid URL escape", quotedURI)
+	}
+	quotedReq := &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: quotedURI}}
+	if _, err := withholdResourceReadURI(quoted)(context.Background(), "resources/read", quotedReq); err == nil {
+		t.Errorf("quoted-URI error was dropped")
+	} else if strings.Contains(err.Error(), "ghp_") {
+		t.Errorf("quoted-URI message repeats the token: %q", err.Error())
+	}
+
 	plain := "ghost://project/plain/tasks"
 	if _, err := read(plain); err == nil || !strings.Contains(err.Error(), plain) {
 		t.Errorf("error for a URI with no token = %v, want it untouched", err)
