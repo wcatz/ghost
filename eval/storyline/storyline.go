@@ -15,7 +15,7 @@
 //	    [-without-ghost] [-runs 1] [-judge] [-model opencode/big-pickle]
 //	    [-ollama http://localhost:11434]
 //	    [-drain-timeout 3m] [-auth-file path/to/auth.json]
-//	    [-results-dir eval/storyline/results]
+//	    [-results-dir eval/storyline/results] [-fake-harness]
 //
 // LOCAL-ONLY. There is no CI wiring (issue #338 is not done), because every
 // session is a real model call and the stages are nondeterministic. The
@@ -61,6 +61,34 @@ type Record struct {
 	// the session start must withhold, and the grade checks that it did and that
 	// no answer used it.
 	ValidUntil string
+	// Scope is the record's scope, passed to the save tool as written: where the
+	// claim applies, e.g. {"environment": "staging"}. A scoped record is the one
+	// a session working somewhere else must not be handed as applying to it.
+	Scope map[string]string
+}
+
+// Probe is one search a reader of the project would run once the arc is over,
+// graded on the rows ghost_memory_search returns rather than on its verdict
+// line. Want is the record the search must lead to, Over the records that may
+// be returned but must rank BELOW Want (the claim Want replaced), and Absent the
+// records the search must not return at all (a record scoped elsewhere when the
+// probe carries a scope).
+type Probe struct {
+	Name   string
+	Query  string
+	Scope  map[string]string
+	Want   string
+	Over   []string
+	Absent []string
+}
+
+// Lure is a pair a fallible classifier would call a supersession although both
+// claims still hold — two values of one setting in two environments. The fake
+// harness's oracle answers SUPERSEDES for it, so the lure-refused check measures
+// whether Ghost's own guards keep the pair away from the classifier, not whether
+// a model resisted it.
+type Lure struct {
+	Older, Newer string
 }
 
 // AnswerCheck is one deterministic reading of a session's ANSWER. Any is a list
@@ -95,6 +123,24 @@ type Stage struct {
 	// appears in a sentence with nothing marking it as old or wrong (see
 	// answerAvoids), so "use X, not Y" is not a use of Y.
 	Avoids []AnswerCheck
+	// SessionScope is the scope this session works in: the block is rendered
+	// with GHOST_INJECTION_SESSION_SCOPE set to it, which is how a host tells
+	// Ghost's session start that it is, say, a production session.
+	SessionScope map[string]string
+	// Withheld lists records whose Mark this session's block must NOT carry, for
+	// a reason other than a supersession — a record scoped to an environment the
+	// session is not working in.
+	Withheld []string
+	// Lifecycle runs the arc stages (restamp, embedding drain, supersede,
+	// resolve) after this stage's records are saved and before the next block
+	// is rendered — the order a host's Stop hook gives a project whose lifecycle
+	// is enabled. Without it the arc stages run once, after the last session, so
+	// a session after a truth change is graded on a store no lifecycle has read.
+	Lifecycle bool
+	// Probes are searches run at this session's start, after its block is
+	// rendered and before its records exist: what the session would get if it
+	// searched before doing anything else. Every key must be an earlier stage's.
+	Probes []Probe
 }
 
 // Storyline is a whole arc. Project is the Ghost project the run works in;
@@ -110,6 +156,19 @@ type Storyline struct {
 	// answer, as a format string taking the expected record's mark and content.
 	// Empty means defaultJudgeQuestion.
 	Judge string
+	// FinalScope is the scope the final block is rendered under, as
+	// Stage.SessionScope is for a session's block.
+	FinalScope map[string]string
+	// Probes are the searches graded against the end state.
+	Probes []Probe
+	// Lures are the pairs the fake classifier is told to get wrong.
+	Lures []Lure
+	// KnownFailing names the checks this storyline is known to fail on main,
+	// each with the one-line reason a report prints beside it. A listed check
+	// that fails is reported as known and does not decide the run; a listed check
+	// that passes is reported as an unexpected pass, so a fix shows up as a line
+	// to delete rather than as silence.
+	KnownFailing map[string]string
 }
 
 // validCategories mirrors memory's own CHECK constraint, so a typo'd category
@@ -202,6 +261,9 @@ func (s Storyline) Validate() error {
 		}
 	}
 	if err := s.validateScope(); err != nil {
+		return err
+	}
+	if err := s.validateTruthChecks(); err != nil {
 		return err
 	}
 	for _, r := range s.Order() {
@@ -312,6 +374,130 @@ func (s Storyline) validateAnswerChecks(i int, st Stage) error {
 	return nil
 }
 
+// validateTruthChecks refuses the shapes of the truth-change checks that would
+// grade the storyline's wording instead of Ghost:
+//
+//   - A record whose Mark is checked for ABSENCE (a superseded record, a
+//     withheld one) must not have that Mark inside any other record's content.
+//     A rename or an upgrade note naturally restates the old name or pin, and a
+//     stale-original check matching it would fail on the current record.
+//   - Every key a probe, a lure or a Withheld list names must be a record here.
+//   - A known-failing entry must say why, so a report line is never bare.
+func (s Storyline) validateTruthChecks() error {
+	absent := map[string]bool{}
+	for _, r := range s.Order() {
+		if r.SupersededBy != "" {
+			absent[r.Key] = true
+		}
+	}
+	for i, st := range s.Stages {
+		for _, k := range st.Withheld {
+			if _, ok := s.RecordByKey(k); !ok {
+				return fmt.Errorf("storyline %s: stage %d withholds no record %q", s.Key, i+1, k)
+			}
+			at, _ := s.stageOf(k)
+			if at >= i {
+				return fmt.Errorf("storyline %s: stage %d withholds %q, which does not exist yet when its block is rendered", s.Key, i+1, k)
+			}
+			absent[k] = true
+		}
+		if err := validScope(st.SessionScope); err != nil {
+			return fmt.Errorf("storyline %s: stage %d session scope: %w", s.Key, i+1, err)
+		}
+	}
+	for _, p := range s.allProbes() {
+		for _, k := range p.Absent {
+			absent[k] = true
+		}
+	}
+	for key := range absent {
+		r, _ := s.RecordByKey(key)
+		for _, o := range s.Order() {
+			if o.Key != key && strings.Contains(o.Content, r.Mark) {
+				return fmt.Errorf("storyline %s: %s's mark %q also appears in %s, so a check for its absence would match the other record", s.Key, key, r.Mark, o.Key)
+			}
+		}
+	}
+	for _, r := range s.Order() {
+		if err := validScope(r.Scope); err != nil {
+			return fmt.Errorf("storyline %s: record %s scope: %w", s.Key, r.Key, err)
+		}
+	}
+	if err := validScope(s.FinalScope); err != nil {
+		return fmt.Errorf("storyline %s: final scope: %w", s.Key, err)
+	}
+	for i, st := range s.Stages {
+		for _, p := range st.Probes {
+			for _, k := range append(append([]string{p.Want}, p.Over...), p.Absent...) {
+				if at, ok := s.stageOf(k); ok && at >= i {
+					return fmt.Errorf("storyline %s: stage %d probe %s names %q, which does not exist yet when the probe runs", s.Key, i+1, p.Name, k)
+				}
+			}
+		}
+	}
+	names := map[string]bool{}
+	for _, p := range s.allProbes() {
+		if strings.TrimSpace(p.Name) == "" || strings.TrimSpace(p.Query) == "" {
+			return fmt.Errorf("storyline %s: a probe needs a name and a query", s.Key)
+		}
+		if names[p.Name] {
+			return fmt.Errorf("storyline %s: probe name %q is a duplicate", s.Key, p.Name)
+		}
+		names[p.Name] = true
+		if err := validScope(p.Scope); err != nil {
+			return fmt.Errorf("storyline %s: probe %s scope: %w", s.Key, p.Name, err)
+		}
+		keys := append(append([]string{p.Want}, p.Over...), p.Absent...)
+		for _, k := range keys {
+			if _, ok := s.RecordByKey(k); !ok {
+				return fmt.Errorf("storyline %s: probe %s names no record %q", s.Key, p.Name, k)
+			}
+		}
+	}
+	for _, l := range s.Lures {
+		older, ok1 := s.stageOf(l.Older)
+		newer, ok2 := s.stageOf(l.Newer)
+		if !ok1 || !ok2 {
+			return fmt.Errorf("storyline %s: lure %s/%s names a record that is not here", s.Key, l.Newer, l.Older)
+		}
+		if newer <= older {
+			return fmt.Errorf("storyline %s: lure %s must be from a later stage than %s", s.Key, l.Newer, l.Older)
+		}
+	}
+	for name, why := range s.KnownFailing {
+		if strings.TrimSpace(why) == "" {
+			return fmt.Errorf("storyline %s: known-failing %s has no reason", s.Key, name)
+		}
+	}
+	return nil
+}
+
+// allProbes is every probe in the storyline, the stages' and the end state's,
+// with each stage probe's name qualified by its session so the names are
+// unique across the storyline.
+func (s Storyline) allProbes() []Probe {
+	var out []Probe
+	for i, st := range s.Stages {
+		for _, p := range st.Probes {
+			p.Name = sessionName(i) + ":" + p.Name
+			out = append(out, p)
+		}
+	}
+	return append(out, s.Probes...)
+}
+
+// validScope refuses an empty key or value, which the save tool and the
+// session-scope setting both refuse too; refusing it here keeps the refusal at
+// the flag boundary instead of in the middle of a run.
+func validScope(scope map[string]string) error {
+	for k, v := range scope {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			return fmt.Errorf("empty key or value in %v", scope)
+		}
+	}
+	return nil
+}
+
 func validateRecord(r Record, seen map[string]bool) error {
 	if r.Key == "" || r.Content == "" {
 		return fmt.Errorf("key and content are required")
@@ -332,11 +518,16 @@ func validateRecord(r Record, seen map[string]bool) error {
 // storylines is the registry of shipped storylines: the reversed decision, and
 // the three arcs the usefulness measurement needs (a correction that must not
 // be repeated, a fact learned in one repository and needed in another, and a
-// fact whose validity window has closed). The service-migration, on-call and
+// fact whose validity window has closed), and the four truth-change arcs in
+// truth.go (a rename, a regressed fix, a version upgrade and a scoped setting).
+// The service-migration, on-call and
 // config-clutter candidates from the design are follow-ups, and each is a
 // Storyline literal here rather than a new mechanism.
 func storylines() []Storyline {
-	return []Storyline{ReversedDecision(), CorrectionReplay(), OpsFact(), StaleFact()}
+	return []Storyline{
+		ReversedDecision(), CorrectionReplay(), OpsFact(), StaleFact(),
+		RenamedEndpoint(), RegressedFix(), VersionUpgrade(), ScopedSetting(),
+	}
 }
 
 // StorylineByKey resolves a -storyline value, naming the ones it does not have
@@ -449,6 +640,13 @@ func ReversedDecision() Storyline {
 				Carries: []AnswerCheck{{Name: "current-store", Any: []string{"SESSION_STORE=postgres"}}},
 				Avoids:  []AnswerCheck{{Name: "superseded-store", Any: []string{"SESSION_STORE=redis"}}},
 			},
+		},
+		// This arc runs its lifecycle after the last session only, which is the
+		// default install's shape (automatic lifecycle phases are off), so
+		// session 3 is graded on what the save path alone left behind.
+		KnownFailing: map[string]string{
+			"stale-original:session-3":             knownSessionStartStale,
+			"distinct-save:session-store-postgres": knownReplacementFolded,
 		},
 	}
 }

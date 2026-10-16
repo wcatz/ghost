@@ -972,7 +972,7 @@ and fails if it grows past the 2048-byte budget, so the figure guarded is the
 one an agent pays. Selection is untouched by the row shape: the behavioral floor
 is still 8/8 and the cap is still 15.
 
-## Storyline evals (`eval/storyline`) — local only, four shipped arcs
+## Storyline evals (`eval/storyline`) — local only, eight shipped arcs
 
 `eval/storyline` measures a property no single-shot benchmark can: what a project
 looks like **across** sessions when the ground truth changes mid-stream. A
@@ -1169,6 +1169,70 @@ in a sandbox HOME. Every run is sandboxed: `HOME`, `XDG_DATA_HOME` and
 `GHOST_DEV_FORBID_DATA_DIR` names the data directory your own environment
 resolves, so a resolve that escapes the tree is refused by the development build
 instead of writing to your store.
+
+### Truth-change arcs, and the deterministic harness
+
+Four arcs grade what the sessions after a change in ground truth are told, and
+what a reader's search returns once the arc is over:
+
+| storyline | project | the change | lifecycle between sessions |
+|---|---|---|---|
+| `renamed-endpoint` | `harbor-gateway` | an endpoint and its handler are renamed in session 2 | after session 2 |
+| `regressed-fix` | `tally-exporter` | a crash is fixed in session 2 and regresses in session 4 | after sessions 2 and 4 |
+| `version-upgrade` | `quill-ledger` | the database driver moves a major version in session 2 | none — the default install |
+| `scoped-setting` | `orbit-search` | one setting differs between staging and production | after session 2 |
+
+A stage marked `Lifecycle` runs restamp, embedding drain, `ghost supersede` and
+`ghost resolve` after its records and before the next block — the order a host's
+Stop hook gives a project whose lifecycle is enabled. `version-upgrade` runs none,
+because automatic lifecycle phases are off by default, so its session 3 is graded
+on what the save path alone left behind. A stage's `SessionScope` is handed to the
+block render as `GHOST_INJECTION_SESSION_SCOPE`. The lines they add:
+
+| check | what it reads |
+|---|---|
+| `withheld:session-N:<key>` | a record scoped to another environment is not in session N's block |
+| `distinct-save:<newer>` | the replacement is not linked `duplicate` to the claim it replaces (`memory_links`) |
+| `lure-refused:<newer>` | a pair that both still hold has no live `supersedes` edge and the older one is not resolved |
+| `search-finds:<probe>` | `ghost_memory_search` returns the probe's record |
+| `search-ranks:<probe>:<key>` | the replacement ranks above the record it replaced, when that one is returned at all |
+| `search-excludes:<probe>:<key>` | a record scoped elsewhere is not returned under the probe's scope |
+
+A probe on a stage (`session-N:<name>`) runs at that session's start, after an
+embedding drain; one on the storyline runs against the end state. Probes grade
+the returned ROWS, never the `[ghost:outcome=…]` line. In a chain (`regressed-fix`:
+crash, then fix, then regression) `reversal-live` and `final-block-carries` are
+asked of the chain's head only, and a site with several superseded records names
+each stale line by key (`stale-original:session-5:export-fixed`).
+
+`Validate` refuses an arc whose absence checks could be failed by its own wording:
+a superseded or withheld record's Mark must not appear in any other record, since a
+rename or an upgrade note naturally restates the old name or pin.
+
+**`-fake-harness`** runs any storyline with no model at all. Sessions get a fixed
+answer, so the answer lines are not graded, and `ghost supersede`/`ghost resolve`
+reach a deterministic fake `opencode` (`eval/storyline/fakeharness`, built from the
+checkout and installed first on the children's `PATH` together with failing
+`claude`, `codex` and `goose` stand-ins). The fake follows the e2e suite's harness
+contract — `--version` 2.0.15, the operation read from the request's own contract
+text, the answer in one JSONL text event, diagnostics on stderr — but its
+supersede verdict is an **oracle** built from the storyline's own `SupersededBy`
+and `Lure` annotations: SUPERSEDES for exactly those pairs, NEITHER for every
+other, KEEP for every resolve item. A failing line is then a failure of Ghost's
+own pipeline — the save path, candidate generation over real embeddings, the
+edges, resolve, the session start and search — never a model's judgement. The
+fake logs every call in the kept scratch tree's `fakebin/`.
+
+```sh
+go run ./eval/storyline -storyline all -fake-harness
+```
+
+**Known failures.** `Storyline.KnownFailing` names the checks an arc is known to
+fail on main, each with a one-line reason. A listed check that fails prints
+`FAIL (known)` and does not decide the verdict or the exit code; a listed check
+that passes prints `PASS (unexpected: listed known-failing)`, so a fix shows up
+as an entry to delete. `TestKnownFailingNamesAreRealChecks` refuses an entry that
+names no check its storyline grades.
 
 ## Reporting rules (all phases)
 
