@@ -34,7 +34,7 @@
 {"name": "q_superseded_injection", "text": "can a superseded fact still appear first in session context", "rel": {"supersede_injection": 3, "time_decay_categories": 1}}
 {"name": "q_fts_cap", "text": "why are FTS queries limited to ten terms", "rel": {"fts_term_cap": 3}}
 {"name": "q_ollama_down", "text": "what happens to search when the embedding service is offline", "rel": {"vector_fallback": 3, "ghost_ollama": 1}}
-{"name": "q_decay_rules", "text": "which memory categories never lose rank to age", "rel": {"time_decay_categories": 3, "pinned_exempt": 1}}
+{"name": "q_decay_rules", "text": "which memory categories never lose rank to age", "rel": {"time_decay_categories": 3, "ghost_decay": 3, "pinned_exempt": 1}}
 {"name": "q_liveness_db", "text": "why should liveness not check the database", "rel": {"k8s_probes": 3, "readiness_vs_liveness": 1}}
 {"name": "q_pdb_drain", "text": "why is the node drain stuck on pod disruption", "rel": {"pdb_budget": 3}}
 {"name": "q_default_deny", "text": "how are network policies started in a new namespace", "rel": {"network_policy_default": 3}}
