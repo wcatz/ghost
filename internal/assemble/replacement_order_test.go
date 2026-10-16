@@ -97,8 +97,9 @@ func TestRunQueryKeepsAReplacementACosineEdgeCallsANearDuplicate(t *testing.T) {
 }
 
 // TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf: the explain row of
-// the moved replacement says which row it was moved ahead of, and its rank is
-// its place in the answer. The older row names nothing.
+// the moved replacement says which row it was moved ahead of, and every rank is
+// the RELEVANCE rank, the row's place before the display move. The older row
+// names nothing.
 func TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf(t *testing.T) {
 	r := newReplacementStore(t)
 	older, newer := addPair(r, dep(pgxV4, 0.8), dep(pgxV5, 0.7))
@@ -128,9 +129,14 @@ func TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf(t *testing.T) {
 	if gotOld.MovedAheadOf != "" {
 		t.Errorf("older row moved_ahead_of = %q, want empty", gotOld.MovedAheadOf)
 	}
-	if gotNew.Rank != indexOf(res.Items, newer)+1 || gotOld.Rank != indexOf(res.Items, older)+1 {
-		t.Errorf("explain ranks new=%d old=%d, want the answer's own places %d and %d",
-			gotNew.Rank, gotOld.Rank, indexOf(res.Items, newer)+1, indexOf(res.Items, older)+1)
+	if gotOld.Rank != 1 || gotNew.Rank != 2 {
+		t.Errorf("explain ranks old=%d new=%d, want the relevance ranks 1 and 2", gotOld.Rank, gotNew.Rank)
+	}
+	// The formatted answer for the same request is in display order.
+	req.Explain = false
+	shown := run(t, r.s, req)
+	if indexOf(shown.Items, newer) != 0 || indexOf(shown.Items, older) != 1 {
+		t.Errorf("answer %v, want the replacement shown first", itemIDs(shown.Items))
 	}
 }
 
@@ -386,5 +392,27 @@ func TestRunPassiveGlobalBucketKeepsBothRowsOfAReplacementPair(t *testing.T) {
 	}
 	if ni > oi {
 		t.Errorf("block %v: the replacement %s must come ahead of %s", itemIDs(res.Items), newer, older)
+	}
+}
+
+// TestRunQueryRecordKeepsTheRelevanceOrder: the retrieval record is the record
+// of what retrieval decided, so its kept rows stay in relevance order while the
+// answer is shown in display order.
+func TestRunQueryRecordKeepsTheRelevanceOrder(t *testing.T) {
+	req := queryRequest(10)
+	sink := &recordingSink{}
+	req.Record = sink
+	res := run(t, &fakeRetriever{set: ftsOnlySet(queryRows("a", "old", "new")...)}, req)
+	if got := itemIDs(res.Items); !eq(got, []string{"a", "new", "old"}) {
+		t.Fatalf("precondition: answer %v, want [a new old]", got)
+	}
+	var kept []string
+	for _, v := range sink.last(t).Verdicts {
+		if v.Kept {
+			kept = append(kept, v.ID)
+		}
+	}
+	if !eq(kept, []string{"a", "old", "new"}) {
+		t.Errorf("record kept %v, want the relevance order [a old new]", kept)
 	}
 }

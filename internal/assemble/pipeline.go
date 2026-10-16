@@ -1943,7 +1943,8 @@ func (p *pipeline) arrangeReplacements() {
 // between the two shifts down by one.
 //
 // res carries the verdict fitResponse made; only its Items and Response are
-// rewritten here, in the new order.
+// rewritten here, in the new order. Run keeps the result as fitResponse left it
+// for explain's rank and the retrieval record, which stay in relevance order.
 func (p *pipeline) displayReplacements(res *Result) {
 	if p.passive || len(p.items) < 2 || len(p.rows) != len(p.items) {
 		return

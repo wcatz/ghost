@@ -120,8 +120,8 @@ type ExplainRow struct {
 	// looks like that row's replacement (the lexical replacement pair the older
 	// row's maybe_replaced_by names). It is a DISPLAY move made after the
 	// relevance verdict: the row's membership, the outcome and the abstention
-	// were decided on the relevance order, and Rank is the row's place in the
-	// answer as shown.
+	// were decided on the relevance order, and Rank stays the row's RELEVANCE
+	// rank, its place before the move.
 	MovedAheadOf string `json:"moved_ahead_of,omitempty"`
 	// FloorDropped says the vector similarity floor removed this row's VECTOR
 	// CONTRIBUTION, and FloorScore is the cosine that did it.
