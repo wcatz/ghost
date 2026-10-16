@@ -4175,7 +4175,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// claim it replaces as a 'duplicate' and strengthened the stale row
 			// (see statesDifferentValue). Skipped rather than ending the scan,
 			// so a compatible candidate ranked below it can still take the fold.
-			if statesDifferentValue(content, candContent) {
+			// A note saying the candidate's subject is gone (retires) is not a
+			// second wording of it either, and it holds no value the candidate
+			// lacks, so the value guard alone folded it into the claim it
+			// retires and strengthened that claim.
+			if statesDifferentValue(content, candContent) || retires(content, candContent) {
 				continue
 			}
 			sim := mergeScore(newTokens, candTokens)
@@ -4275,8 +4279,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				}
 				// And the same value guard, for the default fold: "port 80" as a
 				// fact and "port 81" as a gotcha clear the 0.7 bar too, and a fold
-				// would strengthen the old value and link the new one to it.
-				if statesDifferentValue(content, candContent) {
+				// would strengthen the old value and link the new one to it. A
+				// retirement of the candidate is refused the same way.
+				if statesDifferentValue(content, candContent) || retires(content, candContent) {
 					continue
 				}
 				j := jaccard(newTokens, candTokens)

@@ -102,12 +102,6 @@ func RetiredDependency() Storyline {
 				Over:  []string{"mail-sendgrid"},
 			},
 		},
-		KnownFailing: map[string]string{
-			"distinct-save:mail-removed":                         "the save path folds a retirement note into the claim it retires: the note holds no value token the original lacks, so the value guard does not refuse the fold, the pair is linked duplicate and the retired claim is strengthened",
-			"stale-original:session-3":                           "the strengthened retired claim is the first line of the block, unmarked: the read side's replacement guess needs a value token only the newer note holds, and a retirement holds none",
-			"search-finds:session-3:mail-provider":               "near-duplicate removal drops the retirement note in favour of the claim it retires (the folded pair is not a lexical replacement pair, so the exemption does not apply)",
-			"search-ranks:session-3:mail-provider:mail-sendgrid": "the retired claim is the only matching row returned, and nothing on it says it was removed",
-		},
 		Judge: "Did the session say the dependency is gone (%s: %s) rather than present it as current?",
 	}
 }

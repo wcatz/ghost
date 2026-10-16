@@ -108,10 +108,13 @@ func valueTokens(s string) map[string]bool {
 // valueField is one word of a text as valueTokens reads it, in text order:
 // the lowercased word, whether it is a value token, and whether its SHAPE makes
 // it one (a digit, an inner path or identifier mark, an inner capital, a name
-// away from a sentence start) rather than only its place inside a code span.
+// away from a sentence start) rather than only its place inside a code span,
+// and the index of the sentence it is in, by the same sentence boundaries the
+// capital-letter rule reads (retiresFields asks it).
 type valueField struct {
 	word          string
 	value, shaped bool
+	sentence      int
 }
 
 // valueFields is valueTokens' reading of s, word by word and in order, list
@@ -121,6 +124,7 @@ func valueFields(s string) []valueField {
 	var out []valueField
 	segments := strings.Split(s, "`")
 	sentenceStart, lineStart := true, true
+	sentence := -1
 	for si, seg := range segments {
 		// An odd segment is inside a span, unless it is the unclosed tail.
 		code := si%2 == 1 && si < len(segments)-1
@@ -136,6 +140,9 @@ func valueFields(s string) []valueField {
 				tok := strings.Trim(raw, "\"'«»“”‘’()[]{}<>.,;:!?*")
 				tok = groupedDigits(strings.TrimRight(tok, "/"))
 				starts := sentenceStart
+				if starts || sentence < 0 {
+					sentence++
+				}
 				// The next word starts a sentence after a terminal mark or a
 				// colon, whatever this token turned out to be.
 				closed := strings.TrimRight(raw, "\"'»”’)]}*")
@@ -144,7 +151,7 @@ func valueFields(s string) []valueField {
 					continue
 				}
 				shaped := isValueToken(tok) || (!starts && isName(tok))
-				out = append(out, valueField{word: strings.ToLower(tok), value: code || shaped, shaped: shaped})
+				out = append(out, valueField{word: strings.ToLower(tok), value: code || shaped, shaped: shaped, sentence: sentence})
 			}
 		}
 	}

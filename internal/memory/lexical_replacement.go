@@ -31,7 +31,14 @@ import (
 //   - similarity at the save path's own fold bar: mergeScore > 0 within one
 //     category (the same-category probe), token Jaccard >=
 //     upsertCrossCategoryThreshold across categories (the cross-category probe).
-//   - statesDifferentValue: each side holds a value token the other lacks.
+//   - statesDifferentValue: each side holds a value token the other lacks,
+//     OR the newer row RETIRES the older one (retires): it says, in one
+//     sentence that names a value token of the older row, that the thing is
+//     gone ("SendGrid was removed …"), and the older row says nothing of the
+//     kind. A retirement holds no value the retired claim lacks, so the value
+//     test alone never named it, and it is the newer row's claim that the
+//     older one is no longer current, which is a replacement to the reader.
+//     The rule is directional: an OLDER retirement retires nothing newer.
 //   - and the two hold at least one value token IN COMMON (sharesValue): the
 //     identifier the claim is about (go.mod, Redis, TTL, SESSION_STORE). Two
 //     parallel notes in one template about two different things ("auth-service
@@ -127,15 +134,16 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 			} else if jaccard(a.tokens, b.tokens) < upsertCrossCategoryThreshold {
 				continue
 			}
-			if !sharesValue(a.values, b.values) || !lacksValue(a.values, b.values) || !lacksValue(b.values, a.values) {
+			older, newer := a, b
+			if b.created.Before(a.created) {
+				older, newer = b, a
+			}
+			swapped := sharesValue(a.values, b.values) && lacksValue(a.values, b.values) && lacksValue(b.values, a.values)
+			if !swapped && !retiresFields(newer.fields, older.fields, older.values) {
 				continue
 			}
 			if subjectSwapped(a.fields, b.fields) {
 				continue
-			}
-			older, newer := a, b
-			if b.created.Before(a.created) {
-				older, newer = b, a
 			}
 			if out == nil {
 				out = map[string][]string{}
