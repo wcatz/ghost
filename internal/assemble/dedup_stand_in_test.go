@@ -129,3 +129,79 @@ func TestLegConsensusJudgesAStandInByTheRowItDisplaced(t *testing.T) {
 		})
 	}
 }
+
+// TestQueryModeStandInForAnUnembeddedRowSurvivesLegConsensus goes through the
+// real retriever. The earlier row O was saved moments ago and has no embedding
+// yet, so the vector leg could never see it and leg consensus admits it
+// outright (#1319). Its later restatement N is embedded, but only the keyword
+// leg found it, below its top rank. The removal keeps N in O's place, and
+// N must be admitted on O's evidence, which includes that O is unembedded.
+func TestQueryModeStandInForAnUnembeddedRowSurvivesLegConsensus(t *testing.T) {
+	ctx := context.Background()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "proj", "/src/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	add := func(content string, day int, vec []float32) string {
+		t.Helper()
+		id, err := s.Create(ctx, "proj", memory.Memory{
+			Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", content, err)
+		}
+		stamp := time.Date(2026, 9, day, 10, 0, 0, 0, time.UTC).Format(memory.StoredStampLayout)
+		if _, err := db.Exec(`UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, stamp, stamp, id); err != nil {
+			t.Fatalf("stamp %s: %v", id, err)
+		}
+		if vec != nil {
+			if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+				t.Fatalf("StoreEmbedding(%q): %v", content, err)
+			}
+		}
+		return id
+	}
+	// N's vector is orthogonal to the query, under the vector floor, so N is
+	// embedded yet found by the keyword leg alone, ranked below O: the fused
+	// order is X, O, N, and the pair's rank verdict removes N.
+	other := add("database configuration quorum zebra", 21, []float32{1, 0, 0, 0})
+	older := add("database configuration for the replica refresh runs hourly", 22, nil)
+	newer := add("database configuration of the replica refresh: the cadence is sixty minutes, as set in the platform runbook the ops team keeps", 24, []float32{0, 0, 0, 1})
+	if err := s.CreateLink(ctx, older, newer, "related", 0.95, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	req := Request{
+		ProjectID: "proj",
+		Query:     "database configuration",
+		QueryVec:  []float32{1, 0, 0, 0},
+		Source:    SourceSearch,
+		Budget:    Budget{MaxItems: 5},
+		Condition: memory.CondHybrid,
+		Now:       time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
+	}
+	res := run(t, s, req)
+	ids := itemIDs(res.Items)
+	if !hasID(ids, other) {
+		t.Fatalf("items = %v: the fixture is wrong, %s should be admitted", ids, other)
+	}
+	if !hasID(ids, older) && !hasID(ids, newer) {
+		var why []string
+		for _, d := range res.Trace.Decisions {
+			if d.ID == older || d.ID == newer {
+				why = append(why, d.ID+":"+d.Stage+":"+d.Reason)
+			}
+		}
+		t.Errorf("items = %v: neither row of the pair (%s, %s) is in the answer: %v", ids, older, newer, why)
+	}
+	// The fixture is the flip: the earlier row is the recorded loser, against
+	// the later one, so N is in the answer as O's stand-in.
+	if d := traceDecision(res, older, stageDedup); d == nil || len(d.Against) != 1 || d.Against[0] != newer {
+		t.Errorf("dedup decision for %s = %+v, want it removed against %s", older, d, newer)
+	}
+}

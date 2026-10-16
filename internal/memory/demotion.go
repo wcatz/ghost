@@ -175,13 +175,26 @@ func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pro
 // relevance rank is reported unchanged: only which row of the pair leaves, and
 // the id it lost to, change.
 //
+// A pair joined by a live `supersedes` or `contradicts` edge (explicit, in
+// either direction) is never turned round: the explicit relation decides it,
+// as it does for lexicalReplacements. The rank such a pair arrives in is the
+// order after the supersede demotion, which has already sunk the superseded row,
+// and a superseded row can carry the later created_at (supersede orients by
+// updated_at first, so a stale note re-asserted is the superseded one); turning
+// the verdict round there would remove the superseder and keep the retired row.
+//
 // rows[window:] is a tail the window was extended by (dropNearDuplicatesOver):
 // a verdict is never turned round to remove a window row in favour of a tail
 // row, and the rank verdict stands, because the tail can be cut by the item
 // budget and the answer would then hold neither row of the pair.
-func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected map[string]bool) []demotionPairs {
+func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected map[string]bool, explicit []LinkEdge) []demotionPairs {
 	if len(pairs) == 0 {
 		return pairs
+	}
+	related := make(map[[2]string]bool, 2*len(explicit))
+	for _, e := range explicit {
+		related[[2]string{e.From, e.To}] = true
+		related[[2]string{e.To, e.From}] = true
 	}
 	created := make(map[string]time.Time, len(rows))
 	inTail := make(map[string]bool, len(rows))
@@ -197,7 +210,7 @@ func earlierRowLoses(pairs []demotionPairs, rows []Memory, window int, protected
 	for _, pr := range pairs {
 		lc, lok := created[pr.loser]
 		wc, wok := created[pr.winner]
-		if lok && wok && lc.After(wc) && (!protected[pr.winner] || protected[pr.loser]) && (!inTail[pr.loser] || inTail[pr.winner]) {
+		if lok && wok && lc.After(wc) && (!protected[pr.winner] || protected[pr.loser]) && (!inTail[pr.loser] || inTail[pr.winner]) && !related[[2]string{pr.loser, pr.winner}] {
 			pr.loser, pr.winner = pr.winner, pr.loser
 			pr.flipped = true
 		}
@@ -700,8 +713,12 @@ func (s *Store) dropNearDuplicatesOver(ctx context.Context, results []Memory, wi
 	}
 	s.mu.RLock()
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
-	if err == nil {
-		pairs = earlierRowLoses(pairs, results, window, protected)
+	if err == nil && len(pairs) > 0 {
+		var explicit []LinkEdge
+		explicit, err = explicitEdgesWithin(ctx, s.queryDB(), ids)
+		if err == nil {
+			pairs = earlierRowLoses(pairs, results, window, protected, explicit)
+		}
 	}
 	if err == nil && len(pairs) > 0 {
 		var contradicted map[string]bool

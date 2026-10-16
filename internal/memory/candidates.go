@@ -714,9 +714,15 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// read over a window it never saw. Filing them here, before the explain
 	// buckets are built, is what lets stage 6 put each one in the trace, the
 	// retrieval record and explain with its reason.
+	//
+	// A loser carries the same admission facts a kept row does (the keyword
+	// reservation here, the embedding state below), because a stand-in for it is
+	// judged by its evidence (DroppedLoser.StandIns).
 	for _, m := range removed {
+		c := candidateOf(m, scores, fts, vec, req.Now)
+		c.KeywordReserved = window.Reserved[m.ID]
 		set.DroppedLosers = append(set.DroppedLosers, DroppedLoser{
-			Candidate: candidateOf(m, scores, fts, vec, req.Now),
+			Candidate: c,
 			LostTo:    lostTo[m.ID],
 			StandIns:  standIns[m.ID],
 		})
@@ -783,12 +789,23 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// shares its backing array with set.Rows, so the marks below reach the
 	// returned set.
 	if vecStatus := set.Legs["vector"]; vecStatus.Applicable && vecStatus.Available {
-		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), rows, identity, len(req.QueryVec))
+		judged := rows
+		if len(set.DroppedLosers) > 0 {
+			judged = make([]Candidate, 0, len(rows)+len(set.DroppedLosers))
+			judged = append(judged, rows...)
+			for _, l := range set.DroppedLosers {
+				judged = append(judged, l.Candidate)
+			}
+		}
+		unembedded, err := unembeddedAmong(ctx, cand.queryDB(), judged, identity, len(req.QueryVec))
 		if err != nil {
 			return nil, fmt.Errorf("candidates: unembedded rows: %w", err)
 		}
 		for i := range rows {
 			rows[i].Unembedded = unembedded[rows[i].ID]
+		}
+		for i := range set.DroppedLosers {
+			set.DroppedLosers[i].Unembedded = unembedded[set.DroppedLosers[i].ID]
 		}
 	}
 	return set, nil
