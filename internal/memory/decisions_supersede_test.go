@@ -620,6 +620,102 @@ func memoryBySourceRef(t *testing.T, s *Store, decisionID string) string {
 	return id
 }
 
+// A reflect merge can absorb a decision companion into an ordinary agent save
+// (#1283): the emission's text byte-matches the SAVE, so takeReusableRow reuses
+// the save in place, and fillReusedClaimsTx carries the deleted companion's
+// decision link onto it. The reuse was a verbatim re-emission, so the
+// reuseChangesNothing branch wrote nothing at all and left the save's source as
+// 'mcp'; findDecisionCompanionsTx then rejected the link (neither the decision
+// category nor a trusted source), so the supersede answered a clean success
+// while the reversed decision kept answering search and session start. A reuse
+// that absorbs another source is that source's consolidation successor, so its
+// provenance must be stamped with the source the read lookup trusts.
+func TestSupersedeDecisionRetiresACompanionAbsorbedIntoAnAgentSave(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+
+	var companionText string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, oldMem).Scan(&companionText); err != nil {
+		t.Fatalf("read the companion's text: %v", err)
+	}
+	// The agent save: the same text under its own category and source, and fields
+	// a verbatim re-emission reproduces, so the merge takes the branch that writes
+	// nothing (#727) — the strictest path, and the one the leak is on.
+	save, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", companionText, "mcp", 0.5, nil, UpsertOptions{})
+	if err != nil {
+		t.Fatalf("save the agent copy: %v", err)
+	}
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: companionText, Importance: 0.5,
+		ReplacesIDs: []string{save, oldMem},
+	}}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if !rowExists(t, s, save) || rowExists(t, s, oldMem) {
+		t.Fatalf("the merge did not reuse the save and take the companion (save live=%v, companion live=%v)",
+			rowExists(t, s, save), rowExists(t, s, oldMem))
+	}
+	var source, ref string
+	if err := s.db.QueryRow(`SELECT source, COALESCE(source_ref, '') FROM memories WHERE id = ?`, save).Scan(&source, &ref); err != nil {
+		t.Fatalf("read the reused row: %v", err)
+	}
+	if !sourceRefNamesDecision(ref, oldDec) {
+		t.Fatalf("the reused row %s carries source_ref %q, which does not name decision %s: the fixture did not reproduce the merge",
+			save, ref, oldDec)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != save {
+		t.Errorf("report = %+v, want the reused row %s (source %q) retired", got, save, source)
+	}
+	if !decisionMemoryResolved(t, s, save) {
+		t.Error("the reused row is still live: search and session start keep answering with the reversed decision")
+	}
+}
+
+// The read side must hold on its own (#1283): even when the write side did not
+// stamp the absorbing reuse, a live row that a link names must never be
+// invisible to a supersede. A row whose link the trust arms reject is left live
+// (it may be a forged or downgraded link, not a companion to bury) but reported
+// in Declined, so the caller is never told a reversal was clean while the
+// reversed text still ranks.
+func TestSupersedeDecisionReportsALinkedRowTheTrustArmsReject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	if err := s.Delete(ctx, oldMem); err != nil {
+		t.Fatalf("delete the companion: %v", err)
+	}
+	// The shape the write side used to leave behind: an ordinary agent save
+	// holding the companion's link with neither the decision category nor a
+	// trusted source.
+	id, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "the queue backend, restated by an agent", Source: "mcp", Importance: 0.5})
+	if err != nil {
+		t.Fatalf("create the linked row: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, decisionCompanionRef(oldDec), id); err != nil {
+		t.Fatalf("link the row: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 0 {
+		t.Errorf("a row whose link the trust arms reject was retired: %+v", got)
+	}
+	if len(got.Declined) != 1 || got.Declined[0] != id {
+		t.Errorf("report = %+v, want the linked row %s declined so the supersede is not answered clean", got, id)
+	}
+	if decisionMemoryResolved(t, s, id) {
+		t.Error("the linked row was retired even though its link is not trusted")
+	}
+}
+
 // Old and new compose to the same text and the old companion is gone: the
 // replacement's own companion must not be retired or linked to itself.
 func TestSupersedeDecisionNeverRetiresTheReplacementsOwnCompanion(t *testing.T) {

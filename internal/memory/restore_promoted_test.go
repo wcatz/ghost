@@ -61,8 +61,8 @@ func TestRestoreSnapshotSkipsPromotedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RestoreSnapshot: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("restore reported %d rows, want 1 — only the row the project still owns is restored", n)
+	if n.Restored != 1 {
+		t.Errorf("restore reported %d rows, want 1 — only the row the project still owns is restored", n.Restored)
 	}
 
 	rows, err := s.GetByIDs(ctx, []string{stayID, moveID})

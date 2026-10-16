@@ -1165,12 +1165,20 @@ func runReflect() {
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
 	if restore {
-		n, err := store.RestoreSnapshot(ctx, projectID)
+		res, err := store.RestoreSnapshot(ctx, projectID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Restored %d memories from snapshot for %s\n", n, assemble.Label(projectName))
+		fmt.Printf("Restored %d memories from snapshot for %s\n", res.Restored, assemble.Label(projectName))
+		// An undo the snapshot cannot complete is said so, not assumed: a
+		// snapshot taken before the retention column recorded no tier, so
+		// those rows keep the tier they had rather than the one they were
+		// captured at (#1341). Silence here would read as a full revert.
+		if res.UncapturedRetention > 0 {
+			fmt.Printf("Note: the snapshot predates the retention column: %d rows recorded no tier, so their lifetime was not restored\n",
+				res.UncapturedRetention)
+		}
 		return
 	}
 
