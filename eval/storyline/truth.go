@@ -4,8 +4,7 @@ package main
 // report prints beside a known failure; the audit that found them states the
 // reproduction and the observed store state in full.
 const (
-	knownReplacementFolded = "the save path links a replacement as a near-duplicate of the claim it replaces, and strengthens the stale claim"
-	knownOldWordingDrops   = "before a supersede pass, a search in the old wording drops the replacement as the stale claim's near-duplicate"
+	knownOldWordingFirst   = "before a supersede pass, a search in the old wording ranks the stale claim above its replacement"
 	knownSessionStartStale = "with no lifecycle between sessions, the session start lists the replaced claim, unmarked, ahead of its replacement"
 )
 
@@ -95,9 +94,6 @@ func RenamedEndpoint() Storyline {
 				Want:  "events-endpoint",
 				Over:  []string{"ingest-endpoint"},
 			},
-		},
-		KnownFailing: map[string]string{
-			"distinct-save:events-endpoint": knownReplacementFolded,
 		},
 		Judge: "Did the session give the current endpoint (%s: %s) rather than the one it replaced?",
 	}
@@ -294,10 +290,8 @@ func VersionUpgrade() Storyline {
 			},
 		},
 		KnownFailing: map[string]string{
-			"distinct-save:pgx-upgrade":                      knownReplacementFolded,
 			"stale-original:session-3":                       knownSessionStartStale,
-			"search-finds:session-3:old-constructor":         knownOldWordingDrops,
-			"search-ranks:session-3:old-constructor:pgx-pin": knownOldWordingDrops,
+			"search-ranks:session-3:old-constructor:pgx-pin": knownOldWordingFirst,
 		},
 		Judge: "Did the session use the current driver pin (%s: %s) rather than the one it replaced?",
 	}

@@ -5819,7 +5819,7 @@ func TestStoreUpsert_StrengthenPreservesUpdatedAt(t *testing.T) {
 		t.Fatalf("pin timestamps: %v", err)
 	}
 
-	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Hetzner Compose in region fsn1", "mcp", 0.7, nil)
+	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "Production deploy target: Fly.io in region iad", "mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert B: %v", err)
 	}
@@ -5864,7 +5864,7 @@ func TestStoreUpsert_StrengthenDirectionForSupersede(t *testing.T) {
 	if _, err := db.Exec(`UPDATE memories SET created_at=?, updated_at=? WHERE id=?`, past, past, idA); err != nil {
 		t.Fatalf("pin timestamps: %v", err)
 	}
-	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Hetzner Compose in region fsn1", "mcp", 0.7, nil)
+	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "Production deploy target: Fly.io in region iad", "mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert B: %v", err)
 	}

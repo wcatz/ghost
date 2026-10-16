@@ -3338,7 +3338,9 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // nothing the caller saved is lost), so a genuinely different follow-up save
 // under a manual-sourced target (or any target) is never silently discarded.
 // If no candidate scores above the applicable bar, it creates a new,
-// unlinked row.
+// unlinked row. Neither probe folds into a candidate that states a different
+// value of the same fact (statesDifferentValue): that save is the claim's
+// replacement, stored as a distinct row.
 
 // MaxSourceRefLen is the byte cap on a write-time source reference, at the store
 // rather than at the tool boundary.
@@ -4167,6 +4169,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 				continue
 			}
+			// A similar text that swaps a value of the fact — a version, a
+			// path, an identifier, a number — is the claim's replacement, not a
+			// second wording of it. Folding it linked the replacement to the
+			// claim it replaces as a 'duplicate' and strengthened the stale row
+			// (see statesDifferentValue). Skipped rather than ending the scan,
+			// so a compatible candidate ranked below it can still take the fold.
+			if statesDifferentValue(content, candContent) {
+				continue
+			}
 			sim := mergeScore(newTokens, candTokens)
 			if sim > 0 && sim > bestSim {
 				bestSim = sim
@@ -4260,6 +4271,12 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				// other. Scoped to FoldOnly for the same reason as before — the
 				// default fold keeps the caller's wording either way.
 				if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
+					continue
+				}
+				// And the same value guard, for the default fold: "port 80" as a
+				// fact and "port 81" as a gotcha clear the 0.7 bar too, and a fold
+				// would strengthen the old value and link the new one to it.
+				if statesDifferentValue(content, candContent) {
 					continue
 				}
 				j := jaccard(newTokens, candTokens)
@@ -8866,7 +8883,8 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
 // reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
 // save-time and reflection-time dedup agree on what "duplicate" means for
-// same-length restatements.
+// same-length restatements — except for a pair that swaps a value, which the
+// save path refuses (statesDifferentValue) and reflection's tier does not.
 //
 // Save-time dedup deliberately goes *further* than reflection's tier via the
 // overlap leg below: Upsert sees one candidate against a live corpus and its

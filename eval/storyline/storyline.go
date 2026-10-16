@@ -645,8 +645,7 @@ func ReversedDecision() Storyline {
 		// default install's shape (automatic lifecycle phases are off), so
 		// session 3 is graded on what the save path alone left behind.
 		KnownFailing: map[string]string{
-			"stale-original:session-3":             knownSessionStartStale,
-			"distinct-save:session-store-postgres": knownReplacementFolded,
+			"stale-original:session-3": knownSessionStartStale,
 		},
 	}
 }
