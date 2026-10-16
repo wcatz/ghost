@@ -420,9 +420,13 @@ is also ordered ahead of it: inside the bucket's item cap it moves up and the ro
 stay on the page; from behind the cap it may take only the slot of the lowest-ranked row
 inside the cap that nothing reserved (a pinned row, a behavioural-floor pick, a row the
 category share admitted), and with no such row it stays off the page and the older row is
-not marked. A pinned older row is marked and keeps its place. On `ghost_memory_search` the
+not marked. A pinned row is never displaced out of the cap and never moved ahead of or behind its
+pair: a pinned older row is marked and keeps its place. On `ghost_memory_search` the
 order is the relevance answer and is left alone, so the line is marked only. A row whose
-replacement is not in the answer carries neither field. The marker's words in a tag are
+replacement is not in the answer carries neither field. A note that changes only a plain word —
+a tool or a name with no digit, path or capital (`eslint` → `biome`, `alice` → `robert`) — is
+never marked: that is the known limit of the lexical guess, since the same swap is how two
+parallel facts about different subjects read. The marker's words in a tag are
 not the marker: a tag prints JSON-quoted inside `tags:[…]`, and the marker is the field
 after it.
 

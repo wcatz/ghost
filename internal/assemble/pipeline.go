@@ -1858,9 +1858,12 @@ func (p *pipeline) markSuperseded() {
 //     markMaybeReplaced names nothing, so the older line stays unmarked rather
 //     than pointing at a row the reader cannot see.
 //
-// A pinned older row is never moved behind its replacement and no row is moved
-// ahead of a pin: a guess is weaker evidence than a `supersedes` edge, so a
-// pinned row is treated as a pin a newer row contradicts — marked, in its place.
+// A pinned row is never displaced out of the cap and never moved ahead of or
+// behind its pair: a pinned older row stays where it is (a guess is weaker
+// evidence than a `supersedes` edge, so it is treated as a pin a newer row
+// contradicts — marked, in its place) and a pinned replacement is not pulled. A
+// pinned row BETWEEN an older row and its replacement shifts down by one, and the
+// shift never crosses the cap.
 // A row stage 7 deferred is never pulled back into the window, because that
 // would undo the share it was deferred for. A newly placed replacement is then
 // itself read as an older row, so a chain (v4, v5, v6) comes out newest first;

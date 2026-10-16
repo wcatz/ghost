@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,5 +90,47 @@ func TestLexicalReplacementsKeepsParallelFactsApart(t *testing.T) {
 				t.Errorf("paired = %v (%v), want %v", paired, got, tc.pair)
 			}
 		})
+	}
+}
+
+// worstCaseRows is the session-start shape that made the alignment expensive: one
+// bucket of 45 near-identical notes of about 8KB, each ending in a different
+// version, so every pair clears the similarity bar and reaches the alignment.
+func worstCaseRows() []Candidate {
+	var body strings.Builder
+	for body.Len() < 8000 {
+		body.WriteString("The deploy runbook for the ledger service covers the rollout order, the health gates and the rollback steps. ")
+	}
+	rows := make([]Candidate, 45)
+	for i := range rows {
+		created := time.Date(2026, 9, 1, 0, 0, i, 0, time.UTC).Format(StoredStampLayout)
+		rows[i] = lexRow(fmt.Sprintf("r%02d", i), created, "go.mod pins the runbook tool. "+body.String()+fmt.Sprintf("The tool is pinned at v1.%d.0.", i))
+	}
+	return rows
+}
+
+// TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes: the pair rule runs
+// on the session-start path, so its cost on the worst bucket it can be handed
+// is bounded, and the pairs in it are still found.
+func TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes(t *testing.T) {
+	rows := worstCaseRows()
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	start := time.Now()
+	repl := lexicalReplacements(rows, nil, now)
+	took := time.Since(start)
+	t.Logf("45 x 8KB notes: %s", took)
+	if took > 250*time.Millisecond {
+		t.Errorf("lexicalReplacements took %s on 45 near-identical 8KB notes, want well under 250ms", took)
+	}
+	if got := len(repl["r00"]); got != 44 {
+		t.Errorf("r00 names %d replacements, want 44: every later version replaces it", got)
+	}
+}
+
+func BenchmarkLexicalReplacementsWorstCase(b *testing.B) {
+	rows := worstCaseRows()
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	for b.Loop() {
+		lexicalReplacements(rows, nil, now)
 	}
 }

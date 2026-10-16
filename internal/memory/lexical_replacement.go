@@ -171,6 +171,22 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 // be a change of procedure or a second step beside the first, the text cannot
 // say which, and an unmarked pair is the safe reading.
 func subjectSwapped(a, b []valueField) bool {
+	// Only the CHANGED region is aligned. The words both texts open and close
+	// with are common to them by definition, and they are most of a long note
+	// that differs in one place; aligning them made the table quadratic in the
+	// whole note for nothing.
+	for len(a) > 0 && len(b) > 0 && a[0].word == b[0].word {
+		a, b = a[1:], b[1:]
+	}
+	for len(a) > 0 && len(b) > 0 && a[len(a)-1].word == b[len(b)-1].word {
+		a, b = a[:len(a)-1], b[:len(b)-1]
+	}
+	// A changed region longer than maxAlignedWords on either side is refused
+	// without being aligned: no pair, so no marker and no move, which is the
+	// safe direction for a guess (see maxAlignedWords).
+	if len(a) > maxAlignedWords || len(b) > maxAlignedWords {
+		return true
+	}
 	n, m := len(a), len(b)
 	// lcs[i][j] is the common-subsequence length of a[i:] and b[j:].
 	lcs := make([][]int, n+1)
@@ -212,6 +228,17 @@ func subjectSwapped(a, b []valueField) bool {
 	i, j = n, m
 	return flush()
 }
+
+// maxAlignedWords bounds the changed region subjectSwapped aligns, so the
+// alignment costs at most a 65x65 table per pair on the session-start path
+// whatever the notes' length. 64 words is nearly three times the largest changed
+// region of the replacements this rule is measured against: 23 words (the
+// storyline's renamed endpoint), 17 (the version upgrade), 16 (the reversed
+// decision), and at most 12 across the bench maintenance corpus's eleven pairs.
+// A replacement rewords the clause around its values, not a page. Two notes whose changed
+// region is longer than that differ in more than a value, and a guess about
+// them is not worth its cost or its risk.
+const maxAlignedWords = 64
 
 // subjectWord reports whether a word is a plain content word: not value-shaped,
 // at least four letters, and not a function word. Short and function words are
