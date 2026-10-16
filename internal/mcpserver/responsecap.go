@@ -16,30 +16,51 @@ import (
 // context window.
 //
 // The cut is the same shape search uses: WHOLE rows, from the END of the answer,
-// with a notice saying how many were cut and how to see the rest. The budget is
+// with a notice saying how many were cut and how to see the rest. Like search
+// under KeepPinned, a row marked pinned (ghost_project_context marks them) is cut
+// only once every unpinned row is gone, and the notice then says how many of the
+// cut rows were pinned. The budget is
 // the same number search ships (searchResponseMaxBytes, one memory at the
 // store's own content cap), read through the same accessor, so a caller has one
 // budget to reason about across all six tools rather than six.
 //
-// An answer that HAS rows in it always keeps at least one: the first row is
-// never cut, so a single row larger than the budget (a decision whose 8000-byte
+// An answer that HAS rows in it always keeps at least one: the first row — the
+// first pinned row when one is pinned — is never cut, so a single row larger than the budget (a decision whose 8000-byte
 // decision and rationale are each clamped separately is about 16 KB) is shown
 // whole with a notice rather than dropped for a notice over nothing.
 
 // responsePart is one segment of a tool response, in the order it is rendered.
 // A cuttable part is a WHOLE row: the budget may drop it to make the answer fit,
-// and it drops the last cuttable part first. A non-cuttable part is framing —
+// and it drops the last unpinned cuttable part first. A non-cuttable part is framing —
 // headings, count lines, learned context, a not-registered sentence — which is
 // counted against the budget but never cut, because cutting it would change what
 // the answer means rather than how much of it there is.
+//
+// A PINNED row is cut only once no unpinned row is left to cut. A pin is a slot
+// guarantee ahead of ranking, and ghost_project_context renders its `## Global`
+// section after the project's rows, so a cut strictly from the end removed the
+// one row a pin promised to keep. The assembler's response fit does the same
+// under Budget.KeepPinned.
+//
+// A part with section > 0 is a section HEADING, and section is the number of
+// parts after it that belong to that section — its rows and its trailing notes.
+// A heading whose section the cut left with nothing in it is not rendered, so a
+// cut never prints a heading over nothing.
 type responsePart struct {
 	text     string
 	cuttable bool
+	pinned   bool
+	section  int
 }
 
-// capResponseParts renders parts within budget, cutting WHOLE rows from the last
-// cuttable one backward until the answer fits, and appends a notice naming how
-// many rows went. It returns the rendered answer and the number of rows cut.
+// capResponseParts renders parts within budget, cutting WHOLE rows until the
+// answer fits, and appends a notice naming how many rows went and how many of
+// them were pinned. It returns the rendered answer and the number of rows cut.
+//
+// THE CUT ORDER. Unpinned rows go first, from the last one backward; a pinned row
+// goes only once every unpinned row is gone, again from the last backward. With
+// no pinned row this is exactly the end-first cut every listing tool has always
+// had.
 //
 // The answer is BYTE-IDENTICAL to the uncut render when it already fits, and
 // when the budget is not positive (an unbounded budget, the assembler's own
@@ -51,7 +72,8 @@ type responsePart struct {
 //   - A FRAMING that is already at or over the budget keeps every row. Cutting
 //     rows then reaches no cap and would only empty the answer, the same rule
 //     the assembler's fit pass states as its framing ceiling.
-//   - The FIRST ROW is never cut, whatever the budget. A single row larger than
+//   - The LAST ROW OF THE CUT ORDER is never cut, whatever the budget: the first
+//     pinned row, or the first row when none is pinned. A single row larger than
 //     the budget — a decision whose two 8000-byte fields are clamped separately
 //     is one — would otherwise be dropped and the answer would be framing and a
 //     notice with nothing to read. The row is shown WHOLE and the notice says
@@ -60,12 +82,15 @@ type responsePart struct {
 func capResponseParts(parts []responsePart, budget int, advice string) (string, int) {
 	total := 0
 	framing := 0
-	var cutIndex []int
+	var unpinned, pinned []int
 	for i, p := range parts {
 		total += len(p.text)
-		if p.cuttable {
-			cutIndex = append(cutIndex, i)
-		} else {
+		switch {
+		case p.cuttable && p.pinned:
+			pinned = append(pinned, i)
+		case p.cuttable:
+			unpinned = append(unpinned, i)
+		default:
 			framing += len(p.text)
 		}
 	}
@@ -75,45 +100,81 @@ func capResponseParts(parts []responsePart, budget int, advice string) (string, 
 	if framing >= budget {
 		return joinResponseParts(parts), 0
 	}
-	// The first cuttable row is never removed, so the most that can go is every
-	// row after it.
-	maxCut := len(cutIndex) - 1
-	removed := 0
-	for cut := 1; cut <= maxCut; cut++ {
-		removed += len(parts[cutIndex[len(cutIndex)-cut]].text)
-		notice := responseCapNotice(cut, budget, advice)
-		if total-removed+len(notice) <= budget {
-			return renderTrimmedResponse(parts, cutIndex, cut, notice), cut
+	// The cut order: unpinned rows from the last backward, then pinned rows from
+	// the last backward. Its final entry is the protected row, so the most that
+	// can go is every row before it.
+	order := make([]int, 0, len(parts))
+	for i := len(unpinned) - 1; i >= 0; i-- {
+		order = append(order, unpinned[i])
+	}
+	for i := len(pinned) - 1; i >= 0; i-- {
+		order = append(order, pinned[i])
+	}
+	if len(order) == 0 {
+		return joinResponseParts(parts), 0
+	}
+	cutSet := make([]bool, len(parts))
+	pinnedCut := 0
+	for cut := 1; cut < len(order); cut++ {
+		at := order[cut-1]
+		cutSet[at] = true
+		if parts[at].pinned {
+			pinnedCut++
+		}
+		notice := responseCapNotice(cut, budget, advice) + responseCapPinnedNotice(pinnedCut, budget)
+		kept := trimmedParts(parts, cutSet)
+		if textsLen(kept)+len(notice) <= budget {
+			return strings.Join(kept, "") + notice, cut
 		}
 	}
-	if len(cutIndex) > 0 {
-		// Even framing, the first row and its notice do not fit. Keep the first
-		// row whole, cut the rows after it, and say why the budget was missed.
-		cut := len(cutIndex) - 1
-		return renderTrimmedResponse(parts, cutIndex, cut, responseCapNoticeFirstKept(cut, budget)), cut
-	}
-	return joinResponseParts(parts), 0
+	// Even framing, the protected row and its notice do not fit. Keep that row
+	// whole, cut every other row, and say why the budget was missed.
+	cut := len(order) - 1
+	notice := responseCapNoticeFirstKept(cut, budget, len(pinned) > 0) + responseCapPinnedNotice(pinnedCut, budget)
+	return strings.Join(trimmedParts(parts, cutSet), "") + notice, cut
 }
 
-// renderTrimmedResponse renders parts with the LAST cut cuttable rows removed,
-// then the notice. cutIndex is the cuttable positions in order, so the rows
-// removed are cutIndex[len-cut:] and everything before them survives.
-func renderTrimmedResponse(parts []responsePart, cutIndex []int, cut int, notice string) string {
-	skip := len(cutIndex) - cut
-	var b strings.Builder
-	next := 0
+// trimmedParts is the text of every part a cut keeps, in order. A cut row is
+// left out, and so is a section heading whose rows and notes are all gone. A
+// heading that would open the answer drops the blank-line separator it carries
+// for following an earlier section, because that section is gone.
+func trimmedParts(parts []responsePart, cutSet []bool) []string {
+	out := make([]string, 0, len(parts))
+	written := 0
 	for i, p := range parts {
-		if next < len(cutIndex) && cutIndex[next] == i {
-			cutThis := next >= skip
-			next++
-			if cutThis {
+		if cutSet[i] {
+			continue
+		}
+		text := p.text
+		if p.section > 0 {
+			end := min(i+1+p.section, len(parts))
+			keep := false
+			for j := i + 1; j < end; j++ {
+				if !cutSet[j] {
+					keep = true
+					break
+				}
+			}
+			if !keep {
 				continue
 			}
+			if written == 0 {
+				text = strings.TrimPrefix(text, "\n\n")
+			}
 		}
-		b.WriteString(p.text)
+		out = append(out, text)
+		written += len(text)
 	}
-	b.WriteString(notice)
-	return b.String()
+	return out
+}
+
+// textsLen is the summed length of rendered texts.
+func textsLen(texts []string) int {
+	n := 0
+	for _, t := range texts {
+		n += len(t)
+	}
+	return n
 }
 
 // capRowsToResponseBudget is capResponseParts for the common shape: a framing
@@ -148,22 +209,44 @@ func responseCapNotice(cut, budget int, advice string) string {
 }
 
 // responseCapNoticeFirstKept is the notice for the one over-budget answer the
-// pass still returns: the first row alone is larger than the budget and is kept
-// whole rather than dropped, so the caller has something to read. It names no
-// advice, because the usual lever — a lower `limit` — cannot shrink a single row
-// and naming it would send the caller to a call that fails identically.
-func responseCapNoticeFirstKept(cut, budget int) string {
+// pass still returns: the protected row — the first row, or the first pinned row
+// when a row is pinned — is larger than the budget and is kept whole rather than
+// dropped, so the caller has something to read. It names no advice, because the
+// usual lever — a lower `limit` — cannot shrink a single row and naming it would
+// send the caller to a call that fails identically.
+func responseCapNoticeFirstKept(cut, budget int, pinned bool) string {
+	which := "first row"
+	if pinned {
+		which = "first pinned row"
+	}
 	if cut > 0 {
 		verb := "rows were"
 		if cut == 1 {
 			verb = "row was"
 		}
-		return fmt.Sprintf("\n(%d %s cut from the end of this answer, and the first row alone is larger than the "+
+		return fmt.Sprintf("\n(%d %s cut from the end of this answer, and the %s alone is larger than the "+
 			"%d-byte response budget, so it is shown in full rather than dropped; no listing argument makes one "+
-			"row smaller.)\n", cut, verb, budget)
+			"row smaller.)\n", cut, verb, which, budget)
 	}
-	return fmt.Sprintf("\n(The first row alone is larger than the %d-byte response budget, so it is shown in full "+
-		"rather than dropped; no listing argument makes one row smaller.)\n", budget)
+	return fmt.Sprintf("\n(The %s alone is larger than the %d-byte response budget, so it is shown in full "+
+		"rather than dropped; no listing argument makes one row smaller.)\n", which, budget)
+}
+
+// responseCapPinnedNotice is the pinned-cut statement a trimmed answer carries
+// after its cut notice, and "" when no pinned row was cut. A pinned row is cut
+// only once every unpinned row is gone, so when one is, the pinned rows alone do
+// not fit and the ones shown are the first of them.
+func responseCapPinnedNotice(pinnedCut, budget int) string {
+	if pinnedCut <= 0 {
+		return ""
+	}
+	verb := "were"
+	if pinnedCut == 1 {
+		verb = "was"
+	}
+	return fmt.Sprintf("(%d of the cut rows %s pinned: the pinned rows alone exceed the %d-byte response budget, "+
+		"and the ones shown are the first of them. Call ghost_memories_list to see the rest.)\n",
+		pinnedCut, verb, budget)
 }
 
 // responseSection builds one `## `-headed section as response parts: the heading
@@ -173,10 +256,15 @@ func responseCapNoticeFirstKept(cut, budget int) string {
 // is the rule `projectContextSection` applies to a written block: a note never
 // gives a section its heading.
 //
+// pinned marks which rows are pinned, by index, and may be nil or shorter than
+// rows for a section with no pinned row. The heading records how many parts
+// follow it in the section, so a byte cut that empties the section drops the
+// heading too.
+//
 // priorLen is the rendered length of the block before this section, which is how
 // the separator knows whether this is the first section — the same `sb.Len() > 0`
 // projectContextSection reads.
-func responseSection(priorLen int, heading string, rows []string, notes string) []responsePart {
+func responseSection(priorLen int, heading string, rows []string, pinned []bool, notes string) []responsePart {
 	if len(rows) == 0 && notes == "" {
 		return nil
 	}
@@ -191,13 +279,23 @@ func responseSection(priorLen int, heading string, rows []string, notes string) 
 	// an analyzer reads as an overflow risk.
 	parts := make([]responsePart, 0, len(rows))
 	parts = append(parts, responsePart{text: head.String()})
-	for _, r := range rows {
-		parts = append(parts, responsePart{text: r, cuttable: true})
+	for i, r := range rows {
+		parts = append(parts, responsePart{text: r, cuttable: true, pinned: i < len(pinned) && pinned[i]})
 	}
 	if notes != "" {
 		parts = append(parts, responsePart{text: notes})
 	}
+	parts[0].section = len(parts) - 1
 	return parts
+}
+
+// itemPins is which of items are pinned, index for index with itemLines.
+func itemPins(items []assemble.Item) []bool {
+	pins := make([]bool, len(items))
+	for i, it := range items {
+		pins[i] = it.Pinned
+	}
+	return pins
 }
 
 // joinResponseParts is the uncut render: every part in order.
