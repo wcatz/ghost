@@ -170,7 +170,7 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first RestoreSnapshot: %v", err)
 	}
-	if first == 0 {
+	if first.Restored == 0 {
 		t.Fatalf("first restore reported no work done")
 	}
 	state := func() string {
@@ -201,7 +201,7 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	if got := state(); got != afterFirst {
 		t.Errorf("second restore changed the corpus:\nafter first:  %s\nafter second: %s", afterFirst, got)
 	}
-	if second == 0 {
+	if second.Restored == 0 {
 		t.Errorf("second restore reported no work; it should still find the row to confirm in place")
 	}
 }

@@ -367,6 +367,113 @@ func TestApplyReflectionPromotesOnlyGlobals(t *testing.T) {
 	}
 }
 
+// TestApplyReflectionPromotionInheritsSourceScope: a cross-project candidate
+// promoted into _global must carry the scope its sources agreed on. Reflection
+// carries no machine-readable scope, so without resolving it from the sources
+// under the project the promotion lands unscoped and a production-only fact
+// applies in every project — the widening the project replace already refuses,
+// on the one path that leaves the project.
+//
+// The project emission does NOT claim the source, so the project replace deletes
+// it before promotion runs. That ordering is the point: the scope has to be read
+// while the sources still exist, or resolving it at promotion time reads an empty
+// row and the promoted memory lands unscoped anyway.
+func TestApplyReflectionPromotionInheritsSourceScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	src, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a production-only fact that gets promoted",
+		Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src: %v", err)
+	}
+
+	projectMems := []Memory{{Category: "fact", Content: "an unrelated project fact", Source: "reflection", Importance: 0.4}}
+	_, promoted, kept, _, _, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
+		{Category: "fact", Content: "a cross-project fact", Source: "reflection", Importance: 0.6, ReplacesIDs: []string{src}},
+	}, "", true, nil)
+	if err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	if promoted != 1 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
+	}
+
+	// The project replace ran and took the source with it: without that the
+	// fixture would not exercise the read-before-delete ordering.
+	if project, err := s.GetAll(ctx, testProject, -1); err != nil {
+		t.Fatalf("GetAll project: %v", err)
+	} else if containsMemoryContent(project, "a production-only fact that gets promoted") {
+		t.Fatalf("project = %+v, want the source deleted by the project replace", project)
+	}
+
+	globals, err := s.GetAll(ctx, "_global", -1)
+	if err != nil {
+		t.Fatalf("GetAll global: %v", err)
+	}
+	if len(globals) != 1 {
+		t.Fatalf("_global = %+v, want one promoted row", globals)
+	}
+	if globals[0].Scope["environment"] != "production" {
+		t.Errorf("promoted scope = %v, want environment=production — the promotion dropped the sources' scope", globals[0].Scope)
+	}
+}
+
+// TestApplyReflectionPromotionRefusedOnScopeConflict: a candidate whose sources
+// disagree on scope is not promoted. There is no single scope to promote under,
+// so the candidate is kept project-scoped rather than widened into every project.
+// The project emission does not claim the sources, so the project replace runs —
+// the ordering the promotion has to resolve its scope across.
+func TestApplyReflectionPromotionRefusedOnScopeConflict(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "staging fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	projectMems := []Memory{{Category: "fact", Content: "an unrelated project fact", Source: "reflection", Importance: 0.4}}
+	_, promoted, kept, _, _, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
+		{Category: "fact", Content: "a cross-project fact", Source: "reflection", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", true, nil)
+	if err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	if promoted != 0 || len(kept) != 1 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/1 — a candidate whose sources disagree must stay project-scoped", promoted, len(kept))
+	}
+
+	globals, err := s.GetAll(ctx, "_global", -1)
+	if err != nil {
+		t.Fatalf("GetAll global: %v", err)
+	}
+	if len(globals) != 0 {
+		t.Errorf("_global = %+v, want no promotion for a disagreeing candidate", globals)
+	}
+
+	project, err := s.GetAll(ctx, testProject, -1)
+	if err != nil {
+		t.Fatalf("GetAll project: %v", err)
+	}
+	if !containsMemoryContent(project, "a cross-project fact") {
+		t.Errorf("project = %+v, want the kept candidate", project)
+	}
+}
+
 func containsMemoryContent(memories []Memory, content string) bool {
 	for _, m := range memories {
 		if m.Content == content {

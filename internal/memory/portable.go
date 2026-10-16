@@ -66,12 +66,16 @@ type PortableMemory struct {
 	Category  string `json:"category"`
 	Content   string `json:"content"`
 	// Importance is a pointer because 0 is a real rating and an absent field is
-	// not: `Store.Create` binds a Memory's importance with no default, so a
-	// memory saved without one is stored as 0 and exported as `"importance":0`.
-	// A plain float64 cannot tell that from a record that states nothing, and
-	// folding the two together would promote a 0 to the column's default on every
-	// re-import — a silent rewrite of exactly the kind the artifact exists to
-	// avoid. nil therefore takes the column default, and only nil.
+	// not: a record exported with `"importance":0` states it, and re-importing
+	// that must store 0 rather than raise it to the column's default. The value
+	// is rare because the save tools default an omitted importance —
+	// `ghost_memory_save` stores 0.7 and `ghost_save_global` 0.8 — and the
+	// writers that bind no default (`Store.Create` and the corpus seeders that
+	// share its insert) are not reached by a production save path. A plain
+	// float64 cannot tell a stated 0 from a record that states nothing, and
+	// folding the two together would promote a 0 to the column's default on
+	// every re-import — a silent rewrite of exactly the kind the artifact exists
+	// to avoid. nil therefore takes the column default, and only nil.
 	Importance   *float64          `json:"importance,omitempty"`
 	AccessCount  int               `json:"access_count"`
 	LastAccessed *string           `json:"last_accessed,omitempty"`

@@ -219,6 +219,61 @@ func TestGhostMemorySave_RejectsNonNumericImportance(t *testing.T) {
 	}
 }
 
+// TestSaveToolsStoreTheirDocumentedImportanceDefaults pins the two defaults the
+// tool schemas state: ghost_memory_save stores 0.7 when the caller omits an
+// importance, and ghost_save_global stores 0.8. The writers that bind no
+// default (`Store.Create` and the corpus seeders that share its insert) are not
+// reached by a production save path, so neither tool may leave a saved row at
+// 0. A stated 0 is a different case the caller asked for, and the schemas say
+// so; the artifact's round trip is what depends on this distinction, so a
+// default that drifted here would make the docs wrong about every row the tools
+// write.
+func TestSaveToolsStoreTheirDocumentedImportanceDefaults(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	projectResult := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "abc123",
+		"content":    "a project memory saved with no importance",
+	})
+	if projectResult.IsError {
+		t.Fatalf("ghost_memory_save: %s", resultText(projectResult))
+	}
+	projectID, ok := extractID(resultText(projectResult))
+	if !ok {
+		t.Fatalf("parse id from %q", resultText(projectResult))
+	}
+
+	globalResult := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  "a cross-project memory saved with no importance",
+		"category": "fact",
+	})
+	if globalResult.IsError {
+		t.Fatalf("ghost_save_global: %s", resultText(globalResult))
+	}
+	globalID, ok := extractID(resultText(globalResult))
+	if !ok {
+		t.Fatalf("parse id from %q", resultText(globalResult))
+	}
+
+	mem, err := store.GetByIDs(context.Background(), []string{projectID, globalID})
+	if err != nil || len(mem) != 2 {
+		t.Fatalf("GetByIDs: %v, %d rows", err, len(mem))
+	}
+	got := map[string]float32{}
+	for _, m := range mem {
+		got[m.ID] = m.Importance
+	}
+	if math.Abs(float64(got[projectID])-0.7) > 1e-6 {
+		t.Errorf("ghost_memory_save stored importance %v, want its documented 0.7 default", got[projectID])
+	}
+	if math.Abs(float64(got[globalID])-0.8) > 1e-6 {
+		t.Errorf("ghost_save_global stored importance %v, want its documented 0.8 default", got[globalID])
+	}
+}
+
 func TestGhostTaskCreateAndUpdate_AcceptStringifiedPriority(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))

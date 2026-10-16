@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -159,6 +160,31 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 		globalMems = nil
 	}
 
+	// Resolve the scope each surviving cross-project candidate inherits from the
+	// rows it stands in for, BEFORE the project replace below deletes them. That
+	// replace removes every replaceable row no project emission accounts for, and
+	// a row merged into a cross-project candidate is exactly one of those, so a
+	// scope read after it comes back empty and the promotion writes unscoped
+	// whatever the sources said. Resolved here so the promotion half is held to
+	// the same rule as the project half: an agreement is carried onto the
+	// promoted row, and a disagreement (or a scoped/unscoped mix) is not a scope
+	// to promote under, so the candidate is kept project-scoped rather than
+	// widened into every project. A read or decode failure is not a refusal and
+	// fails the apply, exactly as the project half propagates it.
+	globalScope := make([]map[string]string, len(globalMems))
+	globalConflict := make([]bool, len(globalMems))
+	for i, m := range globalMems {
+		sc, scopeErr := inheritedScope(txCtx, tx, projectID, m)
+		if scopeErr != nil {
+			if !errors.Is(scopeErr, errScopeConflict) {
+				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("resolve cross-project scope: %w", scopeErr)
+			}
+			globalConflict[i] = true
+			continue
+		}
+		globalScope[i] = sc
+	}
+
 	if len(projectMems) > 0 {
 		var projectDrop EmissionDrops
 		preserved, projectDrop, deleted, appliedByCategory, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
@@ -194,8 +220,19 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 				appliedByCategory[m.Category]++
 			}
 		} else {
-			for _, m := range globalMems {
-				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m)
+			for i, m := range globalMems {
+				if globalConflict[i] {
+					// No single scope to promote under: keep the candidate
+					// project-scoped instead of writing it into _global unscoped,
+					// where it would apply in every project and environment.
+					keptMems = append(keptMems, m)
+					appliedByCategory[m.Category]++
+					if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{m}); err != nil {
+						return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("keep conflicting candidate project-scoped: %w", err)
+					}
+					continue
+				}
+				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m, globalScope[i])
 				if candidateErr != nil {
 					return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, candidateErr
 				}
@@ -265,7 +302,16 @@ func ensureGlobalProjectTx(ctx context.Context, tx *sql.Tx) error {
 // against the open transaction. A savepoint makes a failed global upsert
 // recoverable: the failed statement's partial writes are discarded before the
 // candidate is inserted into the project instead.
-func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (promoted, kept bool, err error) {
+//
+// scope is the scope the candidate inherited from the project rows it stands
+// in for, resolved by the caller BEFORE the project replace deleted those rows
+// (the candidate carries none of its own). Passing it onto the _global upsert
+// keeps a production-only fact from landing in _global unscoped and applying in
+// every environment, and arms UpsertWithOptions' scope-conflict clause against
+// an existing _global duplicate. A candidate whose sources disagreed is never
+// promoted, so this is always a scope the sources agreed on (or nil when they
+// stated none).
+func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, projectID string, m Memory, scope map[string]string) (promoted, kept bool, err error) {
 	const savepoint = "ghost_reflect_candidate"
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT `+savepoint); err != nil {
 		return false, false, fmt.Errorf("savepoint global promotion: %w", err)
@@ -287,7 +333,7 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	// asked to keep.
 	_, _, _, upsertErr := s.UpsertWithOptions(withStoreTx(ctx, tx), "_global", m.Category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
 		Provenance: provenanceFromMemory(m),
-		Scope:      m.Scope,
+		Scope:      scope,
 		FoldOnly:   true,
 	})
 	if upsertErr == nil {
@@ -303,6 +349,10 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 		return false, false, fmt.Errorf("global promotion failed: %v; release savepoint: %w", upsertErr, releaseErr)
 	}
 
+	// The recovery row keeps the scope the candidate inherited: an unscoped
+	// write-back would widen a scoped fact inside the project even though the
+	// promotion it failed was refused the safety of _global.
+	m.Scope = scope
 	if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{m}); err != nil {
 		return false, false, fmt.Errorf("global promotion failed: %v; return candidate to project: %w", upsertErr, err)
 	}

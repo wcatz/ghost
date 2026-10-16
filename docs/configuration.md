@@ -43,7 +43,7 @@ ghost: config: /home/you/.config/ghost/config.yaml: unknown key(s) ignored: link
 This check covers **config files only**, and the limits are worth knowing:
 
 - A misspelled `GHOST_*` variable is still ignored silently. Ghost cannot report it, because most of its variables are not config keys at all — `GHOST_DEBUG`, `GHOST_LOG_FILE`, `GHOST_SCRATCH_DIR`, `GHOST_PASSTHROUGH_ENV` and `GHOST_OPENCODE_MODEL` are documented here or in the harness section below, and none of them binds a `Config` field.
-- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable, and only that variable is skipped — the rest of your environment still applies. This is true of the generic mapping too, not just the explicit shortcuts in the table below: `GHOST_EMBEDDING_DIMENSIONS=abc` is reported and ignored, and `GHOST_EMBEDDING_ENABLED=false` beside it still takes effect.
+- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable. On a CLI subcommand it stops the command, exactly as a config file that does not parse does (`error: load config: GHOST_EMBEDDING_DIMENSIONS: …`, exit `1`). On the paths that must not fail — the `ghost mcp` server, the host-session hooks and `ghost mcp status` — it is reported and only that variable is skipped, so the rest of your environment still applies. That skip is per variable and true of the generic mapping too, not just the explicit shortcuts in the table below: `GHOST_EMBEDDING_DIMENSIONS=abc` is reported and ignored, and `GHOST_EMBEDDING_ENABLED=false` beside it still takes effect.
 
 Each distinct warning is printed once per process, so a SessionStart hook and a `ghost mcp status` in the same session do not repeat the same line. A second, different problem is still reported.
 
@@ -600,11 +600,14 @@ GHOST_INJECTION_SESSION_SCOPE="environment=development"
 
 A value that cannot be read as its key's type is an error naming the variable, not a silently ignored setting.
 
+`GHOST_SCRATCH_MAX_BYTES` (`scratch.max_bytes`) bounds the harness scratch root. The pre-spawn check measures the root against it, reaps stale entries when it is over, and warns loudly if it is still over; quiet under-budget spawns write nothing. It defaults to 512 MiB, and `0` or a negative value disables the check entirely.
+
 Other useful variables:
 
 - `GHOST_OPENCODE_MODEL` — inherited model pin for opencode-backed operations. If unset, Ghost passes `opencode/big-pickle` explicitly because the isolated child does not load the user's global OpenCode config.
 - `GHOST_DEBUG` — enable debug logging.
 - `GHOST_LOG_FILE` — redirect MCP logs to a file; useful when a client surfaces stderr as protocol noise. The file is bounded like every other Ghost log: when it is at or over 5 MiB at open it is renamed to `<file>.1` (replacing any earlier copy) and a fresh file is started, so at most the current file and one `.1` copy exist. A newly created file is mode 0600 whatever the umask.
+- `GHOST_SCRATCH_DIR` — override where Ghost confines its LLM-harness children. Default: `<dataDir>/scratch`. A blank value is treated as unset, so an empty export cannot move the root to the current directory. The root is created `0700` and re-tightened on every use, and its size is bounded by `scratch.max_bytes` above.
 - `GHOST_LIVE_TESTS=1` — opt into the live LLM tests; without it, `go test ./...` skips billable harness calls.
 - `GHOST_DEV_FORBID_DATA_DIR` — a list of data directories (separated by the platform's list separator) that a build that is **not a release** refuses to open, so a development build cannot migrate a real store. A release build ignores it entirely, which is what makes it safe to export in a development shell. Unlike every other variable here it is not a config key and never reaches a config file; the full rules, including the canonicalization and the hook paths' fail-open behaviour, are in [`cli.md`](cli.md#development-builds-refusing-a-real-store).
 - `GHOST_TEST_SOURCE` — select the harness source used by opt-in live tests (`claude-code`, `opencode`, `codex`, or `goose`).
