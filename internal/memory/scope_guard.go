@@ -63,9 +63,11 @@ func (e *ScopeBoundError) Error() string {
 }
 
 // ScopeKeyValueError is a scope key or value that breaks the character rules.
-// It carries the field name (as the token guard does) and the reason class.
+// It carries the field name (as the token guard does), the reason class, and
+// for value errors the original key (so the export can screen it for credentials
+// before SafeToken rendering).
 type ScopeKeyValueError struct {
-	Field, Reason string
+	Field, Reason, Key string
 }
 
 func (e *ScopeKeyValueError) Error() string {
@@ -114,11 +116,11 @@ func checkScope(scope map[string]string) error {
 	}
 	// Character rules: blank, NUL, invalid UTF-8, control, line-break (U+2028, U+2029, U+0085).
 	for i, k := range keys {
-		if err := validateScopeKeyValue(fmt.Sprintf("scope_key[%d]", i), k); err != nil {
+		if err := validateScopeKeyValue(fmt.Sprintf("scope_key[%d]", i), k, ""); err != nil {
 			return err
 		}
 		v := scope[k]
-		if err := validateScopeKeyValue(fmt.Sprintf("scope[%s]", SafeToken(k)), v); err != nil {
+		if err := validateScopeKeyValue(fmt.Sprintf("scope[%s]", SafeToken(k)), v, k); err != nil {
 			return err
 		}
 	}
@@ -144,26 +146,28 @@ func checkScope(scope map[string]string) error {
 // byte, is not valid UTF-8, contains a control character, or contains a line
 // separator (U+2028, U+2029) or next line (U+0085). The field is the caller's
 // name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
-// refusal is actionable without quoting the offending text.
-func validateScopeKeyValue(field, value string) error {
+// refusal is actionable without quoting the offending text. For value errors,
+// key is the original (unrendered) scope key so the export can screen it for
+// credentials.
+func validateScopeKeyValue(field, value, key string) error {
 	// Blank: empty or only whitespace/format characters.
 	if strings.TrimFunc(value, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
 	}) == "" {
-		return &ScopeKeyValueError{Field: field, Reason: "empty or blank"}
+		return &ScopeKeyValueError{Field: field, Reason: "empty or blank", Key: key}
 	}
 	// Invalid UTF-8.
 	if !utf8.ValidString(value) {
-		return &ScopeKeyValueError{Field: field, Reason: "invalid UTF-8"}
+		return &ScopeKeyValueError{Field: field, Reason: "invalid UTF-8", Key: key}
 	}
 	// NUL byte.
 	if strings.IndexByte(value, 0) >= 0 {
-		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte"}
+		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte", Key: key}
 	}
 	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085 NEL).
 	for _, r := range value {
 		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
-			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator"}
+			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator", Key: key}
 		}
 	}
 	return nil

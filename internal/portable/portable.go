@@ -406,15 +406,13 @@ func exportRefusal(err error) (reason string, secret bool) {
 // is rendered through memory.SafeToken; a credential-shaped key is withheld.
 func scopeCharReason(e *memory.ScopeKeyValueError) string {
 	reason := "ghost import refuses it: " + e.Error()
-	// The key is embedded in the field name of the error (scope[key] for values).
-	// Extract it from the field.
-	field := e.Field
-	if strings.HasPrefix(field, "scope[") && strings.HasSuffix(field, "]") {
-		key := field[6 : len(field)-1]
-		if _, shaped := secret.Detect(key); shaped {
+	// For value errors, the original key is in e.Key. For key errors, there's no
+	// separate key to report.
+	if e.Key != "" {
+		if _, shaped := secret.Detect(e.Key); shaped {
 			reason += " (one scope value; its key is not shown)"
 		} else {
-			reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(key))
+			reason += fmt.Sprintf(" (the scope key is %s)", memory.SafeToken(e.Key))
 		}
 	}
 	return reason
