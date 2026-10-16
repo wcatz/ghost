@@ -221,12 +221,13 @@ func TestGhostMemorySave_RejectsNonNumericImportance(t *testing.T) {
 
 // TestSaveToolsStoreTheirDocumentedImportanceDefaults pins the two defaults the
 // tool schemas state: ghost_memory_save stores 0.7 when the caller omits an
-// importance, and ghost_save_global stores 0.8. Only Store.Create, which no
-// production path calls, binds 0 when the caller states nothing, so neither
-// tool may leave a saved row at 0. A stated 0 is a different case the caller
-// asked for, and the schemas say so; the artifact's round trip is what depends
-// on this distinction, so a default that drifted here would make the docs wrong
-// about every row the tools write.
+// importance, and ghost_save_global stores 0.8. The writers that bind no
+// default (`Store.Create` and the corpus seeders that share its insert) are not
+// reached by a production save path, so neither tool may leave a saved row at
+// 0. A stated 0 is a different case the caller asked for, and the schemas say
+// so; the artifact's round trip is what depends on this distinction, so a
+// default that drifted here would make the docs wrong about every row the tools
+// write.
 func TestSaveToolsStoreTheirDocumentedImportanceDefaults(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
