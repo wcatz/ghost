@@ -223,7 +223,7 @@ linking:
   demotion_threshold: 0.90
 ```
 
-- `threshold` is the cosine similarity required for a `related` edge.
+- `threshold` is the cosine similarity required for a `related` edge. It is a cosine, so it is checked at load against `[0, 1]`: a value outside that range, or a non-finite one (`.nan`, `.inf`), is a load error naming the key, whether it came from a file or `GHOST_LINKING_THRESHOLD`.
 - `demotion_threshold` is the stronger similarity required before a related edge can demote a near-duplicate during injection.
 
 The link graph is used by the Obsidian mirror and supersession ranking. It is not a graph-expansion bonus in production search.
@@ -238,6 +238,8 @@ search:
 ```
 
 FTS candidates are not subject to this floor. Raise it only after testing against your corpus with `ghost bench`; a higher value can remove weak semantic matches, while `0.0` preserves the historical behavior of dropping only non-positive cosine scores.
+
+The floor is a cosine, so it is checked at load against `[0, 1]`: a value outside that range, or a non-finite one (`.nan`, `.inf`), is a load error naming the key, whether it came from a file or `GHOST_SEARCH_MIN_SIMILARITY`. The refusal matters more here than for the context floors, because this one is applied *inside* the vector leg: a floor no cosine can clear drops every vector candidate, and hybrid search then answers from the keyword arm alone while still returning an answer, so nothing tells the caller the semantic leg is gone.
 
 Two more ranking signals are fixed rather than configurable, because they describe the rows being ranked instead of a preference:
 

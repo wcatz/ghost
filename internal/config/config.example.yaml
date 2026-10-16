@@ -46,7 +46,9 @@
 # Cosine floor applied to the vector leg of hybrid search BEFORE RRF fusion.
 # FTS candidates are exempt. 0 keeps historical behavior (only non-positive
 # cosines dropped); raise to stop weak semantic matches from padding results
-# when the corpus has no true match. Tune against `ghost bench`.
+# when the corpus has no true match. Tune against `ghost bench`. A cosine, so
+# it must be in [0,1]: a non-finite or out-of-range value is refused at load
+# (this one empties the vector leg, leaving keyword-only answers).
 # search:
 #   min_similarity: 0.0
 
