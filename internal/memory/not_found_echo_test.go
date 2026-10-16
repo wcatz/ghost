@@ -26,6 +26,10 @@ func TestDeleteAndPinNotFoundNeverEchoTheID(t *testing.T) {
 			"TogglePinInProject":   s.TogglePinInProject(ctx, testProject, id, true),
 			"DeletePurge":          func() error { _, err := s.DeletePurge(ctx, id); return err }(),
 			"DeletePurgeInProject": func() error { _, err := s.DeletePurgeInProject(ctx, testProject, id); return err }(),
+			"PurgeDeletedMemoryHistoryInProject": func() error {
+				_, err := s.PurgeDeletedMemoryHistoryInProject(ctx, testProject, id)
+				return err
+			}(),
 		}
 		for name, err := range calls {
 			if err == nil {

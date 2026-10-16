@@ -4,7 +4,7 @@ The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost he
 
 Every subcommand accepts `-h` or `--help`: it prints that command's usage on stdout and exits `0`, before anything with a side effect runs — no configuration load, no database open, no file written, no harness spawned. The top-level summary (`ghost help`, `ghost --help`) is unchanged by this and still prints to stderr.
 
-Two spellings decide whether a flag is a request. The token after a flag that *this* command takes a value for is a value, never a help request — `ghost reflect --project -h` runs reflect for a project named `-h` — and a flag belonging to a different command is not a value at all, so `ghost upgrade --cwd -h` prints the upgrade usage instead of upgrading with the help flag swallowed as `--cwd`'s value. And a bare `--` ends the options for that scan: a token after it is an operand, never a help request, so `ghost reflect -- --help` runs reflect rather than printing usage. What the command then does with that operand is its own parser's business — none of them implements `--` (several report it as an unknown flag), so a project whose name looks like a flag is still addressed with the verbatim `--project <name>` form.
+Two spellings decide whether a flag is a request. The token after a flag that *this* command takes a value for is a value, never a help request — `ghost reflect --project -h` runs reflect for a project named `-h` — and a flag belonging to a different command is not a value at all, so `ghost upgrade --cwd -h` prints the upgrade usage instead of upgrading with the help flag swallowed as `--cwd`'s value. And a bare `--` ends the options for that scan: a token after it is an operand, never a help request, so `ghost reflect -- --help` passes `--help` to reflect instead of the help layer answering it. What the command then does with that operand is its own parser's business — none of them implements `--` (several report it as an unknown flag), and reflect skips both tokens, finds no project and prints its own usage with exit `1` — so a project whose name looks like a flag is still addressed with the verbatim `--project <name>` form.
 
 ## Exit codes
 
@@ -559,7 +559,7 @@ A near-duplicate save **raises** the surviving row's tier and never lowers it, s
 
 A `session` row is never removed automatically. It is a candidate for `ghost prune` and nothing else.
 
-A tier is set by a save (`ghost_memory_save`, `ghost_save_global`) and there is no update path: restating a memory with `retention: persistent` folds into the existing row and raises it, which is how a memory that is already stored becomes keep-forever. A save that finds no near-duplicate stores its own new row, so restating a memory in substantially different words creates a second row rather than retiering the first.
+A tier is set by a save (`ghost_memory_save`, `ghost_save_global`) and there is no update path: restating a memory with `retention: persistent` stores its own **linked copy** — a second row — and raises the existing row it was linked to as a near-duplicate, so both come out persistent and the row a later consolidation would absorb is protected. A save that finds no near-duplicate stores its own unlinked row, so restating a memory in substantially different words creates a second row rather than retiering the first.
 
 ### `ghost prune`
 
@@ -964,7 +964,7 @@ A dry run is not a separate code path: every record goes through the same valida
 
   A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
 
-  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v16 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v16 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
+  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. `export` and a dry run read past v10 more than `projects.repo_remote` (v11) and `memories.scope` (v12): they also select `memories.retention` (v19) and read the `memory_provenance` table (v18), so a v12–v16 store would NOT in fact query fine — a floor would have to hardcode which columns and tables exist at which version, and the day a reader selects a newer one it would quietly admit a store that fails with a missing-column error again. So a v12–v16 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
 
 ### Imported provenance
 
@@ -1033,7 +1033,7 @@ Rules the import follows:
   error: project laptop-1 cannot be imported: this Ghost already records /src/thing as project ghost — import into that project, or merge it with `ghost project merge`
   ```
 
-- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. A *stated* `importance: 0` is kept as 0: a memory saved without an importance is stored as 0, exported as `"importance":0`, and re-importing it must not promote it to the 0.5 default.
+- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. A *stated* `importance: 0` is kept as 0 and round-trips as `"importance":0`: re-importing it must not promote it to the column's own default. An omitted importance does not land at 0 either — `ghost_memory_save` stores 0.7 when the caller states nothing and `ghost_save_global` stores 0.8 — so the only 0 an artifact can carry is one a caller asked for.
 
 Import does not run Upsert's near-duplicate probe. A restore is putting back what was there, not adding knowledge, and folding two rows of the artifact into one would silently drop a memory the user chose to keep.
 
@@ -1075,6 +1075,7 @@ retrieval audit — window: everything the store still holds
     2 of those verdicts are degraded (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls in this window
   project_context: no rows — this source has recorded no calls in this window
+  working_moment: no rows — this source has recorded no calls in this window
   contradicted (search):
     91C0983A1162AE3AAEA00518B6A4C96E
     B2AB0F6DD58B80C74B21FF76885727A3
@@ -1264,8 +1265,8 @@ a `reflect` version recorded before the bound. Six things always stay:
   cleaned up is never written to again.
 
 `save`, `update` and `baseline` are never compacted even though they record a state
-and nothing else, and the reason is a real one rather than caution: `ghost memory
-update` appends an `update` version on **every** edit, and a **tags-only** edit is a
+and nothing else, and the reason is a real one rather than caution: the MCP tool
+`ghost_memory_update` appends an `update` version on **every** edit, and a **tags-only** edit is a
 change to what the memory says about itself that this table cannot see, because it
 has no column for tags. Both `update` versions and the stamps they moved survive.
 
@@ -1435,7 +1436,7 @@ ghost bench --cutoff-sweep
 ghost bench --no-answer-sweep
 ```
 
-Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then the **top-row shares and the R@1 ceiling** — the share of queries whose first result is relevant, the share whose first result carries the best label, the share with a relevant row in the first five, and the mean ceiling a perfect ranking hits on these labels — then the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
+Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then the **top-row shares and the R@1 ceiling** — the share of queries whose first result is relevant, the share whose first result carries the best label, the share with a relevant row in the first five, and the mean ceiling a perfect ranking hits on these labels — then the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — then the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs, and finally the **abstention baseline for the shipped fused path**.
 
 `--sweep` is a different report: it grid-searches the vector-leg weight (FTS weight is the complement) and prints each point's NDCG@10, R@1, R@10 and MRR@10 **plus a paired 95% interval against the shipped default** — because a sort by point estimate is not a ranking of points the dataset cannot separate. It returns there, so it prints neither table above. See [Benchmarks and methodology](benchmarks.md).
 
