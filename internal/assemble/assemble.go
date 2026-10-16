@@ -521,6 +521,11 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	// diagnostic of one, so counting it would put calls that delivered no answer
 	// in that denominator. It matches what explain did before it became a
 	// projection of this run: it never reached the sink.
+	// The display order, and nothing else: the verdict above was decided on the
+	// relevance order and stays as it was (displayReplacements).
+	if err == nil {
+		p.displayReplacements(&res)
+	}
 	if err == nil && req.Explain {
 		res.Explain = p.explainProjection(res)
 	}

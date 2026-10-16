@@ -120,6 +120,11 @@ type pipeline struct {
 	// have held by rank: a row that took a deferred row's slot, or a deferred row
 	// that came back. arrangeReplacements never displaces one to make room.
 	diversityAdmitted map[string]bool
+	// movedAhead maps each replacement the query-mode display order moved to the
+	// older row it now sits directly ahead of (displayReplacements). explain
+	// reads it for moved_ahead_of. Nil on a passive read, whose order is the
+	// block's own and is not reported by explain.
+	movedAhead map[string]string
 	// noteCut is how many notes the response-fit post-pass has taken off the end
 	// of the bounded list. It lives here rather than in the post-pass so notes()
 	// stays the one function that produces the list: a second derivation would be
@@ -1839,9 +1844,10 @@ func (p *pipeline) markSuperseded() {
 
 // arrangeReplacements orders each lexical replacement (Candidate.MaybeReplacedBy,
 // the retriever's guess) ahead of the older row it may replace, on a PASSIVE read,
-// just before stage 9 closes the window. A query read is left in its relevance
-// order. It runs here because this is the one place that knows both the cap and
-// which rows an earlier stage reserved.
+// just before stage 9 closes the window. A query read keeps its relevance order
+// through every stage and is reordered for display only after its verdict
+// (displayReplacements). It runs here because this is the one place that knows
+// both the cap and which rows an earlier stage reserved.
 //
 // A replacement is moved to directly ahead of its older row, and the rule for
 // the slot it takes follows the explicit-supersedes precedent, where a
@@ -1917,6 +1923,61 @@ func (p *pipeline) arrangeReplacements() {
 	p.rows, p.items = rows, items
 }
 
+// displayReplacements is the QUERY-mode counterpart of arrangeReplacements, and
+// it is a display order only. It runs once, after fitResponse has settled the
+// page, so everything a query answer decides is decided on the relevance order
+// before it: every stage's membership (the cutoff, the leg-consensus gate, the
+// no-answer bar, the item caps and the response-fit trim, which cuts the
+// relevance-lowest row), the outcome and its reason, the abstention sentence,
+// the machine line and the notes. Then, when both rows of a lexical replacement
+// pair are on the page, the newer one is moved to directly ahead of the older
+// one, and the rows between shift down by one.
+//
+// It never adds a row and never removes one: the page is the same set of rows,
+// so the rendered response is the same lines in a different order and its byte
+// count does not change. A replacement the caps or the trim left off the page
+// is not pulled back (arrangeBucket's pos is -1 for it), and the older row is
+// then unmarked, because markMaybeReplaced names only rows on the page. The
+// pinned rule is the passive one, from the same walk: a pinned older row keeps
+// its place and is marked, a pinned replacement is not pulled, and a pinned row
+// between the two shifts down by one.
+//
+// res carries the verdict fitResponse made; only its Items and Response are
+// rewritten here, in the new order.
+func (p *pipeline) displayReplacements(res *Result) {
+	if p.passive || len(p.items) < 2 || len(p.rows) != len(p.items) {
+		return
+	}
+	named := false
+	for _, c := range p.rows {
+		if len(c.MaybeReplacedBy) > 0 {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return
+	}
+	order := make([]int, len(p.rows))
+	for i := range order {
+		order[i] = i
+	}
+	p.movedAhead = map[string]string{}
+	order = p.arrangeBucket(order, 0)
+	if len(p.movedAhead) == 0 {
+		return
+	}
+	rows := make([]memory.Candidate, len(p.rows))
+	items := make([]Item, len(p.items))
+	for dst, src := range order {
+		rows[dst], items[dst] = p.rows[src], p.items[src]
+	}
+	p.rows, p.items = rows, items
+	res.Items = p.items
+	res.Response = p.response(*res)
+	res.Bytes = len(res.Response)
+}
+
 // arrangeBucket is arrangeReplacements over one bucket's rows (indices into
 // p.rows, in rank order) with its item cap (0 is no cap).
 func (p *pipeline) arrangeBucket(order []int, limit int) []int {
@@ -1976,6 +2037,9 @@ func (p *pipeline) arrangeBucket(order []int, limit int) []int {
 				move(victim, limit) // the displaced row heads the rows behind the cap
 			}
 			placed[newer] = true
+			if p.movedAhead != nil {
+				p.movedAhead[p.rows[newer].ID] = p.rows[older].ID
+			}
 			// Read the placed row as an older row next: its own replacements go
 			// ahead of it.
 			k--
@@ -1992,8 +2056,9 @@ func (p *pipeline) arrangeBucket(order []int, limit int) []int {
 // runs from fitResponse beside markSuperseded for the same reason: a response-fit
 // drop can remove the newer row after the stages are done, and a marker naming a
 // row the page no longer holds would point at nothing. It runs on both modes. A
-// passive read has already ordered the newer row ahead (the retriever did it); a
-// query read is marked only, in its relevance order.
+// passive read has already ordered the newer row ahead (arrangeReplacements); a
+// query read is marked here on its relevance order, and displayReplacements
+// moves the newer row ahead after the last pass, over the same page.
 func (p *pipeline) markMaybeReplaced() {
 	present := make(map[string]bool, len(p.items))
 	for _, it := range p.items {

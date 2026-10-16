@@ -116,6 +116,13 @@ type ExplainRow struct {
 	// score explains it.
 	TookSlotFrom string `json:"took_slot_from,omitempty"`
 	DisplacedBy  string `json:"displaced_by,omitempty"`
+	// MovedAheadOf names the row this one was shown directly ahead of because it
+	// looks like that row's replacement (the lexical replacement pair the older
+	// row's maybe_replaced_by names). It is a DISPLAY move made after the
+	// relevance verdict: the row's membership, the outcome and the abstention
+	// were decided on the relevance order, and Rank is the row's place in the
+	// answer as shown.
+	MovedAheadOf string `json:"moved_ahead_of,omitempty"`
 	// FloorDropped says the vector similarity floor removed this row's VECTOR
 	// CONTRIBUTION, and FloorScore is the cosine that did it.
 	//

@@ -249,10 +249,10 @@ func TestRunPassiveMarksAPinnedOlderRowWithoutMovingIt(t *testing.T) {
 	}
 }
 
-// TestRunQueryMarksAValueReplacementInRelevanceOrder: ghost_memory_search
-// renders through the same Item.Line, so the older row carries the same marker
-// there. The order is the relevance answer and is left as the ranking made it.
-func TestRunQueryMarksAValueReplacementInRelevanceOrder(t *testing.T) {
+// TestRunQueryMarksAValueReplacement: ghost_memory_search renders through the
+// same Item.Line, so the older row carries the same marker there. Its order is
+// replacement_order_test.go's subject.
+func TestRunQueryMarksAValueReplacement(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(dep(pgxV4, 0.8), 20)
 	newer := r.add(dep(pgxV5, 0.7), 24)

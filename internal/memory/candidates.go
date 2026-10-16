@@ -337,9 +337,9 @@ type Candidate struct {
 	// different value, with no
 	// live `supersedes` or `contradicts` edge between the two. It is a lexical
 	// guess, newest first. On a passive read the assembler also orders those rows
-	// ahead of this one (assemble's arrangeReplacements); a query read only names
-	// them, because there the order is the relevance answer. Empty when no row
-	// qualifies.
+	// ahead of this one (assemble's arrangeReplacements); on a query read it moves
+	// them ahead for display only, after the relevance verdict is decided
+	// (assemble's displayReplacements). Empty when no row qualifies.
 	MaybeReplacedBy []string
 	// FloorReserved says the passive two-pass selection's behavioural floor
 	// reserved this row a slot. The assembler's replacement arrangement never
@@ -625,7 +625,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// The near-duplicate verdicts are read once more, by the removal itself: the
 	// loser leaves the set here rather than being ranked last, and it reports
 	// what it removed so the assembler can file the verdict (#926).
-	kept, removed, lostTo := cand.dropNearDuplicates(ctx, selected, p)
+	kept, removed, lostTo := cand.dropNearDuplicates(ctx, selected, p, req.Now)
 	selected = kept
 	droppedIDs := make([]string, len(removed))
 	for i, m := range removed {
@@ -656,7 +656,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// are untouched by this pass.
 	if len(tail) > 0 {
 		combined := append(append([]Memory{}, selected...), tail...)
-		keptAll, passLosers, lostToPass := cand.dropNearDuplicates(ctx, combined, p)
+		keptAll, passLosers, lostToPass := cand.dropNearDuplicates(ctx, combined, p, req.Now)
 		if len(passLosers) > 0 {
 			inWindow := make(map[string]bool, len(selected))
 			for _, m := range selected {
@@ -721,9 +721,10 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	set.Edges, set.EdgesStatus = edges, status
 
 	// The replacements no lifecycle has related yet, NAMED and not reordered: the
-	// order of a query answer is its relevance verdict (the cutoff reads the top
-	// row, the leg-consensus stage each leg's first place), so a guess about
-	// chronology may annotate it and must not rearrange it. Asked over the rows
+	// order of a query answer is what its relevance verdict is decided on (the
+	// cutoff reads the top row, the leg-consensus stage each leg's first place),
+	// so the retriever must not rearrange it; the assembler moves a replacement
+	// ahead for display only after that verdict. Asked over the rows
 	// the edges were read for, and not at all when that read failed, so an
 	// explicit relation always gets to overrule it.
 	if status.Status != edgesErr {

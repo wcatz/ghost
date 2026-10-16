@@ -1,7 +1,10 @@
 package memory
 
 import (
+	"context"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -290,4 +293,101 @@ func scopesEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// replacementPairsWithin reports the lexical replacement pairs among rows, keyed
+// both ways round, by the rule lexicalReplacements states and through it, so the
+// near-duplicate removal and the marker can never disagree about what a pair is.
+// The live `supersedes` and `contradicts` edges among the rows are read here so
+// an explicit relation still wins exactly as it does for the marker.
+//
+// It exists for the near-duplicate REMOVAL, which runs before the read that
+// names the pairs: a removal that took one row of a pair out first would leave
+// nothing for the marker to name, and the reader would get one of the two claims
+// with nothing saying the other exists.
+func replacementPairsWithin(ctx context.Context, db Queryer, rows []Memory, now time.Time) (map[[2]string]bool, error) {
+	if len(rows) < 2 {
+		return nil, nil
+	}
+	ids := make([]string, len(rows))
+	cands := make([]Candidate, len(rows))
+	for i, m := range rows {
+		ids[i] = m.ID
+		cands[i] = Candidate{Memory: m}
+	}
+	edges, err := explicitEdgesWithin(ctx, db, ids)
+	if err != nil {
+		return nil, err
+	}
+	repl := lexicalReplacements(cands, edges, now)
+	if len(repl) == 0 {
+		return nil, nil
+	}
+	out := make(map[[2]string]bool, 2*len(repl))
+	for older, newer := range repl {
+		for _, n := range newer {
+			out[[2]string{older, n}] = true
+			out[[2]string{n, older}] = true
+		}
+	}
+	return out, nil
+}
+
+// explicitEdgesWithin is the live `supersedes` and `contradicts` edges whose
+// both endpoints are in ids: the two relations that take a pair out of
+// lexicalReplacements.
+func explicitEdgesWithin(ctx context.Context, db Queryer, ids []string) ([]LinkEdge, error) {
+	ph := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids)*2)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	list := strings.Join(ph, ",")
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT l.source_id, l.target_id, l.relation
+		FROM memory_links l
+		WHERE l.relation IN ('supersedes', 'contradicts') AND l.invalidated_at IS NULL
+		  AND l.source_id IN (%s) AND l.target_id IN (%s)
+	`, list, list), args...)
+	if err != nil {
+		return nil, fmt.Errorf("replacement pairs: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []LinkEdge
+	for rows.Next() {
+		var e LinkEdge
+		if err := rows.Scan(&e.From, &e.To, &e.Relation); err != nil {
+			return nil, fmt.Errorf("replacement pairs: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("replacement pairs: %w", err)
+	}
+	return out, nil
+}
+
+// withoutReplacementPairs drops the near-duplicate verdicts whose two rows are a
+// lexical replacement pair. A replacement is not a duplicate (the save path
+// refuses to fold it for that reason), and the lexical guess never withholds a
+// row: both rows stay, the newer one is shown ahead of the older and the older
+// one is marked. Keeping both, rather than removing the older row, is the
+// choice for that second reason: the guess can be wrong, and a wrong guess that
+// removed a row would hide a live claim with nothing on the page saying so.
+func withoutReplacementPairs(pairs []demotionPairs, repl map[[2]string]bool) []demotionPairs {
+	if len(repl) == 0 {
+		return pairs
+	}
+	kept := make([]demotionPairs, 0, len(pairs))
+	for _, pr := range pairs {
+		if repl[[2]string{pr.loser, pr.winner}] {
+			continue
+		}
+		kept = append(kept, pr)
+	}
+	return kept
 }
