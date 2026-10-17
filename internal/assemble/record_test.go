@@ -469,6 +469,67 @@ func TestNoRecordForAResultTheCallerTurnsIntoAnError(t *testing.T) {
 	}
 }
 
+// TestAFailedRecordLogWithholdsATokenShapedProjectID is #1464: the drop line is
+// the one record a caller's operator sees when the retrieval record could not be
+// written, and a STORED project id is not token-guarded — CheckImportedProjectID
+// refuses a control character but never asks the guard — so an imported artifact
+// can carry a token-shaped id, and emit interpolated it with a bare struct field.
+// This is the same class as #1327's cooldown skip line, closed there on the one
+// lifecycle call site that still printed a stored id raw: every place a stored
+// project id reaches a log line goes through memory.RefusalArg, so an ordinary
+// id is %q-quoted (unchanged for a reader) and a token-shaped one is withheld
+// behind a placeholder naming the field and the format.
+//
+// Both halves are asserted from ONE log line: the token-shaped id must be absent,
+// and an ordinary id must still appear — a renderer that withheld everything
+// would keep the token out and leave the line unable to name the project whose
+// record was dropped.
+func TestAFailedRecordLogWithholdsATokenShapedProjectID(t *testing.T) {
+	// Obviously fake, shaped by the detector's own GitHub rule. The length is
+	// the PAT's: "ghp_" + 36.
+	const tokenID = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	var logged bytes.Buffer
+	sink := &recordingSink{err: errors.New("disk full")}
+
+	req := baseRequest()
+	req.ProjectID = tokenID
+	req.Logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	runRecorded(t, sink, req, candidate("A", tokenID, "fact", "database configuration pooling", 0.9))
+
+	line := logged.String()
+	if !strings.Contains(line, "retrieval record not written") {
+		t.Fatalf("the drop was not logged at all: %q", line)
+	}
+	if strings.Contains(line, tokenID) {
+		t.Errorf("the drop log repeats the token-shaped project id: %s", line)
+	}
+	// The line has to stay actionable: a bare "withheld" that named neither the
+	// field nor the format would tell an operator nothing about which project's
+	// record went missing.
+	if !strings.Contains(line, "<project_id withheld: it holds a GitHub personal access token>") {
+		t.Errorf("the drop log does not name the withheld project id and its format: %s", line)
+	}
+
+	// The ordinary half, from a second run on the same logger: an id with no
+	// token in it must still appear so the line can name the project whose
+	// record was dropped. RefusalArg %q-quotes it and the text handler quotes
+	// the field value once more, so the id arrives escaped — the same shape the
+	// #1327 stophook.go fix produces, and the property under test is that the
+	// id is still THERE, not how many layers of quoting wrap it.
+	var ordinary bytes.Buffer
+	okSink := &recordingSink{err: errors.New("disk full")}
+	okReq := baseRequest()
+	okReq.ProjectID = "proj"
+	okReq.Logger = slog.New(slog.NewTextHandler(&ordinary, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	runRecorded(t, okSink, okReq, candidate("A", "proj", "fact", "database configuration pooling", 0.9))
+
+	if !strings.Contains(ordinary.String(), "proj") {
+		t.Errorf("an ordinary project id no longer appears in the drop log: %s", ordinary.String())
+	}
+}
+
 func TestARefusedRecordReachesTheCallersLoggerNotTheProcessDefault(t *testing.T) {
 	// Poison the process default: any write to it fails the test.
 	prev := slog.Default()
