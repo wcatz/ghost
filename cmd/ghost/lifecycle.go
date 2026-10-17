@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1329,6 +1330,34 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 	return p, nil
 }
 
+// reflectTiers is every value `ghost reflect --tier` selects a backend with.
+// The removed "haiku" tier is not one of them, but validateReflectSelection
+// lets it through so the tier switch keeps answering it with its own
+// removal message.
+var reflectTiers = []string{"auto", "cli", "opencode", "sqlite"}
+
+// validateReflectSelection refuses a --tier or --source value outside the
+// documented sets. Both used to reach the tier switch's "auto" default, where
+// an unknown tier skipped the undetectable-caller refusal and an unknown source
+// only printed a warning, so a typo ran the SQLite floor and exited 0 — with
+// --apply, it rewrote the project's memories. runReflect asks this before the
+// store is opened, so a refused value has touched nothing.
+//
+// Case is exact, as the switch compares it. An empty --source is the flag left
+// off (the parser cannot tell `--source=` from no flag), and only the explicit
+// value is asked: a detected source comes from ai.DetectSource. A known source
+// whose binary is missing is not refused here; that is the documented SQLite
+// fallback, or a failure under --require-llm.
+func validateReflectSelection(p reflectArgs) error {
+	if p.tier != "haiku" && !slices.Contains(reflectTiers, p.tier) {
+		return fmt.Errorf("unknown --tier %s (allowed: %s)", memory.RefusalArg("tier", p.tier), strings.Join(reflectTiers, ", "))
+	}
+	if p.source != "" && !ai.IsKnownSource(p.source) {
+		return fmt.Errorf("unknown --source %s (allowed: %s)", memory.RefusalArg("source", p.source), strings.Join(ai.KnownSources(), ", "))
+	}
+	return nil
+}
+
 // reflectProposalLimit is how many bytes of a memory `ghost reflect` prints by
 // default. A proposal list is a summary — 120 is a screenful of context per
 // memory and a large project has hundreds — and the section that accounts for
@@ -1370,7 +1399,8 @@ Flags:
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
                    or goose. Defaults to the calling harness (detected from
                    the environment and process ancestry); an undetectable
-                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite.
+                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite,
+                   though an unknown value is refused under any tier.
   --project string Project name; an alternative to the positional form that
                    takes the next argument verbatim, so dash-prefixed names work.
 `
@@ -1401,6 +1431,10 @@ func runReflect() {
 	parsed, parseErr := parseReflectArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
+	}
+	if err := validateReflectSelection(parsed); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	projectName := parsed.project
