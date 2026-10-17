@@ -558,8 +558,10 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	landedTasks := map[string]bool{}
 	landedDecisions := map[string]bool{}
 	// Which of them this run created. A dropped pointer is restored when the
-	// store already holds its target (#1153) — but only a target the store held
-	// BEFORE the run: one this run wrote is there in an apply and not in the dry
+	// store already holds its target in the project the record is imported
+	// under, after mapping (#1153); one in another project stays dropped, like a
+	// target that exists nowhere. And only a target the store held BEFORE the
+	// run: one this run wrote is there in an apply and not in the dry
 	// run that previews it, so counting it would make the two disagree about a
 	// cycle's pointers.
 	createdTasks := map[string]bool{}
@@ -575,7 +577,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 					dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
 				}
 				if dropped != "" {
-					held, err := s.HasTask(ctx, dropped)
+					held, err := s.HasTask(ctx, task.ProjectID, dropped)
 					if err != nil {
 						return outcome{action: ActionReject, err: fmt.Errorf("look up the task blocked_by names, %s: %w", memory.RefusalArg("blocked_by", dropped), err)}
 					}
@@ -607,7 +609,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 					dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
 				}
 				if dropped != "" {
-					held, err := s.HasDecision(ctx, dropped)
+					held, err := s.HasDecision(ctx, decision.ProjectID, dropped)
 					if err != nil {
 						return outcome{action: ActionReject, err: fmt.Errorf("look up the decision superseded_by names, %s: %w", memory.RefusalArg("superseded_by", dropped), err)}
 					}
