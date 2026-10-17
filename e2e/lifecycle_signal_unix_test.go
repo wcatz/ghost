@@ -53,7 +53,12 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	}
 	pidFile := filepath.Join(s.bin, "resolve.pid")
 
-	cmd := exec.Command(ghostBin, "lifecycle", "--project", e2eProject)
+	// --source is explicit rather than left to the coordinator's phase
+	// self-detection: the sandbox env carries no harness marker and the phase's
+	// ancestor chain is the test runner, so an undetectable source would make
+	// the resolve phase fail fast before it reaches its harness — and the run
+	// would never be blocked on the call this test signals.
+	cmd := exec.Command(ghostBin, "lifecycle", "--project", e2eProject, "--source", "claude-code")
 	cmd.Env = s.env
 	cmd.Dir = s.work
 	var out, errb bytes.Buffer
