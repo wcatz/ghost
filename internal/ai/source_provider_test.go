@@ -45,6 +45,56 @@ func TestSourceProviderForSource(t *testing.T) {
 	}
 }
 
+// TestKnownSourcesMatchTheProviderSwitch ties the written-down source list to
+// newSourceProvider's switch: every listed token resolves to an available
+// provider when its binary exists, and a few tokens outside the list do not.
+// A source dropped from the list fails here; a case added to the switch alone
+// does not, because the switch cannot be enumerated, so a new source still has
+// to be added to knownSources by hand.
+func TestKnownSourcesMatchTheProviderSwitch(t *testing.T) {
+	binary := sourceProviderTestBinary(t)
+	for _, source := range KnownSources() {
+		if !IsKnownSource(source) {
+			t.Errorf("IsKnownSource(%q) = false for a listed source", source)
+		}
+		if p := NewSourceProviderForSource(source, binary, binary, binary, binary); !p.Available() {
+			t.Errorf("listed source %q is not resolved by the provider switch", source)
+		}
+	}
+	// Every token this package itself produces — from an MCP client name or
+	// a harness process name — must be one the list names, or a detected
+	// source would be refused as unknown.
+	for _, c := range clientSourceNames {
+		if !IsKnownSource(c.source) {
+			t.Errorf("clientSourceNames maps %q to %q, which KnownSources omits", c.name, c.source)
+		}
+	}
+	for _, name := range []string{"claude", "claude-code", "opencode", "codex", "goose"} {
+		if s := sourceFromProcessName(name); !IsKnownSource(s) {
+			t.Errorf("sourceFromProcessName(%q) = %q, which KnownSources omits", name, s)
+		}
+	}
+	for _, env := range []string{"OPENCODE", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"} {
+		lookup := func(k string) string {
+			if k == env {
+				return "1"
+			}
+			return ""
+		}
+		if s := detectSourceFromEnv(lookup); !IsKnownSource(s) {
+			t.Errorf("detectSourceFromEnv with %s set = %q, which KnownSources omits", env, s)
+		}
+	}
+	for _, source := range []string{"", "claude", "Claude-Code", "bogus"} {
+		if IsKnownSource(source) {
+			t.Errorf("IsKnownSource(%q) = true, want false", source)
+		}
+		if p := NewSourceProviderForSource(source, binary, binary, binary, binary); p.Available() {
+			t.Errorf("unlisted source %q is resolved by the provider switch; add it to knownSources", source)
+		}
+	}
+}
+
 func TestSourceProviderUnavailable(t *testing.T) {
 	p := NewSourceProviderForSource("claude-code", "/nonexistent/claude")
 	if p.Available() {
