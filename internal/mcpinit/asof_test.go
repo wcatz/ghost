@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -330,6 +331,78 @@ func TestRenderSessionContextAtCapsAfterWithholdingAtT(t *testing.T) {
 		t.Errorf("a withheld row displaced the valid one:\n%s", block)
 	}
 	if strings.Contains(block, "withheld at T") {
+		t.Errorf("a row closed before T is listed:\n%s", block)
+	}
+}
+
+// cappedValidityRows returns n rows with no validity bounds, each distinct, so
+// every one is in scope and valid at any instant.
+func cappedValidityRows(prefix string, n int) []validityRow {
+	rows := make([]validityRow, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, validityRow{
+			id:      fmt.Sprintf("%s-%02d", prefix, i),
+			content: fmt.Sprintf("%s row number %02d", prefix, i),
+		})
+	}
+	return rows
+}
+
+// TestRenderSessionContextAtCountsTheRowsTheCapCut: the historical block cuts
+// the project's rows at sessionMemoriesCap, and its heading has to say so in
+// the current block's own words. A bare "(15 shown)" over a set of 21 reads as
+// the whole of what the project held at T.
+func TestRenderSessionContextAtCountsTheRowsTheCapCut(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	dir := validityStore(t, at, cappedValidityRows("capped", sessionMemoriesCap+6))
+	block := RenderSessionContextAt(dir, &at)
+	want := "**Memories (15 shown of 21 total — 6 not shown, ranked by " + projectRankPhrase + "; use " + projectToolPhrase + " for the rest):**"
+	if !strings.Contains(block, want) {
+		t.Errorf("the capped historical block does not count the 6 rows past the cap; want %q in:\n%s", want, block)
+	}
+	if got := strings.Count(block, "capped row number"); got != sessionMemoriesCap {
+		t.Errorf("the block lists %d rows, want %d:\n%s", got, sessionMemoriesCap, block)
+	}
+}
+
+// TestRenderSessionContextAtUncappedSetKeepsTheBareHeading is the control: a
+// set under the cap lost nothing, so the heading stays "(N shown)".
+func TestRenderSessionContextAtUncappedSetKeepsTheBareHeading(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	dir := validityStore(t, at, cappedValidityRows("uncapped", 10))
+	block := RenderSessionContextAt(dir, &at)
+	if !strings.Contains(block, "**Memories (10 shown):**") {
+		t.Errorf("a 10-row historical block lost its bare heading:\n%s", block)
+	}
+	if strings.Contains(block, "not shown") {
+		t.Errorf("a 10-row historical block claims rows were not shown:\n%s", block)
+	}
+}
+
+// TestRenderSessionContextAtCapCountKeepsTheValidityDisclosure: rows withheld
+// for validity at T are disclosed by the block-level validity note, as before,
+// and are not folded into the cap's count: 21 valid rows and 2 closed before T
+// read "15 shown of 21 total — 6 not shown" plus "2 memories were withheld".
+func TestRenderSessionContextAtCapCountKeepsTheValidityDisclosure(t *testing.T) {
+	at := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	f := memory.StoredStampLayout
+	rows := cappedValidityRows("capped", sessionMemoriesCap+6)
+	rows = append(rows,
+		validityRow{id: "gone-a", content: "closed before T a", until: at.Add(-time.Hour).Format(f)},
+		validityRow{id: "gone-b", content: "closed before T b", until: at.Add(-time.Hour).Format(f)},
+	)
+	dir := validityStore(t, at, rows)
+	block := RenderSessionContextAt(dir, &at)
+	if !strings.Contains(block, "**Memories (15 shown of 21 total — 6 not shown, ranked by ") {
+		t.Errorf("the cap count is wrong once rows are withheld at T:\n%s", block)
+	}
+	if strings.Contains(block, "withheld rather than ranked out") {
+		t.Errorf("rows withheld at T moved into the heading's tally:\n%s", block)
+	}
+	if !strings.Contains(block, "Validity judged at "+at.Format(time.RFC3339)) || !strings.Contains(block, "2 memories were withheld") {
+		t.Errorf("the block no longer discloses the 2 rows withheld at T:\n%s", block)
+	}
+	if strings.Contains(block, "closed before T") {
 		t.Errorf("a row closed before T is listed:\n%s", block)
 	}
 }
