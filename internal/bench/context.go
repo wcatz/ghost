@@ -238,9 +238,9 @@ type LeakArm struct {
 //
 // MaxResponse and OverByteCap are the direct reading — the largest rendered
 // response any query produced, and how many responses came back over the cap. A
-// non-zero OverByteCap is a defect in the response-fit pass rather than a finding,
-// so it is printed as a count and never folded into a ratio that could be
-// averaged away.
+// response over the cap is either a first row the fit kept whole because it would
+// not fit (the first row is never cut) or a defect in the response-fit pass, so it
+// is printed as a count and never folded into a ratio that could be averaged away.
 //
 // The two trims are counted separately because they are different failures with
 // opposite remedies. The item cap is the caller's own bound, and a block that hits

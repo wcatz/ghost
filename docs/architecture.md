@@ -2299,8 +2299,8 @@ and whose vector leg then failed.)
   multiple rather than a match). The content cap is the binding half, not the
   "same order" argument: at or below 8000 a maximum-length memory plus the
   truncation marker, the item line's framing and the verdict line is already past
-  the cap, so the pass would drop the only row and the answer would come back
-  `empty`/`all_over_budget` naming a server-side cap no search argument reaches.
+  the cap, so every such answer would come back over it, its first row kept whole
+  under the first-row notice (#1483) rather than fitted.
   Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
   callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
