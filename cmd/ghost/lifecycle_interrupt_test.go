@@ -154,3 +154,86 @@ func TestTheSweepIsAwaitedOnlyForAnInterruptedRun(t *testing.T) {
 		}
 	})
 }
+
+// TestTheInterruptIsAppendedToAnEarlierFailure pins how a signal's outcome
+// lands in the marker's two fields when the run has already failed.
+//
+// The marker carries ONE error string and keeps the FIRST cause, so an
+// interrupt that follows an earlier phase's failure must be appended to that
+// cause rather than passed in as a second one: otherwise the phase the signal
+// caught is named in phases_failed while its own cause — the signal, and the
+// output tail that is the only record of what it was doing — is silently
+// dropped, and the alert reads as if the earlier phase were the whole story.
+//
+// The one shape with no phase to name and no failure to append to is the run
+// itself, returned as a direct-write cause because FinishLifecycleRun reads an
+// empty failure list as success and would clear the record.
+func TestTheInterruptIsAppendedToAnEarlierFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		failed       []string
+		err          string
+		running      string
+		next         string
+		tail         string
+		wantFailed   []string
+		wantErr      string
+		wantRunCause string
+	}{
+		{
+			// The regression: an earlier phase failed, then the signal caught a
+			// later phase. Both facts have to survive in the one record.
+			name:       "a phase caught in flight after an earlier failure keeps both causes",
+			failed:     []string{"reflect"},
+			err:        "reflect exploded",
+			running:    "resolve",
+			tail:       "partial harness output\n",
+			wantFailed: []string{"reflect", "resolve"},
+			wantErr:    "reflect exploded; interrupted by SIGTERM while running resolve\npartial harness output",
+		},
+		{
+			name:       "a phase caught in flight with nothing failed sets its cause",
+			running:    "resolve",
+			wantFailed: []string{"resolve"},
+			wantErr:    "interrupted by SIGTERM while running resolve",
+		},
+		{
+			name:       "between phases after an earlier failure appends and names nobody",
+			failed:     []string{"reflect"},
+			err:        "reflect exploded",
+			next:       "supersede",
+			wantFailed: []string{"reflect"},
+			wantErr:    "reflect exploded; interrupted by SIGTERM before supersede",
+		},
+		{
+			name:         "between phases with nothing failed is written directly",
+			next:         "supersede",
+			wantRunCause: "interrupted by SIGTERM before supersede",
+		},
+		{
+			name:       "a signal that cut nothing short leaves the bookkeeping alone",
+			failed:     []string{"reflect"},
+			err:        "reflect exploded",
+			wantFailed: []string{"reflect"},
+			wantErr:    "reflect exploded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failed, err, runCause := applyInterrupt(tc.failed, tc.err, tc.running, tc.next, tc.tail)
+			if len(failed) != len(tc.wantFailed) {
+				t.Fatalf("phases_failed = %v, want %v", failed, tc.wantFailed)
+			}
+			for i := range failed {
+				if failed[i] != tc.wantFailed[i] {
+					t.Errorf("phases_failed[%d] = %q, want %q", i, failed[i], tc.wantFailed[i])
+				}
+			}
+			if err != tc.wantErr {
+				t.Errorf("error = %q, want %q", err, tc.wantErr)
+			}
+			if runCause != tc.wantRunCause {
+				t.Errorf("direct-write cause = %q, want %q", runCause, tc.wantRunCause)
+			}
+		})
+	}
+}

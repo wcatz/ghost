@@ -364,24 +364,13 @@ func runLifecycle() {
 	// failure, and it is recorded only when something was actually left
 	// unfinished. A chain that finished every enabled phase records nothing:
 	// every phase ran, so nothing is paused and the success below heals.
+	//
+	// applyInterrupt returns the run's bookkeeping unchanged when no signal
+	// stopped it, and folds the interrupt's outcome into it — the phases the
+	// marker names and the one error string it carries — when one did.
 	var interruptedRunCause string
-	if phases, cause, interrupted := interruptOutcome(interruptedRunning, interruptedNext, interruptedTail); interrupted {
-		switch {
-		case len(phases) > 0:
-			recordFailure(phases[0], cause)
-		case len(failedPhases) > 0:
-			// An earlier phase already failed and the interrupt names no phase
-			// of its own: the one record carries both facts.
-			firstPhaseErr += "; " + cause
-		default:
-			// Nothing failed and no phase may be named, so the run itself is
-			// what failed. FinishLifecycleRun reads an empty failure list as a
-			// successful run — success heals — which would leave an
-			// interrupted run's record unwritten, so this marker is written
-			// directly.
-			interruptedRunCause = cause
-		}
-	}
+	failedPhases, firstPhaseErr, interruptedRunCause = applyInterrupt(
+		failedPhases, firstPhaseErr, interruptedRunning, interruptedNext, interruptedTail)
 
 	// Record the outcome durably: any failed phase leaves an atomic
 	// lifecycle-last-failure.json marker that the next session-start turns
@@ -454,6 +443,47 @@ func interruptOutcome(running, next, tail string) (phases []string, cause string
 	default:
 		return nil, "", false
 	}
+}
+
+// applyInterrupt folds a signal's outcome (see interruptOutcome) into the run's
+// failure bookkeeping — the phases_failed list and the marker's single error
+// string — and reports the one shape that has to be written directly.
+//
+// failedPhases and firstPhaseErr are the run's state before the signal; the
+// return values are that state after, plus the direct-write cause ("" when
+// there is none).
+//
+// The marker carries ONE error string, and recordFailure keeps the FIRST
+// cause, so an interrupt that follows an earlier phase's failure is APPENDED to
+// that cause rather than dropped: without this, a phase caught in flight after
+// an earlier phase failed would be named in phases_failed while its own cause —
+// and the output tail that is the only record of what it was doing — went
+// unwritten.
+//
+// When no phase may be named and nothing failed, the run ITSELF is what the
+// interrupt stopped. FinishLifecycleRun reads an empty failure list as a
+// successful run — success heals — which would leave that record unwritten and
+// clear an earlier one, so the cause is returned for the caller to write
+// directly.
+func applyInterrupt(failedPhases []string, firstPhaseErr, running, next, tail string) ([]string, string, string) {
+	phases, cause, ok := interruptOutcome(running, next, tail)
+	if !ok {
+		return failedPhases, firstPhaseErr, ""
+	}
+	if firstPhaseErr != "" {
+		firstPhaseErr += "; " + cause
+	}
+	if len(phases) > 0 {
+		failedPhases = append(failedPhases, phases[0])
+		if firstPhaseErr == "" {
+			firstPhaseErr = cause
+		}
+		return failedPhases, firstPhaseErr, ""
+	}
+	if firstPhaseErr == "" {
+		return failedPhases, firstPhaseErr, cause
+	}
+	return failedPhases, firstPhaseErr, ""
 }
 
 // runAuditPhase judges the calls this session made against the transcript the
