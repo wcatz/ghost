@@ -681,12 +681,13 @@ const tagMaxCount = 10
 // validateTags bounds a tag list and refuses the characters that could end the
 // line it is printed on.
 //
-// It returns an error for two different refusals and trims exactly one thing. A
+// It returns an error for three different refusals and trims exactly one thing. A
 // list longer than tagMaxCount is refused, because the count is a number the
 // caller can act on and a silent cut leaves a label unaccounted for behind a
 // success sentence; a tag longer than tagMaxLen is TRIMMED, silently and
 // harmlessly, because a shortened label is still the label the caller meant; and
-// a control character, a backtick or a `«»` is a refusal. A tag list is
+// a control character, a backtick or a `«»` is a refusal, and so is a tag whose
+// uncut text is token-shaped, checked before the cut could hide it. A tag list is
 // printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
 // the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
 // pairs into a markdown code span that swallows the rest of the row, and a «
@@ -752,6 +753,16 @@ func validateTags(tags []string) ([]string, error) {
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
 				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
+		}
+		// The token check runs on the tag as the caller sent it, not on the cut:
+		// the store's own check sees only what this function returns, so a token
+		// placed past byte tagMaxLen would be cut out of its sight and the save
+		// would answer as a success. It runs after the shape check so a tag that
+		// fails both is still refused by shape, through refusedTag, which already
+		// withholds a token-shaped tag. The field is named the way the store
+		// names it, by position.
+		if err := memory.RejectSecret(fmt.Sprintf("tags[%d]", i), orig); err != nil {
+			return nil, err
 		}
 	}
 	return tags, nil
