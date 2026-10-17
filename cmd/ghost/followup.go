@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/followup"
@@ -90,8 +89,9 @@ func printReassessFollowup(projectName string, targets []string, writtenBy strin
 // this is a command about to be run rather than a line to read.
 //
 // The project name is a shell argument, and a project name is free text — the
-// reason sanitizeFileNamePart exists is that a name can hold a separator or a
-// space. So a name that needs no quoting is rendered as the positional the docs
+// reason scratch sanitizes it before it enters a file name is that a name can
+// hold a separator or a space. So a name that needs no quoting is rendered as
+// the positional the docs
 // use everywhere, and anything else goes through --project in single quotes,
 // which parseResolveArgs takes verbatim ("a dash-leading name is a name, not a
 // flag"). Rendering a bare `ghost resolve my proj …` would be two positionals
@@ -247,11 +247,15 @@ func containsLineBreak(id string) bool { return strings.ContainsAny(id, "\n\r") 
 // never name different lists.
 //
 // The root is Ghost's own scratch, not the system temp: it is created 0700
-// beneath the data dir, it is already exempt from the per-invocation reaping
-// (which only collects directories in Open's <pid>-<hex> shape), and an operator
-// who wants to read the list days later still can. No id file is removed by a
-// later pass, which is deliberate — a repair an operator meant to run and did
-// not should still be there to run.
+// beneath the data dir, the per-invocation reaping (which only collects
+// directories in Open's <pid>-<hex> shape) does not touch it, and an operator
+// who wants to read the list days later still can. The one rule that does
+// collect it is the id-file rule in scratch.Reap, on scratch's own 14-day
+// window rather than a caller's age: a repair an operator meant to run and did
+// not should still be there to run, and a list nobody ever ran must not
+// accumulate in the root forever, counting against the budget with nothing
+// left to take it. The name that rule recognises is the name this writes —
+// both come from scratch.ReassessTargetsName.
 //
 // Nothing is ever written OVER. The root can be a directory someone else shares
 // ($GHOST_SCRATCH_DIR, or a root an operator pointed at), the name is derived
@@ -370,44 +374,14 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 // reassessTargetsAttempts bounds the name search in writeReassessTargets.
 const reassessTargetsAttempts = 3
 
-// defaultReassessTargetsName builds the id file's name: the repair, the project,
-// the UTC second for a human reading a directory listing, and a per-run token so
-// no two runs — or anything else in the root — can hold the same name.
+// defaultReassessTargetsName builds the id file's name. The name lives in
+// internal/scratch (scratch.ReassessTargetsName) because scratch.Reap has to
+// recognise exactly the name this writes to decide when it may be collected,
+// and two spellings of one name are two things to get wrong.
 //
 // It is a variable so a test can pin the name and ask what the writer does when
 // that name is already taken, which is the only way to observe the refusal
 // without racing a clock.
-var defaultReassessTargetsName = func(projectName string) (string, error) {
-	suffix, err := scratch.UniqueSuffix()
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("supersede-reassess-%s-%s-%s.ids",
-		sanitizeFileNamePart(projectName), time.Now().UTC().Format("20060102T150405Z"), suffix), nil
-}
+var defaultReassessTargetsName = scratch.ReassessTargetsName
 
 var reassessTargetsName = defaultReassessTargetsName
-
-// sanitizeFileNamePart renders a project name safe to embed in a file name. The
-// name is free text — `ghost resolve --project` takes the next argument verbatim
-// so a dash-leading project name works — and a name holding a separator would
-// otherwise write the file outside the scratch root, or not at all.
-func sanitizeFileNamePart(s string) string {
-	const maxLen = 40
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-		if b.Len() >= maxLen {
-			break
-		}
-	}
-	if b.Len() == 0 {
-		return "project"
-	}
-	return b.String()
-}

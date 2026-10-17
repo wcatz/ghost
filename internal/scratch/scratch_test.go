@@ -415,6 +415,107 @@ func TestReap_LeavesSymlinksAlone(t *testing.T) {
 	}
 }
 
+// TestReap_ReclaimsOnlyStaleReassessIDFiles: the follow-up id file
+// (supersede-reassess-<project>-<utc>-<suffix>.ids) is the one markerless
+// regular file Reap may collect, and the age bound it uses is its own window
+// rather than maxAge — the file is an operator's pending repair, so 13 days
+// old must survive a Reap(0) that would collect anything of the caller's own
+// age, and idFileStaleAge is the boundary both ways. Everything else under the
+// root keeps its old treatment: a directory wearing the name is never removed
+// (it is not a file Ghost wrote), a link is never followed, and a foreign name
+// is never touched.
+func TestReap_ReclaimsOnlyStaleReassessIDFiles(t *testing.T) {
+	const (
+		idFile   = "supersede-reassess-myproj-20260101T000000Z-123-0123456789abcdef.ids"
+		upperHex = "supersede-reassess-myproj-20260101T000000Z-123-0123456789ABCDEF.ids"
+		nearMiss = "supersede-reassess-myproj-20260101T000000Z-123-0123456789abcdef.ids.txt"
+		foreign  = "someone-elses-list.ids"
+	)
+	// Ages read as: past the window, inside the window (14 days), and just
+	// written. Every case is reaped with Reap(0), so a survivor is surviving on
+	// the id file's own window and on nothing else.
+	stale := time.Now().Add(-90 * 24 * time.Hour)
+	insideWindow := time.Now().Add(-13 * 24 * time.Hour)
+	fresh := time.Now().Add(-time.Hour)
+	// The window read off the constant rather than restated: a bound only one
+	// of the two can change is a bound that drifts silently.
+	oneHourInside := time.Now().Add(-idFileStaleAge + time.Hour)
+	oneHourPast := time.Now().Add(-idFileStaleAge - time.Hour)
+
+	tests := []struct {
+		name       string
+		entry      string
+		kind       string // "file", "dir" or "symlink"
+		mtime      *time.Time
+		wantRemove bool
+	}{
+		{"an id file past its window is reclaimed", idFile, "file", &stale, true},
+		{"an id file one hour inside its window is kept", idFile, "file", &oneHourInside, false},
+		{"an id file one hour past its window is reclaimed", idFile, "file", &oneHourPast, true},
+		{"an id file inside its window is kept", idFile, "file", &insideWindow, false},
+		{"a freshly written id file is kept", idFile, "file", &fresh, false},
+		{"an id file with uppercase hex is not ours", upperHex, "file", &stale, false},
+		{"an id file name with a longer suffix is not ours", nearMiss, "file", &stale, false},
+		{"a foreign id list is not ours", foreign, "file", &stale, false},
+		{"a directory wearing an id file's name is kept", idFile, "dir", &stale, false},
+		{"a symlink wearing an id file's name is kept", idFile, "symlink", &stale, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.kind == "symlink" && runtime.GOOS == "windows" {
+				t.Skip("symlink creation requires privileges on Windows")
+			}
+			root := t.TempDir()
+			t.Setenv("GHOST_SCRATCH_DIR", root)
+			entry := filepath.Join(root, tt.entry)
+			switch tt.kind {
+			case "dir":
+				if err := os.Mkdir(entry, 0o700); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			case "symlink":
+				// The target lives outside the root: Reap scans the root's own
+				// entries, so a link that survives must leave its target alone.
+				target := filepath.Join(t.TempDir(), "outside.txt")
+				if err := os.WriteFile(target, []byte("keep me\n"), 0o600); err != nil {
+					t.Fatalf("write the link target: %v", err)
+				}
+				if err := os.Symlink(target, entry); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				defer func() {
+					if _, err := os.Stat(target); err != nil {
+						t.Errorf("the link's target outside the root was damaged: %v", err)
+					}
+				}()
+			default:
+				if err := os.WriteFile(entry, []byte("# one id\naaaaaaaa1111111111111111111111\n"), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			if err := os.Chtimes(entry, *tt.mtime, *tt.mtime); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+
+			removed, err := Reap(0)
+			if err != nil {
+				t.Fatalf("Reap: %v", err)
+			}
+			wantCount := 0
+			if tt.wantRemove {
+				wantCount = 1
+			}
+			if removed != wantCount {
+				t.Errorf("removed = %d, want %d", removed, wantCount)
+			}
+			_, statErr := os.Lstat(entry)
+			if os.IsNotExist(statErr) != tt.wantRemove {
+				t.Errorf("entry present = %v, want %v (lstat err %v)", !os.IsNotExist(statErr), !tt.wantRemove, statErr)
+			}
+		})
+	}
+}
+
 func TestReap_UnusableRootReturnsError(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
