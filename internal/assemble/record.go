@@ -245,8 +245,22 @@ func emit(ctx context.Context, sink RecordSink, req Request, res Result) {
 	writeCtx, cancel := context.WithTimeout(ctx, recordWriteBudget)
 	defer cancel()
 	if err := sink.RecordRetrieval(writeCtx, rec); err != nil {
+		// The project id is a STORED value, not this call's own argument, so
+		// nothing upstream judged it: CheckImportedProjectID refuses a control
+		// character but never asks the token guard, and `ghost import` writes an
+		// artifact's project id verbatim. A session in that project's recorded
+		// directory then resolves to it, and this line — the one record an
+		// operator sees when the write failed — interpolated it with a bare
+		// struct field. It goes through memory.RefusalArg, the same renderer the
+		// lifecycle cooldown's skip line moved to (#1327): an ordinary id is
+		// %q-quoted (byte-identical for a reader), and a token-shaped one is
+		// withheld behind a placeholder naming the field and the format.
+		//
+		// source and outcome stay bare: both are this build's own enum values
+		// (string(req.Source), string(res.Outcome)), chosen from a closed set in
+		// Request and Result, and a stored id never reaches either.
 		log.Warn("retrieval record not written; the audit will be missing this call",
-			"project_id", rec.ProjectID, "source", rec.Source,
+			"project_id", memory.RefusalArg("project_id", rec.ProjectID), "source", rec.Source,
 			"outcome", rec.Outcome, "error", err)
 	}
 }
