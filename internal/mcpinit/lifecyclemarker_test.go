@@ -637,6 +637,43 @@ func TestSessionStart_SilentMarkerDoesNotSuppressAnInToleranceFutureFailure(t *t
 	}
 }
 
+// TestSessionStart_SilentMarkersConsumeNoSelfCleanPass: the self-clean bound
+// (lifecycleSelfCleanMaxPasses) counts REMOVALS — the files a session-start
+// deletes — so passing over a kept-but-silent marker must not spend one. In a
+// session that resolves to no project the candidate set is every per-project
+// marker in the data directory, unbounded, and each marker between the alert
+// horizon and the keep horizon outranks an in-tolerance future one. If a skip
+// cost a pass, eight of them — any project that failed once and has not run
+// since — would exhaust the bound and return "", hiding the real failure at
+// every session start until those files aged past the keep horizon. The read
+// drops the silent band itself, so the future failure is reached in one pass.
+func TestSessionStart_SilentMarkersConsumeNoSelfCleanPass(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	stale := time.Now().UTC().Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	for i := range lifecycleSelfCleanMaxPasses {
+		writeMarkerFile(t, xdgHome, testMarker{
+			Project: fmt.Sprintf("quiet-%d", i), PhasesFailed: []string{"reflect"},
+			Error: "old", At: stale, Version: 1,
+		})
+	}
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recent", PhasesFailed: []string{"resolve"}, Error: "fresh", At: future, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the in-tolerance future failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recent") {
+		t.Errorf("silent markers must not consume the self-clean bound, got: %s", firstLine)
+	}
+}
+
 // TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure: the same
 // rule as the 365-day test, at the distance the review caught — a marker 20
 // days ahead is past the 24h tolerated skew, so it must not be shown, and in a
