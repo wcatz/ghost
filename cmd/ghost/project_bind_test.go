@@ -539,8 +539,9 @@ func TestUnboundProjectNotice(t *testing.T) {
 // sentence, which carries no value — correct for `ghost export`, where the caller's
 // text is noise, and wrong for a person who just typed a directory and needs to be
 // told which one was refused. So the command names it, through `assemble.Label`,
-// and this holds both halves of that: the directory IS named (escaped, so the
-// sentence holds none of the characters it is refusing) and nothing else is.
+// and this holds both halves of that: the directory IS named (escaped: a
+// guillemet is replaced, and a backtick is shown with a backslash in front of it)
+// and nothing else is.
 //
 // The credential case is the reason the naming is skipped there, and it is the half
 // that is easy to get wrong in the other direction: `assemble.Label` renders a value

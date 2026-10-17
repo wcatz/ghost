@@ -142,11 +142,8 @@ func TestVerifyBackupNamesADamagedManifestAsPresentNotAbsent(t *testing.T) {
 	if rep.ManifestErr == nil {
 		t.Error("ManifestErr is nil, so the report has nothing to tell the reader went wrong")
 	}
-	// And nothing was measured, so nothing may be claimed.
-	if rep.BytesRead || rep.CountsRead {
-		t.Errorf("a run that stopped at the manifest reports BytesRead=%v CountsRead=%v, want both false",
-			rep.BytesRead, rep.CountsRead)
-	}
+	// The checks that need nothing from the manifest still ran.
+	requireManifestFreeChecksRan(t, dest, rep, err)
 }
 
 // TestVerifyBackupRefusesADanglingManifestSymlink: a symlink at the manifest
@@ -180,10 +177,7 @@ func TestVerifyBackupRefusesADanglingManifestSymlink(t *testing.T) {
 	if rep.ManifestErr == nil {
 		t.Error("ManifestErr is nil, so the report would print the nil error it names")
 	}
-	if rep.BytesRead || rep.CountsRead {
-		t.Errorf("a run that stopped at the manifest reports BytesRead=%v CountsRead=%v, want both false",
-			rep.BytesRead, rep.CountsRead)
-	}
+	requireManifestFreeChecksRan(t, dest, rep, err)
 }
 
 // TestVerifyBackupMarksTheSizeReadOnceItHasStatEd: BytesRead is what stops a
