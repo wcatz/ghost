@@ -2591,15 +2591,16 @@ func (s *Server) registerTools() {
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
-		var refusedFiles, failedFiles []string
+		var refusedFiles, failedFiles, notRegularFiles []string
 		if asOf == nil {
 			if count, cErr := s.store.CountMemories(ctx, args.ProjectID); cErr == nil && count == 0 {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							imported, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							imported, refused, failed, notRegular, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
 							refusedFiles = append(refusedFiles, refused...)
 							failedFiles = append(failedFiles, failed...)
+							notRegularFiles = append(notRegularFiles, notRegular...)
 							// The imported rows are memory rows, so queue the
 							// project for embedding exactly as the save tools do.
 							// Only a run that wrote at least one row is queued, and
@@ -2762,7 +2763,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles, notRegularFiles)
 		if err != nil {
 			return nil, nil, err
 		}
