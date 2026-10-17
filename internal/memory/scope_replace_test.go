@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -439,7 +440,8 @@ func TestReplaceNonManualMergeInheritsScope(t *testing.T) {
 // disagreeing scopes does NOT silently widen the scope. Per #1391, the
 // expected behavior is that the merge is not performed (sources stay unmerged)
 // or only shared keys are kept. The current implementation will drop the
-// emission (via the corpus guard) when sources disagree on scope.
+// emission as a scope refusal (not a corpus-guard drop) when sources disagree
+// on scope.
 func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -467,7 +469,7 @@ func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
 	}
 
 	// Merge them - the emission has NO scope.
-	// The corpus guard should drop this emission because the sources
+	// The replace should refuse this emission because the sources
 	// have conflicting scopes and we can't silently widen.
 	var dropped EmissionDrops
 	if _, dropped, _, _, err = s.ReplaceNonManual(ctx, testProject, []Memory{
@@ -483,8 +485,10 @@ func TestReplaceNonManualMergeDisagreeingScope(t *testing.T) {
 	}
 
 	// The emission should be dropped due to scope conflict
-	if dropped.Changed == 0 {
-		t.Errorf("expected emission to be dropped due to scope conflict, but dropped.Changed = %d", dropped.Changed)
+	// A scope refusal is counted under its own reason, not as a concurrent edit
+	// (#1492): nothing moved, and every later run would refuse it again.
+	if dropped.Scope != 1 || dropped.Changed != 0 {
+		t.Errorf("dropped = %+v, want the emission counted as one scope refusal and no concurrent-edit drop", dropped)
 	}
 
 	// Both sources should still exist
@@ -551,8 +555,8 @@ func TestReplaceNonManualMergeMixedScopeOrderAB(t *testing.T) {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
-	if dropped.Changed == 0 {
-		t.Errorf("expected emission to be dropped due to mixed scopes (order AB), but dropped.Changed = %d", dropped.Changed)
+	if dropped.Scope != 1 || dropped.Changed != 0 {
+		t.Errorf("dropped = %+v, want the mixed-scope emission (order AB) counted as one scope refusal and no concurrent-edit drop", dropped)
 	}
 
 	// Both sources should still exist
@@ -606,8 +610,8 @@ func TestReplaceNonManualMergeMixedScopeOrderBA(t *testing.T) {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
-	if dropped.Changed == 0 {
-		t.Errorf("expected emission to be dropped due to mixed scopes (order BA), but dropped.Changed = %d", dropped.Changed)
+	if dropped.Scope != 1 || dropped.Changed != 0 {
+		t.Errorf("dropped = %+v, want the mixed-scope emission (order BA) counted as one scope refusal and no concurrent-edit drop", dropped)
 	}
 
 	// Both sources should still exist
@@ -666,8 +670,8 @@ func TestReplaceNonManualReuseDisagreeingScope(t *testing.T) {
 	}
 
 	// The emission should be dropped due to scope conflict
-	if dropped.Changed == 0 {
-		t.Errorf("expected emission to be dropped due to scope conflict in reuse branch, but dropped.Changed = %d", dropped.Changed)
+	if dropped.Scope != 1 || dropped.Changed != 0 {
+		t.Errorf("dropped = %+v, want the reuse-branch refusal counted as one scope refusal and no concurrent-edit drop", dropped)
 	}
 
 	// Both sources should still exist unchanged
@@ -829,8 +833,8 @@ func TestReplaceNonManualReuseDisagreesOnScope(t *testing.T) {
 	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
-	if dropped.Changed == 0 {
-		t.Errorf("dropped = %+v, want the reuse emission refused over the scope disagreement", dropped)
+	if dropped.Scope != 1 || dropped.Changed != 0 {
+		t.Errorf("dropped = %+v, want the reuse emission refused over the scope disagreement, counted as a scope refusal", dropped)
 	}
 
 	rows, err := s.GetByIDs(ctx, []string{reused, src1, src2})
@@ -896,5 +900,307 @@ func TestRestoreSnapshotRewritesScopeOnExistingRow(t *testing.T) {
 	if rows[0].Scope["environment"] != "production" {
 		t.Errorf("restored scope = %v, want environment=production — the restore UPDATE does not carry scope",
 			rows[0].Scope)
+	}
+}
+
+// TestReplaceNonManualScopeRefusalIsNotASurvivor is #1492 at the store. A merge
+// whose sources' scopes disagree is refused and its sources kept, and that is a
+// refusal of its own kind: it is counted in EmissionDrops.Scope rather than in
+// Changed, the corpus guard's bucket, and the sources it kept are not reported
+// as preserved survivors. Either one would make `ghost reflect` withhold the skip
+// fingerprint for a refusal that every later run makes again.
+func TestReplaceNonManualScopeRefusalIsNotASurvivor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	prod, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy needs a manual approval gate", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create prod: %v", err)
+	}
+	staging, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy needs no manual approval gate", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create staging: %v", err)
+	}
+	other, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the consumer restarts in place", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	setAgesDaysAgo(t, s, prod, 2)
+	setAgesDaysAgo(t, s, staging, 2)
+	setAgesDaysAgo(t, s, other, 2)
+	// The corpus the pass read, unchanged since: nothing moved under this round.
+	fed := corpusRows(t, s, prod, staging, other)
+
+	preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the deploy approval gate differs by environment", Importance: 0.6, ReplacesIDs: []string{prod, staging}},
+		{Category: "fact", Content: "the consumer restarts in place", Importance: 0.5},
+	}, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Scope != 1 || dropped.Changed != 0 || dropped.Overflow != 0 {
+		t.Errorf("dropped = %+v, want exactly one scope refusal: no row changed underneath the pass", dropped)
+	}
+	if len(preserved) != 0 {
+		t.Errorf("preserved = %v, want empty: the rows a scope refusal keeps are not survivors a later run can merge", preserved)
+	}
+	rows, err := s.GetByIDs(ctx, []string{prod, staging})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("GetByIDs: %v, len=%d, want both sources kept", err, len(rows))
+	}
+}
+
+// TestReplaceNonManualScopeRefusalBesideAMovedRow is the control: a row that
+// really changed while the pass ran is still the corpus guard's, counted in
+// Changed and reported as preserved, in the same round as a scope refusal.
+// Only the rows the scope refusal alone kept leave the preserved list.
+func TestReplaceNonManualScopeRefusalBesideAMovedRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	prod, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy needs a manual approval gate", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create prod: %v", err)
+	}
+	staging, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy needs no manual approval gate", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create staging: %v", err)
+	}
+	edited, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the consumer restarts in place", Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create edited: %v", err)
+	}
+	setAgesDaysAgo(t, s, prod, 2)
+	setAgesDaysAgo(t, s, staging, 2)
+	setAgesDaysAgo(t, s, edited, 2)
+	fed := corpusRows(t, s, prod, staging, edited)
+
+	// The edit lands while the harness is answering.
+	moved := "the consumer restarts in place after a config change"
+	if err := s.UpdateMemory(ctx, testProject, edited, &moved, nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+
+	preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the deploy approval gate differs by environment", Importance: 0.6, ReplacesIDs: []string{prod, staging}},
+		{Category: "fact", Content: "the consumer restarts in place", Importance: 0.5},
+	}, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Scope != 1 || dropped.Changed != 1 {
+		t.Errorf("dropped = %+v, want one scope refusal and one concurrent-edit drop", dropped)
+	}
+	if len(preserved) != 1 || preserved[0] != edited {
+		t.Errorf("preserved = %v, want only the edited row %s: it changed underneath the pass and needs the next run", preserved, edited)
+	}
+}
+
+// TestFoldSourceScopesIsTheReplaceRule pins the exported fold to the refusal
+// the replace makes, case for case: the reflect dry run predicts a scope
+// refusal with FoldSourceScopes, so a rule that drifted from inheritedScope's
+// would preview a merge the apply refuses, or the reverse. Each case runs
+// through both — the pure fold over the scopes, and ReplaceNonManual over rows
+// stored with them.
+func TestFoldSourceScopesIsTheReplaceRule(t *testing.T) {
+	prod := map[string]string{"environment": "production"}
+	staging := map[string]string{"environment": "staging"}
+	cases := []struct {
+		name    string
+		scopes  []map[string]string
+		refused bool
+	}{
+		{"agreeing scopes", []map[string]string{prod, prod}, false},
+		{"disagreeing scopes", []map[string]string{prod, staging}, true},
+		{"scoped then unscoped", []map[string]string{prod, nil}, true},
+		{"unscoped then scoped", []map[string]string{nil, prod}, true},
+		{"no scope anywhere", []map[string]string{nil, nil}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			var ids []string
+			var sources []SourceScope
+			for i, sc := range tc.scopes {
+				id, err := s.Create(ctx, testProject, Memory{
+					Category: "fact", Content: fmt.Sprintf("source fact number %d", i), Source: "mcp", Importance: 0.5, Scope: sc,
+				})
+				if err != nil {
+					t.Fatalf("create: %v", err)
+				}
+				ids = append(ids, id)
+				sources = append(sources, SourceScope{ID: id, Scope: sc})
+			}
+			_, foldErr := FoldSourceScopes(sources)
+			if got := IsScopeConflict(foldErr); got != tc.refused {
+				t.Errorf("FoldSourceScopes conflict = %v (%v), want %v", got, foldErr, tc.refused)
+			}
+			_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+				{Category: "fact", Content: "the merged fact", Importance: 0.6, ReplacesIDs: ids},
+			}, "", nil)
+			if err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if got := dropped.Scope == 1; got != tc.refused {
+				t.Errorf("replace scope refusal = %v (%+v), want %v: the fold and the write disagree", got, dropped, tc.refused)
+			}
+		})
+	}
+}
+
+// reflectHistoryFor counts the history rows the reflect phase wrote for id.
+func reflectHistoryFor(t *testing.T, s *Store, id string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = 'reflect'`, id).Scan(&n); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	return n
+}
+
+// TestReplaceNonManualReAddOfAScopeKeptRowIsAKeep is the guard re-add after a
+// scope refusal. The merge over X and Y is refused and both are kept; the drop
+// guard also handed X back verbatim, because the merge text did not carry it.
+// The kept row left the reuse map, so that re-add used to be INSERTed as a fresh
+// row with no scope — a copy of a production-only fact that applied in every
+// environment, and, once the refusal stopped holding the project open, one a
+// recorded fingerprint would freeze in place. The re-add must land on X as a
+// keep: no insert, no write to X, and nothing reported as preserved.
+//
+// Both shapes of the source pair are covered: two disagreeing scopes, and a
+// scoped row beside an unscoped one.
+func TestReplaceNonManualReAddOfAScopeKeptRowIsAKeep(t *testing.T) {
+	prod := map[string]string{"environment": "production"}
+	for _, tc := range []struct {
+		name  string
+		other map[string]string
+	}{
+		{"disagreeing scopes", map[string]string{"environment": "staging"}},
+		{"scoped beside unscoped", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			x, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the deploy needs a manual approval gate", Source: "mcp", Importance: 0.5,
+				Tags: []string{"deploy"}, Scope: prod,
+			})
+			if err != nil {
+				t.Fatalf("create x: %v", err)
+			}
+			y, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the deploy approval gate is skipped", Source: "mcp", Importance: 0.5,
+				Tags: []string{"deploy"}, Scope: tc.other,
+			})
+			if err != nil {
+				t.Fatalf("create y: %v", err)
+			}
+			setAgesDaysAgo(t, s, x, 2)
+			setAgesDaysAgo(t, s, y, 2)
+			fed := corpusRows(t, s, x, y)
+			historyBefore := reflectHistoryFor(t, s, x)
+
+			preserved, dropped, deleted, applied, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+				{Category: "fact", Content: "the approval gate depends on the environment", Importance: 0.6, ReplacesIDs: []string{x, y}},
+				// RetainGuardedDrops' shape: the stored row's own fields, no sources.
+				{Category: "fact", Content: "the deploy needs a manual approval gate", Importance: 0.5, Tags: []string{"deploy"}},
+			}, "", fed)
+			if err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if dropped.Scope != 1 || dropped.Changed != 0 {
+				t.Errorf("dropped = %+v, want one scope refusal and no concurrent-edit drop", dropped)
+			}
+			if len(preserved) != 0 || deleted != 0 {
+				t.Errorf("preserved = %v, deleted = %d, want neither: nothing moved and nothing was removed", preserved, deleted)
+			}
+			if applied["fact"] != 1 {
+				t.Errorf("applied = %v, want the re-add counted as the one keep that landed", applied)
+			}
+			all, err := s.GetAll(ctx, testProject, -1)
+			if err != nil {
+				t.Fatalf("GetAll: %v", err)
+			}
+			if len(all) != 2 {
+				t.Fatalf("the project holds %d rows, want exactly X and Y — the re-add inserted a copy: %+v", len(all), all)
+			}
+			for _, m := range all {
+				switch m.ID {
+				case x:
+					if !ScopeEquals(m.Scope, prod) {
+						t.Errorf("X scope = %v, want %v", m.Scope, prod)
+					}
+				case y:
+					if !ScopeEquals(m.Scope, tc.other) {
+						t.Errorf("Y scope = %v, want %v", m.Scope, tc.other)
+					}
+				default:
+					t.Errorf("unexpected row %s (scope %v): %q", m.ID, m.Scope, m.Content)
+				}
+			}
+			if got := reflectHistoryFor(t, s, x); got != historyBefore {
+				t.Errorf("X has %d reflect history rows, want %d: a keep writes nothing", got, historyBefore)
+			}
+		})
+	}
+}
+
+// TestReplaceNonManualReAddOfAMovedRowIsStillRefused is the control: when the
+// row the re-add restates really changed while the pass ran, it is the corpus
+// guard's drop as before, counted in Changed, and still no copy is inserted.
+func TestReplaceNonManualReAddOfAMovedRowIsStillRefused(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	x, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy needs a manual approval gate", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create x: %v", err)
+	}
+	y, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the deploy approval gate is skipped", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create y: %v", err)
+	}
+	setAgesDaysAgo(t, s, x, 2)
+	setAgesDaysAgo(t, s, y, 2)
+	fed := corpusRows(t, s, x, y)
+	moved := float32(0.9)
+	if err := s.UpdateMemory(ctx, testProject, x, nil, nil, &moved, nil); err != nil {
+		t.Fatalf("edit x: %v", err)
+	}
+
+	_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the approval gate depends on the environment", Importance: 0.6, ReplacesIDs: []string{x, y}},
+		{Category: "fact", Content: "the deploy needs a manual approval gate", Importance: 0.5},
+	}, "", fed)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if dropped.Changed != 2 {
+		t.Errorf("dropped = %+v, want both emissions refused as claims on the moved row", dropped)
+	}
+	if n := countRows(t, s, "memories", testProject); n != 2 {
+		t.Errorf("the project holds %d rows, want X and Y only", n)
 	}
 }
