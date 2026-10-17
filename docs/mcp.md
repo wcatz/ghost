@@ -227,6 +227,10 @@ nothing to say, which is a different claim.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 
+## `ghost_search_all`
+
+`ghost_search_all` is one ranking fused across every project and `_global`, so each row names the bucket it came from: `project=<id>` right after the importance, for example ``- [gotcha] `A4AA7CCE…` (0.7 project=alpha agent=«claude-code» source=mcp) «…»``, and `project=_global` for a cross-project row. The id is printed through the same safe token renderer as the memory id, so an id holding a space or a quote is shown quoted (`project="my proj"`). It is a label on the row rather than a heading per project, so the rows stay in the order the search ranked them, and the 16,000-byte response budget (see [Tools](#tools)) still cuts whole rows from the end of that ranking, with the label counted as part of each row. A `project=_global` row is one of the cross-project memories the agent guidance describes under `## Global (applies to all projects)`, and its `source=` origin label is the one to trust, as it is there. The tool carries no verdict line, and `ghost_memory_search` output is unchanged and carries no project label.
+
 ## Retention tiers
 
 `ghost_memory_save` takes an optional `retention`:
