@@ -47,10 +47,17 @@ const (
 	// ignore the block. Between lifecycleAlertMaxAge and
 	// lifecycleMarkerMaxAge the file is kept but stays silent.
 	lifecycleAlertMaxAge = 14 * 24 * time.Hour
-	// lifecycleMarkerMaxAge is the self-clean horizon: markers older than
-	// this are deleted at the next session-start so a permanently-dead
-	// marker (its project deleted, its config changed by hand) can never
-	// nag — or linger on disk — forever.
+	// lifecycleMarkerMaxAge is the self-clean horizon, and it bounds the age on
+	// BOTH sides: a marker older than this is deleted at the next session-start
+	// so a permanently-dead marker (its project deleted, its config changed by
+	// hand) can never nag — or linger on disk — forever, and a marker dated
+	// more than this far AHEAD reads the same way. The future side is not
+	// symmetry for its own sake: such a stamp comes from a clock that was set
+	// forward when it was written or a marker copied from another machine, its
+	// negative age never reaches an "older than" horizon, and its future date
+	// would also outrank a genuinely recent failure when newestMarker picks the
+	// one recorded last. The cooldown beside this file reads a far-future stamp
+	// as stale for the same reason.
 	lifecycleMarkerMaxAge = 30 * 24 * time.Hour
 	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
 	// session-start removes before giving up on finding a current one: more
@@ -648,9 +655,10 @@ func markerCandidates(ids ...string) []markerCandidate {
 // Print rules (each pinned by a test):
 //   - no marker, or a marker that cannot be parsed/aged: no output;
 //   - marker older than lifecycleAlertMaxAge (14d): no output, file kept;
-//   - marker older than lifecycleMarkerMaxAge (30d): that file DELETED
-//     (self-clean), and only that file — the next candidate is then read and
-//     judged by these same rules, so a current marker behind it still alerts;
+//   - marker older than lifecycleMarkerMaxAge (30d), or dated more than 30d
+//     AHEAD: that file DELETED (self-clean), and only that file — the next
+//     candidate is then read and judged by these same rules, so a current
+//     marker behind it still alerts;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -685,7 +693,16 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 			return ""
 		}
 		age = time.Since(at)
-		if age <= lifecycleMarkerMaxAge {
+		// Expired on EITHER side of the age. A marker dated implausibly far
+		// ahead (a clock set forward when it was written, a VM resumed with a
+		// skewed clock, a marker copied in from another machine) has a negative
+		// age and so would never satisfy an "older than" horizon: it would alert
+		// at every session start, unchanged, until wall time caught up, and its
+		// future stamp would win newestMarker against a real recent failure. It
+		// reads as expired for the same reason the cooldown reads a far-future
+		// stamp as stale (lifecycleCooldownActive), and is swept by the removal
+		// below rather than left to linger.
+		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerMaxAge {
 			break
 		}
 		// Remove the expired file that was read, and only that file. Not
