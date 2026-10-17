@@ -478,9 +478,24 @@ printf '%s\n' "$kind" >> "$dir/$name.kinds"
 # own signal handling has to terminate; the recorded pid is how a test sees that
 # it was, rather than orphaned. The probe cases above return before this point,
 # so a capability probe is never delayed.
+#
+# "$kind.trapdelay" asks the same call to KEEP RUNNING for that many seconds
+# after a SIGTERM before answering — the shape of a harness that is busy and
+# does not stop at once, and the state a test needs to see that a coordinator
+# waited for its phase instead of returning the moment the signal landed. The
+# delay is a loop of short sleeps rather than one long 'sleep': a shell runs a
+# trap only once its current foreground child has finished, so a single
+# 'sleep 120' would sit out the whole delay and never take the signal at all.
 if [ -f "$dir/$kind.delay" ]; then
   printf '%s\n' "$$" > "$dir/$kind.pid"
-  sleep "$(cat "$dir/$kind.delay")"
+  if [ -f "$dir/$kind.trapdelay" ]; then
+    trap 'sleep "$(cat "$dir/$kind.trapdelay")"; exit 0' TERM
+  fi
+  ticks=$(( $(cat "$dir/$kind.delay") * 20 ))
+  while [ "$ticks" -gt 0 ]; do
+    sleep 0.05
+    ticks=$((ticks - 1))
+  done
 fi
 
 # A test can ask for the next N calls of one kind to FAIL, the way a real harness

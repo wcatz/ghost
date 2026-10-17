@@ -45,11 +45,20 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	s.mustRun("project", "bind", e2eProject, s.work)
 	s.reconfigure(configOpts{autoResolve: true, minInterval: "0"})
 
-	// Make the resolve phase's harness call slow, so the phase is still running
-	// when the signal lands. The fake records the pid it is sleeping as, which is
-	// the process the phase's own signal handling has to reach.
+	// Make the resolve phase's harness call slow — and make the harness keep
+	// running for a moment after it is asked to stop — so the phase is still
+	// running when the signal lands, and stays running long enough to see that
+	// the coordinator waited for it. The fake records the pid it is sleeping
+	// as, which is the process the phase's own signal handling has to reach.
 	if err := os.WriteFile(filepath.Join(s.bin, "resolve.delay"), []byte("120\n"), 0o644); err != nil {
 		t.Fatalf("write the harness delay: %v", err)
+	}
+	// Long enough to observe, and shorter than the harness call's own grace
+	// (internal/ai's harnessWaitDelay, two seconds): a harness that outlived
+	// that grace would be given up on by the phase itself, and the coordinator's
+	// exit would no longer be the thing that ends it.
+	if err := os.WriteFile(filepath.Join(s.bin, "resolve.trapdelay"), []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("write the harness trap delay: %v", err)
 	}
 	pidFile := filepath.Join(s.bin, "resolve.pid")
 
@@ -93,11 +102,39 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	waitForFile(t, pidFile, 60*time.Second, "the resolve phase's harness call")
 	harnessPid := readPidFile(t, pidFile)
 
+	// The per-project claim the coordinator holds for the whole run: the lock a
+	// second chain is turned away by. It names a LIVE pid for as long as the
+	// phase it was claimed for is running, and is gone once the coordinator is.
+	lockPath := filepath.Join(s.dataDir(), "lifecycle-"+e2eProject+".pid")
+	waitForFile(t, lockPath, 60*time.Second, "the coordinator's per-project claim")
+	coordPid := cmd.Process.Pid
+
 	// Signal the coordinator ALONE, the way `kill <pid>` does: the phase is in
 	// its own group and receives nothing directly.
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("signal the coordinator: %v", err)
 	}
+
+	// The coordinator must WAIT for the phase rather than return the instant the
+	// signal lands. The phase is blocked on a harness that traps the SIGTERM and
+	// stays up for resolve.trapdelay, so for as long as that harness is alive the
+	// coordinator — and the claim it holds — must be too. A coordinator that
+	// returned on the signal would leave the phase and its harness running beside
+	// a released lock, which is the interruption this test exists to get right.
+	deadline := time.Now().Add(20 * time.Second)
+	for pidAlive(harnessPid) && time.Now().Before(deadline) {
+		if !pidAlive(coordPid) {
+			t.Fatalf("the coordinator exited while the phase's harness (pid %d) was still running: the phase was abandoned, not waited for\n%s", harnessPid, errb.String())
+		}
+		if pid := pidInFile(lockPath); !pidAlive(pid) {
+			t.Fatalf("the per-project claim named pid %d, not a live pid, while the phase's harness (pid %d) was still running: the lock was released before the phase ended\n%s", pid, harnessPid, errb.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(harnessPid) {
+		t.Fatalf("the phase's harness (pid %d) was still running after %s: the coordinator never terminated the phase it was waiting on\n%s", harnessPid, 20*time.Second, errb.String())
+	}
+
 	select {
 	case <-exited:
 	case <-time.After(30 * time.Second):
@@ -129,6 +166,9 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	if err := waitPidGone(harnessPid, 15*time.Second); err != nil {
 		t.Errorf("the phase's harness (pid %d) survived the signal — the phase was orphaned, not terminated: %v\n%s", harnessPid, err, errb.String())
 	}
+
+	// The claim is free once the coordinator is gone, so the next chain can run.
+	waitForFileGone(t, lockPath, 15*time.Second, "the per-project claim to be released")
 }
 
 // readPidFile reads a pid a sandbox helper recorded, failing when it cannot.
@@ -144,12 +184,19 @@ func readPidFile(t *testing.T, path string) int {
 // pidInFile reads a pid a sandbox helper recorded, or 0 when the file is absent
 // or unreadable. The cleanup path uses this form: a test that aborted before the
 // helper wrote anything still has to sweep, and a missing file is not a crash.
+//
+// The value is cut at the first ":" because two formats reach here. The fake
+// harness records a bare pid ("$$"), while the per-project lifecycle claim is
+// written by mcpinit as "<pid>:<creation-token>" — the token is how the claim
+// tells a reused pid apart from a live one — and only the pid before the colon
+// is the process to look up.
 func pidInFile(path string) int {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	pidStr, _, _ := strings.Cut(strings.TrimSpace(string(raw)), ":")
+	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		return 0
 	}

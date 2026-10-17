@@ -65,6 +65,7 @@ func newPhaseCmd(timeout time.Duration, script string) (context.Context, context
 func realEscalation(grace time.Duration, attempts *atomic.Int64) phaseEscalation {
 	return phaseEscalation{
 		grace:          grace,
+		poll:           5 * time.Millisecond,
 		after:          time.After,
 		groupInhabited: phaseGroupInhabited,
 		kill: func(cmd *exec.Cmd) {
@@ -355,6 +356,41 @@ func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
 				t.Errorf("the escalation fired %d time(s), want %d", got, tc.wantKills)
 			}
 		})
+	}
+}
+
+// TestThePhaseWatchdogReturnsWhenTheGroupEmpties is what makes waiting for the
+// escalation cheap. The grace is a deadline on the KILL, not a sleep: a phase
+// that takes the SIGTERM and exits must not hold its watchdog — and so the
+// coordinator that now waits for it before releasing the per-project claim —
+// for the rest of the grace. The grace clock here never fires, and the
+// escalation returns anyway because the group it polls is already empty.
+func TestThePhaseWatchdogReturnsWhenTheGroupEmpties(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the phase was interrupted
+	<-ctx.Done()
+
+	never := make(chan time.Time) // the grace never elapses
+	var kills atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		phaseWatchdog(ctx, ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+			grace:          time.Hour,
+			poll:           5 * time.Millisecond,
+			after:          func(time.Duration) <-chan time.Time { return never },
+			groupInhabited: func(*exec.Cmd) bool { return false },
+			kill:           func(*exec.Cmd) { kills.Add(1) },
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the escalation did not return while the group was empty: it is sleeping out the grace instead of polling the group")
+	}
+	if n := kills.Load(); n != 0 {
+		t.Errorf("the escalation killed an empty group %d time(s)", n)
 	}
 }
 
