@@ -446,7 +446,10 @@ func neutralizeDelimiters(s string) string {
 // delimiters and the backtick. This list is neither JSON nor delimited, so the
 // newline, the carriage return and every other control character are live here and
 // are the larger half of the class. Anything smaller would leave a tag free to end
-// the record, which is the hazard this function exists for.
+// the record, which is the hazard this function exists for. The class is wider than
+// the controls: U+2028 and U+2029 are not control characters but every
+// Unicode-aware reader ends a line at them, and the no-break space is spelled too,
+// so all three are written as a marked U+XXXX like the C1 block.
 //
 // The class also has one member `assemble`'s does not: this surface's own
 // separators. That is not a rendering concern but a SEMANTIC one — a tag holding the
@@ -484,9 +487,13 @@ func tagSubstitution(t string) string {
 			// Spelled, not dropped: a reader can tell this tag was altered, and no
 			// control character survives to alter anything.
 			fmt.Fprintf(&b, "%s<0x%02X>", tagEscape, r)
-		case r == 0x85 || r == 0xA0:
-			// The two Unicode controls the C0 test above does not catch and that a
-			// terminal or a markdown renderer may still treat as a break.
+		case (r >= 0x80 && r <= 0x9F) || r == 0xA0 || r == 0x2028 || r == 0x2029:
+			// What the C0 test above does not catch and a reader may still act on:
+			// the C1 block, whose NEL a terminal or a markdown renderer may treat as
+			// a break and whose CSI starts a terminal control sequence; the no-break
+			// space; and U+2028/U+2029, which Python's splitlines, JavaScript and
+			// any Unicode-aware reader end a line at, so a raw one ends the record
+			// exactly as a newline would.
 			fmt.Fprintf(&b, "%s<U+%04X>", tagEscape, r)
 		case r == '`':
 			// A lone backtick opens a markdown code span that swallows the rest of
