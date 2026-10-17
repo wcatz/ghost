@@ -146,7 +146,7 @@ func TestOversizedMemoryFileIsSkippedUnread(t *testing.T) {
 	}
 
 	store := storeFor(t, "p-oversized")
-	imported, _, _, err := importFromDir(context.Background(), store, "p-oversized", dir, slog.Default())
+	imported, _, _, _, err := importFromDir(context.Background(), store, "p-oversized", dir, slog.Default())
 	if err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestHostileFrontmatterKeysCannotForgeProvenance(t *testing.T) {
 			}
 
 			store := storeFor(t, "p-forged")
-			if _, _, _, err := importFromDir(context.Background(), store, "p-forged", dir, slog.Default()); err != nil {
+			if _, _, _, _, err := importFromDir(context.Background(), store, "p-forged", dir, slog.Default()); err != nil {
 				t.Fatalf("importFromDir: %v", err)
 			}
 
@@ -301,7 +301,7 @@ func TestImportedMemoriesAreNeverPromotedToGlobal(t *testing.T) {
 	}
 
 	store := storeFor(t, "p-hostile")
-	if _, _, _, err := importFromDir(context.Background(), store, "p-hostile", dir, slog.Default()); err != nil {
+	if _, _, _, _, err := importFromDir(context.Background(), store, "p-hostile", dir, slog.Default()); err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
 	// Registered empty, so the _global read below is a real query rather than
@@ -374,7 +374,7 @@ func TestInjectionPayloadsImportAsInertProjectData(t *testing.T) {
 	}
 
 	store := storeFor(t, "p-inert")
-	if _, _, _, err := importFromDir(context.Background(), store, "p-inert", dir, slog.Default()); err != nil {
+	if _, _, _, _, err := importFromDir(context.Background(), store, "p-inert", dir, slog.Default()); err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
 	mems, err := store.GetAll(context.Background(), "p-inert", 1000)
@@ -441,7 +441,7 @@ func TestCredentialPayloadsAreRefusedAndNamed(t *testing.T) {
 	store := storeFor(t, "p-creds")
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if _, _, _, err := importFromDir(context.Background(), store, "p-creds", dir, logger); err != nil {
+	if _, _, _, _, err := importFromDir(context.Background(), store, "p-creds", dir, logger); err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
 
@@ -571,7 +571,7 @@ func TestImportLeavesTheMemoryDirectoryByteIdentical(t *testing.T) {
 
 	before := adversarial.Snapshot(t, dir)
 	store := storeFor(t, "p-readonly")
-	if _, _, _, err := importFromDir(context.Background(), store, "p-readonly", dir, slog.Default()); err != nil {
+	if _, _, _, _, err := importFromDir(context.Background(), store, "p-readonly", dir, slog.Default()); err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
 	before.AssertUnchanged(t, "claudeimport", adversarial.Snapshot(t, dir))

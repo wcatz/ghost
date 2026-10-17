@@ -180,14 +180,14 @@ func isStub(content string) bool {
 // not be imported.
 func ParseMemoryFile(path string) (content, category string, importance float32, skip bool, err error) {
 	cleanPath := filepath.Clean(path)
-	// Read through a LimitReader rather than os.ReadFile so the ceiling bounds
-	// the read, not just the outcome: the extra byte is what distinguishes "at
-	// the ceiling" from "past it" without reading the rest of the file.
-	f, err := os.Open(cleanPath) // #nosec G304 — path is validated by caller via ClaudeMemoryDir
+	f, err := openMemoryFile(cleanPath)
 	if err != nil {
 		return "", "", 0, false, err
 	}
 	defer f.Close() //nolint:errcheck
+	// Read through a LimitReader rather than os.ReadFile so the ceiling bounds
+	// the read, not just the outcome: the extra byte is what distinguishes "at
+	// the ceiling" from "past it" without reading the rest of the file.
 	data, err := io.ReadAll(io.LimitReader(f, maxMemoryFileBytes+1))
 	if err != nil {
 		return "", "", 0, false, err
@@ -231,6 +231,41 @@ func ParseMemoryFile(path string) (content, category string, importance float32,
 	importance = importanceForType(fmType)
 
 	return content, category, importance, false, nil
+}
+
+// openMemoryFile opens a memory file for reading after refusing anything that
+// is not a regular file. The file was written by a session Ghost did not
+// start, so its type is untrusted: opening a FIFO blocks until a writer
+// appears, which would wedge the import, and following a symlink would store
+// the bytes of a file outside the memory directory. The path is Lstat'ed, so
+// a link is refused rather than followed, and a non-regular path is never
+// opened — the stat-before-open rule mcpinit's openTranscript and
+// memory.ReadBackupManifest apply, with Lstat in place of Stat because a link
+// is refused here. memoryFileOpenFlags close the window between the Lstat and
+// the open, and the fstat on the open descriptor refuses whatever was swapped
+// in during it.
+func openMemoryFile(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (%s)", info.Mode().Type())
+	}
+	f, err := os.OpenFile(path, memoryFileOpenFlags, 0) // #nosec G304 — path is validated by caller via ClaudeMemoryDir
+	if err != nil {
+		return nil, err
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("not a regular file (%s)", opened.Mode().Type())
+	}
+	return f, nil
 }
 
 // parseFrontmatter extracts YAML frontmatter fields from markdown content.
@@ -308,13 +343,14 @@ func importanceForType(claudeType string) float32 {
 
 // Import discovers and imports all Claude Code memories for a project.
 // Returns the number of memories imported, the names of files the store's
-// token guard refused, and the names of files whose write failed. Read-only —
+// token guard refused, the names of files whose write failed, and the names
+// of entries refused unopened because they are not regular files. Read-only —
 // never modifies Claude's files. Writes through store.UpsertWithOptions with
 // SkipExactContent; see importFromDir.
-func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, []string, []string, error) {
+func Import(ctx context.Context, store provider.MemoryStore, projectID, projectPath string, logger *slog.Logger) (int, []string, []string, []string, error) {
 	dir := ClaudeMemoryDir(projectPath)
 	if dir == "" {
-		return 0, nil, nil, nil
+		return 0, nil, nil, nil, nil
 	}
 	return importFromDir(ctx, store, projectID, dir, logger)
 }
@@ -351,22 +387,27 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 // a later ghost mcp init run — never by another project_context call, which
 // will not race the import at all once any memory exists.
 //
-// The two failure slices are kept apart because they mean different things and
+// The failure slices are kept apart because they mean different things and
 // are answered differently downstream. `refused` names files the store's token
 // guard rejected — that cannot succeed on a retry. `failed` names files whose
 // write failed for a reason the import does not recognise, which a later init
 // retries. A token-guard refusal is matched through errors.As on a wrapped
 // error, so a guard that wrapped its refusal is still told apart from a write
-// that failed. The names are reported, never any of the files' text.
+// that failed. `notRegular` names entries called *.md that are not regular
+// files — a symlink, a FIFO, a device or a socket. They are never opened, and
+// a retry cannot change that, so they are reported apart from `failed`. A
+// name skipFile already skips, such as MEMORY.md, stays silent whatever its
+// type, as it did when it was read and then skipped.
+// The names are reported, never any of the files' text.
 //
 // The write goes through provider.MemoryStore's own UpsertWithOptions, so
 // every store the import can be handed has the guarded path, and there is no
 // fallback to an unguarded one.
-func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, []string, error) {
+func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, []string, []string, []string, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("read claude memory dir: %w", err)
+		return 0, nil, nil, nil, fmt.Errorf("read claude memory dir: %w", err)
 	}
 
 	existing, err := store.GetAll(ctx, projectID, 100000)
@@ -379,9 +420,22 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 	}
 
 	var imported int
-	var refused, failed []string
+	var refused, failed, notRegular []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		// entry.Type() comes from ReadDir and does not follow links, so a
+		// symlink, FIFO, device or socket named *.md is refused here unopened:
+		// a FIFO would block the loop and a link would import a file outside
+		// this directory. It is reported in notRegular by name, unless
+		// skipFile would have skipped the name anyway.
+		if !entry.Type().IsRegular() {
+			if skipFile(entry.Name()) {
+				continue
+			}
+			logger.Warn("claude import: not a regular file", "file", entry.Name(), "type", entry.Type().String())
+			notRegular = append(notRegular, entry.Name())
 			continue
 		}
 
@@ -430,5 +484,5 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		logger.Info("claude memory import complete", "project", projectID, "memories", imported)
 	}
 
-	return imported, refused, failed, nil
+	return imported, refused, failed, notRegular, nil
 }
