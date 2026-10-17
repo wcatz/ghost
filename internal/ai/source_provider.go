@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -31,6 +32,22 @@ func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourcePro
 func NewSourceProviderForSourceWithModel(source, model string, cfgBinaries ...string) *SourceProvider {
 	return newSourceProvider(source, model, cfgBinaries...)
 }
+
+// knownSources is every source token newSourceProvider resolves, in the order
+// a refusal names them. It is the switch below written down once so a caller
+// can ask whether a token is one this build knows before it builds a provider:
+// an unknown token and a known one whose binary is missing both come back as
+// the unavailable "none" provider, and only the first is a typo.
+// TestKnownSourcesMatchTheProviderSwitch holds the two together.
+var knownSources = []string{"claude-code", "opencode", "codex", "goose"}
+
+// KnownSources returns the source tokens NewSourceProviderForSource resolves,
+// as a fresh slice the caller may keep.
+func KnownSources() []string { return slices.Clone(knownSources) }
+
+// IsKnownSource reports whether source is one of KnownSources. It says nothing
+// about whether that harness's binary is installed.
+func IsKnownSource(source string) bool { return slices.Contains(knownSources, source) }
 
 func newSourceProvider(source, model string, cfgBinaries ...string) *SourceProvider {
 	var claudeBin, opencodeBin, codexBin, gooseBin string

@@ -228,7 +228,7 @@ ghost reflect myproject --apply
 
 | Flag | Meaning |
 |---|---|
-| `--tier auto\|cli\|opencode\|sqlite` | Select the consolidation backend. `auto` is the default and routes to the calling harness when available. |
+| `--tier auto\|cli\|opencode\|sqlite` | Select the consolidation backend. `auto` is the default and routes to the calling harness when available. Any other value (case matters, so `AUTO` is one) is refused with exit 1 naming `auto`, `cli`, `opencode` and `sqlite`, before the store is opened. |
 | `--apply` | Save the consolidated result. |
 | `--restore` | Restore the most recent consolidation snapshot. Only the rows the project still holds are reverted: a memory promoted to `_global` after the snapshot is left alone, because the project no longer owns it. A row whose content the restore reverts is re-queued for re-embedding and re-linking in the same write, because its vector described the text that was reverted away; a row whose content the restore leaves alone keeps its vector. The retention tier the snapshot recorded is put back too, even over a tier a later save or fold raised, since the snapshot is the undo history — matching how a restore already reverts content and scope. The expiry is re-derived through `sessionExpiry` only when the tier actually comes back as `session` on a row that carries none, so an untouched row keeps its own; a snapshot taken before the tier column (schema v26) recorded no tier, so the restore leaves the live tier alone and prints a note saying how many covered rows it could not restore one for. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
@@ -236,7 +236,7 @@ ghost reflect myproject --apply
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--full` | Print the full text of every memory the run reports, instead of the 120-byte preview. Display only — the result and the write are identical either way. |
-| `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
+| `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. Any other value is refused with exit 1 naming those four, before the store is opened; a known source whose binary is missing is not refused (see below). |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.

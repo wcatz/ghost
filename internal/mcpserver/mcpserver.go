@@ -1428,6 +1428,9 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	var content, category *string
 	truncated := false
 	if args.Content != "" {
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return "", err
+		}
 		args.Content, truncated = memory.ClampContent(args.Content)
 		content = &args.Content
 		changed = append(changed, "content")
@@ -2413,6 +2416,9 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)
 
@@ -3141,6 +3147,9 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		globalTruncated := false
 		args.Content, globalTruncated = memory.ClampContent(args.Content)
 
@@ -3238,6 +3247,12 @@ func (s *Server) registerTools() {
 		}
 		// A title of "   " is not empty and was stored verbatim (#1038).
 		if err := validateRequiredText("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("description", args.Description); err != nil {
 			return nil, nil, err
 		}
 		titleTruncated := len(args.Title) > maxTitleLen
@@ -3583,6 +3598,15 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
+		if err := memory.RejectSecret("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("decision", args.Decision); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("rationale", args.Rationale); err != nil {
+			return nil, nil, err
+		}
 		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
@@ -3591,6 +3615,11 @@ func (s *Server) registerTools() {
 		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
 		if err != nil {
 			return nil, nil, err
+		}
+		for i, alt := range alternatives {
+			if err := memory.RejectSecret(fmt.Sprintf("alternatives[%d]", i), alt); err != nil {
+				return nil, nil, err
+			}
 		}
 		// Track whether the caller's list exceeds the stored bound, so the cut is
 		// reported instead of only being applied silently. memory.AlternativesClamped
@@ -4305,6 +4334,9 @@ func (s *Server) registerTools() {
 		}
 		truncated := false
 		if args.Description != nil {
+			if err := memory.RejectSecret("description", *args.Description); err != nil {
+				return nil, nil, err
+			}
 			clamped, cut := memory.ClampContent(*args.Description)
 			args.Description = &clamped
 			if cut {
