@@ -318,9 +318,9 @@ type VerifyReport struct {
 	// was truncated or appended to.
 	//
 	// Meaningful only when BytesRead is set. A run that failed before the stat —
-	// a damaged sidecar, a path that is not there — leaves it false, and a caller
-	// that printed the zero value would be reporting a 0-byte file rather than an
-	// unmeasured one. The flag is the size's counterpart to CountsRead.
+	// a path that is not there — leaves it false, and a caller that printed the
+	// zero value would be reporting a 0-byte file rather than an unmeasured one.
+	// The flag is the size's counterpart to CountsRead.
 	Bytes int64
 	// BytesRead reports whether Bytes was actually read. Not inferable from the
 	// value: a genuinely empty file is a 0-byte file, and "this file is empty"
@@ -419,7 +419,10 @@ func (r VerifyReport) Failed() []string {
 // rather than that they passed, and the structural ones still stand. A manifest
 // that is present but unreadable IS a failure — that is damage, not an absent
 // optional file, and treating it as absent would downgrade a damaged sidecar
-// into an unverified backup that still looked fine.
+// into an unverified backup that still looked fine. Its error is the one the
+// run returns, and the checks that need nothing from it still run: the size,
+// the integrity check and the schema version are reported, and sha256 and the
+// row counts are skipped with the manifest named.
 //
 // What it reads is the file it was given and the manifest beside it. It does
 // NOT open the database in the data directory, and that is the property that
@@ -433,8 +436,13 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 
 	// The manifest is read first so that a hard error about it — an unreadable
 	// one, or one written by a format this build does not read — is the
-	// diagnosis, rather than a check-by-check account of a file nobody can
-	// compare anything against.
+	// diagnosis: it is the error this run returns, whatever else it finds. It
+	// does not end the run, though. The size, the integrity check and the schema
+	// version need nothing from the manifest, so they still run and are
+	// reported, and the two checks that compare against it are reported as
+	// skipped with the manifest named as the reason. Stopping here would answer
+	// "nothing could be checked" about a file whose only problem may be its
+	// sidecar.
 	// Lstat before the read, so a sidecar that is there and unreadable is a
 	// different report from one that is not there. ReadFile cannot tell them
 	// apart on its own: both surface as "no manifest" to a caller that only looks
@@ -461,23 +469,36 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 		// zero exit that a backup script reads as nothing failed.
 	default:
 		rep.ManifestErr = err
+	}
+	// fail is how every return below reports a run that could not finish: the
+	// manifest's error stays the diagnosis when there is one, so a file that is
+	// not a database at all, beside a sidecar that cannot be read, is still
+	// refused for the sidecar first and its own findings ride in the rows.
+	fail := func(err error) (VerifyReport, error) {
+		if rep.ManifestErr != nil {
+			return rep, rep.ManifestErr
+		}
 		return rep, err
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return rep, err
+		return fail(err)
 	}
 	rep.Bytes, rep.BytesRead = info.Size(), true
 
 	// Before the open, deliberately; see the ordering note on VerifyBackup. The size
 	// and the digest are what a truncated or appended-to copy is diagnosed by,
 	// and neither of them needs the file to be a database.
-	rep.add(checkHash(path, manifest, rep.HasManifest, info.Size()))
+	if rep.ManifestErr != nil {
+		rep.add(checkManifestUnreadable("sha256"))
+	} else {
+		rep.add(checkHash(path, manifest, rep.HasManifest, info.Size()))
+	}
 
 	db, err := OpenReadDB(path)
 	if err != nil {
-		return rep, fmt.Errorf("%s cannot be checked as a backup: %w", path, err)
+		return fail(fmt.Errorf("%s cannot be checked as a backup: %w", path, err))
 	}
 	defer db.Close() //nolint:errcheck
 
@@ -498,6 +519,12 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	} else {
 		rep.SchemaVersion = version
 		rep.add(checkSchemaVersion(version, manifest, rep.HasManifest))
+	}
+	if rep.ManifestErr != nil {
+		// Not counted: the check is a comparison against a manifest nobody could
+		// read, so CountsRead stays false and the headline says "not checked".
+		rep.add(checkManifestUnreadable("row counts"))
+		return fail(readErr)
 	}
 	counts, err := CountRows(ctx, db)
 	if err != nil {
@@ -669,6 +696,20 @@ func checkSchemaVersionUnreadable(err error) VerifyCheck {
 		Name:   "schema version",
 		State:  VerifySkipped,
 		Detail: fmt.Sprintf("could not read the file's schema version: %v", err),
+	}
+}
+
+// checkManifestUnreadable is the row for a check that compares against the
+// manifest, when the manifest is present and could not be read. It is skipped
+// rather than failed for the reason checkSchemaVersionUnreadable gives, and the
+// manifest's own error is the run's error, so the report still refuses the
+// file. The detail gives the manifest as the reason without repeating its path
+// or its error, both of which the report's footer prints once.
+func checkManifestUnreadable(name string) VerifyCheck {
+	return VerifyCheck{
+		Name:   name,
+		State:  VerifySkipped,
+		Detail: "the manifest beside it could not be read, so there is nothing to compare against",
 	}
 }
 

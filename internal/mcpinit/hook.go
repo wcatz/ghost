@@ -670,12 +670,12 @@ func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string
 	}
 }
 
-// shownOnly synthesizes the tally for a rendering that never assembled — the
-// historical path, whose rows come from a recorded set rather than from the
-// assembler — so every row the renderer holds was shown. The zero
-// RankedOut/Withheld halves are what make the historical block byte-identical
-// to today's: nothing was cut by a cap and nothing was withheld by a stage, and
-// a header that claimed either would be describing work that never ran.
+// shownOnly synthesizes the tally for a rendering that never assembled, where
+// every row the renderer holds was shown: nothing was cut by a cap and nothing
+// was withheld by a stage, and a header that claimed either would be describing
+// work that never ran. The historical path does NOT use it for its project
+// half, because historicalSessionMemories does cut at the cap and counts what
+// it cut.
 func shownOnly(projectShown, globalsShown int) sessionTally {
 	return sessionTally{
 		project: assemble.BucketTally{Shown: projectShown},
@@ -823,6 +823,10 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 		// withheldAtT counts the in-scope rows left out because their window was
 		// closed or not yet open at asOf.
 		withheldAtT int
+		// projectRankedOut counts the in-scope rows valid at asOf that the cap
+		// left out, so the heading says the set was cut rather than reading as
+		// the whole of it.
+		projectRankedOut int
 	)
 	scope := config.LoadForHook().Injection.SessionScope
 
@@ -837,7 +841,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 			readErr = "This store's recorded history could not be read, so nothing below is a reading of that instant: " + err.Error()
 		default:
 			var w int
-			memories, w = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
+			memories, w, projectRankedOut = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
 			withheldAtT += w
 			gapNote = set.UnknownNote()
 		}
@@ -850,14 +854,26 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// may not have.
 	if gset, err := memory.ReadMemoriesAsOf(context.Background(), db, memory.GlobalOnly, memory.GlobalProjectID, asOf); err == nil {
 		var w int
-		globals, w = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
+		// The globals' ranked-out count is not carried into the tally: their
+		// count line names the current globals ranking (pinned, importance,
+		// recency), and these rows are in the decay composite's order, so the
+		// phrase would misdescribe the cut.
+		globals, w, _ = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
 		withheldAtT += w
 	}
 	if projectID == "" && len(globals) == 0 && withheldAtT == 0 {
 		return ""
 	}
-	tally := shownOnly(len(memories), len(globals))
-	tally.asOfWithheld = withheldAtT
+	// The project half's tally is the current path's type and goes through the
+	// same count line, so a cut set reads "N shown of M total — K not shown,
+	// ranked by ...". Rows withheld for validity at T stay out of it: they are
+	// stated once at block level by memory.AsOfValidityNote, counted in
+	// asOfWithheld, and are neither shown nor ranked out.
+	tally := sessionTally{
+		project:      assemble.BucketTally{Shown: len(memories), RankedOut: projectRankedOut},
+		globals:      assemble.BucketTally{Shown: len(globals)},
+		asOfWithheld: withheldAtT,
+	}
 	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, globals, tally)
 	if readErr != "" {
 		block += "\n\n(" + readErr + ")"
@@ -882,8 +898,12 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 // wants would put a scoping decision in the enum every search carries. The
 // version row's own project_id is exact, so the filter is an equality on a value
 // the read already chose.
-func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]sessionMemory, int) {
-	withheld := 0
+//
+// It returns the shown rows, how many in-scope rows were withheld for validity
+// at asOf, and how many in-scope rows valid at asOf the cap left out (ranked
+// out, since the set arrives in composite order).
+func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]sessionMemory, int, int) {
+	withheld, rankedOut := 0, 0
 	out := make([]sessionMemory, 0, min(len(rows), cap))
 	for _, row := range rows {
 		if row.ProjectID != projectID {
@@ -903,8 +923,10 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 			continue
 		}
 		// The cap bounds what is shown, not what is counted: the walk goes on
-		// past it so the withheld count covers every row the same narrowing saw.
+		// past it so the withheld count covers every row the same narrowing saw,
+		// and a row valid at T past the cap is counted as ranked out.
 		if len(out) >= cap {
+			rankedOut++
 			continue
 		}
 		// AsOfRow embeds Memory, so all Memory fields are promoted.
@@ -965,7 +987,7 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 			SourceRef:     row.SourceRef,
 		})
 	}
-	return out, withheld
+	return out, withheld, rankedOut
 }
 
 // globalsCap is lower than the project-memories cap (sessionMemoriesCap)
