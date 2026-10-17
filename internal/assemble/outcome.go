@@ -994,10 +994,64 @@ func (p *pipeline) responseCutNotice() string {
 		return ""
 	}
 	cut := p.droppedBy[stageResponseFit]
+	if p.firstKept {
+		return "\n\n" + p.firstKeptNotice()
+	}
 	if cut <= 0 {
 		return ""
 	}
 	return "\n\n" + CutNotice(cut, p.req.Budget.MaxBytes, searchFitAdvice)
+}
+
+// FirstKept describes the one over-budget answer a byte budget still returns:
+// its protected row — the first row, or the first pinned row — is kept whole
+// rather than dropped, so the caller has something to read.
+type FirstKept struct {
+	Cut    int    // rows cut before the protected one
+	Budget int    // the response budget the answer was fitted to
+	Which  string // "first row" or "first pinned row"
+	Where  string // where the cut rows came from, e.g. "from the end of this answer,"
+	Tool   string // the kind of call, e.g. "search" or "listing"
+	// RowAlone is whether the protected row's own rendered line is larger than
+	// Budget. When it is not, the row fits and the framing around it is the
+	// excess, and the sentence must say that instead.
+	RowAlone bool
+}
+
+// FirstKeptNotice is the parenthesised sentence for a FirstKept answer. It is
+// exported for the reason CutNotice is: the assembler's response-fit post-pass
+// and `capResponseParts` both keep a protected row whole, and one sentence built
+// in one place is how the two cannot describe the same case two ways. It names
+// no advice, because the usual lever — fewer results — cannot shrink a single
+// row and naming it would send the caller to a call that comes back the same.
+func FirstKeptNotice(k FirstKept) string {
+	lead := "The " + k.Which
+	if k.Cut > 0 {
+		verb := "rows were"
+		if k.Cut == 1 {
+			verb = "row was"
+		}
+		lead = fmt.Sprintf("%d %s cut %s and the %s", k.Cut, verb, k.Where, k.Which)
+	}
+	if k.RowAlone {
+		return fmt.Sprintf("(%s alone is larger than the %d-byte response budget, so it is shown in full "+
+			"rather than dropped; no %s argument makes one row smaller.)", lead, k.Budget, k.Tool)
+	}
+	return fmt.Sprintf("(%s fits the %d-byte response budget, but not with the rest of this answer around "+
+		"it, so it is shown in full over the budget rather than dropped.)", lead, k.Budget)
+}
+
+// firstKeptNotice is FirstKeptNotice for a search answer the response-fit pass
+// kept its one row of, over the budget.
+func (p *pipeline) firstKeptNotice() string {
+	return FirstKeptNotice(FirstKept{
+		Cut:      p.droppedBy[stageResponseFit],
+		Budget:   p.req.Budget.MaxBytes,
+		Which:    "first row",
+		Where:    "from the end of this answer,",
+		Tool:     "search",
+		RowAlone: len(p.items) > 0 && len(p.items[0].Line()) > p.req.Budget.MaxBytes,
+	})
 }
 
 // filterCaveat is the windowed-answer hint, already wrapped in the blank line
@@ -1042,7 +1096,8 @@ func (p *pipeline) filterCaveat() string {
 // machine line are last, and if they still do not fit there is no answer to
 // return: ErrResponseBudgetExceeded says the budget was impossible, which is a
 // different fact from `empty` and one this package must not report as an
-// absence.
+// absence. On the search envelope the last row is never cut: an answer that had
+// rows keeps its first one whole, over the budget, with a notice saying so.
 func (p *pipeline) fitResponse(base Result) (Result, error) {
 	// Whether the vector arm judged anything is a fact about the RUN, not the
 	// request, so it is recorded here and not in newTrace, which only knows what
@@ -1103,6 +1158,24 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 			framingIsExcess = p.framingIsTheExcess()
 		}
 		if framingIsExcess {
+			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
+			p.trace.Notes = res.Notes
+			return res, nil
+		}
+
+		// The search envelope never cuts its LAST row (#1483). A single row larger
+		// than the budget — a memory at the store's content cap whose line breaks
+		// fold to `⏎` renders past it — would otherwise be dropped and the answer
+		// would claim nothing trustworthy was found about a row nothing judged. It
+		// is kept whole, the notice says so, and the pass stops: the notice makes
+		// the render larger, so measuring again would only re-enter this branch.
+		// A Budget.Measure caller is excluded because its contract is to cut down
+		// to none (FramingCeiling). The notes are not cut first: an answer with a
+		// row does not render them, so cutting them would change no byte.
+		if len(p.items) == 1 && p.req.Budget.Measure == nil {
+			p.firstKept = true
+			res.Response = p.response(res)
+			res.Bytes = len(res.Response)
 			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
 			p.trace.Notes = res.Notes
 			return res, nil

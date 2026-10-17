@@ -130,7 +130,8 @@ func capResponseParts(parts []responsePart, budget int, advice string) (string, 
 	// Even framing, the protected row and its notice do not fit. Keep that row
 	// whole, cut every other row, and say why the budget was missed.
 	cut := len(order) - 1
-	notice := responseCapNoticeFirstKept(cut, budget, len(pinned) > 0) + responseCapPinnedNotice(pinnedCut, budget)
+	rowAlone := len(parts[order[cut]].text) > budget
+	notice := responseCapNoticeFirstKept(cut, budget, len(pinned) > 0, rowAlone) + responseCapPinnedNotice(pinnedCut, budget)
 	return strings.Join(trimmedParts(parts, cutSet), "") + notice, cut
 }
 
@@ -228,30 +229,20 @@ func responseCapNoticeFor(cut, budget int, advice string, pinned bool) string {
 
 // responseCapNoticeFirstKept is the notice for the one over-budget answer the
 // pass still returns: the protected row — the first row, or the first pinned row
-// when a row is pinned — is larger than the budget and is kept whole rather than
-// dropped, so the caller has something to read. It names no advice, because the
-// usual lever — a lower `limit` — cannot shrink a single row and naming it would
-// send the caller to a call that fails identically.
-func responseCapNoticeFirstKept(cut, budget int, pinned bool) string {
+// when a row is pinned — is kept whole rather than dropped, so the caller has
+// something to read. rowAlone says whether that row by itself is larger than the
+// budget; when it is not, the framing around it is the excess and the sentence
+// says so. The sentence is the assembler's, shared with ghost_memory_search.
+func responseCapNoticeFirstKept(cut, budget int, pinned, rowAlone bool) string {
 	which := "first row"
+	where := "from the end of this answer,"
 	if pinned {
 		which = "first pinned row"
+		where = "from this answer, unpinned rows first,"
 	}
-	if cut > 0 {
-		verb := "rows were"
-		if cut == 1 {
-			verb = "row was"
-		}
-		where := "from the end of this answer,"
-		if pinned {
-			where = "from this answer, unpinned rows first,"
-		}
-		return fmt.Sprintf("\n(%d %s cut %s and the %s alone is larger than the "+
-			"%d-byte response budget, so it is shown in full rather than dropped; no listing argument makes one "+
-			"row smaller.)\n", cut, verb, where, which, budget)
-	}
-	return fmt.Sprintf("\n(The %s alone is larger than the %d-byte response budget, so it is shown in full "+
-		"rather than dropped; no listing argument makes one row smaller.)\n", which, budget)
+	return "\n" + assemble.FirstKeptNotice(assemble.FirstKept{
+		Cut: cut, Budget: budget, Which: which, Where: where, Tool: "listing", RowAlone: rowAlone,
+	}) + "\n"
 }
 
 // responseCapPinnedNotice is the pinned-cut statement a trimmed answer carries
