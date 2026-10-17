@@ -622,3 +622,86 @@ func idsOf(mems []memory.Memory) []string {
 	}
 	return out
 }
+
+// TestMarkRefusesTheGlobalProjectBeforeAnyLookup: naming `_global` as the project
+// is refused up front, in the dry run as well as under Apply. The per-row
+// ownership check cannot catch it (a promoted row's project_id IS `_global`), and
+// the store's write-time refusal is one a dry run never reaches, so without the
+// up-front check the preview reported "would mark resolved 1" for a request that
+// --apply then refused. The store is wrapped to count every call, so "before any
+// lookup" is observed rather than inferred from the error text.
+func TestMarkRefusesTheGlobalProjectBeforeAnyLookup(t *testing.T) {
+	store, _ := markSeed(t)
+	ctx := context.Background()
+	promoted := markMem(t, store, "a promoted row every project injects", "")
+	if err := store.PromoteToGlobal(ctx, "p", promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	for _, apply := range []bool{false, true} {
+		s := &countingMarkStore{MarkStore: store}
+		res, err := Mark(ctx, s, MarkRequest{ProjectID: memory.GlobalProjectID, Refs: []string{promoted[:8]}, Apply: apply}, markLogger())
+		if err == nil {
+			t.Fatalf("apply=%v: Mark accepted a request naming the _global project: %+v", apply, res)
+		}
+		if !strings.Contains(err.Error(), "refusing to mark in the _global project") ||
+			!strings.Contains(err.Error(), "every project injects") {
+			t.Errorf("apply=%v: the refusal does not give the documented reason: %v", apply, err)
+		}
+		if res.Resolved != 0 || len(res.Memories) != 0 {
+			t.Errorf("apply=%v: the refusal reported rows as though it would mark them: %+v", apply, res)
+		}
+		if s.lookups != 0 || s.loads != 0 || s.writes != 0 {
+			t.Errorf("apply=%v: the store was reached before the refusal: %d lookups, %d loads, %d writes", apply, s.lookups, s.loads, s.writes)
+		}
+	}
+	if isMarkResolved(t, store, promoted) {
+		t.Fatal("a promoted memory was stamped")
+	}
+}
+
+// TestMarkStillMarksAnOrdinaryProject is the control for the `_global` refusal:
+// the same counting store, an ordinary project, and the dry run previews the row
+// while --apply stamps it.
+func TestMarkStillMarksAnOrdinaryProject(t *testing.T) {
+	store, _ := markSeed(t)
+	ctx := context.Background()
+	id := markMem(t, store, "a note in an ordinary project", "")
+
+	s := &countingMarkStore{MarkStore: store}
+	dry, err := Mark(ctx, s, MarkRequest{ProjectID: "p", Refs: []string{id[:8]}}, markLogger())
+	if err != nil {
+		t.Fatalf("Mark (dry run): %v", err)
+	}
+	if dry.Resolved != 1 || dry.Marked != 0 || s.lookups == 0 || s.writes != 0 {
+		t.Fatalf("dry run = %+v (%d lookups, %d writes), want one row previewed and nothing written", dry, s.lookups, s.writes)
+	}
+	res, err := Mark(ctx, s, MarkRequest{ProjectID: "p", Refs: []string{id[:8]}, Apply: true}, markLogger())
+	if err != nil {
+		t.Fatalf("Mark (apply): %v", err)
+	}
+	if res.Marked != 1 || !isMarkResolved(t, store, id) {
+		t.Fatalf("apply = %+v, want the row marked", res)
+	}
+}
+
+// countingMarkStore is the real store with every call Mark makes counted.
+type countingMarkStore struct {
+	MarkStore
+	lookups, loads, writes int
+}
+
+func (c *countingMarkStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
+	c.lookups++
+	return c.MarkStore.MemoryIDsByIDPrefix(ctx, projectID, prefix)
+}
+
+func (c *countingMarkStore) GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	c.loads++
+	return c.MarkStore.GetByIDs(ctx, ids)
+}
+
+func (c *countingMarkStore) MarkResolved(ctx context.Context, projectID string, ids []string, prov memory.Provenance) ([]string, error) {
+	c.writes++
+	return c.MarkStore.MarkResolved(ctx, projectID, ids, prov)
+}
