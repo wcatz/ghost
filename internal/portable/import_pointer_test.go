@@ -521,3 +521,80 @@ func TestCycleMembersMarksOnlyCycles(t *testing.T) {
 		}
 	}
 }
+
+// TestAPointerIntoAnotherProjectIsDropped: a blocked_by or superseded_by naming
+// a record the store holds, but in a different project from the one the record
+// is imported under, does not resolve. The store's own readers join a successor
+// on the decision's project and no live writer links across projects, so such a
+// pointer is a link nothing can follow. It is dropped and reported exactly like
+// a pointer to a record that exists nowhere, in the dry run and the apply alike.
+//
+// Kept, it was also a link another project could rewrite: deleting the project
+// that holds the target cleared both pointers through ON DELETE SET NULL,
+// leaving a blocked task with no blocker and a superseded decision with no
+// successor in a project the delete never named. So the test deletes that
+// project afterwards and holds every row of the imported project unchanged.
+func TestAPointerIntoAnotherProjectIsDropped(t *testing.T) {
+	seed := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pa","path":"/src/pa","name":"pa"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pa","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pa","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n"
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"tb1","project_id":"pb","title":"B task","status":"blocked","priority":2,"blocked_by":"ta1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"db1","project_id":"pb","title":"B decision","decision":"use y","rationale":"r","status":"superseded","superseded_by":"da1"}}` + "\n"
+
+	applied := runPointerImportOnto(t, seed, artifact, true)
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), applied,
+		map[string]Action{"task/tb1": ActionCreate, "decision/db1": ActionCreate},
+		map[string]string{"task/tb1": "ta1", "decision/db1": "da1"},
+		map[string]DropReason{"task/tb1": DropAbsent, "decision/db1": DropAbsent},
+		map[string]string{"task/tb1": "", "decision/db1": ""})
+
+	ctx := context.Background()
+	before := projectRows(t, applied.store, "pb")
+	if _, err := applied.store.DeleteProject(ctx, "pa", true); err != nil {
+		t.Fatalf("DeleteProject(pa): %v", err)
+	}
+	if after := projectRows(t, applied.store, "pb"); after != before {
+		t.Errorf("deleting project pa changed project pb's rows:\n before %s\n after  %s", before, after)
+	}
+}
+
+// TestAPointerIntoTheMappedProjectIsKept: the project a record is imported
+// under is the one the mapping chose, not the id the artifact names. A project
+// whose checkout the store already records attaches to the store's project, and
+// a pointer to a record that project holds resolves and is kept, unreported, in
+// the dry run and the apply alike. A check that compared against the artifact's
+// own project id would drop it.
+func TestAPointerIntoTheMappedProjectIsKept(t *testing.T) {
+	seed := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"tx1","project_id":"pb","title":"target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dx1","project_id":"pb","title":"successor","decision":"use x","rationale":"r","status":"active"}}` + "\n"
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pq","path":"/src/pb","name":"pq"}}` + "\n" +
+		`{"type":"task","task":{"id":"tq1","project_id":"pq","title":"dependent","status":"blocked","priority":2,"blocked_by":"tx1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dq1","project_id":"pq","title":"superseded","decision":"use y","rationale":"r","status":"superseded","superseded_by":"dx1"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), runPointerImportOnto(t, seed, artifact, true),
+		map[string]Action{"project/pq": ActionSkip, "task/tq1": ActionCreate, "decision/dq1": ActionCreate},
+		map[string]string{},
+		nil,
+		map[string]string{"task/tq1": "tx1", "decision/dq1": "dx1"})
+}
+
+// projectRows renders every task and decision row of one project, whole, so a
+// comparison catches any field a later write changed.
+func projectRows(t *testing.T, s *memory.Store, projectID string) string {
+	t.Helper()
+	tasks, err := selectTasks(context.Background(), s, []string{projectID})
+	if err != nil {
+		t.Fatalf("selectTasks: %v", err)
+	}
+	decisions, err := selectDecisions(context.Background(), s, []string{projectID})
+	if err != nil {
+		t.Fatalf("selectDecisions: %v", err)
+	}
+	return fmt.Sprintf("tasks=%d %+v decisions=%d %+v", len(tasks), tasks, len(decisions), decisions)
+}
