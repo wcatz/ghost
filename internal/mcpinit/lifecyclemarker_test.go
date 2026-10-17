@@ -453,6 +453,337 @@ func TestSessionStart_MarkerOlderThan30DaysSelfCleans(t *testing.T) {
 	}
 }
 
+// TestSessionStart_FarFutureMarkerSelfCleans: a marker stamped implausibly far
+// ahead — a clock that was set forward when it was written, a VM resumed with a
+// skewed clock, or a marker copied in from another machine — has a NEGATIVE age
+// and would otherwise never reach the 30-day horizon: as the only candidate it
+// would alert at every session start, unchanged, until wall time caught up. The
+// self-clean is what removes it, so it must be judged expired on both sides of
+// the age and neither print nor linger on disk.
+func TestSessionStart_FarFutureMarkerSelfCleans(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	_, out := alertFirstLine(t, projDir)
+
+	if strings.Contains(out, "Ghost maintenance alert") {
+		t.Errorf("a marker a year in the future must not print, got:\n%s", out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a marker a year in the future must be deleted like an expired one, stat err = %v", err)
+	}
+}
+
+// TestSessionStart_SlightlyFutureMarkerStillPrints pins the other side of the
+// bound: a marker only a little ahead (ordinary clock skew between the writer
+// and this session) is still a real, recent failure and must not be swept away
+// as implausible. It brackets lifecycleMarkerMaxAge with the 365-day test above:
+// this fails if the tolerated skew drops below two hours, that one fails if the
+// far-future bound is removed.
+func TestSessionStart_SlightlyFutureMarkerStillPrints(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	firstLine, _ := alertFirstLine(t, projDir)
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Errorf("a marker two hours in the future (small skew) must still print, got: %s", firstLine)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a slightly-future marker must be kept: %v", err)
+	}
+}
+
+// TestSessionStart_FutureMarkerWithinClockSkewStillPrints pins the tolerated
+// clock skew (lifecycleMarkerClockSkew, 24h) from BELOW: a marker 23 hours
+// ahead — ordinary skew between the writer's clock and this session, just
+// inside the tolerance — is still a real, recent failure and must alert, not
+// be swept. Together with TestSessionStart_FutureMarkerPastClockSkewSelfCleans
+// (25h swept) it brackets the constant: this one fails if the tolerance drops
+// below 23 hours, that one fails if it widens to 25 hours or more.
+func TestSessionStart_FutureMarkerWithinClockSkewStillPrints(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(23 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	firstLine, _ := alertFirstLine(t, projDir)
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Errorf("a marker 23h in the future (inside the 24h tolerated skew) must still print, got: %s", firstLine)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a marker inside the tolerated skew must be kept: %v", err)
+	}
+}
+
+// TestSessionStart_FutureMarkerPastClockSkewSelfCleans pins the tolerated
+// clock skew (lifecycleMarkerClockSkew, 24h) from ABOVE: a marker 25 hours
+// ahead is past ordinary skew — its negative age would never reach the 14-day
+// alert cutoff nor the 30-day horizon, so without the future bound it would
+// alert at every session start until wall time caught up — and it must be
+// swept on the 24h bound like an expired marker: no alert, file deleted.
+func TestSessionStart_FutureMarkerPastClockSkewSelfCleans(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(25 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	_, out := alertFirstLine(t, projDir)
+
+	if strings.Contains(out, "Ghost maintenance alert") {
+		t.Errorf("a marker 25h in the future (past the 24h tolerated skew) must not print, got:\n%s", out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a marker past the tolerated skew must be swept like an expired one, stat err = %v", err)
+	}
+}
+
+// TestSessionStart_FutureMarkerDoesNotOutrankARecentFailure: a marker 23 hours
+// ahead is INSIDE the tolerated skew, so it is a real, recent failure and it is
+// never swept — but it is still dated after now, and a future date is not
+// evidence of a later failure. It must rank BELOW a real failure from an hour
+// ago, so a session that resolves to no project reports the failure that really
+// happened rather than the one stamped ahead. This is the case a plain
+// min(at, now) clamp gets wrong: the clamped stamp ties with now, which still
+// beats an hour ago, and the skewed marker is named.
+func TestSessionStart_FutureMarkerDoesNotOutrankARecentFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	future := time.Now().UTC().Add(23 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "skewed", PhasesFailed: []string{"reflect"}, Error: "ahead", At: future, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recovered", PhasesFailed: []string{"resolve"}, Error: "real", At: recent, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the current real failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recovered") {
+		t.Errorf("a marker dated after now must rank below one dated at or before it, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project skewed") {
+		t.Errorf("the 23h-ahead marker must not be shown over the real failure, got: %s", firstLine)
+	}
+}
+
+// TestSessionStart_SilentMarkerDoesNotSuppressAnInToleranceFutureFailure: a
+// marker between lifecycleAlertMaxAge and lifecycleMarkerMaxAge is kept on disk
+// but stays deliberately silent, and a future failure inside the tolerated skew
+// is a real, recent failure that must alert. Ranking a stamp dated ahead below
+// every stamp dated at or before now makes one such silent marker outrank the
+// future one, and an alert read that stops at the first in-bounds marker would
+// then print nothing — leaving a paused consolidation hidden for as long as the
+// stale marker sits in the 14-to-30-day band. The read must pass over the
+// silent marker (keeping it) and still surface the current failure.
+func TestSessionStart_SilentMarkerDoesNotSuppressAnInToleranceFutureFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	stale := time.Now().UTC().Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	stalePath := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "quiet", PhasesFailed: []string{"reflect"}, Error: "old", At: stale, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recent", PhasesFailed: []string{"resolve"}, Error: "fresh", At: future, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("an in-tolerance future failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recent") {
+		t.Errorf("a silently kept stale marker must be passed over, not suppress the alert, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project quiet") {
+		t.Errorf("the stale marker is over the alert horizon and must stay silent, got: %s", firstLine)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Errorf("the silent marker is kept, not swept, so it stays on disk: %v", err)
+	}
+}
+
+// TestSessionStart_SilentMarkersConsumeNoSelfCleanPass: the self-clean bound
+// (lifecycleSelfCleanMaxPasses) counts REMOVALS — the files a session-start
+// deletes — so passing over a kept-but-silent marker must not spend one. In a
+// session that resolves to no project the candidate set is every per-project
+// marker in the data directory, unbounded, and each marker between the alert
+// horizon and the keep horizon outranks an in-tolerance future one. If a skip
+// cost a pass, eight of them — any project that failed once and has not run
+// since — would exhaust the bound and return "", hiding the real failure at
+// every session start until those files aged past the keep horizon. The read
+// drops the silent band itself, so the future failure is reached in one pass.
+func TestSessionStart_SilentMarkersConsumeNoSelfCleanPass(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	stale := time.Now().UTC().Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	for i := range lifecycleSelfCleanMaxPasses {
+		writeMarkerFile(t, xdgHome, testMarker{
+			Project: fmt.Sprintf("quiet-%d", i), PhasesFailed: []string{"reflect"},
+			Error: "old", At: stale, Version: 1,
+		})
+	}
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recent", PhasesFailed: []string{"resolve"}, Error: "fresh", At: future, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the in-tolerance future failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recent") {
+		t.Errorf("silent markers must not consume the self-clean bound, got: %s", firstLine)
+	}
+}
+
+// TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure: the same
+// rule as the 365-day test, at the distance the review caught — a marker 20
+// days ahead is past the 24h tolerated skew, so it must not be shown, and in a
+// session that resolves to no project the real failure from an hour ago (keyed
+// under another project) must be the one reported instead of being shadowed by
+// the future stamp. The skewed file stays on disk: the self-clean removes only
+// the file it read, and the ranking never lets the future stamp win that read
+// while a real failure exists (a lone future marker is swept, pinned by
+// TestSessionStart_FutureMarkerPastClockSkewSelfCleans).
+func TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	future := time.Now().UTC().Add(20 * 24 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	futurePath := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "skewed", PhasesFailed: []string{"reflect"}, Error: "stale", At: future, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recovered", PhasesFailed: []string{"resolve"}, Error: "real", At: recent, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the current real failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recovered") {
+		t.Errorf("the real failure from an hour ago must be the one shown, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project skewed") {
+		t.Errorf("the 20-days-ahead marker must not be shown, got: %s", firstLine)
+	}
+	if _, err := os.Stat(futurePath); err != nil {
+		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
+	}
+}
+
+// TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead pins the
+// ranking rule among future stamps: in a session that resolves to no project,
+// two markers BOTH dated ahead — one 10 hours, one 23 hours — are inside the
+// tolerated skew, so neither is swept and the read picks between them. Being
+// further ahead in the future must buy no rank: the EARLIEST future stamp wins,
+// so the 23-hour marker loses to the 10-hour one rather than jumping ahead by
+// the size of its lie. A plain at.After read credits the later future stamp and
+// shows the wrong project, so this fails under that ranking.
+func TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	now := time.Now().UTC()
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "future-near", PhasesFailed: []string{"reflect"}, Error: "nearer",
+		At: now.Add(10 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "future-far", PhasesFailed: []string{"reflect"}, Error: "farther",
+		At: now.Add(23 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("one of the two future markers must alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project future-near") {
+		t.Errorf("the least-skewed future marker must win: want project future-near, got: %s", firstLine)
+	}
+}
+
+// TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure: the second face of
+// the same stamp. When a session resolves to no project, readLifecycleFailure
+// takes the marker newestMarker ranks first — and a stamp dated ahead ranks
+// below every stamp dated at or before now, so a many-months-ahead stamp cannot
+// shadow a real failure from an hour ago that is keyed under another project.
+// The genuinely recent failure is the one reported. The skewed file stays on
+// disk: it never wins the read while the real failure exists, and a lone future
+// marker past the skew is swept (TestSessionStart_FarFutureMarkerSelfCleans).
+func TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	future := time.Now().UTC().Add(365 * 24 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	futurePath := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "skewed", PhasesFailed: []string{"reflect"}, Error: "old", At: future, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recovered", PhasesFailed: []string{"resolve"}, Error: "real", At: recent, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the current real failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recovered") {
+		t.Errorf("the newer real failure must outrank the skewed one, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project skewed") {
+		t.Errorf("the skewed future marker must not be shown, got: %s", firstLine)
+	}
+	if _, err := os.Stat(futurePath); err != nil {
+		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
+	}
+}
+
 // TestSessionStart_TwentyNineDayOldMarkerKept pins the self-clean horizon
 // from BELOW. It brackets lifecycleMarkerMaxAge together with
 // TestSessionStart_MarkerOlderThan30DaysSelfCleans (31d deleted): this test
