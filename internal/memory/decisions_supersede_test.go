@@ -2133,3 +2133,115 @@ func TestAConcurrentSourceKeepsWhatTheMergeBesideItWouldTake(t *testing.T) {
 		t.Errorf("the live concurrent row's history names the merge %s as its successor", successor)
 	}
 }
+
+// A reflect carrier that is already resolved states nothing, so it does not
+// compete with the live companion: the companion is retired as the sole live
+// claimant, not reported ambiguous and left ranking beside a decision that is
+// marked superseded and cannot be superseded again.
+func TestSupersedeDecisionIgnoresAResolvedReflectCarrier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	carrier, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "reflection", Importance: 0.9,
+		Content: "the job queue runs on redis lists, and its consumer restarts in place"})
+	if err != nil {
+		t.Fatalf("create the carrier: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ?, resolved_at = datetime('now') WHERE id = ?`,
+		decisionCompanionRef(oldDec), carrier); err != nil {
+		t.Fatalf("link and resolve the carrier: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMem || len(got.Ambiguous) != 0 {
+		t.Errorf("report = %+v, want the live companion %s retired and nothing ambiguous", got, oldMem)
+	}
+	if !decisionMemoryResolved(t, s, oldMem) {
+		t.Error("the live companion still ranks beside a superseded decision")
+	}
+}
+
+// The replacement decision carries the same two-carrier shape — its
+// RecordDecision row and a live reflect successor both link it. That is the
+// replacement's own ambiguity, not the old decision's: the old companion is
+// still retired, and the supersedes edge still runs from the row RecordDecision
+// wrote, so the link graph says what replaced it.
+func TestSupersedeDecisionStillLinksTheReplacementBesideItsReflectCarrier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+	carrier, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "reflection", Importance: 0.9,
+		Content: "the job queue moves to postgres with skip locked consumers"})
+	if err != nil {
+		t.Fatalf("create the carrier: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ? WHERE id = ?`, decisionCompanionRef(newDec), carrier); err != nil {
+		t.Fatalf("link the carrier: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMem {
+		t.Fatalf("report = %+v, want the old companion %s retired", got, oldMem)
+	}
+	links, err := s.GetLinks(ctx, oldMem)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var edge bool
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == newMem && l.TargetID == oldMem {
+			edge = true
+		}
+	}
+	if !edge {
+		t.Errorf("no supersedes edge %s -> %s: the replacement's second carrier dropped what replaced the companion", newMem, oldMem)
+	}
+	var phase, related string
+	if err := s.db.QueryRow(`SELECT phase, COALESCE(related_id, '') FROM memory_history WHERE memory_id = ? ORDER BY rowid DESC LIMIT 1`, oldMem).
+		Scan(&phase, &related); err != nil {
+		t.Fatalf("read the companion's history: %v", err)
+	}
+	if phase != phaseSupersede || related != newMem {
+		t.Errorf("history = %s/%q, want %s naming %s", phase, related, phaseSupersede, newMem)
+	}
+}
+
+// A rewrite whose only source the guard re-adds verbatim folds nothing, so the
+// evidence split leaves it no source to read a tier from. It must still take
+// that source's tier rather than the default: a session row's rewrite landing
+// as a project row nothing ever expires is the longer life the tier rule
+// exists to prevent.
+func TestAGuardReaddedRewriteKeepsItsSourcesTier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const keptText = "the bastion host is the only ssh entry point"
+	kept, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", keptText, "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("create the session row: %v", err)
+	}
+	const rewritten = "ssh reaches every host through the bastion and nowhere else"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: rewritten, Importance: 0.6, ReplacesIDs: []string{kept}},
+		{Category: "fact", Content: keptText, Importance: 0.5},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if !rowExists(t, s, kept) {
+		t.Fatal("the re-added row did not keep its row: the fixture no longer reproduces the guard's reuse")
+	}
+	var tier string
+	var expires sql.NullString
+	if err := s.db.QueryRow(`SELECT retention, expires_at FROM memories WHERE content = ?`, rewritten).Scan(&tier, &expires); err != nil {
+		t.Fatalf("read the rewrite: %v", err)
+	}
+	if tier != RetentionSession || !expires.Valid {
+		t.Errorf("the rewrite is %q expiring %q, want %q with an expiry like its only source", tier, expires.String, RetentionSession)
+	}
+}

@@ -566,7 +566,11 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	// memory was left standing. Counting only 'decision_log' here picked the
 	// RecordDecision row beside a live reflect successor carrying the same link,
 	// retired it alone and answered clean while the successor kept asserting the
-	// reversed decision.
+	// reversed decision. A reflection row counts only while it is LIVE: a resolved
+	// successor states nothing, and counting it made the sole live companion
+	// ambiguous, so it kept ranking beside a decision already marked superseded,
+	// which no second supersede can reach. The RecordDecision row counts either
+	// way, as it always has: when it is the one resolved, nothing is chosen.
 	type linkRow struct {
 		id       string
 		category string
@@ -667,7 +671,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	if len(single) > 1 {
 		var logged []linkRow
 		for _, r := range single {
-			if r.source == "decision_log" || r.source == "reflection" {
+			if r.source == "decision_log" || (r.source == "reflection" && r.live) {
 				logged = append(logged, r)
 			}
 		}
@@ -809,14 +813,11 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	out.Declined = append(out.Declined, declined...)
 	// The replacement's companion names the reason. One with no companion (an
 	// imported decision) leaves the reason unstated rather than naming an id
-	// that is not a memory.
-	newCompanions, _, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, newID)
+	// that is not a memory. See replacementCompanionTx for a replacement whose
+	// link more than one live row carries.
+	newCompanion, err := replacementCompanionTx(ctx, tx, projectID, newID)
 	if err != nil {
 		return out, err
-	}
-	newCompanion := ""
-	if len(newCompanions) > 0 {
-		newCompanion = newCompanions[0]
 	}
 	// The replacement's own companion cannot be among the candidates: a link
 	// names one memory, so one memory is never linked to both decisions, and the
@@ -888,6 +889,45 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	}
 	out.Retired = changed
 	return out, nil
+}
+
+// replacementCompanionTx is the row a retired companion's 'supersedes' edge and
+// history name: the replacement decision's companion.
+//
+// It is findDecisionCompanionsTx's answer when that is one row. When it is not —
+// the replacement's own link is carried by its RecordDecision row AND by a live
+// reflect successor, the two-carrier shape a guard re-add leaves — the lookup's
+// ambiguity is a question for the replacement's own supersede, not this one, and
+// the row RecordDecision wrote is still the replacement's companion. So the sole
+// live 'decision_log' claimant is returned. Without it the old companion was
+// retired with a 'resolve' history row and no edge, which the rules above keep
+// for a replacement with no companion at all. Only when no single such row
+// exists is the edge left out, as before.
+func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (string, error) {
+	found, ambiguous, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, decisionID)
+	if err != nil {
+		return "", err
+	}
+	if len(found) > 0 {
+		return found[0], nil
+	}
+	var logged []string
+	for _, id := range ambiguous {
+		var source string
+		if err := tx.QueryRowContext(ctx, `SELECT source FROM memories WHERE id = ? AND resolved_at IS NULL`, id).Scan(&source); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return "", fmt.Errorf("read replacement claimant %s: %w", RefusalArg("memory_id", id), err)
+		}
+		if source == "decision_log" {
+			logged = append(logged, id)
+		}
+	}
+	if len(logged) == 1 {
+		return logged[0], nil
+	}
+	return "", nil
 }
 
 // ListDecisions returns decisions for a project.

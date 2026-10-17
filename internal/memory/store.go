@@ -7132,6 +7132,30 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 	return NormalizeRetention(m.Retention)
 }
 
+// foldedRetention is the tier a fresh successor takes: the longest life among
+// the sources it folds (folded, the split sourcesNotKeptLive makes), and when it
+// folds none, the longest among the kept-live sources it names (m).
+//
+// The fallback is a choice, and it is not the claims rule. A claim is backed by
+// a record, and a claim copied from a row whose records stayed behind stands on
+// the successor with nothing recording it, so claims follow evidence and a
+// kept-live source gives none. A tier is backed by nothing: it is how long a row
+// lives, and the only rule it answers to is that a successor never outlives every
+// row it restates. When the emission folds a source, that source's tier answers
+// it, and a kept-live source's tier is not added, since its knowledge is still
+// live on its own row. When it folds none — a `rewrite X` whose X the guard
+// re-added verbatim, or a merge every source of which is reused, kept as
+// concurrent or kept for a refusal — the emission restates only rows that stay,
+// and the default is the wrong answer: a rewrite of a session row would land as
+// a project row nothing expires, the longer life inheritedRetention exists to
+// prevent. Their tier is the one value that keeps the rule, so it is read.
+func foldedRetention(ctx context.Context, tx *sql.Tx, projectID string, m, folded Memory) (string, error) {
+	if tier, ok, err := sourceRetentionTx(ctx, tx, projectID, folded.ReplacesIDs); err != nil || ok {
+		return tier, err
+	}
+	return inheritedRetention(ctx, tx, projectID, m)
+}
+
 // errScopeConflict marks the refusal inheritedScope makes when the rows it
 // reads cannot agree on one scope: they state different scopes, or a mix of
 // scoped and unscoped rows. It is a refusal of the EMISSION — the callers drop
@@ -8043,7 +8067,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// because the branch above wrote nothing at all — a verbatim re-emission
 			// is the commonest case and the one that leaked. See
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
-			// rule.
+			// rule. Only the folded sources raise it: a kept-live source still holds
+			// its knowledge on its own row under its own tier, so nothing durable is
+			// left on this one alone, and the row's own tier is never a default the
+			// way an INSERT's is (foldedRetention).
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, folded); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
@@ -8110,8 +8137,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// ever expire, which is the tier the user asked to escape (#773).
 		//
 		// Read here for the same reason as the claims above and for the same
-		// reordering: the delete below is what takes the sources.
-		tier, err := inheritedRetention(ctx, tx, projectID, folded)
+		// reordering: the delete below is what takes the sources. See
+		// foldedRetention for an emission every source of which stays live.
+		tier, err := foldedRetention(ctx, tx, projectID, m, folded)
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
