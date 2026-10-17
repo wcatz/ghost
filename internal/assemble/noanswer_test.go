@@ -408,16 +408,19 @@ func TestNoAnswerJudgesAVectorLegRowWithANegativeCosine(t *testing.T) {
 // byte cap then removes that last row the empty block is the cap's doing, and it
 // has to read that way: "nothing cleared the bar" sends a caller to lower a bar
 // that already passed the row they were shown, while the cap is the thing to raise.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied(t *testing.T) {
 	kw := cosRow("kw", -1)
 	kw.FTSRank = 0
 	kw.Content = strings.Repeat("x", 400)
 	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v", 0.30))}, stored: map[string]float32{}}
 	req := noAnswerRequest(0.62)
-	// Between the two envelopes: the block holding the keyword row renders at 567
-	// bytes and the empty one at 477, so this cap cuts the last row instead of
-	// failing the request outright.
-	req.Budget.MaxBytes = 500
+	// Under the row's own size, measured by a caller's own Budget.Measure: only
+	// that fit cuts the last row, because the search envelope keeps its first row
+	// whole over the cap (#1483).
+	req.Budget.MaxBytes = 300
+	req.Budget.Measure = rowsOnlyMeasure
 	res := run(t, r, req)
 	if len(res.Items) != 0 {
 		t.Fatalf("items = %v, want the cap to have emptied the block", itemIDs(res.Items))

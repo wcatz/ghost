@@ -3,10 +3,13 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // bulkyContent is one row's worth of stored text: unique per index, so the save
@@ -125,6 +128,55 @@ func TestCapResponsePartsNeverDropsEveryRow(t *testing.T) {
 	}
 	if strings.Contains(got, "Ask for fewer results") {
 		t.Errorf("the notice gives advice that cannot shrink one row: %q", tail(got, 300))
+	}
+}
+
+// TestCapResponsePartsDoesNotClaimAFittingRowIsTooLarge: the protected row fits
+// the budget and the framing plus the notice are what put the answer over. The
+// row is still kept whole, and the notice, which is the assembler's shared
+// sentence, says the row fits rather than that it alone is larger.
+func TestCapResponsePartsDoesNotClaimAFittingRowIsTooLarge(t *testing.T) {
+	framing := strings.Repeat("f", 300)
+	row := strings.Repeat("r", 300)
+	parts := []responsePart{
+		{text: framing},
+		{text: row, cuttable: true},
+		{text: strings.Repeat("s", 300), cuttable: true},
+	}
+	got, cut := capResponseParts(parts, 500, "Advise.")
+	if cut != 1 || !strings.Contains(got, row) {
+		t.Fatalf("want the lower row cut and the first kept whole: cut=%d\n%s", cut, got)
+	}
+	if strings.Contains(got, "alone is larger") {
+		t.Errorf("the notice claims a 300-byte row is larger than a 500-byte budget: %q", tail(got, 300))
+	}
+	want := "(1 row was cut from the end of this answer, and the first row fits the 500-byte response budget, " +
+		"but not with the rest of this answer around it, so it is shown in full over the budget rather than dropped.)"
+	if !strings.Contains(got, want) {
+		t.Errorf("the notice is not %q: %q", want, tail(got, 300))
+	}
+}
+
+// TestCapResponsePartsSaysAnOversizedRowIsLargerThanTheBudget is the other half
+// of the case above: a protected row whose own text is over the budget keeps the
+// "alone is larger" sentence, so a listing that always took the framing wording
+// would fail here rather than tell a reader a 600-byte row fits a 500-byte budget.
+func TestCapResponsePartsSaysAnOversizedRowIsLargerThanTheBudget(t *testing.T) {
+	row := strings.Repeat("r", 600)
+	parts := []responsePart{
+		{text: strings.Repeat("f", 100)},
+		{text: row, cuttable: true},
+		{text: strings.Repeat("s", 300), cuttable: true},
+	}
+	got, cut := capResponseParts(parts, 500, "Advise.")
+	if cut != 1 || !strings.Contains(got, row) {
+		t.Fatalf("want the lower row cut and the oversized first row kept whole: cut=%d\n%s", cut, got)
+	}
+	if strings.Contains(got, "first row fits") {
+		t.Errorf("the notice says a 600-byte row fits a 500-byte budget: %q", tail(got, 300))
+	}
+	if !strings.Contains(got, "the first row alone is larger than the 500-byte response budget") {
+		t.Errorf("the notice does not say the first row alone is larger than the budget: %q", tail(got, 300))
 	}
 }
 
@@ -452,6 +504,74 @@ func TestDecisionsListKeepsADecisionLargerThanTheBudget(t *testing.T) {
 	}
 	if !strings.Contains(out, "shown in full") {
 		t.Errorf("the notice does not say the oversized decision was kept whole: %q", tail(out, 400))
+	}
+}
+
+// TestMemorySearchKeepsAMemoryLargerThanTheBudget is #1483's tool-level
+// regression. A memory saved whole at the store's content cap whose line breaks
+// fold to the 3-byte `⏎` renders past the 16,000-byte search budget, and search
+// used to drop it and abstain with all_over_budget, `limit: 1` included, while
+// ghost_memories_list returned the same row whole. Search now keeps its first
+// row the same way, with a notice, on a current and on an as_of read.
+func TestMemorySearchKeepsAMemoryLargerThanTheBudget(t *testing.T) {
+	srv, session := newCapSession(t)
+	content := "zebra" + strings.Repeat("\nx", 3997)
+	if len(content) != 7999 {
+		t.Fatalf("fixture is %d bytes, want 7999", len(content))
+	}
+	if _, stored := saveAndFetchContent(t, srv, session, content); stored != content {
+		t.Fatalf("precondition: the content was not stored whole (%d of %d bytes)", len(stored), len(content))
+	}
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"no limit", map[string]any{}},
+		{"limit 1", map[string]any{"limit": 1}},
+		{"as_of", map[string]any{"as_of": "2035-01-01T00:00:00Z"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"project_id": "test-project", "query": "zebra"}
+			maps.Copy(args, tc.args)
+			res := callTool(t, session, "ghost_memory_search", args)
+			if res.IsError {
+				t.Fatalf("search failed: %s", resultText(res))
+			}
+			out := resultText(res)
+			if len(out) <= searchResponseMaxBytes {
+				t.Fatalf("the answer is %d bytes, inside the budget: the fixture never put the row over it", len(out))
+			}
+			if !strings.Contains(out, assemble.Data(content)) {
+				t.Errorf("the memory is not in the answer whole:\n%s", tail(out, 400))
+			}
+			if strings.Contains(out, "outcome=empty") || strings.Contains(out, "all_over_budget") {
+				t.Errorf("the answer abstains over a row it could return:\n%s", tail(out, 400))
+			}
+			if !strings.Contains(out, "The first row alone is larger than the 16000-byte response budget, so it is shown in full") {
+				t.Errorf("the notice does not say the oversized row was kept whole:\n%s", tail(out, 400))
+			}
+		})
+	}
+}
+
+// TestMemorySearchWithNoMatchStillAbstains is the control for the rule above:
+// keeping the first row is about a row that exists, so a search that finds
+// nothing still answers empty with its own reason (with no embedder that reason
+// is the vector leg's, as it was before).
+func TestMemorySearchWithNoMatchStillAbstains(t *testing.T) {
+	_, session := newCapSession(t)
+	saveMemory(t, session, "an unrelated memory about giraffes")
+	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "zebra",
+	}))
+	if !strings.Contains(out, "[ghost:outcome=empty reason=vector_backend_unavailable ") ||
+		!strings.Contains(out, " candidates=0 admitted=0 ") {
+		t.Errorf("a search that matched nothing does not abstain as it did:\n%s", out)
+	}
+	if strings.Contains(out, "shown in full") {
+		t.Errorf("an answer with no row carries the first-row notice:\n%s", out)
 	}
 }
 

@@ -137,7 +137,8 @@ type Slice struct {
 // an omission. A MaxBytes cap alone is bounded, so it is honoured — the
 // retrieval window falls back to its documented ceiling, stage 9 still trims by
 // the per-slice item caps, and Run's response-fit post-pass brings the complete
-// rendered response inside MaxBytes. MaxBytes is the RESPONSE's bytes, never
+// rendered response inside MaxBytes, except that the search envelope keeps its
+// first row whole when that row alone is larger. MaxBytes is the RESPONSE's bytes, never
 // item content: Slice.MaxBytes is the item-content cap, and applying one field to
 // two units would make the effective limit depend on a caller's framing.
 //

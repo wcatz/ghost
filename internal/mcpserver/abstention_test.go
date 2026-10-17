@@ -425,6 +425,10 @@ func countItemLines(out string) int {
 // TestAnImpossibleByteBudgetIsAToolError: a cap below the empty envelope is not
 // an empty answer, and a caller that received one would go looking for a memory
 // to save. The tool's own text has to say the budget could not be met.
+//
+// The query matches nothing, so the envelope is the empty one. An answer with a
+// row keeps its first row whole however small the cap (#1483), so a cap below
+// the envelope is only an error for an answer that had no row to keep.
 func TestAnImpossibleByteBudgetIsAToolError(t *testing.T) {
 	srv, session := newCapSession(t)
 	srv.searchMaxBytes = 20
@@ -432,7 +436,7 @@ func TestAnImpossibleByteBudgetIsAToolError(t *testing.T) {
 
 	res := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
-		"query":      "database configuration pooling",
+		"query":      "zebra",
 	})
 
 	if !res.IsError {
@@ -469,7 +473,11 @@ func TestTheInstructionsOnlyPromiseReachableReasons(t *testing.T) {
 	// for a hybrid search. `no_floor_arm` is still a real reason — see
 	// docs/configuration.md — but it belongs to a surface this instruction block
 	// is not about.
-	for _, unreachable := range []string{"retrieval_failed", "no_vector_leg"} {
+	//
+	// `all_over_budget` is the third: the search answer keeps its first row
+	// whole over the response budget (#1483), and its item cap keeps at least
+	// one row, so neither producer of that reason can empty a search answer.
+	for _, unreachable := range []string{"retrieval_failed", "no_vector_leg", "all_over_budget"} {
 		if strings.Contains(mcpInstructions, unreachable) {
 			t.Errorf("mcpInstructions tells the agent to expect %q on a ghost_memory_search verdict "+
 				"line, which that tool cannot produce", unreachable)
@@ -477,7 +485,7 @@ func TestTheInstructionsOnlyPromiseReachableReasons(t *testing.T) {
 	}
 	// And the ones it can, which a caller will meet and the block must explain.
 	for _, reachable := range []string{
-		"answerable", "weak", "no_candidates", "all_invalid", "all_over_budget", "all_out_of_scope",
+		"answerable", "weak", "no_candidates", "all_invalid", "all_out_of_scope",
 		"all_out_of_retention", "not_run", "no_floor_arm", "retrieval_partial", "vector_backend_unavailable",
 		"nothing_cleared_the_bar",
 	} {
