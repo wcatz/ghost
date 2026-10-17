@@ -1532,6 +1532,72 @@ func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
 	}
 }
 
+// TestCheckStoreHealth_StatsReadFailureIsReported pins that a store whose
+// embedding or link tables cannot be counted does not read as healthy. Both
+// stats reads run only when embedding is enabled, and a failure there used to
+// fall through the `err == nil` guard with no output and no check at all, so a
+// run that could not determine embedding or link coverage still printed every
+// check it did make as passing.
+func TestCheckStoreHealth_StatsReadFailureIsReported(t *testing.T) {
+	statusEnv(t)
+	// Embedding must be on for the stats reads to run at all. The Ollama URL
+	// points at a closed port so the liveness probe fails fast and cannot be
+	// what decides this test's outcome.
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", "http://127.0.0.1:1")
+
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		t.Fatalf("DataDirPath: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	db, err := memory.OpenDB(filepath.Join(dataDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	for _, table := range []string{"memory_embeddings", "memory_links", "link_scans"} {
+		if _, err := db.Exec("DROP TABLE " + table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var out bytes.Buffer
+	type gotCheck struct {
+		ok   bool
+		text string
+	}
+	var ran []gotCheck
+	store := checkStoreHealth(&out, func(ok bool, pass, fail string) {
+		text := pass
+		if !ok {
+			text = fail
+		}
+		ran = append(ran, gotCheck{ok, text})
+	})
+	if store != nil {
+		store.Close() //nolint:errcheck
+	}
+
+	// The Ollama fail line also says "embeddings paused", so the prefix is what
+	// distinguishes the coverage check from the liveness one.
+	failed := func(prefix string) bool {
+		return slices.ContainsFunc(ran, func(c gotCheck) bool {
+			return !c.ok && strings.HasPrefix(c.text, prefix)
+		})
+	}
+	if !failed("embeddings:") {
+		t.Errorf("a store that cannot count embeddings recorded no failed embedding check, checks: %+v\n%s", ran, out.String())
+	}
+	if !failed("memory links:") {
+		t.Errorf("a store that cannot count links recorded no failed link check, checks: %+v\n%s", ran, out.String())
+	}
+}
+
 // TestCheckEmbeddingStats pins the embedding-stats classification: an empty
 // store passes with "(store empty)", a populated store passes only when some
 // memories are embedded, and a populated store with zero embeddings fails. It

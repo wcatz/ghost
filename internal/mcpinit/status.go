@@ -485,7 +485,10 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale
 // embedding-coverage and link lines on exactly the run where a user needs them:
 // a broken config silently disabling vector search is the thing this command
 // exists to explain. On the fallback these checks still run and still
-// report the truth about the store in front of them.
+// report the truth about the store in front of them. A stats read that fails
+// here — EmbeddingStats or LinkStats — is reported as a failed check rather
+// than dropped, so a store that cannot answer them is never mistaken for a
+// healthy one.
 func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memory.Store {
 	// 8. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive. Ollama checks run regardless of
@@ -568,12 +571,25 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// which is exactly the state an operator runs `ghost mcp status` to catch.
 	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 	if cfg.Embedding.Enabled {
+		// Both stats reads are checks that cannot run when they fail, and a
+		// check that cannot run must not print nothing at all: an `err == nil`
+		// guard with no other branch would drop the coverage line and record no
+		// failed check, so a store whose vectors cannot be counted read as a
+		// healthy one — the exact confusion `ghost mcp status` exists to
+		// prevent. The error names the store's own reason (a missing table, an
+		// I/O failure), so it is reported verbatim.
 		ctx := context.Background()
-		if embedded, stale, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
+		embedded, stale, total, sErr := store.EmbeddingStats(ctx)
+		if sErr == nil {
 			checkEmbeddingStats(check, embedded, stale, total)
+		} else {
+			check(false, "", fmt.Sprintf("embeddings: %v", sErr))
 		}
-		if links, scans, lErr := store.LinkStats(ctx); lErr == nil {
+		links, scans, lErr := store.LinkStats(ctx)
+		if lErr == nil {
 			_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
+		} else {
+			check(false, "", fmt.Sprintf("memory links: %v", lErr))
 		}
 	}
 	reportHistoryGrowth(w, store)
