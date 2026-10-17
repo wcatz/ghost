@@ -456,10 +456,10 @@ func TestSessionStart_MarkerOlderThan30DaysSelfCleans(t *testing.T) {
 // TestSessionStart_FarFutureMarkerSelfCleans: a marker stamped implausibly far
 // ahead — a clock that was set forward when it was written, a VM resumed with a
 // skewed clock, or a marker copied in from another machine — has a NEGATIVE age
-// and would otherwise never reach the 30-day horizon: it would alert at every
-// session start until wall time caught up, and its future stamp would outrank a
-// newer real failure in newestMarker. It must be judged expired on both sides of
-// the age, so it neither prints nor lingers on disk.
+// and would otherwise never reach the 30-day horizon: as the only candidate it
+// would alert at every session start, unchanged, until wall time caught up. The
+// self-clean is what removes it, so it must be judged expired on both sides of
+// the age and neither print nor linger on disk.
 func TestSessionStart_FarFutureMarkerSelfCleans(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
@@ -563,12 +563,50 @@ func TestSessionStart_FutureMarkerPastClockSkewSelfCleans(t *testing.T) {
 	}
 }
 
+// TestSessionStart_FutureMarkerDoesNotOutrankARecentFailure: a marker 23 hours
+// ahead is INSIDE the tolerated skew, so it is a real, recent failure and it is
+// never swept — but it is still dated after now, and a future date is not
+// evidence of a later failure. It must rank BELOW a real failure from an hour
+// ago, so a session that resolves to no project reports the failure that really
+// happened rather than the one stamped ahead. This is the case a plain
+// min(at, now) clamp gets wrong: the clamped stamp ties with now, which still
+// beats an hour ago, and the skewed marker is named.
+func TestSessionStart_FutureMarkerDoesNotOutrankARecentFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	future := time.Now().UTC().Add(23 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "skewed", PhasesFailed: []string{"reflect"}, Error: "ahead", At: future, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recovered", PhasesFailed: []string{"resolve"}, Error: "real", At: recent, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("the current real failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recovered") {
+		t.Errorf("a marker dated after now must rank below one dated at or before it, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project skewed") {
+		t.Errorf("the 23h-ahead marker must not be shown over the real failure, got: %s", firstLine)
+	}
+}
+
 // TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure: the same
 // rule as the 365-day test, at the distance the review caught — a marker 20
-// days ahead is past the 24h tolerated skew, so it must be swept rather than
-// shown, and in a session that resolves to no project the real failure from
-// an hour ago (keyed under another project) must be the one reported instead
-// of being shadowed by the future stamp.
+// days ahead is past the 24h tolerated skew, so it must not be shown, and in a
+// session that resolves to no project the real failure from an hour ago (keyed
+// under another project) must be the one reported instead of being shadowed by
+// the future stamp. The skewed file stays on disk: the self-clean removes only
+// the file it read, and the ranking never lets the future stamp win that read
+// while a real failure exists (a lone future marker is swept, pinned by
+// TestSessionStart_FutureMarkerPastClockSkewSelfCleans).
 func TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
@@ -594,41 +632,31 @@ func TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure(t *testing.
 	if strings.Contains(firstLine, "for project skewed") {
 		t.Errorf("the 20-days-ahead marker must not be shown, got: %s", firstLine)
 	}
-	if _, err := os.Stat(futurePath); !os.IsNotExist(err) {
-		t.Errorf("the 20-days-ahead marker must be swept past the 24h skew, stat err = %v", err)
+	if _, err := os.Stat(futurePath); err != nil {
+		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
 	}
 }
 
 // TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead pins the
-// ranking rule (newestMarker ranks by min(at, now)) where it is observable:
-// in a session that resolves to no project, two markers BOTH dated ahead —
-// one 10 hours, one 23 hours — are inside the tolerated skew, so neither is
-// swept and the read picks between them. Being further ahead in the future
-// must buy no rank: both stamps rank at most "now", so the read order (the
-// glob's file order) decides, and the 23-hour marker cannot jump ahead of the
-// 10-hour one by the size of its lie. The file that sorts first in the glob
-// is computed here, and the EARLIER stamp is seeded onto it, so plain
-// `at.After` ranking (which credits the later future stamp) shows the other
-// project's marker and fails.
+// ranking rule among future stamps: in a session that resolves to no project,
+// two markers BOTH dated ahead — one 10 hours, one 23 hours — are inside the
+// tolerated skew, so neither is swept and the read picks between them. Being
+// further ahead in the future must buy no rank: the EARLIEST future stamp wins,
+// so the 23-hour marker loses to the 10-hour one rather than jumping ahead by
+// the size of its lie. A plain at.After read credits the later future stamp and
+// shows the wrong project, so this fails under that ranking.
 func TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	// Seed the glob-first file with the smaller future offset. filepath.Glob
-	// returns matches sorted, so with both stamps clamped to "now" the first
-	// file wins the read.
-	first, second := "future-alpha", "future-beta"
-	if projectMarkerFile(second) < projectMarkerFile(first) {
-		first, second = second, first
-	}
 	now := time.Now().UTC()
 	writeMarkerFile(t, xdgHome, testMarker{
-		Project: first, PhasesFailed: []string{"reflect"}, Error: "nearer",
+		Project: "future-near", PhasesFailed: []string{"reflect"}, Error: "nearer",
 		At: now.Add(10 * time.Hour).Format(time.RFC3339), Version: 1,
 	})
 	writeMarkerFile(t, xdgHome, testMarker{
-		Project: second, PhasesFailed: []string{"reflect"}, Error: "farther",
+		Project: "future-far", PhasesFailed: []string{"reflect"}, Error: "farther",
 		At: now.Add(23 * time.Hour).Format(time.RFC3339), Version: 1,
 	})
 
@@ -637,17 +665,19 @@ func TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead(t *testing.T) {
 	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
 		t.Fatalf("one of the two future markers must alert, got:\n%s", out)
 	}
-	if !strings.Contains(firstLine, "for project "+first) {
-		t.Errorf("the read must not be won by being further ahead in the future: want project %s, got: %s", first, firstLine)
+	if !strings.Contains(firstLine, "for project future-near") {
+		t.Errorf("the least-skewed future marker must win: want project future-near, got: %s", firstLine)
 	}
 }
 
 // TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure: the second face of
 // the same stamp. When a session resolves to no project, readLifecycleFailure
-// takes the marker newestMarker ranks as recorded LAST — and a many-months-ahead
-// stamp always wins that ranking, shadowing a real failure from an hour ago that
-// is keyed under another project. The skewed marker must be recognised as
-// expired (and swept) so the genuinely recent failure is the one reported.
+// takes the marker newestMarker ranks first — and a stamp dated ahead ranks
+// below every stamp dated at or before now, so a many-months-ahead stamp cannot
+// shadow a real failure from an hour ago that is keyed under another project.
+// The genuinely recent failure is the one reported. The skewed file stays on
+// disk: it never wins the read while the real failure exists, and a lone future
+// marker past the skew is swept (TestSessionStart_FarFutureMarkerSelfCleans).
 func TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
@@ -673,8 +703,8 @@ func TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure(t *testing.T) {
 	if strings.Contains(firstLine, "for project skewed") {
 		t.Errorf("the skewed future marker must not be shown, got: %s", firstLine)
 	}
-	if _, err := os.Stat(futurePath); !os.IsNotExist(err) {
-		t.Errorf("the skewed future marker must be swept, stat err = %v", err)
+	if _, err := os.Stat(futurePath); err != nil {
+		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
 	}
 }
 

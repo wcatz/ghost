@@ -64,10 +64,11 @@ const (
 	// reaches an "older than" horizon, so without this bound it would alert
 	// at every session start, unchanged, until wall time caught up — so the
 	// self-clean expires it on this bound, on the same path as an old one,
-	// and newestMarker ranks its stamp at most "now" (min(at, now)) so its
-	// future date earns it no rank beyond the instant of the read. This is a
-	// stamp-plausibility bound and deliberately NOT the 30-day age horizon
-	// and not the cooldown's one-window rule; each bounds a different thing.
+	// and newestMarker ranks a stamp dated ahead of the read's now BELOW every
+	// stamp dated at or before it, so its future date cannot outrank a real
+	// failure. This is a stamp-plausibility bound and deliberately NOT the
+	// 30-day age horizon and not the cooldown's one-window rule; each bounds a
+	// different thing.
 	lifecycleMarkerClockSkew = 24 * time.Hour
 	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
 	// session-start removes before giving up on finding a current one: more
@@ -597,16 +598,36 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 	return nil
 }
 
-// newestMarker reads every path it can and returns the one recorded last,
-// ranking every stamp by min(at, now): a stamp dated ahead of this machine's
-// clock ranks as the instant of this read, never later, so its future date
-// earns it nothing. Two future markers therefore cannot order themselves by
-// how far ahead each is — being further ahead buys no rank, and a marker
-// beyond the tolerated skew is expired by the self-clean on the path that
-// reads it rather than shown.
+// ranksAbove reports whether the stamp at candidateAt wins newestMarker's read
+// over the stamp at incumbentAt, for a read taken at now.
+//
+// A stamp dated AFTER now ranks below every stamp dated at or before it: a
+// future date is not evidence of a later failure, so it must not outrank a real
+// one, whatever the gap. Among stamps at or before now the newest wins. Among
+// future stamps the earliest — the least skewed — wins, so being further ahead
+// buys no rank. A future stamp still wins when it is the only candidate.
+func ranksAbove(candidateAt, incumbentAt, now time.Time) bool {
+	candidateFuture := candidateAt.After(now)
+	incumbentFuture := incumbentAt.After(now)
+	switch {
+	case candidateFuture != incumbentFuture:
+		return !candidateFuture
+	case candidateFuture:
+		return candidateAt.Before(incumbentAt)
+	default:
+		return candidateAt.After(incumbentAt)
+	}
+}
+
+// newestMarker reads every path it can and returns the marker that ranks first:
+// a stamp dated after this read's now ranks BELOW every stamp dated at or
+// before it, so a future-dated marker never outranks a real failure recorded at
+// or before the read; among stamps at or before now the newest wins; among
+// future stamps the earliest — the least skewed — wins, so being further ahead
+// buys no rank. A future stamp is still returned when it is the only candidate.
 func newestMarker(patterns ...string) *lifecycleFailureMarker {
 	var newest *lifecycleFailureMarker
-	newestAt := time.Time{}
+	var newestAt time.Time
 	now := time.Now()
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
@@ -622,12 +643,8 @@ func newestMarker(patterns ...string) *lifecycleFailureMarker {
 			if err != nil {
 				continue
 			}
-			rank := at
-			if rank.After(now) {
-				rank = now
-			}
-			if newest == nil || rank.After(newestAt) {
-				newest, newestAt = m, rank
+			if newest == nil || ranksAbove(at, newestAt, now) {
+				newest, newestAt = m, at
 			}
 		}
 	}
@@ -720,12 +737,11 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// side. A marker dated ahead — a clock set forward when it was
 		// written, a VM resumed with a skewed clock, a marker copied in from
 		// another machine — has a NEGATIVE age and so would never satisfy an
-		// "older than" horizon: it would alert at every session start,
-		// unchanged, until wall time caught up, and its future date would
-		// win newestMarker's read against a genuinely recent failure. Within
-		// the 24h tolerance the skew is ordinary and the marker still
-		// alerts; beyond it the stamp is implausible and is swept by the
-		// removal below rather than left to linger.
+		// "older than" horizon: as the only candidate it would alert at every
+		// session start, unchanged, until wall time caught up. Within the 24h
+		// tolerance the skew is ordinary and the marker still alerts; beyond
+		// it the stamp is implausible and is swept by the removal below rather
+		// than left to linger.
 		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerClockSkew {
 			break
 		}
