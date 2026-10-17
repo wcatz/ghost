@@ -109,18 +109,51 @@ func worstCaseRows() []Candidate {
 	return rows
 }
 
+// lexicalWorstCaseCPUBound is the cost test's bar, in CPU time, and the
+// figures behind it are all measured rather than round numbers. Without race
+// instrumentation this laptop reads 23-44ms of CPU for the bucket; with it, as
+// CI runs the package, 151-168ms of CPU. The regression the test bounds — the
+// whole-note alignment that predates the changed-region trim and the 64-word
+// cap — reads 13.9s on the same machine, so the bar separates the two by an
+// order of magnitude in the direction that matters and still sits more than an
+// order of magnitude above the busiest honest sample: a runner several times
+// slower than this laptop clears the bar and still fails the regression.
+const lexicalWorstCaseCPUBound = 2 * time.Second
+
 // TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes: the pair rule runs
 // on the session-start path, so its cost on the worst bucket it can be handed
 // is bounded, and the pairs in it are still found.
+//
+// The figure is the CHEAPEST CPU time over several rounds, not one wall-clock
+// sample: the single-sample wall clock flapped on a loaded shared runner
+// (#1458), one sample of a call that costs tens of milliseconds reading 257ms
+// against a 250ms bar. Wall time counts the time this process was not running,
+// so a wall bar close enough to the honest cost to catch a small regression
+// cannot also hold when the rest of the runner is busy, and one far above it
+// catches nothing; CPU time counts the work and only the work, so it is the
+// same on a busy runner as on an idle one, and the quadratic alignment this
+// bounds IS work. The minimum over rounds, not a mean, because everything that
+// can go wrong around the measurement — a collection charged to the window, a
+// page fault, a lost timeslice on the non-unix fallback clock — can only make
+// the call look more expensive, and the quadratic cost is in every round,
+// because it is the work.
 func TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes(t *testing.T) {
 	rows := worstCaseRows()
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
-	start := time.Now()
-	repl := lexicalReplacements(rows, nil, now)
-	took := time.Since(start)
-	t.Logf("45 x 8KB notes: %s", took)
-	if took > 250*time.Millisecond {
-		t.Errorf("lexicalReplacements took %s on 45 near-identical 8KB notes, want well under 250ms", took)
+	const rounds = 5
+	lexicalReplacements(rows, nil, now) // one warm-up call, outside every measurement
+	best := time.Duration(1<<63 - 1)
+	var repl map[string][]string
+	for i := 0; i < rounds; i++ {
+		start := cpuClock()
+		repl = lexicalReplacements(rows, nil, now)
+		if took := cpuClock() - start; took < best {
+			best = took
+		}
+	}
+	t.Logf("45 x 8KB notes: %s of CPU (cheapest of %d rounds)", best, rounds)
+	if best > lexicalWorstCaseCPUBound {
+		t.Errorf("lexicalReplacements took %s of CPU on 45 near-identical 8KB notes, want well under %s", best, lexicalWorstCaseCPUBound)
 	}
 	if got := len(repl["r00"]); got != 44 {
 		t.Errorf("r00 names %d replacements, want 44: every later version replaces it", got)
