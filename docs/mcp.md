@@ -56,7 +56,7 @@ The `scope` argument of `ghost_memory_save` is an object of string values naming
 ```text
 **History:** 8 version rows in the last 24h, 6 restatements (75%) — deepest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
   ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote, plus the newest version of any memory
-  ⚠ memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
+  ⚠ memory "1F2E3D4C5B6A7988" is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
 
 **The restatement share is pressure, not disposability, and the sentence says so.**
@@ -78,12 +78,17 @@ anything, which is what the store-cap `⚠` is for.
 totals, and usually not the memory a `⚠` line is about. The per-memory cap is
 reached per memory, so that finding names one memory by **full id** and quotes
 **that memory's own** two counts — how many versions it holds and how many it wrote
-in the window — which is what the countdown closes against. A memory can be *at* its
-cap while still being written, because pruning holds it there, so that is a separate
-sentence rather than a countdown of zero days:
+in the window — which is what the countdown closes against. The id goes through the
+shared `memory.RefusalArg` renderer: an ordinary id is named whole and quoted, which
+is the operand `ghost history <id>` takes, while a token-shaped or over-256-byte
+stored id — legal because `ghost import` writes an artifact's id verbatim — is
+withheld behind a placeholder naming the field and the format rather than written
+into an agent's context. A memory can be *at* its cap while still being written,
+because pruning holds it there, so that is a separate sentence rather than a
+countdown of zero days:
 
 ```text
-  ⚠ memory 1F2E3D4C5B6A7988 is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
+  ⚠ memory "1F2E3D4C5B6A7988" is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
 ```
 
 A store that opened cleanly and then could not be read prints the error in place of
