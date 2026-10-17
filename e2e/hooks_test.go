@@ -621,6 +621,22 @@ func TestHookFailOpen(t *testing.T) {
 			t.Fatalf("an unknown event produced stdout:\n%s", badEvent.stdout)
 		}
 		mustMatch(t, "the unknown-event fail-open line", badEvent.stderr, "(?i)fail-open|unknown event")
+
+		// A hook line that lost its event word — no event, no --source, no
+		// arguments at all — must not exit silently: an empty hook log is how
+		// a broken wire goes unnoticed. Same contract as the rest.
+		bare := s.runStdin(payload, "hook")
+		if bare.code != 0 {
+			t.Fatalf("a bare hook exited %d, want 0 — the host must be allowed to proceed", bare.code)
+		}
+		if strings.TrimSpace(bare.stdout) != "" {
+			t.Fatalf("a bare hook produced stdout:\n%s", bare.stdout)
+		}
+		bareLines := nonEmptyLines(bare.stderr)
+		if len(bareLines) != 1 {
+			t.Fatalf("a bare hook produced %d diagnostic lines, want exactly 1:\n%s", len(bareLines), bare.stderr)
+		}
+		mustMatch(t, "the bare-hook fail-open line", bareLines[0], "(?i)fail-open|--source")
 	})
 
 	t.Run("a missing transcript is fail-open, not a crash", func(t *testing.T) {

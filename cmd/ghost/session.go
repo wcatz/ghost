@@ -267,18 +267,24 @@ diagnostic line and exit status 0 — re-run ghost mcp init to repair wiring.
 // event — including unrecognized ones — goes through RunHostEvent so
 // validation and its fail-open diagnostics live in exactly one place.
 func runHook() {
-	if len(os.Args) < 3 {
-		os.Exit(0)
-	}
-	event := os.Args[2]
+	// `ghost hook` with no event word used to exit silently here, before any
+	// validation ran, so a hook line that lost its event word left no
+	// diagnostic in the host's hook log. Fall through to the same missing-source
+	// path every other sourceless invocation takes: one fail-open line on
+	// stderr, exit 0. `ghost hook -h`/`--help` is answered earlier by
+	// handleHelp and never reaches this point.
+	event := ""
 	var source string
-	for i := 3; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--source" && i+1 < len(os.Args):
-			source = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--source="):
-			source = strings.TrimPrefix(os.Args[i], "--source=")
+	if len(os.Args) >= 3 {
+		event = os.Args[2]
+		for i := 3; i < len(os.Args); i++ {
+			switch {
+			case os.Args[i] == "--source" && i+1 < len(os.Args):
+				source = os.Args[i+1]
+				i++
+			case strings.HasPrefix(os.Args[i], "--source="):
+				source = strings.TrimPrefix(os.Args[i], "--source=")
+			}
 		}
 	}
 	if source == "" {
