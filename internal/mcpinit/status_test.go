@@ -1532,6 +1532,80 @@ func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
 	}
 }
 
+// TestCheckStoreHealth_StatsReadFailureIsReported pins that a store whose
+// embedding or link tables cannot be counted is reported as a `!` line and
+// does not fail the run. Both stats reads run only when embedding is enabled,
+// and a failure there used to fall through the `err == nil` guard with no
+// output at all, so a run that could not determine embedding or link coverage
+// printed every check it did make as passing with no sign of the gap. The
+// reporting is print-only — like reportHistoryGrowth's own unreadable read —
+// because a store that opened cleanly and then cannot be read is not wiring
+// `ghost mcp init` repairs, so the run stays healthy and the footer is never
+// printed.
+func TestCheckStoreHealth_StatsReadFailureIsReported(t *testing.T) {
+	ollama := ollamaStub("nomic-embed-text:v1.5")
+	defer ollama.Close()
+
+	statusEnv(t)
+	writeGhostConfigFile(t, fmt.Sprintf(`embedding:
+  ollama_url: %s
+  model: nomic-embed-text:v1.5
+  dimensions: 768
+  enabled: true
+`, ollama.URL))
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", ollama.URL)
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
+
+	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("open fresh db: %v", err)
+	}
+	for _, table := range []string{"memory_embeddings", "memory_links", "link_scans"} {
+		if _, err := db.Exec("DROP TABLE " + table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fresh db: %v", err)
+	}
+
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
+	writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+
+	var out bytes.Buffer
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
+		t.Fatalf("StatusOpencode: %v", err)
+	}
+	if !healthy {
+		t.Errorf("StatusOpencode: healthy = false, want true when only the stats reads fail; they are reported, not failed:\n%s", out.String())
+	}
+
+	output := out.String()
+	// Each line must carry the store's OWN error text, so a bare
+	// "! embeddings: unavailable" that dropped the error would fail here: the
+	// table name is the driver's message for the store this test broke.
+	for _, want := range []string{
+		"! embeddings:",
+		"no such table: memory_embeddings",
+		"! memory links:",
+		"no such table: memory_links",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "fix issues") {
+		t.Errorf("a print-only stats failure must not print the init footer, got:\n%s", output)
+	}
+}
+
 // TestCheckEmbeddingStats pins the embedding-stats classification: an empty
 // store passes with "(store empty)", a populated store passes only when some
 // memories are embedded, and a populated store with zero embeddings fails. It

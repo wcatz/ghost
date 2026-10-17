@@ -485,7 +485,13 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale
 // embedding-coverage and link lines on exactly the run where a user needs them:
 // a broken config silently disabling vector search is the thing this command
 // exists to explain. On the fallback these checks still run and still
-// report the truth about the store in front of them.
+// report the truth about the store in front of them. A stats read that fails
+// here — EmbeddingStats or LinkStats — is printed as a `!` line, the way
+// reportHistoryGrowth prints its own unreadable read: the store opened cleanly
+// and its schema matched, so a read that then fails is not something
+// `ghost mcp init` repairs, and failing the run would print a footer pointing
+// at the wrong repair. The line is still printed rather than dropped, because a
+// check that cannot run must not print nothing at all.
 func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memory.Store {
 	// 8. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive. Ollama checks run regardless of
@@ -568,12 +574,28 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// which is exactly the state an operator runs `ghost mcp status` to catch.
 	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 	if cfg.Embedding.Enabled {
+		// Both stats reads are checks that cannot run when they fail, and a
+		// check that cannot run must not print nothing at all: an `err == nil`
+		// guard with no other branch would drop the coverage line, and the
+		// coverage line's absence reads as a healthy store. They are PRINTED as
+		// `!` lines rather than failed, exactly as reportHistoryGrowth prints
+		// its own unreadable read — the store opened cleanly and its schema
+		// matched, so this is not wiring `ghost mcp init` repairs, and failing
+		// the run would print a footer pointing at the wrong repair. The error
+		// names the store's own reason (a missing table, an I/O failure), so it
+		// is reported verbatim.
 		ctx := context.Background()
-		if embedded, stale, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
+		embedded, stale, total, sErr := store.EmbeddingStats(ctx)
+		if sErr == nil {
 			checkEmbeddingStats(check, embedded, stale, total)
+		} else {
+			_, _ = fmt.Fprintf(w, "  ! embeddings: %v\n", sErr)
 		}
-		if links, scans, lErr := store.LinkStats(ctx); lErr == nil {
+		links, scans, lErr := store.LinkStats(ctx)
+		if lErr == nil {
 			_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
+		} else {
+			_, _ = fmt.Fprintf(w, "  ! memory links: %v\n", lErr)
 		}
 	}
 	reportHistoryGrowth(w, store)
