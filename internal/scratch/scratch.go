@@ -193,8 +193,11 @@ func (d *Dir) Release() {
 // with a readable ownerFile marker, or — for a markerless entry, including one
 // whose marker is being written right now — one whose name has exactly the
 // shape Open creates. A markerless entry is removed only once its mtime is
-// older than maxAge. Anything else, such as a foreign file or directory that
-// happens to live under the root, is left alone: $GHOST_SCRATCH_DIR may point
+// older than maxAge. The one markerless REGULAR file is a follow-up id file
+// (ReassessTargetsName), which is removed once older than idFileStaleAge
+// instead of maxAge, for the reason those two ages differ: see the constant.
+// Anything else, such as a foreign file or directory that happens to live
+// under the root, is left alone: $GHOST_SCRATCH_DIR may point
 // at a shared directory, and Ghost must never delete what it did not create.
 // Symlinks are left alone entirely: the root is Ghost-owned, but a link can
 // point anywhere, and removing one must never follow it.
@@ -247,6 +250,22 @@ func Reap(maxAge time.Duration) (int, error) {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			continue // never follow or remove links
+		}
+		// The follow-up id file: the one markerless regular file eligible for
+		// collection, recognised by ReassessTargetsName's exact shape and
+		// bounded by its own window rather than maxAge, because it is an
+		// operator's pending repair that has to stay readable for days rather
+		// than abandoned scratch. IsRegular is checked here rather than after
+		// Lstat already said this is not a link: a DIRECTORY wearing the name
+		// is not a file Ghost wrote and must never be removed, and the
+		// os.Remove below removes one file and never descends.
+		if info.Mode().IsRegular() && isReassessIDFile(entry.Name()) {
+			if now.Sub(info.ModTime()) > idFileStaleAge {
+				if err := os.Remove(path); err == nil {
+					removed++
+				}
+			}
+			continue
 		}
 		stale := now.Sub(info.ModTime()) > maxAge
 		pid, start, ok := ownerMarker(path)

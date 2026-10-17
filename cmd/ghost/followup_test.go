@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
@@ -563,5 +565,62 @@ func TestWriteReassessTargetsFailsWithoutAnId(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	if _, err := writeReassessTargets("myproj", nil, "ghost supersede --reassess --apply"); err == nil {
 		t.Fatal("writeReassessTargets with no ids must not write a file")
+	}
+}
+
+// TestTheFollowupIDFileIsReclaimedAfterItsWindow: the id file the follow-up
+// writes under the scratch root is the operator's pending repair — read days
+// later by whoever runs it — so nothing may take it while that is still a live
+// possibility. But no pass ever removed it either: Reap's markerless rule
+// collects per-invocation DIRECTORIES only, and this is a regular file, so
+// every --apply run added one more entry nothing could ever reclaim, each
+// counting against the scratch budget forever. It is now collected once its
+// own window passes, and only then.
+func TestTheFollowupIDFileIsReclaimedAfterItsWindow(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	ids := []string{"aaaaaaaa1111111111111111111111"}
+
+	pending, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
+	if err != nil {
+		t.Fatalf("writeReassessTargets: %v", err)
+	}
+	fresh, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
+	if err != nil {
+		t.Fatalf("second writeReassessTargets: %v", err)
+	}
+	if pending == fresh {
+		t.Fatalf("the two runs wrote the same path %q", pending)
+	}
+	// Age the first file past the point an operator still needs it. The second
+	// is left at its write time: that is the list still waiting to be run.
+	past := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(pending, past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	// Reap(0) gives the caller no age bound of its own, so whatever collects the
+	// file has to be the file's OWN window — the same call the budget check's
+	// repro uses.
+	removed, err := scratch.Reap(0)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("Reap(0) removed %d entries, want 1 — the id file past its window is reclaimable", removed)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Errorf("the id file past its window survived Reap (stat err %v)", err)
+	}
+
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("an id file inside its window must survive the reaper: %v", err)
+	}
+	got, err := readRefSelectors("--only-file", fresh)
+	if err != nil {
+		t.Fatalf("the surviving file must still be readable as --only-file: %v", err)
+	}
+	if len(got) != 1 || got[0] != ids[0] {
+		t.Errorf("the surviving file reads as %v, want %v", got, ids)
 	}
 }

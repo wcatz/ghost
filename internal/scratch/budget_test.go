@@ -265,6 +265,58 @@ func TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning(t *testing.T) {
 	}
 }
 
+// TestEnforceBudget_ReapsAStaleReassessIDFile: the issue's own repro through
+// the budget check — a follow-up id file, 90 days old, over a one-byte budget.
+// EnforceBudget reaps through Reap(staleAge), so the id file's OWN window is
+// what has to reach it, and the fresh list must survive even while the root is
+// over budget: the budget is why the file is collected eventually, not a
+// reason to take a repair nobody has run yet.
+func TestEnforceBudget_ReapsAStaleReassessIDFile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	body := []byte("# one id\naaaaaaaa1111111111111111111111\n")
+	stale := filepath.Join(root, "supersede-reassess-proj-20260101T000000Z-123-0123456789abcdef.ids")
+	fresh := filepath.Join(root, "supersede-reassess-proj-20260102T000000Z-124-f00dbeefcafe1234.ids")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("check did not fire over a one-byte budget: %+v", res)
+	}
+	if res.ReapedCount != 1 {
+		t.Errorf("ReapedCount = %d, want 1 — the stale id file is reclaimable through the budget path", res.ReapedCount)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the stale id file survived the budget reap (stat err %v)", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a fresh id file must survive even an over-budget reap: %v", err)
+	}
+	if !res.OverBudget {
+		t.Errorf("OverBudget = false, want true (the surviving file still exceeds one byte)")
+	}
+	for _, want := range []string{"over budget", root, "reaped=1"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("warning missing %q; slog output:\n%s", want, logs.String())
+		}
+	}
+}
+
 // TestRecordBudgetRun_ReapFailureNotRecordedAsWithinBudget: EnforceBudget warns
 // and proceeds when Reap fails — correctly, hygiene must never block a spawn.
 // But recordBudgetRun must not then write "within budget after reaping stale
