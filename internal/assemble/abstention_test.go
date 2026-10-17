@@ -647,6 +647,8 @@ func TestTheResponseFitPassRecomputesTheOutcome(t *testing.T) {
 
 // TestTheResponseFitPassReportsAllOverBudget: a response that fits no row at
 // all is not an absence claim, it is a budget that could not hold the answer.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestTheResponseFitPassReportsAllOverBudget(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
@@ -661,16 +663,13 @@ func TestTheResponseFitPassReportsAllOverBudget(t *testing.T) {
 			full.Outcome, len(full.Items))
 	}
 
-	capAt, boundary := roomiestEmptyCap(t, set, req, full)
+	_, boundary := roomiestEmptyCap(t, set, req, full)
 	if len(boundary.Items) != 0 {
 		t.Fatalf("no cap in (0, %d) emptied the block: the pass cannot report all_over_budget, "+
 			"so a response that fits no row would be an error instead", full.Bytes)
 	}
 	if boundary.Outcome != OutcomeEmpty || boundary.Reason != reasonAllOverBudget {
 		t.Errorf("outcome/reason = %q/%q, want empty/all_over_budget", boundary.Outcome, boundary.Reason)
-	}
-	if boundary.Bytes > capAt {
-		t.Errorf("the empty envelope is %d bytes, want at most the cap it was fitted to (%d)", boundary.Bytes, capAt)
 	}
 	if !strings.Contains(boundary.Response, "response budget") {
 		t.Errorf("response = %q, want the sentence that says the budget is what removed the rows", boundary.Response)
@@ -681,6 +680,8 @@ func TestTheResponseFitPassReportsAllOverBudget(t *testing.T) {
 // server-side — no tool argument reaches it — so advice to "raise the limit"
 // sends a caller after a knob it does not have. The number, and the action the
 // caller does have, are what the sentence has to carry.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestTheBudgetCopyNamesTheCapRatherThanAnUnreachableLimit(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
@@ -710,6 +711,8 @@ func TestTheBudgetCopyNamesTheCapRatherThanAnUnreachableLimit(t *testing.T) {
 // is the sentence/note contradiction the other four branches do not have — and
 // unlike them it needs no large cap to reach, only a caller that sets
 // `Budget.MaxBytes` itself.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestTheResponseFitSentenceNamesTheCapAndTheOtherStage(t *testing.T) {
 	expired := "2020-01-01 00:00:00"
 	rows := []memory.Candidate{
@@ -748,15 +751,19 @@ func TestTheResponseFitSentenceNamesTheCapAndTheOtherStage(t *testing.T) {
 // tight enough to reach it, an answer would read "The note below breaks the
 // removals down per stage." with nothing below, which is the checkability the
 // sentence exists to promise, gone. The pointer has to leave with its note.
+//
+// The block is emptied by VALIDITY, not by the fit: a query answer the fit
+// started with rows in keeps its first row (#1483), so the notes it cuts are
+// only ever an answer that was empty before the fit ran.
 func TestTheStagePointerDisappearsWithTheNoteItPointsAt(t *testing.T) {
 	expired := "2020-01-01 00:00:00"
-	rows := []memory.Candidate{
-		ranked("A1", 0, strings.Repeat("first row content ", 120)),
-		ranked("A2", 1, strings.Repeat("second row content ", 120)),
+	var rows []memory.Candidate
+	for i, id := range []string{"A1", "A2", "A3"} {
+		r := ranked(id, i, "an expired row")
+		r.ValidUntil = &expired
+		rows = append(rows, r)
 	}
-	gone := ranked("A3", 0, "an expired row")
-	gone.ValidUntil = &expired
-	set := ftsOnlySet(append(rows, gone)...)
+	set := ftsOnlySet(rows...)
 	// A SECOND note, and that is the point of the fixture. The tail cut takes from
 	// the end, so with only the breakdown in the list one cut removes the note the
 	// pointer names and the two states are indistinguishable. The retrieval-failure
@@ -769,31 +776,25 @@ func TestTheStagePointerDisappearsWithTheNoteItPointsAt(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
 	full := run(t, &fakeRetriever{set: set}, req)
+	if full.Reason != reasonAllInvalid {
+		t.Fatalf("precondition: reason = %q, want all_invalid", full.Reason)
+	}
+	if !hasNote(full.Notes, "validity 3") || len(full.Notes) < 2 {
+		t.Fatalf("precondition: the uncut answer does not carry the breakdown and a second note, so no "+
+			"cap in this fixture can test losing one without the other: %v", full.Notes)
+	}
 
-	// The tightest empty cap and the note-bearing envelope move together — the
-	// sentence quotes the cap, so a cap one byte smaller renders a byte shorter —
-	// which makes any single cap a boundary to be guessed at. The invariant is
-	// swept instead: across the band the pointer is present exactly when the
-	// breakdown is, and the sweep has to reach all three states (both notes, only
-	// the breakdown, no notes) or it proves nothing.
-	_, roomiest := roomiestEmptyCap(t, set, req, full)
-	if !hasNote(roomiest.Notes, "validity 1") {
-		t.Fatalf("precondition: the roomiest empty cap does not keep the breakdown, so no cap in this "+
-			"fixture can test losing it: %v", roomiest.Notes)
-	}
-	if len(roomiest.Notes) < 2 {
-		t.Fatalf("precondition: the roomiest empty cap carries %d note(s), so a one-note cut cannot "+
-			"leave the breakdown behind and the mid-band state is unreachable: %v",
-			len(roomiest.Notes), roomiest.Notes)
-	}
+	// The cap is swept rather than guessed at, and the sweep has to reach all
+	// three states (both notes, only the breakdown, no notes) or it proves
+	// nothing. Across the band the pointer is present exactly when the breakdown is.
 	both, breakdownOnly, none := 0, 0, 0
-	for cap := roomiest.Bytes; cap > roomiest.Bytes/2; cap-- {
+	for cap := full.Bytes; cap > full.Bytes/2; cap-- {
 		req.Budget.MaxBytes = cap
 		got, err := Run(context.Background(), &fakeRetriever{set: set}, req)
 		if err != nil || len(got.Items) != 0 {
 			continue
 		}
-		switch breakdown := hasNote(got.Notes, "validity 1"); {
+		switch breakdown := hasNote(got.Notes, "validity 3"); {
 		case breakdown && len(got.Notes) > 1:
 			both++
 		case breakdown:
@@ -803,12 +804,12 @@ func TestTheStagePointerDisappearsWithTheNoteItPointsAt(t *testing.T) {
 		}
 		// The exact pairing, stated on the note the pointer names rather than on
 		// the note COUNT: a second note surviving is not a reason to drop it.
-		if strings.Contains(got.Abstention, perStageNote) != hasNote(got.Notes, "validity 1") {
+		if strings.Contains(got.Abstention, perStageNote) != hasNote(got.Notes, "validity 3") {
 			t.Errorf("cap %d: the sentence's pointer (%t) and the breakdown it names (%t) disagree: %q",
-				cap, strings.Contains(got.Abstention, perStageNote), hasNote(got.Notes, "validity 1"),
+				cap, strings.Contains(got.Abstention, perStageNote), hasNote(got.Notes, "validity 3"),
 				got.Abstention)
 		}
-		if !strings.Contains(got.Abstention, "response budget") {
+		if !strings.Contains(got.Abstention, "out of date") {
 			t.Errorf("cap %d: the sentence lost its cause along with the pointer: %q", cap, got.Abstention)
 		}
 	}
@@ -838,8 +839,16 @@ func TestTheStagePointerDisappearsWithTheNoteItPointsAt(t *testing.T) {
 // the pass drops the very note such a test is checking for. A caller that needs
 // the tightest cap does not need this helper — it gets whichever end fits, and
 // the verdict is the same either way.
+//
+// The sweep runs under rowsOnlyMeasure. A query answer measured against the
+// search envelope never empties any more: its first row is kept whole however
+// far over the cap it is (#1483). A caller's own Budget.Measure still cuts down
+// to none (FramingCeiling), so that is the path an emptied block is reached on.
 func roomiestEmptyCap(t *testing.T, set *memory.CandidateSet, req Request, full Result) (int, Result) {
 	t.Helper()
+	if req.Budget.Measure == nil {
+		req.Budget.Measure = rowsOnlyMeasure
+	}
 	for cap := full.Bytes; cap > 0; cap-- {
 		req.Budget.MaxBytes = cap
 		got, err := Run(context.Background(), &fakeRetriever{set: set}, req)
@@ -849,6 +858,18 @@ func roomiestEmptyCap(t *testing.T, set *memory.CandidateSet, req Request, full 
 	}
 	t.Fatalf("no cap in (0, %d) emptied the block, so the pass cannot report all_over_budget", full.Bytes)
 	return 0, Result{}
+}
+
+// rowsOnlyMeasure is a Budget.Measure that counts the rendered rows alone, the
+// shape a session-start block with no frame measures. It is what the tests of an
+// emptied block run under, because only a Measure caller's fit can still cut the
+// last row.
+func rowsOnlyMeasure(items []Item, _ *Trace) int {
+	n := 0
+	for _, it := range items {
+		n += len(it.Line()) + 1
+	}
+	return n
 }
 
 // TestAResponseThatCannotFitIsAnError: the empty envelope still carries the
@@ -872,6 +893,8 @@ func TestAResponseThatCannotFitIsAnError(t *testing.T) {
 // shrinks the admitted items but not the surviving rows, the breakdown's own gate
 // stays false and the note silently disappears — on exactly the case this
 // post-pass introduces.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestAFitPassEmptyStillExplainsWhatRemovedTheRows(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
@@ -1010,6 +1033,8 @@ func TestDiagnosticNotesDropBeforeTheMachineLine(t *testing.T) {
 // TestTheResponseFitEmptyNamesTheByteCap: the response-fit producer of
 // `all_over_budget`. This one really was the response cap, so the sentence quotes
 // it and says the one thing the caller can actually do.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestTheResponseFitEmptyNamesTheByteCap(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 5
@@ -1681,6 +1706,8 @@ func TestTheMachineLineDoesNotPrintAThresholdItNeverApplied(t *testing.T) {
 // a block that ended empty printed `floor_fts_rank=3` beside a verdict that
 // compared no row — the exact hole the field was added to close, reopened by the
 // pass that makes the empty case reachable.
+// It runs a query request under a Budget.Measure, a combination no production
+// caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestAFitPassThatEmptiesTheBlockClearsTheArmsState(t *testing.T) {
 	expired := "2020-01-01 00:00:00"
 	gone := ranked("A2", 0, "an expired row")

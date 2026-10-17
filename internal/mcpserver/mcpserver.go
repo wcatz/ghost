@@ -681,12 +681,13 @@ const tagMaxCount = 10
 // validateTags bounds a tag list and refuses the characters that could end the
 // line it is printed on.
 //
-// It returns an error for two different refusals and trims exactly one thing. A
+// It returns an error for three different refusals and trims exactly one thing. A
 // list longer than tagMaxCount is refused, because the count is a number the
 // caller can act on and a silent cut leaves a label unaccounted for behind a
 // success sentence; a tag longer than tagMaxLen is TRIMMED, silently and
 // harmlessly, because a shortened label is still the label the caller meant; and
-// a control character, a backtick or a `«»` is a refusal. A tag list is
+// a control character, a backtick or a `«»` is a refusal, and so is a tag whose
+// uncut text is token-shaped, checked before the cut could hide it. A tag list is
 // printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
 // the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
 // pairs into a markdown code span that swallows the rest of the row, and a «
@@ -752,6 +753,16 @@ func validateTags(tags []string) ([]string, error) {
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
 				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
+		}
+		// The token check runs on the tag as the caller sent it, not on the cut:
+		// the store's own check sees only what this function returns, so a token
+		// placed past byte tagMaxLen would be cut out of its sight and the save
+		// would answer as a success. It runs after the shape check so a tag that
+		// fails both is still refused by shape, through refusedTag, which already
+		// withholds a token-shaped tag. The field is named the way the store
+		// names it, by position.
+		if err := memory.RejectSecret(fmt.Sprintf("tags[%d]", i), orig); err != nil {
+			return nil, err
 		}
 	}
 	return tags, nil
@@ -1108,7 +1119,7 @@ When the user changes or reverses a decision already recorded, call ghost_decisi
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
 - answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
 - weak — the memories are listed, but NONE cleared the relevance floor. They are leads, not answers: verify against the source before acting on one, and say the result is weak if you rely on it anyway.
-- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, nothing_cleared_the_bar means the best vector match was below the configured no-answer bar so the rows were withheld as a judgement (the sentence states the score and the bar; it is not an absence claim, and the bar is lowered or set to 0 to see them), and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
+- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, nothing_cleared_the_bar means the best vector match was below the configured no-answer bar so the rows were withheld as a judgement (the sentence states the score and the bar; it is not an absence claim, and the bar is lowered or set to 0 to see them), and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty. Size never empties a ghost_memory_search answer: a single row larger than the response budget is returned whole, with a notice saying so.
 - abstain_cosine is the configured cosine floor, and its three states are three different facts: off means none is configured, not_applied means one IS configured and no cosine could be compared because the vector leg never ran OR ran and failed (reason= and legs= say which), and a number means the arm was configured AND the vector leg ran, so a cosine was available to compare — it does not mean any particular row was judged against it. not_applied is how a floor you set tells you it did nothing.
 - admitted is how many rows the answer carries. It is lower than candidates whenever something was cut, and after a byte-cap trim it is the only place that shows: a too-large answer is shortened, not refused. legs names each retrieval leg as ok, failed, not_run (asked for, never executed) or absent — and absent means the leg does not APPLY to this request rather than that nobody asked for it, which is what an as_of read reports for the vector leg.
 - legs=vector:not_run means the vector leg did not execute — either no embedder is configured or the query could not be embedded; legs=vector:failed means it ran and broke. Either way the answer is narrower than a full hybrid search, so treat a surprising miss as worth retrying rather than as proof the memory is gone. A search with NO surviving rows and a failed leg comes back as a tool error instead of a verdict — so if you got a line, at least one leg answered.

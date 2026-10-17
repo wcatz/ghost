@@ -1,6 +1,7 @@
 package assemble
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -68,32 +69,119 @@ func withCutNotice(base, cut int) int {
 	return cap
 }
 
-// TestAnEmptiedQueryAnswerCarriesNoCutNotice is the other half of the contract:
-// when the cap cuts every row there is nothing left for a notice to qualify, and
-// the abstention sentence already names the budget and the action. A notice over
-// no rows would be a sentence about rows the reader cannot see.
-func TestAnEmptiedQueryAnswerCarriesNoCutNotice(t *testing.T) {
+// TestAQueryAnswerKeepsItsOnlyRowWholeOverTheBudget is #1483's regression. The
+// one row is larger than the cap on its own, and the pass used to drop it and
+// answer empty/all_over_budget: a memory at the store's content cap whose line
+// breaks fold to `⏎` renders past the search budget, so a legal memory could not
+// be returned by search at all. The first row is never cut, which is the rule
+// the listing tools already apply: it is shown whole, over the cap, with a
+// notice saying why, and the notice names no advice because no argument makes
+// one row smaller. This replaces the test that pinned the emptied answer.
+func TestAQueryAnswerKeepsItsOnlyRowWholeOverTheBudget(t *testing.T) {
+	content := "zebra" + strings.Repeat("\nx", 300)
+	for _, limit := range []int{1, 2} {
+		req := baseRequest()
+		req.Budget.MaxItems = limit
+		req.Budget.MaxBytes = 600
+		rows := []memory.Candidate{candidate("A1", "proj", "fact", content, 0.9)}
+
+		res := run(t, &fakeRetriever{set: ftsOnlySet(rows...)}, req)
+		if len(res.Items) != 1 || res.Items[0].ID != "A1" {
+			t.Fatalf("limit %d: items = %v, want the only row kept", limit, itemIDs(res.Items))
+		}
+		if res.Outcome == OutcomeEmpty || res.Reason == reasonAllOverBudget {
+			t.Errorf("limit %d: outcome/reason = %q/%q, want the row's own verdict, not an abstention",
+				limit, res.Outcome, res.Reason)
+		}
+		if !strings.Contains(res.Response, Data(content)) {
+			t.Errorf("limit %d: the row is not in the answer whole:\n%s", limit, res.Response)
+		}
+		want := "(The first row alone is larger than the 600-byte response budget, so it is shown in full " +
+			"rather than dropped; no search argument makes one row smaller.)"
+		if !strings.Contains(res.Response, want) {
+			t.Errorf("limit %d: the answer does not carry the first-row notice %q:\n%s", limit, want, res.Response)
+		}
+		if strings.Contains(res.Response, searchFitAdvice) {
+			t.Errorf("limit %d: the notice advises fewer results, which cannot shrink one row:\n%s",
+				limit, res.Response)
+		}
+		if res.Bytes <= req.Budget.MaxBytes {
+			t.Fatalf("limit %d: the answer is %d bytes, inside the %d-byte cap: the fixture never put "+
+				"the row over it", limit, res.Bytes, req.Budget.MaxBytes)
+		}
+		if strings.Contains(res.Response, "[ghost:outcome=empty") {
+			t.Errorf("limit %d: the machine line reports an empty answer:\n%s", limit, res.Response)
+		}
+	}
+}
+
+// TestAQueryAnswerCutsLowerRowsBeforeKeepingTheFirstOverBudget is the control for
+// the rule above: a lower-ranked row is still cut while more than one row is
+// left, and only the LAST row is kept whole. Two rows each larger than the cap
+// come back as the first one, with the notice counting the one that went.
+func TestAQueryAnswerCutsLowerRowsBeforeKeepingTheFirstOverBudget(t *testing.T) {
 	req := baseRequest()
 	req.Budget.MaxItems = 2
-	// The one row is large enough that its render cannot fit, while the empty
-	// envelope the pass falls back to can: the answer is EMPTIED by the cap
-	// rather than returned as the impossible-budget error.
 	req.Budget.MaxBytes = 600
 	rows := []memory.Candidate{
-		candidate("A1", "proj", "fact", strings.Repeat("a", 1000), 0.9),
+		candidate("KEEP", "proj", "fact", strings.Repeat("first ", 200), 0.9),
+		candidate("CUT", "proj", "fact", strings.Repeat("second ", 200), 0.8),
 	}
 
 	res := run(t, &fakeRetriever{set: ftsOnlySet(rows...)}, req)
-	if len(res.Items) != 0 {
-		t.Fatalf("the fixture did not empty: items = %v — the case under test never happened", itemIDs(res.Items))
+	if !eq(itemIDs(res.Items), []string{"KEEP"}) {
+		t.Fatalf("items = %v, want the lower row cut and the first kept", itemIDs(res.Items))
 	}
-	if res.Outcome != OutcomeEmpty || res.Reason != reasonAllOverBudget {
-		t.Fatalf("outcome/reason = %q/%q, want empty/all_over_budget", res.Outcome, res.Reason)
+	want := "(1 row was cut from the end of this answer, and the first row alone is larger than the 600-byte " +
+		"response budget, so it is shown in full rather than dropped; no search argument makes one row smaller.)"
+	if !strings.Contains(res.Response, want) {
+		t.Errorf("the answer does not carry %q:\n%s", want, res.Response)
 	}
-	if !strings.Contains(res.Response, "cut by the response budget") {
-		t.Errorf("the emptied answer does not name the cap that emptied it:\n%s", res.Response)
+	if !eq(stageTrace(t, res, "response_fit").DroppedIDs, []string{"CUT"}) {
+		t.Errorf("the trace does not record the lower row as cut: %+v", stageTrace(t, res, "response_fit"))
 	}
-	if strings.Contains(res.Response, "cut from the end of this answer") {
-		t.Errorf("an emptied answer carries the rows-cut notice, which describes rows it does not hold:\n%s", res.Response)
+}
+
+// TestAQueryAnswerWhoseFramingIsTheExcessDoesNotClaimTheRowIsTooLarge: the row
+// fits the cap on its own and the framing around it — the verdict line, the
+// qualifiers — is what pushes the answer over. The row is still kept whole,
+// because the first row is never cut, but the notice may not say the row alone
+// is larger than the budget: that is false, and a caller reading it would
+// believe the stored memory is what cannot fit. Both the one-row answer and the
+// one a lower row was cut from are checked.
+func TestAQueryAnswerWhoseFramingIsTheExcessDoesNotClaimTheRowIsTooLarge(t *testing.T) {
+	keep := candidate("KEEP", "proj", "fact", strings.Repeat("a", 500), 0.9)
+	for _, tc := range []struct {
+		name string
+		rows []memory.Candidate
+		lead string
+	}{
+		{"one row", []memory.Candidate{keep}, "(The first row fits the "},
+		{"a lower row cut", []memory.Candidate{keep, candidate("CUT", "proj", "fact", strings.Repeat("b", 500), 0.8)},
+			"(1 row was cut from the end of this answer, and the first row fits the "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseRequest()
+			req.Budget.MaxItems = 2
+			alone := run(t, &fakeRetriever{set: ftsOnlySet(keep)}, req)
+			req.Budget.MaxBytes = alone.Bytes - 1
+
+			res := run(t, &fakeRetriever{set: ftsOnlySet(tc.rows...)}, req)
+			if !eq(itemIDs(res.Items), []string{"KEEP"}) {
+				t.Fatalf("items = %v, want the first row kept whole", itemIDs(res.Items))
+			}
+			if line := len(res.Items[0].Line()); line > req.Budget.MaxBytes {
+				t.Fatalf("precondition: the row's line is %d bytes, over the %d-byte cap, so the framing "+
+					"is not what this fixture puts over it", line, req.Budget.MaxBytes)
+			}
+			want := fmt.Sprintf("%s%d-byte response budget, but not with the rest of this answer around it, "+
+				"so it is shown in full over the budget rather than dropped.)", tc.lead, req.Budget.MaxBytes)
+			if !strings.Contains(res.Response, want) {
+				t.Errorf("the answer does not carry %q:\n%s", want, res.Response)
+			}
+			if strings.Contains(res.Response, "alone is larger") {
+				t.Errorf("the notice claims a row that fits the cap is larger than it:\n%s", res.Response)
+			}
+		})
 	}
 }
