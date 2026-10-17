@@ -47,18 +47,28 @@ const (
 	// ignore the block. Between lifecycleAlertMaxAge and
 	// lifecycleMarkerMaxAge the file is kept but stays silent.
 	lifecycleAlertMaxAge = 14 * 24 * time.Hour
-	// lifecycleMarkerMaxAge is the self-clean horizon, and it bounds the age on
-	// BOTH sides: a marker older than this is deleted at the next session-start
-	// so a permanently-dead marker (its project deleted, its config changed by
-	// hand) can never nag — or linger on disk — forever, and a marker dated
-	// more than this far AHEAD reads the same way. The future side is not
-	// symmetry for its own sake: such a stamp comes from a clock that was set
-	// forward when it was written or a marker copied from another machine, its
-	// negative age never reaches an "older than" horizon, and its future date
-	// would also outrank a genuinely recent failure when newestMarker picks the
-	// one recorded last. The cooldown beside this file reads a far-future stamp
-	// as stale for the same reason.
+	// lifecycleMarkerMaxAge is the self-clean horizon on the AGE side: a
+	// marker older than this is deleted at the next session-start so a
+	// permanently-dead marker (its project deleted, its config changed by
+	// hand) can never nag — or linger on disk — forever. The forward side has
+	// its own, much tighter bound below: a marker dated ahead has a NEGATIVE
+	// age, so no "older than" horizon ever reaches it.
 	lifecycleMarkerMaxAge = 30 * 24 * time.Hour
+	// lifecycleMarkerClockSkew is the tolerated clock skew: how far ahead of
+	// this machine's clock a marker may be dated and still count as a real,
+	// recent failure. A marker up to this far ahead still alerts — ordinary
+	// skew between the writer's clock and this session's is not evidence of
+	// anything. Further ahead than this is a bad stamp, not skew: a clock set
+	// forward when the marker was written, a VM resumed with a skewed clock,
+	// or a marker copied in from another machine. Its negative age never
+	// reaches an "older than" horizon, so without this bound it would alert
+	// at every session start, unchanged, until wall time caught up — so the
+	// self-clean expires it on this bound, on the same path as an old one,
+	// and newestMarker ranks its stamp at most "now" (min(at, now)) so its
+	// future date earns it no rank beyond the instant of the read. This is a
+	// stamp-plausibility bound and deliberately NOT the 30-day age horizon
+	// and not the cooldown's one-window rule; each bounds a different thing.
+	lifecycleMarkerClockSkew = 24 * time.Hour
 	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
 	// session-start removes before giving up on finding a current one: more
 	// than a project's candidate files (markerCandidates), so it never cuts a
@@ -587,10 +597,17 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 	return nil
 }
 
-// newestMarker reads every path it can and returns the one recorded last.
+// newestMarker reads every path it can and returns the one recorded last,
+// ranking every stamp by min(at, now): a stamp dated ahead of this machine's
+// clock ranks as the instant of this read, never later, so its future date
+// earns it nothing. Two future markers therefore cannot order themselves by
+// how far ahead each is — being further ahead buys no rank, and a marker
+// beyond the tolerated skew is expired by the self-clean on the path that
+// reads it rather than shown.
 func newestMarker(patterns ...string) *lifecycleFailureMarker {
 	var newest *lifecycleFailureMarker
 	newestAt := time.Time{}
+	now := time.Now()
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
@@ -605,8 +622,12 @@ func newestMarker(patterns ...string) *lifecycleFailureMarker {
 			if err != nil {
 				continue
 			}
-			if newest == nil || at.After(newestAt) {
-				newest, newestAt = m, at
+			rank := at
+			if rank.After(now) {
+				rank = now
+			}
+			if newest == nil || rank.After(newestAt) {
+				newest, newestAt = m, rank
 			}
 		}
 	}
@@ -655,10 +676,10 @@ func markerCandidates(ids ...string) []markerCandidate {
 // Print rules (each pinned by a test):
 //   - no marker, or a marker that cannot be parsed/aged: no output;
 //   - marker older than lifecycleAlertMaxAge (14d): no output, file kept;
-//   - marker older than lifecycleMarkerMaxAge (30d), or dated more than 30d
-//     AHEAD: that file DELETED (self-clean), and only that file — the next
-//     candidate is then read and judged by these same rules, so a current
-//     marker behind it still alerts;
+//   - marker older than lifecycleMarkerMaxAge (30d), or dated more than
+//     lifecycleMarkerClockSkew (24h) AHEAD: that file DELETED (self-clean),
+//     and only that file — the next candidate is then read and judged by
+//     these same rules, so a current marker behind it still alerts;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -693,16 +714,19 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 			return ""
 		}
 		age = time.Since(at)
-		// Expired on EITHER side of the age. A marker dated implausibly far
-		// ahead (a clock set forward when it was written, a VM resumed with a
-		// skewed clock, a marker copied in from another machine) has a negative
-		// age and so would never satisfy an "older than" horizon: it would alert
-		// at every session start, unchanged, until wall time caught up, and its
-		// future stamp would win newestMarker against a real recent failure. It
-		// reads as expired for the same reason the cooldown reads a far-future
-		// stamp as stale (lifecycleCooldownActive), and is swept by the removal
-		// below rather than left to linger.
-		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerMaxAge {
+		// Expired on EITHER side, each on its own bound: past
+		// lifecycleMarkerMaxAge on the age side, or past
+		// lifecycleMarkerClockSkew (24h of tolerated skew) on the forward
+		// side. A marker dated ahead — a clock set forward when it was
+		// written, a VM resumed with a skewed clock, a marker copied in from
+		// another machine — has a NEGATIVE age and so would never satisfy an
+		// "older than" horizon: it would alert at every session start,
+		// unchanged, until wall time caught up, and its future date would
+		// win newestMarker's read against a genuinely recent failure. Within
+		// the 24h tolerance the skew is ordinary and the marker still
+		// alerts; beyond it the stamp is implausible and is swept by the
+		// removal below rather than left to linger.
+		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerClockSkew {
 			break
 		}
 		// Remove the expired file that was read, and only that file. Not
