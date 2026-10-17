@@ -434,13 +434,13 @@ func awaitPhaseSweep(rootCtx context.Context, done <-chan struct{}, within func(
 func interruptOutcome(running, next, tail string) (phases []string, cause string, ok bool) {
 	switch {
 	case running != "":
-		cause = "interrupted by SIGTERM while running " + running
+		cause = mcpinit.InterruptedBySignal + " while running " + running
 		if t := strings.TrimSpace(tail); t != "" {
 			cause += "\n" + t
 		}
 		return []string{running}, cause, true
 	case next != "":
-		return nil, "interrupted by SIGTERM before " + next, true
+		return nil, mcpinit.InterruptedBySignal + " before " + next, true
 	default:
 		return nil, "", false
 	}
