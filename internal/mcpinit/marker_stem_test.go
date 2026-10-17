@@ -48,7 +48,7 @@ func TestPunctuationDifferingProjectsKeepSeparateMarkers(t *testing.T) {
 		t.Fatalf("B success: %v", err)
 	}
 
-	m := readLifecycleFailure("my project", "")
+	m := readLifecycleFailure("my project", "", nil)
 	if m == nil || m.Error != "A reflect is broken" || m.Project != "my project" {
 		t.Fatalf("B's clean run erased A's failure: marker = %+v", m)
 	}

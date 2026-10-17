@@ -582,7 +582,7 @@ func TestReadLifecycleFailureTouchesNothingInAForbiddenDataDir(t *testing.T) {
 	if alert := lifecycleFailureAlert(projectID, projectID); alert != "" {
 		t.Errorf("the refused session start alerted on a marker in a forbidden data dir: %q", alert)
 	}
-	if got := readLifecycleFailure(projectID, projectID); got != nil {
+	if got := readLifecycleFailure(projectID, projectID, nil); got != nil {
 		t.Errorf("readLifecycleFailure = %+v, want nil for a forbidden data dir", got)
 	}
 	if got := dirEntries(t, dataDir); strings.Join(got, ",") != strings.Join(beforeNames, ",") {

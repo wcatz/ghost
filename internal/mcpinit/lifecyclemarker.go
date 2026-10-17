@@ -567,7 +567,12 @@ func readMarkerAtPath(path string) *lifecycleFailureMarker {
 // own file first, then the name it may have been written under if the id was
 // unknown at write time, and finally the legacy shared file so a record made
 // by an older build still alerts instead of silently rotting on disk.
-func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker {
+//
+// skip names markers this read has already judged and passed over — a marker
+// older than lifecycleAlertMaxAge is kept on disk but stays silent, and the
+// caller skips it here so a marker behind it is still found instead of the read
+// ending on it.
+func readLifecycleFailure(projectID, projectName string, skip map[string]bool) *lifecycleFailureMarker {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return nil
@@ -578,11 +583,15 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		// case, because some news beats none when there is nothing to filter
 		// by — so keep it, and surface the most recent failure rather than
 		// whatever sorts first.
-		return newestMarker(filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
+		return newestMarker(skip, filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
 			filepath.Join(dataDir, legacyMarkerFile))
 	}
 	for _, c := range markerCandidates(projectID, projectName) {
-		m := readMarkerAtPath(filepath.Join(dataDir, c.name))
+		path := filepath.Join(dataDir, c.name)
+		if skip[path] {
+			continue
+		}
+		m := readMarkerAtPath(path)
 		if m == nil {
 			continue
 		}
@@ -625,7 +634,10 @@ func ranksAbove(candidateAt, incumbentAt, now time.Time) bool {
 // or before the read; among stamps at or before now the newest wins; among
 // future stamps the earliest — the least skewed — wins, so being further ahead
 // buys no rank. A future stamp is still returned when it is the only candidate.
-func newestMarker(patterns ...string) *lifecycleFailureMarker {
+//
+// skip excludes markers the caller has already passed over (kept on disk but
+// silent), so they do not end the read.
+func newestMarker(skip map[string]bool, patterns ...string) *lifecycleFailureMarker {
 	var newest *lifecycleFailureMarker
 	var newestAt time.Time
 	now := time.Now()
@@ -635,6 +647,9 @@ func newestMarker(patterns ...string) *lifecycleFailureMarker {
 			continue
 		}
 		for _, path := range matches {
+			if skip[path] {
+				continue
+			}
 			m := readMarkerAtPath(path)
 			if m == nil {
 				continue
@@ -692,7 +707,10 @@ func markerCandidates(ids ...string) []markerCandidate {
 //
 // Print rules (each pinned by a test):
 //   - no marker, or a marker that cannot be parsed/aged: no output;
-//   - marker older than lifecycleAlertMaxAge (14d): no output, file kept;
+//   - marker older than lifecycleAlertMaxAge (14d): no output from that marker
+//     and the file is kept, but the read passes OVER it (never ends there), so
+//     a marker behind it — a newer failure, or an in-tolerance future one the
+//     ranking places below every stamp at or before now — still alerts;
 //   - marker older than lifecycleMarkerMaxAge (30d), or dated more than
 //     lifecycleMarkerClockSkew (24h) AHEAD: that file DELETED (self-clean),
 //     and only that file — the next candidate is then read and judged by
@@ -718,10 +736,18 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		at  time.Time
 		age time.Duration
 	)
-	// Each pass either returns or removes the expired file it read, so the
-	// loop ends when the candidates run out; the bound is only a backstop.
+	// Each pass either returns, removes the expired file it read, or skips a
+	// silently kept one, so the loop ends when the candidates run out; the
+	// bound is only a backstop.
+	//
+	// A marker older than lifecycleAlertMaxAge is kept but stays silent, and
+	// because it is kept it would win the next read again and end the loop,
+	// hiding whatever sits behind it — a newer failure, or an in-tolerance
+	// future one, which the ranking places below every stamp at or before
+	// now. So a silent marker is skipped by path and the read goes on.
+	skipped := make(map[string]bool)
 	for range lifecycleSelfCleanMaxPasses {
-		m = readLifecycleFailure(projectID, projectName)
+		m = readLifecycleFailure(projectID, projectName, skipped)
 		if m == nil {
 			return ""
 		}
@@ -743,7 +769,17 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// it the stamp is implausible and is swept by the removal below rather
 		// than left to linger.
 		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerClockSkew {
-			break
+			if age <= lifecycleAlertMaxAge {
+				break
+			}
+			// Over the alert horizon: kept and silent, so pass over this
+			// marker rather than letting it end the read.
+			if m.path == "" {
+				return ""
+			}
+			skipped[m.path] = true
+			m = nil
+			continue
 		}
 		// Remove the expired file that was read, and only that file. Not
 		// ClearLifecycleFailure: that is a clean run's clear, which removes
@@ -761,9 +797,8 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	if m == nil {
 		return ""
 	}
-	if age > lifecycleAlertMaxAge {
-		return ""
-	}
+	// m is non-nil only via the break above, which requires an alertable age,
+	// so a marker older than lifecycleAlertMaxAge never reaches the render.
 	if m.Project != "" && projectID != "" && m.Project != projectID && m.Project != projectName {
 		return ""
 	}

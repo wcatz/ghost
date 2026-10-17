@@ -598,6 +598,45 @@ func TestSessionStart_FutureMarkerDoesNotOutrankARecentFailure(t *testing.T) {
 	}
 }
 
+// TestSessionStart_SilentMarkerDoesNotSuppressAnInToleranceFutureFailure: a
+// marker between lifecycleAlertMaxAge and lifecycleMarkerMaxAge is kept on disk
+// but stays deliberately silent, and a future failure inside the tolerated skew
+// is a real, recent failure that must alert. Ranking a stamp dated ahead below
+// every stamp dated at or before now makes one such silent marker outrank the
+// future one, and an alert read that stops at the first in-bounds marker would
+// then print nothing — leaving a paused consolidation hidden for as long as the
+// stale marker sits in the 14-to-30-day band. The read must pass over the
+// silent marker (keeping it) and still surface the current failure.
+func TestSessionStart_SilentMarkerDoesNotSuppressAnInToleranceFutureFailure(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	stale := time.Now().UTC().Add(-20 * 24 * time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	stalePath := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "quiet", PhasesFailed: []string{"reflect"}, Error: "old", At: stale, Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "recent", PhasesFailed: []string{"resolve"}, Error: "fresh", At: future, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("an in-tolerance future failure must still alert, got:\n%s", out)
+	}
+	if !strings.Contains(firstLine, "for project recent") {
+		t.Errorf("a silently kept stale marker must be passed over, not suppress the alert, got: %s", firstLine)
+	}
+	if strings.Contains(firstLine, "for project quiet") {
+		t.Errorf("the stale marker is over the alert horizon and must stay silent, got: %s", firstLine)
+	}
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Errorf("the silent marker is kept, not swept, so it stays on disk: %v", err)
+	}
+}
+
 // TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure: the same
 // rule as the 365-day test, at the distance the review caught — a marker 20
 // days ahead is past the 24h tolerated skew, so it must not be shown, and in a
