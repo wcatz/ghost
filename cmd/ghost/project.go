@@ -373,8 +373,10 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 		// `ghost export`'s, where the caller's text is noise and a hazard, so it
 		// carries no path; a person who typed the directory needs to know which
 		// one was refused, and `assemble.Label` — the renderer `printBinding`
-		// already prints every path through — neutralises exactly the characters
-		// the refusal is about, so the sentence holds none of them.
+		// already prints every path through — neutralises the characters the
+		// refusal is about: a line break, a control character and a guillemet
+		// become escapes, and a backtick keeps a backslash in front of it rather
+		// than being replaced, which is Label's own documented form.
 		//
 		// The credential refusal is EXCLUDED, and the exclusion is the whole
 		// subtlety: `assemble.Label` renders a value for a line, it does not

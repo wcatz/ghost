@@ -1206,25 +1206,28 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	return true, clamped, nil
 }
 
-// HasTask reports whether a task with exactly this id is in the store. The
-// portable import asks it before dropping a blocked_by pointer whose target the
-// artifact does not supply: a target the store already holds resolves, so the
-// pointer is kept. It is a plain read, so a dry run's read-only store answers it
-// exactly as the apply's does.
-func (s *Store) HasTask(ctx context.Context, id string) (bool, error) {
-	return s.hasRow(ctx, `SELECT 1 FROM tasks WHERE id = ?`, id)
+// HasTask reports whether a task with exactly this id is in the store, in the
+// project projectID. The portable import asks it before dropping a blocked_by
+// pointer whose target the artifact does not supply: a target the store
+// already holds in the project the record is imported under resolves, so the
+// pointer is kept. A target in any other project does not: the store's own
+// readers follow a pointer only within one project, and a row kept pointing
+// across projects is rewritten by deleting the other one. It is a plain read,
+// so a dry run's read-only store answers it exactly as the apply's does.
+func (s *Store) HasTask(ctx context.Context, projectID, id string) (bool, error) {
+	return s.hasRow(ctx, `SELECT 1 FROM tasks WHERE id = ? AND project_id = ?`, id, projectID)
 }
 
 // HasDecision is HasTask for a decision's superseded_by.
-func (s *Store) HasDecision(ctx context.Context, id string) (bool, error) {
-	return s.hasRow(ctx, `SELECT 1 FROM decisions WHERE id = ?`, id)
+func (s *Store) HasDecision(ctx context.Context, projectID, id string) (bool, error) {
+	return s.hasRow(ctx, `SELECT 1 FROM decisions WHERE id = ? AND project_id = ?`, id, projectID)
 }
 
-func (s *Store) hasRow(ctx context.Context, query, id string) (bool, error) {
+func (s *Store) hasRow(ctx context.Context, query string, args ...any) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var present int
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&present)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&present)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

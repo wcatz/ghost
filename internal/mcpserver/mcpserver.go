@@ -681,12 +681,13 @@ const tagMaxCount = 10
 // validateTags bounds a tag list and refuses the characters that could end the
 // line it is printed on.
 //
-// It returns an error for two different refusals and trims exactly one thing. A
+// It returns an error for three different refusals and trims exactly one thing. A
 // list longer than tagMaxCount is refused, because the count is a number the
 // caller can act on and a silent cut leaves a label unaccounted for behind a
 // success sentence; a tag longer than tagMaxLen is TRIMMED, silently and
 // harmlessly, because a shortened label is still the label the caller meant; and
-// a control character, a backtick or a `«»` is a refusal. A tag list is
+// a control character, a backtick or a `«»` is a refusal, and so is a tag whose
+// uncut text is token-shaped, checked before the cut could hide it. A tag list is
 // printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
 // the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
 // pairs into a markdown code span that swallows the rest of the row, and a «
@@ -752,6 +753,16 @@ func validateTags(tags []string) ([]string, error) {
 				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
 				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
 				"any length are fine. Change the tag and call again", i, refusedTag(orig, t), reason)
+		}
+		// The token check runs on the tag as the caller sent it, not on the cut:
+		// the store's own check sees only what this function returns, so a token
+		// placed past byte tagMaxLen would be cut out of its sight and the save
+		// would answer as a success. It runs after the shape check so a tag that
+		// fails both is still refused by shape, through refusedTag, which already
+		// withholds a token-shaped tag. The field is named the way the store
+		// names it, by position.
+		if err := memory.RejectSecret(fmt.Sprintf("tags[%d]", i), orig); err != nil {
+			return nil, err
 		}
 	}
 	return tags, nil
@@ -1428,6 +1439,9 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	var content, category *string
 	truncated := false
 	if args.Content != "" {
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return "", err
+		}
 		args.Content, truncated = memory.ClampContent(args.Content)
 		content = &args.Content
 		changed = append(changed, "content")
@@ -2413,6 +2427,9 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)
 
@@ -2585,15 +2602,16 @@ func (s *Server) registerTools() {
 		// read is skipped: importing rows now would add memories to a store the
 		// caller asked to see as it was, and would make the answer depend on
 		// whether the import had happened yet.
-		var refusedFiles, failedFiles []string
+		var refusedFiles, failedFiles, notRegularFiles []string
 		if asOf == nil {
 			if count, cErr := s.store.CountMemories(ctx, args.ProjectID); cErr == nil && count == 0 {
 				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 					for _, p := range projects {
 						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-							imported, refused, failed, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							imported, refused, failed, notRegular, _ := claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
 							refusedFiles = append(refusedFiles, refused...)
 							failedFiles = append(failedFiles, failed...)
+							notRegularFiles = append(notRegularFiles, notRegular...)
 							// The imported rows are memory rows, so queue the
 							// project for embedding exactly as the save tools do.
 							// Only a run that wrote at least one row is queued, and
@@ -2756,7 +2774,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles)
+		text, err := s.projectContextBlock(ctx, args.ProjectID, asked, args.Limit, refusedFiles, failedFiles, notRegularFiles)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -3139,6 +3157,9 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
+		if err := memory.RejectSecret("content", args.Content); err != nil {
+			return nil, nil, err
+		}
 		globalTruncated := false
 		args.Content, globalTruncated = memory.ClampContent(args.Content)
 
@@ -3236,6 +3257,12 @@ func (s *Server) registerTools() {
 		}
 		// A title of "   " is not empty and was stored verbatim (#1038).
 		if err := validateRequiredText("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("description", args.Description); err != nil {
 			return nil, nil, err
 		}
 		titleTruncated := len(args.Title) > maxTitleLen
@@ -3581,6 +3608,15 @@ func (s *Server) registerTools() {
 		if err := validateRequiredText("rationale", args.Rationale); err != nil {
 			return nil, nil, err
 		}
+		if err := memory.RejectSecret("title", args.Title); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("decision", args.Decision); err != nil {
+			return nil, nil, err
+		}
+		if err := memory.RejectSecret("rationale", args.Rationale); err != nil {
+			return nil, nil, err
+		}
 		titleTruncated := len(args.Title) > maxTitleLen
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		var decisionTruncated, rationaleTruncated bool
@@ -3589,6 +3625,11 @@ func (s *Server) registerTools() {
 		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
 		if err != nil {
 			return nil, nil, err
+		}
+		for i, alt := range alternatives {
+			if err := memory.RejectSecret(fmt.Sprintf("alternatives[%d]", i), alt); err != nil {
+				return nil, nil, err
+			}
 		}
 		// Track whether the caller's list exceeds the stored bound, so the cut is
 		// reported instead of only being applied silently. memory.AlternativesClamped
@@ -4303,6 +4344,9 @@ func (s *Server) registerTools() {
 		}
 		truncated := false
 		if args.Description != nil {
+			if err := memory.RejectSecret("description", *args.Description); err != nil {
+				return nil, nil, err
+			}
 			clamped, cut := memory.ClampContent(*args.Description)
 			args.Description = &clamped
 			if cut {
