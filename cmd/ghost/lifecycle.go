@@ -93,6 +93,19 @@ func runLifecycle() {
 	}
 	defer release()
 
+	// Catch SIGINT/SIGTERM for the rest of the run, exactly as the phase
+	// commands do. A signal aimed at this process alone — `kill <pid>`, Ctrl-C
+	// on a foreground run, or a supervisor stopping only this pid — would
+	// otherwise take Go's default action and kill the coordinator while its
+	// phase, in a process group of its own, kept running and writing; the
+	// per-project claim's pid file would then name a dead pid, so the next
+	// Stop hook would claim it and start a second chain beside the orphan.
+	// Cancelling this root cancels the phase in flight, which delivers the
+	// group SIGTERM through the phase's Cancel, and the loop below stops
+	// rather than starting the next phase.
+	rootCtx, stopSignals := maintenanceContext()
+	defer stopSignals()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
@@ -218,13 +231,15 @@ func runLifecycle() {
 		if source != "" {
 			phaseArgs = append(phaseArgs, "--source", source)
 		}
-		// One context per branch, so nothing is created and then abandoned.
+		// One context per branch, so nothing is created and then abandoned. Each
+		// derives from rootCtx, so a signal to the coordinator cancels the phase
+		// in flight — the same cancel a deadline causes — and stops the chain.
 		var ctx context.Context
 		var cancel context.CancelFunc
 		if ph.timeout > 0 {
-			ctx, cancel = context.WithTimeout(context.Background(), ph.timeout)
+			ctx, cancel = context.WithTimeout(rootCtx, ph.timeout)
 		} else {
-			ctx, cancel = context.WithCancel(context.Background())
+			ctx, cancel = context.WithCancel(rootCtx)
 		}
 		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
 		// A deadline must not SIGKILL a phase mid-write or orphan the CLI
@@ -256,7 +271,7 @@ func runLifecycle() {
 		// then, since the deadline's Cancel needs a process to signal.
 		runErr := cmd.Start()
 		if runErr == nil {
-			go phaseWatchdog(ctx, phaseDone, cmd, phaseEscalation{
+			go phaseWatchdog(rootCtx, ctx, phaseDone, cmd, phaseEscalation{
 				grace:          phaseGracePeriod,
 				after:          time.After,
 				groupInhabited: phaseGroupInhabited,
@@ -266,18 +281,36 @@ func runLifecycle() {
 		}
 		close(phaseDone)
 		cancel()
+		// A signal to the coordinator cancels rootCtx, which cancels this
+		// phase's context: the phase's Cancel delivers the group SIGTERM, and
+		// the wait above returns the context error even for a phase that exits
+		// zero. No further phase starts under a cancelled context — the run was
+		// asked to stop — and the interrupted phase is recorded like a failed
+		// one so the next session start surfaces an alert instead of silence.
+		interrupted := rootCtx.Err() != nil
 		if runErr != nil {
 			// The cause, not the exit status: with no output this becomes
 			// "exit 1; argv: ghost reflect --project x --apply; ghost dev"
 			// instead of the bare "exit status 1" that made 357 log entries
 			// indistinguishable.
 			cause := phaseFailureCause(phaseArgs, runErr, tail.String())
-			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
 			recordFailure(ph.name, cause)
+			if interrupted {
+				fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s; interrupted, not starting the remaining phases: %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
+				break
+			}
+			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
 			continue
 		}
 		phasesRan++
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
+		if interrupted {
+			// The phase finished just as the signal landed, so the run was
+			// still cut short: record it and skip the phases that remain.
+			recordFailure(ph.name, "interrupted before the run completed")
+			fmt.Fprintf(os.Stderr, "lifecycle: interrupted after %s; not starting the remaining phases\n", ph.name)
+			break
+		}
 	}
 
 	// Record the outcome durably: any failed phase leaves an atomic
@@ -505,6 +538,12 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 // `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
 // the harnesses from being orphaned when the process is asked to stop.
 //
+// The lifecycle coordinator holds the same root for the length of its phase
+// chain: the phases derive their contexts from it, so a signal aimed at the
+// coordinator alone cancels the phase in flight — turning into that phase's
+// group SIGTERM through its Cancel — rather than letting Go's default action
+// kill the coordinator and leave the phase running.
+//
 // Harness children run in their own process group, so this process's group is
 // no longer the umbrella that reaches them: the phase's own deadline (the
 // lifecycle phase group signal) and a terminal Ctrl-C would otherwise end this
@@ -555,37 +594,46 @@ type phaseEscalation struct {
 	kill           func(*exec.Cmd)
 }
 
-// phaseWatchdog is the second half of a phase's deadline. The deadline's Cancel
-// has already asked the phase's whole process group to shut down; this is the
-// escalation for a phase that ignored it, and it returns without escalating
-// when the phase ends before its deadline.
+// phaseWatchdog is the second half of a phase interruption. The phase context's
+// Cancel has already asked the phase's whole process group to shut down; this is
+// the escalation for a phase that ignored it, and it returns without escalating
+// when the phase ends before it is interrupted.
 //
 // The question it asks before signalling is about the GROUP, not the phase
 // process, and the difference is the whole point. cmd.Wait returns the instant
 // the direct child is reaped, and a phase is a plain ghost process with no
-// SIGTERM handler, so it dies the moment the deadline's group signal lands —
-// while the CLI harness it spawned, same group, can ignore or slowly handle the
-// signal and survive as an orphan. That orphan is the reason killPhaseProcess
-// exists, so "the phase has been waited for" is not a reason to stay the
-// escalation; "the group is empty" is. Asking the group is also what keeps the
-// id safe to signal: an empty group is the one whose id belongs to no run here
-// and, on a busy machine, can already have been reused. Go's select picks a
-// ready case at random, but the phaseDone/ctx.Done choice below no longer
-// decides anything: both cases fall through to the deadline test.
-func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
-	// Wait for the deadline, or for the phase to end first.
+// SIGTERM handler, so it dies the moment the group signal lands — while the CLI
+// harness it spawned, same group, can ignore or slowly handle the signal and
+// survive as an orphan. That orphan is the reason killPhaseProcess exists, so
+// "the phase has been waited for" is not a reason to stay the escalation; "the
+// group is empty" is. Asking the group is also what keeps the id safe to
+// signal: an empty group is the one whose id belongs to no run here and, on a
+// busy machine, can already have been reused. Go's select picks a ready case at
+// random, but the phaseDone/ctx.Done choice below no longer decides anything:
+// both cases fall through to the interruption test.
+//
+// rootCtx is the coordinator's own root context, the one a SIGINT/SIGTERM
+// cancels (see maintenanceContext). It is a second argument rather than the
+// phase context because the phase context alone cannot tell the two cancels
+// apart: the phase loop cancels it once the phase has returned, and that cancel
+// means the phase ended on its own and has nothing to sweep, while a root
+// cancellation is a signal that terminated the phase in flight.
+func phaseWatchdog(rootCtx, ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
+	// Wait for the deadline or the signal, or for the phase to end first.
 	select {
 	case <-phaseDone:
 	case <-ctx.Done():
 	}
 
-	// Only a deadline escalates. The phase loop also cancels this context once
-	// the phase has returned, and a context the loop cancelled is not a
-	// deadline: a phase that ended on its own has nothing to sweep. When the
-	// deadline did fire, it fired BEFORE the SIGTERM that is what ends the
-	// phase, so the answer here is DeadlineExceeded by the time phaseDone
-	// closes — the check does not race the signal that caused it.
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// Only an interruption escalates: the phase's own deadline, or a signal
+	// that cancelled the coordinator's root context and so cancelled this
+	// phase's context with it. The phase loop also cancels ctx once the phase
+	// has returned, and a context the loop cancelled is neither — a phase that
+	// ended on its own has nothing to sweep. When the deadline fired, it fired
+	// BEFORE the SIGTERM that ends the phase, and a signal cancelled rootCtx
+	// before the phase it terminated is reaped, so neither check races the
+	// signal that caused it.
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) && rootCtx.Err() == nil {
 		return
 	}
 

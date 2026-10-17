@@ -88,7 +88,7 @@ func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan str
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		phaseWatchdog(ctx, phaseDone, cmd, esc)
+		phaseWatchdog(context.Background(), ctx, phaseDone, cmd, esc)
 	}()
 	return &wg
 }
@@ -299,7 +299,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 			defer wg.Done()
 			close(started)
 			<-release
-			phaseWatchdog(ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+			phaseWatchdog(context.Background(), ctx, phaseDone, cmd, realEscalation(grace, &attempts))
 		}()
 		<-started
 
@@ -344,7 +344,7 @@ func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
 			close(graceUp) // and the grace is up
 
 			var kills atomic.Int64
-			phaseWatchdog(ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+			phaseWatchdog(context.Background(), ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
 				grace:          0,
 				after:          func(time.Duration) <-chan time.Time { return graceUp },
 				groupInhabited: func(*exec.Cmd) bool { return tc.groupAlive },
@@ -355,6 +355,38 @@ func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
 				t.Errorf("the escalation fired %d time(s), want %d", got, tc.wantKills)
 			}
 		})
+	}
+}
+
+// TestThePhaseWatchdogEscalatesWhenTheCoordinatorIsSignalled is the other
+// interruption the escalation answers. A SIGINT/SIGTERM to the coordinator
+// cancels its root context, which cancels the phase's own context and delivers
+// the group SIGTERM through the phase's Cancel — and a phase that ignores it has
+// to be swept all the same, or the signal that stopped the coordinator would
+// leave the phase and its harness behind. The clock and the group question are
+// injected so the boundary is set rather than waited for.
+func TestThePhaseWatchdogEscalatesWhenTheCoordinatorIsSignalled(t *testing.T) {
+	root, stopRoot := context.WithCancel(context.Background())
+	defer stopRoot()
+	ctx, cancel := context.WithCancel(root)
+	defer cancel()
+
+	// The signal reached the coordinator: rootCtx is cancelled, and that
+	// cancellation is what cancelled the phase's context too.
+	stopRoot()
+	<-ctx.Done()
+
+	graceUp := make(chan time.Time)
+	close(graceUp)
+	var kills atomic.Int64
+	phaseWatchdog(root, ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+		grace:          0,
+		after:          func(time.Duration) <-chan time.Time { return graceUp },
+		groupInhabited: func(*exec.Cmd) bool { return true },
+		kill:           func(*exec.Cmd) { kills.Add(1) },
+	})
+	if got := kills.Load(); got != 1 {
+		t.Errorf("the escalation fired %d time(s) for a phase a coordinator signal terminated, want exactly 1", got)
 	}
 }
 

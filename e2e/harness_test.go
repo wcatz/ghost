@@ -471,6 +471,18 @@ else
 fi
 printf '%s\n' "$kind" >> "$dir/$name.kinds"
 
+# A test can ask a call of one kind to be SLOW, the way a real model is: the
+# file "$kind.delay" holds a number of seconds to sleep before answering, and
+# the pid that is sleeping is recorded in "$kind.pid". A lifecycle phase that
+# is signalled while it is blocked on such a call is the case the coordinator's
+# own signal handling has to terminate; the recorded pid is how a test sees that
+# it was, rather than orphaned. The probe cases above return before this point,
+# so a capability probe is never delayed.
+if [ -f "$dir/$kind.delay" ]; then
+  printf '%s\n' "$$" > "$dir/$kind.pid"
+  sleep "$(cat "$dir/$kind.delay")"
+fi
+
 # A test can ask for the next N calls of one kind to FAIL, the way a real harness
 # occasionally exits 1. The counter is a file because every classify call is its
 # own process, and only the first N fail: the calls after them answer normally,
