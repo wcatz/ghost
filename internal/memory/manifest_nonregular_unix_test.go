@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -48,10 +49,7 @@ func requireRefusedNonRegular(t *testing.T, dest string) {
 	if rep.ManifestErr == nil {
 		t.Error("ManifestErr is nil, so the report would print the nil error it names")
 	}
-	if rep.BytesRead || rep.CountsRead {
-		t.Errorf("a run that stopped at the manifest reports BytesRead=%v CountsRead=%v, want both false",
-			rep.BytesRead, rep.CountsRead)
-	}
+	requireManifestFreeChecksRan(t, dest, rep, err)
 }
 
 func TestVerifyBackupRefusesAFIFOManifestWithoutBlocking(t *testing.T) {
@@ -64,6 +62,25 @@ func TestVerifyBackupRefusesAFIFOManifestWithoutBlocking(t *testing.T) {
 		t.Skipf("mkfifo unavailable: %v", err)
 	}
 	requireRefusedNonRegular(t, dest)
+}
+
+// TestVerifyRunsTheManifestFreeChecksOnAFIFOManifest: a FIFO in the manifest's
+// place is refused unopened, and the run goes on to the checks that need no
+// manifest without blocking on it.
+func TestVerifyRunsTheManifestFreeChecksOnAFIFOManifest(t *testing.T) {
+	dest := backedUpFixture(t)
+	path := ManifestPath(dest)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove the manifest: %v", err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	rep, err := verifyWithDeadline(t, dest)
+	requireManifestFreeChecksRan(t, dest, rep, err)
+	if err != nil && !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("error = %v, want it to say the manifest is not a regular file", err)
+	}
 }
 
 func TestVerifyBackupRefusesASymlinkToAFIFOManifestWithoutBlocking(t *testing.T) {

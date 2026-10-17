@@ -800,7 +800,7 @@ var descriptorWords = map[string]bool{
 // lowercasing rather than by inspecting the already-lowered string.
 func keyWords(key string) []string {
 	runes := []rune(key)
-	marked := make([]rune, 0, len(runes)+4)
+	marked := make([]rune, 0, len(runes))
 	for i, r := range runes {
 		if i > 0 && isUpper(r) {
 			prev := runes[i-1]

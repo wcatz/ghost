@@ -131,6 +131,11 @@ type pipeline struct {
 	// a second statement of which notes exist, and the two would disagree the
 	// first time a row drop re-derived them.
 	noteCut int
+	// firstKept is set by the response-fit post-pass when the search envelope is
+	// still over Budget.MaxBytes with ONE row left: that row is kept whole rather
+	// than dropped, and the response says so (responseCutNotice). It is never set
+	// under Budget.Measure, whose callers cut down to none (see FramingCeiling).
+	firstKept bool
 }
 
 // stage is one step of the ordered pipeline. A stage that changes nothing in

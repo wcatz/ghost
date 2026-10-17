@@ -99,15 +99,12 @@ func TestRunBackupVerifyCoreRefusesADanglingManifestSymlink(t *testing.T) {
 
 // TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat: a run that fails
 // before the stat has measured nothing, and "0 bytes" is a claim about a file —
-// the same reason CountsRead exists for row counts. A damaged sidecar is the
-// reachable case: the manifest error returns before the stat, so a perfectly
-// good snapshot would be reported as 0 bytes.
+// the same reason CountsRead exists for row counts. A snapshot that is not there
+// beside a damaged sidecar is the reachable case: the manifest is still the
+// diagnosis, and the stat that follows it has nothing to measure.
 func TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "snap.db")
-	if err := os.WriteFile(dest, make([]byte, 2*1024*1024), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
 	if err := os.WriteFile(memory.ManifestPath(dest), []byte("{ not json"), 0o600); err != nil {
 		t.Fatalf("damage the manifest: %v", err)
 	}
@@ -117,7 +114,7 @@ func TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat(t *testing.T) {
 		t.Fatalf("verify accepted a damaged manifest:\n%s", out.String())
 	}
 	text := out.String()
-	if strings.Contains(text, "0 bytes") {
+	if strings.Contains(text, " bytes") {
 		t.Errorf("the report states a size for a file it never stat'ed:\n%s", text)
 	}
 	if !strings.Contains(text, "not checked") {

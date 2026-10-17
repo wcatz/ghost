@@ -1739,7 +1739,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 			continue
 		}
 
-		n, refused, failed, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
+		n, refused, failed, notRegular, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
 			continue
@@ -1754,6 +1754,9 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		}
 		for _, f := range failed {
 			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", p.Name, memory.ProjectArg("file", f))
+		}
+		for _, f := range notRegular {
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", p.Name, memory.ProjectArg("file", f))
 		}
 	}
 
