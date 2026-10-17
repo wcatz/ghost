@@ -93,6 +93,19 @@ func runLifecycle() {
 	}
 	defer release()
 
+	// Catch SIGINT/SIGTERM for the rest of the run, exactly as the phase
+	// commands do. A signal aimed at this process alone — `kill <pid>`, Ctrl-C
+	// on a foreground run, or a supervisor stopping only this pid — would
+	// otherwise take Go's default action and kill the coordinator while its
+	// phase, in a process group of its own, kept running and writing; the
+	// per-project claim's pid file would then name a dead pid, so the next
+	// Stop hook would claim it and start a second chain beside the orphan.
+	// Cancelling this root cancels the phase in flight, which delivers the
+	// group SIGTERM through the phase's Cancel, and the loop below stops
+	// rather than starting the next phase.
+	rootCtx, stopSignals := maintenanceContext()
+	defer stopSignals()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
@@ -213,18 +226,42 @@ func runLifecycle() {
 		runAuditPhase(projectName, signalsPath)
 	}
 
+	// The signal's own record, kept out of the per-phase bookkeeping because it
+	// is not a phase's failure. interruptedRunning is the phase the signal
+	// caught in flight — it started, so it may be named; interruptedNext is the
+	// enabled phase the chain never reached — it did not run, so naming it
+	// would claim work that never happened; interruptedTail is the caught
+	// phase's output, the only record of what it was doing when it stopped.
+	var interruptedRunning, interruptedNext, interruptedTail string
+
+	// The escalation's own return, waited for before this process returns when
+	// a signal stopped the run — see below.
+	var watchdogDone <-chan struct{}
+
 	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
+		// A signal that landed BETWEEN phases stops the chain here. The phase
+		// below never started, so it has no failure of its own to record, and
+		// starting it under a cancelled context would only spawn a process that
+		// dies with "context canceled" — a marker blaming a phase that never
+		// ran, which is the misattribution this record is careful about.
+		if rootCtx.Err() != nil {
+			interruptedNext = ph.name
+			fmt.Fprintf(os.Stderr, "lifecycle: interrupted before %s; not starting the remaining phases\n", ph.name)
+			break
+		}
 		phaseArgs := append([]string{}, ph.args...)
 		if source != "" {
 			phaseArgs = append(phaseArgs, "--source", source)
 		}
-		// One context per branch, so nothing is created and then abandoned.
+		// One context per branch, so nothing is created and then abandoned. Each
+		// derives from rootCtx, so a signal to the coordinator cancels the phase
+		// in flight — the same cancel a deadline causes — and stops the chain.
 		var ctx context.Context
 		var cancel context.CancelFunc
 		if ph.timeout > 0 {
-			ctx, cancel = context.WithTimeout(context.Background(), ph.timeout)
+			ctx, cancel = context.WithTimeout(rootCtx, ph.timeout)
 		} else {
-			ctx, cancel = context.WithCancel(context.Background())
+			ctx, cancel = context.WithCancel(rootCtx)
 		}
 		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
 		// A deadline must not SIGKILL a phase mid-write or orphan the CLI
@@ -255,30 +292,85 @@ func runLifecycle() {
 		// kill is decided by. It also cannot have anything to escalate before
 		// then, since the deadline's Cancel needs a process to signal.
 		runErr := cmd.Start()
+		// Whether the phase ever existed. A Start failure is the phase's own
+		// failure to record; only a phase that actually STARTED can be the one
+		// a signal caught, and a signal that races a failed spawn must not name
+		// a phase that never ran.
+		phaseStarted := runErr == nil
 		if runErr == nil {
-			go phaseWatchdog(ctx, phaseDone, cmd, phaseEscalation{
-				grace:          phaseGracePeriod,
-				after:          time.After,
-				groupInhabited: phaseGroupInhabited,
-				kill:           killPhaseProcess,
-			})
+			// The watchdog's return is kept so a signalled run can wait for
+			// its group sweep before it goes; see below.
+			done := make(chan struct{})
+			watchdogDone = done
+			go func() {
+				defer close(done)
+				phaseWatchdog(rootCtx, ctx, phaseDone, cmd, phaseEscalation{
+					grace:          phaseGracePeriod,
+					poll:           phaseGroupPollInterval,
+					after:          time.After,
+					groupInhabited: phaseGroupInhabited,
+					kill:           killPhaseProcess,
+				})
+			}()
 			runErr = cmd.Wait()
 		}
 		close(phaseDone)
 		cancel()
+		// A signal to the coordinator cancels rootCtx, which cancels this
+		// phase's context: the phase's Cancel delivers the group SIGTERM, and
+		// the wait above returns the context error even for a phase that exits
+		// zero. No further phase starts under a cancelled context — the run was
+		// asked to stop — and the phase the signal caught is recorded as its own
+		// outcome so the next session start surfaces an alert instead of
+		// silence.
 		if runErr != nil {
+			if phaseStarted && rootCtx.Err() != nil {
+				// The signal caught this phase in flight. It started, so it is
+				// the one phase that may be named, and the SIGNAL — not the
+				// "context canceled" the cancellation produced — is its cause.
+				interruptedRunning, interruptedTail = ph.name, tail.String()
+				fmt.Fprintf(os.Stderr, "lifecycle: %s interrupted after %s; not starting the remaining phases\n", ph.name, time.Since(start).Round(time.Second))
+				break
+			}
 			// The cause, not the exit status: with no output this becomes
 			// "exit 1; argv: ghost reflect --project x --apply; ghost dev"
 			// instead of the bare "exit status 1" that made 357 log entries
 			// indistinguishable.
 			cause := phaseFailureCause(phaseArgs, runErr, tail.String())
-			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
 			recordFailure(ph.name, cause)
+			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
 			continue
 		}
 		phasesRan++
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
+		// A phase that succeeded while a signal was landing is NOT an
+		// interrupted phase: it ran, and the loop's next iteration records the
+		// interrupt against the phase it never reached. When it was the last
+		// enabled phase, every phase has run and there is nothing left to
+		// record at all — the run was cut short after its work was done.
 	}
+
+	// A signal that stopped the run has one thing left to finish before this
+	// process returns: the escalation's sweep of the interrupted phase's group.
+	// cmd.Wait above returns the moment the phase is REAPED, but a member of
+	// its group that ignored the SIGTERM is still running — and this process
+	// releases the per-project claim as it goes, so returning first would orphan
+	// that member and let the next chain start beside it, which is the case
+	// #1450 exists for. The wait costs a moment rather than the grace, because
+	// the escalation returns as soon as the group is empty.
+	awaitPhaseSweep(rootCtx, watchdogDone, time.After)
+
+	// A signal that stopped the chain is its own outcome rather than a phase's
+	// failure, and it is recorded only when something was actually left
+	// unfinished. A chain that finished every enabled phase records nothing:
+	// every phase ran, so nothing is paused and the success below heals.
+	//
+	// applyInterrupt returns the run's bookkeeping unchanged when no signal
+	// stopped it, and folds the interrupt's outcome into it — the phases the
+	// marker names and the one error string it carries — when one did.
+	var interruptedRunCause string
+	failedPhases, firstPhaseErr, interruptedRunCause = applyInterrupt(
+		failedPhases, firstPhaseErr, interruptedRunning, interruptedNext, interruptedTail)
 
 	// Record the outcome durably: any failed phase leaves an atomic
 	// lifecycle-last-failure.json marker that the next session-start turns
@@ -286,9 +378,112 @@ func runLifecycle() {
 	// lifecycle.log); a run where every phase that ran succeeded clears an
 	// earlier marker. The per-phase stderr lines above are unchanged — for a
 	// foreground run they are already the terminal's visible record.
-	if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
+	if interruptedRunCause != "" {
+		if err := mcpinit.WriteLifecycleFailure(projectName, nil, interruptedRunCause); err != nil {
+			fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record run outcome: %v\n", err)
+		}
+	} else if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
 		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record run outcome: %v\n", err)
 	}
+}
+
+// phaseSweepTimeout is the backstop on the wait for a signalled phase's
+// escalation. The escalation is itself bounded by phaseGracePeriod and returns
+// sooner still when the group empties, so this is only a guard against a clock
+// or an escalation that never returns — never a second deadline.
+const phaseSweepTimeout = phaseGracePeriod + 5*time.Second
+
+// awaitPhaseSweep blocks until the escalation for the phase a signal interrupted
+// has returned, because this is the last thing that has to land before the
+// coordinator releases the per-project claim and exits. cmd.Wait returns the
+// moment the phase is REAPED, while a member of its group that ignored the
+// SIGTERM is still running, so a run that exited there would orphan that member
+// and let the next chain start beside it — the case the fix exists for.
+//
+// It returns at once when no signal stopped the run (nothing was interrupted,
+// nothing is owed) and when no phase ever launched an escalation. The bound,
+// which the caller supplies as a clock so a test can fire it rather than wait,
+// is a backstop and not a second deadline.
+func awaitPhaseSweep(rootCtx context.Context, done <-chan struct{}, within func(time.Duration) <-chan time.Time) {
+	if rootCtx.Err() == nil || done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-within(phaseSweepTimeout):
+	}
+}
+
+// interruptOutcome is what a signal that stopped the lifecycle chain records,
+// in one pure function so each shape is testable without a coordinator.
+//
+// running is the phase that was in flight when the signal landed ("" when the
+// chain was between phases or had not started) and next is the enabled phase
+// the chain never reached ("" when every enabled phase has run). tail is the
+// caught phase's output, the only record of what it was doing when it stopped.
+//
+// A phase that never started is never NAMED: it did not run, so a failure
+// attributed to it would claim work that never happened — the old shape
+// recorded "context canceled" against the next phase in line, which blamed a
+// phase for a process that was never meaningfully started. The phase the signal
+// DID catch is named, because it started and did not finish, and the phase it
+// was never reached before travels in the cause alone. ok is false when there is
+// nothing to record at all: every enabled phase completed, so the run was not
+// cut short in any phase's work and nothing is paused.
+func interruptOutcome(running, next, tail string) (phases []string, cause string, ok bool) {
+	switch {
+	case running != "":
+		cause = "interrupted by SIGTERM while running " + running
+		if t := strings.TrimSpace(tail); t != "" {
+			cause += "\n" + t
+		}
+		return []string{running}, cause, true
+	case next != "":
+		return nil, "interrupted by SIGTERM before " + next, true
+	default:
+		return nil, "", false
+	}
+}
+
+// applyInterrupt folds a signal's outcome (see interruptOutcome) into the run's
+// failure bookkeeping — the phases_failed list and the marker's single error
+// string — and reports the one shape that has to be written directly.
+//
+// failedPhases and firstPhaseErr are the run's state before the signal; the
+// return values are that state after, plus the direct-write cause ("" when
+// there is none).
+//
+// The marker carries ONE error string, and recordFailure keeps the FIRST
+// cause, so an interrupt that follows an earlier phase's failure is APPENDED to
+// that cause rather than dropped: without this, a phase caught in flight after
+// an earlier phase failed would be named in phases_failed while its own cause —
+// and the output tail that is the only record of what it was doing — went
+// unwritten.
+//
+// When no phase may be named and nothing failed, the run ITSELF is what the
+// interrupt stopped. FinishLifecycleRun reads an empty failure list as a
+// successful run — success heals — which would leave that record unwritten and
+// clear an earlier one, so the cause is returned for the caller to write
+// directly.
+func applyInterrupt(failedPhases []string, firstPhaseErr, running, next, tail string) ([]string, string, string) {
+	phases, cause, ok := interruptOutcome(running, next, tail)
+	if !ok {
+		return failedPhases, firstPhaseErr, ""
+	}
+	if firstPhaseErr != "" {
+		firstPhaseErr += "; " + cause
+	}
+	if len(phases) > 0 {
+		failedPhases = append(failedPhases, phases[0])
+		if firstPhaseErr == "" {
+			firstPhaseErr = cause
+		}
+		return failedPhases, firstPhaseErr, ""
+	}
+	if firstPhaseErr == "" {
+		return failedPhases, firstPhaseErr, cause
+	}
+	return failedPhases, firstPhaseErr, ""
 }
 
 // runAuditPhase judges the calls this session made against the transcript the
@@ -505,6 +700,12 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 // `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
 // the harnesses from being orphaned when the process is asked to stop.
 //
+// The lifecycle coordinator holds the same root for the length of its phase
+// chain: the phases derive their contexts from it, so a signal aimed at the
+// coordinator alone cancels the phase in flight — turning into that phase's
+// group SIGTERM through its Cancel — rather than letting Go's default action
+// kill the coordinator and leave the phase running.
+//
 // Harness children run in their own process group, so this process's group is
 // no longer the umbrella that reaches them: the phase's own deadline (the
 // lifecycle phase group signal) and a terminal Ctrl-C would otherwise end this
@@ -539,61 +740,116 @@ func consolidationContext(parent context.Context, minutes int) (context.Context,
 	return context.WithTimeout(parent, time.Duration(minutes)*time.Minute)
 }
 
-// phaseGracePeriod is how long a phase has to exit after its deadline's
-// SIGTERM before its whole process group is force-killed.
-const phaseGracePeriod = 30 * time.Second
+const (
+	// phaseGracePeriod is how long a phase has to exit after its deadline's
+	// SIGTERM before its whole process group is force-killed.
+	phaseGracePeriod = 30 * time.Second
+
+	// phaseGroupPollInterval is how often the escalation re-asks whether the
+	// phase's process group is still inhabited while the grace runs. The
+	// question is a signal-0 probe, so asking it this often costs nothing, and
+	// an "empty" answer is what ends the grace early — the same shape the
+	// harness escalation already uses (harnessGracePoll, internal/ai). A phase
+	// that exits a moment after the SIGTERM must not hold the coordinator open
+	// for the rest of the grace: the loop waits for this escalation to finish
+	// before it returns, and a thirty-second exit on every Ctrl-C would be the
+	// price of a fixed sleep.
+	phaseGroupPollInterval = 50 * time.Millisecond
+)
 
 // phaseEscalation is the impure edge of a phase's deadline: the grace period,
-// the clock that measures it, the question of whether anything is still in the
-// phase's process group, and the signal itself. All four are fields so a test
-// can set the boundary where the grace is up and the group has emptied at once,
-// rather than waiting for it to arrive.
+// the clock that measures it, how often the group is re-asked while the grace
+// runs, the question of whether anything is still in the phase's process group,
+// and the signal itself. They are fields so a test can set the boundary where
+// the grace is up and the group has emptied at once, rather than waiting for it
+// to arrive.
 type phaseEscalation struct {
 	grace          time.Duration
+	poll           time.Duration
 	after          func(time.Duration) <-chan time.Time
 	groupInhabited func(*exec.Cmd) bool
 	kill           func(*exec.Cmd)
 }
 
-// phaseWatchdog is the second half of a phase's deadline. The deadline's Cancel
-// has already asked the phase's whole process group to shut down; this is the
-// escalation for a phase that ignored it, and it returns without escalating
-// when the phase ends before its deadline.
+// phaseWatchdog is the second half of a phase interruption. The phase context's
+// Cancel has already asked the phase's whole process group to shut down; this is
+// the escalation for a phase that ignored it, and it returns without escalating
+// when the phase ends before it is interrupted.
 //
 // The question it asks before signalling is about the GROUP, not the phase
 // process, and the difference is the whole point. cmd.Wait returns the instant
 // the direct child is reaped, and a phase is a plain ghost process with no
-// SIGTERM handler, so it dies the moment the deadline's group signal lands —
-// while the CLI harness it spawned, same group, can ignore or slowly handle the
-// signal and survive as an orphan. That orphan is the reason killPhaseProcess
-// exists, so "the phase has been waited for" is not a reason to stay the
-// escalation; "the group is empty" is. Asking the group is also what keeps the
-// id safe to signal: an empty group is the one whose id belongs to no run here
-// and, on a busy machine, can already have been reused. Go's select picks a
-// ready case at random, but the phaseDone/ctx.Done choice below no longer
-// decides anything: both cases fall through to the deadline test.
-func phaseWatchdog(ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
-	// Wait for the deadline, or for the phase to end first.
+// SIGTERM handler, so it dies the moment the group signal lands — while the CLI
+// harness it spawned, same group, can ignore or slowly handle the signal and
+// survive as an orphan. That orphan is the reason killPhaseProcess exists, so
+// "the phase has been waited for" is not a reason to stay the escalation; "the
+// group is empty" is. Asking the group is also what keeps the id safe to
+// signal: an empty group is the one whose id belongs to no run here and, on a
+// busy machine, can already have been reused. Go's select picks a ready case at
+// random, but the phaseDone/ctx.Done choice below no longer decides anything:
+// both cases fall through to the interruption test.
+//
+// rootCtx is the coordinator's own root context, the one a SIGINT/SIGTERM
+// cancels (see maintenanceContext). It is a second argument rather than the
+// phase context because the phase context alone cannot tell the two cancels
+// apart: the phase loop cancels it once the phase has returned, and that cancel
+// means the phase ended on its own and has nothing to sweep, while a root
+// cancellation is a signal that terminated the phase in flight.
+//
+// The grace period is a deadline on the KILL, not a sleep: the group is
+// re-asked every phaseGroupPollInterval and the escalation returns the moment
+// it is empty. That is what makes the loop's wait for it cheap — the loop
+// holds this goroutine's return open before it releases the per-project claim,
+// so a fixed sleep here would be a fixed thirty-second exit on every signal.
+func phaseWatchdog(rootCtx, ctx context.Context, phaseDone <-chan struct{}, cmd *exec.Cmd, esc phaseEscalation) {
+	// Wait for the deadline or the signal, or for the phase to end first.
 	select {
 	case <-phaseDone:
 	case <-ctx.Done():
 	}
 
-	// Only a deadline escalates. The phase loop also cancels this context once
-	// the phase has returned, and a context the loop cancelled is not a
-	// deadline: a phase that ended on its own has nothing to sweep. When the
-	// deadline did fire, it fired BEFORE the SIGTERM that is what ends the
-	// phase, so the answer here is DeadlineExceeded by the time phaseDone
-	// closes — the check does not race the signal that caused it.
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// Only an interruption escalates: the phase's own deadline, or a signal
+	// that cancelled the coordinator's root context and so cancelled this
+	// phase's context with it. The phase loop also cancels ctx once the phase
+	// has returned, and a context the loop cancelled is neither — a phase that
+	// ended on its own has nothing to sweep. When the deadline fired, it fired
+	// BEFORE the SIGTERM that ends the phase, and a signal cancelled rootCtx
+	// before the phase it terminated is reaped, so neither check races the
+	// signal that caused it.
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) && rootCtx.Err() == nil {
 		return
 	}
 
-	// The deadline fired. The group has the grace period to empty out on the
-	// SIGTERM it was sent, and whatever is still in it is force-killed.
-	<-esc.after(esc.grace)
-	if esc.groupInhabited(cmd) {
-		esc.kill(cmd)
+	// The deadline fired, or a signal cancelled the coordinator's root context.
+	// The group has the grace period to empty out on the SIGTERM it was sent,
+	// and whatever is still in it when the grace is up is force-killed.
+	//
+	// The grace is re-asked rather than slept out, because an empty group is
+	// the end of the escalation — there is nothing left to signal — and the
+	// loop now waits for this function to finish before a signalled run
+	// returns. A phase that takes the SIGTERM and exits a moment later must
+	// therefore cost a moment, not the rest of the grace: the kill is the only
+	// thing the grace is a deadline FOR, and a group that has already emptied
+	// has no kill to wait for.
+	graceUp := esc.after(esc.grace)
+	poll := esc.poll
+	if poll <= 0 {
+		poll = phaseGroupPollInterval
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-graceUp:
+			if esc.groupInhabited(cmd) {
+				esc.kill(cmd)
+			}
+			return
+		case <-ticker.C:
+			if !esc.groupInhabited(cmd) {
+				return
+			}
+		}
 	}
 }
 

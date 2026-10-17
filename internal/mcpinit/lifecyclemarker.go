@@ -826,7 +826,16 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 // assemble.Token writes an ordinary phase name byte for byte and quotes
 // anything outside its bare set, so a line break prints as the Go escape `\n`
 // and cannot start a line.
+//
+// An empty list is a legitimate shape now — a signal that landed between phases
+// records the run, not a phase, and names none — so the field renders "none"
+// rather than an empty gap between its two separators. The stand-in is a
+// constant, not caller data, so it carries nothing through the token guard the
+// entries do.
 func renderMarkerPhases(phases []string) string {
+	if len(phases) == 0 {
+		return "none"
+	}
 	rendered := make([]string, len(phases))
 	for i, p := range phases {
 		rendered[i] = assemble.Token(p)

@@ -73,3 +73,27 @@ func TestSessionStart_OrdinaryPhaseListRendersUnchanged(t *testing.T) {
 		t.Errorf("an ordinary phase list must render unchanged\n got: %s\nwant it to contain: %s", firstLine, want)
 	}
 }
+
+// TestSessionStart_EmptyPhaseListRendersAsNone pins the shape a signal that
+// landed between phases leaves: the marker names the run, not a phase, so
+// phases_failed is empty. The field must read "none" rather than an empty gap
+// between its two separators.
+func TestSessionStart_EmptyPhaseListRendersAsNone(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{}, Error: "interrupted by SIGTERM before resolve", At: at, Version: 1,
+	})
+
+	firstLine, out := alertFirstLine(t, filepath.Join(t.TempDir(), "no-such-project"))
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Fatalf("a marker naming no phase must still alert, got:\n%s", out)
+	}
+	if want := "(phase(s): none;"; !strings.Contains(firstLine, want) {
+		t.Errorf("an empty phase list must read as none\n got: %s\nwant it to contain: %s", firstLine, want)
+	}
+}

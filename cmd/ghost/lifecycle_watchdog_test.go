@@ -65,6 +65,7 @@ func newPhaseCmd(timeout time.Duration, script string) (context.Context, context
 func realEscalation(grace time.Duration, attempts *atomic.Int64) phaseEscalation {
 	return phaseEscalation{
 		grace:          grace,
+		poll:           5 * time.Millisecond,
 		after:          time.After,
 		groupInhabited: phaseGroupInhabited,
 		kill: func(cmd *exec.Cmd) {
@@ -88,7 +89,7 @@ func startPhaseAndWatchdog(t *testing.T, ctx context.Context, phaseDone chan str
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		phaseWatchdog(ctx, phaseDone, cmd, esc)
+		phaseWatchdog(context.Background(), ctx, phaseDone, cmd, esc)
 	}()
 	return &wg
 }
@@ -299,7 +300,7 @@ func TestThePhaseWatchdogSkipsTheKillWhenThePhaseEndedBeforeItRan(t *testing.T) 
 			defer wg.Done()
 			close(started)
 			<-release
-			phaseWatchdog(ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+			phaseWatchdog(context.Background(), ctx, phaseDone, cmd, realEscalation(grace, &attempts))
 		}()
 		<-started
 
@@ -344,7 +345,7 @@ func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
 			close(graceUp) // and the grace is up
 
 			var kills atomic.Int64
-			phaseWatchdog(ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+			phaseWatchdog(context.Background(), ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
 				grace:          0,
 				after:          func(time.Duration) <-chan time.Time { return graceUp },
 				groupInhabited: func(*exec.Cmd) bool { return tc.groupAlive },
@@ -355,6 +356,73 @@ func TestThePhaseWatchdogAsksTheGroupBeforeItSignals(t *testing.T) {
 				t.Errorf("the escalation fired %d time(s), want %d", got, tc.wantKills)
 			}
 		})
+	}
+}
+
+// TestThePhaseWatchdogReturnsWhenTheGroupEmpties is what makes waiting for the
+// escalation cheap. The grace is a deadline on the KILL, not a sleep: a phase
+// that takes the SIGTERM and exits must not hold its watchdog — and so the
+// coordinator that now waits for it before releasing the per-project claim —
+// for the rest of the grace. The grace clock here never fires, and the
+// escalation returns anyway because the group it polls is already empty.
+func TestThePhaseWatchdogReturnsWhenTheGroupEmpties(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the phase was interrupted
+	<-ctx.Done()
+
+	never := make(chan time.Time) // the grace never elapses
+	var kills atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		phaseWatchdog(ctx, ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+			grace:          time.Hour,
+			poll:           5 * time.Millisecond,
+			after:          func(time.Duration) <-chan time.Time { return never },
+			groupInhabited: func(*exec.Cmd) bool { return false },
+			kill:           func(*exec.Cmd) { kills.Add(1) },
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the escalation did not return while the group was empty: it is sleeping out the grace instead of polling the group")
+	}
+	if n := kills.Load(); n != 0 {
+		t.Errorf("the escalation killed an empty group %d time(s)", n)
+	}
+}
+
+// TestThePhaseWatchdogEscalatesWhenTheCoordinatorIsSignalled is the other
+// interruption the escalation answers. A SIGINT/SIGTERM to the coordinator
+// cancels its root context, which cancels the phase's own context and delivers
+// the group SIGTERM through the phase's Cancel — and a phase that ignores it has
+// to be swept all the same, or the signal that stopped the coordinator would
+// leave the phase and its harness behind. The clock and the group question are
+// injected so the boundary is set rather than waited for.
+func TestThePhaseWatchdogEscalatesWhenTheCoordinatorIsSignalled(t *testing.T) {
+	root, stopRoot := context.WithCancel(context.Background())
+	defer stopRoot()
+	ctx, cancel := context.WithCancel(root)
+	defer cancel()
+
+	// The signal reached the coordinator: rootCtx is cancelled, and that
+	// cancellation is what cancelled the phase's context too.
+	stopRoot()
+	<-ctx.Done()
+
+	graceUp := make(chan time.Time)
+	close(graceUp)
+	var kills atomic.Int64
+	phaseWatchdog(root, ctx, make(chan struct{}), &exec.Cmd{}, phaseEscalation{
+		grace:          0,
+		after:          func(time.Duration) <-chan time.Time { return graceUp },
+		groupInhabited: func(*exec.Cmd) bool { return true },
+		kill:           func(*exec.Cmd) { kills.Add(1) },
+	})
+	if got := kills.Load(); got != 1 {
+		t.Errorf("the escalation fired %d time(s) for a phase a coordinator signal terminated, want exactly 1", got)
 	}
 }
 
