@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -637,6 +638,148 @@ func TestSearchAll_CrossProject(t *testing.T) {
 	}
 	if len(results) < 2 {
 		t.Errorf("expected at least 2 cross-project results, got %d", len(results))
+	}
+}
+
+// searchAllLineFor is the one ghost_search_all row whose content holds needle.
+func searchAllLineFor(t *testing.T, out, needle string) string {
+	t.Helper()
+	var found []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "- [") && strings.Contains(line, needle) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one row holding %q, got %d:\n%s", needle, len(found), out)
+	}
+	return found[0]
+}
+
+// TestSearchAllRowsNameTheirProject: ghost_search_all is one ranking over every
+// project and `_global`, so each row has to say which bucket it came from. The
+// label is ON the row (not somewhere in the answer), it names the row's own
+// project id, and the rows keep the order the store ranked them in.
+func TestSearchAllRowsNameTheirProject(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	for _, tc := range []struct{ project, content, category string }{
+		{"alpha", "never run the zebra migration in alpha", "gotcha"},
+		{"beta", "never run the zebra migration in beta", "gotcha"},
+	} {
+		res := callTool(t, session, "ghost_memory_save", map[string]any{
+			"project_id": tc.project, "content": tc.content, "category": tc.category,
+		})
+		if res.IsError {
+			t.Fatalf("save in %s: %s", tc.project, resultText(res))
+		}
+	}
+	if res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content": "the zebra tool is preferred everywhere", "category": "preference",
+	}); res.IsError {
+		t.Fatalf("save_global: %s", resultText(res))
+	}
+
+	res := callTool(t, session, "ghost_search_all", map[string]any{"query": "zebra"})
+	if res.IsError {
+		t.Fatalf("search_all: %s", resultText(res))
+	}
+	out := resultText(res)
+
+	rows, err := srv.store.SearchHybridAll(ctx, "zebra", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybridAll: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want the three seeded rows from the store, got %d", len(rows))
+	}
+	byContent := map[string]string{}
+	for _, m := range rows {
+		byContent[m.Content] = m.ProjectID
+	}
+	for content, wantBucket := range map[string]string{
+		"never run the zebra migration in alpha": "alpha",
+		"never run the zebra migration in beta":  "beta",
+		"the zebra tool is preferred everywhere": memory.GlobalProjectID,
+	} {
+		// The store's own project id for the row, so the assertion is about the
+		// id the label prints, and the fixture's bucket is checked against it.
+		if got := byContent[content]; got != wantBucket {
+			t.Fatalf("fixture: %q is stored in project %q, want %q", content, got, wantBucket)
+		}
+		line := searchAllLineFor(t, out, content)
+		if !strings.Contains(line, "(0.") || !strings.Contains(line, " project="+wantBucket+" ") {
+			t.Errorf("row for %q does not name project=%s:\n%s", content, wantBucket, line)
+		}
+	}
+
+	// Ranking order is the store's, untouched by the label.
+	var gotIDs []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "- [") {
+			start := strings.IndexByte(line, '`')
+			end := strings.IndexByte(line[start+1:], '`')
+			gotIDs = append(gotIDs, line[start+1:start+1+end])
+		}
+	}
+	if len(gotIDs) != len(rows) {
+		t.Fatalf("answer has %d rows, store ranked %d:\n%s", len(gotIDs), len(rows), out)
+	}
+	for i, m := range rows {
+		if gotIDs[i] != m.ID {
+			t.Errorf("row %d is %s, the store ranked %s there", i, gotIDs[i], m.ID)
+		}
+	}
+}
+
+// TestSearchAllProjectLabelIsATokenTheLineCannotEscape: a project id is caller
+// text (project_id allows a space), so the label goes through assemble.Token and
+// a space is quoted rather than splitting `project=` from the rest of the id, and
+// a double quote inside the id is escaped inside that quoted token. (The store
+// already refuses an id holding a line break, backtick or data delimiter.)
+func TestSearchAllProjectLabelIsATokenTheLineCannotEscape(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	if res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "my proj", "content": "the quokka cache is warmed nightly", "category": "fact",
+	}); res.IsError {
+		t.Fatalf("save in a spaced project: %s", resultText(res))
+	}
+	const quoteID = `odd"id`
+	if err := srv.store.EnsureProject(ctx, quoteID, "/tmp/odd", "odd"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := srv.store.Create(ctx, quoteID, memory.Memory{
+		Content: "the quokka relay is idle", Category: "fact", Importance: 0.5, Source: "mcp",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	out := resultText(callTool(t, session, "ghost_search_all", map[string]any{"query": "quokka"}))
+
+	rows, err := srv.store.SearchHybridAll(ctx, "quokka", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybridAll: %v", err)
+	}
+	var spacedID string
+	for _, m := range rows {
+		if m.Content == "the quokka cache is warmed nightly" {
+			spacedID = m.ProjectID
+		}
+	}
+	if !strings.Contains(spacedID, " ") {
+		t.Fatalf("fixture: the spaced project was stored under %q, which holds no space", spacedID)
+	}
+	line := searchAllLineFor(t, out, "the quokka cache is warmed nightly")
+	if want := " project=" + strconv.QuoteToASCII(spacedID) + " "; !strings.Contains(line, want) {
+		t.Errorf("spaced project id is not rendered as the quoted token %q:\n%s", want, line)
+	}
+	line = searchAllLineFor(t, out, "the quokka relay is idle")
+	if want := " project=" + strconv.QuoteToASCII(quoteID) + " "; !strings.Contains(line, want) {
+		t.Errorf("double-quoted project id is not rendered as the quoted token %q:\n%s", want, line)
+	}
+	if f := forgedLines(out); len(f) != 0 {
+		t.Errorf("a project id printed a line shaped like a memory line: %q\n%s", f, out)
 	}
 }
 
