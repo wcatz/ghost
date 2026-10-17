@@ -21,12 +21,36 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/wcatz/ghost/internal/mcpinit"
 )
+
+// syncBuffer is a bytes.Buffer whose writes are safe alongside reads. os/exec
+// copies a child's output into the writer from its own goroutine, and only
+// cmd.Wait — which here runs in a separate goroutine signalled by 'exited' —
+// guarantees that copy has finished. The wait loop below reads the buffer on
+// its failure paths while the coordinator is still running and the copier is
+// still writing, which `go test -race` flags as a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // TestLifecycleSignalStopsTheRunningPhase signals the coordinator's own pid
 // while a phase is blocked on a slow harness and requires three things of the
@@ -72,7 +96,7 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	cmd := exec.Command(ghostBin, "lifecycle", "--project", e2eProject, "--source", "claude-code")
 	cmd.Env = s.env
 	cmd.Dir = s.work
-	var out, errb bytes.Buffer
+	var out, errb syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start ghost lifecycle: %v", err)
