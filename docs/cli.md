@@ -99,7 +99,7 @@ Status also reports how fast `memory_history` is filling, and how much of that i
 ```text
   - history: 8 version rows in 24h, 6 restatements (75%), deepest memory 7/50 versions, store 8/20000 rows
   ! 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote, plus the newest version of any memory
-  ! memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
+  ! memory "1F2E3D4C5B6A7988" is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
 
 The restatement finding is careful about what it tells you to run, and the care is
@@ -137,12 +137,19 @@ written, so "at the cap" is the ordinary steady state of an active store rather 
 an edge case, and it is a separate sentence from a countdown:
 
 ```text
-  ! memory 1F2E3D4C5B6A7988 is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
+  ! memory "1F2E3D4C5B6A7988" is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
   ! the store holds 20000 of its 20000 history rows and wrote 310 in the last 24h, so it is at the store cap and the oldest rows in the table are what it trims — not the noisiest ones
 ```
 
 The id is printed **whole** rather than abbreviated, because here it is an operand:
-`ghost history 1F2E3D4C5B6A7988` is what you do with it.
+`ghost history 1F2E3D4C5B6A7988` is what you do with it. It is rendered through the
+shared `memory.RefusalArg` renderer — the same one every other stored id a refusal
+names uses — which returns exactly the quoted value for an ordinary id, so the
+operand is intact, and withholds a token-shaped or over-256-byte one behind a
+placeholder naming the field and the format the guard found. A stored id is not
+token-guarded: `ghost import` writes an artifact's id verbatim, so a
+`ghp_`-shaped 40-byte id is a legal stored id, and both this surface and
+`ghost_health` print this same sentence.
 
 Each finding gets its own `!` line, naming both the number that tripped it and the
 threshold it tripped against:

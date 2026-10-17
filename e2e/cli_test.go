@@ -3156,8 +3156,10 @@ var (
 // headroom over its own rate is smallest), and a finding that quoted the deepest
 // memory's count beside the busiest writer's rate would name no memory at all —
 // so the id and both counts are part of what the two surfaces are compared on.
+// The pattern requires the quotes the renderer adds and captures only the id,
+// which is what the store query below keys on.
 var historyCapWarningRE = regexp.MustCompile(
-	`memory ([0-9A-F]{16,}) is closest to the per-memory cap: it holds (\d+) of its (\d+) versions and wrote (\d+) in the last (\d+)h`)
+	`memory "([0-9A-F]{16,})" is closest to the per-memory cap: it holds (\d+) of its (\d+) versions and wrote (\d+) in the last (\d+)h`)
 
 // TestCLIMCPStatusHistoryGrowth drives #729 against the built binary: the two
 // surfaces that report memory_history growth, asked the same question about one
