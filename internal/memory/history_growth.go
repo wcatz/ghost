@@ -498,11 +498,20 @@ func historyGrowthWarnings(res HistoryGrowthResult) []HistoryWarning {
 // historyPerMemoryCapDetail is the sentence for the per-memory cap, in one memory's
 // terms.
 //
-// The id is printed WHOLE, unlike most ids on a Ghost report, because here it is
-// an OPERAND: `ghost history <id>` is what a reader does with it, and an
-// abbreviated id would send them to a lookup instead of the memory. The two counts
-// are in the sentence so the countdown can be redone from them, which is the same
-// reason the share's threshold is printed next to the share.
+// The id is rendered WHOLE, because here it is an OPERAND: `ghost history <id>` is
+// what a reader does with it, and an abbreviated id would send them to a lookup
+// instead of the memory. It goes through RefusalArg rather than a bare `%s`
+// because a stored id is not token-guarded — `ghost import` writes an artifact's
+// id verbatim and the id shape check never asks the guard, so a `ghp_`-shaped
+// 40-byte id is a legal stored id — and this sentence is printed by `ghost mcp
+// status` and ghost_health alike, so interpolating it verbatim would relocate a
+// token-shaped value to a terminal and an agent's context. RefusalArg is the
+// renderer every other stored id a refusal names uses: an ordinary id stays whole
+// — quoted, which is its one visible change — and a token-shaped or over-256-byte
+// one is withheld behind a placeholder naming the field and the format, so the
+// operand is intact whenever there is an operand to use. The two counts are in the
+// sentence so the countdown can be redone from them, which is the same reason the
+// share's threshold is printed next to the share.
 //
 // The countdown is at or past zero or it is not, and the two read as different
 // sentences rather than as a duration: pruneHistoryTx holds a memory at exactly
@@ -511,15 +520,16 @@ func historyGrowthWarnings(res HistoryGrowthResult) []HistoryWarning {
 // "reaches the cap in 0 days" (or interpolated a state into the frame) would be
 // broken exactly when it mattered most.
 func historyPerMemoryCapDetail(res HistoryGrowthResult) string {
+	id := RefusalArg("memory_id", res.CapMemoryID)
 	if res.DaysToPerMemoryCap <= 0 {
 		return fmt.Sprintf(
 			"memory %s is at the per-memory cap: it holds %d of its %d versions and wrote %d in the last %dh, so its oldest versions are what the trim takes now (warning threshold %d days)",
-			res.CapMemoryID, res.CapMemoryVersions, res.PerMemoryCap, res.CapMemoryRecent,
+			id, res.CapMemoryVersions, res.PerMemoryCap, res.CapMemoryRecent,
 			res.WindowHours, HistoryCapHorizonDays)
 	}
 	return fmt.Sprintf(
 		"memory %s is closest to the per-memory cap: it holds %d of its %d versions and wrote %d in the last %dh, so the cap is %s away at that rate (warning threshold %d days)",
-		res.CapMemoryID, res.CapMemoryVersions, res.PerMemoryCap, res.CapMemoryRecent,
+		id, res.CapMemoryVersions, res.PerMemoryCap, res.CapMemoryRecent,
 		res.WindowHours, historyDaysText(res.DaysToPerMemoryCap), HistoryCapHorizonDays)
 }
 

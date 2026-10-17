@@ -1033,6 +1033,80 @@ func TestHistoryGrowthNamesTheMemoryClosestToTheCap(t *testing.T) {
 	}
 }
 
+// TestHistoryGrowthWithholdsATokenShapedMemoryID: the per-memory finding names
+// the memory its countdown is about so a reader can act on it — `ghost history
+// <id>` — and it used to interpolate that id with a bare `%s`. A stored id is
+// not token-guarded: `ghost import` writes an artifact's id verbatim and the id
+// shape check never asks the guard, so a `ghp_`-shaped 40-byte id is a legal
+// stored id and rode out of BOTH surfaces in the sentence — `ghost mcp status`
+// prints it on its `!` line and ghost_health on its `⚠` line, from the one
+// Detail this report builds. The id now reaches the sentence through
+// memory.RefusalArg like every other stored id Ghost names, so an ordinary id
+// stays whole — the operand a reader needs — and a token-shaped one is withheld
+// behind a placeholder naming the field and the format, with no character of the
+// value printed.
+//
+// The two arms are subtests of one test because the point is the renderer, not
+// the label: the ordinary arm is what fails if the id is dropped or abbreviated
+// in the name of withholding, which is the tempting over-correction.
+func TestHistoryGrowthWithholdsATokenShapedMemoryID(t *testing.T) {
+	ctx := context.Background()
+	// `ghp_` plus 36 characters, the GitHub personal access token rule, and a
+	// legal stored id: `memory.CheckImportedID` bounds length, control
+	// characters, whitespace and a backtick, and asks the guard nothing.
+	const tokenID = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	t.Run("token-shaped id is withheld", func(t *testing.T) {
+		s := testStore(t)
+		if _, _, _, err := s.ImportMemory(ctx, PortableMemory{
+			ID: tokenID, ProjectID: testProject, Category: "fact",
+			Content: "an artifact carried this row, and its id, verbatim", Source: "mcp",
+		}, ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+			t.Fatalf("store the token-shaped memory: %v", err)
+		}
+		for range 11 {
+			appendWindowRestatement(t, s, tokenID)
+		}
+
+		res, err := s.HistoryGrowth(ctx)
+		if err != nil {
+			t.Fatalf("HistoryGrowth: %v", err)
+		}
+		// The RESULT still carries the id: it is data, and a caller that wants to
+		// act on it holds it in a field rather than in this sentence.
+		if res.CapMemoryID != tokenID {
+			t.Fatalf("CapMemoryID = %q, want the stored id", res.CapMemoryID)
+		}
+		detail := warningDetail(t, res, HistoryWarnPerMemoryCap)
+		if strings.Contains(detail, tokenID) || strings.Contains(detail, "ghp_") {
+			t.Errorf("the per-memory finding prints the token-shaped stored id:\n%s", detail)
+		}
+		for _, want := range []string{"withheld", "GitHub personal access token"} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the per-memory finding does not mention %q:\n%s", want, detail)
+			}
+		}
+	})
+
+	t.Run("ordinary id stays whole", func(t *testing.T) {
+		s := testStore(t)
+		id := createCompactMemory(t, s, "the relay keeps its own address book")
+		for range 11 {
+			appendWindowRestatement(t, s, id)
+		}
+		res, err := s.HistoryGrowth(ctx)
+		if err != nil {
+			t.Fatalf("HistoryGrowth: %v", err)
+		}
+		detail := warningDetail(t, res, HistoryWarnPerMemoryCap)
+		// Whole, because `ghost history <id>` takes it, and quoted the way
+		// RefusalArg renders every ordinary value.
+		if !strings.Contains(detail, `"`+id+`"`) {
+			t.Errorf("the per-memory finding does not name the whole id %s:\n%s", id, detail)
+		}
+	})
+}
+
 // TestHistoryGrowthSaysTheCapHasBeenReached covers the state both cap warnings
 // are FOR, which is also the state they used to render as broken English: a memory
 // sitting at exactly 50 versions that wrote anything today has zero days left, and
