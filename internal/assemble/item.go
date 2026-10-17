@@ -514,13 +514,21 @@ func Label(s string) string {
 func labelNeedsEscaping(s string) bool {
 	for _, r := range s {
 		switch {
-		case unicode.IsControl(r) || isLineBreak(r):
+		case isLineEndingOrControl(r):
 			return true
 		case r == '`', r == '"', r == '«', r == '»':
 			return true
 		}
 	}
 	return false
+}
+
+// isLineEndingOrControl is the line-ending class Label escapes (#1363): every rune
+// isLineBreak reports, plus the rest of the C0 and C1 control classes. It is a
+// named predicate because TagsLabel escapes the same class (#1488), and two
+// spellings of "what ends a line" is how one of them came to miss NEL.
+func isLineEndingOrControl(r rune) bool {
+	return unicode.IsControl(r) || isLineBreak(r)
 }
 
 // PreviewLine returns the first line of stored text, capped at max runes with an
@@ -817,8 +825,30 @@ const tagBacktickEscape = "\\u0060"
 // Ghost printed. Widening that function would change how every content block in
 // every answer renders, on no evidence that a content backtick is unsafe. So the
 // label has its own, and this is the one place the two rules differ.
+//
+// It also writes every rune of Label's line-ending class (isLineEndingOrControl)
+// as a JSON `\uXXXX` escape (#1488). `json.Marshal` escapes C0 and U+2028/U+2029
+// but leaves NEL (U+0085) and the rest of C1 raw, and an imported tag is stored
+// verbatim, so a NEL in one forged a line in the session-start block. Every rune
+// of that class is in the BMP, so the four-digit escape is exact, and an escape
+// inside a JSON string decodes back to the same rune: the array stays valid and
+// a reader decoding it gets the stored tag unchanged. Outside a JSON string the
+// marshalled array holds only ASCII punctuation, so no escape lands there.
 func neutralizeTagLabel(s string) string {
-	return strings.ReplaceAll(neutralizeDelimiters(s), "`", tagBacktickEscape)
+	s = strings.ReplaceAll(neutralizeDelimiters(s), "`", tagBacktickEscape)
+	if !strings.ContainsFunc(s, isLineEndingOrControl) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		if isLineEndingOrControl(r) {
+			fmt.Fprintf(&b, "\\u%04x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // neutralizeDelimiters rewrites the « and » that open and close a data block into
