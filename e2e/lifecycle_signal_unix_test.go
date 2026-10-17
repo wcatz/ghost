@@ -29,10 +29,12 @@ import (
 )
 
 // TestLifecycleSignalStopsTheRunningPhase signals the coordinator's own pid
-// while a phase is blocked on a slow harness and requires two things of the
-// interruption: the phase and its harness are terminated (not orphaned), and
-// the interrupted phase is recorded like a failed one, so the next session
-// start raises the maintenance alert rather than silence.
+// while a phase is blocked on a slow harness and requires three things of the
+// interruption: the coordinator WAITS for the phase rather than abandoning it
+// (while the harness is alive the coordinator, and the per-project claim it
+// holds, must be too), the phase's harness is terminated rather than orphaned,
+// and the interrupted phase is recorded, so the next session start raises the
+// maintenance alert rather than silence.
 func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	s := newSandbox(t)
 	cs := s.mcpSession(t)
