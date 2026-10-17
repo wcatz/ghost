@@ -3841,9 +3841,19 @@ func (s *Server) registerTools() {
 		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
 		totalMemories := 0
+		uncountedProjects := 0
 		for _, p := range projects {
 			count, err := s.store.CountMemories(ctx, p.ID)
 			if err != nil {
+				// A project whose count failed used to be skipped in silence —
+				// no bullet, and a total that quietly excluded it — so an
+				// unreadable project looked like an empty one (#1461). The
+				// count is a read like every other in this tool, and a failed
+				// read is reported rather than dropped: the same rule the
+				// pinned, history and retrieval blocks follow.
+				uncountedProjects++
+				fmt.Fprintf(&sb, "- **%s** (%s): count could not be read: %v\n",
+					assemble.Label(p.Name), shortID(p.ID), err)
 				continue
 			}
 			totalMemories += count
@@ -3857,7 +3867,17 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", assemble.Label(p.Name),
 				shortID(p.ID), count)
 		}
-		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
+		if uncountedProjects > 0 {
+			// The total is a sum of what WAS read, so it has to say what it
+			// leaves out rather than print as complete.
+			if uncountedProjects == 1 {
+				fmt.Fprintf(&sb, "\n**Total memories:** %d — 1 project could not be counted, so it is not in this total\n", totalMemories)
+			} else {
+				fmt.Fprintf(&sb, "\n**Total memories:** %d — %d projects could not be counted, so they are not in this total\n", totalMemories, uncountedProjects)
+			}
+		} else {
+			fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
+		}
 
 		if s.embedder != nil {
 			if embedded, stale, total, err := s.store.EmbeddingStats(ctx); err == nil {
@@ -3883,7 +3903,11 @@ func (s *Server) registerTools() {
 						stale, total-embedded-stale)
 				}
 			} else {
-				sb.WriteString("**Embeddings:** enabled\n")
+				// A bare "enabled" read as a healthy store with full coverage,
+				// so the failed read is named beside it: the embedder IS wired
+				// (that is why this branch ran), and the coverage is unknown
+				// (#1461).
+				fmt.Fprintf(&sb, "**Embeddings:** enabled — coverage could not be read: %v\n", err)
 			}
 			// Diagnose the Ollama side when the embedder supports it.
 			if d, ok := s.embedder.(embedderDiagnostics); ok {
@@ -3901,6 +3925,11 @@ func (s *Server) registerTools() {
 
 		if links, scans, err := s.store.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
+		} else {
+			// The line used to be omitted on a failed read, so its absence
+			// meant both "no links to report" and "the read was cut short"
+			// (#1461). Reported in place, like the sections around it.
+			fmt.Fprintf(&sb, "**Memory links:** could not be read: %v\n", err)
 		}
 
 		// Pinned rows with open contradictions (#975): a pin keeps a memory in
@@ -3994,12 +4023,20 @@ func (s *Server) registerTools() {
 		var sb strings.Builder
 		sb.WriteString("## Ghost Projects\n\n")
 		for _, p := range projects {
-			count, _ := s.store.CountMemories(ctx, p.ID)
+			count, err := s.store.CountMemories(ctx, p.ID)
 			// Name and path through assemble.Label, id through assemble.Token, for
 			// the reasons the health listing above gives. The path is the one that
 			// has to stay copyable: it is printed for a human to paste into a
 			// terminal, and `/Users/w/My Projects/ghost` quoted would be a worse
 			// answer than a newline in it would be dangerous (#791).
+			if err != nil {
+				// A count that failed is not a count of zero (#1461): this
+				// listing is how an agent discovers which projects exist, so a
+				// 0 here is a claim it would act on.
+				fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — count could not be read: %v\n",
+					assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), err)
+				continue
+			}
 			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n",
 				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count)
 		}
