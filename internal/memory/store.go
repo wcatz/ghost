@@ -6932,7 +6932,15 @@ type rowClaims struct {
 // NULL every time and fix nothing. Read here because the delete below is what
 // disposes of the sources, and this loop runs before it — the same reordering
 // carryEvidenceTx already depends on.
-func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (rowClaims, error) {
+//
+// CLAIMS FOLLOW EVIDENCE. A source in keptLive — a candidate the pass keeps live
+// rather than deleting — supplies no claim, because its records are not carried
+// onto the row (sourcesNotKeptLive). It keeps its records, so its window,
+// verification, confidence and provenance strings stay with it too; a
+// verified_at taken from it would stand on the successor with no verification
+// record behind it. What such a source still gives is its decision links,
+// gathered into the list below with every other source's.
+func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory, keptLive map[string]bool) (rowClaims, error) {
 	claims := rowClaims{
 		validFrom:  m.ValidFrom,
 		validUntil: m.ValidUntil,
@@ -6967,6 +6975,12 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		}
 		if err != nil {
 			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", RefusalArg("memory_id", id), err)
+		}
+		if keptLive[id] {
+			// A source this pass keeps live: its decision links and nothing else.
+			// See CLAIMS FOLLOW EVIDENCE above.
+			decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
+			continue
 		}
 		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
 		// See the resolution after the loop for why, and for what a candidate is
@@ -7323,8 +7337,11 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 // No updated_at and no history row: memory_history records none of these
 // columns, and the evidence that backs them is carried by the caller in the same
 // transaction (carryEvidenceTx), so a filled verified_at stands beside the record
-// that claims it, as on the fresh INSERT.
-func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory) error {
+// that claims it, as on the fresh INSERT. That holds because the claims come
+// from the same sources the carry reads: keptLive is the candidates the pass
+// keeps live, and a named source among them gives only its decision links
+// (inheritedClaims).
+func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory, keptLive map[string]bool) error {
 	others := make([]string, 0, len(m.ReplacesIDs))
 	for _, replaced := range m.ReplacesIDs {
 		if replaced != "" && replaced != id {
@@ -7334,7 +7351,7 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	if len(others) == 0 {
 		return nil
 	}
-	claims, err := inheritedClaims(ctx, tx, projectID, Memory{ReplacesIDs: others})
+	claims, err := inheritedClaims(ctx, tx, projectID, Memory{ReplacesIDs: others}, keptLive)
 	if err != nil {
 		return err
 	}
@@ -7422,6 +7439,62 @@ func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m M
 		return false, fmt.Errorf("count the reused memory's provenance stamp: %w", err)
 	}
 	return n > 0, nil
+}
+
+// sourcesNotKeptLive drops from an emission's ReplacesIDs every source that is
+// a candidate this pass keeps live rather than deleting, so the row stays live
+// as itself. keptLive is that set: the rows the pass reuses in place and the
+// ones it keeps as concurrent or for a refused emission.
+//
+// The split is deliberate. The drop guard's re-add is the shape that first
+// needed it: RetainGuardedDrops re-adds a merge source verbatim, the re-add
+// byte-matches the stored row and reuses it, and the merge still names that
+// row. It is not the only one: a direct caller's accepted emission can name a
+// row the pass keeps because it changed during the round trip, or because a
+// refused emission named it too. None of those rows is deleted, so what the
+// merge would otherwise take from them is wrong:
+//   - its evidence (carryEvidenceTx): the row keeps its own records, so a copy
+//     on the merge counts the same support on two live rows;
+//   - its claims (inheritedClaims, fillReusedClaimsTx): claims follow evidence,
+//     so a verified_at, confidence or window taken from a row whose records
+//     stayed behind would stand on the merge with nothing recording it;
+//   - its retention (inheritedRetention, raiseReusedRetentionTx): the row's tier
+//     still governs the row, and it is not knowledge folded into the merge;
+//   - a delete-history successor pointer (successorOf, linkSuccessorTx): the row
+//     has no successor while it is live.
+//
+// Of what a merge inherits, only the decision links come from the FULL list: the
+// claim readers take them from every named source, and everything else from
+// this list alone. Whether the merge text still restates the kept
+// row is not something the store can tell — a paraphrase the guard scored below
+// its bar, or a rewrite elsewhere that happened to reuse the row, both leave a
+// merge that asserts the decision — and a merge that asserts a decision without
+// its link is one no supersede can ever find. Keeping the link means two live
+// rows carry it, and the supersede then reports them as ambiguous rather than
+// retiring one and answering clean. The corpus guard, a refusal's kept sources,
+// the inherited scope, the link-overflow check and the provenance stamp read
+// the full list as well; each of them only refuses an emission, keeps its
+// sources or reads the pass's delete set.
+//
+// A source the emission reuses ITSELF is dropped too, and that is equivalent to
+// keeping it: every consumer above already skips the row's own id
+// (carryEvidenceTx and raiseReusedRetentionTx exclude it, linkSuccessorTx
+// ignores a row named as its own successor), and an insert reuses nothing. So
+// no emission index is compared here.
+//
+// A named row that was never a candidate — a manual, builtin, pinned or
+// retention-exempt row, or an id no row holds — is outside the split and keeps
+// what it had: a merge still inherits its claims and its tier, as before.
+func sourcesNotKeptLive(ids []string, keptLive map[string]bool) []string {
+	// A fresh slice, never ids[:0]: the caller's slice is not rewritten.
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if keptLive[id] {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // reuseAbsorbsConsumed reports whether the emission names a source other than
@@ -7883,10 +7956,24 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// slices instead would include an emission the guard refused, and the parts
 	// would no longer sum to the total.
 	appliedByCategory = make(map[string]int, len(memories))
+	// keptLive is every candidate this pass keeps live rather than deleting: a
+	// row the final reuse assignment updates in place, and a row kept as
+	// concurrent or for a refused emission. See sourcesNotKeptLive.
+	keptLive := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		if !consumed[c.id] {
+			keptLive[c.id] = true
+		}
+	}
 	for i, m := range memories {
 		if dropEmission[i] {
 			continue
 		}
+		// The sources whose evidence, claims, retention and history this emission
+		// takes over: m.ReplacesIDs minus the candidates this pass keeps live. Only
+		// the decision links still come from the full list. See sourcesNotKeptLive.
+		folded := m
+		folded.ReplacesIDs = sourcesNotKeptLive(m.ReplacesIDs, keptLive)
 		appliedByCategory[m.Category]++
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
@@ -7957,7 +8044,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// is the commonest case and the one that leaked. See
 			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
 			// rule.
-			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, m); err != nil {
+			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, folded); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
 			// A reuse that absorbed a source is that source's consolidation
@@ -7982,14 +8069,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// The fresh INSERT carries both and FoldRows carries the evidence; a
 			// reuse that names no other source carries nothing, because the row's
 			// own evidence never left it. See fillReusedClaimsTx.
-			if err := carryEvidenceTx(ctx, tx, id, m.ReplacesIDs); err != nil {
+			if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m); err != nil {
+			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m, keptLive); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
 			reused++
-			for _, replaced := range m.ReplacesIDs {
+			for _, replaced := range folded.ReplacesIDs {
 				successorOf[replaced] = id
 			}
 			continue
@@ -8011,7 +8098,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		//
 		// Read here because the delete below is what takes the sources, and this loop
 		// runs before it: the same reordering the carry already depends on.
-		claims, err := inheritedClaims(ctx, tx, projectID, m)
+		claims, err := inheritedClaims(ctx, tx, projectID, m, keptLive)
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
@@ -8024,7 +8111,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		//
 		// Read here for the same reason as the claims above and for the same
 		// reordering: the delete below is what takes the sources.
-		tier, err := inheritedRetention(ctx, tx, projectID, m)
+		tier, err := inheritedRetention(ctx, tx, projectID, folded)
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
@@ -8062,11 +8149,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// rows merged into it are deleted like any other source. And an emission
 		// with no ReplacesIDs carries nothing, because a brand-new memory has no
 		// inherited support and "none" is the answer.
-		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
+		if err := carryEvidenceTx(ctx, tx, newID, folded.ReplacesIDs); err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 		reflected = append(reflected, newID)
-		for _, replaced := range m.ReplacesIDs {
+		for _, replaced := range folded.ReplacesIDs {
 			successorOf[replaced] = newID
 		}
 	}

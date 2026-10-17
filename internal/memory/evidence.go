@@ -395,11 +395,11 @@ func carryEvidenceTx(ctx context.Context, tx *sql.Tx, toMemoryID string, fromIDs
 // in the snapshot was live when the snapshot was taken and the carry undone is
 // the one the restore is undoing. Everything else on the row stays: its own
 // records, and any support recorded after the snapshot, which a restore never
-// touches on a row it did not delete (restoreSnapshotEvidenceTx). The one shape
-// this over-reaches on is a carry whose source SURVIVED the pass that carried
-// it (a ReplacesIDs entry another emission reused) and is therefore in a LATER
-// snapshot too; restoring that later snapshot drops the copy, and the source
-// still holds the original records.
+// touches on a row it did not delete (restoreSnapshotEvidenceTx). A carry whose
+// source SURVIVED the pass is no longer written: a ReplacesIDs entry the pass
+// keeps live — one another emission reuses in place, or one it keeps as
+// concurrent or for a refused emission — keeps its own records
+// (sourcesNotKeptLive), so its records are never copied onto the merge beside it.
 //
 // The in-place set uses the same predicate as the restore's UPDATE, so a pinned,
 // resolved, persistent or promoted row the restore leaves alone keeps its records

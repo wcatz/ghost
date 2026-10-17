@@ -558,11 +558,15 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	// decision kept answering search and session start, and the caller was told
 	// the supersede was clean.
 	//
-	// When more than one claims it, the one RecordDecision wrote is the one with
-	// source 'decision_log' — an import downgrades the source — and it is the
-	// companion only if it is the sole such row. Otherwise nothing is chosen and
-	// the live claimants are returned as ambiguous, so the caller can say the
-	// decision's memory was left standing.
+	// When more than one claims it, the row Ghost itself wrote is the one with
+	// source 'decision_log' (RecordDecision) or 'reflection' (a consolidation
+	// successor) — an import downgrades the source — and it is the companion only
+	// if it is the sole such row. Otherwise nothing is chosen and the live
+	// claimants are returned as ambiguous, so the caller can say the decision's
+	// memory was left standing. Counting only 'decision_log' here picked the
+	// RecordDecision row beside a live reflect successor carrying the same link,
+	// retired it alone and answered clean while the successor kept asserting the
+	// reversed decision.
 	type linkRow struct {
 		id       string
 		category string
@@ -663,7 +667,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	if len(single) > 1 {
 		var logged []linkRow
 		for _, r := range single {
-			if r.source == "decision_log" {
+			if r.source == "decision_log" || r.source == "reflection" {
 				logged = append(logged, r)
 			}
 		}
