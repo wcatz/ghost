@@ -460,8 +460,8 @@ func TestApplyReflectionPromotionRefusedOnScopeConflict(t *testing.T) {
 	if promoted != 0 || len(kept) != 0 {
 		t.Fatalf("result promoted=%d kept=%d, want 0/0 — a candidate whose sources disagree is dropped, not kept", promoted, len(kept))
 	}
-	if globalDropped.Changed != 1 {
-		t.Errorf("globalDropped = %+v, want one changed drop for the refused candidate", globalDropped)
+	if globalDropped.Scope != 1 || globalDropped.Changed != 0 {
+		t.Errorf("globalDropped = %+v, want one scope refusal for the refused candidate and no concurrent-edit drop", globalDropped)
 	}
 
 	globals, err := s.GetAll(ctx, "_global", -1)
@@ -516,8 +516,8 @@ func TestApplyReflectionPromotionRefusedOnScopeMix(t *testing.T) {
 	if promoted != 0 || len(kept) != 0 {
 		t.Fatalf("result promoted=%d kept=%d, want 0/0 — a scoped/unscoped mix is refused like a disagreement", promoted, len(kept))
 	}
-	if globalDropped.Changed != 1 {
-		t.Errorf("globalDropped = %+v, want one changed drop for the refused candidate", globalDropped)
+	if globalDropped.Scope != 1 || globalDropped.Changed != 0 {
+		t.Errorf("globalDropped = %+v, want one scope refusal for the refused candidate and no concurrent-edit drop", globalDropped)
 	}
 
 	globals, err := s.GetAll(ctx, "_global", -1)
@@ -537,6 +537,52 @@ func TestApplyReflectionPromotionRefusedOnScopeMix(t *testing.T) {
 	}
 	assertMemoryScope(t, project, "production fact", map[string]string{"environment": "production"})
 	assertMemoryScope(t, project, "everywhere fact", nil)
+}
+
+// TestApplyReflectionPromotionScopeRefusalIsNotASurvivor is #1492 on the
+// promotion half: a cross-project candidate refused over its sources' scopes
+// keeps those sources through the shared view, and the project replace must not
+// then report them as preserved survivors — they did not move, and every later
+// run refuses the same candidate again. Reporting them is what withheld the
+// skip fingerprint on the --promote-globals path.
+func TestApplyReflectionPromotionScopeRefusalIsNotASurvivor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	src1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "production fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create src1: %v", err)
+	}
+	src2, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "staging fact", Source: "mcp", Importance: 0.5,
+		Scope: map[string]string{"environment": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("create src2: %v", err)
+	}
+
+	projectMems := []Memory{{Category: "fact", Content: "an unrelated project fact", Source: "reflection", Importance: 0.4}}
+	preserved, _, _, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject, projectMems, []Memory{
+		{Category: "fact", Content: "a cross-project fact", Source: "reflection", Importance: 0.6, ReplacesIDs: []string{src1, src2}},
+	}, "", true, nil)
+	if err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	if globalDropped.Scope != 1 || globalDropped.Changed != 0 || projectDropped.Total() != 0 {
+		t.Errorf("drops = project %+v / global %+v, want one global scope refusal and nothing else", projectDropped, globalDropped)
+	}
+	if len(preserved) != 0 {
+		t.Errorf("preserved = %v, want empty: the sources a scope refusal keeps are not survivors a later run can merge", preserved)
+	}
+	project, err := s.GetAll(ctx, testProject, -1)
+	if err != nil {
+		t.Fatalf("GetAll project: %v", err)
+	}
+	assertMemoryScope(t, project, "production fact", map[string]string{"environment": "production"})
+	assertMemoryScope(t, project, "staging fact", map[string]string{"environment": "staging"})
 }
 
 func containsMemoryContent(memories []Memory, content string) bool {
