@@ -64,10 +64,26 @@ func TestCandidatesCarriesTheEvidenceCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if _, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
+	restated, foldedInto, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
 		"the readiness probe gate misconfiguration is in the api deployment, per the runbook", "mcp", 0.5, nil,
-		Provenance{Agent: "codex", SessionID: "ses_b"}); err != nil {
+		Provenance{Agent: "codex", SessionID: "ses_b"})
+	if err != nil {
 		t.Fatalf("second Upsert: %v", err)
+	}
+	if foldedInto != corroborated {
+		t.Fatalf("the second save folded into %q, want the corroborated row %s", foldedInto, corroborated)
+	}
+	// The restatement is kept as its own row behind a duplicate edge, and the
+	// candidate read keeps one row of such a pair: by rank when both were saved
+	// in the same second, the NEWER one when created_at differs
+	// (earlierRowLoses). created_at has one-second resolution, so two saves that
+	// straddle a second boundary would drop the corroborated row. Pinning the
+	// copy to the same second keeps the rank verdict this test reads.
+	if _, err := s.db.Exec(
+		`UPDATE memories SET created_at = (SELECT created_at FROM memories WHERE id = ?) WHERE id = ?`,
+		corroborated, restated,
+	); err != nil {
+		t.Fatalf("pin the copy's created_at: %v", err)
 	}
 	if _, err := s.db.Exec(
 		`UPDATE memory_provenance SET verified_at = datetime('now') WHERE memory_id = ? AND agent = 'codex'`,
@@ -91,6 +107,17 @@ func TestCandidatesCarriesTheEvidenceCounts(t *testing.T) {
 	counts := map[string]EvidenceCounts{}
 	for _, c := range set.Rows {
 		counts[c.ID] = c.Evidence
+	}
+	// A row missing from the set would read as zero counts below, so its absence
+	// is reported as what it is.
+	for _, id := range []string{corroborated, unattributed} {
+		if _, ok := counts[id]; !ok {
+			dropped := map[string][]string{}
+			for _, d := range set.DroppedLosers {
+				dropped[d.ID] = d.LostTo
+			}
+			t.Fatalf("row %s is not in the candidate set %v (dropped, with what each lost to: %v)", id, candidateIDs(t, set), dropped)
+		}
 	}
 	if got := counts[corroborated]; got.Observations != 2 || got.Verified != 1 {
 		t.Errorf("the corroborated row's counts = %+v, want 2 observations and 1 verified", got)
