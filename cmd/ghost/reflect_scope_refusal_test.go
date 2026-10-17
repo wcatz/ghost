@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -262,6 +263,13 @@ func TestRunReflectConcurrentEditStillWithholdsTheFingerprint(t *testing.T) {
 					}
 					_ = db.Close()
 				}
+				// The edit only counts as concurrent if the round is still
+				// waiting on the harness when it lands.
+				select {
+				case <-done:
+					t.Errorf("the reflect round finished before the edit landed, so the edit was not concurrent")
+				default:
+				}
 				if err := os.WriteFile(release, nil, 0o600); err != nil {
 					t.Errorf("release the harness: %v", err)
 				}
@@ -287,11 +295,24 @@ func TestRunReflectConcurrentEditStillWithholdsTheFingerprint(t *testing.T) {
 	}
 }
 
+// gateSleep is sleep's absolute path, resolved when the package loads and so
+// before isolatedLifecycleEnv points PATH at an empty directory. The harness
+// inherits that PATH, where a bare `sleep` is not found; the wait loop then
+// fails every turn at once, the harness answers within a few milliseconds
+// without seeing release, and on a slow machine the round has applied before
+// the test's edit lands.
+var gateSleep, _ = exec.LookPath("sleep")
+
 // gatedReflectHarness is fakeReflectHarness with a pause in the turn: it
 // touches started, waits (bounded) for release to exist, and only then answers
-// with ops. That is the window a concurrent edit lands in.
+// with ops. That is the window a concurrent edit lands in. A wait that ends
+// without release fails the harness, so a gate that does not hold fails the
+// round instead of answering early.
 func gatedReflectHarness(t *testing.T, calls, started, release string, ops []string) string {
 	t.Helper()
+	if gateSleep == "" {
+		t.Fatal("no sleep binary on the PATH the tests started with; the harness gate cannot wait")
+	}
 	payload, err := json.Marshal(map[string]any{"ops": ops})
 	if err != nil {
 		t.Fatalf("build harness response: %v", err)
@@ -307,7 +328,8 @@ func gatedReflectHarness(t *testing.T, calls, started, release string, ops []str
 		"echo x >> " + calls + "\n" +
 		": > " + started + "\n" +
 		"i=0\n" +
-		"while [ ! -f " + release + " ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n" +
+		"while [ ! -f " + release + " ] && [ $i -lt 600 ]; do " + gateSleep + " 0.05 || exit 1; i=$((i+1)); done\n" +
+		"[ -f " + release + " ] || { echo 'the gate was never released' >&2; exit 1; }\n" +
 		"printf '%s' '" + string(payload) + "'\n"
 	path := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

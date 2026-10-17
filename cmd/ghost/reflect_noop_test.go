@@ -216,10 +216,10 @@ func countHistory(t *testing.T, dataHome, phase string) int {
 	return n
 }
 
-// openRawDB opens the test store outside the product. The busy timeout matters
-// for the tests that edit a row while a reflect round runs: the round can hold
-// the write lock for a moment, and without a timeout the edit fails at once
-// with SQLITE_BUSY instead of waiting its turn as the product's own writers do.
+// openRawDB opens the test store outside the product, with the same busy
+// timeout the product's writers use, so a raw write that meets another
+// connection's transaction waits its turn instead of failing at once with
+// SQLITE_BUSY.
 func openRawDB(dataHome string) (*sql.DB, error) {
 	return sql.Open("sqlite", "file:"+filepath.Join(dataHome, "ghost", "ghost.db")+"?_pragma=busy_timeout(5000)")
 }
