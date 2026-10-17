@@ -209,9 +209,10 @@ type MarkResult struct {
 // property that makes internal/supersede.Withdraw usable from a stop hook.
 //
 // The whole request is settled before anything is written, and a refusal writes
-// nothing. A row that resolves to `_global` is a refusal and not a mark, because
-// the ref query reaches it for the sake of the supersede endpoints' sake and a
-// project's mark is about rows the project owns.
+// nothing. Naming `_global` as the project is refused before any ref is read,
+// in the dry run as well as under Apply. A row that resolves to `_global` is a
+// refusal and not a mark, because the ref query reaches it for the sake of the
+// supersede endpoints' sake and a project's mark is about rows the project owns.
 //
 // The write is all-or-nothing, and that is a property rather than a reporting
 // choice: MarkResolved runs the stamp, the KEEP-cache clear and the `resolve`
@@ -224,6 +225,16 @@ func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Lo
 	var res MarkResult
 	if req.ProjectID == "" {
 		return res, fmt.Errorf("resolve --mark: a project is required, so no memory can be named from it")
+	}
+	if req.ProjectID == memory.GlobalProjectID {
+		// Refused here, before any ref is resolved or row loaded, because the
+		// per-row ownership check cannot see it — a `_global` row's project_id
+		// IS the named project — and the store's write-time refusal is one a dry
+		// run never reaches, so the preview would promise a mark --apply refuses.
+		// Both the CLI and ghost_resolve_mark pass through here with the project
+		// already resolved, so a name that resolves to `_global` is caught too.
+		// The store's own refusal stays as the guard for any other caller.
+		return res, fmt.Errorf("nothing marked: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", memory.GlobalProjectID)
 	}
 	if len(req.Refs) == 0 {
 		return res, fmt.Errorf("no memory to mark: name one as --mark <id> (a full id, or 8 or more characters of one)")

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/resolve"
 )
 
@@ -336,5 +338,54 @@ func TestMarkStampedIDsIsOnlyWhatThisRunWrote(t *testing.T) {
 	}
 	if got := markStampedIDs(nil); len(got) != 0 {
 		t.Errorf("markStampedIDs(nil) = %v, want nothing", got)
+	}
+}
+
+// TestResolveMarkGlobalDryRunPreviewsNothing is the CLI half of the `_global`
+// refusal: runResolveMark hands the resolved project to resolve.Mark and prints
+// resolveMarkReport before raising the error, so the dry run of `ghost resolve
+// _global --mark <id>` must print no "would mark" line and must fail, exactly as
+// --apply does. An ordinary project's dry run, the control, still previews.
+func TestResolveMarkGlobalDryRunPreviewsNothing(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	promoted, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "a promoted note every project injects", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.PromoteToGlobal(ctx, "p", promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	ordinary, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "an ordinary note", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, apply := range []bool{false, true} {
+		res, err := resolve.Mark(ctx, store, resolve.MarkRequest{
+			ProjectID: memory.GlobalProjectID, Refs: []string{promoted[:8]}, Apply: apply,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "refusing to mark in the _global project") {
+			t.Errorf("apply=%v: err = %v, want the _global refusal", apply, err)
+		}
+		if out := resolveMarkReport(memory.GlobalProjectID, res, apply); out != "" {
+			t.Errorf("apply=%v: a refused _global mark printed a report:\n%s", apply, out)
+		}
+	}
+
+	res, err := resolve.Mark(ctx, store, resolve.MarkRequest{ProjectID: "p", Refs: []string{ordinary[:8]}}, nil)
+	if err != nil {
+		t.Fatalf("Mark (ordinary dry run): %v", err)
+	}
+	if out := resolveMarkReport("p", res, false); !strings.Contains(out, "would mark resolved 1") {
+		t.Errorf("the ordinary dry run does not preview the row:\n%s", out)
 	}
 }
