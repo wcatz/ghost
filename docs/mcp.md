@@ -106,6 +106,19 @@ an agent looking at one store are told the same thing about it — and an agent 
 sees the restatement share rising has the same number the operator sees on the
 command line. A store with no history prints `no version rows recorded yet`.
 
+**Every other figure the tool prints follows the same rule.** Embedding
+coverage, the memory-link figures and each project's count are reads like the one
+above, and a read that fails is reported under its own name rather than dropped:
+`**Embeddings:** enabled — coverage could not be read: …` (the embedder is wired,
+so `enabled` is still a fact, but the coverage is unknown and a bare `enabled`
+read as full coverage), `**Memory links:** could not be read: …` (the line used
+to be omitted, so its absence meant both "no links" and "the read was cut
+short"), and a project bullet reading `count could not be read: …`, with the
+total then stating how many projects it excludes, because a project the read
+could not count is not a project with no memories. `ghost_list_projects` names
+the failure the same way, since a `0` there is a figure an agent acts on when
+choosing where to save.
+
 The thresholds, and what each one is for, are in
 [`ghost mcp status`](cli.md#ghost-mcp-status). The short version: more than 20% of
 the last 24 hours' version rows restated their predecessor, or the table or some
