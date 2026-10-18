@@ -75,8 +75,14 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		if trunc {
 			e.Logger.Warn("obsidian export: list truncated at limit", "project", p.ID, "kind", "memories", "limit", limit)
 		}
+		// One project's memories share one Memories/ directory, so they are
+		// named together: see noteNames for why a built name is not enough.
+		recs := make([]noteRecord, 0, len(mems))
 		for _, m := range mems {
-			fileFor[m.ID] = fileName(m)
+			recs = append(recs, noteRecord{id: m.ID, name: fileName(m)})
+		}
+		for id, name := range noteNames(recs) {
+			fileFor[id] = name
 		}
 		data = append(data, projData{p: p, folder: folders[p.ID], memories: mems, trunc: trunc})
 	}
@@ -111,8 +117,13 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			e.Logger.Warn("obsidian export: list truncated at limit", "project", d.p.ID, "kind", "decisions", "limit", limit)
 			d.trunc = true
 		}
+		decRecs := make([]noteRecord, 0, len(decisions))
 		for _, dec := range decisions {
-			path := filepath.Join(vaultDir, d.folder, "Decisions", fileNameFor(dec.Title, dec.ID))
+			decRecs = append(decRecs, noteRecord{id: dec.ID, name: fileNameFor(dec.Title, dec.ID)})
+		}
+		decNames := noteNames(decRecs)
+		for _, dec := range decisions {
+			path := filepath.Join(vaultDir, d.folder, "Decisions", decNames[dec.ID])
 			keep[keepKey(vaultDir, path)] = struct{}{}
 			w, err := writeIfChanged(path, renderDecision(dec))
 			if err != nil {
@@ -128,8 +139,13 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			e.Logger.Warn("obsidian export: list truncated at limit", "project", d.p.ID, "kind", "tasks", "limit", limit)
 			d.trunc = true
 		}
+		taskRecs := make([]noteRecord, 0, len(tasks))
 		for _, tk := range tasks {
-			path := filepath.Join(vaultDir, d.folder, "Tasks", fileNameFor(tk.Title, tk.ID))
+			taskRecs = append(taskRecs, noteRecord{id: tk.ID, name: fileNameFor(tk.Title, tk.ID)})
+		}
+		taskNames := noteNames(taskRecs)
+		for _, tk := range tasks {
+			path := filepath.Join(vaultDir, d.folder, "Tasks", taskNames[tk.ID])
 			keep[keepKey(vaultDir, path)] = struct{}{}
 			w, err := writeIfChanged(path, renderTask(tk))
 			if err != nil {

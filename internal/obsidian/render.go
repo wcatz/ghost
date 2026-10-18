@@ -358,3 +358,63 @@ func renderTask(t memory.Task) string {
 	}
 	return b.String()
 }
+
+// noteRecord is one record headed for a note directory: its id and the name
+// fileName or fileNameFor builds for it.
+type noteRecord struct{ id, name string }
+
+// noteNames assigns every record bound for ONE directory a note name of its own.
+//
+// A built name is the title slug plus idToken, the first idTokenWidth bytes of
+// the id, so two records with one title whose ids agree on those bytes are built
+// the same name — imported ids reach that easily — and the second write used to
+// overwrite the first while Export reported success. Names are compared case-
+// folded, because a vault on a case-insensitive filesystem merges names that
+// differ only in case just as surely.
+//
+// The rule keeps every name that was ever unique exactly as it was: a record
+// whose built name nobody else in the directory has keeps it, so this changes no
+// note in a vault without a collision. Within a colliding group the SMALLEST id
+// (bytewise) keeps the built name and every other member is named
+// <stem>-<8 hex of sha256(id)>.md. The winner depends on the set of ids alone,
+// never on the order the store lists them in, so two passes over the same store
+// cannot swap names and churn the vault. Retention is unchanged: the caller puts
+// these names in the keep-set, so when the record holding the plain name goes,
+// the survivor inherits it and its old note is pruned as stale like any other.
+//
+// A suffixed name could still meet another record's built name, because an
+// imported id can be chosen to make it. Such a name is replaced by the stem plus
+// the WHOLE 64-hex hash: that cannot meet a built name (a built stem is at most
+// 40 slug bytes + "-" + idTokenWidth bytes, shorter than the hash alone) nor
+// another full-hash name (two of them agree only if the hashes, so the ids, do).
+// The suffix is hex and the stem a name idToken already made safe, so the result
+// stays one path component, well under any filesystem's name limit.
+func noteNames(recs []noteRecord) map[string]string {
+	out := make(map[string]string, len(recs))
+	groups := make(map[string][]noteRecord, len(recs))
+	for _, r := range recs {
+		k := strings.ToLower(r.name)
+		groups[k] = append(groups[k], r)
+	}
+	claimed := make(map[string]bool, len(recs))
+	var losers []noteRecord
+	for k, g := range groups {
+		sort.Slice(g, func(i, j int) bool { return g[i].id < g[j].id })
+		out[g[0].id] = g[0].name
+		claimed[k] = true
+		losers = append(losers, g[1:]...)
+	}
+	sort.Slice(losers, func(i, j int) bool { return losers[i].id < losers[j].id })
+	for _, r := range losers {
+		stem := strings.TrimSuffix(r.name, ".md")
+		sum := sha256.Sum256([]byte(r.id))
+		h := hex.EncodeToString(sum[:])
+		name := stem + "-" + h[:8] + ".md"
+		if claimed[strings.ToLower(name)] {
+			name = stem + "-" + h + ".md"
+		}
+		claimed[strings.ToLower(name)] = true
+		out[r.id] = name
+	}
+	return out
+}
