@@ -1464,8 +1464,12 @@ func EnsureConfigFile() (path string, created bool, err error) {
 // A file that is readable but does not PARSE is an error naming the path, and
 // that is the distinction worth stopping for: the user wrote a typo, and will
 // keep not getting the settings they asked for until someone says so.
+//
+// A layer that is not a regular file — a FIFO, a device, a directory — is
+// skipped with the same warning, and its bytes are never read: see
+// readConfigLayer.
 func loadConfigFile(k *koanf.Koanf, path string, parser koanf.Parser) error {
-	raw, err := os.ReadFile(path)
+	raw, err := readConfigLayer(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -1483,6 +1487,30 @@ func loadConfigFile(k *koanf.Koanf, path string, parser koanf.Parser) error {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	return nil
+}
+
+// readConfigLayer returns the bytes of the config file at path, refusing one
+// that is not a regular file. A FIFO opened for reading blocks until a writer
+// appears, which stopped every command that loads config and left a lifecycle
+// run deaf to SIGTERM while it waited; a device such as /dev/zero would be read
+// without end. configOpenFlags carry O_NONBLOCK on unix, so the open of a FIFO
+// returns at once, and the fstat on the open descriptor refuses it before a
+// byte is read. Symlinks are followed on purpose: a config.yaml linked from a
+// dotfiles checkout is ordinary, and the check is made on what the link names.
+func readConfigLayer(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, configOpenFlags, 0) // #nosec G304 -- the system and user config paths, not caller input
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (%s)", info.Mode().Type())
+	}
+	return io.ReadAll(f)
 }
 
 // pruneNulls drops the keys whose YAML value is null, in place. A section
