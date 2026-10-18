@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -57,6 +58,26 @@ const SchemaVersion = 2
 // SchemaVersion for why it is a range and not everything below.
 const minReadableSchemaVersion = 1
 
+// knownFeatures is the set of feature names this build understands, and the
+// single source of truth for the features this build writes: headerLine derives
+// its list from these keys, so the two cannot drift. An artifact that declares
+// a feature outside this set is refused, because importing it would silently
+// drop a field this build cannot interpret.
+var knownFeatures = map[string]bool{
+	"retention": true,
+}
+
+// declaredFeatures returns the feature list this build writes, derived from
+// knownFeatures in sorted order so the header stays byte-reproducible.
+func declaredFeatures() []string {
+	out := make([]string, 0, len(knownFeatures))
+	for name := range knownFeatures {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Record type discriminators. Each line carries exactly one, and an import
 // refuses a type it does not know: silently skipping records would produce a
 // store that is missing data the artifact plainly contains, and the user would
@@ -84,6 +105,12 @@ type record struct {
 	// payload that repeated it would raise the question of which value governs
 	// when the two disagreed.
 	SchemaVersion int `json:"schema_version,omitempty"`
+
+	// Features names the must-understand features this artifact relies on. An
+	// importer that does not understand one refuses the file rather than
+	// silently dropping the field. A field that is not listed here is one an
+	// older build may ignore, which is why a must-understand one is listed.
+	Features []string `json:"features,omitempty"`
 }
 
 // headerLine returns the artifact's opening line. It carries the version and
@@ -92,7 +119,7 @@ type record struct {
 // the whole point of the deterministic ordering is that a diff of two artifacts
 // shows only what changed in the store.
 func headerLine() []byte {
-	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion})
+	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion, Features: declaredFeatures()})
 	return b
 }
 

@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 26
+const schemaVersion = 28
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -89,6 +89,8 @@ var migrations = []func(*sql.Tx) error{
 	migrateV24,
 	migrateV25,
 	migrateV26,
+	migrateV27,
+	migrateV28,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1939,6 +1941,113 @@ func migrateV26(tx *sql.Tx) error {
 	if !hasCaptured {
 		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN retention_captured INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("add memory_snapshots.retention_captured: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV27 widens idx_memories_project_imp to carry the decay order's secondary
+// key (created_at) and adds a companion index for the global bucket's secondary
+// key (updated_at), so the passive threshold scan can stream rows in importance
+// order and then by the tie-break key without sorting the bucket. The old index
+// is dropped first because CREATE INDEX IF NOT EXISTS would otherwise leave the
+// narrower definition in place on databases that already carry it.
+func migrateV27(tx *sql.Tx) error {
+	stmts := []string{
+		`DROP INDEX IF EXISTS idx_memories_project_imp`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC, id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrateV27: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV28 buckets the full-text index by project (#1563). A save's duplicate
+// lookups and a project-scoped keyword search used to run a MATCH that FTS5
+// answered for the whole store, so every project's matches were enumerated,
+// ranked and joined before the project filter and the LIMIT applied, and a
+// save's write-lock hold grew with the rows of other projects.
+//
+// The new index gives each project an ordinal (memories_fts_projects) and keys
+// each FTS row by ordinal * 2^40 + the memory's rowid, so a project's rows are
+// one rowid range and the project-scoped statements bound the FTS5 scan to it.
+// The columns and tokenizer are unchanged, so every row carries the same tokens
+// and bm25 ranks exactly as before.
+//
+// The index cannot be altered in place (an FTS5 table's content and rowid
+// mapping are fixed at creation), so the step drops the triggers, the index and
+// the content view, renumbers the ordinals from memories, recreates all of them
+// and rebuilds the index from the view. Every object is dropped before it is
+// created, so running the step on a database that already has the v28 shape
+// rebuilds the same index from the same rows: idempotent. The DDL is a frozen
+// copy of initSQL's, for the reason every step carries its own.
+func migrateV28(tx *sql.Tx) error {
+	// The steps are also run directly against the partial fixtures the earlier
+	// steps' tests build; a store without memories has no index to bucket.
+	ok, err := tableExists(tx, "memories")
+	if err != nil {
+		return fmt.Errorf("v28 fts project buckets: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS memories_ai`,
+		`DROP TRIGGER IF EXISTS memories_ad`,
+		`DROP TRIGGER IF EXISTS memories_au`,
+		`DROP TABLE IF EXISTS memories_fts`,
+		`DROP VIEW IF EXISTS memories_fts_source`,
+		`CREATE TABLE IF NOT EXISTS memories_fts_projects (
+    ord        INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE
+)`,
+		`DELETE FROM memories_fts_projects`,
+		`INSERT INTO memories_fts_projects(project_id) SELECT DISTINCT project_id FROM memories ORDER BY project_id`,
+		`CREATE VIEW IF NOT EXISTS memories_fts_source AS
+    SELECT k.ord * 1099511627776 + m.rowid AS fts_rowid, m.content AS content
+    FROM memories m JOIN memories_fts_projects k ON k.project_id = m.project_id`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    content=memories_fts_source,
+    content_rowid=fts_rowid,
+    tokenize='porter unicode61'
+)`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts_projects(project_id) SELECT new.project_id
+        WHERE NOT EXISTS (SELECT 1 FROM memories_fts_projects WHERE project_id = new.project_id);
+    INSERT INTO memories_fts(rowid, content) VALUES (
+        (SELECT ord FROM memories_fts_projects WHERE project_id = new.project_id) * 1099511627776 + new.rowid,
+        new.content);
+END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete',
+        (SELECT ord FROM memories_fts_projects WHERE project_id = old.project_id) * 1099511627776 + old.rowid,
+        old.content);
+    DELETE FROM memories_fts_projects WHERE project_id = old.project_id
+        AND NOT EXISTS (SELECT 1 FROM memories WHERE project_id = old.project_id);
+END`,
+		`CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories
+    WHEN old.content != new.content OR old.project_id != new.project_id BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete',
+        (SELECT ord FROM memories_fts_projects WHERE project_id = old.project_id) * 1099511627776 + old.rowid,
+        old.content);
+    INSERT INTO memories_fts_projects(project_id) SELECT new.project_id
+        WHERE NOT EXISTS (SELECT 1 FROM memories_fts_projects WHERE project_id = new.project_id);
+    INSERT INTO memories_fts(rowid, content) VALUES (
+        (SELECT ord FROM memories_fts_projects WHERE project_id = new.project_id) * 1099511627776 + new.rowid,
+        new.content);
+    DELETE FROM memories_fts_projects WHERE project_id = old.project_id
+        AND NOT EXISTS (SELECT 1 FROM memories WHERE project_id = old.project_id);
+END`,
+		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v28 fts project buckets: %q: %w", stmt[:min(40, len(stmt))], err)
 		}
 	}
 	return nil

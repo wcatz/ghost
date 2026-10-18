@@ -128,19 +128,20 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 // INFO on stderr. GHOST_DEBUG always restores Debug level. The returned
 // closeLog is non-nil when a file was opened and must be called on shutdown.
 //
-// GHOST_LOG_FILE is opened through mcpinit.OpenLogForAppend, the same rotated
-// append every other Ghost log uses, because a client-spawned server appends
-// for the whole host session: under GHOST_DEBUG that is the full debug stream,
-// and a file nothing bounds grows until the disk fills. It also inherits that
-// helper's 0600 create, so the log is owner-only whatever the umask rather
-// than readable by every local account on the machine.
+// GHOST_LOG_FILE is opened through mcpinit.OpenRotatingLog, which applies the
+// same rotated append every other Ghost log uses at open and again while the
+// server runs, because a client-spawned server appends for the whole host
+// session: under GHOST_DEBUG that is the full debug stream, and a file nothing
+// bounds grows until the disk fills. It also inherits that helper's 0600
+// create, so the log is owner-only whatever the umask rather than readable by
+// every local account on the machine.
 func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level, func()) {
 	level := slog.LevelInfo
 	writer := io.Writer(os.Stderr)
 	var closeLog func()
 
 	if path := os.Getenv("GHOST_LOG_FILE"); path != "" {
-		if f, err := mcpinit.OpenLogForAppend(path); err != nil {
+		if f, err := mcpinit.OpenRotatingLog(path); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot open GHOST_LOG_FILE %q: %v\n", path, err)
 			if !stderrTerminal {
 				level = slog.LevelWarn
