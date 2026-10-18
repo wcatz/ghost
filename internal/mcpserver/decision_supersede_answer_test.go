@@ -141,3 +141,87 @@ func TestDecisionRecordAnswerReportsASharedSuccessorWithoutDeleteAdvice(t *testi
 		t.Errorf("the answer treats the shared memory as an extra claimant and advises deleting it:\n%s", out)
 	}
 }
+
+// Two live memories claim the reversed decision: the companion the decision
+// tool wrote and a consolidation merge that also holds another memory's
+// content. The answer must not tell the agent to delete "the extras" — the
+// merge is the only copy of the fact it folded in — nor to supersede again,
+// which the tool refuses once the decision is marked superseded. Following the
+// advice it does give leaves no live memory stating the reversed decision.
+func TestDecisionRecordAnswerGivesAmbiguousClaimantsAdviceThatWorks(t *testing.T) {
+	db, _, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	first := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "abc123", "title": "queue", "decision": "we use nats for the event queue", "rationale": "it was cheapest",
+	})
+	if first.IsError {
+		t.Fatal(resultText(first))
+	}
+	oldDec := labeledID(t, resultText(first), "decision_id: ")
+	comp := labeledID(t, resultText(first), "memory_id: ")
+	saved := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "abc123", "category": "fact",
+		"content": "the event queue runs on nats, and its consumer restarts in place",
+	})
+	if saved.IsError {
+		t.Fatal(resultText(saved))
+	}
+	merge := labeledID(t, resultText(saved), "(id: ")
+	// What a reflect merge of the companion and the fact leaves when the
+	// companion's row is also kept live: the merge carries the link too.
+	if _, err := db.Exec(`UPDATE memories SET source = 'reflection', category = 'decision', source_ref = ? WHERE id = ?`,
+		"decision:"+oldDec, merge); err != nil {
+		t.Fatal(err)
+	}
+
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "abc123", "title": "queue v2", "decision": "we use kafka for the event queue", "rationale": "scale", "supersedes": oldDec,
+	})
+	out := resultText(res)
+	if !res.IsError {
+		t.Errorf("an ambiguous retirement was reported as a plain success:\n%s", out)
+	}
+	for _, want := range []string{comp, merge, "more than one memory claims it", "no second supersede", "ghost_memory_update", "ghost_memory_delete"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the answer lacks %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"delete the extras", "supersede again"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("the answer still advises %q:\n%s", bad, out)
+		}
+	}
+
+	// The advice says there is no second supersede to run: the tool refuses one.
+	again := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "abc123", "title": "queue v3", "decision": "we use kafka", "rationale": "again", "supersedes": oldDec,
+	})
+	if !again.IsError || !strings.Contains(resultText(again), "already superseded") {
+		t.Errorf("a second supersede of the same decision was not refused:\n%s", resultText(again))
+	}
+
+	// Following the advice: the merge holds the fact, so it is rewritten; the
+	// companion holds nothing else, so it is deleted.
+	if upd := callTool(t, session, "ghost_memory_update", map[string]any{
+		"project_id": "abc123", "memory_id": merge, "content": "the event queue consumer restarts in place",
+	}); upd.IsError {
+		t.Fatalf("ghost_memory_update: %s", resultText(upd))
+	}
+	if del := callTool(t, session, "ghost_memory_delete", map[string]any{"project_id": "abc123", "memory_id": comp}); del.IsError {
+		t.Fatalf("ghost_memory_delete: %s", resultText(del))
+	}
+	var stating int
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE project_id = 'abc123' AND resolved_at IS NULL AND lower(content) LIKE '%nats%'`).Scan(&stating); err != nil {
+		t.Fatal(err)
+	}
+	if stating != 0 {
+		t.Errorf("%d live memories still state the reversed decision after following the advice", stating)
+	}
+	var fact int
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE id = ? AND content LIKE '%restarts in place%'`, merge).Scan(&fact); err != nil {
+		t.Fatal(err)
+	}
+	if fact != 1 {
+		t.Error("following the advice lost the fact the merge held")
+	}
+}

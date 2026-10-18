@@ -3771,14 +3771,14 @@ func (s *Server) registerTools() {
 				// check of `isError` reads both (#1041).
 				if len(retirement.Ambiguous) > 0 {
 					supersedeFailed = true
-					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s), so session start and search still return it; delete the extras and supersede again.", joinTokens(retirement.Ambiguous))
+					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because more than one memory claims it (%s); nothing was retired, so session start and search still return the reversed text. The decision is already marked superseded, so there is no second supersede to run: settle each of these memories directly. Keep one that holds anything besides the reversed decision — a consolidation merge holds the other memories it folded in — and rewrite its text with ghost_memory_update so it no longer states the reversed decision; retire one with ghost_memory_delete only if it holds nothing else.", joinTokens(retirement.Ambiguous))
 				}
 				// Shared is the same partial failure for a different reason: a
 				// consolidation folded this decision's companion and another
 				// decision's into one memory that still states a decision not yet
-				// superseded. It is not an extra, so the ambiguity remedy above — delete the extras —
-				// would destroy a live decision; nothing was retired, and the advice
-				// is to rewrite its text so it no longer states the reversed one.
+				// superseded. It is not an extra claimant, and deleting it would destroy a
+				// live decision; nothing was retired, and the advice is to rewrite its
+				// text so it no longer states the reversed one.
 				if len(retirement.Shared) > 0 {
 					supersedeFailed = true
 					supersedeNote += fmt.Sprintf(" WARNING: its memory was left live because one merged memory (%s) holds this decision together with at least one other decision that is not superseded; nothing was retired, so session start and search still return the reversed text. Keep that memory — it still states that other decision; rewrite its text with ghost_memory_update so it no longer states the reversed one. It is retired once every decision it holds is superseded.", joinTokens(retirement.Shared))
