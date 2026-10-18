@@ -1206,7 +1206,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 // resource or resource-template URI before the SDK starts tracking it.
 func (s *Server) handleSubscribe(ctx context.Context, req *mcp.SubscribeRequest) error {
 	if !strings.HasPrefix(req.Params.URI, "ghost://") {
-		return fmt.Errorf("unknown resource URI: %s", memory.RefusalArg("resource URI", req.Params.URI))
+		return invalidParamsError(fmt.Errorf("unknown resource URI: %s", memory.RefusalArg("resource URI", req.Params.URI)))
 	}
 	return nil
 }
@@ -4493,7 +4493,7 @@ func (s *Server) registerResources() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// An unresolved name resolves to "". The block is still built — its
 		// `_global` section does not depend on the project, and the base ref
@@ -4738,7 +4738,7 @@ func (s *Server) registerPrompts() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// The same unresolved-name case the tool and the resource handle, and the
 		// same block-plus-sentence: the `_global` section does not depend on the
@@ -5101,6 +5101,19 @@ func parseProjectIDFromURI(rawURI string) (string, error) {
 // store read stays a plain error.
 func invalidParamsError(err error) error {
 	return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: err.Error()}
+}
+
+// resolveProjectRefusal wraps a ResolveProject failure for a resource or
+// template handler. An identifier that matches more than one project is the
+// caller's argument and goes out as -32602; any other failure is a store read
+// that went wrong and stays a plain error. An unknown project is not a
+// failure here: ResolveProject answers it with an empty id and no error.
+func resolveProjectRefusal(err error) error {
+	wrapped := fmt.Errorf("resolve project: %w", err)
+	if errors.Is(err, memory.ErrAmbiguousProject) {
+		return invalidParamsError(wrapped)
+	}
+	return wrapped
 }
 
 // projectResourceNotFound is the refusal of a ghost://project/{project_id}/...
