@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -101,10 +103,25 @@ func (s *Store) ListTasks(ctx context.Context, projectID, status string, limit i
 // resolveTaskID expands a task ID or unique prefix to the full stored ID,
 // like git short SHAs. Session-hook and task-list output truncate IDs to 8
 // characters, so callers routinely hold a prefix rather than the full 32-char
-// ID. Caller must hold s.mu (read or write).
+// ID. An exact id match is tried first and wins at any length; only an input
+// that names no task exactly is expanded as a prefix. Caller must hold s.mu
+// (read or write).
 func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, error) {
 	if idOrPrefix == "" {
 		return "", fmt.Errorf("task id is required")
+	}
+
+	// A byte-exact match wins at any length, the rule memref follows for a
+	// memory reference: the id is the primary key, so the spelling the caller
+	// typed is decisive. Without this arm a task whose id prefixes another's
+	// (`ghost import` writes an artifact's ids verbatim, so T1 beside T10 is
+	// possible) is ambiguous under every spelling and can never be reached.
+	var exact string
+	switch err := s.db.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id = ?`, idOrPrefix).Scan(&exact); {
+	case err == nil:
+		return exact, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("resolve task id: %w", err)
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
