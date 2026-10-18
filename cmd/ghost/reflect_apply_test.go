@@ -599,3 +599,14 @@ func TestWriteAppliedReportOmitsRemovedCountWhenNothingDeleted(t *testing.T) {
 		t.Errorf("Applied line changed: %q", out.String())
 	}
 }
+
+// A promoted merge carries its sources' evidence and decision links into
+// _global, and a restore of the project leaves it there with them: the hint has
+// to say so, or an operator who removes nothing by hand leaves two live rows
+// claiming the same decision beside the restored sources.
+func TestRestoreHintSaysPromotedGlobalsKeepWhatTheyCarried(t *testing.T) {
+	const want = "(use --restore to undo the project replace; promoted globals stay in _global with the evidence and decision links they carried from the replaced rows, and must be removed from _global by hand)"
+	if got := restoreHint(1); got != want {
+		t.Errorf("restoreHint(1) = %q, want %q", got, want)
+	}
+}
