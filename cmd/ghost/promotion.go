@@ -314,14 +314,29 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 //
 // Text is the join key because it is the only handle the operation list and the
 // emitted list share — the operations are resolved before the memories are, and
-// nothing pairs them by id. Two emissions with identical text are the same fact
-// as far as consolidation is concerned, so they legitimately share the mapping.
+// nothing pairs them by id. Two merge or rewrite survivors with identical text
+// are the same fact as far as consolidation is concerned, so they legitimately
+// share the mapping.
+//
+// An emission that restates an input row verbatim (RestatesID set) is NOT one of
+// them, and takes no ids from the join. It consumed nothing: it is that row's
+// keep, pass-through, grounding-refusal re-emit or drop-guard re-add, and it can
+// carry a merge's text only because the row it restates already does. Joined by
+// text it inherited the merge's sources, so the replace read the row's own keep
+// as a claim on rows the merge named: when the merge was then refused (its
+// decision links overflowed, its scopes disagreed), the keep was dropped as a
+// claim on a row that changed while consolidation ran, the round reported a
+// concurrent edit nobody made and withheld its skip fingerprint.
 func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, replaced map[string][]string) []memory.Memory {
 	if len(mems) == 0 {
 		return nil
 	}
 	rows := make([]memory.Memory, len(mems))
 	for i, m := range mems {
+		var replaces []string
+		if m.RestatesID == "" {
+			replaces = replaced[m.Content]
+		}
 		rows[i] = memory.Memory{
 			ProjectID:   projectID,
 			Category:    m.Category,
@@ -329,7 +344,7 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 			Importance:  m.Importance,
 			Source:      "reflection",
 			Tags:        m.Tags,
-			ReplacesIDs: replaced[m.Content],
+			ReplacesIDs: replaces,
 		}
 	}
 	return rows
