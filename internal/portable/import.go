@@ -10,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
@@ -281,6 +282,11 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 				err: fmt.Errorf("line %d: not a valid ghost artifact record: %w", lineNum, err),
 			})
 			continue
+		}
+		// A repeated top-level key, refused as a file before the line is judged
+		// any other way. See repeatedKey.
+		if key := repeatedKey(line); key != "" {
+			return nil, nil, fmt.Errorf("line %d: the record repeats the %s key — a line holds each key once, and only the last copy would be read, so the file is refused rather than imported with the earlier copy dropped", lineNum, memory.RefusalArg("key", key))
 		}
 		if !header {
 			if rec.Type != TypeHeader {
@@ -825,6 +831,68 @@ func otherPayloads(rec record, own string) string {
 		return ""
 	}
 	return strings.Join(extra, ", ") + " payload"
+}
+
+// repeatedKey returns the second spelling of the first top-level key the line's
+// object repeats, or "" when every key appears once. encoding/json keeps the
+// last value of a repeated key, so a line holding two "memory" objects decodes
+// to one record and the first memory is gone before the importer sees it; the
+// payload-mismatch check cannot catch that, because the decoded record holds a
+// single payload. The exporter never repeats a key, so a line that does was
+// merged or hand-edited, and which copy it meant is a guess.
+//
+// Every top-level key is checked, not only the payload keys: a repeated "type"
+// decides which payload the line must carry and a repeated "schema_version"
+// decides which version governs, and a key this build does not read today may
+// be one a later schema does. Keys are compared the way the decoder matches a
+// key to a field — case-insensitively — because "memory" and "Memory" fill the
+// same field (see foldRune). A nested object's keys are not checked: the record is the unit
+// this function judges.
+//
+// The line has already been decoded, so it is valid JSON; a line whose top
+// level is not an object has no keys to repeat. The pass costs a second scan of
+// the line: each key is read as a token and each value is skipped by decoding
+// it into one reused json.RawMessage.
+func repeatedKey(line []byte) string {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return ""
+	}
+	seen := map[string]bool{}
+	var skip json.RawMessage
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return ""
+		}
+		folded := strings.Map(foldRune, key)
+		if seen[folded] {
+			return key
+		}
+		seen[folded] = true
+		if err := dec.Decode(&skip); err != nil {
+			return ""
+		}
+	}
+	return ""
+}
+
+// foldRune maps a rune to the smallest member of its simple case-folding orbit,
+// which is how encoding/json folds a key before matching it to a field (its own
+// foldRune, applied to every rune). Folding the same way is what makes "taſk",
+// with a long s, the same key as "task" here, as it is to the decoder.
+func foldRune(r rune) rune {
+	for {
+		r2 := unicode.SimpleFold(r)
+		if r2 <= r {
+			return r2
+		}
+		r = r2
+	}
 }
 
 // actionFor turns a created flag into the action the report shows. A record
