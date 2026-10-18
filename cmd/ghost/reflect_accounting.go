@@ -103,12 +103,15 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 	// so their headers count the ids the lines name rather than the lines. A
 	// header that counted operations would break the only check the section asks
 	// the reader to make.
-	merged, refused, scopeRefused := 0, 0, 0
+	merged, refused, overflowed, scopeRefused := 0, 0, 0, 0
 	for _, m := range acc.Merges {
 		merged += len(m.IDs)
 	}
 	for _, r := range acc.Refusals {
 		refused += len(r.IDs)
+	}
+	for _, r := range acc.LinkOverflows {
+		overflowed += len(r.IDs) + len(r.Carriers)
 	}
 	for _, r := range acc.ScopeRefusals {
 		scopeRefused += len(r.IDs)
@@ -134,6 +137,20 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 		// one part of the report that cannot be read.
 		_, _ = fmt.Fprintf(w, "  %s <- the %s introduced identifiers no source carries: %s; the sources are kept unchanged\n",
 			tokenList(r.IDs), r.Kind, displayClaim(strings.Join(r.Identifiers, ", "), 0))
+	}
+
+	// A merge whose sources fold more decision links than one source_ref can
+	// hold is dropped at the write with every source kept, so it is listed here
+	// with the link count and the bound rather than under Merges, as the scope
+	// refusal below is.
+	_, _ = fmt.Fprintf(w, "Refused because the merge folds more decision links than one source_ref can hold (%d):\n", overflowed)
+	for _, r := range acc.LinkOverflows {
+		line := fmt.Sprintf("  %s <- the merge folds %d decision links, whose joined source_ref would exceed the %d-byte bound; the sources are kept unchanged",
+			tokenList(r.IDs), r.Links, r.Bound)
+		if len(r.Carriers) > 0 {
+			line += fmt.Sprintf(", and so is %s, which already carries the merge's text", tokenList(r.Carriers))
+		}
+		_, _ = fmt.Fprintln(w, line)
 	}
 
 	// A merge whose sources' scopes disagree is refused at the write, with every

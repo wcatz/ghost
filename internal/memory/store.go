@@ -6623,6 +6623,16 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 	return ids
 }
 
+// EmissionClaimsRow reports whether an emission whose sources are named and
+// whose text is content claims the stored row (rowID, rowContent): the row is
+// one of its named sources, or it already carries the emission's text. It is
+// keepEmissionClaims' predicate, exported so the reflect accounting lists the
+// rows an overflowing merge keeps — its text twins included — by the same rule
+// the replace keeps them, rather than by a copy of it.
+func EmissionClaimsRow(named map[string]bool, content, rowID, rowContent string) bool {
+	return named[rowID] || rowContent == content
+}
+
 // keepEmissionClaims marks every candidate an emission that is not written would
 // otherwise have taken as kept, exactly as fedGuard.drop does for a void claim,
 // and returns the ids it marked so the caller can tell WHICH refusal kept which
@@ -6636,7 +6646,7 @@ func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]boo
 	}
 	var kept []string
 	for _, c := range candidates {
-		if named[c.id] || c.content == m.Content {
+		if EmissionClaimsRow(named, m.Content, c.id, c.content) {
 			concurrent[c.id] = true
 			kept = append(kept, c.id)
 		}
