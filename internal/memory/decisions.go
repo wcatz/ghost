@@ -587,10 +587,52 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 		if err != nil {
 			return 0, false, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
 		}
-		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+		refs = append(refs, ref.String)
+	}
+	links, over = DecisionLinksOverflow(refs)
+	return links, over, nil
+}
+
+// DecisionLinksOverflow is decisionLinksOverflowTx's rule over source_refs the
+// caller already holds: how many distinct decision links they name between them,
+// and whether those links joined exceed MaxSourceRefLen — the merge the replace
+// drops before it writes. The reflect accounting calls it with the input rows'
+// source_refs, so a dry run lists such a merge as refused instead of as a merge
+// the apply will not write, and the two cannot disagree about the rule.
+func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
+	var refs []string
+	for _, ref := range sourceRefs {
+		refs = append(refs, decisionRefsInSourceRef(ref)...)
 	}
 	unique := dedupeDecisionRefs(refs)
-	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen, nil
+	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen
+}
+
+// foldedDecisionLinksTx counts the distinct decision links a merge folded into
+// the row target stands for: the target's own and those the sources (rows of
+// projectID) carry. decisionLinksOverflowTx reads one project only, and a
+// promotion's target is in _global, so it is read here by id.
+func foldedDecisionLinksTx(ctx context.Context, tx *sql.Tx, projectID, target string, sources []string) (int, error) {
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, target).Scan(&own); err != nil {
+		return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", target), err)
+	}
+	refs := decisionRefsInSourceRef(own.String)
+	for _, id := range sources {
+		if id == "" || id == target {
+			continue
+		}
+		var ref sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`, id, projectID).Scan(&ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
+		}
+		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+	}
+	return len(dedupeDecisionRefs(refs)), nil
 }
 
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the

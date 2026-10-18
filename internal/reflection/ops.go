@@ -659,6 +659,7 @@ func verbatimMemory(m memory.Memory) ReflectMemory {
 		Content:    m.Content,
 		Importance: m.Importance,
 		Tags:       tags,
+		RestatesID: m.ID,
 	}
 }
 
