@@ -21,9 +21,7 @@ import (
 // replyLogFragment is part of its body, so a partial leak fails too.
 var (
 	replyLogToken    = "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
-	replyLogToken2   = "ghp_" + strings.Repeat("Z9y8X7w6V5u4", 3) + "QrSt"
 	replyLogFragment = "a1B2c3D4e5F6"
-	replyLogFrag2    = "Z9y8X7w6V5u4"
 )
 
 // replyLogBound is the most any one logged value may hold: the rendered
