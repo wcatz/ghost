@@ -514,7 +514,7 @@ func writeAppliedReport(w io.Writer, applied, promoteGlobals bool, appliedByCate
 
 func restoreHint(promoted int) string {
 	if promoted > 0 {
-		return "(use --restore to undo the project replace; promoted globals must be removed from _global by hand)"
+		return "(use --restore to undo the project replace; promoted globals stay in _global with the evidence and decision links they carried from the replaced rows, and must be removed from _global by hand)"
 	}
 	return "(use --restore to undo)"
 }

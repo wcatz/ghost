@@ -303,7 +303,7 @@ func (w *Worker) Run(ctx context.Context, projectIDs <-chan string) {
 func (w *Worker) safeProcessProject(ctx context.Context, projectID string) {
 	defer func() {
 		if r := recover(); r != nil {
-			w.logger.Error("panic in embedding processProject, recovered", "panic", r, "project_id", projectID)
+			w.logger.Error("panic in embedding processProject, recovered", "panic", r, "project_id", memory.RefusalArg("project_id", projectID))
 		}
 	}()
 	w.processProject(ctx, projectID)
@@ -389,7 +389,7 @@ func (w *Worker) SweepOnce(ctx context.Context) {
 		// the first, which is the misreading this whole change is about.
 		if _, last := w.processProject(ctx, p.ID); last != Reachable {
 			w.logger.Info("embed: endpoint did not answer; ending this sweep here",
-				"project_id", p.ID, "reachability", last.String(), "next_attempt", "next tick")
+				"project_id", memory.RefusalArg("project_id", p.ID), "reachability", last.String(), "next_attempt", "next tick")
 			return
 		}
 	}
@@ -522,7 +522,7 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	// here and are re-embedded in bounded batches, off the startup path.
 	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), limit)
 	if err != nil {
-		w.logger.Error("embed: list unembedded", "error", err, "project_id", projectID)
+		w.logger.Error("embed: list unembedded", "error", err, "project_id", memory.RefusalArg("project_id", projectID))
 		return 0, withoutEvidence(got)
 	}
 
@@ -530,7 +530,7 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 		return 0, withoutEvidence(got)
 	}
 
-	w.logger.Info("embedding memories", "project_id", projectID, "count", len(ids))
+	w.logger.Info("embedding memories", "project_id", memory.RefusalArg("project_id", projectID), "count", len(ids))
 
 	embedded, failed := 0, 0
 	var lastErr error
@@ -644,11 +644,11 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	// model otherwise fails silently at debug level forever.
 	if failed > 0 {
 		w.logger.Warn("embedding failures this sweep — check `ghost mcp status`",
-			"project_id", projectID, "failed", failed, "embedded", embedded, "last_error", lastErr)
+			"project_id", memory.RefusalArg("project_id", projectID), "failed", failed, "embedded", embedded, "last_error", lastErr)
 	}
 
 	if embedded > 0 {
-		w.logger.Info("embedding batch complete", "project_id", projectID, "embedded", embedded)
+		w.logger.Info("embedding batch complete", "project_id", memory.RefusalArg("project_id", projectID), "embedded", embedded)
 	}
 	return embedded, got
 }
