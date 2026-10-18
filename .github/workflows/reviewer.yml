@@ -63,10 +63,11 @@ jobs:
         opencode/big-pickle
       PAID_MODEL: opencode-go/deepseek-v4.1-flash
     # Must stay above the bounded model-selection phase (15 min), the free
-    # review phase (70 min), the paid fallback phase (15 min), and the
+    # review phase (80 min), the paid fallback phase (25 min), and the
     # ~3 min of checkout/install/prepare ahead of them, or the job ceiling
-    # kills the run before the fallback can execute.
-    timeout-minutes: 110
+    # kills the run before the fallback can execute. 15 + 80 + 25 + 3 =
+    # 123, and 130 leaves room for step overhead.
+    timeout-minutes: 130
     # Fork PRs get a read-only token and no repo secrets by GitHub's design,
     # so the App mint below would fail and the whole pipeline would run
     # anyway, wasting an LLM invocation to reach a guaranteed failure at
@@ -790,7 +791,10 @@ jobs:
           steps.select_model.outcome == 'success' &&
           steps.select_model.outputs.selected_model != ''
         continue-on-error: true
-        timeout-minutes: 70
+        # Worst case: one first attempt capped at 2400s, then up to seven
+        # retries at 300s each (MAX_CANDIDATES=8) = 4500s = 75 min; 80 min
+        # leaves room for validation overhead between attempts.
+        timeout-minutes: 80
         env:
           SELECTED_MODEL: ${{ steps.select_model.outputs.selected_model }}
         run: |
@@ -881,13 +885,16 @@ jobs:
               free_status=0
               free_attempt=$((free_attempt + 1))
               if [ "$free_attempt" -eq 1 ]; then
-                # Scale the review window with the diff size so a large pull
-                # request gets a review rather than being killed at a fixed
-                # 1200s. Later retries stay bounded so exhausting the capped
-                # free list leaves time for the paid fallback.
+                # Scale the review window with the diff size: the free tier
+                # must consume the whole diff to produce a verdict, and its
+                # runtime grows with input. 18 s/KB is fitted to the one
+                # measured failure (a 68 KB diff killed the 1200s budget),
+                # giving it a 2x budget while keeping the old 1200s floor for
+                # small diffs. Later retries stay bounded so exhausting the
+                # capped free list leaves time for the paid fallback.
                 diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
                 diff_kb=$(( (diff_bytes + 1023) / 1024 ))
-                free_timeout=$(( 1200 + diff_kb * 5 ))
+                free_timeout=$(( 1200 + diff_kb * 18 ))
                 if [ "$free_timeout" -gt 2400 ]; then
                   free_timeout=2400
                 fi
@@ -1030,9 +1037,12 @@ jobs:
           : > model-stderr.txt
           : > model-validation.err
           paid_status=0
+          # Half the free slope: the paid route is a single fast model, but
+          # it still has to read the whole diff. 9 s/KB gives the 68 KB case
+          # a 2x budget over the 600s it died at, capped at 1200s.
           diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
           diff_kb=$(( (diff_bytes + 1023) / 1024 ))
-          paid_timeout=$(( 600 + diff_kb * 3 ))
+          paid_timeout=$(( 600 + diff_kb * 9 ))
           if [ "$paid_timeout" -gt 1200 ]; then
             paid_timeout=1200
           fi
