@@ -298,6 +298,9 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 		// unchanged: this is attribution, not a second drop.
 		projectDropped = projectDropped.sub(view.crossProjectDropped)
 		globalDropped = globalDropped.add(view.crossProjectDropped)
+		// And the promotions the replace refused at the write, which only the
+		// global half ever counted.
+		globalDropped = globalDropped.add(view.promotionDropped)
 	}
 
 	if len(globalMems) > 0 {
@@ -430,12 +433,24 @@ type promotionSources struct {
 // makes the upsert mint a verification record nobody performed, and the fold's
 // COALESCE would replace a target's own decision link instead of extending it.
 //
-// A fold into a row the replace could not touch — manual, builtin, pinned or
+// A row the replace could not touch — manual, builtin, pinned or
 // retention-exempt — takes nothing from the sources: the project path never
 // merges into such a row either, and a decision link written onto it would let
-// a supersede retire a row the user made or protected. The fold itself still
-// strengthens it, as before. stamped reports that the provenance stamp wrote,
-// so the replace files the version.
+// a supersede retire a row the user made or protected. When the promotion
+// consumes a source carrying a decision link, its duplicate lookups skip such
+// rows (UpsertOptions.foldReplaceableOnly): it folds into the best replaceable
+// match, such as the carrier an earlier round inserted, or is inserted as a
+// fresh _global row beside the protected one, as a project emission is
+// inserted beside a manual row, so the link has a live carrier a supersede can
+// retire. Any other promotion may still fold into a protected row and
+// strengthen it, as before, and the consumed sources' evidence is then deleted
+// with them, not carried. stamped reports that the provenance stamp wrote, so
+// the replace files the version.
+//
+// A fold target whose own decision links leave no room for the sources' is
+// only found here, at the write: the absorb is refused as boundedDecisionRefs
+// refuses it, and promoteErr is a *promotionOverflowError naming the links the
+// merge stood for, so the replace keeps the sources instead of consuming them.
 //
 // A candidate that cannot be promoted is never written here: the caller does
 // that after the replace, for the reason given at its write-back.
@@ -453,8 +468,20 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	// failure too (it aborts the replace), not a promotion the project can take
 	// back instead.
 	var tier string
+	var consumedLinks int
 	if src != nil {
 		if tier, err = foldedRetention(ctx, tx, projectID, m, src.folded); err != nil {
+			return "", false, nil, err
+		}
+		// The decision links the sources this promotion consumes carry, which
+		// only the promoted row can keep live once the replace deletes them.
+		var consumedIDs []string
+		for _, replaced := range m.ReplacesIDs {
+			if src.consumed[replaced] {
+				consumedIDs = append(consumedIDs, replaced)
+			}
+		}
+		if consumedLinks, _, err = decisionLinksOverflowTx(ctx, tx, projectID, consumedIDs); err != nil {
 			return "", false, nil, err
 		}
 	}
@@ -483,6 +510,9 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 		Scope:      scope,
 		FoldOnly:   true,
 		Retention:  tier,
+		// A row the replace could not merge into cannot carry a consumed
+		// source's decision link, so the merge gets a row of its own beside it.
+		foldReplaceableOnly: consumedLinks > 0,
 	})
 	if upsertErr == nil && src != nil {
 		// A fresh row is the promotion's own; a fold target takes the sources only
@@ -493,6 +523,16 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 		}
 		if upsertErr == nil && absorbs {
 			stamped, upsertErr = absorbSourcesTx(ctx, tx, projectID, id, m, src.folded, src.keptLive, src.consumed)
+			if errors.Is(upsertErr, errDecisionRefsOverflow) {
+				// Counted before the rollback below, while the target's own links
+				// are still the ones it held, for the drop the replace records.
+				links, countErr := foldedDecisionLinksTx(ctx, tx, projectID, id, m.ReplacesIDs)
+				if countErr != nil {
+					upsertErr = countErr
+				} else {
+					upsertErr = &promotionOverflowError{links: links}
+				}
+			}
 		}
 	}
 	if upsertErr == nil {
@@ -509,6 +549,17 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	}
 	return "", false, upsertErr, nil
 }
+
+// promotionOverflowError is a promotion refused at the write because its fold
+// target's own decision links and the sources' do not fit in one source_ref.
+// links is how many distinct links the merge stood for, for the overflow drop.
+type promotionOverflowError struct{ links int }
+
+func (e *promotionOverflowError) Error() string {
+	return fmt.Sprintf("%v (%d decision links)", errDecisionRefsOverflow, e.links)
+}
+
+func (e *promotionOverflowError) Unwrap() error { return errDecisionRefsOverflow }
 
 // upsertMemoriesTx uses the same duplicate probing, scope-conflict checks,
 // metadata writes, and duplicate links as a normal project save while keeping

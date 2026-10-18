@@ -469,10 +469,11 @@ func TestPromotedMergeFoldedIntoAReplaceableGlobalRowExtendsIt(t *testing.T) {
 
 // The open question: FoldOnly can fold a promoted merge into a manual or a
 // pinned _global row. Those are rows the project replace never touches, and the
-// promotion holds them to the same rule: the fold strengthens the row as any
-// fold does, but no claim, link, record or provenance of the consumed sources
-// is written onto it, so a supersede of the decision cannot retire a row the
-// user made or protected.
+// promotion holds them to the same rule: no claim, link, record or provenance
+// of the consumed sources is written onto it, so a supersede of the decision
+// cannot retire a row the user made or protected. The merge lands on a fresh
+// row beside it instead (TestAPromotionBesideAManualOrPinnedGlobalRowCarriesTheLink),
+// which is the row the supersede retires.
 func TestPromotedMergeLeavesAManualOrPinnedGlobalRowAlone(t *testing.T) {
 	for _, shape := range []string{"manual", "pinned"} {
 		t.Run(shape, func(t *testing.T) {
@@ -494,20 +495,20 @@ func TestPromotedMergeLeavesAManualOrPinnedGlobalRowAlone(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before := readPromotedRow(t, f.s, issueMergeText)
+			before := readPromotedRowByID(t, f.s, existing)
 			f.apply(t, []Memory{f.unrelatedProjectMm}, true)
-			after := readPromotedRow(t, f.s, issueMergeText)
-			if after.id != existing {
-				t.Fatalf("successor = %s, want the fold into %s", after.id, existing)
-			}
+			after := readPromotedRowByID(t, f.s, existing)
 			if after.source != before.source || after.sourceRef != before.sourceRef || after.validFrom != before.validFrom || after.verifiedAt != before.verifiedAt {
 				t.Errorf("the %s row changed: before %+v, after %+v", shape, before, after)
 			}
 			if got := carriedCounts(t, f.s, existing); len(got) != 1 {
 				t.Errorf("the %s row holds carried records %v", shape, got)
 			}
-			if report := f.supersede(t); len(report.Retired) != 0 {
-				t.Errorf("supersede report = %+v, want the %s row left alone", report, shape)
+			report := f.supersede(t)
+			for _, id := range report.Retired {
+				if id == existing {
+					t.Errorf("supersede report = %+v, want the %s row left alone", report, shape)
+				}
 			}
 			if decisionMemoryResolved(t, f.s, existing) {
 				t.Errorf("the %s row was retired", shape)
