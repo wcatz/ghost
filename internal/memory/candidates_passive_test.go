@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -1519,18 +1520,79 @@ func TestPassiveEligibleCountUsesTheWindowsOwnPredicates(t *testing.T) {
 	}
 	st := NewStore(db, nil)
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	got, excluded, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", OverFetch: 3}, now, nil)
+	got, excluded, _, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", OverFetch: 3}, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != 8 || excluded != 1 {
 		t.Errorf("count = %d/%d, want 8/1 (7 live + 1 expired, which the fetch's validity predicate removes; the resolved row and the global row are not this bucket's)", got, excluded)
 	}
-	mixed, _, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", IncludeGlobal: true}, now, nil)
+	mixed, _, _, err := st.PassiveEligibleCount(context.Background(), SlicePolicy{Bucket: "p", IncludeGlobal: true}, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if mixed != 9 {
 		t.Errorf("mixed count = %d, want 9", mixed)
+	}
+}
+
+// seedPassiveBucket adds n live rows to project `p` in one statement, which is
+// what lets a test sit on either side of the count's cap without ten thousand
+// round trips.
+func seedPassiveBucket(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p','/p','p')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?)
+		INSERT INTO memories (id, project_id, category, content, source, importance)
+		SELECT 'bulk' || i, 'p', 'fact', 'c', 'manual', 0.5 FROM seq`, n); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPassiveEligibleCountReportsWhenItStoppedAtTheCap: below the cap the count
+// is exact and not capped; at the cap and above it the count is the cap, a lower
+// bound, and says so. It used to return -1, which the header read as "unknown"
+// and replaced with the window's size (issue #1531).
+func TestPassiveEligibleCountReportsWhenItStoppedAtTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rows       int
+		want       int
+		wantCapped bool
+	}{
+		{"below the cap", PassiveEligibleCountCap - 1, PassiveEligibleCountCap - 1, false},
+		{"at the cap", PassiveEligibleCountCap, PassiveEligibleCountCap, true},
+		{"above the cap", PassiveEligibleCountCap + 500, PassiveEligibleCountCap, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := OpenDB(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			seedPassiveBucket(t, db, tc.rows)
+			got, excluded, capped, err := NewStore(db, nil).PassiveEligibleCount(
+				context.Background(), SlicePolicy{Bucket: "p"}, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want || excluded != 0 || capped != tc.wantCapped {
+				t.Errorf("count = %d/%d capped=%v, want %d/0 capped=%v", got, excluded, capped, tc.want, tc.wantCapped)
+			}
+		})
+	}
+}
+
+// TestPassiveEligibleCountCapIsBounded pins the cap's size. The aggregate is
+// capped so a session start never pays a table pass for a number a reader does
+// not act on; a cap of 1<<40 passes every behavioural test while making the
+// count unbounded, so the bound itself is asserted. The floor keeps a header
+// below it exact for any project a person plausibly keeps.
+func TestPassiveEligibleCountCapIsBounded(t *testing.T) {
+	if PassiveEligibleCountCap < 1000 || PassiveEligibleCountCap > 100000 {
+		t.Errorf("PassiveEligibleCountCap = %d, want within [1000, 100000]", PassiveEligibleCountCap)
 	}
 }

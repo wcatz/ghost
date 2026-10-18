@@ -396,10 +396,10 @@ func passiveCapOf(spec PassiveSurfaceSpec) int { return spec.ProjectCap + spec.G
 // them, so the same check runs on both.
 var (
 	hdrShownRE     = regexp.MustCompile(`(\d+) shown`)
-	hdrTotalRE     = regexp.MustCompile(`of (\d+) total`)
-	hdrNotShownRE  = regexp.MustCompile(`(\d+) not shown`)
-	hdrRankedOutRE = regexp.MustCompile(`(\d+) ranked out`)
-	hdrWithheldRE  = regexp.MustCompile(`(\d+) withheld`)
+	hdrTotalRE     = regexp.MustCompile(`of (\d+)\+? total`)
+	hdrNotShownRE  = regexp.MustCompile(`(\d+)\+? not shown`)
+	hdrRankedOutRE = regexp.MustCompile(`(\d+)\+? ranked out`)
+	hdrWithheldRE  = regexp.MustCompile(`(\d+)\+? withheld`)
 )
 
 const sessionGlobalMarker = "**Global (applies to all projects):**"
