@@ -881,10 +881,16 @@ jobs:
               free_status=0
               free_attempt=$((free_attempt + 1))
               if [ "$free_attempt" -eq 1 ]; then
-                # Give the preferred model the same generous window as the
-                # old single-model review; later retries stay bounded so
-                # exhausting the capped free list leaves time for paid.
-                free_timeout=1200
+                # Scale the review window with the diff size so a large pull
+                # request gets a review rather than being killed at a fixed
+                # 1200s. Later retries stay bounded so exhausting the capped
+                # free list leaves time for the paid fallback.
+                diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
+                diff_kb=$(( (diff_bytes + 1023) / 1024 ))
+                free_timeout=$(( 1200 + diff_kb * 5 ))
+                if [ "$free_timeout" -gt 2400 ]; then
+                  free_timeout=2400
+                fi
               else
                 free_timeout=300
               fi
@@ -950,7 +956,7 @@ jobs:
            (steps.free_review.outcome == 'success' &&
             steps.free_review.outputs.review_status == 'failed'))
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
           SELECT_MODEL_OUTCOME: ${{ steps.select_model.outcome }}
@@ -1024,8 +1030,14 @@ jobs:
           : > model-stderr.txt
           : > model-validation.err
           paid_status=0
+          diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
+          diff_kb=$(( (diff_bytes + 1023) / 1024 ))
+          paid_timeout=$(( 600 + diff_kb * 3 ))
+          if [ "$paid_timeout" -gt 1200 ]; then
+            paid_timeout=1200
+          fi
           OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-            timeout --foreground 600s opencode run --standalone \
+            timeout --foreground "${paid_timeout}s" opencode run --standalone \
             --agent ghost-reviewer -m "$PAID_MODEL" --format json \
             "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
 
