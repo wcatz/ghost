@@ -598,3 +598,135 @@ func projectRows(t *testing.T, s *memory.Store, projectID string) string {
 	}
 	return fmt.Sprintf("tasks=%d %+v decisions=%d %+v", len(tasks), tasks, len(decisions), decisions)
 }
+
+// TestAnInArtifactPointerIntoAnotherProjectIsDropped: a blocked_by or
+// superseded_by naming a record of the same artifact is kept only when that
+// record lands in the project the dependent is imported under. An artifact
+// carrying two projects, pa with the targets and pb with the dependents, used to
+// keep both pointers across the projects with nothing on the report: the state
+// the store-held check refuses, which no live writer can make and which deleting
+// pa rewrites through ON DELETE SET NULL. The pointer is now dropped and
+// reported like one naming a record that exists nowhere, in the dry run and the
+// apply alike, and deleting pa leaves pb's rows unchanged.
+func TestAnInArtifactPointerIntoAnotherProjectIsDropped(t *testing.T) {
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pa","path":"/src/pa","name":"pa"}}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pa","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"task","task":{"id":"tb1","project_id":"pb","title":"B task","status":"blocked","priority":2,"blocked_by":"ta1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pa","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"db1","project_id":"pb","title":"B decision","decision":"use y","rationale":"r","status":"superseded","superseded_by":"da1"}}` + "\n"
+
+	applied := runPointerImport(t, artifact, true)
+	assertPointerOutcome(t, runPointerImport(t, artifact, false), applied,
+		map[string]Action{"task/ta1": ActionCreate, "task/tb1": ActionCreate, "decision/da1": ActionCreate, "decision/db1": ActionCreate},
+		map[string]string{"task/tb1": "ta1", "decision/db1": "da1"},
+		map[string]DropReason{"task/tb1": DropAbsent, "decision/db1": DropAbsent},
+		map[string]string{"task/tb1": "", "decision/db1": ""})
+
+	assertDeleteLeavesProject(t, applied.store, "pa", "pb")
+}
+
+// TestAnInArtifactPointerToARecordStoredInAnotherProjectIsDropped: the target
+// is in the artifact under pb, but the store already holds that id under pa, so
+// the target record is a skip and the row the pointer would name lives in pa.
+// A skip used to count as landed whatever project held the row, and the pointer
+// was kept across projects. What decides is the project the stored row is in:
+// the pointer is dropped and reported like one naming a record that exists
+// nowhere, in both modes, and deleting pa leaves pb's rows unchanged.
+func TestAnInArtifactPointerToARecordStoredInAnotherProjectIsDropped(t *testing.T) {
+	seed := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pa","path":"/src/pa","name":"pa"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pa","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pa","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n"
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pb","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"task","task":{"id":"tb1","project_id":"pb","title":"B task","status":"blocked","priority":2,"blocked_by":"ta1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pb","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"db1","project_id":"pb","title":"B decision","decision":"use y","rationale":"r","status":"superseded","superseded_by":"da1"}}` + "\n"
+
+	applied := runPointerImportOnto(t, seed, artifact, true)
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), applied,
+		map[string]Action{"task/ta1": ActionSkip, "task/tb1": ActionCreate, "decision/da1": ActionSkip, "decision/db1": ActionCreate},
+		map[string]string{"task/tb1": "ta1", "decision/db1": "da1"},
+		map[string]DropReason{"task/tb1": DropAbsent, "decision/db1": DropAbsent},
+		map[string]string{"task/tb1": "", "decision/db1": ""})
+
+	assertDeleteLeavesProject(t, applied.store, "pa", "pb")
+}
+
+// TestAnInArtifactPointerIntoTheMappedProjectIsKept is the control for the two
+// above: the comparison is made after project mapping, on the project a record
+// is imported under. The artifact's pq records the checkout the store's pb
+// already has, so its records attach to pb. A target the artifact creates under
+// pq, and a target it carries under pq that the store already holds under pb,
+// both land in pb with their dependents, and both pointers are kept and nothing
+// is reported, in the dry run and the apply alike. A comparison against the
+// artifact's own project id, or one that treated every skip as landing
+// elsewhere, would drop them.
+func TestAnInArtifactPointerIntoTheMappedProjectIsKept(t *testing.T) {
+	seed := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ts1","project_id":"pb","title":"stored target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"ds1","project_id":"pb","title":"stored successor","decision":"use x","rationale":"r","status":"active"}}` + "\n"
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pq","path":"/src/pb","name":"pq"}}` + "\n" +
+		`{"type":"task","task":{"id":"tn1","project_id":"pq","title":"new target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"task","task":{"id":"tn2","project_id":"pq","title":"blocked by the new target","status":"blocked","priority":2,"blocked_by":"tn1"}}` + "\n" +
+		`{"type":"task","task":{"id":"ts1","project_id":"pq","title":"stored target","status":"pending","priority":2}}` + "\n" +
+		`{"type":"task","task":{"id":"ts2","project_id":"pq","title":"blocked by the stored target","status":"blocked","priority":2,"blocked_by":"ts1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dn1","project_id":"pq","title":"new successor","decision":"use x","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"dn2","project_id":"pq","title":"superseded by the new one","decision":"use y","rationale":"r","status":"superseded","superseded_by":"dn1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"ds1","project_id":"pq","title":"stored successor","decision":"use x","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"ds2","project_id":"pq","title":"superseded by the stored one","decision":"use y","rationale":"r","status":"superseded","superseded_by":"ds1"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), runPointerImportOnto(t, seed, artifact, true),
+		map[string]Action{
+			"project/pq": ActionSkip,
+			"task/tn1":   ActionCreate, "task/tn2": ActionCreate, "task/ts1": ActionSkip, "task/ts2": ActionCreate,
+			"decision/dn1": ActionCreate, "decision/dn2": ActionCreate, "decision/ds1": ActionSkip, "decision/ds2": ActionCreate,
+		},
+		map[string]string{},
+		nil,
+		map[string]string{"task/tn2": "tn1", "task/ts2": "ts1", "decision/dn2": "dn1", "decision/ds2": "ds1"})
+}
+
+// TestAnInArtifactPointerToARecordStoredInItsOwnProjectIsKept: the other side
+// of the skipped-target rule. The artifact puts ta1 and da1 under pa, but the
+// store already holds both under pb, the project of the records pointing at
+// them. A skip lands where the stored row is, so each pointer names a row in its
+// own record's project and is kept, unreported, in the dry run and the apply
+// alike. A rule that went by the project the artifact names would drop it.
+func TestAnInArtifactPointerToARecordStoredInItsOwnProjectIsKept(t *testing.T) {
+	seed := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pb","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pb","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n"
+	artifact := `{"type":"header","schema_version":2}` + "\n" +
+		`{"type":"project","project":{"id":"pa","path":"/src/pa","name":"pa"}}` + "\n" +
+		`{"type":"project","project":{"id":"pb","path":"/src/pb","name":"pb"}}` + "\n" +
+		`{"type":"task","task":{"id":"ta1","project_id":"pa","title":"A task","status":"pending","priority":2}}` + "\n" +
+		`{"type":"task","task":{"id":"tb1","project_id":"pb","title":"B task","status":"blocked","priority":2,"blocked_by":"ta1"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"da1","project_id":"pa","title":"A decision","decision":"use x","rationale":"r","status":"active"}}` + "\n" +
+		`{"type":"decision","decision":{"id":"db1","project_id":"pb","title":"B decision","decision":"use y","rationale":"r","status":"superseded","superseded_by":"da1"}}` + "\n"
+
+	assertPointerOutcome(t, runPointerImportOnto(t, seed, artifact, false), runPointerImportOnto(t, seed, artifact, true),
+		map[string]Action{"task/ta1": ActionSkip, "task/tb1": ActionCreate, "decision/da1": ActionSkip, "decision/db1": ActionCreate},
+		map[string]string{},
+		nil,
+		map[string]string{"task/tb1": "ta1", "decision/db1": "da1"})
+}
+
+// assertDeleteLeavesProject deletes project gone and holds every task and
+// decision row of project kept unchanged across it.
+func assertDeleteLeavesProject(t *testing.T, s *memory.Store, gone, kept string) {
+	t.Helper()
+	before := projectRows(t, s, kept)
+	if _, err := s.DeleteProject(context.Background(), gone, true); err != nil {
+		t.Fatalf("DeleteProject(%s): %v", gone, err)
+	}
+	if after := projectRows(t, s, kept); after != before {
+		t.Errorf("deleting project %s changed project %s's rows:\n before %s\n after  %s", gone, kept, before, after)
+	}
+}
