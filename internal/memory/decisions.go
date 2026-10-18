@@ -496,6 +496,33 @@ func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
 	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen
 }
 
+// foldedDecisionLinksTx counts the distinct decision links a merge folded into
+// the row target stands for: the target's own and those the sources (rows of
+// projectID) carry. decisionLinksOverflowTx reads one project only, and a
+// promotion's target is in _global, so it is read here by id.
+func foldedDecisionLinksTx(ctx context.Context, tx *sql.Tx, projectID, target string, sources []string) (int, error) {
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, target).Scan(&own); err != nil {
+		return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", target), err)
+	}
+	refs := decisionRefsInSourceRef(own.String)
+	for _, id := range sources {
+		if id == "" || id == target {
+			continue
+		}
+		var ref sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`, id, projectID).Scan(&ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
+		}
+		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+	}
+	return len(dedupeDecisionRefs(refs)), nil
+}
+
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the
 // consolidation successor that inherits its link) writes. The writer tools
 // (UpsertWithOptions, UpdateMemoryWithOptions) refuse it through

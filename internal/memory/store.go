@@ -3725,6 +3725,17 @@ type UpsertOptions struct {
 	// is scoped to the project and ignores category, scope and resolved
 	// state, which is the same set the import's pre-read (GetAll) covers.
 	SkipExactContent bool
+
+	// foldReplaceableOnly keeps every row a reflection replace could not touch
+	// (replaceableRowSQL: a manual, builtin, pinned, resolved or
+	// retention-exempt row) out of the duplicate lookups, so the fold lands on
+	// the best replaceable match and the save inserts only when there is none.
+	// Only a promoted merge that consumes a source carrying a decision link
+	// sets it (promoteReflectionCandidate): a protected row may not take the
+	// link, so the merge folds into a replaceable carrier, or gets a row of its
+	// own beside the protected one, as a project emission does beside a manual
+	// row. Every other promotion may still fold into a protected row.
+	foldReplaceableOnly bool
 }
 
 // mergeRetention resolves a fold's two tiers into the one the surviving row
@@ -3990,6 +4001,11 @@ type applyView struct {
 	promotions       []pendingPromotion
 	promoted         int
 	failedPromotions []failedPromotion
+	// promotionDropped is the global half's drops the replace makes while it
+	// promotes: a promotion whose fold target leaves no room for the sources'
+	// decision links, found only at the write. ApplyReflection adds it to the
+	// global half's drops; the replace's own drops never counted it.
+	promotionDropped EmissionDrops
 }
 
 // pendingPromotion is a cross-project candidate and the scope it inherited,
@@ -4175,6 +4191,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if incomingScope != nil {
 		scopeClause = "AND NOT " + scopesConflictSQL("m.scope", "?")
 		scopeArgs = []any{incomingScope, incomingScope}
+	}
+	// A save that may fold only into a row a reflection replace could touch
+	// (UpsertOptions.foldReplaceableOnly) never sees any other row as a
+	// candidate, in either lookup: excluded before the window is cut, for the
+	// reason the scope clause is, so the best replaceable match takes the fold
+	// and the save inserts only when there is none. Checking the winner alone
+	// inserted a second carrier whenever a protected row outranked the first.
+	if opts.foldReplaceableOnly {
+		scopeClause += " AND " + replaceableRowSQL
 	}
 	probeArgs := func(lead ...any) []any {
 		args := append([]any{}, lead...)
@@ -8419,6 +8444,41 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
+			// A promotion whose fold target leaves no room for the sources'
+			// decision links is the pre-check's overflow found at the write, and
+			// refused as that one is: the sources it would have consumed, and any
+			// row carrying its text, leave the delete set, so each companion keeps
+			// its link live, and the merge is an overflow drop rather than a
+			// write-back into the project, which would carry no link. A row an
+			// earlier emission already took as its source keeps that successor.
+			// None of them is reported as a survivor: preserved is fixed above,
+			// and the same merge overflows again on the next run for as long as
+			// the fold target's own links are unchanged.
+			var overflow *promotionOverflowError
+			if errors.As(promoteErr, &overflow) {
+				named := make(map[string]bool, len(p.m.ReplacesIDs))
+				for _, replaced := range p.m.ReplacesIDs {
+					named[replaced] = true
+				}
+				keep := make(map[string]bool)
+				for _, c := range candidates {
+					if _, taken := successorOf[c.id]; consumed[c.id] && !taken && (named[c.id] || c.content == p.m.Content) {
+						keep[c.id] = true
+					}
+				}
+				remaining := deleteIDs[:0:0]
+				for _, id := range deleteIDs {
+					if keep[id] {
+						delete(consumed, id)
+						keptLive[id] = true
+						continue
+					}
+					remaining = append(remaining, id)
+				}
+				deleteIDs = remaining
+				view.promotionDropped.record(dropOverflow, overflow.links)
+				continue
+			}
 			if promoteErr != nil {
 				view.failedPromotions = append(view.failedPromotions, failedPromotion{pendingPromotion: p, err: promoteErr})
 				continue
@@ -8433,6 +8493,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				}
 			}
 		}
+		// A refused promotion above may have kept rows out of the delete set.
+		deleted = len(deleteIDs)
 	}
 
 	if len(deleteIDs) > 0 {
