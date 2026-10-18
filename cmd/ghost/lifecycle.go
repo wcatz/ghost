@@ -71,7 +71,7 @@ verbatim, so dash-prefixed names work.
 // hook read it, which is before reflect rewrote a single memory.
 //
 // Internal subcommand: not listed in help.
-func runLifecycle() {
+func runLifecycle() int {
 	projectName, source, signalsPath, err := parseLifecycleArgs(os.Args[2:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -95,7 +95,7 @@ func runLifecycle() {
 		lifecycleLogf(projectName, "warning: could not take the per-project lock (%v); continuing unlocked", lockErr)
 	case !ok:
 		lifecycleLogf(projectName, "%s", lifecycleLockRefusal(projectName))
-		return
+		return 0
 	}
 	defer release()
 
@@ -141,7 +141,7 @@ func runLifecycle() {
 		if terr := mcpinit.TouchLifecycleStart(projectName); terr != nil {
 			lifecycleLogf(projectName, "warning: could not record the run start (%v)", terr)
 		}
-		return
+		return 1
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -216,12 +216,17 @@ func runLifecycle() {
 	// Record the START for lifecycle.min_interval (#541): the stop hook reads
 	// this stamp to decide whether the next turn's spawn is inside the cooldown.
 	//
-	// Placed here, after every precondition above that can exit non-zero — a
-	// config file that does not parse, an unlocatable binary — because a run
-	// that dies before doing any work must not burn a 30m window, and because
-	// such a death precedes FinishLifecycleRun and so leaves no failure marker
-	// either. This is the silent-death class the marker exists to catch, and
-	// the stamp must not add to it.
+	// Placed here, after the preconditions above that can exit non-zero — an
+	// unlocatable binary — because a run that dies before doing any work must
+	// not burn a 30m window.
+	//
+	// A config file that does not parse is the one deliberate exception: that
+	// branch touches this stamp itself, and writes the failure marker, before it
+	// returns. The death is then not silent (the next session-start surfaces the
+	// marker) and the cooldown holds, so the stop hook does not respawn a run
+	// that can only fail the same way on every turn until the config is fixed.
+	// A manual `ghost lifecycle` does not consult the cooldown, so the retry
+	// after the fix is not blocked.
 	//
 	// It is NOT conditional on holding the lock. A run turned away because
 	// another one holds it has already returned above; this one proceeds, and
@@ -419,6 +424,7 @@ func runLifecycle() {
 	} else if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
 		lifecycleLogf(projectName, "warning: could not record run outcome: %v", err)
 	}
+	return 0
 }
 
 // phaseSweepTimeout is the backstop on the wait for a signalled phase's
