@@ -747,16 +747,16 @@ func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, p
 	return beyond, nil
 }
 
-// passiveEligibleCountCap bounds the eligible-count aggregate. The count is
+// PassiveEligibleCountCap bounds the eligible-count aggregate. The count is
 // HEADER ARITHMETIC — it says how many rows the store holds against the
 // over-fetch's window — and it is the one read on this path the threshold scan
-// cannot bound, because the rows the scan never reads are exactly the ones the
+// cannot bound, because the rows the scan never read are exactly the ones the
 // count is about. An exact census of a bucket past this many rows costs a table
 // pass at every session start for a number a reader does not act on, so the
-// aggregate stops here and reports the count UNKNOWN (a negative eligible),
-// which leaves the header describing the window — the same answer a count that
-// could not be read gives.
-const passiveEligibleCountCap = 10000
+// aggregate stops here and reports that it did (capped), which makes the header
+// say the bucket holds AT LEAST this many rows. It is exported so a test of a
+// header that crosses it names the bound rather than repeating the number.
+const PassiveEligibleCountCap = 10000
 
 // PassiveEligibleCount is how many rows the policy's bucket holds that the
 // window's fetch could ever draw from, and how many of those the fetch's own
@@ -773,43 +773,37 @@ const passiveEligibleCountCap = 10000
 // rather than ranked out. A store below the validity floor has no predicate:
 // validityExcluded is zero.
 //
-// The aggregate is CAPPED (passiveEligibleCountCap): it reads at most that many
-// rows, and a bucket that fills the cap reports an UNKNOWN count (a negative
-// eligible, the value CountedAgainst reads as "could not be read") rather than
-// paying a full table pass for an exact figure. The cap is well above any bucket
-// whose exact size a header line acts on, and the fallback is the header
-// describing the window, which is what it does when the count fails.
-func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, err error) {
+// The aggregate is CAPPED (PassiveEligibleCountCap): it reads at most that many
+// rows, and a bucket that fills the cap reports capped with eligible equal to
+// the cap, a LOWER BOUND, rather than paying a full table pass for an exact
+// figure. validityExcluded is then the count over the rows the aggregate read,
+// also a lower bound. A header built from a capped count says "at least", and
+// never names the window as the total.
+func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, capped bool, err error) {
 	cols, err := passiveColumnsFor(s)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	where, popArgs := passivePopulationSQL(pol, CandidateRequest{Scope: scope, Now: now}, cols)
 	if !cols.HasValidity {
 		query := "SELECT COUNT(*) FROM (SELECT 1 FROM memories WHERE " + where + " LIMIT ?)"
-		args := append(append([]any{}, popArgs...), passiveEligibleCountCap)
+		args := append(append([]any{}, popArgs...), PassiveEligibleCountCap)
 		if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible); err != nil {
-			return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+			return 0, 0, false, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
 		}
-		if eligible >= passiveEligibleCountCap {
-			return -1, 0, nil
-		}
-		return eligible, 0, nil
+		return eligible, 0, eligible >= PassiveEligibleCountCap, nil
 	}
 	stamp := now.UTC().Format(stampLayoutForSQL)
 	// The inner SELECT's validity placeholders come first in the statement's text,
 	// then the population's bucket, then the cap.
 	inner := "SELECT CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END AS invalid FROM memories WHERE " + where + " LIMIT ?"
 	args := append([]any{stamp, stamp}, popArgs...)
-	args = append(args, passiveEligibleCountCap)
+	args = append(args, PassiveEligibleCountCap)
 	query := "SELECT COUNT(*), COALESCE(SUM(invalid), 0) FROM (" + inner + ")"
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible, &validityExcluded); err != nil {
-		return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+		return 0, 0, false, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
 	}
-	if eligible >= passiveEligibleCountCap {
-		return -1, -1, nil
-	}
-	return eligible, validityExcluded, nil
+	return eligible, validityExcluded, eligible >= PassiveEligibleCountCap, nil
 }
 
 // passiveValidityExcluded counts the rows in one bucket's window that the validity
@@ -1324,6 +1318,23 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// The verdicts, not just the penalty: a dropped loser has to name the row it
 	// lost to, and it is read from the one edge pass that decided the loss.
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, nearDupProtected, threshold)
+	// A protected row is never REMOVED as a near-duplicate. The verdict already
+	// flips when exactly one side is protected, so a protected loser here means
+	// BOTH rows of the pair are (two pinned copies, the pair a pinned fold
+	// writes). The drop branch takes such a pair out of the verdicts before the
+	// removal: both rows stay, nothing is filed as dropped, and no loser names a
+	// winner it did not lose its slot to. The reorder branch keeps the pair, as
+	// every reorder-only reader does, because a demotion keeps both rows.
+	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
+		removable := make([]demotionPairs, 0, len(pairs))
+		for _, pr := range pairs {
+			if nearDupProtected[pr.loser] {
+				continue
+			}
+			removable = append(removable, pr)
+		}
+		pairs = removable
+	}
 	// The contradicts veto is a DROP rule: a near-duplicate removal would take one
 	// side out of the window before stage 5 sees it, so the pair would be judged
 	// by the near-duplicate verdict instead of stage 5's contradiction tie-break,
