@@ -263,6 +263,89 @@ func TestPassiveKeyScanPlanDoesNotSortTheBucket(t *testing.T) {
 	}
 }
 
+// TestPassiveThresholdScanKeepsTheNewestTiedRows pins the tie-break at the
+// window's edge, for both orders. Every row of a bucket is a fact at the save
+// default for that bucket (0.7 for a project, 0.8 for `_global`), so every rank
+// equals every importance and the window is decided by the secondary key alone:
+// created_at for `decay`, updated_at for `pinned_importance_updated`. The five
+// newest rows are inserted LAST, so the index hands them to the scan last: a
+// stop condition that fired on an equal importance would end the scan once the
+// window filled with older rows and never read them. The strict stop keeps
+// reading through the tie, and the five newest must be in the window, in the
+// legacy order.
+func TestPassiveThresholdScanKeepsTheNewestTiedRows(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	fresh := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	// The fixture only tests the tie if the rank IS the importance: a fact on
+	// the project tier must not decay.
+	if f := DecayFactor("fact", RetentionProject, false, ageDays(old.Format("2006-01-02 15:04:05"), now)); f != 1 {
+		t.Fatalf("a project-tier fact decays by %v, so the fixture's rows are not tied on rank", f)
+	}
+	for _, tc := range []struct {
+		pol        SlicePolicy
+		importance float64
+	}{
+		{projectPassivePolicy(), 0.7},
+		{globalPassivePolicy(), 0.8},
+	} {
+		t.Run(tc.pol.Order, func(t *testing.T) {
+			db, err := OpenDB(filepath.Join(t.TempDir(), "tied.db"))
+			if err != nil {
+				t.Fatalf("OpenDB: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			st := NewStore(db, nil)
+			ctx := context.Background()
+			if err := st.EnsureProject(ctx, tc.pol.Bucket, tc.pol.Bucket, tc.pol.Bucket); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			insert := func(id string, at time.Time) {
+				stamp := at.Format("2006-01-02 15:04:05")
+				if _, err := db.Exec(
+					`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+					 VALUES (?, ?, 'fact', 'tied fixture', 'manual', ?, 0, ?, ?)`,
+					id, tc.pol.Bucket, tc.importance, stamp, stamp,
+				); err != nil {
+					t.Fatalf("insert %s: %v", id, err)
+				}
+			}
+			for i := 0; i < 55; i++ {
+				insert(fmt.Sprintf("old%02d", i), old.Add(time.Duration(i)*time.Hour))
+			}
+			var newest []string
+			for i := 0; i < 5; i++ {
+				id := fmt.Sprintf("new%02d", i)
+				insert(id, fresh.Add(time.Duration(i)*time.Hour))
+				newest = append(newest, id)
+			}
+			cols, err := passiveColumnsFor(st)
+			if err != nil {
+				t.Fatalf("passiveColumnsFor: %v", err)
+			}
+			req := passiveRequest(tc.pol.Bucket, tc.pol)
+			req.Now = now
+			got, err := st.passiveWindow(ctx, req, tc.pol, cols)
+			if err != nil {
+				t.Fatalf("passiveWindow: %v", err)
+			}
+			ids := idsOfMemories(got)
+			in := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				in[id] = true
+			}
+			for _, id := range newest {
+				if !in[id] {
+					t.Errorf("the window lost the newest tied row %s: %v", id, ids)
+				}
+			}
+			if want := legacyPassiveWindow(t, st, tc.pol, req, cols); !eqStrings(ids, want) {
+				t.Errorf("the tied window differs from the legacy window:\n got %v\nwant %v", ids, want)
+			}
+		})
+	}
+}
+
 // idsOfMemories is the id projection the window tests compare on.
 func idsOfMemories(memories []Memory) []string {
 	out := make([]string, len(memories))
