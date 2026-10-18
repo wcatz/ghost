@@ -90,7 +90,7 @@ func (w *Worker) SweepOnce(ctx context.Context) {
 func (w *Worker) processProject(ctx context.Context, projectID string) {
 	ids, err := w.store.UnscannedEmbeddedMemoryIDs(ctx, projectID, batchSize)
 	if err != nil {
-		w.logger.Error("linking: list unscanned", "error", err, "project_id", projectID)
+		w.logger.Error("linking: list unscanned", "error", err, "project_id", memory.RefusalArg("project_id", projectID))
 		return
 	}
 	if len(ids) == 0 {
@@ -176,6 +176,6 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 	if linked > 0 {
 		// linked counts CreateLink writes; symmetric pairs normalize to one
 		// row, so the distinct edge count can be lower.
-		w.logger.Info("linking: batch complete", "project_id", projectID, "scanned", len(ids), "link_writes", linked)
+		w.logger.Info("linking: batch complete", "project_id", memory.RefusalArg("project_id", projectID), "scanned", len(ids), "link_writes", linked)
 	}
 }
