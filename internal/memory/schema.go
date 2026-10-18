@@ -886,9 +886,40 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		// A database written by a newer ghost has columns, constraints, or tables
 		// this binary does not know about. Opening it read-write would let this
 		// binary corrupt state it cannot interpret, so refuse instead.
-		if version > schemaVersion {
+		if err := refuseNewerSchema(version); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("database schema v%d is newer than this ghost build (v%d) — upgrade ghost before opening it", version, schemaVersion)
+			return nil, err
+		}
+	}
+
+	// A lagging store is decided, copied and migrated by ONE opener at a time.
+	// Two processes that start together after a schema-bumping upgrade (two
+	// editors each spawning `ghost mcp`, a server and a lifecycle child) both
+	// read the old stamp above; without this, both took a pre-migration copy —
+	// colliding on its one-second name, so one of them failed to start — and
+	// both ran the steps from that stale read. The version is therefore read
+	// AGAIN once the lock is held, and that read is the one that decides: a
+	// waiter that finds the store already current skips the copy and the
+	// migration both, and one that finds it NEWER (a newer ghost migrated while
+	// it waited) is refused exactly as the read above would have refused it.
+	//
+	// The lock is held to the end of the open, so initSQL and the guards below
+	// run against a store no other opener is migrating. A current store never
+	// takes it, so the ordinary open pays nothing and creates no file.
+	if tableCount > 0 && version < schemaVersion {
+		release, err := acquireMigrationLock(dbPath)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		defer release()
+		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read schema version: %w", err)
+		}
+		if err := refuseNewerSchema(version); err != nil {
+			_ = db.Close()
+			return nil, err
 		}
 	}
 
