@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -917,6 +918,14 @@ func IsSidecarPath(path string) bool {
 // dir, shared with every other process on the machine, and a sweep that removed
 // anything matching a glob there would be a bug waiting for a collision. A file
 // that merely shares the prefix is left alone.
+//
+// Only a regular file is ever opened. Every local process can write to that
+// dir, so an entry's type is as untrusted as its bytes: a FIFO wearing the
+// name blocked the open until a writer appeared, and a symlink was followed
+// to whatever it named, /dev/zero included, which held the lifecycle
+// coordinator before its first phase. A sidecar is always a regular file this
+// package wrote, so a symlink is skipped even when it names one, and is never
+// removed. See readSidecarHead for the open itself.
 func SweepSidecars(dir string, maxAge time.Duration) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -928,23 +937,22 @@ func SweepSidecars(dir string, maxAge time.Duration) (int, error) {
 	cutoff := time.Now().Add(-maxAge)
 	removed := 0
 	for _, ent := range entries {
-		if ent.IsDir() {
-			continue
-		}
 		name := ent.Name()
 		if !IsSidecarName(name) {
 			continue
 		}
 		path := filepath.Join(dir, name)
+		// ent.Info is an lstat, so a symlink reports as one here and is
+		// skipped with the directories, FIFOs, sockets and devices.
 		info, err := ent.Info()
-		if err != nil || info.ModTime().After(cutoff) {
+		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
 			continue
 		}
-		raw, err := os.ReadFile(path)
+		head, err := readSidecarHead(path)
 		// ANY version's header, not only the current one: a file an older build wrote can
 		// never be read again (ReadSidecar refuses it by name), so a sweep that matched
 		// only the current header left every one of them behind for good.
-		if err != nil || !bytes.HasPrefix(raw, []byte(sidecarHeaderPrefix)) {
+		if err != nil || !bytes.Equal(head, []byte(sidecarHeaderPrefix)) {
 			continue
 		}
 		if err := os.Remove(path); err == nil {
@@ -952,4 +960,37 @@ func SweepSidecars(dir string, maxAge time.Duration) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// errNotRegularSidecar is readSidecarHead's refusal of an open descriptor
+// that is not a regular file.
+var errNotRegularSidecar = errors.New("audit: sidecar is not a regular file")
+
+// readSidecarHead reads the first len(sidecarHeaderPrefix) bytes of the
+// sidecar at path, which is all the sweep needs to tell a sidecar from a
+// file that only borrowed the name.
+//
+// The caller has already lstat'ed path and seen a regular file; this is what
+// holds when the entry is swapped between that lstat and this open.
+// sidecarOpenFlags refuse a symlink and keep a FIFO from blocking the open,
+// and the fstat on the descriptor refuses anything that is not a regular
+// file before a byte is read. Reading only the header also bounds the read.
+func readSidecarHead(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, sidecarOpenFlags, 0) // #nosec G304 -- a sidecar name in the swept dir
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w (%s)", errNotRegularSidecar, info.Mode().Type())
+	}
+	head := make([]byte, len(sidecarHeaderPrefix))
+	if _, err := io.ReadFull(f, head); err != nil {
+		return nil, err
+	}
+	return head, nil
 }
