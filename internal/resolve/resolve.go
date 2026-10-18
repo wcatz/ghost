@@ -504,7 +504,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		if reason, vetoed := VetoKeep(m.Content); vetoed {
 			res.Vetoed++
 			if logger != nil {
-				logger.Debug("resolve veto kept memory", "id", m.ID, "pattern", reason)
+				logger.Debug("resolve veto kept memory", "id", memory.RefusalArg("memory_id", m.ID), "pattern", reason)
 			}
 			continue
 		}

@@ -281,7 +281,10 @@ func (h *RelationClassifier) Classify(ctx context.Context, pair Candidate) (Rela
 	}
 	rel, ok := parseRelation(result)
 	if !ok {
-		return "", fmt.Errorf("%w: %q", errUnparseableVerdict, result)
+		// Rendered here rather than at each print: every caller logs this
+		// error, and the reply is model text bound for lifecycle.log (see
+		// logReply).
+		return "", fmt.Errorf("%w: %s", errUnparseableVerdict, logReply(result))
 	}
 	return rel, nil
 }
@@ -859,7 +862,7 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 	if !hasVerdict(rels) {
 		if h.logger != nil {
 			h.logger.Warn("supersede: batch reply unparseable; falling back to per-pair classification",
-				"reply", strings.TrimSpace(resp))
+				"reply", logReply(resp))
 		}
 		for i := range chunk {
 			rel, err := h.Classify(ctx, chunk[i])
@@ -886,10 +889,22 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 		}
 		if len(missing) > 0 {
 			h.logger.Warn("supersede: batch reply missing verdicts",
-				"pairs", missing, "reply", strings.TrimSpace(resp))
+				"pairs", missing, "reply", logReply(resp))
 		}
 	}
 	return rels, nil
+}
+
+// logReply renders a classifier reply for a log line or for the
+// errUnparseableVerdict message, through memory.RefusalArg — the renderer
+// these lines already use for their ids, because both reach lifecycle.log. The
+// token guard runs on the whole reply first, so a token is withheld and named by
+// its format; a reply over memory.ArgEchoMaxBytes (256) is withheld with its
+// byte count. That bound holds a whole batch of verdicts, and a reply past it is
+// a transcript rather than a verdict. resolve's logReply is the same call, and
+// says why this renderer rather than reflection's previews.
+func logReply(resp string) string {
+	return memory.RefusalArg("reply", strings.TrimSpace(resp))
 }
 
 // formatBatchContent renders pairs as numbered OLDER/NEWER blocks matching the
