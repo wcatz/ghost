@@ -56,10 +56,10 @@ const phaseIgnoresTerm = "trap '' TERM; while :; do sleep 0.05; done"
 func phaseWithSweptHarness(harnessPidFile string) string {
 	return fmt.Sprintf(
 		"trap 'i=0; while [ ! -f %[1]s ] && [ $i -lt 100 ]; do sleep 0.02; i=$((i + 1)); done; "+
-			"p=$(cat %[1]s 2>/dev/null); [ -n \"$p\" ] && kill -TERM -- -$p 2>/dev/null; "+
+			"p=$(cat %[1]s 2>/dev/null); [ -n \"$p\" ] && kill -s TERM -- -$p 2>/dev/null; "+
 			"[ -n \"$h\" ] && wait $h; exit 0' TERM; "+
 			"setsid sh -c '"+
-			"if kill -0 -- -$$ 2>/dev/null; then g=own; else g=shared; fi; echo $g > %[1]s.group; "+
+			"if kill -s 0 -- -$$ 2>/dev/null; then g=own; else g=shared; fi; echo $g > %[1]s.group; "+
 			"trap \": > %[1]s.termed; exit 0\" TERM; echo $$ > %[1]s.tmp && mv %[1]s.tmp %[1]s; "+
 			"i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done"+
 			"' </dev/null >/dev/null 2>&1 & h=$!; "+
