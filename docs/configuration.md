@@ -457,6 +457,7 @@ reflect → resolve → supersede
 
 - `consolidation_timeout_minutes` bounds one `ghost reflect` consolidation call, harness calls included: a run that needs the LLM tier's one repair turn (a rejected answer is re-read once with the reader's complaint attached) spends what is left of this budget rather than getting a deadline of its own.
 - `lifecycle_timeout_minutes` bounds each lifecycle phase. Set it to `0` to remove the bound, but keep it above the consolidation timeout when using both settings.
+- An explicit `consolidation_timeout_minutes: 0` removes the per-call bound too. Without a deadline, a harness client otherwise cuts each call at its own default of 5 minutes, and the error then says that default ended the call. `0` lifts that default for the consolidation's harness calls only. Resolve and supersede calls keep it, and `lifecycle_timeout_minutes` stays the outer guard on the reflect phase.
 - For both keys, only an explicit `0` removes the bound. A negative value is reported with a config warning and the default (60 and 10) is used instead, and a value too large to represent as a duration is reported and clamped to the largest one, rather than either silently meaning "no bound".
 - The lifecycle process is fire-and-forget. Failures are logged in the Ghost data directory and do not block the Stop hook.
 - The unattended reflect path requires a real CLI harness; it does not silently use the offline fallback for an automatic rewrite.

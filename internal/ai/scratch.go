@@ -99,7 +99,7 @@ func harnessCommand(ctx context.Context, binary string, args, baseEnv []string, 
 	// helper that inherited stdout keeps the copy pipe's write end open and Wait
 	// blocks until the orphan exits — measured as a 500 ms context returning
 	// after 6 s, which is the deadline failing at exactly the thing
-	// defaultTimeout (cli_client.go) claims it prevents. boundHarnessProcess
+	// defaultTimeout (call_bound.go) claims it prevents. boundHarnessProcess
 	// closes that, in the same shape the lifecycle phase spawn uses one level
 	// up, and it lives in one function so the cleanup runner's children — which
 	// are built here-adjacent rather than through this funnel — share it.
