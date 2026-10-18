@@ -3974,9 +3974,36 @@ type applyView struct {
 	// they moved. The replace keeps them as it keeps every concurrent row, but
 	// does not report them as survivors, for the reason it does not report an
 	// overflow drop's (#1492).
-	scopeKept           map[string]bool
+	scopeKept map[string]bool
+	// overflowKept is the same subset for the global half's overflow refusals:
+	// rows kept because a promoted merge's decision links do not fit in one
+	// source_ref (#1228), which no later run can write either.
+	overflowKept        map[string]bool
 	crossProjectFrom    int
 	crossProjectDropped EmissionDrops
+	// promotions are the cross-project candidates the replace promotes into
+	// _global, at the point where it knows which sources it consumes and which it
+	// keeps live, so each promoted row inherits by the rule a project successor
+	// does (promoteReflectionCandidate). The replace reports back how many landed
+	// and which it could not promote; ApplyReflection writes those back into the
+	// project once the replace has returned.
+	promotions       []pendingPromotion
+	promoted         int
+	failedPromotions []failedPromotion
+}
+
+// pendingPromotion is a cross-project candidate and the scope it inherited,
+// resolved before the replace.
+type pendingPromotion struct {
+	m     Memory
+	scope map[string]string
+}
+
+// failedPromotion is a candidate whose _global write was rolled back, kept with
+// its scope and the reason so the write-back can name both failures.
+type failedPromotion struct {
+	pendingPromotion
+	err error
 }
 
 func withApplyView(ctx context.Context, view *applyView) context.Context {
@@ -7514,6 +7541,54 @@ func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m M
 	return n > 0, nil
 }
 
+// absorbSourcesTx is what a row that already exists takes from the sources an
+// emission merges into it: the reflection provenance the decision lookup trusts
+// (markReusedSuccessorSourceTx), the records of the sources it folds
+// (carryEvidenceTx over folded, the sourcesNotKeptLive split) and their claims
+// (fillReusedClaimsTx, where a kept-live source gives its decision links alone).
+// It returns whether the provenance stamp wrote, so the caller can file the
+// version.
+//
+// Two callers, one rule: the reuse branch of ReplaceNonManual, and a merge
+// promoted into _global (promoteReflectionCandidate), whose row is in the reused
+// row's position — it exists when the sources are merged into it, whether the
+// promotion inserted it or folded into a row _global already held. The tier is
+// the caller's, because a reuse raises its row's own tier and a promotion hands
+// foldedRetention to the upsert that writes the row.
+func absorbSourcesTx(ctx context.Context, tx *sql.Tx, projectID, id string, m, folded Memory, keptLive, consumed map[string]bool) (bool, error) {
+	stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
+	if err != nil {
+		return false, err
+	}
+	// A merge that kept one row deletes the rest into it, and the cascade takes
+	// their evidence the moment the replace's delete runs, so the carry runs
+	// before it. A merge that names no other source carries nothing, because the
+	// row's own evidence never left it. See fillReusedClaimsTx.
+	if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
+		return false, err
+	}
+	if err := fillReusedClaimsTx(ctx, tx, projectID, id, m, keptLive); err != nil {
+		return false, err
+	}
+	return stamped, nil
+}
+
+// replaceableRowSQL is the predicate a row a reflection replace may delete,
+// reuse or merge into passes: not a manual or builtin row, not pinned, not
+// resolved and not retention-exempt. replaceableCandidatesTx selects the
+// project's candidates with it, and replaceableRowTx asks it of one row.
+const replaceableRowSQL = `source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND ` + retentionExemptSQL
+
+// replaceableRowTx reports whether the row id passes replaceableRowSQL.
+func replaceableRowTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE id = ? AND `+replaceableRowSQL, id).Scan(&n); err != nil {
+		return false, fmt.Errorf("read whether %s is replaceable: %w", RefusalArg("memory_id", id), err)
+	}
+	return n == 1, nil
+}
+
 // sourcesNotKeptLive drops from an emission's ReplacesIDs every source that is
 // a candidate this pass keeps live rather than deleting, so the row stays live
 // as itself. keptLive is that set: the rows the pass reuses in place and the
@@ -7612,8 +7687,7 @@ func reuseAbsorbsConsumed(id string, m Memory, consumed map[string]bool) bool {
 func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]replaceCandidate, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
-		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		  AND `+retentionExemptSQL+`
+		WHERE project_id = ? AND `+replaceableRowSQL+`
 		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
@@ -7811,7 +7885,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// refusal alone marked in the shared view did not move (#1492).
 	moved := make(map[string]bool, len(concurrent))
 	for id := range concurrent {
-		if shared && view.scopeKept[id] {
+		if shared && (view.scopeKept[id] || view.overflowKept[id]) {
 			continue
 		}
 		moved[id] = true
@@ -7845,7 +7919,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 		}
 	}
+	// Seeded from the global half's overflow refusals, as scopeKept is from its
+	// scope refusals.
 	overflowKept := make(map[string]bool)
+	if shared {
+		for id := range view.overflowKept {
+			overflowKept[id] = true
+		}
+	}
 	// refusalKept is a row a refusal (an overflow or a scope conflict) keeps
 	// live although nothing moved it. Such a row is still the corpus the pass
 	// read, so a verbatim re-emission of it — a keep, or the drop guard's re-add
@@ -8213,13 +8294,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, folded); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			// A reuse that absorbed a source is that source's consolidation
-			// successor, so it carries the provenance the decision lookup trusts —
-			// the same source a fresh INSERT and the default reuse stamp. Its own
-			// statement for the same reason the tier raise is: the verbatim branch
-			// above wrote nothing at all, and that is the branch a merge of
-			// byte-identical text takes. See markReusedSuccessorSourceTx.
-			stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
+			// The provenance stamp, the other sources' support and their claims:
+			// absorbSourcesTx, shared with a promoted merge. Their own statements for
+			// the reason the tier raise is: the verbatim branch above wrote nothing
+			// at all, and that is the branch a merge of byte-identical text takes.
+			stamped, err := absorbSourcesTx(ctx, tx, projectID, id, m, folded, keptLive, consumed)
 			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
@@ -8228,18 +8307,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				// pass records — the same event a content rewrite files. The
 				// other two branches already added the id above.
 				reflected = append(reflected, id)
-			}
-			// The other sources' support and claims, for the same reason and in the
-			// same place: a merge that kept one source's row deletes the rest into it,
-			// and the cascade takes their evidence the moment the delete below runs.
-			// The fresh INSERT carries both and FoldRows carries the evidence; a
-			// reuse that names no other source carries nothing, because the row's
-			// own evidence never left it. See fillReusedClaimsTx.
-			if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
-				return nil, EmissionDrops{}, 0, nil, err
-			}
-			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m, keptLive); err != nil {
-				return nil, EmissionDrops{}, 0, nil, err
 			}
 			reused++
 			for _, replaced := range folded.ReplacesIDs {
@@ -8322,6 +8389,38 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		reflected = append(reflected, newID)
 		for _, replaced := range folded.ReplacesIDs {
 			successorOf[replaced] = newID
+		}
+	}
+
+	// The cross-project candidates of a promoting apply, written into _global
+	// HERE: after the delete set, keptLive and consumed are fixed, and before the
+	// delete takes the sources. A promoted merge is the successor of the rows this
+	// pass consumes exactly as a project emission is, so it inherits from them by
+	// the same rule (sourcesNotKeptLive, foldedRetention, absorbSourcesTx), and its
+	// sources' delete rows name it through the same successorOf below. Written
+	// after the replace, it found its sources gone and inherited nothing (#1491).
+	if shared {
+		for _, p := range view.promotions {
+			folded := p.m
+			folded.ReplacesIDs = sourcesNotKeptLive(p.m.ReplacesIDs, keptLive)
+			id, stamped, promoteErr, err := s.promoteReflectionCandidate(ctx, tx, projectID, p.m, p.scope,
+				&promotionSources{folded: folded, keptLive: keptLive, consumed: consumed})
+			if err != nil {
+				return nil, EmissionDrops{}, 0, nil, err
+			}
+			if promoteErr != nil {
+				view.failedPromotions = append(view.failedPromotions, failedPromotion{pendingPromotion: p, err: promoteErr})
+				continue
+			}
+			view.promoted++
+			if stamped {
+				reflected = append(reflected, id)
+			}
+			for _, replaced := range folded.ReplacesIDs {
+				if _, taken := successorOf[replaced]; !taken {
+					successorOf[replaced] = id
+				}
+			}
 		}
 	}
 
