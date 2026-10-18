@@ -3698,9 +3698,9 @@ func (s *Server) registerTools() {
 		// left both live with the same-title advice skipped. The refusal names
 		// the successor, the decision that is current, so the caller can
 		// supersede that one instead. The same check runs again inside
-		// SupersedeDecisionReport's transaction; a writer racing past this one
-		// lands in the partial-failure branch below rather than in a silent
-		// repoint.
+		// RecordDecisionSuperseding's transaction; a writer racing past this
+		// one lands in the partial-failure branch below rather than in a
+		// silent repoint.
 		if args.Supersedes != "" {
 			successor, err := s.store.LiveDecisionSuccessor(ctx, args.ProjectID, args.Supersedes)
 			if err != nil {
@@ -3717,15 +3717,34 @@ func (s *Server) registerTools() {
 		if args.Supersedes == "" {
 			sameTitleAdvice = s.sameTitleDecisionAdvice(ctx, args.ProjectID, args.Title)
 		}
-		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		// A decision that supersedes another is recorded and applied in ONE
+		// store transaction, so a request cancelled between the two cannot
+		// leave the new decision live beside the one it replaces, and a retry
+		// of a cancelled call is a fresh write rather than a second live copy.
+		// An error here means nothing was written. A supersede the store
+		// refuses for what the rows say comes back in SupersedeErr with the
+		// decision committed, and is answered below as the partial failure.
+		var (
+			decisionID, memoryID string
+			companionClamped     bool
+			retirement           memory.DecisionRetirement
+			supersedeErr         error
+		)
+		if args.Supersedes == "" {
+			decisionID, memoryID, companionClamped, err = s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		} else {
+			var rec memory.RecordedDecision
+			rec, err = s.store.RecordDecisionSuperseding(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags, args.Supersedes)
+			decisionID, memoryID, companionClamped = rec.DecisionID, rec.MemoryID, rec.CompanionClamped
+			retirement, supersedeErr = rec.Retirement, rec.SupersedeErr
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
 		supersedeFailed := false
 		if args.Supersedes != "" {
-			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
-			if err != nil {
+			if err := supersedeErr; err != nil {
 				// The new decision is committed and the old one is NOT marked.
 				// That is a partial failure — the caller asked for one write and
 				// got another — so it is reported as an ERROR result rather than
@@ -3742,10 +3761,10 @@ func (s *Server) registerTools() {
 				// cannot forge a line here or bloat the answer (#1041, #1072).
 				//
 				// The store error is appended rather than dropped because it says
-				// WHICH write failed, and it is safe to append: the id-carrying
-				// sentences in `SupersedeDecisionReport` render their ids through
-				// the same renderer, so the whole sentence is bounded and nothing
-				// raw comes back through it.
+				// WHY the supersede was refused, and it is safe to append: the
+				// id-carrying sentences in the store's `supersedeDecisionTx`
+				// render their ids through the same renderer, so the whole
+				// sentence is bounded and nothing raw comes back through it.
 				supersedeFailed = true
 				var successorErr *memory.DecisionSuccessorError
 				if errors.As(err, &successorErr) {
