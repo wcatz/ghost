@@ -121,28 +121,64 @@ CREATE TABLE IF NOT EXISTS memories (
     expires_at    TEXT
 );
 
+-- The full-text index is bucketed by project (schema v28). An FTS row's rowid
+-- is the project's ordinal times 2^40 plus the memory's rowid, so one project's
+-- rows are one contiguous rowid range, and a project-scoped MATCH bounds the
+-- FTS5 scan to that range inside the virtual table instead of enumerating and
+-- ranking every project's matches before a project filter. The table's columns
+-- and tokens are unchanged, so bm25 is the value it always was.
+--
+-- memories_fts_projects holds exactly the project ids memories holds, one
+-- ordinal each: the triggers add a project's row before its first memory is
+-- indexed and remove it once its last memory has left. An ordinal is never
+-- reassigned while an FTS row carries it. The index's external content is the
+-- view memories_fts_source, keyed by the same bucketed rowid; it is created
+-- outside initSQL (see memoriesFTSSourceSQL).
+CREATE TABLE IF NOT EXISTS memories_fts_projects (
+    ord        INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
-    content=memories,
-    content_rowid=rowid,
+    content=memories_fts_source,
+    content_rowid=fts_rowid,
     tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+    INSERT INTO memories_fts_projects(project_id) SELECT new.project_id
+        WHERE NOT EXISTS (SELECT 1 FROM memories_fts_projects WHERE project_id = new.project_id);
+    INSERT INTO memories_fts(rowid, content) VALUES (
+        (SELECT ord FROM memories_fts_projects WHERE project_id = new.project_id) * 1099511627776 + new.rowid,
+        new.content);
 END;
 
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete',
+        (SELECT ord FROM memories_fts_projects WHERE project_id = old.project_id) * 1099511627776 + old.rowid,
+        old.content);
+    DELETE FROM memories_fts_projects WHERE project_id = old.project_id
+        AND NOT EXISTS (SELECT 1 FROM memories WHERE project_id = old.project_id);
 END;
 
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.content != new.content BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
-    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories
+    WHEN old.content != new.content OR old.project_id != new.project_id BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete',
+        (SELECT ord FROM memories_fts_projects WHERE project_id = old.project_id) * 1099511627776 + old.rowid,
+        old.content);
+    INSERT INTO memories_fts_projects(project_id) SELECT new.project_id
+        WHERE NOT EXISTS (SELECT 1 FROM memories_fts_projects WHERE project_id = new.project_id);
+    INSERT INTO memories_fts(rowid, content) VALUES (
+        (SELECT ord FROM memories_fts_projects WHERE project_id = new.project_id) * 1099511627776 + new.rowid,
+        new.content);
+    DELETE FROM memories_fts_projects WHERE project_id = old.project_id
+        AND NOT EXISTS (SELECT 1 FROM memories WHERE project_id = old.project_id);
 END;
 
 CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category);
-CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source);
 
 CREATE TABLE IF NOT EXISTS ghost_state (
@@ -886,9 +922,40 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		// A database written by a newer ghost has columns, constraints, or tables
 		// this binary does not know about. Opening it read-write would let this
 		// binary corrupt state it cannot interpret, so refuse instead.
-		if version > schemaVersion {
+		if err := refuseNewerSchema(version); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("database schema v%d is newer than this ghost build (v%d) — upgrade ghost before opening it", version, schemaVersion)
+			return nil, err
+		}
+	}
+
+	// A lagging store is decided, copied and migrated by ONE opener at a time.
+	// Two processes that start together after a schema-bumping upgrade (two
+	// editors each spawning `ghost mcp`, a server and a lifecycle child) both
+	// read the old stamp above; without this, both took a pre-migration copy —
+	// colliding on its one-second name, so one of them failed to start — and
+	// both ran the steps from that stale read. The version is therefore read
+	// AGAIN once the lock is held, and that read is the one that decides: a
+	// waiter that finds the store already current skips the copy and the
+	// migration both, and one that finds it NEWER (a newer ghost migrated while
+	// it waited) is refused exactly as the read above would have refused it.
+	//
+	// The lock is held to the end of the open, so initSQL and the guards below
+	// run against a store no other opener is migrating. A current store never
+	// takes it, so the ordinary open pays nothing and creates no file.
+	if tableCount > 0 && version < schemaVersion {
+		release, err := acquireMigrationLock(dbPath)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		defer release()
+		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read schema version: %w", err)
+		}
+		if err := refuseNewerSchema(version); err != nil {
+			_ = db.Close()
+			return nil, err
 		}
 	}
 
@@ -1002,6 +1069,30 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 
 	return db, nil
 }
+
+// memoriesFTSSourceSQL is the external content of memories_fts (schema v28):
+// each memory's text keyed by its bucketed FTS rowid (the project's ordinal in
+// memories_fts_projects times 2^40 plus the memory's rowid). FTS5 reads it for
+// 'rebuild' — the purge path's and migrateV28's — and 'integrity-check'; the
+// triggers maintain the index without it.
+//
+// It is NOT part of initSQL, for the ordering reason vectorEpochSQL gives:
+// initSQL runs on every open BEFORE a lagging database is migrated, and the
+// legacy steps that rebuild memories (DROP TABLE memories, then RENAME the new
+// table to memories) fail with "error in view memories_fts_source: no such
+// table: main.memories" when a view names memories at that moment. It is
+// created where the schema is already current: for a fresh database from
+// ensurePostMigrationIndexes right after initSQL, for a migrated one by
+// migrateV28's frozen copy, and IF NOT EXISTS on every open after that.
+//
+// A future migration that rebuilds memories that way must drop this view first
+// and recreate it after, and must keep the rowid arithmetic identical to the
+// triggers', or a rebuild indexes rows under rowids no trigger deletes.
+const memoriesFTSSourceSQL = `
+CREATE VIEW IF NOT EXISTS memories_fts_source AS
+    SELECT k.ord * 1099511627776 + m.rowid AS fts_rowid, m.content AS content
+    FROM memories m JOIN memories_fts_projects k ON k.project_id = m.project_id;
+`
 
 // vectorEpochSQL is the vector corpus cache's counter and the triggers that bump
 // it (schema v24, #1031). It is NOT part of initSQL, and the reason is ordering:
@@ -1123,6 +1214,9 @@ func ensurePostMigrationIndexes(db *sql.DB) error {
 		// The vector corpus cache's counter and triggers (#1031); see
 		// vectorEpochSQL for why they cannot ride in initSQL.
 		{"vector epoch", vectorEpochSQL},
+		// The full-text index's content view (schema v28); see
+		// memoriesFTSSourceSQL for why it cannot ride in initSQL.
+		{"full-text content view", memoriesFTSSourceSQL},
 	} {
 		if _, err := db.Exec(stmt.ddl); err != nil {
 			return fmt.Errorf("create %s: %w", stmt.name, err)

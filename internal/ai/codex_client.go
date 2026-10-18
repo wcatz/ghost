@@ -36,12 +36,10 @@ func (c *CodexClient) Classify(ctx context.Context, systemPrompt, userContent st
 	return c.run(ctx, systemPrompt+"\n\n"+userContent)
 }
 
-func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
-		defer cancel()
-	}
+func (c *CodexClient) run(ctx context.Context, prompt string) (_ string, err error) {
+	ctx, cancel := boundHarnessCall(ctx)
+	defer cancel()
+	defer func() { err = explainDefaultBound(ctx, err) }()
 	support := codexFeaturesFor(ctx, c.binary)
 	args := codexInvocationArgs(support.declared)
 	// The warning is skipped for a caller that stopped waiting. It learned

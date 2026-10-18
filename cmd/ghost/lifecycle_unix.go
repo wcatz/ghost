@@ -3,7 +3,10 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	"github.com/wcatz/ghost/internal/procgroup"
 )
@@ -56,4 +59,20 @@ func killPhaseProcess(cmd *exec.Cmd) {
 // each runs in a group of its own — so this says nothing about them.
 func phaseGroupInhabited(cmd *exec.Cmd) bool {
 	return procgroup.GroupInhabited(cmd)
+}
+
+// maintenanceSignals is what maintenanceContext cancels on. SIGHUP is caught
+// beside SIGINT and SIGTERM because closing the terminal or losing the SSH
+// connection a foreground run is under sends it, and Go's default action for it
+// is to exit: the coordinator would die and leave the phase, in a group of its
+// own, running behind a claim that names a dead pid. It is caught only when it
+// is not already ignored. A run started under nohup inherits SIGHUP ignored and
+// asked to outlive its terminal, and signal.Notify would replace that ignore
+// with a handler, turning the hangup nohup absorbs into an interruption.
+func maintenanceSignals() []os.Signal {
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
 }

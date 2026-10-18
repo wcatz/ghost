@@ -20,6 +20,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -774,9 +775,9 @@ func TestMCPLogConfig_FileRedirect(t *testing.T) {
 	if closeLog == nil {
 		t.Fatal("file opened, closer must be non-nil")
 	}
-	f, ok := writer.(*os.File)
+	f, ok := writer.(*mcpinit.RotatingLog)
 	if !ok {
-		t.Fatalf("writer is %T, want *os.File", writer)
+		t.Fatalf("writer is %T, want *mcpinit.RotatingLog", writer)
 	}
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
 	logger.Info("hello from test")
@@ -2621,6 +2622,27 @@ func TestConsolidationContext(t *testing.T) {
 	assertDeadlineNear(t, "negative minutes", mustCtx(t, -1), config.DefaultConsolidationTimeoutMinutes*time.Minute)
 	if _, ok := mustCtx(t, 200000000).Deadline(); !ok {
 		t.Error("an oversized minute count must still set a deadline")
+	}
+}
+
+// TestConsolidationContextZeroLiftsTheClientDefault is the other half of
+// "zero means unbounded". A context with no deadline is not enough on its own:
+// every harness client applies its own per-call default to a context that has
+// none, so an explicit 0 used to end each harness call at that default. The
+// zero branch must say so to the client, and only the zero branch: a
+// configured or defaulted timeout keeps its deadline and no marker, so the
+// client's default never comes into it.
+func TestConsolidationContextZeroLiftsTheClientDefault(t *testing.T) {
+	if !ai.DefaultBoundRemoved(mustCtx(t, 0)) {
+		t.Error("zero minutes must lift the harness client's per-call default")
+	}
+	for _, minutes := range []int{5, -1, 200000000} {
+		if ai.DefaultBoundRemoved(mustCtx(t, minutes)) {
+			t.Errorf("%d minutes must not lift the harness client's per-call default", minutes)
+		}
+	}
+	if ai.DefaultBoundRemoved(context.Background()) {
+		t.Error("a context the consolidation path did not build must keep the default")
 	}
 }
 

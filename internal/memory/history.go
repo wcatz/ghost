@@ -774,8 +774,8 @@ var errPurgeNoMemoryID = errors.New("purge history: a memory id is required")
 // connection's secure_delete zeroes the freed segment blobs as they go.
 //
 // For an external-content table this is the index's own command, not a schema
-// change: memories_fts is content=memories, so the rebuild reads memories and
-// needs no argument. It runs in the purge transaction so the row and the index
+// change: memories_fts's content is the view memories_fts_source (schema v28),
+// which reads memories, so the rebuild needs no argument. It runs in the purge transaction so the row and the index
 // can never come apart.
 func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx,
