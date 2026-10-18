@@ -184,6 +184,7 @@ func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, 
 	for _, header := range []string{
 		"Merges (",
 		"Refused by the grounding check (",
+		"Refused because the merge folds more decision links than one source_ref can hold (",
 		"Refused because the sources' scopes disagree (",
 		"Rewrites (",
 		"Dropped (",
