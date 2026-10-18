@@ -57,6 +57,24 @@ type AccountScopeRefusal struct {
 	Scopes []map[string]string
 }
 
+// AccountLinkOverflow is one merge the apply will refuse because the decision
+// links its sources carry, joined, do not fit in one source_ref: the ids it
+// named, how many distinct links they fold, and the bound. The verdict is
+// memory.DecisionLinksOverflow — the rule the replace applies before it writes —
+// so the preview and the apply cannot disagree about which merges overflow.
+//
+// Carriers are the input rows the merge did not name whose text is already the
+// merge's text. The replace keeps those too when it drops the merge
+// (keepEmissionClaims, by memory.EmissionClaimsRow), so the line owns them
+// rather than a drop, rewrite, keep or delete line that would describe a write
+// that does not happen.
+type AccountLinkOverflow struct {
+	IDs      []string
+	Carriers []string
+	Links    int
+	Bound    int
+}
+
 // AccountRewrite is one rewrite line: the id it replaced, the text it wrote
 // instead, and whether that text is one of the result's memories.
 type AccountRewrite struct {
@@ -104,7 +122,7 @@ type AccountDeleted struct {
 
 // InputAccounting is every input id of one consolidation, in the buckets the
 // report prints. The fields that name ids and the two counts partition the
-// input set: Merges, Refusals, ScopeRefusals, Rewrites and Drops name the ids an
+// input set: Merges, Refusals, LinkOverflows, ScopeRefusals, Rewrites and Drops name the ids an
 // operation touched, Kept and Passed are the counts of the ids a keep named and of the ids
 // nothing named, and Deleted is the rows an apply removes.
 type InputAccounting struct {
@@ -113,6 +131,12 @@ type InputAccounting struct {
 	Inputs   int
 	Merges   []AccountMerge
 	Refusals []Refusal
+	// LinkOverflows are the merges the apply refuses because their sources fold
+	// more decision links than one source_ref can hold, taken out of Merges for
+	// the reason ScopeRefusals are: every source is kept unchanged. The replace
+	// checks this before the scopes, so a merge that would fail both is listed
+	// here and only here.
+	LinkOverflows []AccountLinkOverflow
 	// ScopeRefusals are the merges the apply refuses because their sources'
 	// scopes disagree, taken out of Merges: the write keeps every source
 	// unchanged, so listing one as a merge would preview a write that does not
@@ -243,7 +267,9 @@ func claimedRows(input []memory.Memory, emitted []emission) map[string]bool {
 // count `ApplyReflection` returns). Everything else follows from the result and
 // the input — including a merge whose sources' scopes disagree, which the apply
 // refuses and this lists as refused, because the scopes are in the input and the
-// verdict is the write's own rule (memory.FoldSourceScopes). One scope refusal is
+// verdict is the write's own rule (memory.FoldSourceScopes), and a merge whose
+// sources fold more decision links than one source_ref can hold, decided the same
+// way over the input rows' source_refs (memory.DecisionLinksOverflow). One scope refusal is
 // NOT predicted: a merge whose text is byte-identical to a stored row with a
 // different scope than its sources agreed on is refused by the replace's reuse
 // branch, and that depends on which row the reuse claims at the write.
@@ -310,10 +336,35 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// the claim pass: a refused merge is written nowhere, so its text must not
 	// claim a stored row here either. Only a merge whose text is in the result
 	// can be refused — one a post-filter removed never reaches the write.
+	//
+	// The link overflow is asked first because the replace asks it first: a merge
+	// it drops never reaches the scope fold. Its rows are the replace's own claim
+	// set, chosen by the replace's own predicate (memory.EmissionClaimsRow) — the
+	// named sources and any input row carrying the merge's text — so the link
+	// count is the one the apply reports and the rows are the ones it keeps.
+	overflowLinks := make(map[int]int)
+	overflowClaims := make(map[int][]string)
 	scopeRefused := make(map[int]bool)
 	refusedText := make(map[string]int)
 	for i, m := range result.Merges {
 		if !present[m.Text] {
+			continue
+		}
+		named := make(map[string]bool, len(m.IDs))
+		for _, id := range m.IDs {
+			named[storedID(id)] = true
+		}
+		var refs, claims []string
+		for _, key := range order {
+			if row := byID[key]; memory.EmissionClaimsRow(named, m.Text, row.ID, row.Content) {
+				refs = append(refs, row.SourceRef)
+				claims = append(claims, key)
+			}
+		}
+		if links, over := memory.DecisionLinksOverflow(refs); over {
+			overflowLinks[i] = links
+			overflowClaims[i] = claims
+			refusedText[m.Text]++
 			continue
 		}
 		sources := make([]memory.SourceScope, 0, len(m.IDs))
@@ -374,7 +425,19 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// annotates the merge line rather than counting the source separately.
 	mergeOf := make(map[string]int, len(result.Merges))
 	scopeOwned := make(map[string]bool)
+	overflowOwned := make(map[string]bool)
+	overflowLine := make(map[int]int)
 	for i, m := range result.Merges {
+		if links, ok := overflowLinks[i]; ok {
+			overflowLine[i] = len(acc.LinkOverflows)
+			acc.LinkOverflows = append(acc.LinkOverflows, AccountLinkOverflow{
+				IDs: storedIDs(m.IDs), Links: links, Bound: memory.MaxSourceRefLen,
+			})
+			for _, id := range m.IDs {
+				overflowOwned[memIDKey(id)] = true
+			}
+			continue
+		}
 		if scopeRefused[i] {
 			line := AccountScopeRefusal{IDs: storedIDs(m.IDs)}
 			for _, id := range m.IDs {
@@ -393,12 +456,42 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 		}
 		acc.Merges = append(acc.Merges, line)
 	}
+	// The text twins an overflowing merge keeps. A row another merge names as a
+	// source, or a grounding refusal names, is already quoted on that line, so it
+	// stays there: quoting it twice would break the partition, and which of the
+	// two the write honours first is not something this pure account can see.
+	mergeSource := make(map[string]bool)
+	for _, m := range result.Merges {
+		for _, id := range m.IDs {
+			mergeSource[memIDKey(id)] = true
+		}
+	}
+	for i := range result.Merges {
+		idx, ok := overflowLine[i]
+		if !ok {
+			continue
+		}
+		for _, key := range overflowClaims[i] {
+			if mergeSource[key] || refused[key] || overflowOwned[key] {
+				continue
+			}
+			overflowOwned[key] = true
+			acc.LinkOverflows[idx].Carriers = append(acc.LinkOverflows[idx].Carriers, byID[key].ID)
+		}
+	}
 
 	for _, key := range order {
 		if idx, ok := mergeOf[key]; ok {
 			if flagged[key] {
 				acc.Merges[idx].Guarded++
 			}
+			continue
+		}
+		if overflowOwned[key] {
+			// Kept by an overflowing merge the replace drops — as a source, or as a
+			// row already carrying its text — and named on the refusal's line. It
+			// comes before the rewrite and drop lines because a twin may be named by
+			// one, and the replace keeps it whatever that line asked for.
 			continue
 		}
 		if rw, ok := rewriteOf[key]; ok {

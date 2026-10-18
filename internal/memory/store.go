@@ -1627,7 +1627,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 			return fmt.Errorf("commit ensure project tx: %w", err)
 		}
 		if mergedOld != "" {
-			s.logger.Info("merged duplicate project", "old_id", mergedOld, "new_id", mergedNew)
+			s.logger.Info("merged duplicate project", "old_id", RefusalArg("project_id", mergedOld), "new_id", RefusalArg("project_id", mergedNew))
 		}
 		return nil
 	}
@@ -1997,7 +1997,7 @@ func (s *Store) mergeProjectWithRepoLocked(ctx context.Context, oldID, newID, re
 		return fmt.Errorf("merge commit: %w", err)
 	}
 
-	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
+	s.logger.Info("merged duplicate project", "old_id", RefusalArg("project_id", oldID), "new_id", RefusalArg("project_id", newID))
 	return nil
 }
 
@@ -2291,7 +2291,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	// This log line is the durable record of what was removed. (audit_log is a
 	// legacy table with no production writer — it is counted and deleted here
 	// for older databases, not because deletions are otherwise recorded there.)
-	s.logger.Info("deleted project", "project_id", id, "project_name", name,
+	s.logger.Info("deleted project", "project_id", RefusalArg("project_id", id), "project_name", name,
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
@@ -6623,6 +6623,16 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 	return ids
 }
 
+// EmissionClaimsRow reports whether an emission whose sources are named and
+// whose text is content claims the stored row (rowID, rowContent): the row is
+// one of its named sources, or it already carries the emission's text. It is
+// keepEmissionClaims' predicate, exported so the reflect accounting lists the
+// rows an overflowing merge keeps — its text twins included — by the same rule
+// the replace keeps them, rather than by a copy of it.
+func EmissionClaimsRow(named map[string]bool, content, rowID, rowContent string) bool {
+	return named[rowID] || rowContent == content
+}
+
 // keepEmissionClaims marks every candidate an emission that is not written would
 // otherwise have taken as kept, exactly as fedGuard.drop does for a void claim,
 // and returns the ids it marked so the caller can tell WHICH refusal kept which
@@ -6636,7 +6646,7 @@ func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]boo
 	}
 	var kept []string
 	for _, c := range candidates {
-		if named[c.id] || c.content == m.Content {
+		if EmissionClaimsRow(named, m.Content, c.id, c.content) {
 			concurrent[c.id] = true
 			kept = append(kept, c.id)
 		}
@@ -6838,7 +6848,7 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 		)
 	`, projectID, projectID)
 	if err != nil && s.logger != nil {
-		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
+		s.logger.Warn("prune old snapshots", "error", err, "project_id", RefusalArg("project_id", projectID))
 	}
 	// The evidence goes with the snapshot it belongs to, and the same statement
 	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
@@ -6849,7 +6859,7 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 		DELETE FROM memory_snapshot_evidence
 		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
 	`); err != nil && s.logger != nil {
-		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
+		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", RefusalArg("project_id", projectID))
 	}
 }
 
@@ -8466,13 +8476,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
 		s.logger.Info("preserved memory identity across reflection replace",
-			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
+			"project_id", RefusalArg("project_id", projectID), "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
 	s.pruneSnapshotsTx(ctx, tx, projectID)
 
 	if s.logger != nil {
-		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
+		s.logger.Info("memories snapshotted before replace", "project_id", RefusalArg("project_id", projectID), "snapshot_id", snapshotID)
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
@@ -8930,7 +8940,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	}
 
 	n := int(removedN + updatedN + insertedN)
-	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID,
+	s.logger.Info("memories restored from snapshot", "project_id", RefusalArg("project_id", projectID), "snapshot_id", snapshotID,
 		"removed", removedN, "updated", updatedN, "reinserted", insertedN, "count", n,
 		"uncaptured_retention", uncapturedRetention)
 	return RestoreResult{Restored: n, UncapturedRetention: uncapturedRetention}, nil
