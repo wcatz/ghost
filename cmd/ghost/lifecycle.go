@@ -726,19 +726,22 @@ func maintenanceContext() (context.Context, context.CancelFunc) {
 // backend takes about that long for ~190 memories), and a kill there is fatal
 // on the autonomous --require-llm path, which has no fallback tier.
 //
-// Zero or negative means NO bound: context.WithTimeout(parent, 0) would cancel
-// the call immediately, which is the opposite of what "unset" should mean.
+// Zero means NO bound: context.WithTimeout(parent, 0) would cancel the call
+// immediately, which is the opposite of what "unset" should mean. The caller
+// passes config.ReflectionConfig.ConsolidationTimeout, which resolves a
+// negative key to the default and clamps an oversized one, so only an explicit
+// 0 reaches this branch.
 //
 // It wraps the whole consolidation, so the LLM tier's one repair turn shares this
 // budget rather than getting a deadline of its own: a run that needs the repair
 // has what is left of it. That is deliberate — the phase timeout above is the
 // bound an operator can raise, and a per-call budget here would let a single
 // pass outlive the phase it runs in.
-func consolidationContext(parent context.Context, minutes int) (context.Context, context.CancelFunc) {
-	if minutes <= 0 {
+func consolidationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, time.Duration(minutes)*time.Minute)
+	return context.WithTimeout(parent, timeout)
 }
 
 const (
@@ -876,14 +879,16 @@ type lifecyclePhase struct {
 // would silently disable auto-consolidation for that project until the process
 // was killed by hand. The bound is long enough that a legitimately slow pass
 // (resolve classifies up to 8 candidates per CLI-harness call, several seconds
-// each) completes; set the value to 0 to remove the bound entirely.
+// each) completes; set the value to 0 to remove the bound entirely. A negative
+// value keeps the default and an oversized one is clamped, both with a warning
+// (config.ReflectionConfig.LifecycleTimeout), so neither removes it.
 //
 // The project is passed to every phase with the explicit --project form (not
 // positionally) so a dash-prefixed project name is parsed as a name by the
 // phase subcommands rather than as a flag — one uniform emission for all
 // projects, dash-leading or not.
 func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
-	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
+	timeout := cfg.Reflection.LifecycleTimeout()
 	var phases []lifecyclePhase
 	if cfg.Reflection.AutoReflect && llmOK {
 		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", "--project", projectName, "--apply", "--require-llm", "--skip-unchanged"}, timeout})
@@ -1718,7 +1723,7 @@ func runReflect() {
 		AllowDrops: allowDrops,
 	}
 
-	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeoutMinutes)
+	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeout())
 	defer cancel()
 
 	result, err := consolidator.Consolidate(consolidateCtx, input)

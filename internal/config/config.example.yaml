@@ -148,7 +148,8 @@
 #                                     # `ghost supersede <project> --reassess` is
 #                                     # how a wrong edge is withdrawn.
 #   lifecycle_timeout_minutes: 60     # bound each phase; 0 disables. Keep it above
-#                                     # consolidation_timeout_minutes.
+#                                     # consolidation_timeout_minutes. For both keys a
+#                                     # negative value warns and keeps the default.
 #   consolidation_timeout_minutes: 10 # bound ONE reflect consolidation call; 0 disables.
 #                                     # Raise it for large projects: a big backlog can take
 #                                     # minutes on a CLI harness, and the kill is fatal on the
