@@ -595,30 +595,55 @@ func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey,
 // floor the predicate names columns that are not there and the whole fetch would
 // fail with "no such column: valid_from".
 //
-// The bindings are in TEXT order: the bucket, then the validity stamps when the
-// predicate is present.
+// A policy that admits `_global` is read as TWO arms, the project bucket and
+// `_global`, joined by UNION ALL under one ORDER BY. The population is the one
+// passivePopulationSQL states with the OR, but the OR is not how it is read:
+// `project_id = ? OR project_id = '_global'` loses the index order, and the
+// engine sorts every row of both buckets in a temp b-tree before the scan sees
+// the first, so the stop saves nothing. Each arm names one bucket and streams
+// out of idx_memories_project_imp, and the compound ORDER BY is served as a
+// merge of the two ordered arms, so the rows still arrive in importance order
+// and the scan stops at the window. Ties across the arms may arrive in either
+// order; the window does not depend on it, because it is re-sorted on the full
+// key and the stop is strict. A `_global` bucket that also admits `_global` is
+// one bucket and one arm, since two would hand every row over twice.
+//
+// The bindings are in TEXT order: per arm, the bucket, then the validity stamps
+// when the predicate is present.
 func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns, pinned bool) (string, []any) {
-	where, args := passivePopulationSQL(pol, req, cols)
-	if pinned {
-		where += " AND pinned = 1"
-	} else {
-		where += " AND pinned = 0"
-	}
-	if cols.HasValidity {
-		stamp := req.Now.UTC().Format(stampLayoutForSQL)
-		where += " AND " + validityMatchesSQL()
-		args = append(args, stamp, stamp)
-	}
 	retention := "retention"
 	if !cols.HasTier {
 		retention = "'' AS retention"
 	}
-	query := fmt.Sprintf(`
+	arm := func(bucket string) (string, []any) {
+		one := pol
+		one.Bucket = bucket
+		one.IncludeGlobal = false
+		where, args := passivePopulationSQL(one, req, cols)
+		if pinned {
+			where += " AND pinned = 1"
+		} else {
+			where += " AND pinned = 0"
+		}
+		if cols.HasValidity {
+			stamp := req.Now.UTC().Format(stampLayoutForSQL)
+			where += " AND " + validityMatchesSQL()
+			args = append(args, stamp, stamp)
+		}
+		return fmt.Sprintf(`
 		SELECT id, importance, pinned, category, created_at, updated_at, %s
 		FROM memories
-		WHERE %s
-		ORDER BY importance DESC`, retention, where)
-	return query, args
+		WHERE %s`, retention, where), args
+	}
+	query, args := arm(pol.Bucket)
+	if pol.IncludeGlobal && pol.Bucket != GlobalProjectID {
+		global, globalArgs := arm(GlobalProjectID)
+		query += `
+		UNION ALL` + global
+		args = append(args, globalArgs...)
+	}
+	return query + `
+		ORDER BY importance DESC`, args
 }
 
 // passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
