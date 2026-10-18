@@ -1215,21 +1215,7 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 // keyword leg applies later rather than in its statement — so the count cannot
 // describe rows the leg never considered.
 func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
-	where := "memories_fts MATCH ?"
-	args := []any{}
-	if !allProjects {
-		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
-		args = append(args, project)
-	}
-	args = append(args, sanitizeFTS(req.Query))
-	// NOT (validityMatchesSQLFor(...)) is "the predicate would have dropped this
-	// row". The two ? placeholders are bound in the predicate's own text order
-	// (until, then from), after the project and the match term.
-	stamp := req.Now.UTC().Format(stampLayoutForSQL)
-	args = append(args, stamp, stamp)
-
-	query := `SELECT COUNT(*) FROM memories m JOIN memories_fts f ON f.rowid = m.rowid WHERE ` + where +
-		` AND NOT (` + validityMatchesSQLFor("m.") + `)`
+	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query), req.Now, allProjects)
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("candidates: keyword validity exclusion count: %w", err)
