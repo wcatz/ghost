@@ -366,7 +366,7 @@ deadline Go kills only the direct child, and a harness helper that inherited the
 child's stdout keeps the copy pipe's write end open, so `os/exec` reads that
 pipe until EOF and `Run` blocks until the orphan exits, however long that is —
 measured as a 500 ms context returning after 6 s, which is exactly what
-`defaultTimeout` (`internal/ai/cli_client.go`) claims to prevent. Three settings
+`defaultTimeout` (`internal/ai/call_bound.go`) claims to prevent. Three settings
 close it, in the same shape the lifecycle phase spawn uses one level up
 (`cmd/ghost/lifecycle.go`): the child starts in its own process group
 (`Setpgid` on unix and `CREATE_NEW_PROCESS_GROUP` on Windows), `cmd.Cancel`
@@ -393,6 +393,28 @@ two cannot drift apart; the phase's `terminatePhaseProcess`,
 `killPhaseProcess` and `phaseGroupInhabited` are thin named wrappers over it,
 and its `setPhaseProcessGroup` wraps `SetGroup` on unix but stays a no-op on
 Windows for the console Ctrl-C reason above.
+
+**A context with no deadline gets the per-call default unless the caller
+removed it on purpose.** Every client's `run` takes its bound from ONE helper,
+`boundHarnessCall` (`internal/ai/call_bound.go`), in this order: a deadline on
+the context is kept as it is; a context marked `ai.WithoutDefaultBound` gets no
+timer; any other context gets `defaultTimeout` (5 minutes). The marker exists
+because a client cannot tell "the caller wants no bound" from "the caller
+forgot a deadline" by looking at `ctx.Deadline` alone, and treating both alike
+cut an explicit `reflection.consolidation_timeout_minutes: 0` at five minutes
+per call. The marker is set in one place, the zero branch of
+`consolidationContext` (`cmd/ghost/lifecycle.go`), so no other caller carries
+it: resolve, supersede, the `ghost_resolve` tool and the bench classifier keep
+the default, and the storyline eval keeps its own per-call deadline; the
+marker never lifts a deadline the context carries; and the 10 s
+capability and version checks keep their own bounds under it. A call the
+default cuts names the default in its error (`explainDefaultBound`, keyed on
+the timer's cancellation cause), because the harness itself reports only a
+bare SIGTERM with an empty tail; a cut at the caller's own deadline is not
+blamed on it. Pinned by `TestHarnessCallWithoutDeadlineKeepsTheDefault`,
+`TestHarnessCallWithoutDefaultBoundIsNotCut`,
+`TestHarnessCallKeepsTheCallersDeadline` (all four clients, with a shortened
+default) and `TestConsolidationContextZeroLiftsTheClientDefault`.
 
 **A harness child in its own group means the command that spawns it owns the
 reach.** The child no longer shares the spawner's process group, so a signal
