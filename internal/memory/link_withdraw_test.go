@@ -2,6 +2,9 @@ package memory
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"sort"
 	"testing"
 )
 
@@ -403,5 +406,40 @@ func TestLinksByRelationSourceReachesAGlobalSource(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("LinksByRelationSource(_global) = %+v, want none: the one edge with a _global source has a p1 target", got)
+	}
+}
+
+// TestLinksByRelationSourceReturnsEdgesInInsertionOrder pins the order the repair
+// pass applies edges in: the order they were written, not the order the query
+// plan happens to visit the two memories joins in. The edges are written with
+// their source ids in DESCENDING order, so a plan that walks memories by id (as an
+// index on memories makes cheap) returns them reversed.
+func TestLinksByRelationSourceReturnsEdgesInInsertionOrder(t *testing.T) {
+	s := linkTestStore(t)
+	ctx := context.Background()
+	const n = 6
+	ids := make([]string, 0, 2*n)
+	for i := 0; i < 2*n; i++ {
+		ids = append(ids, mustCreate(t, s, "p1", fmt.Sprintf("Ordering note number %d with its own wording %d.", i, i*7919)))
+	}
+	sort.Strings(ids)
+	var want []string
+	for i := n - 1; i >= 0; i-- {
+		src, tgt := ids[i], ids[i+n]
+		mustLink(t, s, src, tgt, "supersedes", 0.9, "llm")
+		want = append(want, src+">"+tgt)
+	}
+	for round := 0; round < 3; round++ {
+		links, err := s.LinksByRelationSource(ctx, "p1", "supersedes", "llm")
+		if err != nil {
+			t.Fatalf("LinksByRelationSource: %v", err)
+		}
+		var got []string
+		for _, l := range links {
+			got = append(got, l.SourceID+">"+l.TargetID)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("edges came back as %v, want insertion order %v", got, want)
+		}
 	}
 }

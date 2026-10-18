@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,77 @@ func TestSessionStartRendersNoGlobalSectionWhenTheStoreHasNoGlobals(t *testing.T
 	}
 }
 
+// TestUnmatchedDirectoryKeepsAWhollyWithheldGlobalSectionOnEverySurface is the
+// unmatched-directory half of #1316. A directory that resolves to no project,
+// over a store whose every `_global` row is withheld, got the Global heading and
+// the withheld sentence from the SessionStart hook and nothing at all from
+// RenderSessionContext (`ghost context`, opencode's only session-start surface)
+// or SessionBlockAt (`ghost bench --passive`): both returned early on "no
+// project and no rendered globals" without asking whether rows were withheld.
+// The three surfaces must print the same block, and the live-global control
+// proves the comparison is not passing on a fixture that renders nothing.
+func TestUnmatchedDirectoryKeepsAWhollyWithheldGlobalSectionOnEverySurface(t *testing.T) {
+	_ = outcomeSessionWithGlobals(t, 0, 0, 2)
+	unmatched := filepath.Join(t.TempDir(), "nowhere-known")
+	if err := os.MkdirAll(unmatched, 0o755); err != nil {
+		t.Fatalf("mkdir unmatched: %v", err)
+	}
+	dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db")
+
+	surfaces := func() (hook, rendered, block string) {
+		t.Helper()
+		return renderSessionStart(t, unmatched),
+			RenderSessionContext(unmatched),
+			SessionBlockAt(dbPath, unmatched, mustHookConfig(t), time.Now())
+	}
+	agree := func(label, hook, rendered, block string) {
+		t.Helper()
+		if !strings.Contains(hook, "no project matched this directory") {
+			t.Fatalf("%s: the fixture directory resolved to a project, so the unmatched branch is not exercised; hook:\n%s", label, hook)
+		}
+		if !strings.Contains(hook, "**Global (applies to all projects):**") {
+			t.Fatalf("%s: the hook rendered no Global section, so there is nothing to compare; hook:\n%s", label, hook)
+		}
+		// The hook writes the block with fmt.Fprintln; the two functions return
+		// it without that line ending, so the block is the hook's output less
+		// exactly one trailing newline.
+		if !strings.HasSuffix(hook, "\n") {
+			t.Fatalf("%s: the hook output does not end in the newline Fprintln adds; hook:\n%s", label, hook)
+		}
+		hook = strings.TrimSuffix(hook, "\n")
+		if rendered != hook {
+			t.Errorf("%s: RenderSessionContext differs from the SessionStart hook\n hook (%d bytes):\n%s\n RenderSessionContext (%d bytes):\n%s", label, len(hook), hook, len(rendered), rendered)
+		}
+		if block != hook {
+			t.Errorf("%s: SessionBlockAt differs from the SessionStart hook\n hook (%d bytes):\n%s\n SessionBlockAt (%d bytes):\n%s", label, len(hook), hook, len(block), block)
+		}
+	}
+
+	hook, rendered, block := surfaces()
+	if !strings.Contains(hook, "Call ghost_memories_list to see them, still marked with the window they carry") {
+		t.Fatalf("the hook did not say the global rows were withheld; got:\n%s", hook)
+	}
+	agree("all globals withheld", hook, rendered, block)
+
+	// Control: one live global row. Every surface rendered the section before
+	// the fix too, so this pins the comparison itself.
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO memories (id, project_id, category, content, source, importance)
+		VALUES ('glive00', '_global', 'preference', 'live global row for the outcome fixture', 'manual', 0.5)`); err != nil {
+		t.Fatalf("insert live global: %v", err)
+	}
+	_ = db.Close()
+	hook, rendered, block = surfaces()
+	if !strings.Contains(hook, "live global row for the outcome fixture") {
+		t.Fatalf("control: the hook did not render the live global row; got:\n%s", hook)
+	}
+	agree("one live global", hook, rendered, block)
+}
+
 // TestSessionStartDoesNotCallWithheldRowsRankedOut is repro (b) of issue #897:
 // two expired rows beside one live row were counted by the "N not shown, ranked
 // by a composite score" line as if the ranking had cut them. Expiry is not the
@@ -311,5 +383,71 @@ func TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow(t *tes
 	}
 	if strings.Contains(got, "**Memories (") {
 		t.Errorf("a block with nothing shown rendered a count-line header; got:\n%s", got)
+	}
+}
+
+// topUpOutcomeRows adds n live rows to the fixture project's store in one
+// statement, so a test can sit on either side of the eligible count's cap. The
+// rows rank below the fixture's own, which keeps the shown rows the same.
+func topUpOutcomeRows(t *testing.T, n int) {
+	t.Helper()
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?)
+		INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
+		SELECT 'bulk' || i, 'p1', 'fact', 'bulk row ' || i, 'manual', 0.1, '2025-01-01 00:00:00' FROM seq`, n); err != nil {
+		t.Fatalf("seed %d rows: %v", n, err)
+	}
+}
+
+// TestSessionStartHeaderSaysAtLeastWhenTheCountStoppedAtTheCap: past the cap the
+// store's count is a lower bound, and the header says so instead of naming the
+// over-fetch window as the total (issue #1531: "15 shown of 45 total" for a
+// project of twelve thousand rows). The not-shown counts are lower bounds too.
+func TestSessionStartHeaderSaysAtLeastWhenTheCountStoppedAtTheCap(t *testing.T) {
+	const fixtureRows = 60
+	cap := memory.PassiveEligibleCountCap
+	for _, tc := range []struct {
+		name string
+		rows int
+	}{
+		{"at the cap", cap},
+		{"above the cap", cap + 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := outcomeSession(t, fixtureRows, 0)
+			topUpOutcomeRows(t, tc.rows-fixtureRows)
+			got := renderSessionStart(t, path)
+
+			want := fmt.Sprintf("**Memories (15 shown of %d+ total — %d+ not shown, ranked by a composite score of importance, "+
+				"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**",
+				cap, cap-15)
+			if !strings.Contains(got, want) {
+				t.Errorf("the header does not say the total is at least the cap:\n want %q\n got:\n%s", want, got)
+			}
+			if strings.Contains(got, "of 45 total") {
+				t.Errorf("the header names the over-fetch window as the total:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestSessionStartHeaderIsExactJustBelowTheCap is the control: one row under the
+// cap the count is exact and the header carries no suffix.
+func TestSessionStartHeaderIsExactJustBelowTheCap(t *testing.T) {
+	cap := memory.PassiveEligibleCountCap
+	path := outcomeSession(t, 60, 0)
+	topUpOutcomeRows(t, cap-1-60)
+	got := renderSessionStart(t, path)
+
+	want := fmt.Sprintf("**Memories (15 shown of %d total — %d not shown, ranked by a composite score of importance, "+
+		"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**",
+		cap-1, cap-1-15)
+	if !strings.Contains(got, want) {
+		t.Errorf("the exact header changed below the cap:\n want %q\n got:\n%s", want, got)
 	}
 }

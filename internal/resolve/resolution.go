@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // classifyProvider is the one method the classifier needs — satisfied by
@@ -345,7 +347,7 @@ func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string
 	if !ok {
 		if h.logger != nil {
 			h.logger.Warn("resolve: batch reply unparseable; falling back to per-note classification",
-				"reply", strings.TrimSpace(resp))
+				"reply", logReply(resp))
 		}
 		for i := range chunk {
 			verdict, err := h.IsResolved(ctx, chunk[i])
@@ -359,7 +361,7 @@ func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string
 	if h.logger != nil {
 		if missing := missingVerdicts(resp, len(chunk)); len(missing) > 0 {
 			h.logger.Warn("resolve: batch reply missing verdicts",
-				"notes", missing, "reply", strings.TrimSpace(resp))
+				"notes", missing, "reply", logReply(resp))
 		}
 	}
 	return verdicts, nil
@@ -498,6 +500,24 @@ func formatBatchContent(contents []string) string {
 // covers up to batchSize notes, so compare this against the note count to see
 // the batching win.
 func (h *ResolutionClassifier) Calls() int { return h.calls }
+
+// logReply renders a classifier reply for a log line. The reply is model text
+// over stored notes, and these lines reach the phase's stderr, which a detached
+// lifecycle run appends to lifecycle.log — so it goes through
+// memory.RefusalArg, the renderer the supersede classifier already uses for the
+// ids on its own copies of these lines. Its contract is the one a reply needs:
+// the token guard runs on the WHOLE value before any bound, so a token is
+// withheld and named by its format rather than cut in half, and a value over
+// memory.ArgEchoMaxBytes (256) is withheld with its byte count, so the line
+// still says how big the reply was. 256 sits between reflection's previews (60
+// for a fragment, 160 for content) and the 1200-byte failed-call tail: a whole
+// eight-note batch of verdicts fits, and a reply past it is a transcript, not a
+// verdict. One as-written probe is enough here: the reply is logged exactly as
+// the harness wrote it, and reflection's clipOpText probes case folds only
+// because its parser folds case first.
+func logReply(resp string) string {
+	return memory.RefusalArg("reply", strings.TrimSpace(resp))
+}
 
 // SetLogger attaches a logger for unparseable-reply diagnostics. It is
 // optional: without one, a fully unparseable batch reply still falls back to
