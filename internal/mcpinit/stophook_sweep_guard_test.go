@@ -161,6 +161,16 @@ func TestSweepLeavesEverythingTheHostDidNotMaterialise(t *testing.T) {
 			writeFile(t, filepath.Join(d, opencodeTranscriptName), lineUser+"\n")
 			return filepath.Join(d, opencodeTranscriptName)
 		}},
+		{"a bench temp directory", "opencode", "opencode-messages", func(t *testing.T, base string) string {
+			// The same call internal/bench/passive.go makes for one run,
+			// holding a file of the plugin's name so only the name differs.
+			d, err := os.MkdirTemp(base, "ghost-bench-passive-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(d, opencodeTranscriptName), lineUser+"\n")
+			return filepath.Join(d, opencodeTranscriptName)
+		}},
 		{"a codex payload into a plugin-shaped directory", "codex", "codex-rollout", func(t *testing.T, base string) string {
 			// codex hands over its own rollout file and nothing materialises
 			// one in the temp directory, so a codex payload never sweeps.
