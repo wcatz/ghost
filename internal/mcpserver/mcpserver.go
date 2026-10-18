@@ -711,11 +711,13 @@ const tagMaxCount = 10
 //
 // The tag is named in the refusal through `assemble.Token`, which is the renderer
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
-// the ASCII-only quoted string. Interpolating it raw would be a second injection
-// on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain. A tag that is
-// token-shaped, or that the caller sent longer than the bound a refusal repeats,
-// is withheld instead (refusedTag).
+// the ASCII-only quoted string, with a backtick written as the JSON escape the
+// tag label prints for it, because Token quotes a backtick but leaves it raw.
+// Interpolating the tag raw would be a second injection on the very surface the
+// first one closes, and a backtick is in the class precisely because it is a
+// character this error string must never contain. A tag that is token-shaped, or
+// that the caller sent longer than the bound a refusal repeats, is withheld
+// instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -775,14 +777,15 @@ func validateTags(tags []string) ([]string, error) {
 // credential back that the guard would have refused to store. Both are decided
 // on the tag as the caller sent it, before the cut, so a value cut to the tag
 // bound is not repeated and the length reported is the caller's own. Every
-// other tag is named through assemble.Token, in the form the row would print.
-// RefusalArg alone would not do for those: it quotes with %q, which keeps the
-// data delimiters this sentence must not carry.
+// other tag is named through assemble.Token, in the form the row would print,
+// with a backtick escaped the way the tag label escapes it: Token's quoting
+// keeps a backtick raw. RefusalArg alone would not do for those: it quotes with
+// %q, which keeps the data delimiters this sentence must not carry.
 func refusedTag(orig, cut string) string {
 	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
 		return memory.RefusalArg("tag", orig)
 	}
-	return assemble.Token(cut)
+	return strings.ReplaceAll(assemble.Token(cut), "`", assemble.TagBacktickEscape)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
