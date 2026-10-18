@@ -468,23 +468,26 @@ func insertPassiveRankKey(window []passiveRankKey, key passiveRankKey, order str
 // passiveRankKeyStopsAt reports whether the scan may stop at key: whether key
 // and every row after it rank below the window's last place.
 //
-// It is STRICT, and the strictness is the tie-break: an unread row whose
-// importance EQUALS the threshold could still tie the last place on the primary
-// key and win it on importance, created_at or id, so the scan keeps reading
-// while they are equal. Only a strictly lower importance, which forces a
-// strictly lower rank, excludes the rest.
+// The scan reads rows in importance order, and within one importance value the
+// index delivers them in the policy's secondary-key order (created_at for
+// `decay`, updated_at for `pinned_importance_updated`), newest first. That
+// ordering is what makes a non-strict stop sound: once the window is full, a row
+// whose importance is below the window's k-th key cannot beat it (its rank is at
+// most its importance), and a row whose importance EQUALS the k-th key arrives
+// after every row in that tie that could beat the window on the secondary key,
+// so it and the rest of the tie cannot enter the window either.
 //
 // The threshold is the policy's PRIMARY key, which is what the bound is about:
 // `decay` ranks on the score, so the comparison is against the window's k-th
 // score; `pinned_importance_updated` ranks on importance first, so it is against
 // the k-th importance. An unread row's primary key is at most its importance
 // (the score's because every decay factor is at most 1, importance's trivially),
-// which is what makes the strict comparison sound.
+// which is what makes the comparison sound.
 func passiveRankKeyStopsAt(key, last passiveRankKey, order string) bool {
 	if order == OrderPinnedImportanceUpdated {
-		return key.importance < last.importance
+		return key.importance <= last.importance
 	}
-	return key.importance < last.rank
+	return key.importance <= last.rank
 }
 
 // passiveRankKeyLess is the policy's window order over scan keys, and it is the
@@ -613,11 +616,15 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 	if !cols.HasTier {
 		retention = "'' AS retention"
 	}
+	orderBy := "importance DESC, created_at DESC, id"
+	if pol.Order == OrderPinnedImportanceUpdated {
+		orderBy = "importance DESC, updated_at DESC, id"
+	}
 	query := fmt.Sprintf(`
 		SELECT id, importance, pinned, category, created_at, updated_at, %s
 		FROM memories
 		WHERE %s
-		ORDER BY importance DESC`, retention, where)
+		ORDER BY %s`, retention, where, orderBy)
 	return query, args
 }
 
