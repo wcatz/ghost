@@ -588,6 +588,14 @@ func fakeReflectHarnessOps(t *testing.T, calls string, ops, keepIDs []string) st
 	}
 	return path
 }
+
+// TestRunReflectCountsAnOverflowBesideAConcurrentEdit is the mix the summary's
+// mixed-reasons line has to catch without a scope refusal in it: one merge
+// overflows the decision-link bound and another proposal claims a row edited
+// while the harness was answering. Nothing is written, and the Applied line
+// counts both reasons. Falling through to the concurrent-edit line would tell
+// the operator the next run re-merges everything, which is false for the
+// overflowed merge: it overflows again on every run until it is split.
 func TestRunReflectCountsAnOverflowBesideAConcurrentEdit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake harness requires a POSIX shell")
