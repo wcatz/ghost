@@ -186,15 +186,8 @@ func TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost(t *testing.T) {
 // temp dir is removed after the hook runs, even though the spawning host may
 // have exited before its own cleanup could fire (`opencode run`).
 func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
-	isolatedHome(t)
-	dir, err := os.MkdirTemp("", "ghost-sweeptest-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	dir := plantPluginSessionDir(t, sweepTempBase(t))
 	path := filepath.Join(dir, "messages.jsonl")
-	if err := os.WriteFile(path, []byte(strings.Join([]string{lineUser, ocLineBashTool()}, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
 
 	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
 		fmt.Sprintf(`{"session_id":"oc1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
@@ -274,7 +267,7 @@ func TestRunStop_SweepsGhostDirDespiteATrailingSeparator(t *testing.T) {
 	unsetEnvForTest(t, "TEMP")
 	t.Setenv("TMPDIR", base+string(filepath.Separator))
 
-	dir := sweepableGhostDir(t, base, "ghost-trailing")
+	dir := sweepableGhostDir(t, base, pluginSessionDirName(t))
 	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -299,7 +292,7 @@ func TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar(t *testing.T)
 			unsetEnvForTest(t, "TEMP")
 			t.Setenv(key, base)
 
-			dir := sweepableGhostDir(t, base, "ghost-fallback")
+			dir := sweepableGhostDir(t, base, pluginSessionDirName(t))
 			sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
 
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -319,7 +312,7 @@ func TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase(t *testing.T) {
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		t.Fatalf("create parent dir: %v", err)
 	}
-	dir := sweepableGhostDir(t, parent, "ghost-elsewhere")
+	dir := sweepableGhostDir(t, parent, pluginSessionDirName(t))
 	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
 
 	if _, err := os.Stat(dir); err != nil {
@@ -799,10 +792,9 @@ func TestRunStop_OpencodeV2Transcript(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			isolatedHome(t)
-			dir, err := os.MkdirTemp("", "ghost-v2test-*")
-			if err != nil {
-				t.Fatalf("MkdirTemp: %v", err)
+			dir := filepath.Join(sweepTempBase(t), pluginSessionDirName(t))
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("create session dir: %v", err)
 			}
 			path := filepath.Join(dir, "messages.jsonl")
 			if err := os.WriteFile(path, []byte(strings.Join(tc.lines, "\n")+"\n"), 0o600); err != nil {

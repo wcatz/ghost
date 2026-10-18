@@ -2624,6 +2624,27 @@ func TestConsolidationContext(t *testing.T) {
 	}
 }
 
+// TestConsolidationContextZeroLiftsTheClientDefault is the other half of
+// "zero means unbounded". A context with no deadline is not enough on its own:
+// every harness client applies its own per-call default to a context that has
+// none, so an explicit 0 used to end each harness call at that default. The
+// zero branch must say so to the client, and only the zero branch: a
+// configured or defaulted timeout keeps its deadline and no marker, so the
+// client's default never comes into it.
+func TestConsolidationContextZeroLiftsTheClientDefault(t *testing.T) {
+	if !ai.DefaultBoundRemoved(mustCtx(t, 0)) {
+		t.Error("zero minutes must lift the harness client's per-call default")
+	}
+	for _, minutes := range []int{5, -1, 200000000} {
+		if ai.DefaultBoundRemoved(mustCtx(t, minutes)) {
+			t.Errorf("%d minutes must not lift the harness client's per-call default", minutes)
+		}
+	}
+	if ai.DefaultBoundRemoved(context.Background()) {
+		t.Error("a context the consolidation path did not build must keep the default")
+	}
+}
+
 // assertDeadlineNear fails unless ctx has a deadline about want from now.
 func assertDeadlineNear(t *testing.T, label string, ctx context.Context, want time.Duration) {
 	t.Helper()
