@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/repo"
 )
@@ -109,4 +111,66 @@ func detectLanguage(dir string) string {
 		}
 	}
 	return ""
+}
+
+// commitLineBreak is what a line break inside a commit line is rendered as. It
+// is the glyph assemble.LineBreakEscape uses for the same fold, copied rather
+// than imported because assemble imports memory and this package cannot reach
+// it without a cycle; one spelling of a folded break across Ghost's surfaces is
+// what lets a reader recognise it.
+const commitLineBreak = "⏎"
+
+// commitLine renders one LastCommits entry for the reflection input as data.
+//
+// A commit subject is text from outside the store: anyone who can push to a
+// branch the user pulls writes it. So it is framed the way a memory's content
+// is, through quoteData (« » delimited, any literal « » inside rewritten), and
+// additionally folded to ONE physical line, which quoteData deliberately does
+// not do for memories. The fold is safe here and not there because the model is
+// never asked to rewrite a commit subject, so a visible escape cannot be copied
+// back into stored text as a rewrite of it.
+//
+// Folded: every rune a reader ends a line at (LF, VT, FF, CR, FS, GS, RS, NEL,
+// LS, PS — the set assemble's fold uses, with a CRLF pair as one break) becomes
+// commitLineBreak, and every other C0 or C1 control becomes a space. With the
+// line opened by the builder's own "- «", no subject can start a line with a
+// heading or a memory-shaped "- id:".
+//
+// It is applied at render time rather than in CollectGitContext because
+// LastCommits is also the SHA source for the fabrication and contamination
+// guards and is set directly by callers that never run git; the builder is the
+// one place every entry passes through.
+func commitLine(c string) string {
+	return quoteData(foldCommitControls(c))
+}
+
+func foldCommitControls(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+			b.WriteString(commitLineBreak)
+			i += 2
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case isCommitLineBreak(r):
+			b.WriteString(commitLineBreak)
+		case unicode.IsControl(r):
+			b.WriteByte(' ')
+		default:
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
+}
+
+func isCommitLineBreak(r rune) bool {
+	switch r {
+	case '\n', '\v', '\f', '\r', 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029:
+		return true
+	}
+	return false
 }
