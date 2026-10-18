@@ -248,13 +248,21 @@ var auditSidecarDir = os.TempDir
 
 // cleanupTransientTranscript removes an adapter-materialized transcript once
 // ghost is done with it. The opencode plugin writes under a mkdtemp
-// `ghost-*` directory in the OS temp dir; because the plugin's own cleanup
+// `ghost-XXXXXX` directory in the OS temp dir; because the plugin's own cleanup
 // runs in its (possibly exiting) host process, a host that quits before the
 // detached hook finishes — or exits right after spawning — would otherwise
-// leak transcript dirs forever (`opencode run` does exactly this). Guarded
-// twice: only adapter-materialized formats are considered, and only a
-// `ghost-*` directory directly inside a temp base the host could have used is
-// ever removed.
+// leak transcript dirs forever (`opencode run` does exactly this).
+//
+// The path comes from the payload, and the temp directory is shared with
+// every other process on the machine — including Ghost's own audit sidecars,
+// harness scratch directories and other sessions' directories, all named
+// `ghost-…` — so the sweep removes only an entry it can tie to the layout the
+// plugin creates (see pluginSessionDir), and it removes it with two plain
+// removals rather than a recursive one: the file, then the directory, which a
+// non-empty directory refuses. Only the opencode formats are considered. No
+// adapter materialises a codex rollout — codex hands over the host's rollout
+// file under its own home — so a codex payload never sweeps anything. Every
+// failure leaves the entry in place; the sweep is best-effort and fail-open.
 //
 // The base is a SET rather than one path because the plugin's runtime and this
 // hook do not resolve the temp directory the same way — the plugin strips a
@@ -268,15 +276,81 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 		return
 	}
 	switch p.Contract.TranscriptFormat {
-	case hostevent.FormatOpencodeMessages, hostevent.FormatOpencodeV2Messages, hostevent.FormatCodexRollout:
+	case hostevent.FormatOpencodeMessages, hostevent.FormatOpencodeV2Messages:
 	default:
 		return
 	}
-	dir := filepath.Dir(p.TranscriptPath)
-	if !strings.HasPrefix(filepath.Base(dir), "ghost-") || !insideAHostTempDir(filepath.Dir(dir)) {
+	dir, ok := pluginSessionDir(p.TranscriptPath)
+	if !ok {
 		return
 	}
-	_ = os.RemoveAll(dir)
+	if os.Remove(p.TranscriptPath) != nil {
+		return
+	}
+	_ = os.Remove(dir)
+}
+
+// opencodeSessionDirPrefix and opencodeTranscriptName are the names the
+// embedded plugin uses: `mkdtemp(join(tmpdir(), "ghost-"))` and
+// `join(dir, "messages.jsonl")`. TestSweepNamesMatchThePluginSource reads them
+// back out of the plugin source so the two cannot drift apart.
+const (
+	opencodeSessionDirPrefix = "ghost-"
+	opencodeTranscriptName   = "messages.jsonl"
+)
+
+// isPluginSessionDirName reports whether name is what the plugin's mkdtemp
+// returns: the prefix followed by exactly the six characters mkdtemp
+// substitutes for its XXXXXX template, each from [A-Za-z0-9] (glibc, BSD and
+// libuv's Windows implementation all draw from that set). It is what keeps
+// `ghost-audit-*.signals`, `ghost-<kind>-<digits>` and any other `ghost-…`
+// name out: each carries a separator or a length the template cannot produce.
+func isPluginSessionDirName(name string) bool {
+	rest, ok := strings.CutPrefix(name, opencodeSessionDirPrefix)
+	if !ok || len(rest) != 6 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// pluginSessionDir returns the directory holding transcriptPath when that
+// directory is exactly what the plugin materialised, and false otherwise:
+//   - the file is named opencodeTranscriptName and sits directly in it;
+//   - its name has the plugin's mkdtemp shape;
+//   - it is directly inside a temp base the host could have used;
+//   - it is a real directory (Lstat, so a symlink is refused, never followed);
+//   - it is owned by the current user where the platform can say;
+//   - it holds that one file and nothing else, and the file is regular.
+//
+// Another live opencode session's directory has the same shape, owner and
+// parent, so this cannot tell it apart; the payload's path is what names it.
+func pluginSessionDir(transcriptPath string) (string, bool) {
+	if filepath.Base(transcriptPath) != opencodeTranscriptName {
+		return "", false
+	}
+	dir := filepath.Dir(transcriptPath)
+	if !isPluginSessionDirName(filepath.Base(dir)) || !insideAHostTempDir(filepath.Dir(dir)) {
+		return "", false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || !ownedByCurrentUser(info) {
+		return "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != opencodeTranscriptName {
+		return "", false
+	}
+	fi, err := os.Lstat(transcriptPath)
+	if err != nil || !fi.Mode().IsRegular() || !ownedByCurrentUser(fi) {
+		return "", false
+	}
+	return dir, true
 }
 
 // hostTempDirCandidates lists every base a host runtime might have reported for
