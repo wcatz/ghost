@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
@@ -3214,5 +3215,30 @@ func TestGhostTaskComplete_RepeatKeepsNotesAndStamp(t *testing.T) {
 	}
 	if got.CompletedAt != backdated {
 		t.Errorf("completed_at = %q, want %q kept", got.CompletedAt, backdated)
+	}
+}
+
+// TestSearchAllProjectLabelIsBounded: an imported project id may be as long as
+// the path it was keyed on, and the response budget always keeps its first row
+// whole, so an unbounded label would make ghost_search_all answer at whatever
+// size that id has. The label prints a bounded, marked prefix of it.
+func TestSearchAllProjectLabelIsBounded(t *testing.T) {
+	longID := "/src/" + strings.Repeat("deep/", 4000) + "repo"
+	lines := searchAllLines([]memory.Memory{{
+		ID: "0123456789ABCDEF0123456789ABCDEF", ProjectID: longID, Category: "fact",
+		Importance: 0.5, Content: "the quokka cache is warmed nightly",
+	}})
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	line := lines[0]
+	if strings.Contains(line, longID) {
+		t.Fatalf("the row prints the whole %d-byte project id", len(longID))
+	}
+	if !strings.Contains(line, "…[project id truncated]") {
+		t.Errorf("the row does not say the project id was cut:\n%.400s", line)
+	}
+	if len(line) > 2*assemble.MaxRenderedProjectIDLen+200 {
+		t.Errorf("the row is %d bytes, want it bounded near the %d-byte label cap", len(line), assemble.MaxRenderedProjectIDLen)
 	}
 }

@@ -270,6 +270,24 @@ func AgentLabel(agent string) string {
 	return " agent=" + Data(agent)
 }
 
+// ProjectLabel renders the bucket a row belongs to, as ` project=<id>`, for a
+// listing that fuses rows from several projects. The id goes through Token like
+// every identifier printed outside the data delimiters. It is bounded for the
+// reason AgentLabel is: an imported project id may be as long as the path it
+// was keyed on (memory.CheckImportedProjectID permits that so a long path
+// round-trips), and a response budget that always keeps its first row whole
+// would otherwise return an answer of whatever size that id has.
+func ProjectLabel(projectID string) string {
+	if len(projectID) > MaxRenderedProjectIDLen {
+		return " project=" + Token(clampBytes(projectID, MaxRenderedProjectIDLen)) + "…[project id truncated]"
+	}
+	return " project=" + Token(projectID)
+}
+
+// MaxRenderedProjectIDLen is what a listing prints of a project id. A DISPLAY
+// bound, not a claim about the column.
+const MaxRenderedProjectIDLen = 256
+
 // MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
 // bound, not a claim about the column: memory.MaxAgentLen refuses a longer one on
 // the writers that reach it, and this covers the three that deliberately do not —
