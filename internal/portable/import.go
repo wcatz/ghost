@@ -299,7 +299,7 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
 			if extra := otherPayloads(rec, TypeHeader); extra != "" {
-				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and nothing else", lineNum, TypeHeader, extra)
+				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and its declared features", lineNum, TypeHeader, extra)
 			}
 			header = true
 			continue
@@ -371,18 +371,9 @@ var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
 // reporting that provenance was kept. A header that declares nothing is accepted,
 // so an artifact written before this mechanism existed still imports.
 func checkHeaderFeatures(rec record) error {
-	lists := [][]string{rec.Features, rec.RequiredFeatures, rec.Capabilities, rec.RequiredFields, rec.MustUnderstand}
-	for _, list := range lists {
-		for _, f := range list {
-			if !knownFeatures[f] {
-				return fmt.Errorf("header declares feature %s that this ghost build does not understand", memory.RefusalArg("feature", f))
-			}
-		}
-	}
-	minors := []int{rec.MinorVersion, rec.SchemaMinor, rec.Minor, rec.VersionMinor}
-	for _, m := range minors {
-		if m > currentMinorVersion {
-			return fmt.Errorf("header declares minor version %d that this ghost build does not understand (v%d)", m, currentMinorVersion)
+	for _, f := range rec.Features {
+		if !knownFeatures[f] {
+			return fmt.Errorf("header declares feature %s that this ghost build does not understand", memory.RefusalArg("feature", f))
 		}
 	}
 	return nil

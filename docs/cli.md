@@ -842,7 +842,7 @@ ghost export --out - | head -3
 The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
 
 ```json
-{"type":"header","schema_version":2,"features":["retention"],"minor_version":1}
+{"type":"header","schema_version":2,"features":["retention"]}
 {"type":"project","project":{"id":"p1","path":"/src/p1","name":"one","repo_remote":"github.com/wcatz/one","created_at":"…","updated_at":"…"}}
 {"type":"memory","memory":{"id":"…","project_id":"p1","category":"gotcha","content":"…","importance":0.5,"source":"manual","pinned":false,"created_at":"…","scope":{"environment":"production"}}}
 {"type":"task","task":{"id":"…","project_id":"p1","title":"…","status":"pending","priority":2}}

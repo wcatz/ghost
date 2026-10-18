@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -57,16 +58,24 @@ const SchemaVersion = 2
 // SchemaVersion for why it is a range and not everything below.
 const minReadableSchemaVersion = 1
 
-// currentMinorVersion is the minor version of the artifact format this build
-// writes and reads. It moves when an optional field is added that an importer
-// must understand; SchemaVersion itself does not move for that.
-const currentMinorVersion = 1
-
-// knownFeatures is the set of feature names this build understands. An artifact
-// that declares a feature outside this set is refused, because importing it
-// would silently drop a field this build cannot interpret.
+// knownFeatures is the set of feature names this build understands, and the
+// single source of truth for the features this build writes: headerLine derives
+// its list from these keys, so the two cannot drift. An artifact that declares
+// a feature outside this set is refused, because importing it would silently
+// drop a field this build cannot interpret.
 var knownFeatures = map[string]bool{
 	"retention": true,
+}
+
+// declaredFeatures returns the feature list this build writes, derived from
+// knownFeatures in sorted order so the header stays byte-reproducible.
+func declaredFeatures() []string {
+	out := make([]string, 0, len(knownFeatures))
+	for name := range knownFeatures {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Record type discriminators. Each line carries exactly one, and an import
@@ -97,25 +106,11 @@ type record struct {
 	// when the two disagreed.
 	SchemaVersion int `json:"schema_version,omitempty"`
 
-	// Feature declarations. An artifact can name the optional fields or
-	// capabilities it relies on that an importer must understand; an importer
-	// that does not understand one refuses the file rather than silently
-	// dropping the field. A field that is truly optional is not listed here and
-	// stays ignorable. Several spellings are accepted so an artifact written by
-	// a build that chose a different name still refuses correctly.
-	Features         []string `json:"features,omitempty"`
-	RequiredFeatures []string `json:"required_features,omitempty"`
-	Capabilities     []string `json:"capabilities,omitempty"`
-	RequiredFields   []string `json:"required_fields,omitempty"`
-	MustUnderstand   []string `json:"must_understand,omitempty"`
-
-	// Minor version of the artifact format within SchemaVersion. An added
-	// optional field can bump this without changing SchemaVersion; an importer
-	// that only understands an older minor version refuses the file.
-	MinorVersion int `json:"minor_version,omitempty"`
-	SchemaMinor  int `json:"schema_minor,omitempty"`
-	Minor        int `json:"minor,omitempty"`
-	VersionMinor int `json:"version_minor,omitempty"`
+	// Features names the optional fields or capabilities this artifact relies
+	// on that an importer must understand. An importer that does not understand
+	// one refuses the file rather than silently dropping the field. A field that
+	// is truly optional is not listed here and stays ignorable.
+	Features []string `json:"features,omitempty"`
 }
 
 // headerLine returns the artifact's opening line. It carries the version and
@@ -124,7 +119,7 @@ type record struct {
 // the whole point of the deterministic ordering is that a diff of two artifacts
 // shows only what changed in the store.
 func headerLine() []byte {
-	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion, Features: []string{"retention"}, MinorVersion: currentMinorVersion})
+	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion, Features: declaredFeatures()})
 	return b
 }
 
