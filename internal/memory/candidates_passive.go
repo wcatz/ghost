@@ -1325,6 +1325,23 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// The verdicts, not just the penalty: a dropped loser has to name the row it
 	// lost to, and it is read from the one edge pass that decided the loss.
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, nearDupProtected, threshold)
+	// A protected row is never REMOVED as a near-duplicate. The verdict already
+	// flips when exactly one side is protected, so a protected loser here means
+	// BOTH rows of the pair are (two pinned copies, the pair a pinned fold
+	// writes). The drop branch takes such a pair out of the verdicts before the
+	// removal: both rows stay, nothing is filed as dropped, and no loser names a
+	// winner it did not lose its slot to. The reorder branch keeps the pair, as
+	// every reorder-only reader does, because a demotion keeps both rows.
+	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
+		removable := make([]demotionPairs, 0, len(pairs))
+		for _, pr := range pairs {
+			if nearDupProtected[pr.loser] {
+				continue
+			}
+			removable = append(removable, pr)
+		}
+		pairs = removable
+	}
 	// The contradicts veto is a DROP rule: a near-duplicate removal would take one
 	// side out of the window before stage 5 sees it, so the pair would be judged
 	// by the near-duplicate verdict instead of stage 5's contradiction tie-break,

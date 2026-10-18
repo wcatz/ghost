@@ -10,6 +10,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+const tokenShapedMemoryID = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+
 // ghost_health lists a pinned row a newer row contradicts, and says nothing
 // about one it does not (#975).
 func TestHealthListsPinnedRowsWithOpenContradictions(t *testing.T) {
@@ -48,7 +50,7 @@ func TestHealthListsPinnedRowsWithOpenContradictions(t *testing.T) {
 	}
 
 	report := f.health(t)
-	for _, want := range []string{"Pinned rows with open contradictions:** 1", "unpin or update", "contradicted by **" + newer, "the database is mysql"} {
+	for _, want := range []string{"Pinned rows with open contradictions:** 1", "unpin or update", `contradicted by **"` + newer + `"`, "the database is mysql"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report lacks %q:\n%s", want, report)
 		}
@@ -104,5 +106,52 @@ func TestHealthBoundsThePinnedContradictionSection(t *testing.T) {
 	}
 	if want := fmt.Sprintf("... and %d more", n-bound); !strings.Contains(report, want) {
 		t.Errorf("the remainder line %q is missing:\n%s", want, report)
+	}
+}
+
+// A pinned memory whose id is shaped like a token must not be printed in full
+// in the pinned-contradictions block; the id is withheld like the history
+// cap warning in the same answer.
+func TestHealthPinnedContradictionWithholdsTokenShapedID(t *testing.T) {
+	f := newHealthFixture(t)
+	ctx := context.Background()
+	ms := f.srv.store.(*memory.Store)
+	pin, err := ms.CreateWithID(ctx, "abc123", tokenShapedMemoryID, memory.Memory{Category: "fact", Content: "the database is postgres", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	if pin != tokenShapedMemoryID {
+		t.Fatalf("CreateWithID returned %q", pin)
+	}
+	newer, err := f.srv.store.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: "the database is mysql", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+f.path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`UPDATE memories SET pinned = 1, updated_at = '2026-01-01 00:00:00' WHERE id = ?`, pin); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memories SET updated_at = '2026-06-01 00:00:00' WHERE id = ?`, newer); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	second, err := memory.OpenDB(f.path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer second.Close() //nolint:errcheck
+	if err := memory.NewStore(second, nil).CreateLink(ctx, newer, pin, "contradicts", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	report := f.health(t)
+	if strings.Contains(report, tokenShapedMemoryID) {
+		t.Errorf("report printed the token-shaped id in full:\n%s", report)
+	}
+	if !strings.Contains(report, "<memory_id withheld: it holds a GitHub personal access token>") {
+		t.Errorf("report did not withhold the token-shaped id:\n%s", report)
 	}
 }
