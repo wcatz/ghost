@@ -266,13 +266,13 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			if newer, shared, shadowed := newerSubjects.shadowing(m); shadowed {
 				if logger != nil {
 					logger.Debug("reassess veto deferred to the classifier: a newer note names the same identifiers",
-						"id", memory.RefusalArg("memory_id", m.ID), "pattern", reason, "newer", memory.RefusalArg("memory_id", newer), "shared_identifiers", shared)
+						"id", m.ID, "pattern", reason, "newer", newer, "shared_identifiers", shared)
 				}
 			} else {
 				res.Vetoed++
 				reKeptIDs[m.ID] = true
 				if logger != nil {
-					logger.Debug("reassess veto kept memory", "id", memory.RefusalArg("memory_id", m.ID), "pattern", reason)
+					logger.Debug("reassess veto kept memory", "id", m.ID, "pattern", reason)
 				}
 				continue
 			}
