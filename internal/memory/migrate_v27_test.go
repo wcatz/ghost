@@ -68,8 +68,12 @@ func TestOpenDBMigratesAV26StoreToTheTieOrderedIndexes(t *testing.T) {
 	// both indexes present with the tie-break id column.
 	for _, name := range []string{"idx_memories_project_imp", "idx_memories_project_imp_updated"} {
 		sqlStr := indexSQL(t, db, name)
-		if !strings.Contains(sqlStr, "id") {
-			t.Errorf("index %s missing id tie-break: %s", name, sqlStr)
+		want := "created_at DESC, id"
+		if name == "idx_memories_project_imp_updated" {
+			want = "updated_at DESC, id"
+		}
+		if !strings.Contains(sqlStr, want) {
+			t.Errorf("index %s missing id tie-break %q: %s", name, want, sqlStr)
 		}
 	}
 	// data preserved.
@@ -99,8 +103,12 @@ func TestOpenDBMigratesAV26StoreToTheTieOrderedIndexes(t *testing.T) {
 	}
 	for _, name := range []string{"idx_memories_project_imp", "idx_memories_project_imp_updated"} {
 		sqlStr := indexSQL(t, db3, name)
-		if !strings.Contains(sqlStr, "id") {
-			t.Errorf("index %s missing id tie-break after second migration: %s", name, sqlStr)
+		want := "created_at DESC, id"
+		if name == "idx_memories_project_imp_updated" {
+			want = "updated_at DESC, id"
+		}
+		if !strings.Contains(sqlStr, want) {
+			t.Errorf("index %s missing id tie-break %q after second migration: %s", name, want, sqlStr)
 		}
 	}
 }
