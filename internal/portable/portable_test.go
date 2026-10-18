@@ -327,7 +327,7 @@ func TestExportIsDeterministic(t *testing.T) {
 	// added here would break byte-reproducibility while every field the test
 	// looked for would still be there.
 	head := strings.SplitN(string(first), "\n", 2)[0]
-	if want := `{"type":"header","schema_version":2}`; head != want {
+	if want := `{"type":"header","schema_version":2,"features":["retention"],"minor_version":1}`; head != want {
 		t.Errorf("header line = %s, want exactly %s", head, want)
 	}
 }

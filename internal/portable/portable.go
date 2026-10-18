@@ -57,6 +57,18 @@ const SchemaVersion = 2
 // SchemaVersion for why it is a range and not everything below.
 const minReadableSchemaVersion = 1
 
+// currentMinorVersion is the minor version of the artifact format this build
+// writes and reads. It moves when an optional field is added that an importer
+// must understand; SchemaVersion itself does not move for that.
+const currentMinorVersion = 1
+
+// knownFeatures is the set of feature names this build understands. An artifact
+// that declares a feature outside this set is refused, because importing it
+// would silently drop a field this build cannot interpret.
+var knownFeatures = map[string]bool{
+	"retention": true,
+}
+
 // Record type discriminators. Each line carries exactly one, and an import
 // refuses a type it does not know: silently skipping records would produce a
 // store that is missing data the artifact plainly contains, and the user would
@@ -84,6 +96,26 @@ type record struct {
 	// payload that repeated it would raise the question of which value governs
 	// when the two disagreed.
 	SchemaVersion int `json:"schema_version,omitempty"`
+
+	// Feature declarations. An artifact can name the optional fields or
+	// capabilities it relies on that an importer must understand; an importer
+	// that does not understand one refuses the file rather than silently
+	// dropping the field. A field that is truly optional is not listed here and
+	// stays ignorable. Several spellings are accepted so an artifact written by
+	// a build that chose a different name still refuses correctly.
+	Features         []string `json:"features,omitempty"`
+	RequiredFeatures []string `json:"required_features,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	RequiredFields   []string `json:"required_fields,omitempty"`
+	MustUnderstand   []string `json:"must_understand,omitempty"`
+
+	// Minor version of the artifact format within SchemaVersion. An added
+	// optional field can bump this without changing SchemaVersion; an importer
+	// that only understands an older minor version refuses the file.
+	MinorVersion int `json:"minor_version,omitempty"`
+	SchemaMinor  int `json:"schema_minor,omitempty"`
+	Minor        int `json:"minor,omitempty"`
+	VersionMinor int `json:"version_minor,omitempty"`
 }
 
 // headerLine returns the artifact's opening line. It carries the version and
@@ -92,7 +124,7 @@ type record struct {
 // the whole point of the deterministic ordering is that a diff of two artifacts
 // shows only what changed in the store.
 func headerLine() []byte {
-	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion})
+	b, _ := json.Marshal(record{Type: TypeHeader, SchemaVersion: SchemaVersion, Features: []string{"retention"}, MinorVersion: currentMinorVersion})
 	return b
 }
 

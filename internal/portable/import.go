@@ -295,6 +295,9 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 			if err := checkSchemaVersion(rec.SchemaVersion); err != nil {
 				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
+			if err := checkHeaderFeatures(rec); err != nil {
+				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
+			}
 			if extra := otherPayloads(rec, TypeHeader); extra != "" {
 				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and nothing else", lineNum, TypeHeader, extra)
 			}
@@ -361,6 +364,29 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 // because the second is fixable in the file and the first means the user picked
 // the wrong file.
 var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
+
+// checkHeaderFeatures refuses an artifact whose header declares a feature or a
+// minor version this build does not understand. A newer artifact's fields mean
+// whatever this build guesses, and importing it would store a weaker row while
+// reporting that provenance was kept. A header that declares nothing is accepted,
+// so an artifact written before this mechanism existed still imports.
+func checkHeaderFeatures(rec record) error {
+	lists := [][]string{rec.Features, rec.RequiredFeatures, rec.Capabilities, rec.RequiredFields, rec.MustUnderstand}
+	for _, list := range lists {
+		for _, f := range list {
+			if !knownFeatures[f] {
+				return fmt.Errorf("header declares feature %s that this ghost build does not understand", memory.RefusalArg("feature", f))
+			}
+		}
+	}
+	minors := []int{rec.MinorVersion, rec.SchemaMinor, rec.Minor, rec.VersionMinor}
+	for _, m := range minors {
+		if m > currentMinorVersion {
+			return fmt.Errorf("header declares minor version %d that this ghost build does not understand (v%d)", m, currentMinorVersion)
+		}
+	}
+	return nil
+}
 
 // checkSchemaVersion refuses any version outside the range this build reads. A
 // newer artifact's fields mean whatever this build guesses; an older one is
