@@ -4,7 +4,7 @@ package e2e
 
 // The lifecycle coordinator's own signal handling. Each phase runs in a process
 // group of its own so a deadline can sweep the phase and the CLI harness it
-// spawned, which means a SIGINT/SIGTERM delivered to the coordinator alone — a
+// spawned, which means a SIGINT/SIGTERM/SIGHUP delivered to the coordinator alone — a
 // supervisor stopping that pid, or `kill <pid>` — reaches neither. Without a
 // handler the coordinator dies on Go's default action: the phase keeps running
 // and writing in a group nothing signalled, the per-project claim's pid file
@@ -60,6 +60,23 @@ func (b *syncBuffer) String() string {
 // and the interrupted phase is recorded, so the next session start raises the
 // maintenance alert rather than silence.
 func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
+	lifecycleSignalStopsTheRunningPhase(t, os.Interrupt)
+}
+
+// TestLifecycleSIGHUPStopsTheRunningPhase is the same interruption by a hangup:
+// closing the terminal or losing the SSH connection a foreground `ghost
+// lifecycle` runs under. Without a handler for it the coordinator dies on Go's
+// default action and leaves the phase's harness running, the claim naming a
+// dead pid and no marker, exactly as SIGINT and SIGTERM once did.
+func TestLifecycleSIGHUPStopsTheRunningPhase(t *testing.T) {
+	lifecycleSignalStopsTheRunningPhase(t, syscall.SIGHUP)
+}
+
+// lifecycleSignalStopsTheRunningPhase is the body of the signal tests above:
+// it delivers sig to the coordinator alone while a phase is blocked on a slow
+// harness, and asserts the phase is waited for and terminated, the claim is
+// released and the interruption is recorded.
+func lifecycleSignalStopsTheRunningPhase(t *testing.T, sig os.Signal) {
 	s := newSandbox(t)
 	cs := s.mcpSession(t)
 	// Content carrying a resolution keyword ("reverted"), so the resolve phase
@@ -137,7 +154,7 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 
 	// Signal the coordinator ALONE, the way `kill <pid>` does: the phase is in
 	// its own group and receives nothing directly.
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	if err := cmd.Process.Signal(sig); err != nil {
 		t.Fatalf("signal the coordinator: %v", err)
 	}
 
@@ -166,7 +183,7 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		<-exited
-		t.Fatalf("ghost lifecycle did not exit after SIGINT\n%s", errb.String())
+		t.Fatalf("ghost lifecycle did not exit after %v\n%s", sig, errb.String())
 	}
 
 	// The interrupted run is recorded: a failed phase leaves the per-project
@@ -195,6 +212,84 @@ func TestLifecycleSignalStopsTheRunningPhase(t *testing.T) {
 
 	// The claim is free once the coordinator is gone, so the next chain can run.
 	waitForFileGone(t, lockPath, 15*time.Second, "the per-project claim to be released")
+}
+
+// TestLifecycleIgnoredSIGHUPKeepsTheRunGoing starts the coordinator with SIGHUP
+// already ignored, the way `nohup ghost lifecycle ...` does, and hangs it up
+// mid-phase. A run started under nohup asked to outlive its terminal, so the
+// hangup must neither cancel the phase nor end the coordinator: catching
+// SIGHUP unconditionally would replace the inherited ignore with a handler and
+// turn the hangup nohup exists to absorb into an interruption.
+func TestLifecycleIgnoredSIGHUPKeepsTheRunGoing(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+	call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the failed migration was reverted on the staging relay",
+	})
+	s.mustRun("project", "bind", e2eProject, s.work)
+	s.reconfigure(configOpts{autoResolve: true, minInterval: "0"})
+	if err := os.WriteFile(filepath.Join(s.bin, "resolve.delay"), []byte("120\n"), 0o644); err != nil {
+		t.Fatalf("write the harness delay: %v", err)
+	}
+	pidFile := filepath.Join(s.bin, "resolve.pid")
+
+	// The shell sets the ignore and then execs the coordinator in its own
+	// place, so the pid signalled below is the coordinator's and it starts with
+	// SIGHUP ignored, exactly as under nohup.
+	cmd := exec.Command("/bin/sh", "-c", `trap "" HUP; exec "$0" "$@"`,
+		ghostBin, "lifecycle", "--project", e2eProject, "--source", "claude-code")
+	cmd.Env = s.env
+	cmd.Dir = s.work
+	var out, errb syncBuffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start ghost lifecycle: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		_ = cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-exited:
+		default:
+			_ = cmd.Process.Kill()
+			<-exited
+		}
+		if pid := pidInFile(pidFile); pid > 0 && pidAlive(pid) {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	waitForFile(t, pidFile, 60*time.Second, "the resolve phase's harness call")
+	harnessPid := readPidFile(t, pidFile)
+	lockPath := filepath.Join(s.dataDir(), "lifecycle-"+e2eProject+".pid")
+	waitForFile(t, lockPath, 60*time.Second, "the coordinator's per-project claim")
+
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatalf("signal the coordinator: %v", err)
+	}
+	// Long enough for a coordinator that took the hangup to cancel the phase
+	// and for the harness to take the group SIGTERM, which the fake answers at
+	// once when no trap delay is set.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			t.Fatalf("the coordinator exited on a SIGHUP it started out ignoring\n%s", errb.String())
+		default:
+		}
+		if !pidAlive(harnessPid) {
+			t.Fatalf("the phase's harness (pid %d) ended on a SIGHUP the coordinator started out ignoring\n%s", harnessPid, errb.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pid := pidInFile(lockPath); pid != cmd.Process.Pid {
+		t.Errorf("the per-project claim names pid %d, want the still-running coordinator %d", pid, cmd.Process.Pid)
+	}
 }
 
 // readPidFile reads a pid a sandbox helper recorded, failing when it cannot.

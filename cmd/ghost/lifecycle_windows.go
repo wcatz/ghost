@@ -3,7 +3,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/wcatz/ghost/internal/procgroup"
 )
@@ -37,4 +39,11 @@ func killPhaseProcess(cmd *exec.Cmd) {
 // nothing left to escalate against.
 func phaseGroupInhabited(cmd *exec.Cmd) bool {
 	return procgroup.GroupInhabited(cmd)
+}
+
+// maintenanceSignals is what maintenanceContext cancels on. Windows has no
+// hangup to catch: os.Interrupt is the console Ctrl-C and SIGTERM is what Go
+// maps a console close or shutdown event to.
+func maintenanceSignals() []os.Signal {
+	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
