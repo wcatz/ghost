@@ -116,7 +116,32 @@ func runLifecycle() {
 	cfg, err := config.Load()
 	if err != nil {
 		lifecycleLogf(projectName, "error: load config: %v", err)
-		os.Exit(1)
+		// A config the coordinator cannot load used to kill the run here,
+		// before the failure marker and the start stamp were written, so the
+		// next session showed nothing and the stop hook kept spawning one
+		// every turn. Record the failure (attributed to whatever the
+		// environment still enables, since the file is unreadable) and touch
+		// the start stamp so the cooldown holds and the alert surfaces.
+		fallback := config.FallbackConfig()
+		var phases []string
+		if fallback.Reflection.AutoReflect {
+			phases = append(phases, "reflect")
+		}
+		if fallback.Reflection.AutoResolve {
+			phases = append(phases, "resolve")
+		}
+		if fallback.Reflection.AutoSupersede {
+			phases = append(phases, "supersede")
+		}
+		if len(phases) > 0 {
+			if werr := mcpinit.WriteLifecycleFailure(projectName, phases, fmt.Sprintf("error: load config: %v", err)); werr != nil {
+				lifecycleLogf(projectName, "warning: could not record run outcome: %v", werr)
+			}
+		}
+		if terr := mcpinit.TouchLifecycleStart(projectName); terr != nil {
+			lifecycleLogf(projectName, "warning: could not record the run start (%v)", terr)
+		}
+		return
 	}
 	exe, err := os.Executable()
 	if err != nil {
