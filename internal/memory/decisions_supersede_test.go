@@ -1582,3 +1582,722 @@ func TestMergeReusedRowKeepsItsOwnLinkWhenItsPathGivesWay(t *testing.T) {
 		t.Errorf("source_ref %q does not keep both the row's own link and the absorbed one", ref)
 	}
 }
+
+// guardReaddFixture is the drop guard's shape at the store: a merge names a
+// decision companion and an ordinary fact, and a second emission re-adds the
+// companion's text verbatim, the way RetainGuardedDrops hands it back when the
+// merge's text does not carry it. It returns the decision, the companion, the
+// fact and the merge's id.
+func guardReaddFixture(t *testing.T, s *Store, ctx context.Context) (decID, comp, fact, successor string) {
+	t.Helper()
+	var err error
+	decID, comp, _, err = s.RecordDecision(ctx, testProject, "queue", "we use nats for the event queue", "it was cheapest", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	fact, err = s.Create(ctx, testProject, Memory{Category: "fact", Source: "mcp", Importance: 0.5,
+		Content: "the event queue consumer restarts in place"})
+	if err != nil {
+		t.Fatalf("create the fact: %v", err)
+	}
+	var compText string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, comp).Scan(&compText); err != nil {
+		t.Fatalf("read the companion's text: %v", err)
+	}
+	const mergeText = "event queue consumer restarts in place; queue choice recorded"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: mergeText, Importance: 0.6, Source: "reflection", ReplacesIDs: []string{comp, fact}},
+		{Category: "decision", Content: compText, Importance: 0.5, Source: "reflection"},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = ?`, mergeText).Scan(&successor); err != nil {
+		t.Fatalf("read the merge successor: %v", err)
+	}
+	return decID, comp, fact, successor
+}
+
+// liveRowsLinking returns every live row whose source_ref names the decision.
+func liveRowsLinking(t *testing.T, s *Store, decisionID string) []string {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT id, COALESCE(source_ref, '') FROM memories WHERE resolved_at IS NULL ORDER BY rowid`)
+	if err != nil {
+		t.Fatalf("read linked rows: %v", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []string
+	for rows.Next() {
+		var id, ref string
+		if err := rows.Scan(&id, &ref); err != nil {
+			t.Fatalf("scan linked row: %v", err)
+		}
+		if sourceRefNamesDecision(ref, decisionID) {
+			out = append(out, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read linked rows: %v", err)
+	}
+	return out
+}
+
+func evidenceRows(t *testing.T, s *Store, memoryID string) (total int, carriedFrom []string) {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT COALESCE(carried_from, '') FROM memory_provenance WHERE memory_id = ? ORDER BY rowid`, memoryID)
+	if err != nil {
+		t.Fatalf("read evidence: %v", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var from string
+		if err := rows.Scan(&from); err != nil {
+			t.Fatalf("scan evidence: %v", err)
+		}
+		total++
+		if from != "" {
+			carriedFrom = append(carriedFrom, from)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read evidence: %v", err)
+	}
+	return total, carriedFrom
+}
+
+// A source the drop guard re-adds beside the merge that named it stays live as
+// its own row, and the merge still inherits its decision link: the store cannot
+// tell whether the merge text still restates the decision, and a merge that
+// does but carries no link is one no supersede can ever find. Two live rows
+// then carry the link, and the supersede must report both rather than retire
+// the decision_log row alone and answer clean while the merge keeps asserting
+// the reversed decision — which is what it used to do.
+func TestSupersedeDecisionReportsAGuardReaddedCompanionAndItsMergeAsAmbiguous(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	decID, comp, fact, successor := guardReaddFixture(t, s, ctx)
+
+	if !rowExists(t, s, comp) {
+		t.Fatal("the re-added companion did not keep its row: the fixture no longer reproduces the guard's reuse")
+	}
+	if rowExists(t, s, fact) {
+		t.Fatal("the merged fact is still a row: the fixture no longer folds it")
+	}
+	if got := liveRowsLinking(t, s, decID); len(got) != 2 || got[0] != comp || got[1] != successor {
+		t.Fatalf("live rows carrying the decision link = %v, want the companion %s and the merge %s", got, comp, successor)
+	}
+
+	newDec, _, _, err := s.RecordDecision(ctx, testProject, "queue v2", "we use kafka for the event queue", "scale", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (new): %v", err)
+	}
+	got, err := s.SupersedeDecisionReport(ctx, testProject, decID, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 0 || len(got.Ambiguous) != 2 {
+		t.Errorf("report = %+v, want nothing retired and both carriers (%s, %s) ambiguous", got, comp, successor)
+	}
+	if decisionMemoryResolved(t, s, comp) || decisionMemoryResolved(t, s, successor) {
+		t.Error("an ambiguous link retired a memory")
+	}
+}
+
+// The evidence half of the same defect: the merge copied the re-added
+// companion's records, so the same support counted on two live rows. The merge
+// carries the fact it really absorbed, and nothing of the row that stayed.
+func TestAGuardReaddedSourcesEvidenceIsNotCopiedOntoTheMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, comp, fact, successor := guardReaddFixture(t, s, ctx)
+
+	compTotal, _ := evidenceRows(t, s, comp)
+	if compTotal == 0 {
+		t.Fatal("the companion holds no evidence: the fixture cannot show a double count")
+	}
+	total, carried := evidenceRows(t, s, successor)
+	for _, from := range carried {
+		if from == comp {
+			t.Errorf("the merge carries evidence copied from %s, which is still live with its own records", comp)
+		}
+	}
+	if len(carried) == 0 || total != len(carried) {
+		t.Fatalf("the merge holds %d records, %d carried (%v): want only the fact's", total, len(carried), carried)
+	}
+	for _, from := range carried {
+		if from != fact {
+			t.Errorf("the merge carries a record from %s, want only the absorbed fact %s", from, fact)
+		}
+	}
+}
+
+// The history half: a re-added source is not deleted, so nothing may name the
+// merge as its successor. The companion is given an earlier delete row with no
+// successor first — the shape a restored row carries — because linkSuccessorTx
+// fills exactly such a row, and a live row with no delete row would show
+// nothing whether the pointer leaked or not.
+func TestAGuardReaddedSourceIsNotGivenTheMergeAsItsSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, comp, _, err := s.RecordDecision(ctx, testProject, "queue", "we use nats for the event queue", "it was cheapest", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO memory_history (memory_id, project_id, phase) VALUES (?, ?, 'delete')`, comp, testProject); err != nil {
+		t.Fatalf("seed the restored row's delete history: %v", err)
+	}
+	fact, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "mcp", Importance: 0.5,
+		Content: "the event queue consumer restarts in place"})
+	if err != nil {
+		t.Fatalf("create the fact: %v", err)
+	}
+	var compText string
+	if err := s.db.QueryRow(`SELECT content FROM memories WHERE id = ?`, comp).Scan(&compText); err != nil {
+		t.Fatalf("read the companion's text: %v", err)
+	}
+	const mergeText = "event queue consumer restarts in place; queue choice recorded"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "decision", Content: mergeText, Importance: 0.6, ReplacesIDs: []string{comp, fact}},
+		{Category: "decision", Content: compText, Importance: 0.5},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	var successor string
+	if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = ?`, mergeText).Scan(&successor); err != nil {
+		t.Fatalf("read the merge successor: %v", err)
+	}
+	var named int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_history WHERE memory_id = ? AND related_id = ?`, comp, successor).Scan(&named); err != nil {
+		t.Fatalf("read the companion's history: %v", err)
+	}
+	if named != 0 {
+		t.Errorf("the live companion's history names the merge %s as its successor", successor)
+	}
+	var factSuccessor string
+	if err := s.db.QueryRow(`SELECT COALESCE(related_id, '') FROM memory_history WHERE memory_id = ? AND phase = 'delete'`, fact).Scan(&factSuccessor); err != nil {
+		t.Fatalf("read the fact's delete history: %v", err)
+	}
+	if factSuccessor != successor {
+		t.Errorf("the merged fact's delete row names %q, want the merge %s", factSuccessor, successor)
+	}
+}
+
+// The control: an ordinary re-add with no decision link keeps everything the
+// guard's verbatim reuse has always kept — the row, its id, its age, its source
+// and its own evidence — and the merge still absorbs the other source with its
+// evidence and a successor pointer. Only the re-added row stops being counted
+// as absorbed by the merge.
+func TestAGuardReaddedFactKeepsItsRowBesideTheMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	kept, err := s.Create(ctx, testProject, Memory{Category: "gotcha", Source: "mcp", Importance: 0.7,
+		Content: "ssh to the bastion goes through port 2222, not 22"})
+	if err != nil {
+		t.Fatalf("create the re-added row: %v", err)
+	}
+	other, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "mcp", Importance: 0.5,
+		Content: "the bastion host is the only ssh entry point"})
+	if err != nil {
+		t.Fatalf("create the absorbed row: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET created_at = datetime('now', '-1 hour'), updated_at = datetime('now', '-1 hour')`); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	var createdBefore string
+	if err := s.db.QueryRow(`SELECT created_at FROM memories WHERE id = ?`, kept).Scan(&createdBefore); err != nil {
+		t.Fatalf("read created_at: %v", err)
+	}
+	keptEvidence, _ := evidenceRows(t, s, kept)
+	otherEvidence, _ := evidenceRows(t, s, other)
+
+	const mergeText = "the bastion host is the only ssh entry point"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: mergeText + " for every repo", Importance: 0.6, ReplacesIDs: []string{kept, other}},
+		{Category: "gotcha", Content: "ssh to the bastion goes through port 2222, not 22", Importance: 0.7},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	var successor string
+	if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = ?`, mergeText+" for every repo").Scan(&successor); err != nil {
+		t.Fatalf("read the merge successor: %v", err)
+	}
+	var source, createdAfter string
+	if err := s.db.QueryRow(`SELECT source, created_at FROM memories WHERE id = ?`, kept).Scan(&source, &createdAfter); err != nil {
+		t.Fatalf("the re-added row is gone: %v", err)
+	}
+	if source != "mcp" || createdAfter != createdBefore {
+		t.Errorf("the re-added row is %s created %s, want mcp created %s: the verbatim reuse moved it", source, createdAfter, createdBefore)
+	}
+	if got, _ := evidenceRows(t, s, kept); got != keptEvidence {
+		t.Errorf("the re-added row holds %d records, want its own %d", got, keptEvidence)
+	}
+	if rowExists(t, s, other) {
+		t.Error("the absorbed row survived the merge")
+	}
+	total, carried := evidenceRows(t, s, successor)
+	if total != otherEvidence || len(carried) != otherEvidence {
+		t.Errorf("the merge holds %d records (%d carried), want the absorbed row's %d", total, len(carried), otherEvidence)
+	}
+	for _, from := range carried {
+		if from != other {
+			t.Errorf("the merge carries a record from %s, want only %s", from, other)
+		}
+	}
+	var otherSuccessor string
+	if err := s.db.QueryRow(`SELECT COALESCE(related_id, '') FROM memory_history WHERE memory_id = ? AND phase = 'delete'`, other).Scan(&otherSuccessor); err != nil {
+		t.Fatalf("read the absorbed row's delete history: %v", err)
+	}
+	if otherSuccessor != successor {
+		t.Errorf("the absorbed row's delete row names %q, want the merge %s", otherSuccessor, successor)
+	}
+}
+
+// A live reflect successor beside the RecordDecision row, both carrying the
+// link — a store written before the guard's re-add stopped producing it, or an
+// import that trusted both rows' provenance. The documented rule counts both
+// sources Ghost writes, decision_log and reflection: neither is the sole such
+// row, so nothing is retired and both are reported, never a clean retirement of
+// one while the other keeps asserting the reversed decision.
+func TestSupersedeDecisionReportsAReflectCarrierBesideTheCompanionAsAmbiguous(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	carrier, err := s.Create(ctx, testProject, Memory{Category: "decision", Source: "reflection", Importance: 0.9,
+		Content: "the job queue runs on redis lists, and its consumer restarts in place"})
+	if err != nil {
+		t.Fatalf("create the carrier: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ? WHERE id = ?`, decisionCompanionRef(oldDec), carrier); err != nil {
+		t.Fatalf("link the carrier: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 0 {
+		t.Errorf("report = %+v: a supersede retired one carrier while another stays live", got)
+	}
+	if len(got.Ambiguous) != 2 {
+		t.Errorf("report = %+v, want both live carriers (%s, %s) ambiguous", got, oldMem, carrier)
+	}
+	if decisionMemoryResolved(t, s, oldMem) || decisionMemoryResolved(t, s, carrier) {
+		t.Error("an ambiguous link retired a memory")
+	}
+}
+
+// The retention half of the split: a project-tier source the guard re-adds keeps
+// its own tier on its own row, so it does not lift the merge beside it out of the
+// session tier of the source the merge really absorbed.
+func TestAGuardReaddedSourceDoesNotRaiseTheMergesRetention(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	kept, err := s.Create(ctx, testProject, Memory{Category: "gotcha", Source: "mcp", Importance: 0.7,
+		Content: "deploys freeze on friday afternoons after the release cut"})
+	if err != nil {
+		t.Fatalf("create the re-added row: %v", err)
+	}
+	other, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "the bastion host is the only ssh entry point", "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("create the session row: %v", err)
+	}
+	const mergeText = "the bastion host is the only ssh entry point for every repo"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: mergeText, Importance: 0.6, ReplacesIDs: []string{kept, other}},
+		{Category: "gotcha", Content: "deploys freeze on friday afternoons after the release cut", Importance: 0.7},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	var keptTier, mergeTier string
+	if err := s.db.QueryRow(`SELECT retention FROM memories WHERE id = ?`, kept).Scan(&keptTier); err != nil {
+		t.Fatalf("read the re-added row: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT retention FROM memories WHERE content = ?`, mergeText).Scan(&mergeTier); err != nil {
+		t.Fatalf("read the merge: %v", err)
+	}
+	if keptTier != RetentionProject || mergeTier != RetentionSession {
+		t.Errorf("re-added row is %q and merge is %q, want %q beside %q", keptTier, mergeTier, RetentionProject, RetentionSession)
+	}
+}
+
+// The claims half of the split, and the rule that ties it to the evidence half:
+// claims follow evidence. A source the guard re-adds keeps its own records, so
+// the merge beside it must not take its verification, confidence, window,
+// provenance strings or tier either — a verified_at copied from it would stand
+// on a row holding no verification record, which is the state the evidence rule
+// forbids. Only its decision links travel (the ambiguity tests above). Both
+// branches are covered: a fresh INSERT, and a merge that reuses its other source.
+func TestAGuardReaddedSourcesClaimsAreNotInheritedByTheMerge(t *testing.T) {
+	const (
+		keptText  = "deploys freeze on friday afternoons after the release cut"
+		otherText = "staging restores run from the nightly snapshot bucket"
+		mergeText = "staging restores run from the nightly snapshot bucket every night"
+	)
+	// In the insert case the absorbed row states claims of its own, so the merge
+	// must show them rather than the re-added row's, which ReplacesIDs names
+	// first and first-source-wins would pick. In the reuse case the absorbed row
+	// IS the merge and its own values always win, so it states none: the case
+	// shows the re-added row does not fill its gaps.
+	for _, tc := range []struct {
+		name        string
+		mergeText   string
+		otherClaims bool
+	}{
+		{name: "insert", mergeText: mergeText, otherClaims: true},
+		{name: "reuse", mergeText: otherText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			conf := 0.95
+			kept, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", keptText, "mcp", 0.7, nil, UpsertOptions{
+				Provenance: Provenance{Agent: "codex", SessionID: "sess-kept", SourceRef: "runbook.md", Confidence: &conf},
+				Validity: Validity{
+					ValidFrom:  verifiedStamp("2026-01-01 00:00:00"),
+					ValidUntil: verifiedStamp("2030-01-01 00:00:00"),
+					VerifiedAt: verifiedStamp("2026-09-20 00:00:00"),
+				},
+				Retention: RetentionProject,
+			})
+			if err != nil {
+				t.Fatalf("create the re-added row: %v", err)
+			}
+			if c, err := s.MemoryEvidenceCounts(ctx, kept); err != nil || c.Verified == 0 {
+				t.Fatalf("the re-added row's evidence = %+v (%v): the fixture needs a verification record on it", c, err)
+			}
+			otherOpts := UpsertOptions{Retention: RetentionSession}
+			want := struct {
+				validFrom, validUntil, verifiedAt, agent, session, ref string
+				confidence                                             *float64
+			}{}
+			if tc.otherClaims {
+				otherConf := 0.4
+				otherOpts.Provenance = Provenance{Agent: "claude-code", SessionID: "sess-other", SourceRef: "y.md", Confidence: &otherConf}
+				otherOpts.Validity = Validity{
+					ValidFrom:  verifiedStamp("2026-03-01 00:00:00"),
+					ValidUntil: verifiedStamp("2031-03-01 00:00:00"),
+					VerifiedAt: verifiedStamp("2026-10-01 00:00:00"),
+				}
+				want.validFrom, want.validUntil, want.verifiedAt = "2026-03-01 00:00:00", "2031-03-01 00:00:00", "2026-10-01 00:00:00"
+				want.agent, want.session, want.ref, want.confidence = "claude-code", "sess-other", "y.md", &otherConf
+			}
+			other, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", otherText, "mcp", 0.5, nil, otherOpts)
+			if err != nil {
+				t.Fatalf("create the session row: %v", err)
+			}
+			if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+				{Category: "fact", Content: tc.mergeText, Importance: 0.6, ReplacesIDs: []string{kept, other}},
+				{Category: "fact", Content: keptText, Importance: 0.7},
+			}, "", nil); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if !rowExists(t, s, kept) {
+				t.Fatal("the re-added row did not keep its row: the fixture no longer reproduces the guard's reuse")
+			}
+			var successor string
+			if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = ?`, tc.mergeText).Scan(&successor); err != nil {
+				t.Fatalf("read the merge successor: %v", err)
+			}
+			if tc.name == "reuse" && successor != other {
+				t.Fatalf("the merge is %s, want the reused row %s", successor, other)
+			}
+			var validFrom, validUntil, verifiedAt, agent, session, ref sql.NullString
+			var confidence sql.NullFloat64
+			var tier string
+			if err := s.db.QueryRow(`SELECT valid_from, valid_until, verified_at, confidence, agent, session_id, source_ref, retention
+				FROM memories WHERE id = ?`, successor).Scan(&validFrom, &validUntil, &verifiedAt, &confidence, &agent, &session, &ref, &tier); err != nil {
+				t.Fatalf("read the merge's claims: %v", err)
+			}
+			counts, err := s.MemoryEvidenceCounts(ctx, successor)
+			if err != nil {
+				t.Fatalf("MemoryEvidenceCounts: %v", err)
+			}
+			if verifiedAt.String != "" && counts.Verified == 0 {
+				t.Errorf("the merge states verified_at %q with no verification record (%+v)", verifiedAt.String, counts)
+			}
+			if tc.otherClaims && counts.Verified == 0 {
+				t.Errorf("the merge holds no verification record (%+v), want the absorbed row's carried over", counts)
+			}
+			gotConf := "none"
+			if confidence.Valid {
+				gotConf = fmt.Sprint(confidence.Float64)
+			}
+			wantConf := "none"
+			if want.confidence != nil {
+				wantConf = fmt.Sprint(*want.confidence)
+			}
+			if verifiedAt.String != want.verifiedAt || gotConf != wantConf {
+				t.Errorf("the merge states verified_at %q / confidence %s, want the absorbed row's %q / %s", verifiedAt.String, gotConf, want.verifiedAt, wantConf)
+			}
+			if validFrom.String != want.validFrom || validUntil.String != want.validUntil {
+				t.Errorf("the merge states the window [%q, %q], want the absorbed row's [%q, %q]", validFrom.String, validUntil.String, want.validFrom, want.validUntil)
+			}
+			if ref.String != want.ref || agent.String != want.agent || session.String != want.session {
+				t.Errorf("the merge states source_ref %q, agent %q, session %q, want the absorbed row's %q, %q, %q",
+					ref.String, agent.String, session.String, want.ref, want.agent, want.session)
+			}
+			if tier != RetentionSession {
+				t.Errorf("the merge is %q, want the absorbed row's %q", tier, RetentionSession)
+			}
+		})
+	}
+}
+
+// The same split for a source kept live for a reason other than a reuse: a
+// direct caller's accepted merge names a row saved during the round trip, which
+// the pass keeps as concurrent. That row is never deleted, so it keeps its
+// evidence, its claims, its tier and its history; the merge takes them from
+// the row it really absorbed.
+func TestAConcurrentSourceKeepsWhatTheMergeBesideItWouldTake(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	other, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "staging restores run from the nightly snapshot bucket", "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("create the session row: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET created_at = datetime('now', '-1 hour'), updated_at = datetime('now', '-1 hour') WHERE id = ?`, other); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	since, err := s.CurrentTimestamp(ctx)
+	if err != nil {
+		t.Fatalf("CurrentTimestamp: %v", err)
+	}
+	conf := 0.95
+	kept, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "deploys freeze on friday afternoons after the release cut", "mcp", 0.7, nil, UpsertOptions{
+		Provenance: Provenance{Agent: "codex", SessionID: "sess-kept", SourceRef: "runbook.md", Confidence: &conf},
+		Validity: Validity{
+			ValidFrom:  verifiedStamp("2026-01-01 00:00:00"),
+			ValidUntil: verifiedStamp("2030-01-01 00:00:00"),
+			VerifiedAt: verifiedStamp("2026-09-20 00:00:00"),
+		},
+		Retention: RetentionProject,
+	})
+	if err != nil {
+		t.Fatalf("create the concurrent row: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO memory_history (memory_id, project_id, phase) VALUES (?, ?, 'delete')`, kept, testProject); err != nil {
+		t.Fatalf("seed the concurrent row's delete history: %v", err)
+	}
+	keptEvidence, _ := evidenceRows(t, s, kept)
+	otherEvidence, _ := evidenceRows(t, s, other)
+
+	const mergeText = "staging restores run from the nightly snapshot bucket every night"
+	preserved, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: mergeText, Importance: 0.6, ReplacesIDs: []string{kept, other}},
+	}, since, nil)
+	if err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if len(preserved) != 1 || preserved[0] != kept || !rowExists(t, s, kept) {
+		t.Fatalf("preserved = %v: the fixture no longer keeps %s as concurrent", preserved, kept)
+	}
+	if rowExists(t, s, other) {
+		t.Fatal("the absorbed row survived the merge")
+	}
+	var successor string
+	if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = ?`, mergeText).Scan(&successor); err != nil {
+		t.Fatalf("read the merge successor: %v", err)
+	}
+
+	if got, _ := evidenceRows(t, s, kept); got != keptEvidence {
+		t.Errorf("the concurrent row holds %d records, want its own %d", got, keptEvidence)
+	}
+	total, carried := evidenceRows(t, s, successor)
+	if total != otherEvidence || len(carried) != otherEvidence {
+		t.Errorf("the merge holds %d records (%d carried), want the absorbed row's %d", total, len(carried), otherEvidence)
+	}
+	for _, from := range carried {
+		if from != other {
+			t.Errorf("the merge carries a record from %s, want only %s", from, other)
+		}
+	}
+	var verifiedAt, ref sql.NullString
+	var confidence sql.NullFloat64
+	var tier string
+	if err := s.db.QueryRow(`SELECT verified_at, confidence, source_ref, retention FROM memories WHERE id = ?`, successor).
+		Scan(&verifiedAt, &confidence, &ref, &tier); err != nil {
+		t.Fatalf("read the merge's claims: %v", err)
+	}
+	if verifiedAt.String != "" || confidence.Valid || ref.String != "" {
+		t.Errorf("the merge took verified_at %q, confidence %v, source_ref %q from the concurrent row", verifiedAt.String, confidence, ref.String)
+	}
+	if tier != RetentionSession {
+		t.Errorf("the merge is %q, want the absorbed row's %q", tier, RetentionSession)
+	}
+	var named int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_history WHERE memory_id = ? AND related_id = ?`, kept, successor).Scan(&named); err != nil {
+		t.Fatalf("read the concurrent row's history: %v", err)
+	}
+	if named != 0 {
+		t.Errorf("the live concurrent row's history names the merge %s as its successor", successor)
+	}
+}
+
+// A reflect carrier that is already resolved states nothing, so it does not
+// compete with the live companion: the companion is retired as the sole live
+// claimant, not reported ambiguous and left ranking beside a decision that is
+// marked superseded and cannot be superseded again.
+func TestSupersedeDecisionIgnoresAResolvedReflectCarrier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, _ := decisionSupersedeFixture(t, s, ctx)
+	carrier, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "reflection", Importance: 0.9,
+		Content: "the job queue runs on redis lists, and its consumer restarts in place"})
+	if err != nil {
+		t.Fatalf("create the carrier: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ?, resolved_at = datetime('now') WHERE id = ?`,
+		decisionCompanionRef(oldDec), carrier); err != nil {
+		t.Fatalf("link and resolve the carrier: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMem || len(got.Ambiguous) != 0 {
+		t.Errorf("report = %+v, want the live companion %s retired and nothing ambiguous", got, oldMem)
+	}
+	if !decisionMemoryResolved(t, s, oldMem) {
+		t.Error("the live companion still ranks beside a superseded decision")
+	}
+}
+
+// The replacement decision carries the same two-carrier shape — its
+// RecordDecision row and a live reflect successor both link it. That is the
+// replacement's own ambiguity, not the old decision's: the old companion is
+// still retired, and the supersedes edge still runs from the row RecordDecision
+// wrote, so the link graph says what replaced it.
+func TestSupersedeDecisionStillLinksTheReplacementBesideItsReflectCarrier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	oldDec, newDec, oldMem, newMem := decisionSupersedeFixture(t, s, ctx)
+	carrier, err := s.Create(ctx, testProject, Memory{Category: "fact", Source: "reflection", Importance: 0.9,
+		Content: "the job queue moves to postgres with skip locked consumers"})
+	if err != nil {
+		t.Fatalf("create the carrier: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ? WHERE id = ?`, decisionCompanionRef(newDec), carrier); err != nil {
+		t.Fatalf("link the carrier: %v", err)
+	}
+
+	got, err := s.SupersedeDecisionReport(ctx, testProject, oldDec, newDec)
+	if err != nil {
+		t.Fatalf("SupersedeDecisionReport: %v", err)
+	}
+	if len(got.Retired) != 1 || got.Retired[0] != oldMem {
+		t.Fatalf("report = %+v, want the old companion %s retired", got, oldMem)
+	}
+	links, err := s.GetLinks(ctx, oldMem)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var edge bool
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == newMem && l.TargetID == oldMem {
+			edge = true
+		}
+	}
+	if !edge {
+		t.Errorf("no supersedes edge %s -> %s: the replacement's second carrier dropped what replaced the companion", newMem, oldMem)
+	}
+	var phase, related string
+	if err := s.db.QueryRow(`SELECT phase, COALESCE(related_id, '') FROM memory_history WHERE memory_id = ? ORDER BY rowid DESC LIMIT 1`, oldMem).
+		Scan(&phase, &related); err != nil {
+		t.Fatalf("read the companion's history: %v", err)
+	}
+	if phase != phaseSupersede || related != newMem {
+		t.Errorf("history = %s/%q, want %s naming %s", phase, related, phaseSupersede, newMem)
+	}
+}
+
+// A rewrite whose only source the guard re-adds verbatim folds nothing, so the
+// evidence split leaves it no source to read a tier from. It must still take
+// that source's tier rather than the default: a session row's rewrite landing
+// as a project row nothing ever expires is the longer life the tier rule
+// exists to prevent.
+func TestAGuardReaddedRewriteKeepsItsSourcesTier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const keptText = "the bastion host is the only ssh entry point"
+	kept, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", keptText, "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("create the session row: %v", err)
+	}
+	const rewritten = "ssh reaches every host through the bastion and nowhere else"
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: rewritten, Importance: 0.6, ReplacesIDs: []string{kept}},
+		{Category: "fact", Content: keptText, Importance: 0.5},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if !rowExists(t, s, kept) {
+		t.Fatal("the re-added row did not keep its row: the fixture no longer reproduces the guard's reuse")
+	}
+	var tier string
+	var expires sql.NullString
+	if err := s.db.QueryRow(`SELECT retention, expires_at FROM memories WHERE content = ?`, rewritten).Scan(&tier, &expires); err != nil {
+		t.Fatalf("read the rewrite: %v", err)
+	}
+	if tier != RetentionSession || !expires.Valid {
+		t.Errorf("the rewrite is %q expiring %q, want %q with an expiry like its only source", tier, expires.String, RetentionSession)
+	}
+}
+
+// TestAVerbatimReAddOfAnOverflowKeptRowIsAKeep is the overflow drop's side of
+// the refusal-kept re-add. The merge over thirteen companions does not fit in a
+// source_ref, so every companion is kept; the drop guard also hands one of them
+// back verbatim. In either emission order that re-add must land on the kept row
+// as a keep — not be refused as a claim on a moved row (which withheld the skip
+// fingerprint for a row that never moved), and not be INSERTed as a copy with
+// no decision link (which the reuse map's exclusion of kept rows produced when
+// the re-add came first).
+func TestAVerbatimReAddOfAnOverflowKeptRowIsAKeep(t *testing.T) {
+	for _, reAddFirst := range []bool{false, true} {
+		name := "merge first"
+		if reAddFirst {
+			name = "re-add first"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			var mems []string
+			for i := 0; i < 13; i++ {
+				_, mem, _, err := s.RecordDecision(ctx, testProject, fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mems = append(mems, mem)
+			}
+			rows, err := s.GetByIDs(ctx, mems[:1])
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("GetByIDs: %v", err)
+			}
+			first := rows[0]
+			fed := corpusRows(t, s, mems...)
+			before := countRows(t, s, "memories", testProject)
+
+			merge := Memory{Category: "decision", Content: "Thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems}
+			reAdd := Memory{Category: first.Category, Content: first.Content, Importance: first.Importance, Tags: first.Tags}
+			emitted := []Memory{merge, reAdd}
+			if reAddFirst {
+				emitted = []Memory{reAdd, merge}
+			}
+			preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+			if err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if dropped.Overflow != 1 || dropped.Changed != 0 {
+				t.Errorf("dropped = %+v, want the overflow alone: the re-add restates a row nothing moved", dropped)
+			}
+			if len(preserved) != 0 {
+				t.Errorf("preserved = %v, want empty", preserved)
+			}
+			if after := countRows(t, s, "memories", testProject); after != before {
+				t.Errorf("the project holds %d rows after the replace, want the %d it had: the re-add inserted a copy", after, before)
+			}
+		})
+	}
+}

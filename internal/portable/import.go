@@ -139,11 +139,13 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 // for a complete one.
 //
 // A file that is not a readable artifact at all — no header, an unknown schema
-// version, a second header, an unknown record type, a record with no payload —
-// is refused before any record is written. Those are not per-record problems: a
-// missing header means nobody checked the version, and applying the rest of a
-// file whose format is unknown would be importing data whose meaning this build
-// is guessing at.
+// version, a second header, an unknown record type, a line whose payload is not
+// exactly the one its type names — is refused before any record is written.
+// Those are not per-record problems: a missing header means nobody checked the
+// version, and applying the rest of a file whose format is unknown would be
+// importing data whose meaning this build is guessing at. A line holding a
+// second payload is one of them for the same reason: which of the two the line
+// meant is a guess, and importing the one its type names drops the other.
 //
 // A line that is not JSON is a different thing, and is treated as one. A file
 // can hold an unparseable line because it was truncated, merged badly, or
@@ -285,6 +287,9 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 			if err := checkSchemaVersion(rec.SchemaVersion); err != nil {
 				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
+			if extra := otherPayloads(rec, TypeHeader); extra != "" {
+				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and nothing else", lineNum, TypeHeader, extra)
+			}
 			header = true
 			continue
 		}
@@ -310,7 +315,13 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 		// second copy, because a parser judging ids slightly differently from
 		// the store would classify a dry run differently from the apply run it
 		// previews — the one property this package is built around.
-		if rec.Memory != nil {
+		//
+		// Only a memory line carrying nothing else is judged here. A line of
+		// another type that also carries a memory, or a memory line with a second
+		// payload, is a malformed file whatever its memory id says, and refusing
+		// it by line number here would let the rest of the file import around it;
+		// requirePayload refuses it as a file instead, naming kinds and no id.
+		if rec.Memory != nil && rec.Type == TypeMemory && otherPayloads(rec, TypeMemory) == "" {
 			if err := memory.CheckImportedID(rec.Memory.ID); err != nil {
 				unread = append(unread, unreadable{
 					line: lineNum,
@@ -738,7 +749,36 @@ func requirePayload(p parsedRecord) error {
 	if missing != "" {
 		return fmt.Errorf("line %d: %s record carries no %q payload", p.line, memory.RefusalArg("type", p.rec.Type), missing)
 	}
+	if extra := otherPayloads(p.rec, p.rec.Type); extra != "" {
+		return fmt.Errorf("line %d: %s record also carries %s — a line holds the one payload its type names", p.line, memory.RefusalArg("type", p.rec.Type), extra)
+	}
 	return nil
+}
+
+// otherPayloads names, quoted, every payload the record carries besides the one
+// its type names. A line holding a second payload is a malformed file just as a
+// line holding none is: importing the payload the type names would drop the
+// other one, and the run would report a clean import of a file whose data it
+// left behind. Only the kinds are named, never the payload's content.
+func otherPayloads(rec record, own string) string {
+	var extra []string
+	for _, k := range []struct {
+		kind    string
+		present bool
+	}{
+		{TypeProject, rec.Project != nil},
+		{TypeMemory, rec.Memory != nil},
+		{TypeTask, rec.Task != nil},
+		{TypeDecision, rec.Decision != nil},
+	} {
+		if k.present && k.kind != own {
+			extra = append(extra, fmt.Sprintf("%q", k.kind))
+		}
+	}
+	if len(extra) == 0 {
+		return ""
+	}
+	return strings.Join(extra, ", ") + " payload"
 }
 
 // actionFor turns a created flag into the action the report shows. A record

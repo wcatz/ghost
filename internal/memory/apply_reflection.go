@@ -9,7 +9,7 @@ import (
 )
 
 // EmissionDrops counts the emissions one replace refused to write, by reason.
-// The two reasons are not interchangeable and the caller treats them
+// The reasons are not interchangeable and the caller treats them
 // differently, which is why they are fields and not one integer (#1228):
 //
 //   - Changed is the #1051 corpus guard refusing a claim on a row that changed
@@ -21,8 +21,14 @@ import (
 //     refuse the same merge again: it is reported on its own, and the round it
 //     happened in may record its skip fingerprint, because nothing was lost that
 //     another run could recover.
+//   - Scope is a merge whose sources' scopes disagree (inheritedScope's
+//     errScopeConflict, or a reuse whose stored row carries a different scope
+//     than the sources agreed on). It is permanent in the same way as Overflow —
+//     the scopes are stored data, and every later run would refuse the same merge
+//     for the same reason — so it is reported on its own and does not withhold
+//     the skip fingerprint either (#1492).
 //
-// Total is the count of refused emissions either way, which is what "every
+// Total is the count of refused emissions for any reason, which is what "every
 // proposal was refused" and "the round wrote nothing" read.
 type EmissionDrops struct {
 	Changed  int
@@ -31,19 +37,33 @@ type EmissionDrops struct {
 	// in total. It is the reason's own number, printed beside the byte bound it
 	// exceeds so an operator can see how far over the merge was.
 	OverflowLinks int
+	Scope         int
 }
 
-// Total is the number of emissions refused for either reason.
-func (d EmissionDrops) Total() int { return d.Changed + d.Overflow }
+// Total is the number of emissions refused for any reason.
+func (d EmissionDrops) Total() int { return d.Changed + d.Overflow + d.Scope }
+
+// dropReason is why one emission was refused, so record can count it in the
+// field that reason owns.
+type dropReason int
+
+const (
+	dropChanged dropReason = iota
+	dropOverflow
+	dropScope
+)
 
 // record adds one refused emission under the reason it was refused for.
-func (d *EmissionDrops) record(overflow bool, links int) {
-	if overflow {
+func (d *EmissionDrops) record(reason dropReason, links int) {
+	switch reason {
+	case dropOverflow:
 		d.Overflow++
 		d.OverflowLinks += links
-		return
+	case dropScope:
+		d.Scope++
+	default:
+		d.Changed++
 	}
-	d.Changed++
 }
 
 // add is the sum two halves' counts are combined with, and sub moves one half's
@@ -53,6 +73,7 @@ func (d EmissionDrops) add(o EmissionDrops) EmissionDrops {
 		Changed:       d.Changed + o.Changed,
 		Overflow:      d.Overflow + o.Overflow,
 		OverflowLinks: d.OverflowLinks + o.OverflowLinks,
+		Scope:         d.Scope + o.Scope,
 	}
 }
 
@@ -61,6 +82,7 @@ func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
 		Changed:       d.Changed - o.Changed,
 		Overflow:      d.Overflow - o.Overflow,
 		OverflowLinks: d.OverflowLinks - o.OverflowLinks,
+		Scope:         d.Scope - o.Scope,
 	}
 }
 
@@ -80,8 +102,8 @@ func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
 //
 // projectDropped and globalDropped count the emissions each half refused, by
 // reason (EmissionDrops): the ones whose claimed row changed or was deleted
-// while the harness was answering, and the merges whose decision links do not
-// fit in a source_ref. Keep them attributable: once the two lists are folded
+// while the harness was answering, the merges whose decision links do not fit
+// in a source_ref, and the merges whose sources' scopes disagree. Keep them attributable: once the two lists are folded
 // nobody can say which input a dropped emission came from, so the global half is
 // guarded before the fold below. The caller needs the split to report only what
 // was written (a project summary and a cross-project component subtract
@@ -135,7 +157,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// deletes it as unaccounted — the merge was refused, so NONE of its sources
 	// may be taken. ReplaceNonManual seeds its own concurrent map from this one,
 	// and counts back the refusals it makes about folded candidates.
-	view := &applyView{concurrent: make(map[string]bool), crossProjectFrom: -1}
+	view := &applyView{concurrent: make(map[string]bool), scopeKept: make(map[string]bool), crossProjectFrom: -1}
 	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, view.concurrent)
 	if guardErr != nil {
 		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, guardErr
@@ -197,12 +219,18 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			if !errors.Is(scopeErr, errScopeConflict) {
 				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("resolve cross-project scope: %w", scopeErr)
 			}
+			// A source the guard already marked moved stays a survivor; one this
+			// refusal alone keeps is recorded as scope-kept, so the project
+			// replace does not report it as a row a later run has to merge (#1492).
 			for _, id := range m.ReplacesIDs {
 				if candidateIDs[id] {
+					if !view.concurrent[id] {
+						view.scopeKept[id] = true
+					}
 					view.concurrent[id] = true
 				}
 			}
-			globalDropped.record(false, 0)
+			globalDropped.record(dropScope, 0)
 			continue
 		}
 		promotable = append(promotable, m)
@@ -288,7 +316,7 @@ func dropConcurrentClaims(g *fedGuard, memories []Memory) (live []Memory, droppe
 	live = make([]Memory, 0, len(memories))
 	for _, m := range memories {
 		if g.drop(m) {
-			dropped.record(false, 0)
+			dropped.record(dropChanged, 0)
 			continue
 		}
 		live = append(live, m)

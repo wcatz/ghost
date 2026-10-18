@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -105,6 +106,29 @@ const (
 // diagnosable fact.
 const NoLLMBackendError = "no CLI LLM backend available; reflect skipped"
 
+// InterruptedBySignal opens the sentence the lifecycle coordinator records when
+// a signal stops its chain ("interrupted by SIGTERM while running resolve",
+// "... before supersede"). Shared with that writer so the alert can find the
+// sentence wherever it lands in the stored error: on the first line when
+// nothing failed before it, or at the end of an earlier phase's tail, joined
+// with "; ", when something did.
+const InterruptedBySignal = "interrupted by SIGTERM"
+
+// phaseErrorPrefix opens the line a phase command prints just before it exits
+// non-zero on an error it handled: reflect, resolve and supersede report those
+// as "error: ..." on stderr. It is the line that says why the phase failed,
+// where the phase's first line is a banner or a log record. A phase that ends
+// without printing one — a Go panic, or a group SIGKILL after the grace period
+// — leaves no such line, and the alert falls back to the first line.
+const phaseErrorPrefix = "error: "
+
+// interruptSentence is the whole of the sentence the coordinator writes when a
+// signal stops its chain, and nothing else: InterruptedBySignal, then
+// " while running " or " before ", then one phase name, to the end of the line.
+// Phase output that only quotes the words does not match it.
+var interruptSentence = regexp.MustCompile(
+	"^" + regexp.QuoteMeta(InterruptedBySignal) + " (?:while running|before) [A-Za-z0-9_-]+$")
+
 // lifecycleFailureMarker is the lifecycle-last-failure.json schema. Every
 // field is a fact derivable from the run that wrote it: which project, which
 // phases did not succeed, the first line of the first error, when.
@@ -150,7 +174,7 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	// Keep the whole bounded cause, not just its first line. The first line
 	// used to be all that survived, which threw away the captured stderr tail
 	// the moment it was recorded. The alert still renders one line
-	// (lifecycleFailureAlert splits), so a multi-line marker costs the reader
+	// (renderMarkerError picks it), so a multi-line marker costs the reader
 	// nothing and gives anyone opening the file the actual evidence.
 	//
 	// The cause is the failed phase's raw output tail — whatever the harness or
@@ -741,9 +765,9 @@ func markerCandidates(ids ...string) []markerCandidate {
 // back to the session's project so the retry command is still copyable. The
 // project is a raw `--project` operand the store could not resolve, so it is
 // RENDERED rather than interpolated — see renderMarkerProject. The alert never
-// includes paths — only the project identifier and the first (≤300-byte) line
-// of the recorded error, withheld by the token guard or framed as data — see
-// renderMarkerError.
+// includes paths — only the project identifier and one (≤300-byte) line of
+// the recorded error, the one that explains it (markerExplainingLine),
+// withheld by the token guard or framed as data — see renderMarkerError.
 func lifecycleFailureAlert(projectID, projectName string) string {
 	var (
 		m   *lifecycleFailureMarker
@@ -847,14 +871,82 @@ func renderMarkerPhases(phases []string) string {
 // failed phase's output tail, so it is text a harness or a model wrote, printed
 // at the top of every session start for the marker's lifetime: it goes through
 // the token guard again (markerErrorField — the file may predate the write-side
-// guard), the whole error rather than the line shown, so a credential the line
-// only begins is still caught; then its first line is capped and framed as
-// «...» data (quoteData), so instruction-like output reads as quoted text
-// rather than as Ghost's own words. The cap applies before the frame, so the
-// closing delimiter is never cut.
+// guard), the whole error rather than the line shown, so a token the line only
+// begins is still caught; then ONE line of it (markerExplainingLine) is capped
+// and framed as «...» data (quoteData), so instruction-like output reads as
+// quoted text rather than as Ghost's own words. The cap applies before the
+// frame, so the closing delimiter is never cut.
 func renderMarkerError(text string) string {
-	errLine := strings.SplitN(markerErrorField(text), "\n", 2)[0]
+	// The guard is asked twice: of the stored text, and of the line built from
+	// it, because moving the interruption ahead of the report can put words
+	// that were apart in the file next to each other on the shown line.
+	errLine := markerErrorField(markerExplainingLine(markerErrorField(text)))
 	return quoteData(truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes))
+}
+
+// markerExplainingLine picks the one line of a stored error the alert shows.
+//
+// The error is a phase's output tail, and a phase's first line is its banner
+// ("Project: ...") or a log record ("level=INFO msg=\"resolve prefilter\""),
+// so the first line says that the phase started and not why it failed. The
+// line that says why is the phase's own "error: ..." report (phaseErrorPrefix),
+// and the FIRST one is taken, because the marker records the first cause: an
+// interrupted phase appended after it can carry a cancellation report of its
+// own. The report is found by its prefix rather than by being last, because the
+// tail is fed by the phase's stdout and stderr through two pipes, so a stdout
+// line can land after it. A stored error with no such line — the no-output
+// fallback, NoLLMBackendError, a withheld placeholder, an interruption between
+// phases — is shown by its first line, as before.
+//
+// An interruption is a fact of its own (markerInterrupt), and when it follows
+// an earlier failure it sits at the end of whatever line that tail ended on,
+// which need not be the report. It is put FIRST, joined to the report with
+// "; ", so the cap applied after this cuts the report rather than the
+// interruption. When the two share a line the interruption is moved off the
+// end of it, not repeated. The result is rebuilt text, so renderMarkerError
+// asks the token guard of it again; the whole tail stays in the marker file.
+func markerExplainingLine(text string) string {
+	lines := strings.Split(text, "\n")
+	at := 0
+	for i, l := range lines {
+		if strings.HasPrefix(l, phaseErrorPrefix) {
+			at = i
+			break
+		}
+	}
+	line := lines[at]
+	sentence, on, ok := markerInterrupt(lines)
+	if !ok {
+		return line
+	}
+	if on == at {
+		line = strings.TrimSuffix(strings.TrimSuffix(line, sentence), "; ")
+	}
+	if line = strings.TrimSpace(line); line == "" {
+		return sentence
+	}
+	return sentence + "; " + line
+}
+
+// markerInterrupt finds the interruption sentence in a stored error, in the
+// two places the coordinator writes it and no others: as the whole first line,
+// when nothing failed before the signal (interruptOutcome), or at the end of a
+// line after "; ", when it was appended to an earlier phase's cause
+// (applyInterrupt). It returns the sentence and the index of its line.
+func markerInterrupt(lines []string) (string, int, bool) {
+	if interruptSentence.MatchString(lines[0]) {
+		return lines[0], 0, true
+	}
+	for i, l := range lines {
+		j := strings.LastIndex(l, "; "+InterruptedBySignal)
+		if j < 0 {
+			continue
+		}
+		if s := l[j+len("; "):]; interruptSentence.MatchString(s) {
+			return s, i, true
+		}
+	}
+	return "", -1, false
 }
 
 // renderMarkerProject renders the marker's project for the alert, and it is two
