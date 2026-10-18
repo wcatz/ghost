@@ -215,6 +215,7 @@ func RetainGuardedDrops(drops []DroppedGuarded) []ReflectMemory {
 			Content:    d.Content,
 			Importance: d.Importance,
 			Tags:       d.Tags,
+			RestatesID: d.ID,
 		})
 	}
 	return retained
