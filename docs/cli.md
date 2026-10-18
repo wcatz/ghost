@@ -31,7 +31,7 @@ The same shape applies at every level: `ghost mcp nope` and `ghost project` (no 
 
 A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost reflect` and `ghost resolve`, each refused with `expected exactly one project`), a file that is not there (`ghost import`), an unknown flag. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
 
-Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data.
+Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path and a stored timestamp through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data.
 
 ## MCP server
 
@@ -1140,7 +1140,11 @@ Each entry names when it happened, which write path made it (`save`, `update`,
 `import`, `delete`, `baseline`), which agent and session performed it when the
 write path knew — the lifecycle passes do not, and the entry says so rather than
 inventing one — and the content, category, importance, `resolved_at` and source
-the memory held once that write landed.
+the memory held once that write landed. The two stamps a row carries
+(`recorded_at` in the header, `resolved_at` in the state line) are stored text
+too, so each is rendered through the label renderer: a stamp written by the
+database stays exactly as stored, and one an import carried verbatim cannot end
+its line early or start a line of its own.
 
 Two more fields appear when they apply: the memory on the other end of the event
 (`related memory:` — what replaced a deleted row, or whose edge claims this one)
