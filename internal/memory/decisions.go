@@ -475,10 +475,25 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 		if err != nil {
 			return 0, false, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
 		}
-		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+		refs = append(refs, ref.String)
+	}
+	links, over = DecisionLinksOverflow(refs)
+	return links, over, nil
+}
+
+// DecisionLinksOverflow is decisionLinksOverflowTx's rule over source_refs the
+// caller already holds: how many distinct decision links they name between them,
+// and whether those links joined exceed MaxSourceRefLen — the merge the replace
+// drops before it writes. The reflect accounting calls it with the input rows'
+// source_refs, so a dry run lists such a merge as refused instead of as a merge
+// the apply will not write, and the two cannot disagree about the rule.
+func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
+	var refs []string
+	for _, ref := range sourceRefs {
+		refs = append(refs, decisionRefsInSourceRef(ref)...)
 	}
 	unique := dedupeDecisionRefs(refs)
-	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen, nil
+	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen
 }
 
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the

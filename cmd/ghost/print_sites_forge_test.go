@@ -272,14 +272,16 @@ func TestPruneNamesNoRowAsItsOwnLine(t *testing.T) {
 // or a tab, so a newline-bearing id cannot survive a real reply. What is under
 // test here is the print site, and the accounting it prints is the real one.
 //
-// Eight ids, one per bucket, because a line is only reachable by the bucket that
+// Ten ids, one per bucket, because a line is only reachable by the bucket that
 // owns its id: the merge owns its two sources, so an id planted in a merge can
 // never reach the rewrite, drop or deleted line however hostile it is. The last
 // two are a merge whose sources' scopes disagree, and one of those scopes is
-// itself hostile, because the scope-refusal line prints them (#1492).
+// itself hostile, because the scope-refusal line prints them (#1492). The two
+// after them are a merge whose sources fold more decision links than one
+// source_ref can hold, because the link-overflow line prints its ids too.
 func TestReflectReportsNameNoStoredFieldAsItsOwnLine(t *testing.T) {
 	input := reflection.ReflectionInput{ProjectName: "proj"}
-	ids := make([]string, 8)
+	ids := make([]string, 10)
 	for i := range ids {
 		ids[i] = hostileIDVariant(i + 1)
 		row := memory.Memory{
@@ -292,14 +294,25 @@ func TestReflectReportsNameNoStoredFieldAsItsOwnLine(t *testing.T) {
 		case 7:
 			row.Content = "the relay rolls back from a laptop"
 			row.Scope = map[string]string{"environment": "staging"}
+		case 8, 9:
+			row.Content = fmt.Sprintf("the relay rolls back through gate %d", i)
+			links := make([]string, 0, 7)
+			for n := 0; n < 7; n++ {
+				links = append(links, fmt.Sprintf("decision:%032X", i*10+n))
+			}
+			row.SourceRef = strings.Join(links, ",")
 		}
 		input.ExistingMemories = append(input.ExistingMemories, row)
 	}
 	result := reflection.ReflectionResult{
-		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "the relay rolls back over the serial console from a laptop", Importance: 0.5}},
+		Memories: []reflection.ReflectMemory{
+			{Category: "fact", Content: "the relay rolls back over the serial console from a laptop", Importance: 0.5},
+			{Category: "fact", Content: "the relay rolls back through either gate", Importance: 0.5},
+		},
 		Merges: []reflection.Merge{
 			{IDs: ids[:2], Text: "the bastion answers ping on 443"},
 			{IDs: ids[6:8], Text: "the relay rolls back over the serial console from a laptop"},
+			{IDs: ids[8:10], Text: "the relay rolls back through either gate"},
 		},
 		Replacements: []reflection.Replacement{{ID: ids[2], Text: hostileContentFor()}},
 		Drops:        []reflection.Drop{{ID: ids[3], Reason: "obsolete"}},
@@ -315,7 +328,7 @@ func TestReflectReportsNameNoStoredFieldAsItsOwnLine(t *testing.T) {
 		}
 		// Every bucket has to be non-empty, or the assertions below are about a
 		// report that never printed the line under test.
-		for _, bucket := range []string{"Merges (2)", "Refused by the grounding check (1)", "Refused because the sources' scopes disagree (2)", "Rewrites (1)", "Dropped (1,", "Deleted (1)"} {
+		for _, bucket := range []string{"Merges (2)", "Refused by the grounding check (1)", "Refused because the merge folds more decision links than one source_ref can hold (2)", "Refused because the sources' scopes disagree (2)", "Rewrites (1)", "Dropped (1,", "Deleted (1)"} {
 			if !strings.Contains(s, bucket) {
 				t.Fatalf("fixture: the accounting does not report %q, so its line is not being tested:\n%s", bucket, s)
 			}
