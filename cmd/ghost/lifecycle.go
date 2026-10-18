@@ -773,6 +773,16 @@ func maintenanceContext() (context.Context, context.CancelFunc) {
 // negative key to the default and clamps an oversized one, so only an explicit
 // 0 reaches this branch.
 //
+// A context with no deadline is not enough for that, because every harness
+// client gives a deadline-less context its own per-call default (5 minutes,
+// internal/ai defaultTimeout): it cannot tell a caller that removed the bound
+// from one that never set it. So the zero branch also marks the context with
+// ai.WithoutDefaultBound, and this is the only place that marker is set. Every
+// other caller of the clients — resolve, supersede, the ghost_resolve tool —
+// keeps the default (or its own deadline, when its context carries one), and a
+// positive timeout needs no marker because its
+// deadline already wins over the default.
+//
 // It wraps the whole consolidation, so the LLM tier's one repair turn shares this
 // budget rather than getting a deadline of its own: a run that needs the repair
 // has what is left of it. That is deliberate — the phase timeout above is the
@@ -780,7 +790,7 @@ func maintenanceContext() (context.Context, context.CancelFunc) {
 // pass outlive the phase it runs in.
 func consolidationContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		return context.WithCancel(parent)
+		return context.WithCancel(ai.WithoutDefaultBound(parent))
 	}
 	return context.WithTimeout(parent, timeout)
 }

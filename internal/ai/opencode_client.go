@@ -72,12 +72,10 @@ func (c *OpenCodeClient) Classify(ctx context.Context, systemPrompt, userContent
 	return c.run(ctx, systemPrompt+"\n\n"+userContent)
 }
 
-func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
-		defer cancel()
-	}
+func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err error) {
+	ctx, cancel := boundHarnessCall(ctx)
+	defer cancel()
+	defer func() { err = explainDefaultBound(ctx, err) }()
 	// --format json emits a JSON-lines stream; --pure skips plugins. A
 	// configured model is passed with `-m`; when none is configured, Ghost
 	// passes its explicit Big Pickle default because the child's config dir is
