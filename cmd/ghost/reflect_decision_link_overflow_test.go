@@ -588,3 +588,136 @@ func fakeReflectHarnessOps(t *testing.T, calls string, ops, keepIDs []string) st
 	}
 	return path
 }
+
+// TestRunReflectCountsAnOverflowBesideAConcurrentEdit is the mix the summary's
+// mixed-reasons line has to catch without a scope refusal in it: one merge
+// overflows the decision-link bound and another proposal claims a row edited
+// while the harness was answering. Nothing is written, and the Applied line
+// counts both reasons. Falling through to the concurrent-edit line would tell
+// the operator the next run re-merges everything, which is false for the
+// overflowed merge: it overflows again on every run until it is split.
+func TestRunReflectCountsAnOverflowBesideAConcurrentEdit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake harness requires a POSIX shell")
+	}
+	dataHome := isolatedLifecycleEnv(t)
+	ctx := context.Background()
+	const project = "vaultmix"
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := openReflectStore(t, dataHome, project)
+	var links, companionIDs []string
+	for i := 0; i < soloMergeLinks; i++ {
+		decision, companion, _, err := s.RecordDecision(ctx, project,
+			fmt.Sprintf("Rotation %02d", i), "rotate the queue credential on a schedule",
+			"the consumer drops in-flight work while a token is stale", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision %d: %v", i, err)
+		}
+		links = append(links, decisionLinkPrefix+decision)
+		companionIDs = append(companionIDs, companion)
+	}
+	if n, err := s.SetResolved(ctx, companionIDs); err != nil || n != len(companionIDs) {
+		t.Fatalf("SetResolved = %d, %v; want %d companions resolved so they leave the corpus", n, err, len(companionIDs))
+	}
+	var rows []string
+	for _, content := range []string{soloMergeConsumerRow, soloMergeRetryRow} {
+		id, err := s.Create(ctx, project, memory.Memory{Category: "fact", Source: "mcp", Importance: 0.6, Content: content})
+		if err != nil {
+			t.Fatalf("create row %q: %v", content, err)
+		}
+		rows = append(rows, id)
+	}
+	// The row the harness keeps and the test edits while the harness is
+	// gated, so the keep is a claim on a row that changed.
+	other, err := s.Create(ctx, project, memory.Memory{Category: "fact", Source: "mcp", Importance: 0.5, Content: scopeUnrelatedRow})
+	if err != nil {
+		t.Fatalf("create the kept row: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	// Direct UPDATE for the links, for the reason the overflow-only test gives.
+	db, err := openRawDB(dataHome)
+	if err != nil {
+		t.Fatalf("open to write links: %v", err)
+	}
+	half := soloMergeLinks / 2
+	for i, id := range rows {
+		lo, hi := 0, half
+		if i > 0 {
+			lo, hi = half, soloMergeLinks
+		}
+		if _, err := db.Exec(`UPDATE memories SET source_ref = ? WHERE id = ?`, strings.Join(links[lo:hi], ","), id); err != nil {
+			t.Fatalf("write decision links onto %s: %v", id, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close link writer: %v", err)
+	}
+	if err := execBackdate(dataHome, project); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	started := filepath.Join(dir, "started")
+	release := filepath.Join(dir, "release")
+	harness := gatedReflectHarness(t, calls, started, release, []string{
+		"merge " + strings.Join(rows, ",") + " -> " + soloMergeText,
+		"keep " + other,
+	})
+	t.Setenv("GHOST_CLI_CLAUDE_BINARY", harness)
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+
+	report := captureStderr(t, func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply")
+		}()
+		waitForFile(t, started)
+		db, err := openRawDB(dataHome)
+		if err != nil {
+			t.Errorf("open to edit: %v", err)
+		} else {
+			if _, err := db.Exec(`UPDATE memories SET content = ?, updated_at = datetime('now') WHERE id = ?`,
+				scopeUnrelatedRow+" and on a restart", other); err != nil {
+				t.Errorf("edit the kept row: %v", err)
+			}
+			_ = db.Close()
+		}
+		select {
+		case <-done:
+			t.Errorf("the reflect round finished before the edit landed, so the edit was not concurrent")
+		default:
+		}
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Errorf("release the harness: %v", err)
+		}
+		<-done
+	})
+	t.Logf("report:\n%s", report)
+
+	// Both stderr notes are the precondition: the round really did hit both
+	// reasons, so the Applied line below is judged on a true mix.
+	if !strings.Contains(report, "1 emission(s) stood for") {
+		t.Fatalf("the round did not overflow, so it is not the mix under test:\n%s", report)
+	}
+	if !strings.Contains(report, "1 emission(s) claiming a row that changed or was deleted were dropped") {
+		t.Fatalf("the round did not drop a claim on an edited row, so it is not the mix under test:\n%s", report)
+	}
+	want := "Applied: nothing — every consolidation proposal was refused: 0 merged memories whose scopes disagree, 1 claimed a memory that changed or was deleted while consolidation ran, 1 folded more decision links than one source_ref can hold"
+	if !strings.Contains(report, want) {
+		t.Errorf("the summary does not count both reasons; want %q in:\n%s", want, report)
+	}
+	if strings.Contains(report, "every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written") {
+		t.Errorf("the overflowed merge is folded into the concurrent-edit line:\n%s", report)
+	}
+	// The concurrent edit still withholds the fingerprint: the edited row
+	// is waiting to be consolidated.
+	if got := readReflectSignature(t, dataHome); got != "" {
+		t.Errorf("a skip fingerprint was recorded over a round whose claimed row changed: %q", got)
+	}
+}

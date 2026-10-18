@@ -2001,9 +2001,11 @@ func runReflect() {
 		case scopeRefusedTotal > 0 && droppedTotal == 0 && overflowedTotal == 0:
 			fmt.Println("Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
 			fmt.Println("  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
-		case scopeRefusedTotal > 0:
-			// Mixed reasons: each is counted, so a scope refusal is not folded into
-			// the concurrent-edit line below and a concurrent edit is not hidden.
+		case refusalReasons(scopeRefusedTotal, droppedTotal, overflowedTotal) >= 2:
+			// Mixed reasons: each is counted, so neither a scope refusal nor an
+			// overflow is folded into the concurrent-edit line below, and a
+			// concurrent edit is not hidden. Any two of the three make a mix; an
+			// overflow beside a concurrent edit is one too, scope refusal or not.
 			fmt.Printf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", scopeRefusedTotal, droppedTotal, overflowedTotal)
 			fmt.Println("  every memory those proposals named is left exactly as it is")
 		case droppedTotal == 0:
@@ -4910,4 +4912,17 @@ func memoryLines(memories []memory.Memory) string {
 		fmt.Fprintf(&b, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, displayStored(m.Content, m.Category, 70))
 	}
 	return b.String()
+}
+
+// refusalReasons counts how many of the store's refusal kinds a reflect round
+// hit, each argument being that kind's drop count. The "Applied: nothing"
+// summary prints its mixed line whenever this is two or more.
+func refusalReasons(counts ...int) int {
+	n := 0
+	for _, c := range counts {
+		if c > 0 {
+			n++
+		}
+	}
+	return n
 }
