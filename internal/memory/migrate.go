@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 26
+const schemaVersion = 27
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -89,6 +89,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV24,
 	migrateV25,
 	migrateV26,
+	migrateV27,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -720,7 +721,8 @@ END`,
 END`,
 		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source)`,
 	}
 	for _, stmt := range stmts {
@@ -1028,7 +1030,8 @@ END`,
 END`,
 		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source)`,
 	}
 	for _, s := range stmts {
@@ -1939,6 +1942,26 @@ func migrateV26(tx *sql.Tx) error {
 	if !hasCaptured {
 		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN retention_captured INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("add memory_snapshots.retention_captured: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV27 widens idx_memories_project_imp to carry the decay order's secondary
+// key (created_at) and adds a companion index for the global bucket's secondary
+// key (updated_at), so the passive threshold scan can stream rows in importance
+// order and then by the tie-break key without sorting the bucket. The old index
+// is dropped first because CREATE INDEX IF NOT EXISTS would otherwise leave the
+// narrower definition in place on databases that already carry it.
+func migrateV27(tx *sql.Tx) error {
+	stmts := []string{
+		`DROP INDEX IF EXISTS idx_memories_project_imp`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrateV27: %w", err)
 		}
 	}
 	return nil
