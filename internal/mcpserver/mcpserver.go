@@ -3088,7 +3088,9 @@ func (s *Server) registerTools() {
 		}
 		// The response byte budget (#1039), the same one ghost_memories_list
 		// applies: a cross-project search is bounded by `limit` alone.
-		text, _ := capRowsToResponseBudget("", memoryLines(memories, nil), s.searchResponseCap(), searchAllCutAdvice)
+		// Each row names its project (searchAllLines), and the label is inside
+		// the row the budget measures.
+		text, _ := capRowsToResponseBudget("", searchAllLines(memories), s.searchResponseCap(), searchAllCutAdvice)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
@@ -5189,6 +5191,26 @@ func formatMemoriesInternal(memories []memory.Memory, asOf *time.Time) string {
 // separately so a caller that has to cut whole rows to fit a response budget can
 // drop them one at a time rather than re-render the block with a shorter slice.
 func memoryLines(memories []memory.Memory, asOf *time.Time) []string {
+	return renderMemoryLines(memories, asOf, false)
+}
+
+// searchAllLines is memoryLines with each row's own bucket named on it, as
+// ` project=<id>` right after the importance, for ghost_search_all: that answer
+// is one ranking fused across every project and `_global`, and without the label
+// a row from one repository, a row from another and a cross-project preference
+// have the same shape. The id goes through assemble.ProjectLabel, which quotes
+// it with assemble.Token like every other identifier printed outside the data
+// delimiters and bounds its length, so a project id holding a space or a line
+// break is quoted rather than printed raw and an imported id as long as a path
+// cannot make the first row, which the budget always keeps, unbounded. It is a label rather
+// than a per-project heading so the rows stay in the order the search ranked
+// them and the response budget still cuts from the end of that ranking. The
+// label is part of the row string, so the budget fit counts its bytes.
+func searchAllLines(memories []memory.Memory) []string {
+	return renderMemoryLines(memories, nil, true)
+}
+
+func renderMemoryLines(memories []memory.Memory, asOf *time.Time, withProject bool) []string {
 	lines := make([]string, 0, len(memories))
 	now := time.Now().UTC()
 	for _, m := range memories {
@@ -5212,7 +5234,11 @@ func memoryLines(memories []memory.Memory, asOf *time.Time) []string {
 			verdict = state
 		}
 		validity := assemble.ValidityLabel(verdict, m.ValidFrom, m.ValidUntil, m.VerifiedAt)
-		lines = append(lines, fmt.Sprintf("- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, pin, tags, resolved,
+		project := ""
+		if withProject {
+			project = assemble.ProjectLabel(m.ProjectID)
+		}
+		lines = append(lines, fmt.Sprintf("- [%s] `%s` (%.1f%s%s%s%s%s%s%s%s%s%s) %s\n", m.Category, assemble.Token(m.ID), m.Importance, project, pin, tags, resolved,
 			assemble.ScopeLabel(m.Scope),
 			validity,
 			assemble.ConfidenceLabel(m.Confidence), assemble.AgentLabel(m.Agent), assemble.SourceRefLabel(m.SourceRef),
