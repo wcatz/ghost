@@ -516,3 +516,45 @@ func TestRenderSessionContextAtSaysWhenEveryRowWasWithheldAtT(t *testing.T) {
 		t.Errorf("a project with no rows at T gained a validity note:\n%s", got)
 	}
 }
+
+// TestRenderSessionContextAtCountsTheGlobalRowsTheCapCut: the historical
+// globals are cut at globalsCap like the project rows, and their heading has to
+// say so. The rows arrive in the decay composite's order, so the line must name
+// that ranking and never the current globals one (pinned, importance, recency),
+// which would be a false claim about the order.
+func TestRenderSessionContextAtCountsTheGlobalRowsTheCapCut(t *testing.T) {
+	dir, _ := historicalStore(t)
+	for i := 0; i < globalsCap+3; i++ {
+		saveHistoricalGlobal(t, dir, fmt.Sprintf("capped global row number %02d", i))
+	}
+	at := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
+	block := RenderSessionContextAt(dir, &at)
+	want := fmt.Sprintf("(%d shown of %d total — 3 not shown, ranked by %s; use %s for the rest)",
+		globalsCap, globalsCap+3, projectRankPhrase, globalsToolPhrase)
+	if !strings.Contains(block, want) {
+		t.Errorf("the capped historical globals do not count the 3 rows past the cap; want %q in:\n%s", want, block)
+	}
+	if strings.Contains(block, globalsRankPhrase) {
+		t.Errorf("the historical globals claim the current ranking %q:\n%s", globalsRankPhrase, block)
+	}
+	if got := strings.Count(block, "capped global row number"); got != globalsCap {
+		t.Errorf("the block lists %d global rows, want %d:\n%s", got, globalsCap, block)
+	}
+}
+
+// TestRenderSessionContextAtGlobalsUnderTheCapHaveNoCount is the control: a
+// globals set within the cap lost nothing, so no count line is printed.
+func TestRenderSessionContextAtGlobalsUnderTheCapHaveNoCount(t *testing.T) {
+	dir, _ := historicalStore(t)
+	for i := 0; i < globalsCap; i++ {
+		saveHistoricalGlobal(t, dir, fmt.Sprintf("uncapped global row number %02d", i))
+	}
+	at := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
+	block := RenderSessionContextAt(dir, &at)
+	if got := strings.Count(block, "uncapped global row number"); got != globalsCap {
+		t.Fatalf("the block lists %d global rows, want %d:\n%s", got, globalsCap, block)
+	}
+	if strings.Contains(block, "not shown") {
+		t.Errorf("a globals set within the cap claims rows were not shown:\n%s", block)
+	}
+}
