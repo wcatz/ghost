@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -100,9 +99,10 @@ func runLifecycle() {
 	}
 	defer release()
 
-	// Catch SIGINT/SIGTERM for the rest of the run, exactly as the phase
-	// commands do. A signal aimed at this process alone — `kill <pid>`, Ctrl-C
-	// on a foreground run, or a supervisor stopping only this pid — would
+	// Catch SIGINT/SIGTERM (and SIGHUP on unix, unless it was already ignored)
+	// for the rest of the run, exactly as the phase commands do. A signal aimed
+	// at this process alone — `kill <pid>`, Ctrl-C on a foreground run, a closed
+	// terminal, or a supervisor stopping only this pid — would
 	// otherwise take Go's default action and kill the coordinator while its
 	// phase, in a process group of its own, kept running and writing; the
 	// per-project claim's pid file would then name a dead pid, so the next
@@ -706,8 +706,10 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 
 // maintenanceContext is the root context of a maintenance command that spawns
 // CLI harnesses: `ghost reflect`, `ghost resolve`, `ghost supersede` and
-// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
-// the harnesses from being orphaned when the process is asked to stop.
+// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM, and on unix
+// on SIGHUP when it is not already ignored (maintenanceSignals, one per OS), is
+// what keeps the harnesses from being orphaned when the process is asked to
+// stop or its terminal goes away.
 //
 // The lifecycle coordinator holds the same root for the length of its phase
 // chain: the phases derive their contexts from it, so a signal aimed at the
@@ -725,7 +727,7 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 // cancellation unwinds to the exit. The lifecycle watchdog's group sweep stays
 // as the backstop for a command that does not wind down.
 func maintenanceContext() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return signal.NotifyContext(context.Background(), maintenanceSignals()...)
 }
 
 // consolidationContext bounds a single consolidation call by

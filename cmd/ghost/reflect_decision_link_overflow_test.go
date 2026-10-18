@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -357,31 +359,13 @@ const decisionLinkPrefix = "decision:"
 // silently weaker policy.
 func fakeReflectHarness(t *testing.T, calls, mergeIDs, mergeText, keepIDs string) string {
 	t.Helper()
-	ops := []string{"merge " + mergeIDs + " -> " + mergeText}
+	var keeps []string
 	for _, id := range strings.Split(keepIDs, ",") {
 		if id != "" {
-			ops = append(ops, "keep "+id)
+			keeps = append(keeps, id)
 		}
 	}
-	payload, err := json.Marshal(map[string]any{"ops": ops})
-	if err != nil {
-		t.Fatalf("build harness response: %v", err)
-	}
-	if strings.ContainsAny(string(payload), "'") {
-		t.Fatalf("the harness payload would need shell quoting to survive: %s", payload)
-	}
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"--help\" ]; then\n" +
-		"  printf '%s\\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'\n" +
-		"  exit 0\n" +
-		"fi\n" +
-		"echo x >> " + calls + "\n" +
-		"printf '%s' '" + string(payload) + "'\n"
-	path := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake harness: %v", err)
-	}
-	return path
+	return fakeReflectHarnessOps(t, calls, []string{"merge " + mergeIDs + " -> " + mergeText}, keeps)
 }
 
 // countLines counts the rounds a fake harness answered.
@@ -413,13 +397,197 @@ func readReflectSignature(t *testing.T, dataHome string) string {
 	return sig.String
 }
 
-// TestRunReflectCountsAnOverflowBesideAConcurrentEdit is the mix the summary's
-// mixed-reasons line has to catch without a scope refusal in it: one merge
-// overflows the decision-link bound and another proposal claims a row edited
-// while the harness was answering. Nothing is written, and the Applied line
-// counts both reasons. Falling through to the concurrent-edit line would tell
-// the operator the next run re-merges everything, which is false for the
-// overflowed merge: it overflows again on every run until it is split.
+// TestRunReflectDryRunListsAnOverflowingMergeAsRefused is the dry run of the
+// corpus above. The accounting section is printed before the write and is meant
+// to preview the apply exactly, so a merge the apply drops for folding more
+// decision links than one source_ref can hold has to be listed as refused, with
+// the link count and the bound, and not under Merges. The numbers are then held
+// against what the apply itself reports for the same corpus.
+func TestRunReflectDryRunListsAnOverflowingMergeAsRefused(t *testing.T) {
+	assertOverflowDryRunMatchesApply(t, false)
+}
+
+// TestRunReflectDryRunListsAnOverflowingMergesTextTwinAsKept adds one fact the
+// merge does not name whose text is already the merge's text, and the harness
+// drops it. The replace keeps that row when it drops the merge, because a row
+// carrying an emission's text is one of its claims, so the dry run has to list
+// it on the refusal line rather than as a drop the apply does not make.
+func TestRunReflectDryRunListsAnOverflowingMergesTextTwinAsKept(t *testing.T) {
+	assertOverflowDryRunMatchesApply(t, true)
+}
+
+func assertOverflowDryRunMatchesApply(t *testing.T, twin bool) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake harness requires a POSIX shell")
+	}
+	dataHome := isolatedLifecycleEnv(t)
+	ctx := context.Background()
+	const project = "queue"
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	s := openReflectStore(t, dataHome, project)
+	var companions []string
+	for i := 0; i < 13; i++ {
+		_, mem, _, err := s.RecordDecision(ctx, project,
+			fmt.Sprintf("Queue topic %02d", i), fmt.Sprintf("we chose option %02d for the queue", i),
+			"measured, and nothing cheaper did the job", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision %d: %v", i, err)
+		}
+		companions = append(companions, mem)
+	}
+	var facts []string
+	for i := 0; i < 9; i++ {
+		id, err := s.Create(ctx, project, memory.Memory{
+			Category: "fact", Source: "mcp", Importance: 0.6,
+			Content: fmt.Sprintf("runbook step %02d restarts the queue consumer in place", i),
+		})
+		if err != nil {
+			t.Fatalf("create fact %d: %v", i, err)
+		}
+		facts = append(facts, id)
+	}
+	var twinID string
+	if twin {
+		id, err := s.Create(ctx, project, memory.Memory{
+			Category: "fact", Source: "mcp", Importance: 0.6, Content: mergeFoldText,
+		})
+		if err != nil {
+			t.Fatalf("create twin: %v", err)
+		}
+		twinID = id
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	if err := execBackdate(dataHome, project); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	calls := filepath.Join(t.TempDir(), "calls")
+	harness := fakeReflectHarness(t, calls, strings.Join(companions, ","), mergeFoldText, strings.Join(facts, ","))
+	if twin {
+		harness = fakeReflectHarnessOps(t, calls, []string{
+			"merge " + strings.Join(companions, ",") + " -> " + mergeFoldText,
+			"drop " + twinID + " reason: obsolete",
+		}, facts)
+	}
+	t.Setenv("GHOST_CLI_CLAUDE_BINARY", harness)
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	inputs := len(companions) + len(facts)
+	owned := len(companions)
+	if twin {
+		inputs++
+		owned++
+	}
+
+	// captureStderr takes both streams: the section is on stdout, the notes on
+	// stderr.
+	dry := captureStderr(t, func() { runReflectArgs(t, "reflect", project, "--tier", "cli") })
+	const header = "Refused because the merge folds more decision links than one source_ref can hold ("
+	if got := countReported(t, dry, header); got != owned {
+		t.Errorf("%s%d), want %d:\n%s", header, got, owned, dry)
+	}
+	if !strings.Contains(dry, "Merges (0):") {
+		t.Errorf("the dry run still lists the overflowing merge as a merge:\n%s", dry)
+	}
+	linkLine := regexp.MustCompile(`the merge folds (\d+) decision links, whose joined source_ref would exceed the (\d+)-byte bound; the sources are kept unchanged`)
+	var refusal string
+	for _, line := range strings.Split(dry, "\n") {
+		if strings.HasPrefix(line, "  ") && linkLine.MatchString(line) {
+			refusal = line
+		}
+	}
+	if refusal == "" {
+		t.Fatalf("the dry run has no link-overflow refusal line:\n%s", dry)
+	}
+	for _, id := range companions {
+		if !strings.Contains(refusal, id) {
+			t.Errorf("the refusal line does not name %s: %q", id, refusal)
+		}
+	}
+	if twin {
+		if !strings.Contains(refusal, ", and so is "+twinID+", which already carries the merge's text") {
+			t.Errorf("the refusal line does not name the text twin %s the apply keeps: %q", twinID, refusal)
+		}
+		if strings.Count(dry, twinID) != 1 {
+			t.Errorf("the twin %s is quoted %d times; the partition owns it once:\n%s", twinID, strings.Count(dry, twinID), dry)
+		}
+		if !strings.Contains(dry, "Dropped (0,") {
+			t.Errorf("the dry run lists a drop of the twin, which the apply keeps:\n%s", dry)
+		}
+	}
+	m := linkLine.FindStringSubmatch(refusal)
+	if m[1] != strconv.Itoa(len(companions)) || m[2] != strconv.Itoa(memory.MaxSourceRefLen) {
+		t.Errorf("the refusal line says %s links and a %s-byte bound, want %d and %d: %q", m[1], m[2], len(companions), memory.MaxSourceRefLen, refusal)
+	}
+	// The section still adds up to the input total with the new bucket in it.
+	sum := countReported(t, dry, "Kept verbatim: ") + countReported(t, dry, "Passed through (not named): ")
+	for _, h := range []string{"Merges (", "Refused by the grounding check (", header,
+		"Refused because the sources' scopes disagree (", "Rewrites (", "Dropped (", "Deleted ("} {
+		sum += countReported(t, dry, h)
+	}
+	if total := countReported(t, dry, "Inputs ("); sum != total || total != inputs {
+		t.Errorf("the section's counts sum to %d over %d inputs (want %d):\n%s", sum, total, inputs, dry)
+	}
+
+	// The apply refuses the same merge for the same number of links.
+	apply := captureStderr(t, func() { runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply") })
+	note := regexp.MustCompile(`(\d+) emission\(s\) stood for (\d+) decision link\(s\) whose joined source_ref would exceed the (\d+)-byte bound`).FindStringSubmatch(apply)
+	if note == nil {
+		t.Fatalf("the apply did not report the overflow drop:\n%s", apply)
+	}
+	if note[1] != "1" || note[2] != m[1] || note[3] != m[2] {
+		t.Errorf("the apply reports %s emission(s), %s links, %s-byte bound; the dry run previewed 1, %s, %s", note[1], note[2], note[3], m[1], m[2])
+	}
+	if !strings.Contains(apply, refusal) {
+		t.Errorf("the apply's own accounting does not carry the dry run's refusal line %q:\n%s", refusal, apply)
+	}
+	db, err := openRawDB(dataHome)
+	if err != nil {
+		t.Fatalf("open for read: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	kept := append([]string(nil), companions...)
+	if twin {
+		kept = append(kept, twinID)
+	}
+	for _, mem := range kept {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NULL`, mem).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s is not live after the apply (%d, %v), but the dry run said it is kept", mem, n, err)
+		}
+	}
+}
+
+// fakeReflectHarnessOps is fakeReflectHarness with the operation list spelled
+// out, for a round that needs operations beside the one merge and its keeps.
+func fakeReflectHarnessOps(t *testing.T, calls string, ops, keepIDs []string) string {
+	t.Helper()
+	for _, id := range keepIDs {
+		ops = append(ops, "keep "+id)
+	}
+	payload, err := json.Marshal(map[string]any{"ops": ops})
+	if err != nil {
+		t.Fatalf("build harness response: %v", err)
+	}
+	if strings.ContainsAny(string(payload), "'") {
+		t.Fatalf("the harness payload would need shell quoting to survive: %s", payload)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"echo x >> " + calls + "\n" +
+		"printf '%s' '" + string(payload) + "'\n"
+	path := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake harness: %v", err)
+	}
+	return path
+}
 func TestRunReflectCountsAnOverflowBesideAConcurrentEdit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake harness requires a POSIX shell")
