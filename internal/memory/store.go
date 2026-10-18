@@ -4201,22 +4201,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if opts.foldReplaceableOnly {
 		scopeClause += " AND " + replaceableRowSQL
 	}
-	probeArgs := func(lead ...any) []any {
-		args := append([]any{}, lead...)
-		args = append(args, scopeArgs...)
-		return append(args, ftsQuery)
-	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.content
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE m.project_id = ?
-		  AND m.category = ?
-		  `+scopeClause+`
-		  AND memories_fts MATCH ?
-		ORDER BY rank, m.importance DESC
-		LIMIT 15
-	`, probeArgs(projectID, category)...)
+	sameQuery, sameArgs := dedupLookupStatement(false, scopeClause, scopeArgs, projectID, category, ftsQuery)
+	rows, err := db.QueryContext(ctx, sameQuery, sameArgs...)
 	if err != nil {
 		// Upsert treats a failed probe as "no candidate" and inserts, so a
 		// broken statement would switch dedup off silently. Say so.
@@ -4306,27 +4292,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// compatible duplicate cost that duplicate the fold (issue #665). Only rows
 	// a fold may use are counted against the fifteen.
 	if existingID == "" {
-		crossRows, crossErr := db.QueryContext(ctx, `
-			SELECT m.id, m.content
-			FROM memories m
-			JOIN memories_fts f ON f.rowid = m.rowid
-			WHERE m.project_id = ?
-			  AND m.category != ?
-			  AND m.resolved_at IS NULL
-			  AND NOT EXISTS (
-			      SELECT 1
-			      FROM memory_links l
-			      JOIN memories s ON s.id = l.source_id
-			      WHERE l.target_id = m.id
-			        AND l.relation = 'supersedes'
-			        AND l.invalidated_at IS NULL
-			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
-			  )
-			  `+scopeClause+`
-			  AND memories_fts MATCH ?
-			ORDER BY rank, m.importance DESC
-			LIMIT 15
-		`, probeArgs(projectID, category)...)
+		crossQuery, crossArgs := dedupLookupStatement(true, scopeClause, scopeArgs, projectID, category, ftsQuery)
+		crossRows, crossErr := db.QueryContext(ctx, crossQuery, crossArgs...)
 		if crossErr != nil {
 			s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "cross-category", "err", crossErr)
 		}
@@ -4858,7 +4825,8 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 // searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
 // the query path's keyword leg run. A non-zero now applies the validity window
 // predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
-// unfiltered statement, byte for byte what SearchFTS always ran.
+// same statement without it. The statement is ftsSearchStatement, which reads
+// the project's and _global's FTS buckets alone (schema v28).
 //
 // Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
 // the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
@@ -4875,30 +4843,8 @@ func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	where := "memories_fts MATCH ?"
-	args := []any{}
-	if !allProjects {
-		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
-		args = append(args, projectID)
-	}
-	args = append(args, sanitizeFTS(query))
-	if !now.IsZero() {
-		where += " AND " + validityMatchesSQLFor("m.")
-		// The predicate's placeholders are bound in its own text order: until,
-		// then from, both to the same whole-second-truncated instant.
-		stamp := now.UTC().Format(stampLayoutForSQL)
-		args = append(args, stamp, stamp)
-	}
-	args = append(args, limit)
-
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT `+memoryColumnsPrefixed+`
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE `+where+`
-		ORDER BY rank, m.importance DESC
-		LIMIT ?
-	`, args...)
+	stmt, args := ftsSearchStatement(projectID, sanitizeFTS(query), limit, now, allProjects)
+	rows, err := s.queryDB().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		if allProjects {
 			return nil, fmt.Errorf("search all memories: %w", err)
