@@ -1064,9 +1064,10 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 // blocked_by is inserted as given: the caller is responsible for having ordered
 // the records so a blocker exists before the task that points at it (see the
 // portable package's ordering), and a pointer to a task that is in neither the
-// artifact nor this store, that the same run rejected, or that is part of a
-// cycle, is dropped there and reported rather than written as a foreign key
-// that can never resolve. A pointer to a task this store already holds is kept.
+// artifact nor this store, that the same run rejected, that lands or is held in
+// another project than this task, or that is part of a cycle, is dropped there
+// and reported rather than written as a foreign key that can never resolve. A
+// pointer to a task this store already holds in the task's project is kept.
 //
 // The project and the blocker are checked immediately before the write, for the
 // reason ImportMemory gives. Both checks come after the dry-run return because a
@@ -1253,7 +1254,8 @@ func (s *Store) hasRow(ctx context.Context, query string, args ...any) (bool, er
 // superseded_by is inserted as given: the caller orders the records so a
 // superseding decision exists first, and drops (and reports) a pointer to a
 // decision that is in neither the artifact nor this store, that the same run
-// rejected, or that is part of a cycle. As with a task, the project
+// rejected, that lands or is held in another project than this decision, or
+// that is part of a cycle. As with a task, the project
 // and the reference are checked immediately before the write, after the dry-run
 // return, and the portable plan makes the dry run's equivalent check.
 //
