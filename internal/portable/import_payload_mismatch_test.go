@@ -48,6 +48,21 @@ func TestALineWhosePayloadsDoNotMatchItsTypeIsRefused(t *testing.T) {
 			want: []string{"line 3", `"memory"`},
 		},
 		{
+			// The memory id would be refused line by line on a real memory line;
+			// on a task line it must not turn a malformed file into one damaged
+			// line the rest of the file imports around.
+			name: "a task line that also carries a memory with an id this build refuses",
+			body: header + project +
+				`{"type":"task","task":{"id":"t1","project_id":"pH","title":"t","status":"pending","priority":2},"memory":{"id":"bad id","project_id":"pH","category":"fact","content":"x","source":"manual"}}` + "\n",
+			want: []string{"line 3", `"memory"`},
+		},
+		{
+			name: "a memory line with an id this build refuses and a second payload",
+			body: header + project +
+				`{"type":"memory","memory":{"id":"bad id","project_id":"pH","category":"fact","content":"x","source":"manual"},"task":{"id":"t1","project_id":"pH","title":"t","status":"pending","priority":2}}` + "\n",
+			want: []string{"line 3", `"task"`},
+		},
+		{
 			name: "a header that carries a payload",
 			body: `{"type":"header","schema_version":2,"task":{"id":"t1","project_id":"pH","title":"t","status":"pending","priority":2}}` + "\n" + project,
 			want: []string{"line 1", `"task"`},

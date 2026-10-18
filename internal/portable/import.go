@@ -315,7 +315,13 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 		// second copy, because a parser judging ids slightly differently from
 		// the store would classify a dry run differently from the apply run it
 		// previews — the one property this package is built around.
-		if rec.Memory != nil {
+		//
+		// Only a memory line carrying nothing else is judged here. A line of
+		// another type that also carries a memory, or a memory line with a second
+		// payload, is a malformed file whatever its memory id says, and refusing
+		// it by line number here would let the rest of the file import around it;
+		// requirePayload refuses it as a file instead, naming kinds and no id.
+		if rec.Memory != nil && rec.Type == TypeMemory && otherPayloads(rec, TypeMemory) == "" {
 			if err := memory.CheckImportedID(rec.Memory.ID); err != nil {
 				unread = append(unread, unreadable{
 					line: lineNum,
