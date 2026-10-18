@@ -63,6 +63,27 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, log
 	if logger == nil {
 		logger = slog.Default()
 	}
+	known := knownSHAs(input)
+
+	kept := result.Memories[:0]
+	for _, m := range result.Memories {
+		unknown := unknownSHAs(m.Content, known)
+		if len(unknown) == 0 {
+			kept = append(kept, m)
+			continue
+		}
+		logger.Warn("reflection dropped a memory with a fabricated commit SHA",
+			"category", m.Category, "tokens", strings.Join(unknown, ","),
+			"preview", previewContent(m.Content))
+	}
+	result.Memories = kept
+}
+
+// knownSHAs is the set of SHA-shaped tokens a run can legitimately cite: the
+// ones its input memories and recent commits carry, lowercased. The stored
+// learned_context is not in it. It is the harness's own earlier output, so a
+// SHA only it holds was never traceable to anything.
+func knownSHAs(input ReflectionInput) map[string]bool {
 	known := make(map[string]bool)
 	for _, m := range input.ExistingMemories {
 		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
@@ -78,24 +99,20 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, log
 			}
 		}
 	}
+	return known
+}
 
-	kept := result.Memories[:0]
-	for _, m := range result.Memories {
-		var unknown []string
-		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
-			if shaLikeToken(tok) && !known[strings.ToLower(tok)] {
-				unknown = append(unknown, tok)
-			}
+// unknownSHAs returns the SHA-shaped tokens in text that known does not hold,
+// as written. It is the one rule both a proposed memory and a proposed
+// learned_context are checked against.
+func unknownSHAs(text string, known map[string]bool) []string {
+	var unknown []string
+	for _, tok := range shaLikeRe.FindAllString(text, -1) {
+		if shaLikeToken(tok) && !known[strings.ToLower(tok)] {
+			unknown = append(unknown, tok)
 		}
-		if len(unknown) == 0 {
-			kept = append(kept, m)
-			continue
-		}
-		logger.Warn("reflection dropped a memory with a fabricated commit SHA",
-			"category", m.Category, "tokens", strings.Join(unknown, ","),
-			"preview", previewContent(m.Content))
 	}
-	result.Memories = kept
+	return unknown
 }
 
 // previewContent renders content as a single-line, length-bounded preview for

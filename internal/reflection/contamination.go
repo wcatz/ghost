@@ -30,37 +30,14 @@ func dropForeignProjectMemories(result *ReflectionResult, input ReflectionInput,
 	if len(input.OtherProjectNames) == 0 || len(result.Memories) == 0 {
 		return
 	}
-
-	// Names traceable to the input corpus are not foreign for this run.
-	traceable := make(map[string]bool, len(input.OtherProjectNames))
-	for _, name := range input.OtherProjectNames {
-		if name == "" || name == input.ProjectName {
-			continue
-		}
-		if foreignNameRe(name).MatchString(inputCorpus(input)) {
-			traceable[name] = true
-		}
-	}
-
-	forbidden := make([]string, 0, len(input.OtherProjectNames))
-	for _, name := range input.OtherProjectNames {
-		if name == "" || name == input.ProjectName || traceable[name] {
-			continue
-		}
-		forbidden = append(forbidden, name)
-	}
+	forbidden := forbiddenProjectNames(input)
 	if len(forbidden) == 0 {
 		return
 	}
 
 	kept := result.Memories[:0]
 	for _, m := range result.Memories {
-		var hit []string
-		for _, name := range forbidden {
-			if foreignNameRe(name).MatchString(m.Content) {
-				hit = append(hit, name)
-			}
-		}
+		hit := foreignNamesIn(m.Content, forbidden)
 		if len(hit) == 0 {
 			kept = append(kept, m)
 			continue
@@ -72,14 +49,48 @@ func dropForeignProjectMemories(result *ReflectionResult, input ReflectionInput,
 	result.Memories = kept
 }
 
-// inputCorpus concatenates every input field a foreign project name could
-// legitimately appear in. Built once per drop pass so each name is searched
-// against a single string rather than re-scanning per memory.
+// forbiddenProjectNames returns the known other project names that the input
+// corpus never mentions: the names a run cannot legitimately write about.
+// Names traceable to the corpus are not foreign for this run.
+func forbiddenProjectNames(input ReflectionInput) []string {
+	corpus := inputCorpus(input)
+	forbidden := make([]string, 0, len(input.OtherProjectNames))
+	for _, name := range input.OtherProjectNames {
+		if name == "" || name == input.ProjectName {
+			continue
+		}
+		if foreignNameRe(name).MatchString(corpus) {
+			continue
+		}
+		forbidden = append(forbidden, name)
+	}
+	return forbidden
+}
+
+// foreignNamesIn returns the forbidden names text mentions. It is the one rule
+// both a proposed memory and a proposed learned_context are checked against.
+func foreignNamesIn(text string, forbidden []string) []string {
+	var hit []string
+	for _, name := range forbidden {
+		if foreignNameRe(name).MatchString(text) {
+			hit = append(hit, name)
+		}
+	}
+	return hit
+}
+
+// inputCorpus concatenates the input fields a foreign project name can be
+// traced to: the project's name, its recent commits and its memories. Built
+// once per drop pass so each name is searched against a single string rather
+// than re-scanning per memory.
+//
+// The stored learned_context is deliberately not part of it. It is the
+// harness's own earlier output, not evidence, and counting it let one answer
+// license itself: a name written there was allowed in every later round, in
+// memories and in the next learned_context alike.
 func inputCorpus(input ReflectionInput) string {
 	var sb strings.Builder
 	sb.WriteString(input.ProjectName)
-	sb.WriteByte('\n')
-	sb.WriteString(input.CurrentContext)
 	sb.WriteByte('\n')
 	for _, c := range input.LastCommits {
 		sb.WriteString(c)

@@ -147,6 +147,7 @@ func readOpResponse(responseText string, input ReflectionInput, logger *slog.Log
 	normalizeReflectMemories(&result)
 	dropFabricatedMemories(&result, input, logger)
 	dropForeignProjectMemories(&result, input, logger)
+	guardLearnedContext(&result, input, logger)
 	return result, nil
 }
 
