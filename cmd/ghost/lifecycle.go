@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -79,6 +78,12 @@ func runLifecycle() {
 		os.Exit(1)
 	}
 
+	// The run's opening line, before anything else it writes and before the
+	// lock, so even a run the lock turns away has a start its refusal can be
+	// matched to. Every later line carries the same project and its own time
+	// (lifecycleLine), which is what lets interleaved runs be told apart.
+	lifecycleLogf(projectName, "run started pid=%d", os.Getpid())
+
 	// Hold the per-project lifecycle claim for the whole chain. The claim is
 	// keyed on the RESOLVED project id, so a manual run by name and a
 	// hook-spawned run (which passes the id) contend for the same file. A lock
@@ -87,16 +92,17 @@ func runLifecycle() {
 	release, ok, lockErr := mcpinit.AcquireLifecycleLock(projectName)
 	switch {
 	case lockErr != nil:
-		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not take the per-project lock (%v); continuing unlocked\n", lockErr)
+		lifecycleLogf(projectName, "warning: could not take the per-project lock (%v); continuing unlocked", lockErr)
 	case !ok:
-		fmt.Fprint(os.Stderr, lifecycleLockRefusal(projectName))
+		lifecycleLogf(projectName, "%s", lifecycleLockRefusal(projectName))
 		return
 	}
 	defer release()
 
-	// Catch SIGINT/SIGTERM for the rest of the run, exactly as the phase
-	// commands do. A signal aimed at this process alone — `kill <pid>`, Ctrl-C
-	// on a foreground run, or a supervisor stopping only this pid — would
+	// Catch SIGINT/SIGTERM (and SIGHUP on unix, unless it was already ignored)
+	// for the rest of the run, exactly as the phase commands do. A signal aimed
+	// at this process alone — `kill <pid>`, Ctrl-C on a foreground run, a closed
+	// terminal, or a supervisor stopping only this pid — would
 	// otherwise take Go's default action and kill the coordinator while its
 	// phase, in a process group of its own, kept running and writing; the
 	// per-project claim's pid file would then name a dead pid, so the next
@@ -109,12 +115,12 @@ func runLifecycle() {
 
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
+		lifecycleLogf(projectName, "error: load config: %v", err)
 		os.Exit(1)
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: locate ghost binary: %v\n", err)
+		lifecycleLogf(projectName, "error: locate ghost binary: %v", err)
 		os.Exit(1)
 	}
 
@@ -128,7 +134,7 @@ func runLifecycle() {
 
 	reflectSkipped := cfg.Reflection.AutoReflect && !llmOK
 	if reflectSkipped {
-		fmt.Fprintln(os.Stderr, "lifecycle: skipping reflect — no CLI binary available")
+		lifecycleLogf(projectName, "skipping reflect — no CLI binary available")
 	}
 
 	// A reflection.supersede_consensus below the minimum makes the supersede phase
@@ -139,7 +145,9 @@ func runLifecycle() {
 	// this function reports its own preconditions on stderr and that is where the
 	// unattended path collects them.
 	if cfg.Reflection.AutoSupersede {
-		fmt.Fprint(os.Stderr, supersedeConsensusClampNotice(projectName, cfg.Reflection.SupersedeConsensus))
+		if notice := supersedeConsensusClampNotice(projectName, cfg.Reflection.SupersedeConsensus); notice != "" {
+			lifecycleLogf(projectName, "%s", notice)
+		}
 	}
 
 	// Stale per-invocation scratch dirs from crashed harness children would
@@ -147,9 +155,9 @@ func runLifecycle() {
 	// children start creating new ones. A reap failure is a warning, not a
 	// stop: the phases are the point of this process and they converge.
 	if removed, reapErr := scratch.Reap(24 * time.Hour); reapErr != nil {
-		fmt.Fprintf(os.Stderr, "lifecycle: warning: scratch reap failed: %v\n", reapErr)
+		lifecycleLogf(projectName, "warning: scratch reap failed: %v", reapErr)
 	} else {
-		fmt.Fprintf(os.Stderr, "lifecycle: scratch reap removed=%d\n", removed)
+		lifecycleLogf(projectName, "scratch reap removed=%d", removed)
 	}
 
 	// The audit sidecars no child ever claimed: a lifecycle that crashed, was
@@ -158,9 +166,9 @@ func runLifecycle() {
 	// and with the same posture — a warning, never a stop. A sidecar a child
 	// DID read deletes itself.
 	if removed, sweepErr := audit.SweepStale(os.TempDir()); sweepErr != nil {
-		fmt.Fprintf(os.Stderr, "lifecycle: warning: audit sidecar sweep failed: %v\n", sweepErr)
+		lifecycleLogf(projectName, "warning: audit sidecar sweep failed: %v", sweepErr)
 	} else {
-		fmt.Fprintf(os.Stderr, "lifecycle: audit sidecar sweep removed=%d\n", removed)
+		lifecycleLogf(projectName, "audit sidecar sweep removed=%d", removed)
 	}
 
 	// Outcome tracking for the end-of-run marker: a phase that could not run
@@ -199,7 +207,7 @@ func runLifecycle() {
 	//
 	// Best-effort: a missing stamp only costs one extra spawn.
 	if err := mcpinit.TouchLifecycleStart(projectName); err != nil {
-		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record the run start (%v)\n", err)
+		lifecycleLogf(projectName, "warning: could not record the run start (%v)", err)
 	}
 
 	// The retrieval audit, before the first phase and inside the claim above.
@@ -247,7 +255,7 @@ func runLifecycle() {
 		// ran, which is the misattribution this record is careful about.
 		if rootCtx.Err() != nil {
 			interruptedNext = ph.name
-			fmt.Fprintf(os.Stderr, "lifecycle: interrupted before %s; not starting the remaining phases\n", ph.name)
+			lifecycleLogf(projectName, "interrupted before %s; not starting the remaining phases", ph.name)
 			break
 		}
 		phaseArgs := append([]string{}, ph.args...)
@@ -330,7 +338,7 @@ func runLifecycle() {
 				// the one phase that may be named, and the SIGNAL — not the
 				// "context canceled" the cancellation produced — is its cause.
 				interruptedRunning, interruptedTail = ph.name, tail.String()
-				fmt.Fprintf(os.Stderr, "lifecycle: %s interrupted after %s; not starting the remaining phases\n", ph.name, time.Since(start).Round(time.Second))
+				lifecycleLogf(projectName, "%s interrupted after %s; not starting the remaining phases", ph.name, time.Since(start).Round(time.Second))
 				break
 			}
 			// The cause, not the exit status: with no output this becomes
@@ -339,11 +347,11 @@ func runLifecycle() {
 			// indistinguishable.
 			cause := phaseFailureCause(phaseArgs, runErr, tail.String())
 			recordFailure(ph.name, cause)
-			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
+			lifecycleLogf(projectName, "%s failed after %s (continuing): %v", ph.name, time.Since(start).Round(time.Second), runErr)
 			continue
 		}
 		phasesRan++
-		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
+		lifecycleLogf(projectName, "%s completed in %s", ph.name, time.Since(start).Round(time.Second))
 		// A phase that succeeded while a signal was landing is NOT an
 		// interrupted phase: it ran, and the loop's next iteration records the
 		// interrupt against the phase it never reached. When it was the last
@@ -381,10 +389,10 @@ func runLifecycle() {
 	// foreground run they are already the terminal's visible record.
 	if interruptedRunCause != "" {
 		if err := mcpinit.WriteLifecycleFailure(projectName, nil, interruptedRunCause); err != nil {
-			fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record run outcome: %v\n", err)
+			lifecycleLogf(projectName, "warning: could not record run outcome: %v", err)
 		}
 	} else if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
-		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record run outcome: %v\n", err)
+		lifecycleLogf(projectName, "warning: could not record run outcome: %v", err)
 	}
 }
 
@@ -513,7 +521,7 @@ func applyInterrupt(failedPhases []string, firstPhaseErr, running, next, tail st
 // one.
 func runAuditPhase(projectName, signalsPath string) {
 	skip := func(reason string) {
-		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit skipped: %s\n", reason)
+		lifecycleLogf(projectName, "retrieval audit skipped: %s", reason)
 	}
 
 	// Delete the sidecar ONLY once it has proved to be one. The deferred remove
@@ -583,7 +591,7 @@ func runAuditPhase(projectName, signalsPath string) {
 		// Distinct from "skipped": this one may have persisted some verdicts
 		// before failing on a later write, and a reader deciding whether the
 		// figures hold needs to know the run was not complete.
-		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit incomplete: %v\n", err)
+		lifecycleLogf(projectName, "retrieval audit incomplete: %v", err)
 		return
 	}
 	// stderr, not stdout: on the detached path this is the phase tail an
@@ -698,8 +706,10 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 
 // maintenanceContext is the root context of a maintenance command that spawns
 // CLI harnesses: `ghost reflect`, `ghost resolve`, `ghost supersede` and
-// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM is what keeps
-// the harnesses from being orphaned when the process is asked to stop.
+// `ghost opencode cleanup-sessions`. Cancelling on SIGINT/SIGTERM, and on unix
+// on SIGHUP when it is not already ignored (maintenanceSignals, one per OS), is
+// what keeps the harnesses from being orphaned when the process is asked to
+// stop or its terminal goes away.
 //
 // The lifecycle coordinator holds the same root for the length of its phase
 // chain: the phases derive their contexts from it, so a signal aimed at the
@@ -717,7 +727,7 @@ func parseLifecycleArgs(args []string) (project, source, signals string, err err
 // cancellation unwinds to the exit. The lifecycle watchdog's group sweep stays
 // as the backstop for a command that does not wind down.
 func maintenanceContext() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return signal.NotifyContext(context.Background(), maintenanceSignals()...)
 }
 
 // consolidationContext bounds a single consolidation call by
@@ -976,10 +986,32 @@ func supersedePhaseConsensus(cfg *config.Config) int {
 	return n
 }
 
-// lifecycleLockRefusal is the line runLifecycle prints when another live run
-// holds the per-project claim, and it exists as a function so the operand it
-// names is testable: runLifecycle spawns child processes, so the early-return
-// branch is not reachable from a test.
+// lifecycleLine is one line the coordinator writes, in the shape of the hook's
+// cooldown-skip line: an RFC3339 time in UTC, `lifecycle:`, then the project
+// the run is for. lifecycle.log is shared by every project's detached chain,
+// and two chains that end close together append to it interleaved, so a line
+// that names neither its run nor its time cannot be matched to anything.
+//
+// The project is the run's own operand, which is the session's clone URL about
+// as often as a name (#1087), so it goes through memory.RefusalArg like every
+// other project operand in this file: an ordinary one quoted, a token-shaped
+// one withheld behind a placeholder, an oversized one withheld with its length.
+// The quoting also escapes a newline, so the operand cannot split the line.
+func lifecycleLine(now time.Time, projectName, msg string) string {
+	return fmt.Sprintf("%s lifecycle: project %s: %s\n",
+		now.UTC().Format(time.RFC3339), memory.RefusalArg("project", projectName), msg)
+}
+
+// lifecycleLogf writes one coordinator line for projectName's run to stderr,
+// which the detached path appends to lifecycle.log.
+func lifecycleLogf(projectName, format string, args ...any) {
+	fmt.Fprint(os.Stderr, lifecycleLine(time.Now(), projectName, fmt.Sprintf(format, args...)))
+}
+
+// lifecycleLockRefusal is the message runLifecycle prints, through
+// lifecycleLine, when another live run holds the per-project claim, and it
+// exists as a function so the operand it names is testable: runLifecycle spawns
+// child processes, so the early-return branch is not reachable from a test.
 //
 // It is a refusal sentence, so its project operand goes through
 // `memory.RefusalArg` rather than `%q`: the refusal is printed to stderr, which
@@ -990,11 +1022,12 @@ func supersedePhaseConsensus(cfg *config.Config) int {
 // placeholder, and a value past `ArgEchoMaxBytes` is withheld with its length
 // rather than repeated whole.
 func lifecycleLockRefusal(projectName string) string {
-	return fmt.Sprintf("lifecycle: another lifecycle is already running for project %s; exiting\n",
+	return fmt.Sprintf("another lifecycle is already running for project %s; exiting",
 		memory.RefusalArg("project", projectName))
 }
 
-// supersedeConsensusClampNotice is the one line `ghost lifecycle` prints when
+// supersedeConsensusClampNotice is the message of the one line
+// `ghost lifecycle` prints, through lifecycleLine, when
 // reflection.supersede_consensus is below the minimum, and it exists because the
 // clamp is otherwise invisible: lifecyclePhases omits --consensus entirely, the
 // pass runs with Consensus == 1, and supersedeReport prints its gate line only
@@ -1012,7 +1045,7 @@ func supersedeConsensusClampNotice(projectName string, n int) string {
 	if n >= supersede.MinConsensus {
 		return ""
 	}
-	return fmt.Sprintf("lifecycle: reflection.supersede_consensus is %d, below the minimum of %d — the supersede phase for %s runs UNGATED (one classification pass, no agreement gate)\n",
+	return fmt.Sprintf("reflection.supersede_consensus is %d, below the minimum of %d — the supersede phase for %s runs UNGATED (one classification pass, no agreement gate)",
 		n, supersede.MinConsensus, memory.RefusalArg("project", projectName))
 }
 
@@ -1978,9 +2011,11 @@ func runReflect() {
 		case scopeRefusedTotal > 0 && droppedTotal == 0 && overflowedTotal == 0:
 			fmt.Println("Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
 			fmt.Println("  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
-		case scopeRefusedTotal > 0:
-			// Mixed reasons: each is counted, so a scope refusal is not folded into
-			// the concurrent-edit line below and a concurrent edit is not hidden.
+		case refusalReasons(scopeRefusedTotal, droppedTotal, overflowedTotal) >= 2:
+			// Mixed reasons: each is counted, so neither a scope refusal nor an
+			// overflow is folded into the concurrent-edit line below, and a
+			// concurrent edit is not hidden. Any two of the three make a mix; an
+			// overflow beside a concurrent edit is one too, scope refusal or not.
 			fmt.Printf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", scopeRefusedTotal, droppedTotal, overflowedTotal)
 			fmt.Println("  every memory those proposals named is left exactly as it is")
 		case droppedTotal == 0:
@@ -4887,4 +4922,17 @@ func memoryLines(memories []memory.Memory) string {
 		fmt.Fprintf(&b, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, displayStored(m.Content, m.Category, 70))
 	}
 	return b.String()
+}
+
+// refusalReasons counts how many of the store's refusal kinds a reflect round
+// hit, each argument being that kind's drop count. The "Applied: nothing"
+// summary prints its mixed line whenever this is two or more.
+func refusalReasons(counts ...int) int {
+	n := 0
+	for _, c := range counts {
+		if c > 0 {
+			n++
+		}
+	}
+	return n
 }

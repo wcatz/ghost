@@ -650,21 +650,30 @@ func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string
 
 // sessionCountsBase is the count line before the pinned-row clause.
 func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
-	shown, total := tally.Shown, tally.Total()
+	shown := tally.Shown
+	// A count that stopped at its cap is a lower bound, so every figure derived
+	// from it is written "N+": the total, and the rows behind the window that
+	// are ranked out or withheld. The shown count is the block's own and exact.
+	// Below the cap the suffix is empty and the bytes are what they always were.
+	more := ""
+	if tally.AtLeast {
+		more = "+"
+	}
+	total := fmt.Sprintf("%d%s", tally.Total(), more)
 	// Rows the bucket policy removed as near-duplicate losers are not the
 	// ranking's cut either, so they ride with the withheld rows: one count of
 	// "not the ranking's doing".
 	withheld := tally.Withheld + tally.Deduped
 	switch {
 	case withheld > 0 && tally.RankedOut > 0:
-		return fmt.Sprintf("%d shown of %d total — %d not shown: %d ranked out by %s, %d withheld rather than ranked out; use %s for the rest",
-			shown, total, tally.RankedOut+withheld, tally.RankedOut, rankPhrase, withheld, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s not shown: %d%s ranked out by %s, %d%s withheld rather than ranked out; use %s for the rest",
+			shown, total, tally.RankedOut+withheld, more, tally.RankedOut, more, rankPhrase, withheld, more, toolPhrase)
 	case withheld > 0:
-		return fmt.Sprintf("%d shown of %d total — %d withheld rather than ranked out; use %s for the rest",
-			shown, total, withheld, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s withheld rather than ranked out; use %s for the rest",
+			shown, total, withheld, more, toolPhrase)
 	case tally.RankedOut > 0:
-		return fmt.Sprintf("%d shown of %d total — %d not shown, ranked by %s; use %s for the rest",
-			shown, total, tally.RankedOut, rankPhrase, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s not shown, ranked by %s; use %s for the rest",
+			shown, total, tally.RankedOut, more, rankPhrase, toolPhrase)
 	default:
 		return ""
 	}
@@ -762,8 +771,11 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 
 	// Nothing to surface — don't inject an empty/decorative block. A maintenance
 	// alert is not decorative: with no block to print, a current failure marker
-	// is still the thing this render exists to carry.
-	if projectID == "" && len(globals) == 0 {
+	// is still the thing this render exists to carry. A global bucket whose rows
+	// were all withheld is not nothing either: the hook renders its heading and
+	// the withheld sentence, so this render must too (the --as-of path's
+	// withheldAtT guard, for the current reading).
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
 		return alert
 	}
 	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
@@ -786,7 +798,9 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // `ghost bench --passive` is its only caller.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "")
-	if projectID == "" && len(globals) == 0 {
+	// The same guard as RenderSessionContextAt's: a wholly-withheld global
+	// bucket still renders, so the measured block is the one the hook prints.
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
 		return ""
 	}
 	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)

@@ -69,11 +69,12 @@ type RecordResult struct {
 	Downgraded bool
 	// DroppedRef is the id a task's blocked_by or a decision's superseded_by
 	// named when the pointer was dropped: its target was rejected by this run,
-	// is in neither the artifact nor the store, or the pointer is part of a
-	// cycle (DropReason says which). A target the store already holds is never
-	// a drop. The record itself is still imported, without the pointer; this is
-	// how the report says what it lost. Set for a create, a dry run's included,
-	// so the preview shows the drop the apply will make.
+	// is in neither the artifact nor the store, lands in another project than
+	// the record, or the pointer is part of a cycle (DropReason says which). A
+	// target the store already holds, or this run lands, in the record's own
+	// project is never a drop. The record itself is still imported, without the
+	// pointer; this is how the report says what it lost. Set for a create, a dry
+	// run's included, so the preview shows the drop the apply will make.
 	DroppedRef string
 	// DropReason says why DroppedRef was dropped. Its zero value is
 	// DropRejected, the reason the field was first added for.
@@ -92,7 +93,8 @@ const (
 	// run rejected it.
 	DropRejected DropReason = iota
 	// DropAbsent: the record the pointer names is neither in the artifact nor
-	// already in the store.
+	// already in the store, or it is, but in another project than the record
+	// holding the pointer, which leaves nothing that pointer can follow.
 	DropAbsent
 	// DropCycle: the pointer is part of a cycle of pointers, which no order of
 	// writes can satisfy.
@@ -430,6 +432,13 @@ type outcome struct {
 	err        error
 }
 
+// landedElsewhere is the project planRecords records for a skipped task or
+// decision whose stored row is not in the project the artifact's record is
+// imported under. A project id holds no control character
+// (memory.CheckImportedProjectID), so this never equals the project of the
+// record that points at it.
+const landedElsewhere = "\x00elsewhere"
+
 // planRecords turns the parsed records into an ordered list of steps, in the
 // order an apply run must write them: projects first, then memories, then tasks,
 // then decisions.
@@ -446,10 +455,11 @@ type outcome struct {
 // artifact does not contain, or a cycle, has its pointer dropped rather than
 // failing the import — an artifact that cannot be read in full is still worth
 // importing as far as it goes. A reference to a record the artifact contains but
-// this run rejects is dropped the same way, as the steps run. Every such drop is
-// named on the dependent record's report line (RecordResult.DroppedRef, with
-// DropReason saying why), and a pointer whose target the store already held
-// before the run is kept rather than dropped, because it resolves.
+// this run rejects, or that lands in another project than the dependent, is
+// dropped the same way, as the steps run. Every such drop is named on the
+// dependent record's report line (RecordResult.DroppedRef, with DropReason
+// saying why), and a pointer whose target the store already held before the run,
+// in the record's own project, is kept rather than dropped, because it resolves.
 //
 // Each child step is given the set of project ids its project will exist under
 // by the time it runs: what the store already holds plus what this artifact's
@@ -561,19 +571,31 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			}})
 	}
 	// Which of the artifact's tasks and decisions have landed — been created, or
-	// found already present — by the time a later step runs. orderTasks and
-	// orderDecisions leave a pointer only when it names a record of the artifact
-	// that is ordered before the one holding it, so a target that has not landed
-	// is one this run rejected. Such a pointer can never resolve, exactly like one
-	// naming a record the artifact does not contain, and is dropped the same way
-	// rather than taking its record down with it.
+	// found already present — by the time a later step runs, and the project each
+	// one landed in. orderTasks and orderDecisions leave a pointer only when it
+	// names a record of the artifact that is ordered before the one holding it,
+	// so a target that has not landed is one this run rejected. Such a pointer
+	// can never resolve, exactly like one naming a record the artifact does not
+	// contain, and is dropped the same way rather than taking its record down
+	// with it.
+	//
+	// A target that landed in a project other than the dependent's is dropped
+	// too, and reported like one that exists nowhere (DropAbsent), for the
+	// reason HasTask gives: the store's readers follow these pointers only within
+	// one project, and deleting the other project would rewrite the dependent.
+	// A created record lands in the project it is imported under, after mapping.
+	// A skipped one is the row the store already holds, which can live in
+	// another project than the artifact names, so its project is read back:
+	// landedElsewhere stands for any project but the one it was imported under.
+	// The restore below then keeps the pointer whenever that stored row is in
+	// the dependent's own project after all.
 	//
 	// The set is filled as steps run, in both modes, and it is the dry run's
 	// stand-in for the store's own pre-write check of the pointer, which only an
 	// apply can make (the target of a dry run is never written). It is what keeps
 	// the preview and the apply agreeing about the dependent record (#1147).
-	landedTasks := map[string]bool{}
-	landedDecisions := map[string]bool{}
+	landedTasks := map[string]string{}
+	landedDecisions := map[string]string{}
 	// Which of them this run created. A dropped pointer is restored when the
 	// store already holds its target in the project the record is imported
 	// under, after mapping (#1153); one in another project stays dropped, like a
@@ -590,8 +612,12 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				task := *t
 				dropped, reason := p.droppedRef, p.dropReason
-				if task.BlockedBy != "" && !landedTasks[task.BlockedBy] {
-					dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
+				if task.BlockedBy != "" {
+					if landed, ok := landedTasks[task.BlockedBy]; !ok {
+						dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
+					} else if landed != task.ProjectID {
+						dropped, reason, task.BlockedBy = task.BlockedBy, DropAbsent, ""
+					}
 				}
 				if dropped != "" {
 					held, err := s.HasTask(ctx, task.ProjectID, dropped)
@@ -606,12 +632,20 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				landedTasks[task.ID] = true
+				landed := task.ProjectID
 				if created {
 					createdTasks[task.ID] = true
 				} else {
 					dropped = ""
+					held, err := s.HasTask(ctx, task.ProjectID, task.ID)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the project of task %s: %w", memory.RefusalArg("task_id", task.ID), err)}
+					}
+					if !held {
+						landed = landedElsewhere
+					}
 				}
+				landedTasks[task.ID] = landed
 				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
@@ -622,8 +656,12 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				decision := *d
 				dropped, reason := p.droppedRef, p.dropReason
-				if decision.SupersededBy != "" && !landedDecisions[decision.SupersededBy] {
-					dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
+				if decision.SupersededBy != "" {
+					if landed, ok := landedDecisions[decision.SupersededBy]; !ok {
+						dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
+					} else if landed != decision.ProjectID {
+						dropped, reason, decision.SupersededBy = decision.SupersededBy, DropAbsent, ""
+					}
 				}
 				if dropped != "" {
 					held, err := s.HasDecision(ctx, decision.ProjectID, dropped)
@@ -638,12 +676,20 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				landedDecisions[decision.ID] = true
+				landed := decision.ProjectID
 				if created {
 					createdDecisions[decision.ID] = true
 				} else {
 					dropped = ""
+					held, err := s.HasDecision(ctx, decision.ProjectID, decision.ID)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the project of decision %s: %w", memory.RefusalArg("decision_id", decision.ID), err)}
+					}
+					if !held {
+						landed = landedElsewhere
+					}
 				}
+				landedDecisions[decision.ID] = landed
 				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
