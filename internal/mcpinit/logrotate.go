@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 )
 
 // logRotateCap is the size at which a data-dir log handed to openLogForAppend
@@ -159,4 +160,105 @@ const LogRotateCap = logRotateCap
 // data-dir file, and takes the same cap, single ".1" copy and 0600 create.
 func OpenLogForAppend(path string) (*os.File, error) {
 	return openLogForAppend(path)
+}
+
+// RotatingLog is an append-only log writer that holds the cap while it is
+// open. openLogForAppend checks the size once, at open, which is enough for a
+// log opened per run but not for the MCP server's GHOST_LOG_FILE redirect: the
+// server keeps one descriptor for its whole life, so under GHOST_DEBUG a
+// session that stays open for days would grow the file without bound.
+//
+// Before a write, a log that has reached logRotateCap is closed, handed to
+// openLogForAppend again — which renames it to "<path>.1" by the same rule and
+// recreates it 0600 — and the write goes to the fresh file. The file is
+// closed BEFORE the rename for the Windows reason given on
+// rotateLogIfOversized. The live file therefore ends at most one write past
+// the cap. Writes are serialised by a mutex, because slog handlers share one
+// writer across goroutines.
+//
+// Write never returns an error: a log write that fails must not fail the code
+// that logged. If the reopen after a rotation fails, the writer has no file
+// and drops lines (the same degradation as the server falling back to stderr
+// when the open at start fails) and tries to open again on the next write.
+// A rotation whose rename fails leaves the file where it was, so the writer
+// keeps appending to it and tries again after another megabyte rather than
+// closing and reopening on every line.
+type RotatingLog struct {
+	mu   sync.Mutex
+	path string
+	f    *os.File
+	size int64
+	// limit is the size at which the next write rotates first.
+	limit int64
+	// closed is set by Close; a write after it reports os.ErrClosed, as the
+	// bare file the redirect used to be did.
+	closed bool
+}
+
+// retryAfterFailedRotation is how much a log may grow past a rotation that
+// could not rename it before the writer tries again.
+const retryAfterFailedRotation = 1 << 20
+
+// OpenRotatingLog opens path through openLogForAppend and returns a writer
+// that keeps it within the cap for as long as it stays open.
+func OpenRotatingLog(path string) (*RotatingLog, error) {
+	l := &RotatingLog{path: path}
+	if err := l.open(); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// open opens the log and reads its size. The caller holds mu, or owns l.
+func (l *RotatingLog) open() error {
+	f, err := openLogForAppend(l.path)
+	if err != nil {
+		return err
+	}
+	var size int64
+	if fi, serr := f.Stat(); serr == nil {
+		size = fi.Size()
+	}
+	l.f, l.size, l.limit = f, size, logRotateCap
+	if size >= logRotateCap {
+		// The rename did not happen; do not retry on every line.
+		l.limit = size + retryAfterFailedRotation
+	}
+	return nil
+}
+
+// Write appends p, rotating first when the log has reached its cap. Apart from
+// a write after Close, it always reports len(p) and a nil error; see the type
+// comment.
+func (l *RotatingLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return 0, os.ErrClosed
+	}
+	if l.f != nil && l.size >= l.limit {
+		_ = l.f.Close()
+		l.f = nil
+	}
+	if l.f == nil {
+		if err := l.open(); err != nil {
+			return len(p), nil
+		}
+	}
+	n, _ := l.f.Write(p)
+	l.size += int64(n)
+	return len(p), nil
+}
+
+// Close closes the current file and ends the writer.
+func (l *RotatingLog) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
+	if l.f == nil {
+		return nil
+	}
+	err := l.f.Close()
+	l.f = nil
+	return err
 }

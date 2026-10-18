@@ -20,6 +20,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -774,9 +775,9 @@ func TestMCPLogConfig_FileRedirect(t *testing.T) {
 	if closeLog == nil {
 		t.Fatal("file opened, closer must be non-nil")
 	}
-	f, ok := writer.(*os.File)
+	f, ok := writer.(*mcpinit.RotatingLog)
 	if !ok {
-		t.Fatalf("writer is %T, want *os.File", writer)
+		t.Fatalf("writer is %T, want *mcpinit.RotatingLog", writer)
 	}
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
 	logger.Info("hello from test")
