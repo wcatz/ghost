@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1402,6 +1403,42 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 	}
 }
 
+// TestLifecyclePhasesTimeoutOutOfRange pins that only an explicit 0 removes the
+// phase bound. A negative value used to remove it with no warning, and a value
+// too large for a time.Duration wrapped into a negative timeout that removed it
+// the same way; an unbounded phase can wedge auto-consolidation for the
+// project until the process is killed by hand.
+func TestLifecyclePhasesTimeoutOutOfRange(t *testing.T) {
+	largest := time.Duration(math.MaxInt64/int64(time.Minute)) * time.Minute
+	cases := []struct {
+		name    string
+		minutes int
+		want    time.Duration
+	}{
+		{name: "negative keeps the default", minutes: -5, want: config.DefaultLifecycleTimeoutMinutes * time.Minute},
+		{name: "overflow is clamped", minutes: 200000000, want: largest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Reflection.AutoReflect = true
+			cfg.Reflection.AutoResolve = true
+			cfg.Reflection.AutoSupersede = true
+			cfg.Reflection.LifecycleTimeoutMinutes = tc.minutes
+
+			phases := lifecyclePhases(cfg, "proj", true)
+			if len(phases) != 3 {
+				t.Fatalf("expected 3 phases, got %d", len(phases))
+			}
+			for _, p := range phases {
+				if p.timeout != tc.want {
+					t.Errorf("lifecycle_timeout_minutes=%d: phase %s timeout = %v, want %v", tc.minutes, p.name, p.timeout, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestParseLifecycleArgs pins the argv contract that keeps the coordinator from
 // running its write phases against the wrong project. The misroute this guards
 // is concrete: the hook used to pass the project positionally, so a project
@@ -2571,32 +2608,41 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 }
 
 // TestConsolidationContext pins the bound that replaced a hardcoded 3 minutes.
-// The important case is zero/negative: WithTimeout(parent, 0) would cancel the
-// call immediately, so "unset" must mean unbounded instead.
+// Zero must mean unbounded, because WithTimeout(parent, 0) would cancel the
+// call immediately. A negative or oversized key no longer reaches here as a
+// non-positive duration: the config resolves it to the default or the largest
+// bound, so it keeps a deadline instead of silently losing it.
 func TestConsolidationContext(t *testing.T) {
 	if _, ok := mustCtx(t, 0).Deadline(); ok {
 		t.Fatal("zero minutes must not set a deadline")
 	}
 
-	ctx5, cancel5 := consolidationContext(context.Background(), 5)
-	defer cancel5()
-	dl, ok := ctx5.Deadline()
-	if !ok {
-		t.Fatal("5 minutes must set a deadline")
-	}
-	if d := time.Until(dl); d < 4*time.Minute || d > 6*time.Minute {
-		t.Errorf("deadline %v is not ~5 minutes away", d)
-	}
-
-	if _, ok := mustCtx(t, -1).Deadline(); ok {
-		t.Error("negative minutes must not set a deadline")
+	assertDeadlineNear(t, "5 minutes", mustCtx(t, 5), 5*time.Minute)
+	assertDeadlineNear(t, "negative minutes", mustCtx(t, -1), config.DefaultConsolidationTimeoutMinutes*time.Minute)
+	if _, ok := mustCtx(t, 200000000).Deadline(); !ok {
+		t.Error("an oversized minute count must still set a deadline")
 	}
 }
 
-// mustCtx returns the context for the given minutes without leaking its cancel.
+// assertDeadlineNear fails unless ctx has a deadline about want from now.
+func assertDeadlineNear(t *testing.T, label string, ctx context.Context, want time.Duration) {
+	t.Helper()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Errorf("%s must set a deadline", label)
+		return
+	}
+	if d := time.Until(dl); d < want-time.Minute || d > want+time.Minute {
+		t.Errorf("%s: deadline %v is not ~%v away", label, d, want)
+	}
+}
+
+// mustCtx returns the context the consolidation call site builds for the given
+// reflection.consolidation_timeout_minutes, without leaking its cancel.
 func mustCtx(t *testing.T, minutes int) context.Context {
 	t.Helper()
-	ctx, cancel := consolidationContext(context.Background(), minutes)
+	rc := config.ReflectionConfig{ConsolidationTimeoutMinutes: minutes}
+	ctx, cancel := consolidationContext(context.Background(), rc.ConsolidationTimeout())
 	t.Cleanup(cancel)
 	return ctx
 }

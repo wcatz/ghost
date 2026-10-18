@@ -330,7 +330,8 @@ type ReflectionConfig struct {
 	// hits on a large project: a ~190-memory prompt takes about that long on
 	// the opencode backend, so runs were killed mid-flight ("opencode run:
 	// signal: killed") and — because the autonomous path passes --require-llm —
-	// the whole reflect then failed with no fallback. 0 disables the bound.
+	// the whole reflect then failed with no fallback. 0 disables the bound; a
+	// negative value keeps the default, with a warning (ConsolidationTimeout).
 	// It covers the whole consolidation, harness calls included: the LLM tier's
 	// one repair turn (#689) spends what is left rather than getting a budget of
 	// its own. Keep it below reflection.lifecycle_timeout_minutes, which bounds
@@ -343,10 +344,57 @@ type ReflectionConfig struct {
 	// file keyed to the detached parent's liveness, so a phase that hung with
 	// no bound would wedge auto-consolidation for that project until the
 	// process was killed by hand. A bound lets a stuck run expire and be
-	// retried next session. Set 0 to disable the bound entirely; the timeout
+	// retried next session. Set 0 to disable the bound entirely; a negative
+	// value keeps the default, with a warning (LifecycleTimeout). The timeout
 	// is a graceful SIGTERM to the phase's process group first, escalating
 	// only if the grace period expires.
 	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
+}
+
+const (
+	// DefaultLifecycleTimeoutMinutes is the compiled value of
+	// reflection.lifecycle_timeout_minutes, and what a negative value falls
+	// back to.
+	DefaultLifecycleTimeoutMinutes = 60
+	// DefaultConsolidationTimeoutMinutes is the compiled value of
+	// reflection.consolidation_timeout_minutes, and what a negative value
+	// falls back to.
+	DefaultConsolidationTimeoutMinutes = 10
+)
+
+// LifecycleTimeout resolves LifecycleTimeoutMinutes to the bound on each
+// lifecycle phase, with 0 meaning no bound. See timeoutMinutes.
+func (c ReflectionConfig) LifecycleTimeout() time.Duration {
+	return timeoutMinutes("reflection.lifecycle_timeout_minutes", c.LifecycleTimeoutMinutes, DefaultLifecycleTimeoutMinutes)
+}
+
+// ConsolidationTimeout resolves ConsolidationTimeoutMinutes to the bound on
+// one consolidation call, with 0 meaning no bound. See timeoutMinutes.
+func (c ReflectionConfig) ConsolidationTimeout() time.Duration {
+	return timeoutMinutes("reflection.consolidation_timeout_minutes", c.ConsolidationTimeoutMinutes, DefaultConsolidationTimeoutMinutes)
+}
+
+// maxTimeoutMinutes is the largest minute count a time.Duration can hold.
+const maxTimeoutMinutes = int64(math.MaxInt64 / int64(time.Minute))
+
+// timeoutMinutes resolves a minutes key to the bound it asks for. Only an
+// explicit 0 removes the bound. A negative value falls back to the compiled
+// default def with a warning, NOT to "no bound": an unbounded phase can wedge
+// auto-consolidation for the project until the process is killed by hand, so
+// guessing it for a typo would switch off the guard the key exists for. A value
+// too large for a time.Duration is clamped to the largest one with a warning,
+// because the multiplication would otherwise wrap into a negative duration
+// that every caller reads as "no bound".
+func timeoutMinutes(key string, minutes, def int) time.Duration {
+	if minutes < 0 {
+		warnf("%s: %d is negative; using the default %d (set it to 0 to remove the bound)", key, minutes, def)
+		return time.Duration(def) * time.Minute
+	}
+	if int64(minutes) > maxTimeoutMinutes {
+		warnf("%s: %d is too large for a duration; using %d, the largest it can hold (set it to 0 to remove the bound)", key, minutes, maxTimeoutMinutes)
+		return time.Duration(maxTimeoutMinutes) * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -419,8 +467,8 @@ var defaults = map[string]interface{}{
 	"reflection.auto_supersede":                false,
 	"reflection.auto_reflect":                  false,
 	"reflection.supersede_consensus":           3,
-	"reflection.lifecycle_timeout_minutes":     60,
-	"reflection.consolidation_timeout_minutes": 10,
+	"reflection.lifecycle_timeout_minutes":     DefaultLifecycleTimeoutMinutes,
+	"reflection.consolidation_timeout_minutes": DefaultConsolidationTimeoutMinutes,
 	"lifecycle.min_interval":                   defaultLifecycleMinInterval,
 	"cli.claude_binary":                        "",
 	"cli.opencode_binary":                      "",
@@ -825,8 +873,8 @@ func defaultConfig() *Config {
 			Dimensions: 768,
 		},
 		Reflection: ReflectionConfig{
-			ConsolidationTimeoutMinutes: 10,
-			LifecycleTimeoutMinutes:     60,
+			ConsolidationTimeoutMinutes: DefaultConsolidationTimeoutMinutes,
+			LifecycleTimeoutMinutes:     DefaultLifecycleTimeoutMinutes,
 			SupersedeConsensus:          3,
 		},
 		Lifecycle: LifecycleConfig{MinInterval: defaultLifecycleMinInterval},
