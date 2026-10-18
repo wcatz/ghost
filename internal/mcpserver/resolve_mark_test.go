@@ -574,3 +574,67 @@ func (d *decliningMarkStore) MarkResolved(ctx context.Context, projectID string,
 	}
 	return d.store.MarkResolved(ctx, projectID, keep, prov)
 }
+
+// TestResolveMarkRefusesTheGlobalProjectBeforeTheTransaction: `project_id:
+// "_global"` is refused by the argument check, not by the store's rollback. The
+// store is wrapped to count the ref lookup and the write, so a refusal that came
+// from the transaction (which the answer used to carry, as "mark resolved in
+// _global" with a FAILED row) fails this test even though its answer was right.
+func TestResolveMarkRefusesTheGlobalProjectBeforeTheTransaction(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	ctx := context.Background()
+	promoted := seedMarkable(t, store, "test-project", "a promoted note every project injects")
+	if err := store.PromoteToGlobal(ctx, "test-project", promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	counting := &countingMarkStore{MemoryStore: srv.store, store: store}
+	srv.store = counting
+	session := connectedClientNamed(t, srv, "claude-code")
+
+	refused := callToolErr(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": memory.GlobalProjectID,
+		"memory_ids": []string{promoted},
+	})
+	if !strings.Contains(refused, "nothing marked: refusing to mark in the _global project") ||
+		!strings.Contains(refused, "every project injects") {
+		t.Errorf("the refusal is not the up-front one with its reason: %q", refused)
+	}
+	if strings.Contains(refused, "mark resolved in") || strings.Contains(refused, "FAILED") {
+		t.Errorf("the refusal came from the transaction rather than the argument check: %q", refused)
+	}
+	if counting.lookups != 0 || counting.writes != 0 {
+		t.Errorf("the store was reached before the refusal: %d lookups, %d writes", counting.lookups, counting.writes)
+	}
+	if isMarkedResolved(t, store, promoted) {
+		t.Fatal("the promoted row was stamped")
+	}
+
+	// The control: the same wrapped store still marks in an ordinary project.
+	id := seedMarkable(t, store, "test-project", "an ordinary note the mark may stamp")
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ghost_resolve_mark", Arguments: map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{id},
+	}}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !isMarkedResolved(t, store, id) || counting.writes != 1 {
+		t.Fatalf("an ordinary mark did not land (%d writes)", counting.writes)
+	}
+}
+
+// countingMarkStore is the tool's store with the ref lookup and the write counted.
+type countingMarkStore struct {
+	provider.MemoryStore
+	store           *memory.Store
+	lookups, writes int
+}
+
+func (c *countingMarkStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
+	c.lookups++
+	return c.store.MemoryIDsByIDPrefix(ctx, projectID, prefix)
+}
+
+func (c *countingMarkStore) MarkResolved(ctx context.Context, projectID string, ids []string, prov memory.Provenance) ([]string, error) {
+	c.writes++
+	return c.store.MarkResolved(ctx, projectID, ids, prov)
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -102,12 +103,15 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 	// so their headers count the ids the lines name rather than the lines. A
 	// header that counted operations would break the only check the section asks
 	// the reader to make.
-	merged, refused := 0, 0
+	merged, refused, scopeRefused := 0, 0, 0
 	for _, m := range acc.Merges {
 		merged += len(m.IDs)
 	}
 	for _, r := range acc.Refusals {
 		refused += len(r.IDs)
+	}
+	for _, r := range acc.ScopeRefusals {
+		scopeRefused += len(r.IDs)
 	}
 
 	// Every section prints its count whether or not it has lines, so an operator
@@ -130,6 +134,16 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 		// one part of the report that cannot be read.
 		_, _ = fmt.Fprintf(w, "  %s <- the %s introduced identifiers no source carries: %s; the sources are kept unchanged\n",
 			tokenList(r.IDs), r.Kind, displayClaim(strings.Join(r.Identifiers, ", "), 0))
+	}
+
+	// A merge whose sources' scopes disagree is refused at the write, with every
+	// source kept unchanged, so it is listed here rather than under Merges: the
+	// verdict is the write's own rule, and the preview has to say what the apply
+	// will do (#1492).
+	_, _ = fmt.Fprintf(w, "Refused because the sources' scopes disagree (%d):\n", scopeRefused)
+	for _, r := range acc.ScopeRefusals {
+		_, _ = fmt.Fprintf(w, "  %s <- the merge is refused because its sources' scopes disagree (%s); the sources are kept unchanged\n",
+			tokenList(r.IDs), scopeList(r.Scopes))
 	}
 
 	_, _ = fmt.Fprintf(w, "Rewrites (%d):\n", len(acc.Rewrites))
@@ -176,6 +190,31 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 	}
 
 	_, _ = fmt.Fprintf(w, "Kept verbatim: %d    Passed through (not named): %d\n", len(acc.Kept), len(acc.Passed))
+}
+
+// scopeList renders the distinct scopes a refused merge's sources carry, in the
+// order they first appear, so the line shows the disagreement it names. A scope
+// is stored data, so each one goes through the same renderer as every other
+// stored value on the report.
+func scopeList(scopes []map[string]string) string {
+	seen := make(map[string]bool, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		text := "unscoped"
+		if len(sc) > 0 {
+			b, err := json.Marshal(sc)
+			if err != nil {
+				continue
+			}
+			text = displayClaim(string(b), 0)
+		}
+		if seen[text] {
+			continue
+		}
+		seen[text] = true
+		out = append(out, text)
+	}
+	return strings.Join(out, " vs ")
 }
 
 // guardClause is what the drop guard's verdict means for the ids one line names.

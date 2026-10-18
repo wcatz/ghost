@@ -47,6 +47,16 @@ type AccountMerge struct {
 	Guarded int
 }
 
+// AccountScopeRefusal is one merge the apply will refuse because its sources'
+// scopes disagree: the ids it named, and each one's stored scope in the same
+// order (nil for an unscoped row). The verdict is memory.FoldSourceScopes — the
+// rule the write applies — so the preview and the apply cannot disagree about
+// which merges are refused (#1492).
+type AccountScopeRefusal struct {
+	IDs    []string
+	Scopes []map[string]string
+}
+
 // AccountRewrite is one rewrite line: the id it replaced, the text it wrote
 // instead, and whether that text is one of the result's memories.
 type AccountRewrite struct {
@@ -93,9 +103,9 @@ type AccountDeleted struct {
 }
 
 // InputAccounting is every input id of one consolidation, in the buckets the
-// report prints. The five fields that name ids and the two counts partition the
-// input set: Merges, Refusals, Rewrites and Drops name the ids an operation
-// touched, Kept and Passed are the counts of the ids a keep named and of the ids
+// report prints. The fields that name ids and the two counts partition the
+// input set: Merges, Refusals, ScopeRefusals, Rewrites and Drops name the ids an
+// operation touched, Kept and Passed are the counts of the ids a keep named and of the ids
 // nothing named, and Deleted is the rows an apply removes.
 type InputAccounting struct {
 	// Inputs is the number of distinct input ids, which is what the report's
@@ -103,8 +113,13 @@ type InputAccounting struct {
 	Inputs   int
 	Merges   []AccountMerge
 	Refusals []Refusal
-	Rewrites []AccountRewrite
-	Drops    []AccountDrop
+	// ScopeRefusals are the merges the apply refuses because their sources'
+	// scopes disagree, taken out of Merges: the write keeps every source
+	// unchanged, so listing one as a merge would preview a write that does not
+	// happen.
+	ScopeRefusals []AccountScopeRefusal
+	Rewrites      []AccountRewrite
+	Drops         []AccountDrop
 	// Kept are the ids an explicit `keep` named whose stored row the replace
 	// reuses in place.
 	Kept []string
@@ -226,7 +241,12 @@ func claimedRows(input []memory.Memory, emitted []emission) map[string]bool {
 // printed (see `dropCredentialProposals`), and a row saved during the round trip
 // is preserved untouched rather than claimed or deleted (see the `preserved`
 // count `ApplyReflection` returns). Everything else follows from the result and
-// the input.
+// the input — including a merge whose sources' scopes disagree, which the apply
+// refuses and this lists as refused, because the scopes are in the input and the
+// verdict is the write's own rule (memory.FoldSourceScopes). One scope refusal is
+// NOT predicted: a merge whose text is byte-identical to a stored row with a
+// different scope than its sources agreed on is refused by the replace's reuse
+// branch, and that depends on which row the reuse claims at the write.
 func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []DroppedGuarded) InputAccounting {
 	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {
@@ -286,8 +306,33 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	for _, key := range order {
 		rows = append(rows, byID[key])
 	}
+	// The merges the apply will refuse over their sources' scopes, decided before
+	// the claim pass: a refused merge is written nowhere, so its text must not
+	// claim a stored row here either. Only a merge whose text is in the result
+	// can be refused — one a post-filter removed never reaches the write.
+	scopeRefused := make(map[int]bool)
+	refusedText := make(map[string]int)
+	for i, m := range result.Merges {
+		if !present[m.Text] {
+			continue
+		}
+		sources := make([]memory.SourceScope, 0, len(m.IDs))
+		for _, id := range m.IDs {
+			if src, ok := byID[memIDKey(id)]; ok {
+				sources = append(sources, memory.SourceScope{ID: src.ID, Scope: src.Scope})
+			}
+		}
+		if _, err := memory.FoldSourceScopes(sources); memory.IsScopeConflict(err) {
+			scopeRefused[i] = true
+			refusedText[m.Text]++
+		}
+	}
 	emitted := make([]emission, 0, len(result.Memories))
 	for _, m := range result.Memories {
+		if refusedText[m.Content] > 0 {
+			refusedText[m.Content]--
+			continue
+		}
 		emitted = append(emitted, emission{content: m.Content, category: m.Category})
 	}
 	claimed := claimedRows(rows, emitted)
@@ -328,7 +373,17 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// A merge is reported once and owns each of its sources, so the walk below
 	// annotates the merge line rather than counting the source separately.
 	mergeOf := make(map[string]int, len(result.Merges))
-	for _, m := range result.Merges {
+	scopeOwned := make(map[string]bool)
+	for i, m := range result.Merges {
+		if scopeRefused[i] {
+			line := AccountScopeRefusal{IDs: storedIDs(m.IDs)}
+			for _, id := range m.IDs {
+				line.Scopes = append(line.Scopes, byID[memIDKey(id)].Scope)
+				scopeOwned[memIDKey(id)] = true
+			}
+			acc.ScopeRefusals = append(acc.ScopeRefusals, line)
+			continue
+		}
 		line := AccountMerge{IDs: storedIDs(m.IDs), Text: m.Text, In: present[m.Text]}
 		for _, id := range m.IDs {
 			if src, ok := byID[memIDKey(id)]; ok {
@@ -352,6 +407,11 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 		}
 		if d, ok := dropOf[key]; ok {
 			acc.Drops = append(acc.Drops, d)
+			continue
+		}
+		if scopeOwned[key] {
+			// A merge the apply refuses over its sources' scopes keeps every
+			// source unchanged, and the refusal's own line names it.
 			continue
 		}
 		if refused[key] {

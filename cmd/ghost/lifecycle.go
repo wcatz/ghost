@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -433,13 +434,13 @@ func awaitPhaseSweep(rootCtx context.Context, done <-chan struct{}, within func(
 func interruptOutcome(running, next, tail string) (phases []string, cause string, ok bool) {
 	switch {
 	case running != "":
-		cause = "interrupted by SIGTERM while running " + running
+		cause = mcpinit.InterruptedBySignal + " while running " + running
 		if t := strings.TrimSpace(tail); t != "" {
 			cause += "\n" + t
 		}
 		return []string{running}, cause, true
 	case next != "":
-		return nil, "interrupted by SIGTERM before " + next, true
+		return nil, mcpinit.InterruptedBySignal + " before " + next, true
 	default:
 		return nil, "", false
 	}
@@ -1329,6 +1330,34 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 	return p, nil
 }
 
+// reflectTiers is every value `ghost reflect --tier` selects a backend with.
+// The removed "haiku" tier is not one of them, but validateReflectSelection
+// lets it through so the tier switch keeps answering it with its own
+// removal message.
+var reflectTiers = []string{"auto", "cli", "opencode", "sqlite"}
+
+// validateReflectSelection refuses a --tier or --source value outside the
+// documented sets. Both used to reach the tier switch's "auto" default, where
+// an unknown tier skipped the undetectable-caller refusal and an unknown source
+// only printed a warning, so a typo ran the SQLite floor and exited 0 — with
+// --apply, it rewrote the project's memories. runReflect asks this before the
+// store is opened, so a refused value has touched nothing.
+//
+// Case is exact, as the switch compares it. An empty --source is the flag left
+// off (the parser cannot tell `--source=` from no flag), and only the explicit
+// value is asked: a detected source comes from ai.DetectSource. A known source
+// whose binary is missing is not refused here; that is the documented SQLite
+// fallback, or a failure under --require-llm.
+func validateReflectSelection(p reflectArgs) error {
+	if p.tier != "haiku" && !slices.Contains(reflectTiers, p.tier) {
+		return fmt.Errorf("unknown --tier %s (allowed: %s)", memory.RefusalArg("tier", p.tier), strings.Join(reflectTiers, ", "))
+	}
+	if p.source != "" && !ai.IsKnownSource(p.source) {
+		return fmt.Errorf("unknown --source %s (allowed: %s)", memory.RefusalArg("source", p.source), strings.Join(ai.KnownSources(), ", "))
+	}
+	return nil
+}
+
 // reflectProposalLimit is how many bytes of a memory `ghost reflect` prints by
 // default. A proposal list is a summary — 120 is a screenful of context per
 // memory and a large project has hundreds — and the section that accounts for
@@ -1370,7 +1399,8 @@ Flags:
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
                    or goose. Defaults to the calling harness (detected from
                    the environment and process ancestry); an undetectable
-                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite.
+                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite,
+                   though an unknown value is refused under any tier.
   --project string Project name; an alternative to the positional form that
                    takes the next argument verbatim, so dash-prefixed names work.
 `
@@ -1401,6 +1431,10 @@ func runReflect() {
 	parsed, parseErr := parseReflectArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
+	}
+	if err := validateReflectSelection(parsed); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	projectName := parsed.project
@@ -1879,9 +1913,13 @@ func runReflect() {
 	// overflow drop is a merge whose decision links do not fit in a source_ref,
 	// which no later run can write either — the report names the links and the
 	// bound, and the round is still allowed to record its fingerprint (#1228).
+	// A scope drop is a merge whose sources' scopes disagree: as permanent as an
+	// overflow, so it is reported on its own and does not withhold the
+	// fingerprint either (#1492).
 	droppedTotal := droppedProject.Changed + droppedGlobal.Changed
 	overflowedTotal := droppedProject.Overflow + droppedGlobal.Overflow
 	overflowedLinks := droppedProject.OverflowLinks + droppedGlobal.OverflowLinks
+	scopeRefusedTotal := droppedProject.Scope + droppedGlobal.Scope
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
@@ -1919,9 +1957,17 @@ func runReflect() {
 	// behaviour this adds is in the !applied case, which did not exist before.
 	if !applied {
 		switch {
-		case overflowedTotal > 0 && droppedTotal == 0:
+		case overflowedTotal > 0 && droppedTotal == 0 && scopeRefusedTotal == 0:
 			fmt.Printf("Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", overflowedLinks, memory.MaxSourceRefLen)
 			fmt.Println("  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
+		case scopeRefusedTotal > 0 && droppedTotal == 0 && overflowedTotal == 0:
+			fmt.Println("Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
+			fmt.Println("  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
+		case scopeRefusedTotal > 0:
+			// Mixed reasons: each is counted, so a scope refusal is not folded into
+			// the concurrent-edit line below and a concurrent edit is not hidden.
+			fmt.Printf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", scopeRefusedTotal, droppedTotal, overflowedTotal)
+			fmt.Println("  every memory those proposals named is left exactly as it is")
 		case droppedTotal == 0:
 			fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
 			fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
@@ -1989,6 +2035,12 @@ func runReflect() {
 	if overflowedTotal > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d emission(s) stood for %d decision link(s) whose joined source_ref would exceed the %d-byte bound, and were dropped with every merged memory left live; the same merge would overflow again, so split it\n", overflowedTotal, overflowedLinks, memory.MaxSourceRefLen)
 	}
+	// A scope refusal is reported on its own terms for the same reason: no row
+	// moved, and the merge was refused because the scopes its sources carry
+	// disagree, which a later run would find again (#1492).
+	if scopeRefusedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d merge(s) were refused because their sources' scopes disagree, and every source was left live under its own scope; the same merge would be refused again, so merge them by hand under one scope if they are one fact\n", scopeRefusedTotal)
+	}
 
 	// A save that raced the LLM round trip is preserved untouched by
 	// ReplaceNonManual and is merged by the NEXT reflection. Recording a
@@ -2001,7 +2053,8 @@ func runReflect() {
 	// be consolidated — the merged memories are all live and unchanged, and the
 	// proposal that would have folded them cannot be written at all. Holding it
 	// open is what re-proposed and dropped the same merge on every later run.
-	if !applied && overflowedTotal == 0 {
+	// A round whose refusals were all scope refusals is the same case (#1492).
+	if !applied && overflowedTotal == 0 && scopeRefusedTotal == 0 {
 		// Not "no preserved survivors" — nothing at all was replaced, so the
 		// corpus still holds whatever it held. Recording a fingerprint over an
 		// unchanged corpus is what would make --skip-unchanged skip this project

@@ -184,6 +184,7 @@ func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, 
 	for _, header := range []string{
 		"Merges (",
 		"Refused by the grounding check (",
+		"Refused because the sources' scopes disagree (",
 		"Rewrites (",
 		"Dropped (",
 		"Deleted (",
@@ -327,6 +328,107 @@ func TestReflectSummaryAccountsForARefusedMerge(t *testing.T) {
 	}
 	if !strings.Contains(section, "Refused by the grounding check (2):") {
 		t.Errorf("a refused merge is not reported as one:\n%s", section)
+	}
+}
+
+// TestReflectSummaryListsAScopeRefusedMergeAsTheApplyRefusesIt is #1492's dry
+// run half. A merge whose sources' scopes disagree is refused by the write, which
+// keeps every source; the section used to list it under Merges, so the preview
+// promised a merge the apply never made. The scopes are in the input, and the
+// section now asks the write's own rule (memory.FoldSourceScopes), so it lists
+// the merge as refused. The round is applied to a real store afterwards, so the
+// claim is checked against what the replace actually did rather than against
+// the accounting's own idea of it — and a merge whose sources AGREE is in the
+// same round, so the check cannot pass by refusing every merge.
+func TestReflectSummaryListsAScopeRefusedMergeAsTheApplyRefusesIt(t *testing.T) {
+	const project = "scoperefusal"
+	store, ctx := newReflectStore(t, project)
+	prod := map[string]string{"environment": "production"}
+	seed := func(content string, scope map[string]string) string {
+		t.Helper()
+		id, err := store.Create(ctx, project, memory.Memory{
+			Category: "fact", Content: content, Importance: 0.6, Source: "mcp", Tags: []string{"accounting"}, Scope: scope,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return id
+	}
+	gateProd := seed("the api deploy uses the blue green rollout with manual approval gates", prod)
+	gateStaging := seed("the api deploy uses the blue green rollout without manual approval gates", map[string]string{"environment": "staging"})
+	portA := seed("the production database listens on the standard port", prod)
+	portB := seed("the production database port is the standard one", prod)
+	unnamed := seed("the ingest pipeline writes run manifests under the state directory", nil)
+	fixtures := []accountFixture{
+		{gateProd, "the api deploy uses the blue green rollout with manual approval gates"},
+		{gateStaging, "the api deploy uses the blue green rollout without manual approval gates"},
+		{portA, "the production database listens on the standard port"},
+		{portB, "the production database port is the standard one"},
+		{unnamed, "the ingest pipeline writes run manifests under the state directory"},
+	}
+	input := reflectInputFor(t, store, project)
+
+	result, guarded := reflectRoundForTest(t, input, func() string {
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["merge %s,%s -> the api deploy uses the blue green rollout, with manual approval gates in one environment and without manual approval gates in the other","merge %s,%s -> the production database listens on the standard port, and that port is the standard one"]}`,
+			gateProd, gateStaging, portA, portB)
+	}, false)
+	if len(guarded) != 0 {
+		t.Fatalf("the guard flagged %d rows, so the merges were not accepted as written: %+v", len(guarded), guarded)
+	}
+
+	section := accountingSection(t, input, result, guarded, false, false)
+	t.Logf("section:\n%s", section)
+
+	assertAccountsFor(t, section, fixtures, []string{gateProd, gateStaging, portA, portB}, nil, nil, []string{unnamed})
+	if !strings.Contains(section, "Merges (2):") {
+		t.Errorf("the agreeing merge is not listed as the one merge this round makes:\n%s", section)
+	}
+	if !strings.Contains(section, "Refused because the sources' scopes disagree (2):") {
+		t.Errorf("the disagreeing merge is not listed as refused:\n%s", section)
+	}
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "  new <- ") && (strings.Contains(line, gateProd) || strings.Contains(line, gateStaging)) {
+			t.Errorf("the scope-refused merge is still listed as a merge: %q", line)
+		}
+		if !strings.HasPrefix(line, "  ") || !strings.Contains(line, "scopes disagree") {
+			continue
+		}
+		if !strings.Contains(line, gateProd) || !strings.Contains(line, gateStaging) {
+			t.Errorf("the refusal line does not name both sources: %q", line)
+		}
+		if !strings.Contains(line, `"environment":"production"`) || !strings.Contains(line, `"environment":"staging"`) {
+			t.Errorf("the refusal line does not show the scopes that disagree: %q", line)
+		}
+	}
+
+	// The apply, through the real write boundary: the refused merge is counted as
+	// a scope refusal, its sources are both still there under their own scopes,
+	// and the agreeing merge consumed its two.
+	projectMems, globalMems := splitByScope(result.Memories)
+	_, _, _, _, _, projectDropped, globalDropped, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, replacedIDsByText(&result), nil)
+	if err != nil {
+		t.Fatalf("applyReflection: %v", err)
+	}
+	if got := projectDropped.Scope + globalDropped.Scope; got != 1 || projectDropped.Changed+globalDropped.Changed != 0 {
+		t.Errorf("drops = project %+v / global %+v, want exactly the one scope refusal the section listed", projectDropped, globalDropped)
+	}
+	after, err := store.GetAll(ctx, project, -1)
+	if err != nil {
+		t.Fatalf("GetAll after apply: %v", err)
+	}
+	surviving := map[string]bool{}
+	for _, m := range after {
+		surviving[m.ID] = true
+	}
+	for _, id := range []string{gateProd, gateStaging, unnamed} {
+		if !surviving[id] {
+			t.Errorf("%s is gone after the apply, but the section said it is kept", id)
+		}
+	}
+	for _, id := range []string{portA, portB} {
+		if surviving[id] {
+			t.Errorf("%s survived the apply, but the section listed it as merged", id)
+		}
 	}
 }
 

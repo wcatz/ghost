@@ -2245,3 +2245,59 @@ func TestAGuardReaddedRewriteKeepsItsSourcesTier(t *testing.T) {
 		t.Errorf("the rewrite is %q expiring %q, want %q with an expiry like its only source", tier, expires.String, RetentionSession)
 	}
 }
+
+// TestAVerbatimReAddOfAnOverflowKeptRowIsAKeep is the overflow drop's side of
+// the refusal-kept re-add. The merge over thirteen companions does not fit in a
+// source_ref, so every companion is kept; the drop guard also hands one of them
+// back verbatim. In either emission order that re-add must land on the kept row
+// as a keep — not be refused as a claim on a moved row (which withheld the skip
+// fingerprint for a row that never moved), and not be INSERTed as a copy with
+// no decision link (which the reuse map's exclusion of kept rows produced when
+// the re-add came first).
+func TestAVerbatimReAddOfAnOverflowKeptRowIsAKeep(t *testing.T) {
+	for _, reAddFirst := range []bool{false, true} {
+		name := "merge first"
+		if reAddFirst {
+			name = "re-add first"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			var mems []string
+			for i := 0; i < 13; i++ {
+				_, mem, _, err := s.RecordDecision(ctx, testProject, fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mems = append(mems, mem)
+			}
+			rows, err := s.GetByIDs(ctx, mems[:1])
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("GetByIDs: %v", err)
+			}
+			first := rows[0]
+			fed := corpusRows(t, s, mems...)
+			before := countRows(t, s, "memories", testProject)
+
+			merge := Memory{Category: "decision", Content: "Thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems}
+			reAdd := Memory{Category: first.Category, Content: first.Content, Importance: first.Importance, Tags: first.Tags}
+			emitted := []Memory{merge, reAdd}
+			if reAddFirst {
+				emitted = []Memory{reAdd, merge}
+			}
+			preserved, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, emitted, "", fed)
+			if err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+			if dropped.Overflow != 1 || dropped.Changed != 0 {
+				t.Errorf("dropped = %+v, want the overflow alone: the re-add restates a row nothing moved", dropped)
+			}
+			if len(preserved) != 0 {
+				t.Errorf("preserved = %v, want empty", preserved)
+			}
+			if after := countRows(t, s, "memories", testProject); after != before {
+				t.Errorf("the project holds %d rows after the replace, want the %d it had: the re-add inserted a copy", after, before)
+			}
+		})
+	}
+}
