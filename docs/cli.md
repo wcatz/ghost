@@ -1528,18 +1528,26 @@ duplicate; a harmless one-word paraphrase is kept as two rows.
 The row whose text contains the others is kept verbatim (else the longest, newest
 as the tie-break; for byte-identical rows, the oldest), so its embedding and links
 stay with it. It takes the highest importance, the union of the tags and the longest
-retention tier among the cluster, and its text is never written. Only
-`source = 'reflection'` rows are planned.
+retention tier among the cluster, and its text is never written. It also takes the
+folded rows' decision links, appended to its own `source_ref`, so a later supersede of
+a decision a folded row stood for still retires the survivor, and, by the rule a
+reflection merge into an existing row uses, a validity window, verification stamp,
+confidence, agent and session from the folded rows only where it states none of its
+own. Only `source = 'reflection'` rows are planned.
 
 `--apply` folds every cluster in one transaction, naming rows by id and checking each
 again inside it before anything is written: a row that is no longer
 reflection-written or has become pinned, resolved or persistent, was saved at or
 after the run's start, or was edited since the plan is skipped and reported, never
-reverted. The replaceable set is snapshotted once, before the first delete. Each
+reverted. A cluster whose decision links would not fit in one `source_ref` is refused
+whole rather than folded with links dropped: each of its rows is reported as
+`skipped <id>: decision links do not fit in one source_ref (N link(s), 512-byte bound)`
+and stays live, and the other clusters still fold. The replaceable set is snapshotted once, before the first delete. Each
 folded row's history ends in a `delete` naming the survivor, and its evidence is
 carried onto the survivor. The fold writes only the survivors and deletes only the
 folded rows: an agent-saved row whose text is identical to a survivor's is not
-written in any column. The folded rows' own links and access counts go with them.
+written in any column. The folded rows' own memory links (the related/contradicts
+graph) and access counts go with them; their decision links do not.
 The dry run opens the store read-only, so a store behind this build's schema is
 reported and left as it was.
 

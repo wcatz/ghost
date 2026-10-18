@@ -7559,12 +7559,13 @@ func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m M
 // It returns whether the provenance stamp wrote, so the caller can file the
 // version.
 //
-// Two callers, one rule: the reuse branch of ReplaceNonManual, and a merge
+// Three callers, one rule: the reuse branch of ReplaceNonManual, a merge
 // promoted into _global (promoteReflectionCandidate), whose row is in the reused
 // row's position — it exists when the sources are merged into it, whether the
-// promotion inserted it or folded into a row _global already held. The tier is
-// the caller's, because a reuse raises its row's own tier and a promotion hands
-// foldedRetention to the upsert that writes the row.
+// promotion inserted it or folded into a row _global already held — and the
+// survivor of a FoldRows cluster, which is in the same position. The tier is
+// the caller's, because a reuse and a fold raise their row's own tier and a
+// promotion hands foldedRetention to the upsert that writes the row.
 func absorbSourcesTx(ctx context.Context, tx *sql.Tx, projectID, id string, m, folded Memory, keptLive, consumed map[string]bool) (bool, error) {
 	stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
 	if err != nil {
