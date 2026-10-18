@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -213,7 +214,7 @@ func ensureScratchSpace(w io.Writer, dryRun bool) {
 // The "claude" target requires both ghost and claude; the "opencode" target
 // requires only ghost.
 func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err error) {
-	ghostBin = findBinary("ghost")
+	ghostBin = findGhostBinary()
 	if ghostBin == "" {
 		return "", "", fmt.Errorf("ghost binary not found in PATH — install it first")
 	}
@@ -292,12 +293,22 @@ func commonDirExecutable(p string, st os.FileInfo) bool {
 // defer to the machine's PATHEXT order and content (env-dependent), while
 // the pinned list keeps probe behavior deterministic across machines.
 func findBinary(name string) string {
+	if c := binaryCandidates(name); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}
+
+// binaryCandidates lists every location findBinary would accept for name, in
+// findBinary's order: the PATH hit first, then each executable common-dir hit.
+func binaryCandidates(name string) []string {
+	var out []string
 	if p, err := exec.LookPath(name); err == nil {
-		return p
+		out = append(out, p)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return out
 	}
 	for _, dir := range append([]string{
 		filepath.Join(home, ".local", "bin"),
@@ -305,10 +316,35 @@ func findBinary(name string) string {
 	}, systemBinDirs...) {
 		for _, candidate := range commonBinCandidates(name) {
 			p := filepath.Join(dir, candidate)
-			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) {
-				return p
+			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) && !slices.Contains(out, p) {
+				out = append(out, p)
 			}
 		}
+	}
+	return out
+}
+
+// ghostProbeTimeout bounds each `ghost --version` probe in findGhostBinary.
+const ghostProbeTimeout = 5 * time.Second
+
+// findGhostBinary is findBinary("ghost") for paths written into client config
+// and hooks, which run later with the user's normal environment. It returns
+// the first candidate whose `--version` exits 0 — `--version` returns before
+// any config or data-directory work — so a PATH entry that refuses to run
+// here, such as a sandbox guard shim, is skipped for a working install (#1569).
+// When no candidate runs it fails open to findBinary's answer.
+func findGhostBinary() string {
+	candidates := binaryCandidates("ghost")
+	for _, p := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), ghostProbeTimeout)
+		err := exec.CommandContext(ctx, p, "--version").Run()
+		cancel()
+		if err == nil {
+			return p
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
 	}
 	return ""
 }

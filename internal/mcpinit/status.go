@@ -44,7 +44,7 @@ func Status(w io.Writer) (bool, error) {
 	}
 
 	// 1. Ghost binary.
-	ghostBin := findBinary("ghost")
+	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
 		"ghost binary not found in PATH")
@@ -176,7 +176,7 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	}
 
 	// 1. Ghost binary.
-	ghostBin := findBinary("ghost")
+	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
 		"ghost binary not found in PATH")
@@ -193,7 +193,7 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	pluginOK := false
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
-	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findBinary("ghost")) {
+	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findGhostBinary()) {
 		pluginOK = true
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
 	} else {
@@ -326,7 +326,7 @@ func ReportStaleIntegrations(w io.Writer) {
 				if err != nil || len(cmds) == 0 {
 					continue // integration not in use, or unreadable — leave status to `ghost mcp status`
 				}
-				if !contractHookWired(sf, c.event, c.token, "claude-code", findBinary("ghost")) {
+				if !contractHookWired(sf, c.event, c.token, "claude-code", findGhostBinary()) {
 					hints = append(hints, fmt.Sprintf("%s hook is pre-contract or miswired — run `ghost mcp init` to migrate it", c.label))
 				}
 			}
@@ -341,7 +341,7 @@ func ReportStaleIntegrations(w io.Writer) {
 	if _, statErr := os.Stat(opencodeDirOrEmpty()); statErr == nil {
 		stale := true
 		if pluginPath, perr := opencodePluginPath(); perr == nil {
-			want := renderOpencodeGhostPlugin(findBinary("ghost"))
+			want := renderOpencodeGhostPlugin(findGhostBinary())
 			if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == want {
 				stale = false
 			}
@@ -356,7 +356,7 @@ func ReportStaleIntegrations(w io.Writer) {
 	// ~/.codex dir exists but wiring is missing or drifted.
 	if codexDir, err := codexHomeDir(); err == nil {
 		if _, statErr := os.Stat(codexDir); statErr == nil {
-			bin := findBinary("ghost")
+			bin := findGhostBinary()
 			mcpOK, _ := codexMCPEntryStatus(bin)
 			wired := false
 			if rules, rerr := loadCodexHooksRules(); rerr == nil {
@@ -378,7 +378,7 @@ func ReportStaleIntegrations(w io.Writer) {
 	// integration — hint on any drift when an .agents/plugins dir exists.
 	if pluginDir, err := goosePluginDir(); err == nil {
 		if _, statErr := os.Stat(filepath.Dir(filepath.Dir(pluginDir))); statErr == nil {
-			bin := findBinary("ghost")
+			bin := findGhostBinary()
 			stale := false
 			for _, f := range goosePackageFiles(bin) {
 				if data, rerr := os.ReadFile(filepath.Join(pluginDir, f.rel)); rerr != nil || string(data) != f.want {

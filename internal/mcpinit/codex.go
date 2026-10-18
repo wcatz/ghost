@@ -2190,7 +2190,7 @@ func StatusCodex(w io.Writer) (bool, error) {
 	}
 
 	// 1. Ghost binary.
-	ghostBin := findBinary("ghost")
+	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
 		"ghost binary not found in PATH")
