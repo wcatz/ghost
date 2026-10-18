@@ -268,11 +268,10 @@ func TestPassiveKeyScanPlanDoesNotSortTheBucket(t *testing.T) {
 // default for that bucket (0.7 for a project, 0.8 for `_global`), so every rank
 // equals every importance and the window is decided by the secondary key alone:
 // created_at for `decay`, updated_at for `pinned_importance_updated`. The five
-// newest rows are inserted LAST, so the index hands them to the scan last: a
-// stop condition that fired on an equal importance would end the scan once the
-// window filled with older rows and never read them. The strict stop keeps
-// reading through the tie, and the five newest must be in the window, in the
-// legacy order.
+// newest rows are inserted LAST, so the index hands them to the scan last: the
+// scan reads a tie in the index's secondary-key order, newest first, so the
+// newest rows arrive before the non-strict stop can fire and all five must be
+// in the window, in the legacy order.
 func TestPassiveThresholdScanKeepsTheNewestTiedRows(t *testing.T) {
 	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
 	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -353,4 +352,191 @@ func idsOfMemories(memories []Memory) []string {
 		out[i] = m.ID
 	}
 	return out
+}
+
+// TestPassiveThresholdScanReadsStayBoundedOnTiedImportance pins the read count
+// (passiveKeyScanReads) on the save-defaults case, where importance is tied at
+// the edge, for both orders. Every row is a fact at the bucket's save default,
+// so all importances are equal and the scan must stop at the window rather than
+// walk the bucket.
+func TestPassiveThresholdScanReadsStayBoundedOnTiedImportance(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, pol := range []SlicePolicy{projectPassivePolicy(), globalPassivePolicy()} {
+		t.Run(pol.Order, func(t *testing.T) {
+			db, err := OpenDB(filepath.Join(t.TempDir(), pol.Order+"-tied-reads.db"))
+			if err != nil {
+				t.Fatalf("OpenDB: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			st := NewStore(db, nil)
+			ctx := context.Background()
+			bucket := pol.Bucket
+			if err := st.EnsureProject(ctx, bucket, bucket, bucket); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			imp := 0.7
+			if pol.Order == OrderPinnedImportanceUpdated {
+				imp = 0.8
+			}
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			for i := 0; i < 1000; i++ {
+				created := base.Add(time.Duration(i) * time.Hour).Format("2006-01-02 15:04:05")
+				if _, err := tx.Exec(
+					`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+					 VALUES (?, ?, 'fact', ?, 'manual', ?, 0, ?, ?)`,
+					fmt.Sprintf("t%06d", i), bucket, "tied importance fixture", imp, created, created,
+				); err != nil {
+					t.Fatalf("insert %d: %v", i, err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			cols, err := passiveColumnsFor(st)
+			if err != nil {
+				t.Fatalf("passiveColumnsFor: %v", err)
+			}
+			req := passiveRequest("proj", pol)
+			req.Now = now
+			resetPassiveKeyScan()
+			got, err := st.passiveWindow(ctx, req, pol, cols)
+			if err != nil {
+				t.Fatalf("passiveWindow: %v", err)
+			}
+			if len(got) != pol.OverFetch {
+				t.Fatalf("the window holds %d rows, want %d", len(got), pol.OverFetch)
+			}
+			if reads := passiveKeyScanReads(); reads > int64(pol.OverFetch)+2 {
+				t.Errorf("the scan read %d rows for a %d-row window on tied importance; it must not walk the bucket",
+					reads, pol.OverFetch)
+			}
+			want := legacyPassiveWindow(t, st, pol, req, cols)
+			if !eqStrings(idsOfMemories(got), want) {
+				t.Fatalf("the threshold scan differs from the legacy window:\n got %v\nwant %v",
+					idsOfMemories(got), want)
+			}
+		})
+	}
+}
+
+// TestPassiveThresholdScanBreaksSameTimestampTiesOnID pins the id tie-break when
+// importance and the secondary key are both equal. Rows are inserted in
+// descending id order so that, without id in the scan's ORDER BY, the smaller-id
+// rows arrive after the non-strict stop and never enter the window.
+func TestPassiveThresholdScanBreaksSameTimestampTiesOnID(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	stamp := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	for _, pol := range []SlicePolicy{projectPassivePolicy(), globalPassivePolicy()} {
+		t.Run(pol.Order, func(t *testing.T) {
+			db, err := OpenDB(filepath.Join(t.TempDir(), pol.Order+"-same-ts.db"))
+			if err != nil {
+				t.Fatalf("OpenDB: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			st := NewStore(db, nil)
+			ctx := context.Background()
+			bucket := pol.Bucket
+			if err := st.EnsureProject(ctx, bucket, bucket, bucket); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			imp := 0.7
+			if pol.Order == OrderPinnedImportanceUpdated {
+				imp = 0.8
+			}
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			// Insert in descending id order.
+			for i := 300; i >= 1; i-- {
+				id := fmt.Sprintf("id%04d", i)
+				if _, err := tx.Exec(
+					`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+					 VALUES (?, ?, 'fact', ?, 'manual', ?, 0, ?, ?)`,
+					id, bucket, "same timestamp fixture", imp, stamp, stamp,
+				); err != nil {
+					t.Fatalf("insert %s: %v", id, err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			cols, err := passiveColumnsFor(st)
+			if err != nil {
+				t.Fatalf("passiveColumnsFor: %v", err)
+			}
+			req := passiveRequest("proj", pol)
+			req.Now = now
+			got, err := st.passiveWindow(ctx, req, pol, cols)
+			if err != nil {
+				t.Fatalf("passiveWindow: %v", err)
+			}
+			want := legacyPassiveWindow(t, st, pol, req, cols)
+			if !eqStrings(idsOfMemories(got), want) {
+				t.Fatalf("the threshold scan differs from the legacy window:\n got %v\nwant %v",
+					idsOfMemories(got), want)
+			}
+		})
+	}
+}
+
+// TestPassiveKeyScanPlanUsesBothIndexShapes is the plan pin for both scan
+// shapes: the decay bucket streams out of idx_memories_project_imp and the
+// pinned/importance bucket out of idx_memories_project_imp_updated, with no
+// temp b-tree sort in either case.
+func TestPassiveKeyScanPlanUsesBothIndexShapes(t *testing.T) {
+	st := thresholdScanFixture(t, 60, 60)
+	// seed a _global bucket for the updated index shape.
+	ctx := context.Background()
+	if err := st.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("passiveColumnsFor: %v", err)
+	}
+	cases := []struct {
+		pol   SlicePolicy
+		index string
+	}{
+		{projectPassivePolicy(), "idx_memories_project_imp"},
+		{globalPassivePolicy(), "idx_memories_project_imp_updated"},
+	}
+	for _, c := range cases {
+		t.Run(c.pol.Order, func(t *testing.T) {
+			req := passiveRequest("proj", c.pol)
+			q, args := passiveKeyScanSQL(c.pol, req, cols, false)
+			rows, err := st.db.Query("EXPLAIN QUERY PLAN "+q, args...)
+			if err != nil {
+				t.Fatalf("explain query plan: %v", err)
+			}
+			defer rows.Close() //nolint:errcheck
+			var details []string
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+					t.Fatalf("scan plan row: %v", err)
+				}
+				details = append(details, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("iterate plan: %v", err)
+			}
+			plan := strings.Join(details, " | ")
+			if len(details) == 0 {
+				t.Fatal("the query plan is empty, so nothing is pinned")
+			}
+			if strings.Contains(plan, "USE TEMP B-TREE") {
+				t.Errorf("the passive key scan sorts the bucket:\n%s", plan)
+			}
+			if !strings.Contains(plan, c.index) {
+				t.Errorf("the passive key scan does not stream out of %s:\n%s", c.index, plan)
+			}
+		})
+	}
 }

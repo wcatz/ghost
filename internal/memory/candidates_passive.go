@@ -616,9 +616,9 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 	if !cols.HasTier {
 		retention = "'' AS retention"
 	}
-	orderBy := "importance DESC, created_at DESC"
+	orderBy := "importance DESC, created_at DESC, id"
 	if pol.Order == OrderPinnedImportanceUpdated {
-		orderBy = "importance DESC, updated_at DESC"
+		orderBy = "importance DESC, updated_at DESC, id"
 	}
 	query := fmt.Sprintf(`
 		SELECT id, importance, pinned, category, created_at, updated_at, %s

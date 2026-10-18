@@ -721,8 +721,7 @@ END`,
 END`,
 		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source)`,
 	}
 	for _, stmt := range stmts {
@@ -1030,8 +1029,7 @@ END`,
 END`,
 		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source)`,
 	}
 	for _, s := range stmts {
@@ -1956,8 +1954,8 @@ func migrateV26(tx *sql.Tx) error {
 func migrateV27(tx *sql.Tx) error {
 	stmts := []string{
 		`DROP INDEX IF EXISTS idx_memories_project_imp`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC, id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

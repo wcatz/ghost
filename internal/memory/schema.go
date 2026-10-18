@@ -142,8 +142,8 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.conte
 END;
 
 CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category);
-CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source);
 
 CREATE TABLE IF NOT EXISTS ghost_state (
