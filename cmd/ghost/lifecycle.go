@@ -133,10 +133,10 @@ func runLifecycle() int {
 		if fallback.Reflection.AutoSupersede {
 			phases = append(phases, "supersede")
 		}
-		if len(phases) > 0 {
-			if werr := mcpinit.WriteLifecycleFailure(projectName, phases, fmt.Sprintf("error: load config: %v", err)); werr != nil {
-				lifecycleLogf(projectName, "warning: could not record run outcome: %v", werr)
-			}
+		// Written even when no phase is enabled: the marker renders an empty
+		// list as "none", and skipping it would leave the next session silent.
+		if werr := mcpinit.WriteLifecycleFailure(projectName, phases, fmt.Sprintf("error: load config: %v", err)); werr != nil {
+			lifecycleLogf(projectName, "warning: could not record run outcome: %v", werr)
 		}
 		if terr := mcpinit.TouchLifecycleStart(projectName); terr != nil {
 			lifecycleLogf(projectName, "warning: could not record the run start (%v)", terr)

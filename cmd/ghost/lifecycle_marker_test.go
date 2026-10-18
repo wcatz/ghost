@@ -135,8 +135,8 @@ func TestRunLifecycle_UnparseableConfigRecordsFailureAndExitsNonzero(t *testing.
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	_ = db.Close()
-	// The environment still enables a phase, so the marker has one to name.
-	t.Setenv("GHOST_REFLECTION_AUTO_REFLECT", "true")
+	// No phase is enabled (the defaults leave all three off): the marker must
+	// still be written, naming none.
 
 	origArgs := os.Args
 	os.Args = []string{origArgs[0], "lifecycle", "--project", "projx"}
