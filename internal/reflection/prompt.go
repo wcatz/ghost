@@ -180,6 +180,16 @@ type ReflectMemory struct {
 	Importance float32  `json:"importance"`
 	Tags       []string `json:"tags"`
 	Scope      string   `json:"scope,omitempty"` // "project" (default) or "global"
+	// RestatesID is the input row this memory restates verbatim — a keep, the
+	// pass-through of a row the response never named, a source re-emitted
+	// because the grounding check refused its merge or rewrite, or a row the
+	// drop guard handed back — and "" for a merge or rewrite survivor. The join
+	// that gives an emission the ids it replaced is keyed on text, and a row the
+	// response did not consume can carry exactly the text a merge produced: this
+	// is what keeps that row's own emission from inheriting the merge's sources.
+	// Never read from the model's answer (json:"-"): only executeOps and
+	// RetainGuardedDrops, which hold the row, set it.
+	RestatesID string `json:"-"`
 }
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
