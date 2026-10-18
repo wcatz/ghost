@@ -455,7 +455,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// lifecycle.log.
 	dataHome := isolatedHome(t)
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when every phase is disabled, stat err = %v", err)
@@ -478,7 +478,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
@@ -531,7 +531,7 @@ func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T)
 		// the only writer of the line, and the only path that writes nothing
 		// else (the spawn log and the pid file are both past it).
 		writeStamp(t, dataDir, p.id, now, time.Minute)
-		spawnLifecycleIfConfigured(canonical, "", nil)
+		spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
 	}
 
 	b, err := os.ReadFile(filepath.Join(dataDir, "lifecycle.log"))
@@ -570,7 +570,7 @@ func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *test
 	}
 	t.Setenv("PATH", t.TempDir())
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
 		t.Errorf("expected the resolve phase to reach config.DataDir, stat err = %v", err)
@@ -602,7 +602,7 @@ func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 	}
 	seedProject(t, dataHome, "p1", canonical, "myproj")
 
-	spawnLifecycleIfConfigured(canonical, "", nil)
+	spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
 
 	// Per-project marker: the seed above registers p1, and the spawn resolves
 	// the session directory to it, so that is the file written.
