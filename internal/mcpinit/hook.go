@@ -650,21 +650,30 @@ func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string
 
 // sessionCountsBase is the count line before the pinned-row clause.
 func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string) string {
-	shown, total := tally.Shown, tally.Total()
+	shown := tally.Shown
+	// A count that stopped at its cap is a lower bound, so every figure derived
+	// from it is written "N+": the total, and the rows behind the window that
+	// are ranked out or withheld. The shown count is the block's own and exact.
+	// Below the cap the suffix is empty and the bytes are what they always were.
+	more := ""
+	if tally.AtLeast {
+		more = "+"
+	}
+	total := fmt.Sprintf("%d%s", tally.Total(), more)
 	// Rows the bucket policy removed as near-duplicate losers are not the
 	// ranking's cut either, so they ride with the withheld rows: one count of
 	// "not the ranking's doing".
 	withheld := tally.Withheld + tally.Deduped
 	switch {
 	case withheld > 0 && tally.RankedOut > 0:
-		return fmt.Sprintf("%d shown of %d total — %d not shown: %d ranked out by %s, %d withheld rather than ranked out; use %s for the rest",
-			shown, total, tally.RankedOut+withheld, tally.RankedOut, rankPhrase, withheld, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s not shown: %d%s ranked out by %s, %d%s withheld rather than ranked out; use %s for the rest",
+			shown, total, tally.RankedOut+withheld, more, tally.RankedOut, more, rankPhrase, withheld, more, toolPhrase)
 	case withheld > 0:
-		return fmt.Sprintf("%d shown of %d total — %d withheld rather than ranked out; use %s for the rest",
-			shown, total, withheld, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s withheld rather than ranked out; use %s for the rest",
+			shown, total, withheld, more, toolPhrase)
 	case tally.RankedOut > 0:
-		return fmt.Sprintf("%d shown of %d total — %d not shown, ranked by %s; use %s for the rest",
-			shown, total, tally.RankedOut, rankPhrase, toolPhrase)
+		return fmt.Sprintf("%d shown of %s total — %d%s not shown, ranked by %s; use %s for the rest",
+			shown, total, tally.RankedOut, more, rankPhrase, toolPhrase)
 	default:
 		return ""
 	}

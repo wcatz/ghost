@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,5 +383,71 @@ func TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow(t *tes
 	}
 	if strings.Contains(got, "**Memories (") {
 		t.Errorf("a block with nothing shown rendered a count-line header; got:\n%s", got)
+	}
+}
+
+// topUpOutcomeRows adds n live rows to the fixture project's store in one
+// statement, so a test can sit on either side of the eligible count's cap. The
+// rows rank below the fixture's own, which keeps the shown rows the same.
+func topUpOutcomeRows(t *testing.T, n int) {
+	t.Helper()
+	db, err := memory.OpenDB(filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?)
+		INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
+		SELECT 'bulk' || i, 'p1', 'fact', 'bulk row ' || i, 'manual', 0.1, '2025-01-01 00:00:00' FROM seq`, n); err != nil {
+		t.Fatalf("seed %d rows: %v", n, err)
+	}
+}
+
+// TestSessionStartHeaderSaysAtLeastWhenTheCountStoppedAtTheCap: past the cap the
+// store's count is a lower bound, and the header says so instead of naming the
+// over-fetch window as the total (issue #1531: "15 shown of 45 total" for a
+// project of twelve thousand rows). The not-shown counts are lower bounds too.
+func TestSessionStartHeaderSaysAtLeastWhenTheCountStoppedAtTheCap(t *testing.T) {
+	const fixtureRows = 60
+	cap := memory.PassiveEligibleCountCap
+	for _, tc := range []struct {
+		name string
+		rows int
+	}{
+		{"at the cap", cap},
+		{"above the cap", cap + 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := outcomeSession(t, fixtureRows, 0)
+			topUpOutcomeRows(t, tc.rows-fixtureRows)
+			got := renderSessionStart(t, path)
+
+			want := fmt.Sprintf("**Memories (15 shown of %d+ total — %d+ not shown, ranked by a composite score of importance, "+
+				"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**",
+				cap, cap-15)
+			if !strings.Contains(got, want) {
+				t.Errorf("the header does not say the total is at least the cap:\n want %q\n got:\n%s", want, got)
+			}
+			if strings.Contains(got, "of 45 total") {
+				t.Errorf("the header names the over-fetch window as the total:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestSessionStartHeaderIsExactJustBelowTheCap is the control: one row under the
+// cap the count is exact and the header carries no suffix.
+func TestSessionStartHeaderIsExactJustBelowTheCap(t *testing.T) {
+	cap := memory.PassiveEligibleCountCap
+	path := outcomeSession(t, 60, 0)
+	topUpOutcomeRows(t, cap-1-60)
+	got := renderSessionStart(t, path)
+
+	want := fmt.Sprintf("**Memories (15 shown of %d total — %d not shown, ranked by a composite score of importance, "+
+		"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**",
+		cap-1, cap-1-15)
+	if !strings.Contains(got, want) {
+		t.Errorf("the exact header changed below the cap:\n want %q\n got:\n%s", want, got)
 	}
 }

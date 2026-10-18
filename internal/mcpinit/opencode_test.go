@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	"os"
 	"path/filepath"
@@ -52,8 +53,9 @@ func stubPath(dir, name string) string {
 }
 
 // writeStub creates an executable stub at binDir/name. The stubs exist to be
-// found by exec.LookPath and echoed into rendered config, never run — but the
-// Windows form must still be a real batch file, since PATHEXT governs both
+// found by exec.LookPath and echoed into rendered config; the only run they
+// get is findGhostBinary's `--version` probe, which they pass by exiting 0.
+// The Windows form must be a real batch file, since PATHEXT governs both
 // discovery and execution there.
 func writeStub(t *testing.T, binDir, name string) string {
 	t.Helper()
@@ -443,6 +445,64 @@ func TestFindBinary_CommonDirFallback(t *testing.T) {
 
 	if got := findBinary("claude"); got != stub {
 		t.Errorf("findBinary(claude) = %q, want %q from the common-dir fallback", got, stub)
+	}
+}
+
+// writeExitStub creates an executable stub at dir that exits with code, in
+// the form exec.LookPath resolves on this OS.
+func writeExitStub(t *testing.T, dir, name string, code int) string {
+	t.Helper()
+	content := fmt.Sprintf("#!/bin/sh\nexit %d\n", code)
+	if runtime.GOOS == "windows" {
+		content = fmt.Sprintf("@echo off\r\nexit /b %d\r\n", code)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := stubPath(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestFindGhostBinary_SkipsPathHitThatRefusesToRun pins #1569: a ghost on
+// PATH that cannot run in this environment (a sandbox guard shim exits
+// non-zero outside its sandbox) must not be written into hooks when a
+// working ghost sits in a common install dir.
+func TestFindGhostBinary_SkipsPathHitThatRefusesToRun(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	orig := systemBinDirs
+	systemBinDirs = nil
+	t.Cleanup(func() { systemBinDirs = orig })
+
+	shimDir := t.TempDir()
+	writeExitStub(t, shimDir, "ghost", 97)
+	t.Setenv("PATH", shimDir)
+	good := writeExitStub(t, filepath.Join(home, ".local", "bin"), "ghost", 0)
+
+	if got := findGhostBinary(); got != good {
+		t.Errorf("findGhostBinary() = %q, want %q (the PATH hit exits 97)", got, good)
+	}
+}
+
+// TestFindGhostBinary_FailsOpenToPathHit keeps a lone ghost that fails the
+// probe usable: with no working alternative the PATH hit is returned as
+// before, rather than reporting ghost as not installed.
+func TestFindGhostBinary_FailsOpenToPathHit(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	orig := systemBinDirs
+	systemBinDirs = nil
+	t.Cleanup(func() { systemBinDirs = orig })
+
+	shimDir := t.TempDir()
+	shim := writeExitStub(t, shimDir, "ghost", 97)
+	t.Setenv("PATH", shimDir)
+
+	if got := findGhostBinary(); got != shim {
+		t.Errorf("findGhostBinary() = %q, want the PATH hit %q when nothing else runs", got, shim)
 	}
 }
 

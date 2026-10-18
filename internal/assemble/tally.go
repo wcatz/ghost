@@ -62,6 +62,11 @@ type BucketTally struct {
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
 	Reason string
+	// AtLeast is set when the store's count stopped at its cap, so every count
+	// derived from it (Total, and the ranked-out and withheld rows behind the
+	// window) is a LOWER BOUND, not the figure. A header reads it to say "at
+	// least" instead of naming a total it did not count. Set by CountedAtLeast.
+	AtLeast bool
 }
 
 // Window is the number of rows the retrieval's over-fetched window held for
@@ -97,8 +102,24 @@ func (t BucketTally) Total() int {
 // nothing; a count smaller than what the tally already holds (a write raced the
 // two reads) never shrinks the tally.
 func (t BucketTally) CountedAgainst(eligible, excluded, overFetch int) BucketTally {
+	got, _ := t.countedAgainst(eligible, excluded, overFetch)
+	return got
+}
+
+// CountedAtLeast is CountedAgainst for a count that stopped at its cap: the
+// store holds AT LEAST `eligible` rows, so the folded tally is a lower bound and
+// is marked AtLeast. A count that could not be folded (see CountedAgainst)
+// leaves the tally untouched and unmarked, so the header describes the window
+// rather than claiming a bound it did not fold in.
+func (t BucketTally) CountedAtLeast(eligible, excluded, overFetch int) BucketTally {
+	got, ok := t.countedAgainst(eligible, excluded, overFetch)
+	got.AtLeast = ok
+	return got
+}
+
+func (t BucketTally) countedAgainst(eligible, excluded, overFetch int) (BucketTally, bool) {
 	if eligible < 0 || excluded < 0 || excluded > eligible || eligible < t.Total() {
-		return t
+		return t, false
 	}
 	inWindow := eligible - excluded
 	fetched := inWindow
@@ -118,7 +139,7 @@ func (t BucketTally) CountedAgainst(eligible, excluded, overFetch int) BucketTal
 			t.Reason = validityExpired
 		}
 	}
-	return t
+	return t, true
 }
 
 // CountsFor tallies one bucket's fate from a trace. `shown` is the caller's own
