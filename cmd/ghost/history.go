@@ -355,12 +355,21 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 			who += " session " + assemble.Data(e.SessionID)
 		}
 	}
-	if _, err := fmt.Fprintf(w, "\n%s  %s  (%s)\n", e.RecordedAt, e.Phase, who); err != nil {
+	// The two stamps are stored text too: `ghost import` binds a memory's
+	// resolved_at and updated_at verbatim, the history row copies resolved_at, and
+	// a stamp-moving phase files updated_at as recorded_at. They go through
+	// assemble.Label rather than Token or Data: a stamp SQLite wrote holds a space,
+	// which Token would quote on every row, and Data folds line breaks but passes
+	// a terminal escape through. Label leaves a real stamp byte-identical and
+	// escapes every control and line-ending rune, so the entry stays one header
+	// line and one state line whatever the column holds. Phase, category and
+	// source are not here because the schema's CHECKs close all three.
+	if _, err := fmt.Fprintf(w, "\n%s  %s  (%s)\n", assemble.Label(e.RecordedAt), e.Phase, who); err != nil {
 		return err
 	}
 	resolved := "unresolved"
 	if e.ResolvedAt != nil {
-		resolved = "resolved at " + *e.ResolvedAt
+		resolved = "resolved at " + assemble.Label(*e.ResolvedAt)
 	}
 	if _, err := fmt.Fprintf(w, "  %s/%s importance %.2f, %s, project %s\n",
 		e.Category, e.Source, e.Importance, resolved, assemble.Token(e.ProjectID)); err != nil {

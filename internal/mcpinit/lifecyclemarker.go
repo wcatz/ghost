@@ -833,6 +833,18 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// command to give. Degenerate — stay silent.
 		return ""
 	}
+	// A marker that cannot be cleared — the data directory refuses new
+	// entries — is not presented as the current cause: it may be stale, and
+	// the blocker is the directory, not the recorded phase. Surface that
+	// instead, on the same session-start line (#1580).
+	if dataDir, err := config.DataDirPath(); err == nil {
+		if werr := lifecycleBookkeepingWritable(dataDir); werr != nil {
+			p = renderMarkerProject(p)
+			return fmt.Sprintf(
+				"**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry.",
+				withoutPath(werr), p, at.Format(time.RFC3339), p)
+		}
+	}
 	p = renderMarkerProject(p)
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",

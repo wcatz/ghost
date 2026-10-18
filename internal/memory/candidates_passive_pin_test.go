@@ -333,3 +333,58 @@ func TestAnExpiredOrResolvedReplacementIsNotPulledIn(t *testing.T) {
 		})
 	}
 }
+
+// TestTwoPinnedNearDuplicatesBothStayOnTheGlobalDropBucket: the `_global`
+// bucket REMOVES a near-duplicate loser, and nearDuplicatePenaltyRows flips the
+// verdict only when exactly one side is protected. With both rows pinned the
+// lower-ranked pin was still the loser, and the drop took it out of the session
+// start. A pin is a slot guarantee on every passive surface, so neither row of
+// a pinned pair leaves, and nothing is reported as dropped. The control keeps
+// the existing rule: with only the winner pinned, the unpinned loser is
+// removed and attributed to it.
+func TestTwoPinnedNearDuplicatesBothStayOnTheGlobalDropBucket(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		pinned      []string
+		wantDropped string
+	}{
+		"both pinned":        {pinned: []string{"gp_mid", "gp_high"}},
+		"only winner pinned": {pinned: []string{"gp_high"}, wantDropped: "gp_mid"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := passiveFixture(t)
+			for _, id := range tc.pinned {
+				if _, err := st.db.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, id); err != nil {
+					t.Fatalf("pin %s: %v", id, err)
+				}
+			}
+			if err := st.CreateLink(ctx, "gp_mid", "gp_high", "duplicate", 1, "manual"); err != nil {
+				t.Fatalf("link: %v", err)
+			}
+			set, err := st.Candidates(ctx, passiveRequest("proj", globalPassivePolicy()))
+			if err != nil {
+				t.Fatalf("passive Candidates: %v", err)
+			}
+			ids := passiveIDs(set)
+			if !containsStr(ids, "gp_high") {
+				t.Fatalf("the pinned winner left the set: %v", ids)
+			}
+			if tc.wantDropped == "" {
+				if !containsStr(ids, "gp_mid") {
+					t.Errorf("a pinned row was removed as the loser of a pair whose other row is pinned too: %v", ids)
+				}
+				if len(set.DroppedLosers) != 0 {
+					t.Errorf("DroppedLosers = %+v, want none: no row of a pinned pair is removed", set.DroppedLosers)
+				}
+				return
+			}
+			if containsStr(ids, tc.wantDropped) {
+				t.Errorf("the unpinned loser %s survived the drop: %v", tc.wantDropped, ids)
+			}
+			if len(set.DroppedLosers) != 1 || set.DroppedLosers[0].ID != tc.wantDropped ||
+				len(set.DroppedLosers[0].LostTo) != 1 || set.DroppedLosers[0].LostTo[0] != "gp_high" {
+				t.Errorf("DroppedLosers = %+v, want %s lost to gp_high", set.DroppedLosers, tc.wantDropped)
+			}
+		})
+	}
+}
