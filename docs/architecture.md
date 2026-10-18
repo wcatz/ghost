@@ -1834,9 +1834,11 @@ Axis interaction rules:
 > the trace plus ONE count (`Store.PassiveEligibleCount`) over the population the
 > window and the count share (`passivePopulationSQL`), so M is the eligible rows
 > the store holds and not the over-fetched window's size. That count is CAPPED at
-> `passiveEligibleCountCap`: past it the count is UNKNOWN and the header describes
-> the window alone, because an exact census of a bucket that large costs a table
-> pass at every session start for a number no reader acts on. A row a stage
+> `PassiveEligibleCountCap`: past it the count is a LOWER BOUND, marked on the
+> tally (`BucketTally.AtLeast`, set by `CountedAtLeast`), and the header reads
+> "of 10000+ total" with the not-shown counts suffixed the same way, because an
+> exact census of a bucket that large costs a table pass at every session start
+> for a number no reader acts on. It never names the window as the total. A row a stage
 > withheld is inside the window and so is not counted twice; eligible rows the
 > threshold scan never read are ranked out, because the window is ordered by the
 > ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch

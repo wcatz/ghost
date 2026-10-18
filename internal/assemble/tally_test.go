@@ -281,3 +281,23 @@ func TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt(
 		t.Errorf("rows ranked out inside the window mean the bucket is not wholly withheld, got %q", got)
 	}
 }
+
+// TestCountedAtLeastMarksTheTallyALowerBound: a count that stopped at its cap
+// folds in like an exact one, so the total is the cap rather than the window's
+// size, and the tally says the figure is a lower bound. A count that cannot be
+// folded leaves the tally as the window made it, unmarked.
+func TestCountedAtLeastMarksTheTallyALowerBound(t *testing.T) {
+	got := BucketTally{Shown: 15, RankedOut: 30}.CountedAtLeast(10000, 0, 45)
+	if got.Total() != 10000 || !got.AtLeast {
+		t.Errorf("Total/AtLeast = %d/%v, want 10000/true: %+v", got.Total(), got.AtLeast, got)
+	}
+	if got.RankedOut != 9985 || got.Beyond != 9955 {
+		t.Errorf("RankedOut/Beyond = %d/%d, want 9985/9955", got.RankedOut, got.Beyond)
+	}
+	if exact := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(60, 0, 45); exact.AtLeast {
+		t.Errorf("an exact count was marked a lower bound: %+v", exact)
+	}
+	if un := (BucketTally{Shown: 15, RankedOut: 30}).CountedAtLeast(-1, 0, 45); un.AtLeast || un.Total() != 45 {
+		t.Errorf("an unfoldable count changed or marked the tally: %+v", un)
+	}
+}

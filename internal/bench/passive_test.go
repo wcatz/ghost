@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -487,5 +488,25 @@ func TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestHeaderParserReadsTheCappedForm: past the eligible count's cap the header
+// writes its counts as "N+", and the parser records N, the lower bound, rather
+// than failing to match.
+func TestHeaderParserReadsTheCappedForm(t *testing.T) {
+	for _, tc := range []struct{ name, header string }{
+		{"exact", "15 shown of 60 total — 45 not shown: 40 ranked out by x, 5 withheld rather than ranked out"},
+		{"capped", "15 shown of 60+ total — 45+ not shown: 40+ ranked out by x, 5+ withheld rather than ranked out"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for re, want := range map[*regexp.Regexp]int{
+				hdrTotalRE: 60, hdrNotShownRE: 45, hdrRankedOutRE: 40, hdrWithheldRE: 5,
+			} {
+				if got := atoi(re, tc.header); got != want {
+					t.Errorf("%s: %s read %d, want %d", tc.header, re, got, want)
+				}
+			}
+		})
 	}
 }
