@@ -1121,7 +1121,9 @@ quietly.
 
 "Which run last looked at this memory" is no longer a question the change log
 answers, deliberately: it is not state, and the run itself is already in
-`lifecycle.log`. One consequence is worth stating because it is a narrowing
+`lifecycle.log`, where each run opens with a `run started` line and every line
+the coordinator writes carries its project and its time, so a run is found there
+even when another project's run is interleaved with it. One consequence is worth stating because it is a narrowing
 rather than a fix — a memory written before v17 and thereafter only ever carried
 through keeps no version at all, so an `as_of` read reports it in `Unknown` for as
 long as nothing changes it. That is the honest answer (the store cannot say what
