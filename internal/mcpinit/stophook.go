@@ -710,10 +710,10 @@ func claimPidFile(pidPath string) (bool, error) {
 
 // lifecycleBookkeepingWritable reports whether the data directory accepts new
 // entries — the prerequisite for every bookkeeping file the lifecycle writes
-// (the cooldown stamp, the pid claim, the failure marker). It is a probe, not a
-// claim: it creates and immediately removes a temporary file, and returns the
-// underlying error on refusal. The caller surfaces that error on a surface
-// that does not depend on writing to the data directory.
+// (the cooldown stamp, the pid claim, the failure marker). It is a writability
+// check, not a claim: it creates and immediately removes a temporary file, and
+// returns the underlying error on refusal. The caller surfaces that error on a
+// surface that does not depend on writing to the data directory.
 func lifecycleBookkeepingWritable(dataDir string) error {
 	f, err := os.CreateTemp(dataDir, ".ghost-lifecycle-writability-*")
 	if err != nil {
