@@ -106,10 +106,10 @@ type record struct {
 	// when the two disagreed.
 	SchemaVersion int `json:"schema_version,omitempty"`
 
-	// Features names the optional fields or capabilities this artifact relies
-	// on that an importer must understand. An importer that does not understand
-	// one refuses the file rather than silently dropping the field. A field that
-	// is truly optional is not listed here and stays ignorable.
+	// Features names the must-understand features this artifact relies on. An
+	// importer that does not understand one refuses the file rather than
+	// silently dropping the field. A field that is not listed here is one an
+	// older build may ignore, which is why a must-understand one is listed.
 	Features []string `json:"features,omitempty"`
 }
 

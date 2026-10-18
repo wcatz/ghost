@@ -365,8 +365,8 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 // the wrong file.
 var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
 
-// checkHeaderFeatures refuses an artifact whose header declares a feature or a
-// minor version this build does not understand. A newer artifact's fields mean
+// checkHeaderFeatures refuses an artifact whose header declares a feature this
+// build does not understand. A newer artifact's fields mean
 // whatever this build guesses, and importing it would store a weaker row while
 // reporting that provenance was kept. A header that declares nothing is accepted,
 // so an artifact written before this mechanism existed still imports.
