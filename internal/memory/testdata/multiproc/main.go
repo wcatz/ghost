@@ -237,7 +237,7 @@ type options struct {
 
 func parseFlags() options {
 	var o options
-	flag.StringVar(&o.role, "role", "", "role to run (mcp, cli, ro, maint, snapshot, poller)")
+	flag.StringVar(&o.role, "role", "", "role to run (mcp, cli, ro, maint, snapshot, poller, vecwrite, open)")
 	flag.StringVar(&o.dbPath, "db", "", "path to the shared database file")
 	flag.StringVar(&o.project, "project", "", "project id this role reads and writes")
 	flag.StringVar(&o.label, "label", "", "this process's label, used to name its barrier files")
@@ -306,6 +306,8 @@ func main() {
 		err = runPoller(ctx, o, rep, b)
 	case "vecwrite":
 		err = runVectorWrite(ctx, o, rep)
+	case "open":
+		err = runOpen(o, rep, b)
 	default:
 		err = fmt.Errorf("unknown role %q", o.role)
 	}
@@ -1333,4 +1335,33 @@ func runVectorWrite(ctx context.Context, o options, rep *report) error {
 		rep.KV["op"] = o.op
 	}
 	return err
+}
+
+// runOpen is the open role: one memory.OpenDB of the shared file, started on a
+// barrier so that two of them meet a lagging store at the same moment. It
+// reports itself ready, waits for the parent's "go", opens, and reports the
+// user_version the open left behind. Opening IS the operation under test — the
+// first open after a schema-bumping upgrade, made by two processes at once —
+// so the role does nothing after it but read the stamp back.
+func runOpen(o options, rep *report, b barriers) error {
+	if o.label == "" {
+		return errors.New("open role needs -label")
+	}
+	if err := b.signal("ready-" + o.label); err != nil {
+		return err
+	}
+	if err := b.wait("go", time.Now().Add(barrierDeadline)); err != nil {
+		return err
+	}
+	db, err := memory.OpenDB(o.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	rep.KV["user_version"] = strconv.Itoa(v)
+	return nil
 }
