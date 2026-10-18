@@ -25,11 +25,12 @@ A config file that exists but does not parse is never ignored. The error names t
 
 "Environment plus the compiled defaults" means every layer that does not read a config file. The `GHOST_*` variables still apply, so a broken file cannot undo an opt-out you set in the environment (`GHOST_EMBEDDING_ENABLED=false`, `GHOST_SCRATCH_MAX_BYTES=0`). Only the file layers are lost.
 
-A file that exists but cannot be **read** — wrong permissions, or one owned by root — is a warning and is skipped, as it always was; only a file that is readable and does not **parse** stops a command.
+A file that exists but cannot be **read** — wrong permissions, or one owned by root — is a warning and is skipped, as it always was; a path that is not a **regular file** — a FIFO, a device, a directory — is skipped with the same warning and not one of its bytes is read, because a FIFO opened for reading blocks until a writer appears and would stop every command that loads config. A symlink is still followed, since a linked `config.yaml` is an ordinary setup, and the check applies to what the link names. Only a file that is readable and does not **parse** stops a command.
 
 ```text
 ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to the environment and built-in defaults
 ghost: config: cannot read /etc/ghost/config.yaml: open /etc/ghost/config.yaml: permission denied — skipping it
+ghost: config: cannot read /home/you/.config/ghost/config.yaml: not a regular file (p) — skipping it
 ```
 
 ## Unknown keys
