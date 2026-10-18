@@ -57,7 +57,7 @@ func TestOpenDBMigratesAV26StoreToTheTieOrderedIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB (migrate): %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 	var v int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		t.Fatalf("read user_version: %v", err)

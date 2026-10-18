@@ -1843,7 +1843,7 @@ Axis interaction rules:
 > for a number no reader acts on. It never names the window as the total. A row a stage
 > withheld is inside the window and so is not counted twice; eligible rows the
 > threshold scan never read are ranked out, because the window is ordered by the
-> ranking and cut at its limit The scan reads rows in importance order and, within one importance value, in the policy's tie order — created_at then id for `decay`, updated_at then id for `pinned_importance_updated` — and the stop is non-strict: a row whose importance is at or below the window's k-th key cannot beat it, so the read count stays bounded by the window even when importance is tied at the edge (the save-defaults case). The id term is the window's final tie-break and is required for the non-strict stop to be sound. (`BucketTally.CountedAgainst` takes the over-fetch
+> ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch
 > limit for exactly that split). A row the retriever fetched and then removed as a near-duplicate
 > loser never enters `CandidateSet.Rows`, but the retriever reports it in
 > `CandidateSet.DroppedLosers` with the ids it lost to, and stage 6 files it as a
