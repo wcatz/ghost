@@ -485,6 +485,14 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	if err != nil {
 		return fail(err)
 	}
+	// Refused before anything opens it, for the reason ReadBackupManifest
+	// refuses a manifest the same way: the hash below reads the whole file, and
+	// opening a FIFO for reading blocks until a writer appears. A symlink was
+	// followed by the Stat, so a link to a FIFO is refused too. Nothing was
+	// measured, so BytesRead stays false and the report says "not checked".
+	if !info.Mode().IsRegular() {
+		return fail(fmt.Errorf("the backup at %s is not a regular file (%s)", path, info.Mode().Type()))
+	}
 	rep.Bytes, rep.BytesRead = info.Size(), true
 
 	// Before the open, deliberately; see the ordering note on VerifyBackup. The size

@@ -221,6 +221,15 @@ func sessionRowsFrom(items []assemble.Item) (memories, globals []sessionMemory) 
 	return memories, globals
 }
 
+// foldCount folds the store's count into a bucket's tally: exactly when the
+// count is exact, and as a lower bound when it stopped at its cap.
+func foldCount(t assemble.BucketTally, n, excluded int, capped bool, overFetch int) assemble.BucketTally {
+	if capped {
+		return t.CountedAtLeast(n, excluded, overFetch)
+	}
+	return t.CountedAgainst(n, excluded, overFetch)
+}
+
 // loadSessionPassive assembles the session-start block's memory rows: the
 // project's own and `_global`'s, selected by the retriever's passive policies and
 // shaped by the assembler's stages, in one call.
@@ -286,15 +295,18 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 
 	// The store's own counts per bucket, read once and BEFORE the assembly so the
 	// cap's measure and the final header use the same totals.
-	type eligible struct{ n, excluded int }
+	type eligible struct {
+		n, excluded int
+		capped      bool
+	}
 	counts := make(map[string]eligible, len(budget.Slices))
 	for _, sl := range budget.Slices {
-		n, excluded, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, now, cfg.Injection.SessionScope)
+		n, excluded, capped, err := store.PassiveEligibleCount(ctx, memory.SlicePolicy{Bucket: sl.Bucket, IncludeGlobal: sl.IncludeGlobal}, now, cfg.Injection.SessionScope)
 		if err != nil {
 			slog.Warn("ghost: session-start eligible count failed, so the header counts the retrieval window", "bucket", sl.Bucket, "error", err)
 			continue
 		}
-		counts[sl.Bucket] = eligible{n, excluded}
+		counts[sl.Bucket] = eligible{n, excluded, capped}
 	}
 	// The window is an over-fetch, so the trace counts only the rows it fetched.
 	// The store's count supplies the rows behind it; an unreadable count leaves the
@@ -312,9 +324,9 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 			}
 			switch sl.Bucket {
 			case projectID:
-				t.project = t.project.CountedAgainst(c.n, c.excluded, sl.OverFetch+windowExtra(trace, sl.Bucket))
+				t.project = foldCount(t.project, c.n, c.excluded, c.capped, sl.OverFetch+windowExtra(trace, sl.Bucket))
 			case memory.GlobalProjectID:
-				t.globals = t.globals.CountedAgainst(c.n, c.excluded, sl.OverFetch+windowExtra(trace, sl.Bucket))
+				t.globals = foldCount(t.globals, c.n, c.excluded, c.capped, sl.OverFetch+windowExtra(trace, sl.Bucket))
 			}
 		}
 		return t
