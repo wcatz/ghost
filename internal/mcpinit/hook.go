@@ -771,8 +771,11 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 
 	// Nothing to surface — don't inject an empty/decorative block. A maintenance
 	// alert is not decorative: with no block to print, a current failure marker
-	// is still the thing this render exists to carry.
-	if projectID == "" && len(globals) == 0 {
+	// is still the thing this render exists to carry. A global bucket whose rows
+	// were all withheld is not nothing either: the hook renders its heading and
+	// the withheld sentence, so this render must too (the --as-of path's
+	// withheldAtT guard, for the current reading).
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
 		return alert
 	}
 	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
@@ -795,7 +798,9 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // `ghost bench --passive` is its only caller.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "")
-	if projectID == "" && len(globals) == 0 {
+	// The same guard as RenderSessionContextAt's: a wholly-withheld global
+	// bucket still renders, so the measured block is the one the hook prints.
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
 		return ""
 	}
 	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
