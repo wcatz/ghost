@@ -303,15 +303,17 @@ func runLifecycle() int {
 			ctx, cancel = context.WithCancel(rootCtx)
 		}
 		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
-		// A deadline must not SIGKILL a phase mid-write or orphan the CLI
-		// harness it spawned: the phase runs in its own process group, gets a
-		// SIGTERM first, and only the whole group is force-killed if it misses
-		// the grace period.
+		// A deadline must not SIGKILL a phase mid-write: the phase runs in its
+		// own process group, gets a SIGTERM first — which its own handler turns
+		// into the end of each harness it spawned, every one in a group of its
+		// own — and only the phase's group is force-killed if it misses the
+		// grace period.
 		setPhaseProcessGroup(cmd)
 		cmd.Cancel = func() error { return terminatePhaseProcess(cmd) }
 		// WaitDelay is a backstop for Wait itself; the group-wide escalation is
 		// the watchdog below, because WaitDelay would kill only the direct child
-		// and leave a harness grandchild that ignored SIGTERM orphaned.
+		// and leave any other member of the phase's group that ignored SIGTERM
+		// orphaned.
 		cmd.WaitDelay = phaseGracePeriod + 5*time.Second
 		// Tee into a bounded tail. The child's output still reaches the
 		// terminal (and lifecycle.log for a detached run) unchanged — but
@@ -833,12 +835,13 @@ type phaseEscalation struct {
 //
 // The question it asks before signalling is about the GROUP, not the phase
 // process, and the difference is the whole point. cmd.Wait returns the instant
-// the direct child is reaped, and a phase is a plain ghost process with no
-// SIGTERM handler, so it dies the moment the group signal lands — while the CLI
-// harness it spawned, same group, can ignore or slowly handle the signal and
-// survive as an orphan. That orphan is the reason killPhaseProcess exists, so
-// "the phase has been waited for" is not a reason to stay the escalation; "the
-// group is empty" is. Asking the group is also what keeps the id safe to
+// the direct child is reaped, while another member of the phase's group can
+// ignore or slowly handle the signal and survive as an orphan. That orphan is
+// the reason killPhaseProcess exists, so "the phase has been waited for" is not
+// a reason to stay the escalation; "the group is empty" is. The CLI harnesses
+// the phase spawned are not in this group — each runs in a group of its own —
+// and the phase's own SIGTERM handling (maintenanceContext, then each harness's
+// Cancel) is what ends them, before the phase exits. Asking the group is also what keeps the id safe to
 // signal: an empty group is the one whose id belongs to no run here and, on a
 // busy machine, can already have been reused. Go's select picks a ready case at
 // random, but the phaseDone/ctx.Done choice below no longer decides anything:
