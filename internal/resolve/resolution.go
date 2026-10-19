@@ -631,10 +631,11 @@ func (h *ResolutionClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // rewriting any literal « or » inside it so embedded delimiters can't terminate
 // the data block early and smuggle text back out as instructions.
 //
-// It does NOT fold line breaks, unlike assemble.Data (#911), on purpose: the note
-// handed to it is the stored content plus Ghost's own "\naudit: ..." evidence
-// line, and that newline is the structure the classifier reads. This is a prompt
-// to a model, not a listing a line-oriented reader parses.
+// It does NOT fold line breaks itself: renderNote folds the stored content with
+// assemble.FoldLineBreaks before calling it, so a verdict-shaped line in a note
+// cannot reach the classifier as its own line, and then appends Ghost's own
+// "\naudit: ..." evidence line after the closing delimiter, where its newline is
+// structure the classifier reads.
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }
