@@ -24,6 +24,13 @@ import (
 // store's own content cap), read through the same accessor, so a caller has one
 // budget to reason about across all six tools rather than six.
 //
+// ghost_list_projects and ghost_health (#1541) use it too, for their project
+// rows: neither takes a `limit`. The ghost_list_projects notice says that no
+// argument pages the list; the ghost_health notice says only its per-project
+// rows were cut and points to ghost_list_projects. In ghost_health only the
+// per-project rows are cuttable; every store-wide line is framing and is
+// always shown.
+//
 // An answer that HAS rows in it always keeps at least one: the first row — the
 // first pinned row when one is pinned — is never cut, so a single row larger than the budget (a decision whose 8000-byte
 // decision and rationale are each clamped separately is about 16 KB) is shown
@@ -344,5 +351,7 @@ const (
 	searchAllCutAdvice      = "Ask for fewer results (a lower `limit`) or narrow the query to see the rest."
 	taskListCutAdvice       = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
 	decisionsListCutAdvice  = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
+	listProjectsCutAdvice   = "No argument pages this list: a project left out is still reachable by passing its id or path as `project_id` to the other tools."
+	healthCutAdvice         = "Only the per-project lines are cut, last first; the Projects count above is the whole store, and every other line is shown in full. `ghost_list_projects` lists the same projects within the same budget."
 	projectContextCutAdvice = "Ask for fewer results (a lower `limit`) or use ghost_memories_list to browse the rest."
 )

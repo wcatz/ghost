@@ -697,3 +697,77 @@ func TestOpenCodeClient_Run_DeclinedToolWithoutAbortFails(t *testing.T) {
 		t.Fatal("exit 1 with a declined tool but no session abort is an unknown failure and must not be salvaged")
 	}
 }
+
+// TestParseOpenCodeOutput_ErrorEventAfterTextFails pins #1622: a top-level error
+// event on an otherwise clean (exit 0) stream fails the parse instead of
+// returning the text emitted before the failure. Mutating the parser to drop the
+// error branch makes this test fail (got "KEEP", err nil).
+func TestParseOpenCodeOutput_ErrorEventAfterTextFails(t *testing.T) {
+	raw := `{"type":"text","part":{"type":"text","text":"KEEP"}}` + "\n" +
+		`{"type":"error","error":{"type":"aborted"}}` + "\n"
+	got, err := parseOpenCodeOutput(raw)
+	if err == nil {
+		t.Fatal("expected error for an error event after text")
+	}
+	if got != "" {
+		t.Errorf("got %q, want no partial text on failure", got)
+	}
+	if !strings.Contains(err.Error(), "aborted") {
+		t.Errorf("error does not name the error type: %v", err)
+	}
+}
+
+// TestParseOpenCodeOutput_ErrorEventWithoutTextFails covers the no-text case.
+func TestParseOpenCodeOutput_ErrorEventWithoutTextFails(t *testing.T) {
+	raw := `{"type":"error","error":{"type":"provider.auth","message":"free tier"}}` + "\n"
+	got, err := parseOpenCodeOutput(raw)
+	if err == nil {
+		t.Fatal("expected error for a lone error event")
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty on failure", got)
+	}
+	if !strings.Contains(err.Error(), "provider.auth") {
+		t.Errorf("error does not name the error type: %v", err)
+	}
+	if !strings.Contains(err.Error(), "free tier") {
+		t.Errorf("error does not carry the message: %v", err)
+	}
+}
+
+// TestParseOpenCodeOutput_ErrorEventMessageIsGuarded keeps a credential-shaped or
+// oversized message from being echoed raw (the token guard renders it instead).
+func TestParseOpenCodeOutput_ErrorEventMessageIsGuarded(t *testing.T) {
+	for _, msg := range []string{"AKIAIOSFODNN7EXAMPLE", strings.Repeat("a", 300)} {
+		raw := `{"type":"error","error":{"type":"x","message":"` + msg + `"}}` + "\n"
+		_, err := parseOpenCodeOutput(raw)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if strings.Contains(err.Error(), msg) {
+			t.Errorf("raw message leaked into error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "withheld") {
+			t.Errorf("guarded message not rendered as withheld: %v", err)
+		}
+	}
+}
+
+// TestParseOpenCodeOutput_TextAndControlEventsParse keeps the ignorable events
+// ignorable: only text events contribute, control events and blank lines vanish.
+func TestParseOpenCodeOutput_TextAndControlEventsParse(t *testing.T) {
+	raw := `{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		"\n" +
+		`{"type":"reasoning","part":{"type":"reasoning","text":"thinking aloud"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"OK"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":" fine"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n" +
+		"\n"
+	got, err := parseOpenCodeOutput(raw)
+	if err != nil {
+		t.Fatalf("parseOpenCodeOutput: %v", err)
+	}
+	if got != "OK fine" {
+		t.Errorf("got %q, want %q", got, "OK fine")
+	}
+}

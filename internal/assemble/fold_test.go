@@ -3,6 +3,7 @@ package assemble
 import (
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // lineBreakRunes is every character a line-oriented reader or a terminal can
@@ -109,5 +110,67 @@ func TestPreviewLineCutsAtEveryLineBreakDataFolds(t *testing.T) {
 		if got != "honest prefix" {
 			t.Errorf("PreviewLine with %U = %q, want the first line only", b, got)
 		}
+	}
+}
+
+// hasNonLineControl reports whether s holds a control rune that is neither a
+// line break nor a TAB: the set Data must never print raw.
+func hasNonLineControl(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\t' && !isLineBreak(r)
+	}) >= 0
+}
+
+// TestDataEscapesEveryControlRuneThatIsNotALineBreak: ESC, CSI and the rest of
+// C0, DEL and C1 start terminal sequences when printed raw, so Data prints each
+// as a visible ASCII escape inside the delimiters.
+func TestDataEscapesEveryControlRuneThatIsNotALineBreak(t *testing.T) {
+	cases := []struct {
+		name string
+		r    rune
+		want string
+	}{
+		{"ESC", 0x1b, `\x1b`},
+		{"BEL", 0x07, `\a`},
+		{"NUL", 0x00, `\x00`},
+		{"DEL", 0x7f, `\x7f`},
+		{"U+0080", 0x80, `\u0080`},
+		{"CSI U+009B", 0x9b, `\u009b`},
+		{"U+009F", 0x9f, `\u009f`},
+	}
+	for _, c := range cases {
+		got := Data("a" + string(c.r) + "b")
+		if want := "«a" + c.want + "b»"; got != want {
+			t.Errorf("Data(%s) = %q, want %q", c.name, got, want)
+		}
+		if hasNonLineControl(got) {
+			t.Errorf("Data(%s) left a raw control rune: %q", c.name, got)
+		}
+	}
+	// Every control rune in the C0 and C1 blocks and DEL, none raw.
+	for r := rune(0); r <= 0x9f; r++ {
+		if r >= 0x20 && r < 0x7f {
+			continue
+		}
+		if got := Data("x" + string(r) + "y"); hasNonLineControl(got) {
+			t.Errorf("Data(%U) left a raw control rune: %q", r, got)
+		}
+	}
+}
+
+// TestDataKeepsTabRaw: stored prose legitimately holds tabs and a TAB moves the
+// cursor to the next stop without starting a sequence, so it is not escaped.
+func TestDataKeepsTabRaw(t *testing.T) {
+	if got, want := Data("a\tb"), "«a\tb»"; got != want {
+		t.Errorf("Data(tab) = %q, want %q", got, want)
+	}
+}
+
+// TestDataEscapedControlsKeepLineBreakFold: the escape must not disturb the
+// fold, and a break next to a control is still one escape.
+func TestDataEscapedControlsKeepLineBreakFold(t *testing.T) {
+	got := Data("a\x1b\nb\u009b\r\nc")
+	if want := "«a\\x1b" + LineBreakEscape + "b\\u009b" + LineBreakEscape + "c»"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

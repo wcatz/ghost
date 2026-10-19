@@ -227,7 +227,7 @@ func TestInstallGoosePackage_WritesAtomically(t *testing.T) {
 // first but not the second is already the current wording and is left alone,
 // and a file with neither belongs to the user, so only this shape reaches the
 // write that refreshes ghost's own redirect.
-const staleRedirectSeed = "# Myproject Project Memory\n\nAll project knowledge is stored in Ghost.\nCall `ghost_list_projects` to see what is known.\n"
+const staleRedirectSeed = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost. At session start, run:\n1. `ghost_list_projects` to discover projects\n2. `ghost_project_context` with project_id \"myproject\" to load accumulated knowledge\n"
 
 func TestWriteRedirects_WritesAtomically(t *testing.T) {
 	projectPath := absProjectPath(t)

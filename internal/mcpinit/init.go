@@ -11,9 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -213,7 +215,7 @@ func ensureScratchSpace(w io.Writer, dryRun bool) {
 // The "claude" target requires both ghost and claude; the "opencode" target
 // requires only ghost.
 func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err error) {
-	ghostBin = findBinary("ghost")
+	ghostBin = findGhostBinary()
 	if ghostBin == "" {
 		return "", "", fmt.Errorf("ghost binary not found in PATH — install it first")
 	}
@@ -292,12 +294,22 @@ func commonDirExecutable(p string, st os.FileInfo) bool {
 // defer to the machine's PATHEXT order and content (env-dependent), while
 // the pinned list keeps probe behavior deterministic across machines.
 func findBinary(name string) string {
+	if c := binaryCandidates(name); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}
+
+// binaryCandidates lists every location findBinary would accept for name, in
+// findBinary's order: the PATH hit first, then each executable common-dir hit.
+func binaryCandidates(name string) []string {
+	var out []string
 	if p, err := exec.LookPath(name); err == nil {
-		return p
+		out = append(out, p)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return out
 	}
 	for _, dir := range append([]string{
 		filepath.Join(home, ".local", "bin"),
@@ -305,10 +317,35 @@ func findBinary(name string) string {
 	}, systemBinDirs...) {
 		for _, candidate := range commonBinCandidates(name) {
 			p := filepath.Join(dir, candidate)
-			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) {
-				return p
+			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) && !slices.Contains(out, p) {
+				out = append(out, p)
 			}
 		}
+	}
+	return out
+}
+
+// ghostProbeTimeout bounds each `ghost --version` probe in findGhostBinary.
+const ghostProbeTimeout = 5 * time.Second
+
+// findGhostBinary is findBinary("ghost") for paths written into client config
+// and hooks, which run later with the user's normal environment. It returns
+// the first candidate whose `--version` exits 0 — `--version` returns before
+// any config or data-directory work — so a PATH entry that refuses to run
+// here, such as a sandbox guard shim, is skipped for a working install (#1569).
+// When no candidate runs it fails open to findBinary's answer.
+func findGhostBinary() string {
+	candidates := binaryCandidates("ghost")
+	for _, p := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), ghostProbeTimeout)
+		err := exec.CommandContext(ctx, p, "--version").Run()
+		cancel()
+		if err == nil {
+			return p
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
 	}
 	return ""
 }
@@ -1735,28 +1772,28 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", assemble.Label(p.Name))
 			continue
 		}
 
 		n, refused, failed, notRegular, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
 		if n > 0 {
-			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
+			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", assemble.Label(p.Name), n)
 		} else {
-			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", assemble.Label(p.Name))
 		}
 		for _, f := range refused {
-			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range failed {
-			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range notRegular {
-			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 	}
 
@@ -1806,25 +1843,43 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		// Check if redirect already exists and is current.
 		if data, err := os.ReadFile(target); err == nil {
 			content := string(data)
-			if strings.Contains(content, "stored in Ghost") && !strings.Contains(content, "ghost_list_projects") {
-				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
+			safeName := sanitizeName(p.Name)
+			currentContent := fmt.Sprintf(`# %s Project Memory
+
+All project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.
+Project context (memories + summary) is already in your system prompt — no tool calls needed to load it.
+
+Use `+"`ghost_memory_save`"+` to save new discoveries during work.
+Use `+"`ghost_memory_search`"+` to search for specific facts.
+`, safeName)
+			oldContent := fmt.Sprintf(`# %s Project Memory
+
+All project knowledge is stored in Ghost. At session start, run:
+1. `+"`ghost_list_projects`"+` to discover projects
+2. `+"`ghost_project_context`"+` with project_id "%s" to load accumulated knowledge
+`, safeName, safeName)
+
+			if content == currentContent {
+				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", assemble.Label(p.Name))
 				continue
 			}
-			if !strings.Contains(content, "stored in Ghost") {
-				// File exists with other content — don't clobber.
-				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
+			// Rewrite only an unedited old-format Ghost redirect. Anything else
+			// (including a redirect the user has edited) is left alone, the same
+			// way an unrecognised MEMORY.md is.
+			if content != oldContent {
+				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", assemble.Label(p.Name))
 				continue
 			}
 			// Old Ghost redirect with stale tool-call instructions — update it.
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", assemble.Label(p.Name))
 			continue
 		}
 
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
 
@@ -1839,9 +1894,9 @@ Use `+"`ghost_memory_search`"+` to search for specific facts.
 `, safeName)
 
 		if err := writeFileAtomic(target, []byte(content), 0644); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", p.Name)
+		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", assemble.Label(p.Name))
 	}
 }

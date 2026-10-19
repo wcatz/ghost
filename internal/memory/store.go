@@ -164,6 +164,11 @@ type Store struct {
 	logger   *slog.Logger
 	onSave   func(projectID string) // optional callback after memory create/upsert
 
+	// afterDecisionInsert, when set, runs inside RecordDecisionSuperseding's
+	// transaction after the decision and its companion are written and before
+	// the supersede. Only tests set it, to cancel the request in that window.
+	afterDecisionInsert func()
+
 	// canon memoizes each recorded project path's canonical form for
 	// ResolveProject; see canonMemo for when it is cleared and when it expires.
 	canon canonMemo
@@ -1627,7 +1632,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 			return fmt.Errorf("commit ensure project tx: %w", err)
 		}
 		if mergedOld != "" {
-			s.logger.Info("merged duplicate project", "old_id", mergedOld, "new_id", mergedNew)
+			s.logger.Info("merged duplicate project", "old_id", RefusalArg("project_id", mergedOld), "new_id", RefusalArg("project_id", mergedNew))
 		}
 		return nil
 	}
@@ -1997,7 +2002,7 @@ func (s *Store) mergeProjectWithRepoLocked(ctx context.Context, oldID, newID, re
 		return fmt.Errorf("merge commit: %w", err)
 	}
 
-	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
+	s.logger.Info("merged duplicate project", "old_id", RefusalArg("project_id", oldID), "new_id", RefusalArg("project_id", newID))
 	return nil
 }
 
@@ -2291,7 +2296,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	// This log line is the durable record of what was removed. (audit_log is a
 	// legacy table with no production writer — it is counted and deleted here
 	// for older databases, not because deletions are otherwise recorded there.)
-	s.logger.Info("deleted project", "project_id", id, "project_name", name,
+	s.logger.Info("deleted project", "project_id", RefusalArg("project_id", id), "project_name", name,
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
@@ -3725,6 +3730,17 @@ type UpsertOptions struct {
 	// is scoped to the project and ignores category, scope and resolved
 	// state, which is the same set the import's pre-read (GetAll) covers.
 	SkipExactContent bool
+
+	// foldReplaceableOnly keeps every row a reflection replace could not touch
+	// (replaceableRowSQL: a manual, builtin, pinned, resolved or
+	// retention-exempt row) out of the duplicate lookups, so the fold lands on
+	// the best replaceable match and the save inserts only when there is none.
+	// Only a promoted merge that consumes a source carrying a decision link
+	// sets it (promoteReflectionCandidate): a protected row may not take the
+	// link, so the merge folds into a replaceable carrier, or gets a row of its
+	// own beside the protected one, as a project emission does beside a manual
+	// row. Every other promotion may still fold into a protected row.
+	foldReplaceableOnly bool
 }
 
 // mergeRetention resolves a fold's two tiers into the one the surviving row
@@ -3974,9 +3990,41 @@ type applyView struct {
 	// they moved. The replace keeps them as it keeps every concurrent row, but
 	// does not report them as survivors, for the reason it does not report an
 	// overflow drop's (#1492).
-	scopeKept           map[string]bool
+	scopeKept map[string]bool
+	// overflowKept is the same subset for the global half's overflow refusals:
+	// rows kept because a promoted merge's decision links do not fit in one
+	// source_ref (#1228), which no later run can write either.
+	overflowKept        map[string]bool
 	crossProjectFrom    int
 	crossProjectDropped EmissionDrops
+	// promotions are the cross-project candidates the replace promotes into
+	// _global, at the point where it knows which sources it consumes and which it
+	// keeps live, so each promoted row inherits by the rule a project successor
+	// does (promoteReflectionCandidate). The replace reports back how many landed
+	// and which it could not promote; ApplyReflection writes those back into the
+	// project once the replace has returned.
+	promotions       []pendingPromotion
+	promoted         int
+	failedPromotions []failedPromotion
+	// promotionDropped is the global half's drops the replace makes while it
+	// promotes: a promotion whose fold target leaves no room for the sources'
+	// decision links, found only at the write. ApplyReflection adds it to the
+	// global half's drops; the replace's own drops never counted it.
+	promotionDropped EmissionDrops
+}
+
+// pendingPromotion is a cross-project candidate and the scope it inherited,
+// resolved before the replace.
+type pendingPromotion struct {
+	m     Memory
+	scope map[string]string
+}
+
+// failedPromotion is a candidate whose _global write was rolled back, kept with
+// its scope and the reason so the write-back can name both failures.
+type failedPromotion struct {
+	pendingPromotion
+	err error
 }
 
 func withApplyView(ctx context.Context, view *applyView) context.Context {
@@ -4149,22 +4197,17 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		scopeClause = "AND NOT " + scopesConflictSQL("m.scope", "?")
 		scopeArgs = []any{incomingScope, incomingScope}
 	}
-	probeArgs := func(lead ...any) []any {
-		args := append([]any{}, lead...)
-		args = append(args, scopeArgs...)
-		return append(args, ftsQuery)
+	// A save that may fold only into a row a reflection replace could touch
+	// (UpsertOptions.foldReplaceableOnly) never sees any other row as a
+	// candidate, in either lookup: excluded before the window is cut, for the
+	// reason the scope clause is, so the best replaceable match takes the fold
+	// and the save inserts only when there is none. Checking the winner alone
+	// inserted a second carrier whenever a protected row outranked the first.
+	if opts.foldReplaceableOnly {
+		scopeClause += " AND " + replaceableRowSQL
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.content
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE m.project_id = ?
-		  AND m.category = ?
-		  `+scopeClause+`
-		  AND memories_fts MATCH ?
-		ORDER BY rank, m.importance DESC
-		LIMIT 15
-	`, probeArgs(projectID, category)...)
+	sameQuery, sameArgs := dedupLookupStatement(false, scopeClause, scopeArgs, projectID, category, ftsQuery)
+	rows, err := db.QueryContext(ctx, sameQuery, sameArgs...)
 	if err != nil {
 		// Upsert treats a failed probe as "no candidate" and inserts, so a
 		// broken statement would switch dedup off silently. Say so.
@@ -4254,27 +4297,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// compatible duplicate cost that duplicate the fold (issue #665). Only rows
 	// a fold may use are counted against the fifteen.
 	if existingID == "" {
-		crossRows, crossErr := db.QueryContext(ctx, `
-			SELECT m.id, m.content
-			FROM memories m
-			JOIN memories_fts f ON f.rowid = m.rowid
-			WHERE m.project_id = ?
-			  AND m.category != ?
-			  AND m.resolved_at IS NULL
-			  AND NOT EXISTS (
-			      SELECT 1
-			      FROM memory_links l
-			      JOIN memories s ON s.id = l.source_id
-			      WHERE l.target_id = m.id
-			        AND l.relation = 'supersedes'
-			        AND l.invalidated_at IS NULL
-			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
-			  )
-			  `+scopeClause+`
-			  AND memories_fts MATCH ?
-			ORDER BY rank, m.importance DESC
-			LIMIT 15
-		`, probeArgs(projectID, category)...)
+		crossQuery, crossArgs := dedupLookupStatement(true, scopeClause, scopeArgs, projectID, category, ftsQuery)
+		crossRows, crossErr := db.QueryContext(ctx, crossQuery, crossArgs...)
 		if crossErr != nil {
 			s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "cross-category", "err", crossErr)
 		}
@@ -4806,7 +4830,8 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 // searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
 // the query path's keyword leg run. A non-zero now applies the validity window
 // predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
-// unfiltered statement, byte for byte what SearchFTS always ran.
+// same statement without it. The statement is ftsSearchStatement, which reads
+// the project's and _global's FTS buckets alone (schema v28).
 //
 // Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
 // the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
@@ -4823,30 +4848,8 @@ func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	where := "memories_fts MATCH ?"
-	args := []any{}
-	if !allProjects {
-		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
-		args = append(args, projectID)
-	}
-	args = append(args, sanitizeFTS(query))
-	if !now.IsZero() {
-		where += " AND " + validityMatchesSQLFor("m.")
-		// The predicate's placeholders are bound in its own text order: until,
-		// then from, both to the same whole-second-truncated instant.
-		stamp := now.UTC().Format(stampLayoutForSQL)
-		args = append(args, stamp, stamp)
-	}
-	args = append(args, limit)
-
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT `+memoryColumnsPrefixed+`
-		FROM memories m
-		JOIN memories_fts f ON f.rowid = m.rowid
-		WHERE `+where+`
-		ORDER BY rank, m.importance DESC
-		LIMIT ?
-	`, args...)
+	stmt, args := ftsSearchStatement(projectID, sanitizeFTS(query), limit, now, allProjects)
+	rows, err := s.queryDB().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		if allProjects {
 			return nil, fmt.Errorf("search all memories: %w", err)
@@ -6596,6 +6599,16 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 	return ids
 }
 
+// EmissionClaimsRow reports whether an emission whose sources are named and
+// whose text is content claims the stored row (rowID, rowContent): the row is
+// one of its named sources, or it already carries the emission's text. It is
+// keepEmissionClaims' predicate, exported so the reflect accounting lists the
+// rows an overflowing merge keeps — its text twins included — by the same rule
+// the replace keeps them, rather than by a copy of it.
+func EmissionClaimsRow(named map[string]bool, content, rowID, rowContent string) bool {
+	return named[rowID] || rowContent == content
+}
+
 // keepEmissionClaims marks every candidate an emission that is not written would
 // otherwise have taken as kept, exactly as fedGuard.drop does for a void claim,
 // and returns the ids it marked so the caller can tell WHICH refusal kept which
@@ -6609,7 +6622,7 @@ func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]boo
 	}
 	var kept []string
 	for _, c := range candidates {
-		if named[c.id] || c.content == m.Content {
+		if EmissionClaimsRow(named, m.Content, c.id, c.content) {
 			concurrent[c.id] = true
 			kept = append(kept, c.id)
 		}
@@ -6811,7 +6824,7 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 		)
 	`, projectID, projectID)
 	if err != nil && s.logger != nil {
-		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
+		s.logger.Warn("prune old snapshots", "error", err, "project_id", RefusalArg("project_id", projectID))
 	}
 	// The evidence goes with the snapshot it belongs to, and the same statement
 	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
@@ -6822,7 +6835,7 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 		DELETE FROM memory_snapshot_evidence
 		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
 	`); err != nil && s.logger != nil {
-		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
+		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", RefusalArg("project_id", projectID))
 	}
 }
 
@@ -7514,6 +7527,55 @@ func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m M
 	return n > 0, nil
 }
 
+// absorbSourcesTx is what a row that already exists takes from the sources an
+// emission merges into it: the reflection provenance the decision lookup trusts
+// (markReusedSuccessorSourceTx), the records of the sources it folds
+// (carryEvidenceTx over folded, the sourcesNotKeptLive split) and their claims
+// (fillReusedClaimsTx, where a kept-live source gives its decision links alone).
+// It returns whether the provenance stamp wrote, so the caller can file the
+// version.
+//
+// Three callers, one rule: the reuse branch of ReplaceNonManual, a merge
+// promoted into _global (promoteReflectionCandidate), whose row is in the reused
+// row's position — it exists when the sources are merged into it, whether the
+// promotion inserted it or folded into a row _global already held — and the
+// survivor of a FoldRows cluster, which is in the same position. The tier is
+// the caller's, because a reuse and a fold raise their row's own tier and a
+// promotion hands foldedRetention to the upsert that writes the row.
+func absorbSourcesTx(ctx context.Context, tx *sql.Tx, projectID, id string, m, folded Memory, keptLive, consumed map[string]bool) (bool, error) {
+	stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
+	if err != nil {
+		return false, err
+	}
+	// A merge that kept one row deletes the rest into it, and the cascade takes
+	// their evidence the moment the replace's delete runs, so the carry runs
+	// before it. A merge that names no other source carries nothing, because the
+	// row's own evidence never left it. See fillReusedClaimsTx.
+	if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
+		return false, err
+	}
+	if err := fillReusedClaimsTx(ctx, tx, projectID, id, m, keptLive); err != nil {
+		return false, err
+	}
+	return stamped, nil
+}
+
+// replaceableRowSQL is the predicate a row a reflection replace may delete,
+// reuse or merge into passes: not a manual or builtin row, not pinned, not
+// resolved and not retention-exempt. replaceableCandidatesTx selects the
+// project's candidates with it, and replaceableRowTx asks it of one row.
+const replaceableRowSQL = `source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND ` + retentionExemptSQL
+
+// replaceableRowTx reports whether the row id passes replaceableRowSQL.
+func replaceableRowTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE id = ? AND `+replaceableRowSQL, id).Scan(&n); err != nil {
+		return false, fmt.Errorf("read whether %s is replaceable: %w", RefusalArg("memory_id", id), err)
+	}
+	return n == 1, nil
+}
+
 // sourcesNotKeptLive drops from an emission's ReplacesIDs every source that is
 // a candidate this pass keeps live rather than deleting, so the row stays live
 // as itself. keptLive is that set: the rows the pass reuses in place and the
@@ -7612,8 +7674,7 @@ func reuseAbsorbsConsumed(id string, m Memory, consumed map[string]bool) bool {
 func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]replaceCandidate, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
-		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
-		  AND `+retentionExemptSQL+`
+		WHERE project_id = ? AND `+replaceableRowSQL+`
 		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
@@ -7811,7 +7872,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// refusal alone marked in the shared view did not move (#1492).
 	moved := make(map[string]bool, len(concurrent))
 	for id := range concurrent {
-		if shared && view.scopeKept[id] {
+		if shared && (view.scopeKept[id] || view.overflowKept[id]) {
 			continue
 		}
 		moved[id] = true
@@ -7845,7 +7906,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 		}
 	}
+	// Seeded from the global half's overflow refusals, as scopeKept is from its
+	// scope refusals.
 	overflowKept := make(map[string]bool)
+	if shared {
+		for id := range view.overflowKept {
+			overflowKept[id] = true
+		}
+	}
 	// refusalKept is a row a refusal (an overflow or a scope conflict) keeps
 	// live although nothing moved it. Such a row is still the corpus the pass
 	// read, so a verbatim re-emission of it — a keep, or the drop guard's re-add
@@ -8213,13 +8281,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, folded); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			// A reuse that absorbed a source is that source's consolidation
-			// successor, so it carries the provenance the decision lookup trusts —
-			// the same source a fresh INSERT and the default reuse stamp. Its own
-			// statement for the same reason the tier raise is: the verbatim branch
-			// above wrote nothing at all, and that is the branch a merge of
-			// byte-identical text takes. See markReusedSuccessorSourceTx.
-			stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
+			// The provenance stamp, the other sources' support and their claims:
+			// absorbSourcesTx, shared with a promoted merge. Their own statements for
+			// the reason the tier raise is: the verbatim branch above wrote nothing
+			// at all, and that is the branch a merge of byte-identical text takes.
+			stamped, err := absorbSourcesTx(ctx, tx, projectID, id, m, folded, keptLive, consumed)
 			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
@@ -8228,18 +8294,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				// pass records — the same event a content rewrite files. The
 				// other two branches already added the id above.
 				reflected = append(reflected, id)
-			}
-			// The other sources' support and claims, for the same reason and in the
-			// same place: a merge that kept one source's row deletes the rest into it,
-			// and the cascade takes their evidence the moment the delete below runs.
-			// The fresh INSERT carries both and FoldRows carries the evidence; a
-			// reuse that names no other source carries nothing, because the row's
-			// own evidence never left it. See fillReusedClaimsTx.
-			if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
-				return nil, EmissionDrops{}, 0, nil, err
-			}
-			if err := fillReusedClaimsTx(ctx, tx, projectID, id, m, keptLive); err != nil {
-				return nil, EmissionDrops{}, 0, nil, err
 			}
 			reused++
 			for _, replaced := range folded.ReplacesIDs {
@@ -8325,6 +8379,75 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
+	// The cross-project candidates of a promoting apply, written into _global
+	// HERE: after the delete set, keptLive and consumed are fixed, and before the
+	// delete takes the sources. A promoted merge is the successor of the rows this
+	// pass consumes exactly as a project emission is, so it inherits from them by
+	// the same rule (sourcesNotKeptLive, foldedRetention, absorbSourcesTx), and its
+	// sources' delete rows name it through the same successorOf below. Written
+	// after the replace, it found its sources gone and inherited nothing (#1491).
+	if shared {
+		for _, p := range view.promotions {
+			folded := p.m
+			folded.ReplacesIDs = sourcesNotKeptLive(p.m.ReplacesIDs, keptLive)
+			id, stamped, promoteErr, err := s.promoteReflectionCandidate(ctx, tx, projectID, p.m, p.scope,
+				&promotionSources{folded: folded, keptLive: keptLive, consumed: consumed})
+			if err != nil {
+				return nil, EmissionDrops{}, 0, nil, err
+			}
+			// A promotion whose fold target leaves no room for the sources'
+			// decision links is the pre-check's overflow found at the write, and
+			// refused as that one is: the sources it would have consumed, and any
+			// row carrying its text, leave the delete set, so each companion keeps
+			// its link live, and the merge is an overflow drop rather than a
+			// write-back into the project, which would carry no link. A row an
+			// earlier emission already took as its source keeps that successor.
+			// None of them is reported as a survivor: preserved is fixed above,
+			// and the same merge overflows again on the next run for as long as
+			// the fold target's own links are unchanged.
+			var overflow *promotionOverflowError
+			if errors.As(promoteErr, &overflow) {
+				named := make(map[string]bool, len(p.m.ReplacesIDs))
+				for _, replaced := range p.m.ReplacesIDs {
+					named[replaced] = true
+				}
+				keep := make(map[string]bool)
+				for _, c := range candidates {
+					if _, taken := successorOf[c.id]; consumed[c.id] && !taken && (named[c.id] || c.content == p.m.Content) {
+						keep[c.id] = true
+					}
+				}
+				remaining := deleteIDs[:0:0]
+				for _, id := range deleteIDs {
+					if keep[id] {
+						delete(consumed, id)
+						keptLive[id] = true
+						continue
+					}
+					remaining = append(remaining, id)
+				}
+				deleteIDs = remaining
+				view.promotionDropped.record(dropOverflow, overflow.links)
+				continue
+			}
+			if promoteErr != nil {
+				view.failedPromotions = append(view.failedPromotions, failedPromotion{pendingPromotion: p, err: promoteErr})
+				continue
+			}
+			view.promoted++
+			if stamped {
+				reflected = append(reflected, id)
+			}
+			for _, replaced := range folded.ReplacesIDs {
+				if _, taken := successorOf[replaced]; !taken {
+					successorOf[replaced] = id
+				}
+			}
+		}
+		// A refused promotion above may have kept rows out of the delete set.
+		deleted = len(deleteIDs)
+	}
+
 	if len(deleteIDs) > 0 {
 		// Recorded before the rows go, and in the same transaction, so the
 		// consolidation's dropped memories keep the text that explains why
@@ -8367,13 +8490,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
 		s.logger.Info("preserved memory identity across reflection replace",
-			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
+			"project_id", RefusalArg("project_id", projectID), "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
 	s.pruneSnapshotsTx(ctx, tx, projectID)
 
 	if s.logger != nil {
-		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
+		s.logger.Info("memories snapshotted before replace", "project_id", RefusalArg("project_id", projectID), "snapshot_id", snapshotID)
 	}
 	if ownTx {
 		if err := tx.Commit(); err != nil {
@@ -8831,7 +8954,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	}
 
 	n := int(removedN + updatedN + insertedN)
-	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID,
+	s.logger.Info("memories restored from snapshot", "project_id", RefusalArg("project_id", projectID), "snapshot_id", snapshotID,
 		"removed", removedN, "updated", updatedN, "reinserted", insertedN, "count", n,
 		"uncaptured_retention", uncapturedRetention)
 	return RestoreResult{Restored: n, UncapturedRetention: uncapturedRetention}, nil

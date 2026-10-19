@@ -157,7 +157,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// deletes it as unaccounted — the merge was refused, so NONE of its sources
 	// may be taken. ReplaceNonManual seeds its own concurrent map from this one,
 	// and counts back the refusals it makes about folded candidates.
-	view := &applyView{concurrent: make(map[string]bool), scopeKept: make(map[string]bool), crossProjectFrom: -1}
+	view := &applyView{concurrent: make(map[string]bool), scopeKept: make(map[string]bool), overflowKept: make(map[string]bool), crossProjectFrom: -1}
 	globalGuard, guardErr := s.fedGuardFor(txCtx, tx, projectID, consolidatedSince, fed, view.concurrent)
 	if guardErr != nil {
 		return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, guardErr
@@ -176,7 +176,12 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	// different halves in different flag modes.
 	globalMems, globalDropped = dropConcurrentClaims(globalGuard, globalMems)
 
-	if !promoteGlobals && len(globalMems) > 0 {
+	// A reflect of _global itself has nowhere to promote TO: its cross-project
+	// candidates already stand in the project they would be promoted into, so they
+	// take the replace path, which inherits everything. Promoting them inside the
+	// replace over _global would let a FoldOnly fold land on a row the same
+	// replace is about to delete.
+	if (!promoteGlobals || projectID == GlobalProjectID) && len(globalMems) > 0 {
 		// From here on the replace's input ENDS with the folded candidates, so a
 		// refusal at or after this index is a refusal of a cross-project
 		// candidate even though the replace is what made it.
@@ -214,6 +219,30 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	promotable := make([]Memory, 0, len(globalMems))
 	globalScope := make([]map[string]string, 0, len(globalMems))
 	for _, m := range globalMems {
+		// A merge whose decision links alone do not fit in a source_ref is refused
+		// as the project half refuses it (#1228): truncating the list is the
+		// silent supersede miss, and the merge is void, so its claims are kept —
+		// every source it names and every row carrying its text — and recorded as
+		// overflow-kept, so the replace does not report them as survivors a later
+		// run could merge. A source the guard already marked moved stays a
+		// survivor.
+		links, over, overErr := decisionLinksOverflowTx(txCtx, tx, projectID, emissionClaimIDs(globalGuard.candidates, m))
+		if overErr != nil {
+			return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, overErr
+		}
+		if over {
+			moved := make(map[string]bool, len(view.concurrent))
+			for id := range view.concurrent {
+				moved[id] = true
+			}
+			for _, id := range keepEmissionClaims(globalGuard.candidates, view.concurrent, m) {
+				if !moved[id] {
+					view.overflowKept[id] = true
+				}
+			}
+			globalDropped.record(dropOverflow, links)
+			continue
+		}
 		sc, scopeErr := inheritedScope(txCtx, tx, projectID, m)
 		if scopeErr != nil {
 			if !errors.Is(scopeErr, errScopeConflict) {
@@ -238,6 +267,21 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	}
 	globalMems = promotable
 
+	// The global bucket is ensured BEFORE the replace, because with a project
+	// half the promotions run inside it (applyView.promotions): that is the one
+	// point where the replace knows which sources it consumes, and the sources
+	// still exist to be inherited from. When the bucket is unavailable every
+	// candidate is kept project-scoped after the replace instead, as before.
+	var ensureFailure error
+	if len(globalMems) > 0 {
+		ensureFailure = ensureGlobalProjectTx(ctx, tx)
+		if ensureFailure == nil && len(projectMems) > 0 {
+			for i, m := range globalMems {
+				view.promotions = append(view.promotions, pendingPromotion{m: m, scope: globalScope[i]})
+			}
+		}
+	}
+
 	if len(projectMems) > 0 {
 		var projectDrop EmissionDrops
 		preserved, projectDrop, deleted, appliedByCategory, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince, fed)
@@ -254,17 +298,23 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 		// unchanged: this is attribution, not a second drop.
 		projectDropped = projectDropped.sub(view.crossProjectDropped)
 		globalDropped = globalDropped.add(view.crossProjectDropped)
+		// And the promotions the replace refused at the write, which only the
+		// global half ever counted.
+		globalDropped = globalDropped.add(view.promotionDropped)
 	}
 
 	if len(globalMems) > 0 {
-		if ensureErr := ensureGlobalProjectTx(ctx, tx); ensureErr != nil {
+		failed := view.failedPromotions
+		promoted = view.promoted
+		switch {
+		case ensureFailure != nil:
 			// The global bucket is unavailable, but the project-side write may
 			// still be healthy. Keep each candidate project-scoped instead of
 			// turning an infrastructure error into data loss.
 			var recoveryErr error
 			keptMems, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
 			if recoveryErr != nil {
-				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
+				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureFailure, recoveryErr)
 			}
 			// The recovered rows landed in the project, so they belong in the
 			// applied summary and its category breakdown exactly like the
@@ -272,21 +322,38 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			for _, m := range keptMems {
 				appliedByCategory[m.Category]++
 			}
-		} else {
+		case len(projectMems) == 0:
+			// A global-only apply runs no replace, so it consumes nothing: every
+			// source stays live and the promoted row is nobody's successor. It
+			// inherits nothing from them (a nil promotionSources) — a copy of a
+			// live row's records or claims would count the same support twice.
 			for i, m := range globalMems {
-				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m, globalScope[i])
+				_, _, promoteErr, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m, globalScope[i], nil)
 				if candidateErr != nil {
 					return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, candidateErr
 				}
-				if promotedOK {
-					promoted++
-				} else if kept {
-					keptMems = append(keptMems, m)
-					// Written back into the project (the one place a failed
-					// promotion leaves the row), so it counts as applied there.
-					appliedByCategory[m.Category]++
+				if promoteErr != nil {
+					failed = append(failed, failedPromotion{pendingPromotion: pendingPromotion{m: m, scope: globalScope[i]}, err: promoteErr})
+					continue
 				}
+				promoted++
 			}
+		}
+		// A candidate whose promotion was rolled back is written into the project
+		// AFTER the replace: written inside it, the upsert's duplicate fold could
+		// land on a row the replace is about to delete. The recovery row keeps the
+		// scope the candidate inherited, since an unscoped write-back would widen a
+		// scoped fact inside the project.
+		for _, f := range failed {
+			back := f.m
+			back.Scope = f.scope
+			if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{back}); err != nil {
+				return nil, 0, nil, EmissionDrops{}, EmissionDrops{}, 0, nil, fmt.Errorf("global promotion failed: %v; return candidate to project: %w", f.err, err)
+			}
+			keptMems = append(keptMems, f.m)
+			// Written back into the project (the one place a failed promotion
+			// leaves the row), so it counts as applied there.
+			appliedByCategory[f.m.Category]++
 		}
 	}
 
@@ -340,10 +407,53 @@ func ensureGlobalProjectTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// promotionSources is what a promoted merge inherits from, as the replace that
+// runs the promotion splits it: folded is the candidate with ReplacesIDs cut to
+// the sources the replace consumes (sourcesNotKeptLive), keptLive the
+// candidates it keeps live and consumed its delete set.
+type promotionSources struct {
+	folded             Memory
+	keptLive, consumed map[string]bool
+}
+
 // promoteReflectionCandidate uses the normal Upsert duplicate/link semantics
 // against the open transaction. A savepoint makes a failed global upsert
-// recoverable: the failed statement's partial writes are discarded before the
-// candidate is inserted into the project instead.
+// recoverable: the failed statement's partial writes are discarded, and the
+// caller writes the candidate into the project instead (promoteErr). err is a
+// failure that leaves the transaction unusable and fails the apply.
+//
+// src is nil for a global-only apply, which consumes nothing. Otherwise the
+// promoted row is the successor of the sources the replace consumes, and it
+// inherits by the project path's own rule rather than a copy of it: the tier is
+// foldedRetention, handed to the upsert as its Retention (a fresh row is written
+// at that tier with its expiry, a fold raises its target as any fold does), and
+// the provenance stamp, records and claims are absorbSourcesTx, the reuse
+// branch's own, because the promoted row is in the reused row's position. The
+// claims are deliberately not passed through UpsertOptions: a stated VerifiedAt
+// makes the upsert mint a verification record nobody performed, and the fold's
+// COALESCE would replace a target's own decision link instead of extending it.
+//
+// A row the replace could not touch — manual, builtin, pinned or
+// retention-exempt — takes nothing from the sources: the project path never
+// merges into such a row either, and a decision link written onto it would let
+// a supersede retire a row the user made or protected. When the promotion
+// consumes a source carrying a decision link, its duplicate lookups skip such
+// rows (UpsertOptions.foldReplaceableOnly): it folds into the best replaceable
+// match, such as the carrier an earlier round inserted, or is inserted as a
+// fresh _global row beside the protected one, as a project emission is
+// inserted beside a manual row, so the link has a live carrier a supersede can
+// retire. Any other promotion may still fold into a protected row and
+// strengthen it, as before, and the consumed sources' evidence is then deleted
+// with them, not carried. stamped reports that the provenance stamp wrote, so
+// the replace files the version.
+//
+// A fold target whose own decision links leave no room for the sources' is
+// only found here, at the write: the absorb is refused as boundedDecisionRefs
+// refuses it, and promoteErr is a *promotionOverflowError naming the links the
+// merge stood for, so the replace keeps the sources instead of consuming them.
+//
+// A candidate that cannot be promoted is never written here: the caller does
+// that after the replace, for the reason given at its write-back.
 //
 // scope is the scope the candidate inherited from the project rows it stands
 // in for, resolved by the caller BEFORE the project replace deleted those rows
@@ -353,10 +463,32 @@ func ensureGlobalProjectTx(ctx context.Context, tx *sql.Tx) error {
 // an existing _global duplicate. A candidate whose sources disagreed is never
 // promoted, so this is always a scope the sources agreed on (or nil when they
 // stated none).
-func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, projectID string, m Memory, scope map[string]string) (promoted, kept bool, err error) {
+func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, projectID string, m Memory, scope map[string]string, src *promotionSources) (id string, stamped bool, promoteErr, err error) {
+	// Read before the savepoint: a read failure here is the project path's
+	// failure too (it aborts the replace), not a promotion the project can take
+	// back instead.
+	var tier string
+	var consumedLinks int
+	if src != nil {
+		if tier, err = foldedRetention(ctx, tx, projectID, m, src.folded); err != nil {
+			return "", false, nil, err
+		}
+		// The decision links the sources this promotion consumes carry, which
+		// only the promoted row can keep live once the replace deletes them.
+		var consumedIDs []string
+		for _, replaced := range m.ReplacesIDs {
+			if src.consumed[replaced] {
+				consumedIDs = append(consumedIDs, replaced)
+			}
+		}
+		if consumedLinks, _, err = decisionLinksOverflowTx(ctx, tx, projectID, consumedIDs); err != nil {
+			return "", false, nil, err
+		}
+	}
+
 	const savepoint = "ghost_reflect_candidate"
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT `+savepoint); err != nil {
-		return false, false, fmt.Errorf("savepoint global promotion: %w", err)
+		return "", false, nil, fmt.Errorf("savepoint global promotion: %w", err)
 	}
 
 	source := m.Source
@@ -373,33 +505,61 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	// candidate that could not be promoted is going back into the project
 	// verbatim, and folding there would silently drop the exact text the caller
 	// asked to keep.
-	_, _, _, upsertErr := s.UpsertWithOptions(withStoreTx(ctx, tx), "_global", m.Category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
+	id, foldedInto, _, upsertErr := s.UpsertWithOptions(withStoreTx(ctx, tx), GlobalProjectID, m.Category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
 		Provenance: provenanceFromMemory(m),
 		Scope:      scope,
 		FoldOnly:   true,
+		Retention:  tier,
+		// A row the replace could not merge into cannot carry a consumed
+		// source's decision link, so the merge gets a row of its own beside it.
+		foldReplaceableOnly: consumedLinks > 0,
 	})
+	if upsertErr == nil && src != nil {
+		// A fresh row is the promotion's own; a fold target takes the sources only
+		// when the replace could have merged into it.
+		absorbs := foldedInto == ""
+		if !absorbs {
+			absorbs, upsertErr = replaceableRowTx(ctx, tx, id)
+		}
+		if upsertErr == nil && absorbs {
+			stamped, upsertErr = absorbSourcesTx(ctx, tx, projectID, id, m, src.folded, src.keptLive, src.consumed)
+			if errors.Is(upsertErr, errDecisionRefsOverflow) {
+				// Counted before the rollback below, while the target's own links
+				// are still the ones it held, for the drop the replace records.
+				links, countErr := foldedDecisionLinksTx(ctx, tx, projectID, id, m.ReplacesIDs)
+				if countErr != nil {
+					upsertErr = countErr
+				} else {
+					upsertErr = &promotionOverflowError{links: links}
+				}
+			}
+		}
+	}
 	if upsertErr == nil {
 		if _, err := tx.ExecContext(ctx, `RELEASE `+savepoint); err != nil {
-			return false, false, fmt.Errorf("release global promotion: %w", err)
+			return "", false, nil, fmt.Errorf("release global promotion: %w", err)
 		}
-		return true, false, nil
+		return id, stamped, nil, nil
 	}
 	if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO `+savepoint); rollbackErr != nil {
-		return false, false, fmt.Errorf("global promotion failed: %v; rollback savepoint: %w", upsertErr, rollbackErr)
+		return "", false, nil, fmt.Errorf("global promotion failed: %v; rollback savepoint: %w", upsertErr, rollbackErr)
 	}
 	if _, releaseErr := tx.ExecContext(ctx, `RELEASE `+savepoint); releaseErr != nil {
-		return false, false, fmt.Errorf("global promotion failed: %v; release savepoint: %w", upsertErr, releaseErr)
+		return "", false, nil, fmt.Errorf("global promotion failed: %v; release savepoint: %w", upsertErr, releaseErr)
 	}
-
-	// The recovery row keeps the scope the candidate inherited: an unscoped
-	// write-back would widen a scoped fact inside the project even though the
-	// promotion it failed was refused the safety of _global.
-	m.Scope = scope
-	if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{m}); err != nil {
-		return false, false, fmt.Errorf("global promotion failed: %v; return candidate to project: %w", upsertErr, err)
-	}
-	return false, true, nil
+	return "", false, upsertErr, nil
 }
+
+// promotionOverflowError is a promotion refused at the write because its fold
+// target's own decision links and the sources' do not fit in one source_ref.
+// links is how many distinct links the merge stood for, for the overflow drop.
+type promotionOverflowError struct{ links int }
+
+func (e *promotionOverflowError) Error() string {
+	return fmt.Sprintf("%v (%d decision links)", errDecisionRefsOverflow, e.links)
+}
+
+func (e *promotionOverflowError) Unwrap() error { return errDecisionRefsOverflow }
 
 // upsertMemoriesTx uses the same duplicate probing, scope-conflict checks,
 // metadata writes, and duplicate links as a normal project save while keeping

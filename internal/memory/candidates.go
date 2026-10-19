@@ -228,10 +228,14 @@ type CandidateSet struct {
 	// ValidityExcluded counts the rows a validity predicate removed before the
 	// window closed, so a set that came back empty can say whether it was empty
 	// of valid rows or EMPTY of rows. The passive path sets it for a bucket whose
-	// fetch returned nothing. The query path sets it from the leg that withheld
-	// the rows: the keyword leg counts what its SQL predicate removed when it
-	// returns nothing (#1053), and the vector scan counts the above-floor matches
-	// it withheld before the cut, so a semantic-only or hybrid empty whose every
+	// fetch returned nothing: the count is capped at PassiveEligibleCountCap, so a
+	// value equal to that cap is a LOWER BOUND, matching PassiveEligibleCount.
+	// Only whether it is greater than zero is consumed downstream (the
+	// all_invalid outcome), so the capped flag from the passive read is not
+	// carried here. The query path sets it from the leg that withheld the rows:
+	// the keyword leg counts what its SQL predicate removed when it returns
+	// nothing (#1053), and the vector scan counts the above-floor matches it
+	// withheld before the cut, so a semantic-only or hybrid empty whose every
 	// match retired reads `all_invalid` too rather than as absence. All are zero
 	// on a read whose predicate admitted everything.
 	ValidityExcluded int
@@ -1215,21 +1219,7 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 // keyword leg applies later rather than in its statement — so the count cannot
 // describe rows the leg never considered.
 func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
-	where := "memories_fts MATCH ?"
-	args := []any{}
-	if !allProjects {
-		where = "(m.project_id = ? OR m.project_id = '_global') AND " + where
-		args = append(args, project)
-	}
-	args = append(args, sanitizeFTS(req.Query))
-	// NOT (validityMatchesSQLFor(...)) is "the predicate would have dropped this
-	// row". The two ? placeholders are bound in the predicate's own text order
-	// (until, then from), after the project and the match term.
-	stamp := req.Now.UTC().Format(stampLayoutForSQL)
-	args = append(args, stamp, stamp)
-
-	query := `SELECT COUNT(*) FROM memories m JOIN memories_fts f ON f.rowid = m.rowid WHERE ` + where +
-		` AND NOT (` + validityMatchesSQLFor("m.") + `)`
+	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query), req.Now, allProjects)
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("candidates: keyword validity exclusion count: %w", err)
