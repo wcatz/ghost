@@ -216,6 +216,9 @@ type coordinator struct {
 	cmd    *exec.Cmd
 	stderr *lifecycleSignalBuffer
 	exited chan struct{}
+	// code is the exit status, valid once exited is closed: -1 for a process a
+	// signal ended.
+	code int
 }
 
 // startCoordinator starts the chain with an explicit --source, so the phase
@@ -248,6 +251,7 @@ func (s *signalSandbox) startCoordinatorTo(t *testing.T, stderr *os.File) *coord
 	go func() {
 		defer close(c.exited)
 		_ = cmd.Wait()
+		c.code = cmd.ProcessState.ExitCode()
 	}()
 	t.Cleanup(func() {
 		select {
@@ -492,6 +496,9 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 		t.Fatalf("release the member: %v", err)
 	}
 	c.waitExit(t, 30*time.Second)
+	if c.code != 1 {
+		t.Errorf("an interrupted run exited %d, want 1\n%s", c.code, c.stderr.String())
+	}
 	if !groupEmpty(phasePid) {
 		t.Errorf("the phase's group (pgid %d) was still inhabited when the coordinator exited", phasePid)
 	}

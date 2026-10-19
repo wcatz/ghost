@@ -73,7 +73,9 @@ func TestRunLifecycle_ReflectSkippedWithoutLLMWritesMarker(t *testing.T) {
 	os.Args = []string{origArgs[0], "lifecycle", "--project", "projx"}
 	defer func() { os.Args = origArgs }()
 
-	runLifecycle()
+	if code := runLifecycle(); code != 1 {
+		t.Errorf("runLifecycle exit status = %d, want 1 for a skipped phase", code)
+	}
 
 	// Per-project marker: runLifecycle resolves the session directory to
 	// projx, and the writer keys the file on that resolved id.
