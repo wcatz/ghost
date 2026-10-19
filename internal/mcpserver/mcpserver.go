@@ -1232,6 +1232,10 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 	}
 }
 
+// notifyLookupTimeout bounds the alias lookup and pushes notifyProjectResource
+// makes on a context detached from the request.
+const notifyLookupTimeout = 5 * time.Second
+
 // notifyProjectResource pushes a resources/updated notification for a
 // project-scoped resource (suffix is "context", "decisions", or "tasks") under
 // every URI alias a client might have subscribed with. Resource identity is
@@ -1241,8 +1245,16 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 // delivers resources/updated by exact URI match, we emit on both the hash ID
 // and the project name, each in the percent-encoded form projectResourceURI
 // builds — the form the resource template matches and a client reads with.
-// Best-effort — the ListProjects lookup error is swallowed.
+// Best-effort — the ListProjects lookup error is swallowed, so a failed
+// lookup never fails a write that has already committed. The callers run this
+// after the write, and the request may have been cancelled by then; the
+// lookup and the pushes therefore run on a context detached from the request's
+// cancellation, bounded by notifyLookupTimeout so a stuck database cannot hang
+// the handler. Without that, a cancelled request failed the lookup and only
+// the id form was notified.
 func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyLookupTimeout)
+	defer cancel()
 	emitted := map[string]bool{}
 	emit := func(id string) {
 		if id == "" {
