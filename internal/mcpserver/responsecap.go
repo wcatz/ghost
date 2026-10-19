@@ -25,9 +25,11 @@ import (
 // budget to reason about across all six tools rather than six.
 //
 // ghost_list_projects and ghost_health (#1541) use it too, for their project
-// rows: neither takes a `limit`, so their notice says that no argument pages
-// the list. In ghost_health only the per-project rows are cuttable; every
-// store-wide line is framing and is always shown.
+// rows: neither takes a `limit`. The ghost_list_projects notice says that no
+// argument pages the list; the ghost_health notice says only its per-project
+// rows were cut and points to ghost_list_projects. In ghost_health only the
+// per-project rows are cuttable; every store-wide line is framing and is
+// always shown.
 //
 // An answer that HAS rows in it always keeps at least one: the first row — the
 // first pinned row when one is pinned — is never cut, so a single row larger than the budget (a decision whose 8000-byte
