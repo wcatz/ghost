@@ -484,3 +484,73 @@ func TestPassiveValidityExcludedCountsAnEntirelyInvalidBucket(t *testing.T) {
 		}
 	}
 }
+
+// TestPassiveValidityExcludedStopsAtTheCap pins the bound: a bucket holding more
+// expired rows than the cap reports the cap, not the bucket, and says so.
+func TestPassiveValidityExcludedStopsAtTheCap(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p','/p','p')`); err != nil {
+		t.Fatal(err)
+	}
+	n := PassiveEligibleCountCap + 100
+	if _, err := db.Exec(`
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < ?)
+		INSERT INTO memories (id, project_id, category, content, source, importance, valid_until, expires_at)
+		SELECT 'bulk' || i, 'p', 'fact', 'c', 'manual', 0.5, '2020-01-01 00:00:00', '2020-01-01 00:00:00' FROM seq`, n); err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(db, nil)
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol := SlicePolicy{Bucket: "p", Order: OrderDecay, OverFetch: 20}
+	req := CandidateRequest{ProjectID: "p", Mode: ProjectScoped, Now: now, Condition: CondHybrid, Passive: []SlicePolicy{pol}}
+	got, capped, err := st.passiveValidityExcluded(context.Background(), req, pol, cols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != PassiveEligibleCountCap || !capped {
+		t.Fatalf("passiveValidityExcluded = %d (capped=%v), want %d capped=true", got, capped, PassiveEligibleCountCap)
+	}
+	set, err := st.Candidates(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.ValidityExcluded != PassiveEligibleCountCap {
+		t.Fatalf("CandidateSet.ValidityExcluded = %d, want %d", set.ValidityExcluded, PassiveEligibleCountCap)
+	}
+
+	// Below the cap: exact and not capped.
+	db2, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close() //nolint:errcheck
+	if _, err := db2.Exec(`INSERT INTO projects (id, path, name) VALUES ('p','/p','p')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.Exec(`
+		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < 5)
+		INSERT INTO memories (id, project_id, category, content, source, importance, valid_until, expires_at)
+		SELECT 'bulk' || i, 'p', 'fact', 'c', 'manual', 0.5, '2020-01-01 00:00:00', '2020-01-01 00:00:00' FROM seq`); err != nil {
+		t.Fatal(err)
+	}
+	st2 := NewStore(db2, nil)
+	cols2, err := passiveColumnsFor(st2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, capped2, err := st2.passiveValidityExcluded(context.Background(), req, pol, cols2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2 != 5 || capped2 {
+		t.Fatalf("passiveValidityExcluded = %d (capped=%v), want 5 capped=false", got2, capped2)
+	}
+}

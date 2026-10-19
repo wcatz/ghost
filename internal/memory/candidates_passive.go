@@ -228,6 +228,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		// empty bucket and summing reports the exclusions of a union of two empty
 		// buckets, which is what the verdict describes.
 		if len(fetched) == 0 {
+			// Only the count is consumed downstream (ValidityExcluded > 0 selects
+			// the all_invalid outcome); the capped flag is documented on
+			// CandidateSet.ValidityExcluded and on passiveValidityExcluded.
 			excluded, _, err := s.passiveValidityExcluded(ctx, req, pol, cols)
 			if err != nil {
 				return nil, err
