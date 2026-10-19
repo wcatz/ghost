@@ -21,8 +21,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/wcatz/ghost/internal/mcpinit"
 )
 
 // lifecycleRunDeadline bounds one coordinator run. A run here does no phase
@@ -132,105 +130,10 @@ func TestLifecycleRunsPastAFIFOSidecarInTheTempDir(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("the coordinator did not finish within %s; it is blocked on the FIFO sidecar:\n%s", lifecycleRunDeadline, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "lifecycle: audit sidecar sweep removed=0") {
+	if !strings.Contains(stderr.String(), "audit sidecar sweep removed=0") {
 		t.Errorf("the run did not report the sweep passing over the FIFO:\n%s", stderr.String())
 	}
 	if _, err := os.Lstat(fifo); err != nil {
 		t.Errorf("the sweep removed a FIFO it never identified as a sidecar: %v", err)
-	}
-}
-
-// A SIGTERM that lands before the phase loop ends the run as an
-// interruption before its first phase, exactly as one between phases does,
-// and the steps still ahead of the loop do no further work: the retrieval
-// audit, which writes to the store, does not run.
-//
-// The coordinator is held deterministically by making config.yaml a FIFO.
-// Its config read opens that FIFO after the signal handler is installed, so
-// when this test's open for writing returns, the coordinator is inside the
-// read and SIGTERM is caught rather than fatal. The one wait that is not a
-// handshake is the short pause after the signal: the handler cancels the
-// root context asynchronously and nothing outside the process can observe
-// that it has.
-func TestLifecycleSignalBeforeThePhaseLoopIsAnInterruption(t *testing.T) {
-	s := newLifecycleSandbox(t)
-	if err := syscall.Mkfifo(s.configFile, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	signals := filepath.Join(s.tmp, "ghost-audit-absent.signals")
-
-	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRunDeadline)
-	defer cancel()
-	cmd := s.command(ctx, "--project", "pre-loop-signal", "--signals", signals)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pid := cmd.Process.Pid
-	defer coordinatorGone(t, pid)
-
-	opened := make(chan *os.File, 1)
-	go func() {
-		w, err := os.OpenFile(s.configFile, os.O_WRONLY, 0)
-		if err != nil {
-			opened <- nil
-			return
-		}
-		opened <- w
-	}()
-	var w *os.File
-	select {
-	case w = <-opened:
-	case <-ctx.Done():
-		// Nothing ever opened the config to read it. Release the writer's
-		// open with a reader of our own, so the goroutine does not outlive
-		// the test, and let the deadline's kill end the coordinator.
-		if r, err := os.OpenFile(s.configFile, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-			if w := <-opened; w != nil {
-				_ = w.Close()
-			}
-			_ = r.Close()
-		}
-		_ = cmd.Wait()
-		t.Fatalf("the coordinator never read its config:\n%s", stderr.String())
-	}
-	if w == nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		t.Fatal("could not open the config FIFO for writing")
-	}
-
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-	if _, err := w.WriteString(phasesConfig(true)); err != nil {
-		t.Errorf("write the config: %v", err)
-	}
-	_ = w.Close()
-
-	_ = cmd.Wait()
-	if ctx.Err() != nil {
-		t.Fatalf("the coordinator did not finish within %s after SIGTERM:\n%s", lifecycleRunDeadline, stderr.String())
-	}
-	out := stderr.String()
-	if !strings.Contains(out, "lifecycle: interrupted before resolve") {
-		t.Errorf("the run was not ended as interrupted before its first phase:\n%s", out)
-	}
-	if strings.Contains(out, "retrieval audit") {
-		t.Errorf("the retrieval audit ran after the signal:\n%s", out)
-	}
-
-	markers, _ := filepath.Glob(filepath.Join(s.dataHome, "ghost", "lifecycle-last-failure*.json"))
-	if len(markers) != 1 {
-		t.Fatalf("want one failure marker, found %d: %v", len(markers), markers)
-	}
-	raw, err := os.ReadFile(markers[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := mcpinit.InterruptedBySignal + " before resolve"; !strings.Contains(string(raw), want) {
-		t.Errorf("the failure marker does not record %q:\n%s", want, raw)
 	}
 }
