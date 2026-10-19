@@ -261,7 +261,13 @@ func runLifecycle() int {
 	// are about consolidation ("Memory consolidation is paused"), and a failed
 	// audit has paused nothing — a false claim in a surface an operator reads at
 	// the start of every session is worse than a hole in a report.
-	if signalsPath != "" {
+	//
+	// A signal that landed during the steps above skips it: the audit writes
+	// to the store, and a run asked to stop does no further work. The loop's
+	// first check below then ends the run as interrupted before its first
+	// phase, with the same record and marker as a signal between phases. The
+	// sidecar is left for SweepSidecars.
+	if signalsPath != "" && rootCtx.Err() == nil {
 		runAuditPhase(projectName, signalsPath)
 	}
 
