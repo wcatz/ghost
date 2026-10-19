@@ -432,6 +432,17 @@ func runLifecycle() int {
 	} else if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
 		lifecycleLogf(projectName, "warning: could not record run outcome: %v", err)
 	}
+	// The status says what the marker says. Anything that wrote a failure
+	// record (a phase that failed, reflect skipped for want of a backend, a
+	// signal that cut the chain short) is 1, so a script or supervisor can tell
+	// it from a run that succeeded; a clean run is 0, and so is a run that
+	// recorded nothing because it had already finished every enabled phase when
+	// the signal landed. The returns for a lock another live run holds and for
+	// a config layer that fails to load are above. This is a return and not an
+	// exit so the deferred lock release and signal teardown still run.
+	if len(failedPhases) > 0 || interruptedRunCause != "" {
+		return 1
+	}
 	return 0
 }
 

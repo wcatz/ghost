@@ -217,6 +217,9 @@ func TestLifecycleInterruptBetweenPhasesStartsNoPhase(t *testing.T) {
 	}()
 
 	c.waitExit(t, 60*time.Second)
+	if c.code != 1 {
+		t.Errorf("a run interrupted before its first phase exited %d, want 1", c.code)
+	}
 	select {
 	case err := <-drained:
 		if err != nil {
