@@ -246,7 +246,7 @@ func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
 	if !strings.Contains(msg, older) {
 		t.Errorf("the repair command does not name the target (%s): %q", older, msg)
 	}
-	if !strings.Contains(msg, "ghost resolve test-project --reassess --only '"+older+"' --apply") {
+	if !strings.Contains(msg, "ghost resolve abc123 --reassess --only '"+older+"' --apply") {
 		t.Errorf("the result does not carry the scoped repair for the taken edge: %q", msg)
 	}
 	if !strings.Contains(msg, older[:8]) {
