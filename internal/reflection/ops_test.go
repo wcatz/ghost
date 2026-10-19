@@ -655,6 +655,41 @@ func TestOpTierKeepsSourcesWhenAMergeInventsAnIdentifier(t *testing.T) {
 	}
 }
 
+// TestGroundingRefusalWithholdsTokenShapedStoredIDs: the grounding WARN names
+// the ids the refused merge was given, and every one of them is a stored id —
+// `ghost import` writes an artifact's id verbatim, so an imported one can be
+// token-shaped. The line is a WARN, so it is emitted without a debug switch and
+// on the detached lifecycle path it lands in lifecycle.log; the ids must go
+// through the token guard rather than being joined raw.
+func TestGroundingRefusalWithholdsTokenShapedStoredIDs(t *testing.T) {
+	// Assembled rather than written out: GitHub push protection matches the PAT
+	// format anywhere in a diff.
+	token := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
+	in := ReflectionInput{
+		ProjectName: "ghost",
+		ExistingMemories: []memory.Memory{
+			opMem(token, "fact", "The mesh is served by 2.BeXIAhbj.js", 0.5),
+			opMem(opID2, "fact", "Production runs in region fsn1 behind Cloudflare", 0.5),
+		},
+	}
+	var buf bytes.Buffer
+	llm := NewLlmConsolidator(&fakeReflector{reply: `{"ops":["merge ` + token + `,` + opID2 + ` -> the bastion on port 2222 fronts the mesh bundle 2.BeXIAhbq.js"]}`})
+	llm.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	if _, err := llm.Consolidate(context.Background(), in); err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "introduced identifiers absent from its sources") {
+		t.Fatalf("the grounding refusal was not logged:\n%s", logged)
+	}
+	if strings.Contains(logged, token) || strings.Contains(logged, "a1B2c3D4e5F6") {
+		t.Errorf("the grounding WARN echoed the token-shaped stored id:\n%s", logged)
+	}
+	if !strings.Contains(logged, "withheld") {
+		t.Errorf("the grounding WARN did not name the format the guard found:\n%s", logged)
+	}
+}
+
 // TestOpTierFallsBackWhenEverythingIsDropped: a run that keeps nothing
 // on a corpus big enough to expect a consolidation is the truncation case the
 // quality gate exists for, and it must reach the deterministic tier rather than

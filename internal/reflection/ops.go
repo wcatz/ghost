@@ -428,6 +428,20 @@ func clipOpLine(s string) string {
 	return s
 }
 
+// refusalIDs renders the stored ids a log line names through the token guard,
+// the way the supersede lines render theirs. Every id here has already been
+// checked against the stored set, but a stored id is not token-guarded: `ghost
+// import` writes an artifact's id verbatim, so an imported id can be
+// token-shaped, and the grounding WARN is emitted without a debug switch, so on
+// the detached lifecycle path it lands in lifecycle.log.
+func refusalIDs(ids []string) string {
+	rendered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		rendered = append(rendered, memory.RefusalArg("memory_id", id))
+	}
+	return strings.Join(rendered, ",")
+}
+
 // executeOps resolves the parsed operations against the input corpus and
 // produces the consolidated result.
 //
@@ -539,7 +553,7 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 					kind = "merge"
 				}
 				logger.Warn("reflection "+kind+" introduced identifiers absent from its sources; keeping the sources instead",
-					"ids", strings.Join(op.ids, ","), "identifiers", strings.Join(unknown, ","),
+					"ids", refusalIDs(op.ids), "identifiers", strings.Join(unknown, ","),
 					"preview", previewContent(op.text))
 				for _, m := range sources {
 					result.Memories = append(result.Memories, verbatimMemory(m))
