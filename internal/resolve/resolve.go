@@ -194,26 +194,23 @@ func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
 }
 
 // askedWithEvidence renders the batch the classifier sees: each memory's own
-// content, with that memory's negative audit verdict appended as ONE line when
+// content, and that memory's negative audit verdict as ONE evidence line when
 // the audit holds one (#880). A nil map — an empty audit, or a read that failed
-// and the caller failed open — appends nothing, so those notes reach the model
-// as exactly the bytes they reached it as before this existed.
+// and the caller failed open — carries no evidence, so those notes reach the
+// model with exactly the content they carried before this existed.
 //
-// The line is appended to the CONTENT rather than passed beside it so it lands
-// inside the «...» the classifier's own quoteData renders and is read under that
-// rule with the rest of the note rather than as a line of instructions from the
-// harness. It is also the reason this is a shared function and not two loops:
-// Run and Reassess both stamp KEEP verdicts with KeepStamp over the same
-// evidence, and a stamp that says a verdict was judged with the evidence in
-// front of it is only true when the ask actually carried it. One renderer, so
-// the two passes cannot drift into stamping evidence the judge never saw.
-func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.UsefulnessEvidence) []string {
-	out := make([]string, len(mems))
+// Content and evidence stay apart in the Note: the formatter folds the stored
+// content to one physical line and puts the evidence line after the «...» block
+// on a line of its own (#1633), which a joined string could not tell apart. It
+// is also the reason this is a shared function and not two loops: Run and
+// Reassess both stamp KEEP verdicts with KeepStamp over the same evidence, and
+// a stamp that says a verdict was judged with the evidence in front of it is
+// only true when the ask actually carried it. One renderer, so the two passes
+// cannot drift into stamping evidence the judge never saw.
+func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.UsefulnessEvidence) []Note {
+	out := make([]Note, len(mems))
 	for i, m := range mems {
-		out[i] = m.Content
-		if line := evidence[m.ID].Line(); line != "" {
-			out[i] = out[i] + "\n" + line
-		}
+		out[i] = Note{Content: m.Content, Evidence: evidence[m.ID].Line()}
 	}
 	return out
 }
@@ -549,11 +546,10 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// unreadable audit errs toward re-asking, never toward trusting a verdict
 	// the pass cannot see the evidence for.
 	//
-	// The line is appended to the CONTENT, not passed beside it, so it lands
-	// inside the «...» the classifier's own quoteData renders and is read
-	// under that rule with the rest of the note rather than as a line of
-	// instructions from the harness. askedWithEvidence does that rendering for
-	// both passes, so the ask and the stamp below cannot drift apart.
+	// The line travels beside the content (a Note) and is rendered after the
+	// folded «...» block on its own line, never inside it. askedWithEvidence
+	// builds the ask for both passes, so the ask and the stamp below cannot
+	// drift apart.
 	var evidence map[string]memory.UsefulnessEvidence
 	if len(gated) > 0 {
 		read, evErr := store.UsefulnessByMemory(ctx, projectID)
@@ -599,7 +595,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	var llmConfirmed int
 	if len(pending) > 0 {
 		asked := askedWithEvidence(pending, evidence)
-		verdicts, err := cls.IsResolvedBatch(ctx, asked)
+		verdicts, err := classifyNotes(ctx, cls, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d candidate(s): %w", len(pendingContents), err)
 		}

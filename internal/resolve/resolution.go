@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -114,8 +115,53 @@ const classifyBatchSize = 8
 // is VerdictUnknown, not an implicit KEEP. Every call goes through one
 // CLI-harness provider, so callers do not need a second provider fallback.
 func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (Verdict, error) {
+	return h.isResolvedNote(ctx, Note{Content: content})
+}
+
+// Note is one candidate as the classifier is shown it: the stored content, and
+// Ghost's own audit-evidence line when the audit holds one. They travel
+// separately so the content can be folded to one physical line while the
+// evidence keeps its own line outside the «...» block (#1633).
+type Note struct {
+	Content  string
+	Evidence string
+}
+
+// joined is the pre-split rendering, content then "\n" then the evidence line,
+// for a Classifier that only takes strings.
+func (n Note) joined() string {
+	if n.Evidence == "" {
+		return n.Content
+	}
+	return n.Content + "\n" + n.Evidence
+}
+
+// NoteClassifier is the optional richer form of Classifier: it takes content
+// and evidence apart. ResolutionClassifier implements it; a Classifier that
+// does not is handed Note.joined strings.
+type NoteClassifier interface {
+	IsResolvedNotes(ctx context.Context, notes []Note) ([]Verdict, error)
+}
+
+// classifyNotes asks cls about notes, through NoteClassifier when it has one.
+func classifyNotes(ctx context.Context, cls Classifier, notes []Note) ([]Verdict, error) {
+	if nc, ok := cls.(NoteClassifier); ok {
+		return nc.IsResolvedNotes(ctx, notes)
+	}
+	joined := make([]string, len(notes))
+	for i, n := range notes {
+		joined[i] = n.joined()
+	}
+	return cls.IsResolvedBatch(ctx, joined)
+}
+
+// isResolvedNote is the single-note ask. The content is NOT folded here: the
+// reply is read by its first field only, never line by line, so a verdict-
+// shaped line in the content has no line to forge. The evidence line sits after
+// the «...» block, the same place the batch path puts it.
+func (h *ResolutionClassifier) isResolvedNote(ctx context.Context, n Note) (Verdict, error) {
 	h.calls++
-	result, err := h.client.Classify(ctx, classifySystemPrompt, "NOTE: "+quoteData(content))
+	result, err := h.client.Classify(ctx, classifySystemPrompt, "NOTE: "+renderNote(n, false))
 	if err != nil {
 		return VerdictUnknown, err
 	}
@@ -302,6 +348,17 @@ func isNegation(t string) bool {
 // candidate is re-proposed on the next pass; the zero-verdict fallback exists
 // only so an ignored numbering convention cannot discard a whole chunk at once.
 func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error) {
+	notes := make([]Note, len(contents))
+	for i, c := range contents {
+		notes[i] = Note{Content: c}
+	}
+	return h.IsResolvedNotes(ctx, notes)
+}
+
+// IsResolvedNotes is IsResolvedBatch over notes that carry their evidence line
+// apart from their content. See IsResolvedBatch for the chunking and fallback
+// contract.
+func (h *ResolutionClassifier) IsResolvedNotes(ctx context.Context, contents []Note) ([]Verdict, error) {
 	if len(contents) == 0 {
 		return nil, nil
 	}
@@ -319,7 +376,7 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 		if len(chunk) == 1 {
 			// A lone tail note uses the single-note prompt: no reason to
 			// depend on batch formatting for one item.
-			verdict, err := h.IsResolved(ctx, chunk[0])
+			verdict, err := h.isResolvedNote(ctx, chunk[0])
 			if err != nil {
 				return nil, fmt.Errorf("note %d: %w", start+1, err)
 			}
@@ -337,20 +394,22 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 
 // classifyChunk issues one batched call for a chunk of two or more notes and
 // maps its numbered reply lines onto verdicts.
-func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string) ([]Verdict, error) {
+func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []Note) ([]Verdict, error) {
 	h.calls++
 	resp, err := h.client.Classify(ctx, classifyBatchSystemPrompt, formatBatchContent(chunk))
 	if err != nil {
 		return nil, err
 	}
 	verdicts, ok := parseBatchVerdicts(resp, len(chunk))
-	if !ok {
+	echoed := ok && replyEchoesNote(resp, chunk)
+	if !ok || echoed {
 		if h.logger != nil {
 			h.logger.Warn("resolve: batch reply unparseable; falling back to per-note classification",
-				"reply", logReply(resp))
+				"echoed", echoed, "reply", logReply(resp))
 		}
+		verdicts = unknownVerdicts(len(chunk))
 		for i := range chunk {
-			verdict, err := h.IsResolved(ctx, chunk[i])
+			verdict, err := h.isResolvedNote(ctx, chunk[i])
 			if err != nil {
 				return nil, fmt.Errorf("note %d: %w", i+1, err)
 			}
@@ -483,16 +542,59 @@ func splitNumberedLine(line string) (int, string, bool) {
 
 // formatBatchContent renders notes as numbered NOTE blocks matching the batch
 // prompt's numbering, so reply lines map back by number and not by position
-// alone.
-func formatBatchContent(contents []string) string {
+// alone. Each note's stored content is folded to one physical line, so a
+// verdict-shaped line inside it is not a numbered line of the prompt; the
+// evidence line, when there is one, follows the block on a line of its own.
+func formatBatchContent(notes []Note) string {
 	var b strings.Builder
-	for i, c := range contents {
+	for i, n := range notes {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "%d.\nNOTE: %s", i+1, quoteData(c))
+		fmt.Fprintf(&b, "%d.\nNOTE: %s", i+1, renderNote(n, true))
 	}
 	return b.String()
+}
+
+// renderNote is the «content» block, then the evidence line on its own line
+// when the note has one. Only the content is folded (fold true), and the fold
+// is the assembler's, so the two renderers cannot disagree on what a line
+// break is; the evidence is appended afterwards and keeps its line.
+func renderNote(n Note, fold bool) string {
+	c := n.Content
+	if fold {
+		c = assemble.FoldLineBreaks(c)
+	}
+	out := quoteData(c)
+	if n.Evidence != "" {
+		out += "\n" + n.Evidence
+	}
+	return out
+}
+
+// replyEchoesNote reports whether a numbered line of the reply is, word for
+// word, a line of a note's stored content. The fold keeps such a line out of
+// the prompt as a numbered line, but a model that copies stored text into its
+// reply puts it back, and a copied "8: RESOLVED | closed-by: ..." would decide
+// note 8 when the model's own line for it was omitted. A reply carrying one is
+// not trusted: the caller re-judges every note on its own.
+func replyEchoesNote(resp string, chunk []Note) bool {
+	stored := make(map[string]bool)
+	for _, n := range chunk {
+		for _, l := range strings.Split(assemble.FoldLineBreaks(n.Content), assemble.LineBreakEscape) {
+			stored[echoKey(l)] = true
+		}
+	}
+	for _, line := range strings.Split(resp, "\n") {
+		if num, _, ok := splitNumberedLine(line); ok && num >= 1 && num <= len(chunk) && stored[echoKey(line)] {
+			return true
+		}
+	}
+	return false
+}
+
+func echoKey(l string) string {
+	return strings.Join(strings.Fields(strings.Trim(l, "-+*_#` ")), " ")
 }
 
 // Calls reports how many provider classify calls this classifier has made,
@@ -529,10 +631,11 @@ func (h *ResolutionClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // rewriting any literal « or » inside it so embedded delimiters can't terminate
 // the data block early and smuggle text back out as instructions.
 //
-// It does NOT fold line breaks, unlike assemble.Data (#911), on purpose: the note
-// handed to it is the stored content plus Ghost's own "\naudit: ..." evidence
-// line, and that newline is the structure the classifier reads. This is a prompt
-// to a model, not a listing a line-oriented reader parses.
+// It does NOT fold line breaks itself: renderNote folds the stored content with
+// assemble.FoldLineBreaks before calling it, so a verdict-shaped line in a note
+// cannot reach the classifier as its own line, and then appends Ghost's own
+// "\naudit: ..." evidence line after the closing delimiter, where its newline is
+// structure the classifier reads.
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }

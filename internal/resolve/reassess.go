@@ -314,7 +314,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		// judged with — the same line, in the same place, the ordinary pass
 		// appends (askedWithEvidence), because the two passes write one key.
 		asked := askedWithEvidence(pending, evidence)
-		verdicts, err := cls.IsResolvedBatch(ctx, asked)
+		verdicts, err := classifyNotes(ctx, cls, asked)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %d resolved candidate(s): %w", len(pendingContents), err)
 		}
