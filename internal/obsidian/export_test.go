@@ -271,13 +271,34 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate a crashed write: orphaned tmp inside a managed subtree.
-	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp")
-	if err := os.WriteFile(stray, []byte("orphan"), 0o644); err != nil {
+	// Simulate a killed write: the exact staging name writeIfChanged leaves when
+	// it dies between CreateTemp and the rename — a note name, then the shared
+	// marker, then CreateTemp's random suffix. It is created through the writer's
+	// own pattern, so the fixture cannot drift from the name the reclaim matches.
+	memDir := filepath.Join(vault, "ghost", "Memories")
+	stray, err := os.CreateTemp(memDir, stagingPattern("Some-fact.md"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	// A tmp file outside managed subtrees is none of our business.
-	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp")
+	if _, err := stray.WriteString("orphan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stray.Close(); err != nil {
+		t.Fatal(err)
+	}
+	strayName := stray.Name()
+	// The live note the pass wrote must survive the reclaim, and so must an
+	// unrelated non-note file the user dropped in the same folder.
+	notes, _ := filepath.Glob(filepath.Join(memDir, "*.md"))
+	if len(notes) != 1 {
+		t.Fatalf("want the one live note before reclaim, got %v", notes)
+	}
+	unrelated := filepath.Join(memDir, "user-notes.txt")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A staging file outside managed subtrees is none of our business.
+	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp-1234567890")
 	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -288,11 +309,17 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	if err := ex.Export(ctx, vault, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(stray); !os.IsNotExist(err) {
-		t.Errorf("orphaned tmp in managed subtree should be reclaimed: %v", err)
+	if _, err := os.Stat(strayName); !os.IsNotExist(err) {
+		t.Errorf("staging file in managed subtree should be reclaimed: %v", err)
+	}
+	if _, err := os.Stat(notes[0]); err != nil {
+		t.Errorf("live note must survive the reclaim: %v", err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated file in a managed subtree must survive: %v", err)
 	}
 	if _, err := os.Stat(outside); err != nil {
-		t.Errorf("tmp file outside managed subtrees must survive: %v", err)
+		t.Errorf("staging file outside managed subtrees must survive: %v", err)
 	}
 }
 

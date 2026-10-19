@@ -137,6 +137,29 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+// TestIsStagingName pins the reclaim predicate against the names writeIfChanged
+// stages and against names it never stages, so a real note or an unrelated file
+// is not reclaimed along with the orphan.
+func TestIsStagingName(t *testing.T) {
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{"Some-fact.md.ghost-tmp-1234567890", true}, // what CreateTemp stages
+		{"Some-fact.md.ghost-tmp", true},            // the fixed name a build before CreateTemp used
+		{"a.ghost-tmp-b.md", false},                 // a file that merely mentions the marker
+		{"Some-fact.md", false},                     // a note
+		{"notes.txt", false},                        // an unrelated file
+		{"data.ghost-tmp-1", false},                 // marker with no note name before it
+		{".ghost-tmp-1", false},                     // marker with nothing before it
+	}
+	for _, c := range cases {
+		if got := isStagingName(c.base); got != c.want {
+			t.Errorf("isStagingName(%q) = %v, want %v", c.base, got, c.want)
+		}
+	}
+}
+
 func TestPruneGuards(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
