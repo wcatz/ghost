@@ -220,7 +220,7 @@ func TestLifecycleReflectAboveTheInputBoundIsASkip(t *testing.T) {
 	if strings.Contains(got, "reflect failed") {
 		t.Errorf("the reflect phase failed above the bound:\n%s", got)
 	}
-	if !strings.Contains(got, "lifecycle: reflect completed") {
+	if !strings.Contains(got, `lifecycle: project "bounded": reflect completed`) {
 		t.Errorf("the reflect phase did not complete:\n%s", got)
 	}
 	for _, want := range []string{
