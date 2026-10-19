@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func TestSpawnLifecycle_UnsafeProjectIDWarningWithholdsATokenShapedID(t *testing
 			t.Fatalf("test setup: %q must be unsafe for a path", id)
 		}
 		logs := captureLogOutput(t)
-		spawnLifecycleIfConfigured(canonical, "", nil)
+		spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
 		return logs.String()
 	}
 
