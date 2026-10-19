@@ -1918,8 +1918,10 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 	// The inverse, rendered by internal/followup — the same renderer the CLI and
 	// ghost_link_withdraw use, so the project-name quoting that decides whether
 	// the command RUNS is decided once. And named as a command, because that is
-	// what it is.
-	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, stamped)
+	// what it is. The project is the one the argument RESOLVED to, never the
+	// argument: the command is built to be pasted into a shell, and a caller's
+	// spelling of a project can be a token-shaped clone URL that resolves to it.
+	cmd, viaFileOnly, unnameable := followup.ResolveCommand(resolvedProjectID, stamped)
 	// The two buckets through internal/followup's own renderer, which the CLI
 	// prints them with too. It used to be spelled here: this surface printed a
 	// comma id raw at the start of a line and quoted a newline id with %q, while
@@ -3410,7 +3412,7 @@ func (s *Server) registerTools() {
 		// rewrote while it was being classified is not stamped (#1052), so it is
 		// named rather than silently absent from the resolved count.
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))",
-			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+		memory.ProjectArg("project", args.Project), res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
 			res.Vetoed, res.Skipped, res.Unknown, verb, count, cls.Calls())
 		if res.Stale > 0 {
 			fmt.Fprintf(&sb, ", %d skipped as stale", res.Stale)

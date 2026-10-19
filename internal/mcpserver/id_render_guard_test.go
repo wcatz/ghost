@@ -29,11 +29,19 @@ import (
 // `memoryID`, `memoryIDs`, `decisionID`, `taskID`, `projectID`,
 // `resolvedProjectID`, `requestedProjectID`), an id field on any receiver
 // (`p.ID`, `x.ID`, `summary.ProjectID`, `l.SourceID`, `args.TaskID`,
-// `args.MemoryID`) and a project's name field (`summary.ProjectName`). That set
-// is the honest limit of a scan with no type checker, and it is deliberately the
-// expressions a stored value is spelled with HERE: a value that is not one of
-// them is out of scope, and the set grows with a new spelling rather than the
-// guard being widened to guess.
+// `args.MemoryID`), a project's name field (`summary.ProjectName`) and the
+// caller-supplied project arguments themselves (`args.Project` on the two
+// tools whose parameter is spelled `project`, `args.ProjectID` on the rest).
+// That set is the honest limit of a scan with no type checker, and it is
+// deliberately the expressions a stored value is spelled with HERE: a value
+// that is not one of them is out of scope, and the set grows with a new
+// spelling rather than the guard being widened to guess.
+//
+// A formatting call is not the only sink that can echo one of these values.
+// `followup.ResolveCommand` builds the scoped repair command a tool result
+// prints, and it shell-quotes whatever project it is handed — so a raw
+// project argument reaches the answer through the helper rather than through
+// fmt, and the scan fails on that hand-off too.
 //
 // A verb is not consulted. Any verb prints a bare string, and `%q` is no safer
 // than `%s` — it leaves a printable non-ASCII rune as itself — so the question is
@@ -62,18 +70,30 @@ func TestNoToolResultPrintsAStoredIDOutsideTheRenderer(t *testing.T) {
 				return true
 			}
 			operands, ok := idGuardOperands(call)
-			if !ok {
-				return true
+			if ok {
+				for _, arg := range operands {
+					switch {
+					case idGuardOperand(arg):
+						t.Errorf("%s: a formatting call prints a stored id or project name bare; route it "+
+							"through assemble.Token or assemble.Label (or shortID / memory.RefusalArg) so a "+
+							"line break or a « cannot forge a line in the answer: %s",
+							fset.Position(arg.Pos()), idGuardRender(arg))
+					case idGuardRenders(arg):
+						rendered++
+					}
+				}
 			}
-			for _, arg := range operands {
-				switch {
-				case idGuardOperand(arg):
-					t.Errorf("%s: a formatting call prints a stored id or project name bare; route it "+
-						"through assemble.Token or assemble.Label (or shortID / memory.RefusalArg) so a "+
-						"line break or a « cannot forge a line in the answer: %s",
-						fset.Position(arg.Pos()), idGuardRender(arg))
-				case idGuardRenders(arg):
-					rendered++
+			// The repair-command helper is a second sink: it shell-quotes whatever
+			// project it is handed into a command an agent may paste, so a raw
+			// project argument reaches the answer through it too.
+			if idGuardRepairHelper(call) {
+				for _, arg := range call.Args {
+					if idGuardRawProjectOperand(arg) {
+						t.Errorf("%s: a caller-supplied project argument is handed to the repair-command "+
+							"helper, which shell-quotes it into the answer; pass the RESOLVED project so a "+
+							"token-shaped spelling cannot reach the command: %s",
+							fset.Position(arg.Pos()), idGuardRender(arg))
+					}
 				}
 			}
 			return true
@@ -145,13 +165,17 @@ func idGuardLiteral(expr ast.Expr) (string, bool) {
 }
 
 // idGuardOperand reports whether expr is one of the spellings this package gives
-// a stored id or a project's name. The set is the identifiers and selectors a
-// stored value is written with HERE: an id inside a formatting call is either a
-// local (`id`, `duplicateOf`, `memoryID`, `taskID`, `decisionID`, `projectID`,
-// `resolvedProjectID`, `requestedProjectID`) or a field on some receiver
-// (`p.ID`, `x.ID`, `summary.ProjectID`, `l.SourceID`, `args.TaskID`,
-// `args.MemoryID`) — and a project's name is the one NAME field that is a label
-// rather than quoted free text, so it is here too.
+// a stored id, a project's name or a caller-supplied project argument. The set
+// is the identifiers and selectors a stored value is written with HERE: an id
+// inside a formatting call is either a local (`id`, `duplicateOf`, `memoryID`,
+// `taskID`, `decisionID`, `projectID`, `resolvedProjectID`,
+// `requestedProjectID`) or a field on some receiver (`p.ID`, `x.ID`,
+// `summary.ProjectID`, `l.SourceID`, `args.TaskID`, `args.MemoryID`) — a
+// project's name is the one NAME field that is a label rather than quoted free
+// text, so it is here too — and the project arguments themselves are here
+// because a caller's spelling of a project is caller text exactly like an id:
+// `args.Project` on the two tools whose parameter is spelled `project`, and
+// `args.ProjectID` on the rest.
 func idGuardOperand(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
@@ -164,9 +188,39 @@ func idGuardOperand(expr ast.Expr) bool {
 		switch {
 		case e.Sel.Name == "ID" || strings.HasSuffix(e.Sel.Name, "ID"):
 			return true
-		case e.Sel.Name == "ProjectName":
+		case e.Sel.Name == "ProjectName" || e.Sel.Name == "Project":
 			return true
 		}
+	}
+	return false
+}
+
+// idGuardRepairHelper reports whether call is followup.ResolveCommand, the
+// helper that renders the scoped repair command a tool result prints. It is
+// a second sink for a stored value: the helper shell-quotes whatever project
+// it is handed into a command an agent may paste, so the value reaches the
+// answer without ever passing through fmt.
+func idGuardRepairHelper(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "followup" && sel.Sel.Name == "ResolveCommand"
+}
+
+// idGuardRawProjectOperand reports whether expr is one of the spellings this
+// package gives a CALLER-SUPPLIED project argument rather than a resolved one:
+// the raw `projectID` parameter, or the `project` / `project_id` tool arguments.
+// A resolved id (`resolvedProjectID` and its kin) is what the helper is meant
+// to be handed — the command is about the project the argument resolved to —
+// so the resolved spellings are deliberately not in this set.
+func idGuardRawProjectOperand(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "projectID"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "Project" || e.Sel.Name == "ProjectID"
 	}
 	return false
 }
