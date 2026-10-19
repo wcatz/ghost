@@ -1842,12 +1842,30 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		// Check if redirect already exists and is current.
 		if data, err := os.ReadFile(target); err == nil {
 			content := string(data)
-			if strings.Contains(content, "stored in Ghost") && !strings.Contains(content, "ghost_list_projects") {
+			safeName := sanitizeName(p.Name)
+			currentContent := fmt.Sprintf(`# %s Project Memory
+
+All project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.
+Project context (memories + summary) is already in your system prompt — no tool calls needed to load it.
+
+Use `+"`ghost_memory_save`"+` to save new discoveries during work.
+Use `+"`ghost_memory_search`"+` to search for specific facts.
+`, safeName)
+			oldContent := fmt.Sprintf(`# %s Project Memory
+
+All project knowledge is stored in Ghost. At session start, run:
+1. `+"`ghost_list_projects`"+` to discover projects
+2. `+"`ghost_project_context`"+` with project_id "%s" to load accumulated knowledge
+`, safeName, safeName)
+
+			if content == currentContent {
 				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
 				continue
 			}
-			if !strings.Contains(content, "stored in Ghost") {
-				// File exists with other content — don't clobber.
+			// Rewrite only an unedited old-format Ghost redirect. Anything else
+			// (including a redirect the user has edited) is left alone, the same
+			// way an unrecognised MEMORY.md is.
+			if content != oldContent {
 				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
 				continue
 			}

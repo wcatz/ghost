@@ -440,10 +440,10 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	// the standalone, init-managed wiring has this step.
 	//
 	// It also does not promise more than init does. writeRedirects branches on
-	// the file's CONTENT, not on who wrote it: it skips anything without the
-	// "stored in Ghost" marker, and rewrites what has that marker when the
-	// content still carries the stale ghost_list_projects tool-call marker — so a
-	// hand-written file carrying both can be replaced. Status counts a skipped
+	// the file's CONTENT, not on who wrote it: it leaves alone anything that is
+	// not an unedited old-format Ghost redirect, and rewrites a redirect only
+	// when it matches an old generated template exactly — so a hand-written file
+	// carrying both markers is left alone. Status counts a skipped
 	// project as not redirected and prints the same line either way, so without
 	// this clause the advice would leave the check red with nothing to act on.
 	// The wording is the code's own test rather than a claim about provenance,
