@@ -1841,7 +1841,10 @@ Axis interaction rules:
 > tally (`BucketTally.AtLeast`, set by `CountedAtLeast`), and the header reads
 > "of 10000+ total" with the not-shown counts suffixed the same way, because an
 > exact census of a bucket that large costs a table pass at every session start
-> for a number no reader acts on. It never names the window as the total. A row a stage
+> for a number no reader acts on. It never names the window as the total. The same
+> cap bounds the passive validity-exclusion count (`Store.passiveValidityExcluded`):
+> an all-expired bucket reports the cap with `capped` true instead of walking
+> every row. A row a stage
 > withheld is inside the window and so is not counted twice; eligible rows the
 > threshold scan never read are ranked out, because the window is ordered by the
 > ranking and cut at its limit (`BucketTally.CountedAgainst` takes the over-fetch

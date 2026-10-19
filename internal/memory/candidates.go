@@ -228,10 +228,14 @@ type CandidateSet struct {
 	// ValidityExcluded counts the rows a validity predicate removed before the
 	// window closed, so a set that came back empty can say whether it was empty
 	// of valid rows or EMPTY of rows. The passive path sets it for a bucket whose
-	// fetch returned nothing. The query path sets it from the leg that withheld
-	// the rows: the keyword leg counts what its SQL predicate removed when it
-	// returns nothing (#1053), and the vector scan counts the above-floor matches
-	// it withheld before the cut, so a semantic-only or hybrid empty whose every
+	// fetch returned nothing: the count is capped at PassiveEligibleCountCap, so a
+	// value equal to that cap is a LOWER BOUND, matching PassiveEligibleCount.
+	// Only whether it is greater than zero is consumed downstream (the
+	// all_invalid outcome), so the capped flag from the passive read is not
+	// carried here. The query path sets it from the leg that withheld the rows:
+	// the keyword leg counts what its SQL predicate removed when it returns
+	// nothing (#1053), and the vector scan counts the above-floor matches it
+	// withheld before the cut, so a semantic-only or hybrid empty whose every
 	// match retired reads `all_invalid` too rather than as absence. All are zero
 	// on a read whose predicate admitted everything.
 	ValidityExcluded int
