@@ -179,7 +179,10 @@ func listenParams(uris ...string) map[string]any {
 // saveMemory drives the real ghost_memory_save handler over the wire and
 // returns the resources/updated URIs that arrived before its response. The
 // handler notifies before it returns, so a notification it sent to this
-// connection is always ahead of the response.
+// connection is always ahead of the response. A refused save is a successful
+// JSON-RPC response whose CallToolResult has isError set, so that is checked as
+// well as the protocol error: a refused save notifies nobody, which would read
+// as "no notification" to a caller asserting that none arrived.
 func (w *wireConn) saveMemory(content string) []string {
 	w.t.Helper()
 	id := w.start("tools/call", map[string]any{
@@ -189,6 +192,15 @@ func (w *wireConn) saveMemory(content string) []string {
 	res, updated := w.await(id)
 	if res.Error != nil {
 		w.t.Fatalf("ghost_memory_save: %v", res.Error)
+	}
+	var result struct {
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(res.Result, &result); err != nil {
+		w.t.Fatalf("ghost_memory_save: decode result %s: %v", res.Result, err)
+	}
+	if result.IsError {
+		w.t.Fatalf("ghost_memory_save was refused: %s", res.Result)
 	}
 	return updated
 }
