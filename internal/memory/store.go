@@ -164,6 +164,11 @@ type Store struct {
 	logger   *slog.Logger
 	onSave   func(projectID string) // optional callback after memory create/upsert
 
+	// afterDecisionInsert, when set, runs inside RecordDecisionSuperseding's
+	// transaction after the decision and its companion are written and before
+	// the supersede. Only tests set it, to cancel the request in that window.
+	afterDecisionInsert func()
+
 	// canon memoizes each recorded project path's canonical form for
 	// ResolveProject; see canonMemo for when it is cleared and when it expires.
 	canon canonMemo
