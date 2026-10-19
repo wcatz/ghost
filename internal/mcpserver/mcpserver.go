@@ -3412,7 +3412,7 @@ func (s *Server) registerTools() {
 		// rewrote while it was being classified is not stamped (#1052), so it is
 		// named rather than silently absent from the resolved count.
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))",
-		memory.ProjectArg("project", args.Project), res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+			memory.ProjectArg("project", args.Project), res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
 			res.Vetoed, res.Skipped, res.Unknown, verb, count, cls.Calls())
 		if res.Stale > 0 {
 			fmt.Fprintf(&sb, ", %d skipped as stale", res.Stale)
