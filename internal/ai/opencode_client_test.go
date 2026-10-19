@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -695,6 +696,56 @@ func TestOpenCodeClient_Run_DeclinedToolWithoutAbortFails(t *testing.T) {
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; exit 1`)}
 	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
 		t.Fatal("exit 1 with a declined tool but no session abort is an unknown failure and must not be salvaged")
+	}
+}
+
+// declinedStreamThenSleep is opencode v2 emitting the declined-tool shape on
+// its way out of a shutdown it has not finished: it writes the same stream as
+// declinedStream and then stays alive, so the call is cut by its own context
+// with that stream already in stdout. The version probe answers at once so the
+// real invocation is the one that is cut.
+const declinedStreamThenSleep = `if [ "$1" = "--version" ]; then echo 'opencode v2.0.15'; exit 0; fi
+cat >/dev/null
+printf '%s\n' '{"type":"step_start","part":{"type":"step-start"}}' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'
+sleep 30`
+
+// TestOpenCodeClient_Run_DeadlineCutDeclinedShapeFails pins the rule that a
+// call cut by its own context is a failure, never a declined-tool success.
+// opencode writes the declined shape as it begins to shut down, so a caller's
+// deadline that lands after the answer text leaves a stream the salvage would
+// accept — while the run was killed, not answered. The failure carries the
+// deadline, because Wait reports only the kill ("signal: killed").
+func TestOpenCodeClient_Run_DeadlineCutDeclinedShapeFails(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStreamThenSleep)}
+	ctx, cancel := context.WithTimeout(context.Background(), injectedDefault)
+	defer cancel()
+	text, _, err := c.Reflect(ctx, "prompt")
+	if err == nil {
+		t.Fatalf("a run cut at the caller's deadline returned %q with no error", text)
+	}
+	if text != "" {
+		t.Errorf("text = %q, want no partial answer from a killed run", text)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the failure does not carry the deadline: %v", err)
+	}
+}
+
+// TestOpenCodeClient_Run_DefaultBoundCutDeclinedShapeFails is the same stream
+// with no caller deadline: boundHarnessCall's per-call default cuts it, and the
+// failure names that default the way every other client's cut does.
+func TestOpenCodeClient_Run_DefaultBoundCutDeclinedShapeFails(t *testing.T) {
+	withDefaultTimeout(t, injectedDefault)
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStreamThenSleep)}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err == nil {
+		t.Fatalf("a run cut at the client default returned %q with no error", text)
+	}
+	if text != "" {
+		t.Errorf("text = %q, want no partial answer from a killed run", text)
+	}
+	if !strings.Contains(err.Error(), "default") {
+		t.Errorf("a cut at the client default must name it: %v", err)
 	}
 }
 
