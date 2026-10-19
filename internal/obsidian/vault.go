@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 const markerName = ".ghost-vault"
@@ -58,6 +59,13 @@ const tmpMarker = ".ghost-tmp"
 // with. It is a function rather than an inline expression so a test can create a
 // file with the real pattern instead of a name that only looks like one.
 func stagingPattern(noteBase string) string { return noteBase + tmpMarker + "-*" }
+
+// stagingGrace bounds how long a staging file may sit before prune reclaims it.
+// A manual export and the auto-sync worker can run at once, so one pass's prune
+// can reach the other pass's live staging file between its os.CreateTemp and its
+// Rename; reclaiming that would fail the write with ENOENT. A file younger than
+// this is left alone, and a killed write's orphan is older than it.
+const stagingGrace = time.Minute
 
 // isStagingName reports whether base names a staging file writeIfChanged can
 // leave behind when it is killed between the create and the rename. Such a name
@@ -249,7 +257,7 @@ func keepKey(root, path string) string {
 // from the spec are enforced. Staging files left by a crashed writeIfChanged —
 // the names that writer actually creates, matched through the shared tmpMarker
 // — are also reclaimed, but only inside the managed subtrees, behind the marker
-// guard.
+// guard, and only once older than stagingGrace so a live write is spared.
 func prune(root string, subtrees []string, keep keepSet, knownFolders []string) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
@@ -270,7 +278,13 @@ func prune(root string, subtrees []string, keep keepSet, knownFolders []string) 
 				return nil
 			}
 			if isStagingName(filepath.Base(path)) {
-				return os.Remove(path) // orphan from a crashed write
+				// A fresh staging file may belong to a pass that is still writing
+				// it, so only one older than the grace — a killed write's orphan —
+				// is reclaimed; an age that cannot be read leaves it alone.
+				if fi, err := d.Info(); err == nil && time.Since(fi.ModTime()) >= stagingGrace {
+					return os.Remove(path) // orphan from a crashed write
+				}
+				return nil
 			}
 			if !strings.HasSuffix(path, ".md") {
 				return nil

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -287,6 +288,21 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	strayName := stray.Name()
+	// Age it past the grace so it reads as a killed write's orphan; a staging
+	// file that is still fresh could be another pass's live write.
+	past := time.Now().Add(-2 * stagingGrace)
+	if err := os.Chtimes(strayName, past, past); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh staging file is another pass mid-write and must survive.
+	fresh, err := os.CreateTemp(memDir, stagingPattern("Some-fact.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	freshName := fresh.Name()
 	// The live note the pass wrote must survive the reclaim, and so must an
 	// unrelated non-note file the user dropped in the same folder.
 	notes, _ := filepath.Glob(filepath.Join(memDir, "*.md"))
@@ -310,7 +326,10 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(strayName); !os.IsNotExist(err) {
-		t.Errorf("staging file in managed subtree should be reclaimed: %v", err)
+		t.Errorf("aged staging file in managed subtree should be reclaimed: %v", err)
+	}
+	if _, err := os.Stat(freshName); err != nil {
+		t.Errorf("fresh staging file must survive the reclaim: %v", err)
 	}
 	if _, err := os.Stat(notes[0]); err != nil {
 		t.Errorf("live note must survive the reclaim: %v", err)

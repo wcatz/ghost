@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mustWrite / mustMkdirAll fail the test on setup errors instead of
@@ -157,6 +158,36 @@ func TestIsStagingName(t *testing.T) {
 		if got := isStagingName(c.base); got != c.want {
 			t.Errorf("isStagingName(%q) = %v, want %v", c.base, got, c.want)
 		}
+	}
+}
+
+// TestPruneReclaimsOnlyAgedStagingFiles pins the grace period. A manual export
+// and the auto-sync worker can run at once, so one pass's prune can reach the
+// other pass's live staging file between its CreateTemp and its Rename; only a
+// file older than the grace — a killed write's orphan — is reclaimed.
+func TestPruneReclaimsOnlyAgedStagingFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+
+	fresh := filepath.Join(sub, "fresh.md.ghost-tmp-1111")
+	mustWrite(t, fresh, "in flight")
+	old := filepath.Join(sub, "old.md.ghost-tmp-2222")
+	mustWrite(t, old, "orphan")
+	past := time.Now().Add(-2 * stagingGrace)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prune(root, []string{"proj"}, keepSet{}, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a fresh staging file must survive prune: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("an aged staging file must be reclaimed: %v", err)
 	}
 }
 
