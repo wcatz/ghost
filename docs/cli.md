@@ -1040,6 +1040,15 @@ Rules the import follows:
     create  memory:   line 3  "the WAL holds a transaction…" (3A6B…)
   ```
 
+  The same holds between two projects of one artifact. A file from an older release, which stored remotes as given, can carry `github.com/o/r` and `github.com/o/r?x=1` as two projects, and a hand-merged pair of exports can carry one path twice. The later project is the same checkout as the earlier one, so it is mapped onto it and its records land there, in the dry run and the apply alike:
+
+  ```text
+    create  project:  line 2  "a" (pa)
+    skip    project:  line 3  "b → pa (an earlier project in this artifact records that checkout or repository)" (pb)
+  ```
+
+  An earlier project the run refuses writes nothing and claims nothing, so the later one is then judged on its own record.
+
   A collision that survives that — another writer claiming the same directory between the plan and the write — is refused by name, in the dry run as well as the apply:
 
   ```text

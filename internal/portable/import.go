@@ -555,6 +555,13 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			// the project you already had".
 			detail = fmt.Sprintf("%s → %s (this store already records that checkout or repository)",
 				project.Name, adopted)
+			if !known[adopted] {
+				// Not in the store: an earlier project of this artifact
+				// claimed the checkout or repository. known is still the
+				// store's own set here, as no step has run yet.
+				detail = fmt.Sprintf("%s → %s (an earlier project in this artifact records that checkout or repository)",
+					project.Name, adopted)
+			}
 		}
 		adoptedElsewhere := adopted != project.ID
 		steps = append(steps, step{rec: p, kind: TypeProject, detail: safeDetail(detail, detail, project.ID), opts: opts,
@@ -728,6 +735,17 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 // The mapping is decided before any record runs, which is what lets a dry run
 // and an apply run agree: both read the same map, and the dry run's "skip" for
 // an adopted project is exactly what the apply run does.
+//
+// A project this artifact creates is held to the same rule as one the store
+// already holds. Two projects of one artifact can name the same path, or
+// remotes that normalize to one repository (an older release stored remotes
+// raw, and a hand-merged pair of exports repeats a checkout). The apply inserts
+// the first and its collision check then refuses the second, while the dry run,
+// reading an unchanged store, would promise both. So the later project is
+// mapped onto the earlier one, as it would be onto a store project with that
+// checkout. Only a project the store would accept claims its checkout: one it
+// refuses writes nothing, so the next project is judged on its own record,
+// which is the rule createdIDs follows for a repeated id.
 func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []parsedRecord) (map[string]string, error) {
 	mapping := make(map[string]string, len(projects))
 	live, err := s.PortableProjects(ctx)
@@ -738,12 +756,27 @@ func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []pars
 	for _, p := range live {
 		byID[p.ID] = true
 	}
+	// The checkouts and repositories this run's own projects will create, keyed
+	// the way projectCollision compares them: the path as given, the remote
+	// normalized.
+	claimedPath := map[string]string{}
+	claimedRemote := map[string]string{}
+	// The ids whose mapping is final. A repeated id is decided by its first
+	// record the store would accept: the apply skips every record after that
+	// one, so a later record's path must not remap the id its children
+	// follow. A refused record settles nothing, and the next record with the
+	// id is judged on its own, as the apply judges it.
+	settled := map[string]bool{}
 	for _, rec := range projects {
 		p := *rec.rec.Project
+		if settled[p.ID] {
+			continue
+		}
 		// The very same project, or nothing that collides: keep the artifact's
 		// own id.
 		if byID[p.ID] {
 			mapping[p.ID] = p.ID
+			settled[p.ID] = true
 			continue
 		}
 		// `_global` needs no special case: ProjectForCheckout never returns it
@@ -757,11 +790,31 @@ func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []pars
 		if err != nil {
 			return nil, err
 		}
+		if found == "" && p.Path != "" {
+			found = claimedPath[p.Path]
+		}
+		remote := memory.NormalizeRepoRemote(p.RepoRemote)
+		if found == "" && remote != "" {
+			found = claimedRemote[remote]
+		}
 		if found != "" {
 			mapping[p.ID] = found
+			settled[p.ID] = true
 			continue
 		}
 		mapping[p.ID] = p.ID
+		// The store's own verdict, asked without writing: the same call the
+		// project's step makes, so a project that claims a checkout here is
+		// one both modes create.
+		if created, err := s.ImportProject(ctx, p, false); err == nil && created {
+			settled[p.ID] = true
+			if p.Path != "" {
+				claimedPath[p.Path] = p.ID
+			}
+			if remote != "" {
+				claimedRemote[remote] = p.ID
+			}
+		}
 	}
 	return mapping, nil
 }
