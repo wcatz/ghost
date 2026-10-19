@@ -85,6 +85,9 @@ func reflectBinaryRun(t *testing.T, bin, home string, args ...string) (int, stri
 		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"),
 		"XDG_DATA_HOME=" + filepath.Join(home, "data"),
 		"PATH=" + filepath.Join(home, "empty-path"),
+		// A temp dir of the run's own, so nothing the binary writes or
+		// sweeps under os.TempDir() reaches the machine's.
+		"TMPDIR=" + t.TempDir(),
 		"GHOST_OLLAMA_URL=http://127.0.0.1:1",
 		"GHOST_CLI_CLAUDE_BINARY=" + filepath.Join(home, "no-such-claude"),
 		"GHOST_CLI_OPENCODE_BINARY=" + filepath.Join(home, "no-such-opencode"),

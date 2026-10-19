@@ -1300,6 +1300,42 @@ func reflectMaySkip(skipUnchanged, apply, promoteGlobals, allowDrops bool, store
 	return !promoteGlobals && !allowDrops && reflectSkipDecision(skipUnchanged, apply, stored, current)
 }
 
+// maxConsolidationInput is the most consolidatable memories one
+// `ghost reflect` rewrites. Every tier rewrites its whole input at once: a
+// harness tier is sent all of it as text, and the SQLite floor compares every
+// pair (measured on a raw-SQL-seeded store: 1.8s at 2000 rows, 43s at 10000),
+// so above the bound a run would either overrun the model's context or stall.
+const maxConsolidationInput = 2000
+
+// consolidationBound decides what `ghost reflect` does with a consolidatable
+// set of n memories. At or below maxConsolidationInput it returns "" and the
+// run goes on. Above it the run writes nothing, and the line says why and
+// what to do:
+//
+//   - refuse is true for a manual run, which exits 1 with the line on stderr;
+//   - refuse is false under --skip-unchanged with --apply, the form the
+//     lifecycle phase runs. That run reports a skip on stdout and exits 0, as
+//     the unchanged-set skip does. A failure there would leave the lifecycle
+//     failure marker on every run, and the session-start alert with it, for a
+//     condition no rerun can change.
+//
+// What to do names only actions that shrink the consolidatable set: a
+// resolved memory and an expired session memory removed by a prune are no
+// longer in it. A pure function, because runReflect exits the process.
+func consolidationBound(projectLabel string, n int, skipUnchanged, apply bool) (line string, refuse bool) {
+	if n <= maxConsolidationInput {
+		return "", false
+	}
+	fix := fmt.Sprintf("consolidate it, bring it to at most %d: `ghost resolve <project> --apply` marks resolved-evidence memories and `ghost prune --project <project> --apply` removes expired session ones (pinned, manual and persistent memories do not count)",
+		maxConsolidationInput)
+	if skipUnchanged && apply {
+		return fmt.Sprintf("reflect: skipping — project %s has %d consolidatable memories, above the %d limit for a single consolidation; nothing written, and not a failure. To %s\n",
+			projectLabel, n, maxConsolidationInput, fix), false
+	}
+	return fmt.Sprintf("error: project %s has %d consolidatable memories, above the %d limit for a single consolidation — nothing written; to %s\n",
+		projectLabel, n, maxConsolidationInput, fix), true
+}
+
 // reflectArgs is one parsed `ghost reflect` invocation.
 type reflectArgs struct {
 	project        string
@@ -1723,14 +1759,16 @@ func runReflect() {
 			return
 		}
 	}
-	// Bound the prompt. The consolidator rewrites its entire input in one call,
-	// so an enormous project would either blow the model's context or, without
-	// --require-llm, fall through to the O(n^2) SQLite tier and stall. Refuse
-	// loudly rather than emit a partial or truncated result.
-	const maxConsolidationInput = 2000
-	if len(live) > maxConsolidationInput {
-		fmt.Fprintf(os.Stderr, "error: project %s has %d consolidatable memories, above the %d limit for a single consolidation — nothing written\n", assemble.Label(projectName), len(live), maxConsolidationInput)
-		os.Exit(1)
+	// Bound one consolidation's input; see maxConsolidationInput. Above it a
+	// manual run refuses, and the lifecycle's form of the command reports a
+	// skip, exiting 0 with nothing written and no signature stored.
+	if line, refuse := consolidationBound(assemble.Label(projectName), len(live), skipUnchanged, apply); line != "" {
+		if refuse {
+			fmt.Fprint(os.Stderr, line)
+			os.Exit(1)
+		}
+		fmt.Print(line)
+		return
 	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
 
