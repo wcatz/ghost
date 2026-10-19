@@ -98,7 +98,8 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte("All project knowledge is stored in Ghost."), 0644); err != nil {
+	redirect := "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(redirect), 0644); err != nil {
 		t.Fatal(err)
 	}
 
