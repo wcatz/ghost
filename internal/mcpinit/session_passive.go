@@ -59,10 +59,10 @@ const sessionHostLimit = 10000
 // that writes it, and task and decision titles by nothing on the import paths
 // (the MCP handler's own limit does not apply to `ghost import`). These three
 // fields are bounded in BYTES at the read, which shrinks the usual case; they are
-// not a guarantee. quoteData folds each line break to a 3-byte marker, so a
-// bounded field can still render up to three times as long, and the project name
-// and ids are unbounded. The framing is therefore still unbounded in the tail, and
-// the fit pass keeps the rows when it alone reaches the host limit.
+// not a guarantee. quoteData folds each line break to a 3-byte marker and escapes
+// each control rune to up to six bytes, so a bounded field can still render up
+// to six times as long, and the project name and ids are unbounded. The framing
+// is therefore still unbounded in the tail, and the fit pass keeps the rows when it alone reaches the host limit.
 const (
 	sessionLearnedBytes = 1000
 	sessionTitleBytes   = 120

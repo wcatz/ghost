@@ -84,7 +84,7 @@ func TestBothTagLabelRenderersPrintTheOrdinaryCaseIdentically(t *testing.T) {
 		// And a legacy guillemet, which is the OTHER convention on purpose: `<<` is
 		// what a content block prints for a literal `«`, so a reader who has met one
 		// knows the other. A backtick has no such convention, which is why it gets a
-		// JSON escape instead. See tagBacktickEscape.
+		// JSON escape instead. See TagBacktickEscape.
 		{"a legacy tag holding a guillemet", []string{"a«b"}, ` tags:["a<<b"]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,5 +101,32 @@ func TestBothTagLabelRenderersPrintTheOrdinaryCaseIdentically(t *testing.T) {
 				t.Errorf("formatMemories with tags %q = %q, want it to carry %q", tc.tags, line, tc.want)
 			}
 		})
+	}
+}
+
+// A refused tag that holds a backtick is named in the refusal, and the sentence
+// the refusal promises to keep free of the character must not carry it raw: the
+// answer goes back to the client as tool output, where a raw backtick can pair
+// with the next one into a code span, which is the effect the refusal describes.
+// The tag is named with the escape the tag label prints for it, so the caller
+// still sees which character to remove.
+func TestRefusedTagNamedWithoutARawBacktick(t *testing.T) {
+	_, err := validateTags([]string{"ok", "a`b"})
+	if err == nil {
+		t.Fatal("a tag holding a backtick was accepted")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "tag 1 (") {
+		t.Errorf("the refusal does not name the position of the tag: %v", err)
+	}
+	if !strings.Contains(msg, "\"a\\u0060b\"") {
+		t.Errorf("the refusal does not name the tag with the backtick escaped: %v", err)
+	}
+	// The reason is the one place the sentence may say the word, and it does so
+	// in words; no backtick or delimiter appears anywhere in it.
+	for _, bad := range []string{"`", "«", "»"} {
+		if strings.Contains(msg, bad) {
+			t.Errorf("the refusal carries %q: %v", bad, err)
+		}
 	}
 }

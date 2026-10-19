@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -113,4 +114,49 @@ func TestStoredLineBreaksNeverForgeAMemoryLine(t *testing.T) {
 			assertNoForged(t, "ghost_resolve_mark", out)
 		}
 	})
+}
+
+// rawTerminalBytes returns the first byte sequence in out a terminal acts on:
+// ESC, or a C1 control (U+0080 to U+009F, two bytes C2 80 to C2 9F in UTF-8).
+func rawTerminalBytes(out string) string {
+	for i, r := range out {
+		if r == 0x1b || (r >= 0x80 && r <= 0x9f) {
+			return fmt.Sprintf("%U at byte %d", r, i)
+		}
+	}
+	return ""
+}
+
+// TestStoredControlCharactersNeverReachATerminalRaw: a saved memory holding ESC
+// and CSI must come back through the search answer and its explain payload as
+// visible escapes, never as bytes a terminal would act on.
+func TestStoredControlCharactersNeverReachATerminalRaw(t *testing.T) {
+	const content = "real claim esc\x1b[2J csi\u009b31m bel\a del\x7f end"
+	for _, explain := range []bool{false, true} {
+		srv, session := newCapSession(t)
+		if _, err := srv.store.Create(context.Background(), "abc123", memory.Memory{
+			Content: content, Category: "fact", Importance: 0.9, Source: "mcp",
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+			"project_id": "test-project", "query": "real claim", "explain": explain,
+		}))
+		if !strings.Contains(out, "real claim") {
+			t.Fatalf("explain=%v: the row is not in the answer, the test proves nothing:\n%s", explain, out)
+		}
+		if bad := rawTerminalBytes(out); bad != "" {
+			t.Errorf("explain=%v: raw terminal control %s in the answer: %q", explain, bad, out)
+		}
+		// Under explain the answer is the JSON payload alone, so its content
+		// field is the only rendering of the row and must carry the escape.
+		// A JSON-encoded backslash is two, so the escaped ESC reads `\\x1b`.
+		if explain && !strings.Contains(out, `\\x1b`) {
+			t.Errorf("explain payload content is not escaped: %q", out)
+		}
+		// The explain payload is JSON, which would hide a raw ESC as \u001b.
+		if strings.Contains(out, `\u001b`) || strings.Contains(out, `\u007f`) {
+			t.Errorf("explain=%v: a raw control survived to the JSON encoder: %q", explain, out)
+		}
+	}
 }

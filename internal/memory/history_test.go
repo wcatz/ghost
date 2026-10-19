@@ -2180,3 +2180,72 @@ func TestPurgeInTheDeletePathFindsATextNoHistoryRowHolds(t *testing.T) {
 		t.Errorf("the purged text survives in %d row(s)", leaked)
 	}
 }
+
+// TestImportRefusesAnIDThatStillHasHistoryInADryRunToo: the refusal is made
+// ahead of the dry-run return, so a preview of an import into a remembered id
+// reaches the same verdict as the run it previews. A refusal that slid below that
+// return would give a clean preview and then a failed apply. Both modes are
+// driven here, the error is compared, and neither may write a row: the dry run
+// because it is one, the apply because it was refused.
+func TestImportRefusesAnIDThatStillHasHistoryInADryRunToo(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id := "EEEEEEEEFFFFFFFF1111111122222222"
+	if _, err := s.db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source)
+		 VALUES (?, ?, 'fact', 'a fact that was deleted here', 'mcp')`, id, testProject,
+	); err != nil {
+		t.Fatalf("seed the row to be deleted: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("the deleted memory left no history; the test needs an id that is free but remembered")
+	}
+
+	rec := PortableMemory{
+		ID:        id,
+		ProjectID: testProject,
+		Category:  "convention",
+		Content:   "an unrelated fact from an artifact",
+		Source:    "manual",
+	}
+	errs := map[string]error{}
+	for _, mode := range []struct {
+		name  string
+		apply bool
+	}{{"dry run", false}, {"apply", true}} {
+		created, _, _, err := s.ImportMemory(ctx, rec, ImportOptions{Apply: mode.apply, TrustProvenance: true})
+		if err == nil {
+			t.Fatalf("%s: the import was not refused", mode.name)
+		}
+		if created {
+			t.Errorf("%s: reported a create alongside the refusal", mode.name)
+		}
+		if !strings.Contains(err.Error(), "ghost history purge") {
+			t.Errorf("%s: error = %q, want it to name the operation that frees the id", mode.name, err)
+		}
+		errs[mode.name] = err
+
+		live, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(live) != 0 {
+			t.Errorf("%s: the refused import wrote the row: %v %v", mode.name, live, err)
+		}
+		after, err := s.MemoryHistory(ctx, id, 0)
+		if err != nil {
+			t.Fatalf("MemoryHistory: %v", err)
+		}
+		if len(after) != len(before) {
+			t.Errorf("%s: history went from %d rows to %d", mode.name, len(before), len(after))
+		}
+	}
+	if errs["dry run"].Error() != errs["apply"].Error() {
+		t.Errorf("the dry run and the apply disagree:\n dry:   %v\n apply: %v", errs["dry run"], errs["apply"])
+	}
+}
