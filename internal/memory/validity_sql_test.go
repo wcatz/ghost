@@ -464,12 +464,12 @@ func TestPassiveValidityExcludedCountsAnEntirelyInvalidBucket(t *testing.T) {
 		req := passiveRequest(testProject, pol)
 		req.Now = now
 
-		n, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+		n, capped, err := s.passiveValidityExcluded(ctx, req, pol, cols)
 		if err != nil {
 			t.Fatalf("passiveValidityExcluded(%s): %v", pol.Bucket, err)
 		}
-		if n != 2 {
-			t.Errorf("passiveValidityExcluded(%s) = %d; want 2 (the expired and the not-yet-open row)", pol.Bucket, n)
+		if n != 2 || capped {
+			t.Errorf("passiveValidityExcluded(%s) = %d (capped=%v); want 2 (the expired and the not-yet-open row), not capped", pol.Bucket, n, capped)
 		}
 
 		set, err := s.Candidates(ctx, req)

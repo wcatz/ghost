@@ -228,7 +228,7 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		// empty bucket and summing reports the exclusions of a union of two empty
 		// buckets, which is what the verdict describes.
 		if len(fetched) == 0 {
-			excluded, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+			excluded, _, err := s.passiveValidityExcluded(ctx, req, pol, cols)
 			if err != nil {
 				return nil, err
 			}
@@ -858,24 +858,33 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now t
 // what stage 2 would have withheld (a row admitted only by second-truncation is
 // not counted), never an overcount.
 //
+// The count is CAPPED at PassiveEligibleCountCap, the same bound
+// PassiveEligibleCount uses: a bucket whose invalid rows fill the cap reports the
+// cap with capped true, a LOWER BOUND, instead of paying a full table pass for an
+// exact figure on a path that runs at every session start. capped is false when
+// the count came in under the cap and is therefore exact.
+//
 // A store below the validity floor has no predicate to have excluded anything:
 // zero, not an error.
-func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, error) {
+func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, bool, error) {
 	if !cols.HasValidity {
-		return 0, nil
+		return 0, false, nil
 	}
 	where, args := passivePopulationSQL(pol, req, cols)
 	stamp := req.Now.UTC().Format(stampLayoutForSQL)
 	// NOT (validityMatchesSQL()) is "the predicate would have dropped this row".
 	// The two ? placeholders are bound in the predicate's own text order (until,
-	// then from), after the population's bucket.
+	// then from), after the population's bucket; the cap is the statement's last
+	// binding.
 	args = append(args, stamp, stamp)
-	query := `SELECT COUNT(*) FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `)`
+	inner := `SELECT 1 FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `) LIMIT ?`
+	args = append(args, PassiveEligibleCountCap)
+	query := `SELECT COUNT(*) FROM (` + inner + `)`
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
+		return 0, false, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
 	}
-	return n, nil
+	return n, n >= PassiveEligibleCountCap, nil
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the
