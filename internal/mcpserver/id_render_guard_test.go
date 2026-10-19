@@ -39,9 +39,12 @@ import (
 //
 // A formatting call is not the only sink that can echo one of these values.
 // `followup.ResolveCommand` builds the scoped repair command a tool result
-// prints, and it shell-quotes whatever project it is handed — so a raw
-// project argument reaches the answer through the helper rather than through
-// fmt, and the scan fails on that hand-off too.
+// prints and `repairInstructions` wraps it for the withdrawal answer; both
+// shell-quote whatever project they are handed — so a raw project argument
+// reaches the answer through one of them rather than through fmt, and the
+// scan fails on that hand-off too. A local that merely HOLDS the caller's
+// spelling (`spelling = projectID`) is the same leak one hop further on, so
+// the names a file binds a raw project argument to are consulted as well.
 //
 // A verb is not consulted. Any verb prints a bare string, and `%q` is no safer
 // than `%s` — it leaves a printable non-ASCII rune as itself — so the question is
@@ -64,6 +67,7 @@ func TestNoToolResultPrintsAStoredIDOutsideTheRenderer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+		tainted := idGuardTaintedNames(file)
 		ast.Inspect(file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -83,14 +87,17 @@ func TestNoToolResultPrintsAStoredIDOutsideTheRenderer(t *testing.T) {
 					}
 				}
 			}
-			// The repair-command helper is a second sink: it shell-quotes whatever
-			// project it is handed into a command an agent may paste, so a raw
-			// project argument reaches the answer through it too.
-			if idGuardRepairHelper(call) {
+			// The repair-command sinks are a second kind of place a value reaches
+			// an answer: they shell-quote whatever project they are handed into a
+			// command an agent may paste, so a raw project argument reaches the
+			// answer through one of them without ever passing through fmt. A local
+			// that merely HOLDS the caller's spelling is the same leak one hop
+			// further on, which is why the tainted set is consulted here too.
+			if idGuardRepairSink(call) {
 				for _, arg := range call.Args {
-					if idGuardRawProjectOperand(arg) {
-						t.Errorf("%s: a caller-supplied project argument is handed to the repair-command "+
-							"helper, which shell-quotes it into the answer; pass the RESOLVED project so a "+
+					if idGuardRawProjectOperand(arg) || idGuardTainted(arg, tainted) {
+						t.Errorf("%s: a caller-supplied project argument is handed to a repair-command "+
+							"sink, which shell-quotes it into the answer; pass the RESOLVED project so a "+
 							"token-shaped spelling cannot reach the command: %s",
 							fset.Position(arg.Pos()), idGuardRender(arg))
 					}
@@ -195,34 +202,80 @@ func idGuardOperand(expr ast.Expr) bool {
 	return false
 }
 
-// idGuardRepairHelper reports whether call is followup.ResolveCommand, the
-// helper that renders the scoped repair command a tool result prints. It is
-// a second sink for a stored value: the helper shell-quotes whatever project
-// it is handed into a command an agent may paste, so the value reaches the
-// answer without ever passing through fmt.
-func idGuardRepairHelper(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
+// idGuardRepairSink reports whether call is one of the two functions that
+// render a scoped repair command a tool result prints: `followup.ResolveCommand`
+// (which the CLI and both MCP repair surfaces share) and `repairInstructions`
+// (which wraps it for the withdrawal answer). Both shell-quote whatever project
+// they are handed into a command an agent may paste, so a raw project argument
+// reaches the answer through either without ever passing through fmt.
+func idGuardRepairSink(call *ast.CallExpr) bool {
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := fun.X.(*ast.Ident)
+		return ok && pkg.Name == "followup" && fun.Sel.Name == "ResolveCommand"
+	case *ast.Ident:
+		return fun.Name == "repairInstructions"
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "followup" && sel.Sel.Name == "ResolveCommand"
+	return false
 }
 
 // idGuardRawProjectOperand reports whether expr is one of the spellings this
 // package gives a CALLER-SUPPLIED project argument rather than a resolved one:
-// the raw `projectID` parameter, or the `project` / `project_id` tool arguments.
-// A resolved id (`resolvedProjectID` and its kin) is what the helper is meant
-// to be handed — the command is about the project the argument resolved to —
-// so the resolved spellings are deliberately not in this set.
+// the raw `projectID` parameter, or the `project` / `project_id` tool arguments
+// (the two `args.Project` and the `args.ProjectID` field of every other handler).
+// The receiver is pinned to `args` because that is what makes the value the
+// CALLER's — a resolved id read off a struct (`g.ProjectID` in the withdrawal
+// grouping) is a stored value and is exactly what a sink is meant to be handed.
+// A resolved local (`resolvedProjectID` and its kin) is likewise deliberately
+// not in this set.
 func idGuardRawProjectOperand(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		return e.Name == "projectID"
 	case *ast.SelectorExpr:
-		return e.Sel.Name == "Project" || e.Sel.Name == "ProjectID"
+		recv, ok := e.X.(*ast.Ident)
+		return ok && recv.Name == "args" && (e.Sel.Name == "Project" || e.Sel.Name == "ProjectID")
 	}
 	return false
+}
+
+// idGuardTaintedNames collects the local names this file binds a raw caller
+// project argument to. A sink cannot see through a local, so a name that ever
+// holds the caller's spelling is treated as the argument itself: the shape this
+// catches is `spelling = projectID` followed by `repairInstructions(spelling, …)`,
+// where the value reaches the command one hop on from the call the scan reads.
+func idGuardTaintedNames(file *ast.File) map[string]bool {
+	names := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		if assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE {
+			return true
+		}
+		if len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if idGuardRawProjectOperand(assign.Rhs[i]) {
+				names[id.Name] = true
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// idGuardTainted reports whether expr is a local that idGuardTaintedNames found
+// holding a raw caller project argument.
+func idGuardTainted(expr ast.Expr, tainted map[string]bool) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && tainted[id.Name]
 }
 
 // idGuardRenders reports whether expr is a renderer call over a stored id: the

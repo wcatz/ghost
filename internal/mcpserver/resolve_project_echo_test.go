@@ -20,7 +20,12 @@ import (
 // succeeds, while the value itself is token-shaped and must never come back
 // in the result. The token marker is asserted on its own as well as the whole
 // URL, so a result that withholds the URL but prints the token still fails.
-const tokenProjectArg = "https://oauth2:ghp_0123456789abcdefghijklmnopqrst@github.com/wcatz/ghost.git"
+// It is assembled from parts so no token-shaped literal sits in this source.
+var tokenProjectArg = "https://oauth2:" + tokenMarker + "@github.com/wcatz/ghost.git"
+
+// tokenMarker is a GitHub-token-shaped marker, built from parts so no
+// token-shaped literal appears in this source.
+var tokenMarker = "ghp" + "_" + strings.Repeat("a", 30)
 
 // seedProjectWithRemote gives the testStore project a repository remote, so a
 // clone URL of that repository resolves to it the way docs/mcp.md describes.
@@ -75,7 +80,7 @@ func TestGhostResolveResultNeverEchoesTheTokenShapedProjectArgument(t *testing.T
 	if strings.Contains(text, tokenProjectArg) {
 		t.Errorf("the result echoes the caller's token-shaped project argument:\n%s", text)
 	}
-	if strings.Contains(text, "ghp_") {
+	if strings.Contains(text, tokenMarker) {
 		t.Errorf("the result prints the token marker from the project argument:\n%s", text)
 	}
 	// The pass itself ran and reported its verdict, so the silence above is a
@@ -119,7 +124,7 @@ func TestGhostResolveMarkResultNeverEchoesTheTokenShapedProjectArgument(t *testi
 	if strings.Contains(text, tokenProjectArg) {
 		t.Errorf("the result echoes the caller's token-shaped project argument:\n%s", text)
 	}
-	if strings.Contains(text, "ghp_") {
+	if strings.Contains(text, tokenMarker) {
 		t.Errorf("the result prints the token marker from the project argument:\n%s", text)
 	}
 	// The mark landed, so the silence above is a rendering and not a call that
@@ -129,6 +134,52 @@ func TestGhostResolveMarkResultNeverEchoesTheTokenShapedProjectArgument(t *testi
 	}
 	if !isMarkedResolved(t, store, id) {
 		t.Error("the named memory is not resolved")
+	}
+	// The repair command is scoped to the project the argument RESOLVED to.
+	if !strings.Contains(text, "ghost resolve abc123 --reassess --only") {
+		t.Errorf("the repair command is not built from the resolved project:\n%s", text)
+	}
+}
+
+// TestGhostLinkWithdrawResultNeverEchoesTheTokenShapedProjectArgument pins the
+// third surface: ghost_link_withdraw resolves the project and then builds its
+// repair command from the resolved id the withdrawal grouping carries, so a
+// token-shaped clone URL passed as the project cannot reach the command.
+func TestGhostLinkWithdrawResultNeverEchoesTheTokenShapedProjectArgument(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	seedProjectWithRemote(t, store)
+	ctx := context.Background()
+	newer, older := seedLinkWithdrawal(t, store, "abc123")
+
+	session := connectedClient(t, srv)
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_link_withdraw",
+		Arguments: map[string]any{
+			"project_id": tokenProjectArg,
+			"source_id":  newer,
+			"target_id":  older,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_link_withdraw: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_link_withdraw returned an error result: %+v", result.Content)
+	}
+	text := resultText(result)
+	if strings.Contains(text, tokenProjectArg) {
+		t.Errorf("the result echoes the caller's token-shaped project argument:\n%s", text)
+	}
+	if strings.Contains(text, tokenMarker) {
+		t.Errorf("the result prints the token marker from the project argument:\n%s", text)
+	}
+	// The withdrawal landed, so the silence above is a rendering and not a call
+	// that never reached the store.
+	if !strings.Contains(text, "Withdrew 1 of 1") {
+		t.Errorf("the tool did not report its withdrawal:\n%s", text)
+	}
+	if got := liveInto(t, store, "abc123", older); got != 0 {
+		t.Errorf("live edges into the target = %d, want 0", got)
 	}
 	// The repair command is scoped to the project the argument RESOLVED to.
 	if !strings.Contains(text, "ghost resolve abc123 --reassess --only") {

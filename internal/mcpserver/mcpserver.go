@@ -1755,16 +1755,14 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// implementer inside it reads as an instruction to the agent reading it. That
 	// guidance lives in this function's doc comment instead.
 	for _, g := range groups {
-		// The project that can reach these targets, spelled the way the CALLER
-		// spelled its own project when these are its own targets. That keeps the
-		// ordinary answer byte-identical to what it always was; a group for some
-		// other project — a `_global` call over a target in a project — is spelled
-		// by its id, which ResolveProject accepts.
-		spelling := g.ProjectID
-		if g.ProjectID == resolvedProjectID {
-			spelling = projectID
-		}
-		sb.WriteString(repairInstructions(spelling, g.Targets))
+		// The project is the one the group's targets live in — the resolved id
+		// the group carries — and never the caller's spelling of it. The command
+		// is built to be pasted into a shell, and a caller's spelling of a
+		// project can be a token-shaped clone URL that resolves to it, so passing
+		// the raw argument here would print the token. `g.ProjectID` is already
+		// the resolved id for the caller's own project too, so no special case
+		// keeps a second spelling alive.
+		sb.WriteString(repairInstructions(g.ProjectID, g.Targets))
 	}
 	return sb.String(), nil
 }

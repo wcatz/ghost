@@ -87,7 +87,10 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// `ghost_resolve` is the FORWARD pass — it stamps resolved_at on confirmed
 	// evidence — and takes no id selector, so an agent pointed at it would bury MORE
 	// memories and pay a harness call for it.
-	want, _, _ := followup.ResolveCommand("test-project", []string{older})
+	// The command names the project the argument RESOLVED to — the id "abc123",
+	// not the name "test-project" the call was made with — so a caller's spelling
+	// of a project can never reach the command.
+	want, _, _ := followup.ResolveCommand("abc123", []string{older})
 	if !strings.Contains(msg, want) {
 		t.Errorf("the result does not carry the scoped repair command %q: %q", want, msg)
 	}
