@@ -678,7 +678,12 @@ func WriteSidecar(dir string, s *Signals) (string, error) {
 // used nothing" — which is the one reading that would make the report confidently
 // wrong. A field it cannot parse is an error, not a default.
 func ReadSidecar(path string, h Hasher) (*Signals, error) {
-	raw, err := os.ReadFile(path)
+	f, err := openSidecar(path)
+	if err != nil {
+		return nil, fmt.Errorf("audit: read sidecar: %w", err)
+	}
+	defer f.Close() //nolint:errcheck
+	raw, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("audit: read sidecar: %w", err)
 	}
@@ -976,21 +981,36 @@ var errNotRegularSidecar = errors.New("audit: sidecar is not a regular file")
 // and the fstat on the descriptor refuses anything that is not a regular
 // file before a byte is read. Reading only the header also bounds the read.
 func readSidecarHead(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, sidecarOpenFlags, 0) // #nosec G304 -- a sidecar name in the swept dir
+	f, err := openSidecar(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w (%s)", errNotRegularSidecar, info.Mode().Type())
-	}
 	head := make([]byte, len(sidecarHeaderPrefix))
 	if _, err := io.ReadFull(f, head); err != nil {
 		return nil, err
 	}
 	return head, nil
+}
+
+// openSidecar opens a sidecar for reading and returns it only when the open
+// descriptor is a regular file. Both the sweep and the audit's read go through
+// it, because the temp dir is writable by every local process and a FIFO or
+// symlink swapped in at the path would otherwise block the open or be
+// followed. The caller closes the file.
+func openSidecar(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, sidecarOpenFlags, 0) // #nosec G304 -- a sidecar path, checked for a regular file below
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w (%s)", errNotRegularSidecar, info.Mode().Type())
+	}
+	return f, nil
 }

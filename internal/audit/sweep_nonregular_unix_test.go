@@ -233,3 +233,40 @@ func TestReadSidecarHeadRefusesWhatIsNotARegularFile(t *testing.T) {
 		}
 	})
 }
+
+// The audit reads the same untrusted path while the coordinator holds the
+// lifecycle lock, so ReadSidecar owes the sweep's guarantee: a FIFO or a
+// symlink at the path is refused at once instead of blocking or being followed.
+func TestReadSidecarRefusesWhatIsNotARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "ghost-audit-planted.signals")
+	mkfifo(t, fifo)
+	real := filepath.Join(dir, "ghost-audit-real.signals")
+	if err := writeFileString(real, SidecarHeader+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ghost-audit-link.signals")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("FIFO", func(t *testing.T) {
+		var err error
+		withSweepDeadline(t, []string{fifo}, func() { _, err = ReadSidecar(fifo, testHasher) })
+		if !errors.Is(err, errNotRegularSidecar) {
+			t.Errorf("ReadSidecar(FIFO) = %v, want errNotRegularSidecar", err)
+		}
+	})
+	t.Run("symlink to a valid sidecar", func(t *testing.T) {
+		var err error
+		withSweepDeadline(t, nil, func() { _, err = ReadSidecar(link, testHasher) })
+		if err == nil {
+			t.Error("ReadSidecar followed a symlink")
+		}
+	})
+	t.Run("regular sidecar", func(t *testing.T) {
+		if _, err := ReadSidecar(real, testHasher); err != nil {
+			t.Errorf("ReadSidecar(regular) = %v", err)
+		}
+	})
+}
