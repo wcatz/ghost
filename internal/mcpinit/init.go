@@ -1799,12 +1799,6 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	return infos, nil
 }
 
-// staleRedirectSeedLiteral mirrors the synthetic older redirect used by the
-// atomic-write test fixture, so a redirect in that exact shape is still
-// recognised as Ghost's own and refreshed. It is not a template Ghost ever
-// generated; it stands in for one in tests.
-const staleRedirectSeedLiteral = "# Myproject Project Memory\n\nAll project knowledge is stored in Ghost.\nCall `ghost_list_projects` to see what is known.\n"
-
 // sanitizeName allowlists safe characters for project names interpolated into
 // MEMORY.md files that Claude Code auto-loads (prevents prompt injection).
 func sanitizeName(name string) string {
@@ -1871,7 +1865,7 @@ All project knowledge is stored in Ghost. At session start, run:
 			// Rewrite only an unedited old-format Ghost redirect. Anything else
 			// (including a redirect the user has edited) is left alone, the same
 			// way an unrecognised MEMORY.md is.
-			if content != oldContent && content != staleRedirectSeedLiteral {
+			if content != oldContent {
 				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
 				continue
 			}
