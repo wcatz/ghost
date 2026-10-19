@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -1771,28 +1772,28 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", assemble.Label(p.Name))
 			continue
 		}
 
 		n, refused, failed, notRegular, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
 		if n > 0 {
-			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
+			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", assemble.Label(p.Name), n)
 		} else {
-			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", assemble.Label(p.Name))
 		}
 		for _, f := range refused {
-			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range failed {
-			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range notRegular {
-			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", p.Name, memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
 		}
 	}
 
@@ -1859,26 +1860,26 @@ All project knowledge is stored in Ghost. At session start, run:
 `, safeName, safeName)
 
 			if content == currentContent {
-				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
+				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", assemble.Label(p.Name))
 				continue
 			}
 			// Rewrite only an unedited old-format Ghost redirect. Anything else
 			// (including a redirect the user has edited) is left alone, the same
 			// way an unrecognised MEMORY.md is.
 			if content != oldContent {
-				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
+				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", assemble.Label(p.Name))
 				continue
 			}
 			// Old Ghost redirect with stale tool-call instructions — update it.
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", assemble.Label(p.Name))
 			continue
 		}
 
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
 
@@ -1893,9 +1894,9 @@ Use `+"`ghost_memory_search`"+` to search for specific facts.
 `, safeName)
 
 		if err := writeFileAtomic(target, []byte(content), 0644); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", assemble.Label(p.Name), err)
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", p.Name)
+		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", assemble.Label(p.Name))
 	}
 }
