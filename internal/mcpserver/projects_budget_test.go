@@ -160,7 +160,7 @@ func TestHealthFewProjectsHasNoNotice(t *testing.T) {
 	}
 	// Order of sections is what it was: count line, rows, then the total.
 	i, j, k := strings.Index(text, "**Projects:**"), strings.Index(text, "\n- **"), strings.Index(text, "**Total memories:**")
-	if !(i < j && j < k) {
+	if i >= j || j >= k {
 		t.Errorf("sections out of order: %d %d %d", i, j, k)
 	}
 }
