@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -483,14 +484,47 @@ func splitNumberedLine(line string) (int, string, bool) {
 
 // formatBatchContent renders notes as numbered NOTE blocks matching the batch
 // prompt's numbering, so reply lines map back by number and not by position
-// alone.
+// alone. Each note's content is folded to one physical line so that verdict-
+// shaped lines inside stored content cannot be parsed as batch verdict lines.
 func formatBatchContent(contents []string) string {
 	var b strings.Builder
 	for i, c := range contents {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "%d.\nNOTE: %s", i+1, quoteData(c))
+		fmt.Fprintf(&b, "%d.\nNOTE: %s", i+1, quoteData(foldNoteContent(c)))
+	}
+	return b.String()
+}
+
+// foldNoteContent replaces every line break a line-oriented reader honours
+// with a visible escape (⏎), so that a verdict-shaped line inside stored
+// note content cannot be parsed as a separate numbered batch verdict line.
+// This mirrors the behaviour of assemble.Data's foldLineBreaks (#911).
+func foldNoteContent(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+			b.WriteString("⏎")
+			i += 2
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError && (r == '\n' ||
+			r == '\v' ||
+			r == '\f' ||
+			r == 0x1c ||
+			r == 0x1d ||
+			r == 0x1e ||
+			r == 0x85 ||
+			r == 0x2028 ||
+			r == 0x2029) {
+			b.WriteString("⏎")
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
 	}
 	return b.String()
 }
