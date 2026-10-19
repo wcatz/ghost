@@ -711,11 +711,13 @@ const tagMaxCount = 10
 //
 // The tag is named in the refusal through `assemble.Token`, which is the renderer
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
-// the ASCII-only quoted string. Interpolating it raw would be a second injection
-// on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain. A tag that is
-// token-shaped, or that the caller sent longer than the bound a refusal repeats,
-// is withheld instead (refusedTag).
+// the ASCII-only quoted string, with a backtick written as the JSON escape the
+// tag label prints for it, because Token quotes a backtick but leaves it raw.
+// Interpolating the tag raw would be a second injection on the very surface the
+// first one closes, and a backtick is in the class precisely because it is a
+// character this error string must never contain. A tag that is token-shaped, or
+// that the caller sent longer than the bound a refusal repeats, is withheld
+// instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -775,14 +777,15 @@ func validateTags(tags []string) ([]string, error) {
 // credential back that the guard would have refused to store. Both are decided
 // on the tag as the caller sent it, before the cut, so a value cut to the tag
 // bound is not repeated and the length reported is the caller's own. Every
-// other tag is named through assemble.Token, in the form the row would print.
-// RefusalArg alone would not do for those: it quotes with %q, which keeps the
-// data delimiters this sentence must not carry.
+// other tag is named through assemble.Token, in the form the row would print,
+// with a backtick escaped the way the tag label escapes it: Token's quoting
+// keeps a backtick raw. RefusalArg alone would not do for those: it quotes with
+// %q, which keeps the data delimiters this sentence must not carry.
 func refusedTag(orig, cut string) string {
 	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
 		return memory.RefusalArg("tag", orig)
 	}
-	return assemble.Token(cut)
+	return strings.ReplaceAll(assemble.Token(cut), "`", assemble.TagBacktickEscape)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
@@ -1229,6 +1232,10 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 	}
 }
 
+// notifyLookupTimeout bounds the alias lookup and pushes notifyProjectResource
+// makes on a context detached from the request.
+const notifyLookupTimeout = 5 * time.Second
+
 // notifyProjectResource pushes a resources/updated notification for a
 // project-scoped resource (suffix is "context", "decisions", or "tasks") under
 // every URI alias a client might have subscribed with. Resource identity is
@@ -1238,8 +1245,16 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 // delivers resources/updated by exact URI match, we emit on both the hash ID
 // and the project name, each in the percent-encoded form projectResourceURI
 // builds — the form the resource template matches and a client reads with.
-// Best-effort — the ListProjects lookup error is swallowed.
+// Best-effort — the ListProjects lookup error is swallowed, so a failed
+// lookup never fails a write that has already committed. The callers run this
+// after the write, and the request may have been cancelled by then; the
+// lookup and the pushes therefore run on a context detached from the request's
+// cancellation, bounded by notifyLookupTimeout so a stuck database cannot hang
+// the handler. Without that, a cancelled request failed the lookup and only
+// the id form was notified.
 func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyLookupTimeout)
+	defer cancel()
 	emitted := map[string]bool{}
 	emit := func(id string) {
 		if id == "" {
@@ -3698,9 +3713,9 @@ func (s *Server) registerTools() {
 		// left both live with the same-title advice skipped. The refusal names
 		// the successor, the decision that is current, so the caller can
 		// supersede that one instead. The same check runs again inside
-		// SupersedeDecisionReport's transaction; a writer racing past this one
-		// lands in the partial-failure branch below rather than in a silent
-		// repoint.
+		// RecordDecisionSuperseding's transaction; a writer racing past this
+		// one lands in the partial-failure branch below rather than in a
+		// silent repoint.
 		if args.Supersedes != "" {
 			successor, err := s.store.LiveDecisionSuccessor(ctx, args.ProjectID, args.Supersedes)
 			if err != nil {
@@ -3717,15 +3732,34 @@ func (s *Server) registerTools() {
 		if args.Supersedes == "" {
 			sameTitleAdvice = s.sameTitleDecisionAdvice(ctx, args.ProjectID, args.Title)
 		}
-		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		// A decision that supersedes another is recorded and applied in ONE
+		// store transaction, so a request cancelled between the two cannot
+		// leave the new decision live beside the one it replaces, and a retry
+		// of a cancelled call is a fresh write rather than a second live copy.
+		// An error here means nothing was written. A supersede the store
+		// refuses for what the rows say comes back in SupersedeErr with the
+		// decision committed, and is answered below as the partial failure.
+		var (
+			decisionID, memoryID string
+			companionClamped     bool
+			retirement           memory.DecisionRetirement
+			supersedeErr         error
+		)
+		if args.Supersedes == "" {
+			decisionID, memoryID, companionClamped, err = s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		} else {
+			var rec memory.RecordedDecision
+			rec, err = s.store.RecordDecisionSuperseding(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags, args.Supersedes)
+			decisionID, memoryID, companionClamped = rec.DecisionID, rec.MemoryID, rec.CompanionClamped
+			retirement, supersedeErr = rec.Retirement, rec.SupersedeErr
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
 		supersedeFailed := false
 		if args.Supersedes != "" {
-			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
-			if err != nil {
+			if err := supersedeErr; err != nil {
 				// The new decision is committed and the old one is NOT marked.
 				// That is a partial failure — the caller asked for one write and
 				// got another — so it is reported as an ERROR result rather than
@@ -3742,10 +3776,10 @@ func (s *Server) registerTools() {
 				// cannot forge a line here or bloat the answer (#1041, #1072).
 				//
 				// The store error is appended rather than dropped because it says
-				// WHICH write failed, and it is safe to append: the id-carrying
-				// sentences in `SupersedeDecisionReport` render their ids through
-				// the same renderer, so the whole sentence is bounded and nothing
-				// raw comes back through it.
+				// WHY the supersede was refused, and it is safe to append: the
+				// id-carrying sentences in the store's `supersedeDecisionTx`
+				// render their ids through the same renderer, so the whole
+				// sentence is bounded and nothing raw comes back through it.
 				supersedeFailed = true
 				var successorErr *memory.DecisionSuccessorError
 				if errors.As(err, &successorErr) {

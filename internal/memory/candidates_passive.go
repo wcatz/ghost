@@ -228,7 +228,10 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		// empty bucket and summing reports the exclusions of a union of two empty
 		// buckets, which is what the verdict describes.
 		if len(fetched) == 0 {
-			excluded, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+			// Only the count is consumed downstream (ValidityExcluded > 0 selects
+			// the all_invalid outcome); the capped flag is documented on
+			// CandidateSet.ValidityExcluded and on passiveValidityExcluded.
+			excluded, _, err := s.passiveValidityExcluded(ctx, req, pol, cols)
 			if err != nil {
 				return nil, err
 			}
@@ -598,20 +601,24 @@ func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey,
 // floor the predicate names columns that are not there and the whole fetch would
 // fail with "no such column: valid_from".
 //
-// The bindings are in TEXT order: the bucket, then the validity stamps when the
-// predicate is present.
+// A policy that admits `_global` is read as TWO arms, the project bucket and
+// `_global`, joined by UNION ALL under one ORDER BY. The population is the one
+// passivePopulationSQL states with the OR, but the OR is not how it is read:
+// `project_id = ? OR project_id = '_global'` loses the index order, and the
+// engine sorts every row of both buckets in a temp b-tree before the scan sees
+// the first, so the stop saves nothing. Each arm names one bucket and streams
+// out of idx_memories_project_imp, and the compound ORDER BY is served as a
+// merge of the two ordered arms, so the rows still arrive in importance order
+// and the scan stops at the window. The ORDER BY names the policy's full key
+// (importance, then created_at or updated_at, then id), which each arm's index
+// serves, so the merged stream arrives in the same order a single bucket's scan
+// does, ties across the arms included, and the non-strict stop stays sound over
+// both. A `_global` bucket that also admits `_global` is
+// one bucket and one arm, since two would hand every row over twice.
+//
+// The bindings are in TEXT order: per arm, the bucket, then the validity stamps
+// when the predicate is present.
 func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns, pinned bool) (string, []any) {
-	where, args := passivePopulationSQL(pol, req, cols)
-	if pinned {
-		where += " AND pinned = 1"
-	} else {
-		where += " AND pinned = 0"
-	}
-	if cols.HasValidity {
-		stamp := req.Now.UTC().Format(stampLayoutForSQL)
-		where += " AND " + validityMatchesSQL()
-		args = append(args, stamp, stamp)
-	}
 	retention := "retention"
 	if !cols.HasTier {
 		retention = "'' AS retention"
@@ -620,12 +627,35 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 	if pol.Order == OrderPinnedImportanceUpdated {
 		orderBy = "importance DESC, updated_at DESC, id"
 	}
-	query := fmt.Sprintf(`
+	arm := func(bucket string) (string, []any) {
+		one := pol
+		one.Bucket = bucket
+		one.IncludeGlobal = false
+		where, args := passivePopulationSQL(one, req, cols)
+		if pinned {
+			where += " AND pinned = 1"
+		} else {
+			where += " AND pinned = 0"
+		}
+		if cols.HasValidity {
+			stamp := req.Now.UTC().Format(stampLayoutForSQL)
+			where += " AND " + validityMatchesSQL()
+			args = append(args, stamp, stamp)
+		}
+		return fmt.Sprintf(`
 		SELECT id, importance, pinned, category, created_at, updated_at, %s
 		FROM memories
-		WHERE %s
-		ORDER BY %s`, retention, where, orderBy)
-	return query, args
+		WHERE %s`, retention, where), args
+	}
+	query, args := arm(pol.Bucket)
+	if pol.IncludeGlobal && pol.Bucket != GlobalProjectID {
+		global, globalArgs := arm(GlobalProjectID)
+		query += `
+		UNION ALL` + global
+		args = append(args, globalArgs...)
+	}
+	return query + `
+		ORDER BY ` + orderBy, args
 }
 
 // passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
@@ -831,24 +861,33 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now t
 // what stage 2 would have withheld (a row admitted only by second-truncation is
 // not counted), never an overcount.
 //
+// The count is CAPPED at PassiveEligibleCountCap, the same bound
+// PassiveEligibleCount uses: a bucket whose invalid rows fill the cap reports the
+// cap with capped true, a LOWER BOUND, instead of paying a full table pass for an
+// exact figure on a path that runs at every session start. capped is false when
+// the count came in under the cap and is therefore exact.
+//
 // A store below the validity floor has no predicate to have excluded anything:
 // zero, not an error.
-func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, error) {
+func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, bool, error) {
 	if !cols.HasValidity {
-		return 0, nil
+		return 0, false, nil
 	}
 	where, args := passivePopulationSQL(pol, req, cols)
 	stamp := req.Now.UTC().Format(stampLayoutForSQL)
 	// NOT (validityMatchesSQL()) is "the predicate would have dropped this row".
 	// The two ? placeholders are bound in the predicate's own text order (until,
-	// then from), after the population's bucket.
+	// then from), after the population's bucket; the cap is the statement's last
+	// binding.
 	args = append(args, stamp, stamp)
-	query := `SELECT COUNT(*) FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `)`
+	inner := `SELECT 1 FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `) LIMIT ?`
+	args = append(args, PassiveEligibleCountCap)
+	query := `SELECT COUNT(*) FROM (` + inner + `)`
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
+		return 0, false, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
 	}
-	return n, nil
+	return n, n >= PassiveEligibleCountCap, nil
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the

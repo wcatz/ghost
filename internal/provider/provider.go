@@ -124,6 +124,11 @@ type MemoryStore interface {
 	// SupersedeDecisionReport is SupersedeDecision plus what happened to the old
 	// decision's companion memory (retired, or left live because it is pinned).
 	SupersedeDecisionReport(ctx context.Context, projectID, oldID, newID string) (memory.DecisionRetirement, error)
+	// RecordDecisionSuperseding is RecordDecision and SupersedeDecisionReport
+	// in one transaction: an error means nothing was written, and a supersede
+	// the store refused is reported in SupersedeErr beside the committed
+	// decision.
+	RecordDecisionSuperseding(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string, oldID string) (memory.RecordedDecision, error)
 
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)

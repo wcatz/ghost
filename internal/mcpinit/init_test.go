@@ -98,7 +98,8 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte("All project knowledge is stored in Ghost."), 0644); err != nil {
+	redirect := "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
+	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(redirect), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1825,5 +1826,132 @@ func TestSplitUnquotedOperators_CutsASubshellCloser(t *testing.T) {
 	got, _ := hookCommandTokens(`echo "a)" b`)
 	if want := []string{"echo", "a)", "b"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("quoted closer tokens = %q, want %q", got, want)
+	}
+}
+
+const currentRedirectTemplate = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
+
+const oldRedirectTemplate = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost. At session start, run:\n1. `ghost_list_projects` to discover projects\n2. `ghost_project_context` with project_id \"myproject\" to load accumulated knowledge\n"
+
+func TestWriteRedirects_UpgradesUneditedOldRedirect(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	projectPath := absProjectPath(t)
+	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
+
+	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(oldRedirectTemplate), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	writeRedirects(&out, projects, false)
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != currentRedirectTemplate {
+		t.Fatalf("redirect not upgraded:\n got: %q\nwant: %q", string(data), currentRedirectTemplate)
+	}
+	if !strings.Contains(out.String(), "created redirect") {
+		t.Fatalf("expected 'created redirect', got: %s", out.String())
+	}
+}
+
+func TestWriteRedirects_KeepsEditedOldRedirect(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	projectPath := absProjectPath(t)
+	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
+
+	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	edited := oldRedirectTemplate + "USER NOTE: also see ghost_list_projects\n"
+	if err := os.WriteFile(target, []byte(edited), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	writeRedirects(&out, projects, false)
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != edited {
+		t.Fatalf("edited redirect was changed:\n got: %q\nwant: %q", string(data), edited)
+	}
+	if !strings.Contains(out.String(), "not overwriting") {
+		t.Fatalf("expected 'not overwriting', got: %s", out.String())
+	}
+	if strings.Contains(out.String(), "created redirect") {
+		t.Fatalf("unexpected rewrite: %s", out.String())
+	}
+}
+
+func TestWriteRedirects_KeepsEditedCurrentRedirect(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	projectPath := absProjectPath(t)
+	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
+
+	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	edited := currentRedirectTemplate + "USER NOTE: edited current redirect\n"
+	if err := os.WriteFile(target, []byte(edited), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	writeRedirects(&out, projects, false)
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != edited {
+		t.Fatalf("edited redirect was changed")
+	}
+	if !strings.Contains(out.String(), "not overwriting") {
+		t.Fatalf("expected 'not overwriting', got: %s", out.String())
+	}
+}
+
+func TestWriteRedirects_IdempotentOnSecondRun(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	projectPath := absProjectPath(t)
+	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
+
+	var out bytes.Buffer
+	writeRedirects(&out, projects, false)
+	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
+	first, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	writeRedirects(&out, projects, false)
+	second, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatal("second run changed the redirect")
+	}
+	if !strings.Contains(out.String(), "redirect exists") {
+		t.Fatalf("expected 'redirect exists', got: %s", out.String())
+	}
+	if strings.Contains(out.String(), "created redirect") {
+		t.Fatalf("unexpected rewrite on second run: %s", out.String())
 	}
 }

@@ -58,7 +58,9 @@ func TestPassiveThresholdScanMatchesTheLegacyWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("passiveColumnsFor: %v", err)
 		}
-		for _, pol := range []SlicePolicy{projectPassivePolicy(), globalPassivePolicy()} {
+		union := projectPassivePolicy()
+		union.IncludeGlobal = true
+		for _, pol := range []SlicePolicy{projectPassivePolicy(), globalPassivePolicy(), union} {
 			req := passiveRequest("proj", pol)
 			req.Now = now
 			got, err := st.passiveWindow(context.Background(), req, pol, cols)
@@ -224,42 +226,31 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 
 // TestPassiveKeyScanPlanDoesNotSortTheBucket is the plan pin: the key scan must
 // stream out of idx_memories_project_imp and must not spill to a temp b-tree,
-// which is what the expression ORDER BY did over the whole bucket.
+// which is what the expression ORDER BY did over the whole bucket. It covers
+// the policy that admits `_global` too: an OR over the two buckets lost the
+// index order and sorted both, and every arm of the union has to stream.
 func TestPassiveKeyScanPlanDoesNotSortTheBucket(t *testing.T) {
 	st := thresholdScanFixture(t, 60, 60)
 	cols, err := passiveColumnsFor(st)
 	if err != nil {
 		t.Fatalf("passiveColumnsFor: %v", err)
 	}
-	pol := projectPassivePolicy()
-	req := passiveRequest("proj", pol)
-	q, args := passiveKeyScanSQL(pol, req, cols, false)
-	rows, err := st.db.Query("EXPLAIN QUERY PLAN "+q, args...)
-	if err != nil {
-		t.Fatalf("explain query plan: %v", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var details []string
-	for rows.Next() {
-		var id, parent, notused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			t.Fatalf("scan plan row: %v", err)
+	union := projectPassivePolicy()
+	union.IncludeGlobal = true
+	for _, pol := range []SlicePolicy{projectPassivePolicy(), union} {
+		req := passiveRequest("proj", pol)
+		plan := passiveKeyScanPlan(t, st, pol, req, cols, false)
+		if strings.Contains(plan, "USE TEMP B-TREE") {
+			t.Errorf("include_global=%v: the passive key scan still sorts the bucket:\n%s", pol.IncludeGlobal, plan)
 		}
-		details = append(details, detail)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate plan: %v", err)
-	}
-	plan := strings.Join(details, " | ")
-	if len(details) == 0 {
-		t.Fatal("the query plan is empty, so nothing is pinned")
-	}
-	if strings.Contains(plan, "USE TEMP B-TREE") {
-		t.Errorf("the passive key scan still sorts the bucket:\n%s", plan)
-	}
-	if !strings.Contains(plan, "idx_memories_project_imp") {
-		t.Errorf("the passive key scan does not stream out of idx_memories_project_imp:\n%s", plan)
+		arms := 1
+		if pol.IncludeGlobal {
+			arms = 2
+		}
+		if n := strings.Count(plan, "idx_memories_project_imp"); n < arms {
+			t.Errorf("include_global=%v: %d arm(s) stream out of idx_memories_project_imp, want %d:\n%s",
+				pol.IncludeGlobal, n, arms, plan)
+		}
 	}
 }
 

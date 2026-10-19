@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // OpenCodeClient drives the `opencode` CLI as a subprocess LLM, the way
@@ -500,6 +502,10 @@ type opencodeEvent struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"part"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // openCodeNoToolsPreamble opens every opencode prompt. V2's child advertises
@@ -586,6 +592,16 @@ func parseOpenCodeOutput(raw string) (string, error) {
 		var ev opencodeEvent
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			return "", fmt.Errorf("opencode run: unparseable output line: %w", err)
+		}
+		if ev.Type == "error" {
+			errType := ev.Error.Type
+			if errType == "" {
+				errType = "unknown"
+			}
+			if ev.Error.Message != "" {
+				return "", fmt.Errorf("opencode run: error event %q: %s", errType, memory.RefusalArg("message", ev.Error.Message))
+			}
+			return "", fmt.Errorf("opencode run: error event %q", errType)
 		}
 		if ev.Type == "text" && ev.Part.Type == "text" {
 			sb.WriteString(ev.Part.Text)
