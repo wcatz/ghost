@@ -710,6 +710,10 @@ func foldLineBreaks(s string) string {
 	return b.String()
 }
 
+// FoldLineBreaks is foldLineBreaks for a caller outside the package that must
+// keep a stored value on one physical line by the same set Data folds.
+func FoldLineBreaks(s string) string { return foldLineBreaks(s) }
+
 func isLineBreak(r rune) bool {
 	switch r {
 	case '\n', '\v', '\f', '\r', 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029:
