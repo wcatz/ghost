@@ -621,8 +621,47 @@ func isTokenRune(r rune) bool {
 // `neutralizeDelimiters` rather than building its own substitution: that is the
 // same rule the tag label (#811) needs, and two spellings of a substitution a
 // reader parses visually is two things to keep in step.
+//
+// Every other control rune is printed as a visible ASCII escape (#1489): ESC
+// and the C1 controls, CSI among them, start terminal sequences that recolour,
+// move the cursor, clear the screen or retitle the window, and a memory is
+// printed to a terminal by the CLI. The form is the one Label uses, the
+// strconv escape (backslash x1b, a, x7f, u009b), so the two renderers agree.
+// TAB is the one exception: stored prose holds tabs, and a tab only advances
+// to the next stop, so it stays as written.
 func Data(s string) string {
-	return "«" + foldLineBreaks(neutralizeDelimiters(s)) + "»"
+	return "«" + escapeControls(foldLineBreaks(neutralizeDelimiters(s))) + "»"
+}
+
+// escapeControls replaces each control rune that is not a TAB with its
+// strconv ASCII escape. It runs after foldLineBreaks, so no line break is left
+// to it; text with no such control is returned unchanged, which keeps every
+// golden byte-identical.
+func escapeControls(s string) string {
+	if !strings.ContainsFunc(s, isEscapedControl) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	// Bytes are copied as they came, like foldLineBreaks, so an invalid byte
+	// is never rewritten to U+FFFD by this pass.
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError && isEscapedControl(r) {
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
+}
+
+// isEscapedControl is the set escapeControls prints as an escape: the control
+// runes Label escapes, less TAB.
+func isEscapedControl(r rune) bool {
+	return r != '\t' && unicode.IsControl(r)
 }
 
 // LineBreakEscape is what a stored line break is printed as: every memory
