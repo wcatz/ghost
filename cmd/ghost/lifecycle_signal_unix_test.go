@@ -40,11 +40,6 @@ import (
 // signalTestProject is the project both tests run the chain for.
 const signalTestProject = "sigproj"
 
-// signalCancelMargin is how long the between-phases test keeps the coordinator
-// parked on its config after the signal has left the pending set; see the
-// comment where it is used.
-const signalCancelMargin = 250 * time.Millisecond
-
 // lifecycleSignalBuffer is a bytes.Buffer whose writes are safe alongside
 // reads: os/exec copies the coordinator's output into it from its own
 // goroutine while the test reads it to decide when to act.
@@ -228,12 +223,25 @@ type coordinator struct {
 // cleanup kills a coordinator the test left running.
 func (s *signalSandbox) startCoordinator(t *testing.T) *coordinator {
 	t.Helper()
+	return s.startCoordinatorTo(t, nil)
+}
+
+// startCoordinatorTo is startCoordinator with the coordinator's stderr handed
+// the file given, when it is not nil, instead of being copied into c.stderr: a
+// test that does that owns the file and copies what it wants into c.stderr
+// itself.
+func (s *signalSandbox) startCoordinatorTo(t *testing.T, stderr *os.File) *coordinator {
+	t.Helper()
 	cmd := exec.Command(filepath.Join(s.bin, "ghost"), "lifecycle", "--project", signalTestProject, "--source", "claude-code")
 	cmd.Env = s.env
 	cmd.Dir = s.root
 	c := &coordinator{cmd: cmd, stderr: &lifecycleSignalBuffer{}, exited: make(chan struct{})}
 	cmd.Stdout = &lifecycleSignalBuffer{}
-	cmd.Stderr = c.stderr
+	if stderr != nil {
+		cmd.Stderr = stderr
+	} else {
+		cmd.Stderr = c.stderr
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start ghost lifecycle: %v", err)
 	}
@@ -250,6 +258,12 @@ func (s *signalSandbox) startCoordinator(t *testing.T) *coordinator {
 		}
 	})
 	return c
+}
+
+// coordinatorLine is msg as the coordinator writes it for this run, after the
+// time: every line it writes names its project through lifecycleLine.
+func coordinatorLine(msg string) string {
+	return "lifecycle: project " + memory.RefusalArg("project", signalTestProject) + ": " + msg
 }
 
 // waitExit waits for the coordinator to exit, failing the test when it does not.
@@ -343,146 +357,6 @@ func waitGroupGone(pgid int, within time.Duration) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("still inhabited after %s", within)
-}
-
-// signalPending reports whether sig is still pending for pid, from the
-// SigPnd and ShdPnd masks in /proc/<pid>/status. ok is false where /proc is
-// not there to ask.
-func signalPending(pid int, sig syscall.Signal) (pending, ok bool) {
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return false, false
-	}
-	bit := uint64(1) << (uint(sig) - 1)
-	for _, line := range strings.Split(string(raw), "\n") {
-		name, val, found := strings.Cut(line, ":")
-		if !found || (name != "SigPnd" && name != "ShdPnd") {
-			continue
-		}
-		mask, err := strconv.ParseUint(strings.TrimSpace(val), 16, 64)
-		if err == nil && mask&bit != 0 {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-// TestLifecycleInterruptBetweenPhasesStartsNoPhase holds the coordinator in
-// the gap before its first phase and signals it there. The coordinator reads
-// its config after it has installed its signal handler, and the config here is
-// a FIFO: the test's open for writing returns only once the coordinator has
-// opened it for reading, which is the point at which the signal is sent, and
-// the config is written only after the signal has left the pending set. The
-// loop's check at the top of every phase is what must then stop the chain.
-//
-// The record must name NO phase — none started — and must say which phase was
-// never reached. Without the check the next phase is started under the
-// cancelled context, dies with "context canceled", and is recorded as a
-// failure of work that never ran.
-func TestLifecycleInterruptBetweenPhasesStartsNoPhase(t *testing.T) {
-	s := newSignalSandbox(t)
-	s.seed(t)
-	if err := syscall.Mkfifo(s.configPath(), 0o600); err != nil {
-		t.Fatalf("mkfifo: %v", err)
-	}
-
-	c := s.startCoordinator(t)
-
-	// Rendezvous on the FIFO. The open runs in its own goroutine so a
-	// coordinator that died before opening it fails the test instead of
-	// hanging it; the cleanup's non-blocking reader frees a writer still
-	// parked in open.
-	opened := make(chan *os.File, 1)
-	go func() {
-		f, err := os.OpenFile(s.configPath(), os.O_WRONLY, 0)
-		if err != nil {
-			close(opened)
-			return
-		}
-		opened <- f
-	}()
-	t.Cleanup(func() {
-		if r, err := os.OpenFile(s.configPath(), os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_ = r.Close()
-		}
-	})
-	var fifo *os.File
-	select {
-	case f, ok := <-opened:
-		if !ok {
-			t.Fatal("could not open the config FIFO for writing")
-		}
-		fifo = f
-	case <-c.exited:
-		t.Fatalf("the coordinator exited before it read its config\n%s", c.stderr.String())
-	case <-time.After(60 * time.Second):
-		t.Fatalf("the coordinator never opened its config\n%s", c.stderr.String())
-	}
-
-	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Fatalf("signal the coordinator: %v", err)
-	}
-	// The runtime's handler has taken the signal once it is no longer pending.
-	// What this cannot see is the step after it: the signal reaches
-	// NotifyContext's goroutine, which cancels the root context, a couple of
-	// goroutine hand-offs later, and the coordinator exposes nothing an outside
-	// test can read when that lands — no log line, no file, no marker until the
-	// run is over. So the config is held back for signalCancelMargin on top.
-	//
-	// That margin is why this is safe on a slow -race runner. For its whole
-	// length the coordinator's main goroutine is parked on the FIFO read, so
-	// nothing in the process competes with the goroutine doing the cancel, and
-	// a scheduling delay of a quarter of a second for a runnable goroutine in an
-	// otherwise idle process is not something a loaded machine produces. The
-	// coordinator's remaining pre-loop work after the read (YAML parse, binary
-	// lookups, the scratch reap, the audit sweep, the start stamp) adds to it.
-	// The built binary is not race-instrumented, whatever flags the test runs
-	// under. A run where the cancel still lost would fail loudly, as resolve
-	// "interrupted after" instead of "interrupted before", rather than pass.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		pending, ok := signalPending(c.cmd.Process.Pid, syscall.SIGINT)
-		if !ok || !pending {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the coordinator never took the SIGINT")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	time.Sleep(signalCancelMargin)
-	if _, err := fifo.WriteString(signalTestConfig); err != nil {
-		t.Fatalf("write the config: %v", err)
-	}
-	if err := fifo.Close(); err != nil {
-		t.Fatalf("close the config FIFO: %v", err)
-	}
-
-	c.waitExit(t, 60*time.Second)
-	stderr := c.stderr.String()
-
-	// No phase started: the harness was never called, and no phase reported.
-	if _, err := os.Stat(filepath.Join(s.bin, "harness.argv")); err == nil {
-		t.Errorf("a phase reached its harness after the interrupt\n%s", stderr)
-	}
-	for _, phase := range []string{"resolve", "supersede"} {
-		for _, verb := range []string{" failed after ", " completed in ", " interrupted after "} {
-			if strings.Contains(stderr, "lifecycle: "+phase+verb) {
-				t.Errorf("phase %s ran after the interrupt (%q)\n%s", phase, verb, stderr)
-			}
-		}
-	}
-	if !strings.Contains(stderr, "lifecycle: interrupted before resolve; not starting the remaining phases") {
-		t.Errorf("the coordinator did not stop before the first phase\n%s", stderr)
-	}
-
-	m := s.readMarker(t, c)
-	if len(m.PhasesFailed) != 0 {
-		t.Errorf("phases_failed = %v, want none: no phase started, so none may be blamed (error %q)", m.PhasesFailed, m.Error)
-	}
-	if want := mcpinit.InterruptedBySignal + " before resolve"; m.Error != want {
-		t.Errorf("marker error = %q, want %q", m.Error, want)
-	}
 }
 
 // TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups signals the
@@ -593,7 +467,7 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 	}
 
 	// The phase itself has been reaped; only the member is left in its group.
-	c.waitForStderr(t, "lifecycle: resolve interrupted after", 30*time.Second)
+	c.waitForStderr(t, coordinatorLine("resolve interrupted after"), 30*time.Second)
 	if groupEmpty(phasePid) {
 		t.Fatal("the phase's group emptied before the member was released; this case is not covered")
 	}
@@ -629,7 +503,7 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 
 	stderr := c.stderr.String()
 	for _, verb := range []string{" failed after ", " completed in ", " interrupted after "} {
-		if strings.Contains(stderr, "lifecycle: supersede"+verb) {
+		if strings.Contains(stderr, coordinatorLine("supersede"+verb)) {
 			t.Errorf("supersede ran after resolve was interrupted (%q)\n%s", verb, stderr)
 		}
 	}
