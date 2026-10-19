@@ -34,12 +34,10 @@ func (c *GooseClient) Classify(ctx context.Context, systemPrompt, userContent st
 	return c.run(ctx, systemPrompt+"\n\n"+userContent)
 }
 
-func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
-		defer cancel()
-	}
+func (c *GooseClient) run(ctx context.Context, prompt string) (_ string, err error) {
+	ctx, cancel := boundHarnessCall(ctx)
+	defer cancel()
+	defer func() { err = explainDefaultBound(ctx, err) }()
 	cmd, release, err := c.subprocessEnv(ctx, gooseInvocationArgs())
 	if err != nil {
 		return "", err

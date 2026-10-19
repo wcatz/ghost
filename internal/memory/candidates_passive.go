@@ -228,7 +228,10 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		// empty bucket and summing reports the exclusions of a union of two empty
 		// buckets, which is what the verdict describes.
 		if len(fetched) == 0 {
-			excluded, err := s.passiveValidityExcluded(ctx, req, pol, cols)
+			// Only the count is consumed downstream (ValidityExcluded > 0 selects
+			// the all_invalid outcome); the capped flag is documented on
+			// CandidateSet.ValidityExcluded and on passiveValidityExcluded.
+			excluded, _, err := s.passiveValidityExcluded(ctx, req, pol, cols)
 			if err != nil {
 				return nil, err
 			}
@@ -468,23 +471,26 @@ func insertPassiveRankKey(window []passiveRankKey, key passiveRankKey, order str
 // passiveRankKeyStopsAt reports whether the scan may stop at key: whether key
 // and every row after it rank below the window's last place.
 //
-// It is STRICT, and the strictness is the tie-break: an unread row whose
-// importance EQUALS the threshold could still tie the last place on the primary
-// key and win it on importance, created_at or id, so the scan keeps reading
-// while they are equal. Only a strictly lower importance, which forces a
-// strictly lower rank, excludes the rest.
+// The scan reads rows in importance order, and within one importance value the
+// index delivers them in the policy's secondary-key order (created_at for
+// `decay`, updated_at for `pinned_importance_updated`), newest first. That
+// ordering is what makes a non-strict stop sound: once the window is full, a row
+// whose importance is below the window's k-th key cannot beat it (its rank is at
+// most its importance), and a row whose importance EQUALS the k-th key arrives
+// after every row in that tie that could beat the window on the secondary key,
+// so it and the rest of the tie cannot enter the window either.
 //
 // The threshold is the policy's PRIMARY key, which is what the bound is about:
 // `decay` ranks on the score, so the comparison is against the window's k-th
 // score; `pinned_importance_updated` ranks on importance first, so it is against
 // the k-th importance. An unread row's primary key is at most its importance
 // (the score's because every decay factor is at most 1, importance's trivially),
-// which is what makes the strict comparison sound.
+// which is what makes the comparison sound.
 func passiveRankKeyStopsAt(key, last passiveRankKey, order string) bool {
 	if order == OrderPinnedImportanceUpdated {
-		return key.importance < last.importance
+		return key.importance <= last.importance
 	}
-	return key.importance < last.rank
+	return key.importance <= last.rank
 }
 
 // passiveRankKeyLess is the policy's window order over scan keys, and it is the
@@ -595,30 +601,61 @@ func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey,
 // floor the predicate names columns that are not there and the whole fetch would
 // fail with "no such column: valid_from".
 //
-// The bindings are in TEXT order: the bucket, then the validity stamps when the
-// predicate is present.
+// A policy that admits `_global` is read as TWO arms, the project bucket and
+// `_global`, joined by UNION ALL under one ORDER BY. The population is the one
+// passivePopulationSQL states with the OR, but the OR is not how it is read:
+// `project_id = ? OR project_id = '_global'` loses the index order, and the
+// engine sorts every row of both buckets in a temp b-tree before the scan sees
+// the first, so the stop saves nothing. Each arm names one bucket and streams
+// out of idx_memories_project_imp, and the compound ORDER BY is served as a
+// merge of the two ordered arms, so the rows still arrive in importance order
+// and the scan stops at the window. The ORDER BY names the policy's full key
+// (importance, then created_at or updated_at, then id), which each arm's index
+// serves, so the merged stream arrives in the same order a single bucket's scan
+// does, ties across the arms included, and the non-strict stop stays sound over
+// both. A `_global` bucket that also admits `_global` is
+// one bucket and one arm, since two would hand every row over twice.
+//
+// The bindings are in TEXT order: per arm, the bucket, then the validity stamps
+// when the predicate is present.
 func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns, pinned bool) (string, []any) {
-	where, args := passivePopulationSQL(pol, req, cols)
-	if pinned {
-		where += " AND pinned = 1"
-	} else {
-		where += " AND pinned = 0"
-	}
-	if cols.HasValidity {
-		stamp := req.Now.UTC().Format(stampLayoutForSQL)
-		where += " AND " + validityMatchesSQL()
-		args = append(args, stamp, stamp)
-	}
 	retention := "retention"
 	if !cols.HasTier {
 		retention = "'' AS retention"
 	}
-	query := fmt.Sprintf(`
+	orderBy := "importance DESC, created_at DESC, id"
+	if pol.Order == OrderPinnedImportanceUpdated {
+		orderBy = "importance DESC, updated_at DESC, id"
+	}
+	arm := func(bucket string) (string, []any) {
+		one := pol
+		one.Bucket = bucket
+		one.IncludeGlobal = false
+		where, args := passivePopulationSQL(one, req, cols)
+		if pinned {
+			where += " AND pinned = 1"
+		} else {
+			where += " AND pinned = 0"
+		}
+		if cols.HasValidity {
+			stamp := req.Now.UTC().Format(stampLayoutForSQL)
+			where += " AND " + validityMatchesSQL()
+			args = append(args, stamp, stamp)
+		}
+		return fmt.Sprintf(`
 		SELECT id, importance, pinned, category, created_at, updated_at, %s
 		FROM memories
-		WHERE %s
-		ORDER BY importance DESC`, retention, where)
-	return query, args
+		WHERE %s`, retention, where), args
+	}
+	query, args := arm(pol.Bucket)
+	if pol.IncludeGlobal && pol.Bucket != GlobalProjectID {
+		global, globalArgs := arm(GlobalProjectID)
+		query += `
+		UNION ALL` + global
+		args = append(args, globalArgs...)
+	}
+	return query + `
+		ORDER BY ` + orderBy, args
 }
 
 // passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
@@ -747,16 +784,16 @@ func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, p
 	return beyond, nil
 }
 
-// passiveEligibleCountCap bounds the eligible-count aggregate. The count is
+// PassiveEligibleCountCap bounds the eligible-count aggregate. The count is
 // HEADER ARITHMETIC — it says how many rows the store holds against the
 // over-fetch's window — and it is the one read on this path the threshold scan
-// cannot bound, because the rows the scan never reads are exactly the ones the
+// cannot bound, because the rows the scan never read are exactly the ones the
 // count is about. An exact census of a bucket past this many rows costs a table
 // pass at every session start for a number a reader does not act on, so the
-// aggregate stops here and reports the count UNKNOWN (a negative eligible),
-// which leaves the header describing the window — the same answer a count that
-// could not be read gives.
-const passiveEligibleCountCap = 10000
+// aggregate stops here and reports that it did (capped), which makes the header
+// say the bucket holds AT LEAST this many rows. It is exported so a test of a
+// header that crosses it names the bound rather than repeating the number.
+const PassiveEligibleCountCap = 10000
 
 // PassiveEligibleCount is how many rows the policy's bucket holds that the
 // window's fetch could ever draw from, and how many of those the fetch's own
@@ -773,43 +810,37 @@ const passiveEligibleCountCap = 10000
 // rather than ranked out. A store below the validity floor has no predicate:
 // validityExcluded is zero.
 //
-// The aggregate is CAPPED (passiveEligibleCountCap): it reads at most that many
-// rows, and a bucket that fills the cap reports an UNKNOWN count (a negative
-// eligible, the value CountedAgainst reads as "could not be read") rather than
-// paying a full table pass for an exact figure. The cap is well above any bucket
-// whose exact size a header line acts on, and the fallback is the header
-// describing the window, which is what it does when the count fails.
-func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, err error) {
+// The aggregate is CAPPED (PassiveEligibleCountCap): it reads at most that many
+// rows, and a bucket that fills the cap reports capped with eligible equal to
+// the cap, a LOWER BOUND, rather than paying a full table pass for an exact
+// figure. validityExcluded is then the count over the rows the aggregate read,
+// also a lower bound. A header built from a capped count says "at least", and
+// never names the window as the total.
+func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, capped bool, err error) {
 	cols, err := passiveColumnsFor(s)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	where, popArgs := passivePopulationSQL(pol, CandidateRequest{Scope: scope, Now: now}, cols)
 	if !cols.HasValidity {
 		query := "SELECT COUNT(*) FROM (SELECT 1 FROM memories WHERE " + where + " LIMIT ?)"
-		args := append(append([]any{}, popArgs...), passiveEligibleCountCap)
+		args := append(append([]any{}, popArgs...), PassiveEligibleCountCap)
 		if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible); err != nil {
-			return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+			return 0, 0, false, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
 		}
-		if eligible >= passiveEligibleCountCap {
-			return -1, 0, nil
-		}
-		return eligible, 0, nil
+		return eligible, 0, eligible >= PassiveEligibleCountCap, nil
 	}
 	stamp := now.UTC().Format(stampLayoutForSQL)
 	// The inner SELECT's validity placeholders come first in the statement's text,
 	// then the population's bucket, then the cap.
 	inner := "SELECT CASE WHEN " + validityMatchesSQL() + " THEN 0 ELSE 1 END AS invalid FROM memories WHERE " + where + " LIMIT ?"
 	args := append([]any{stamp, stamp}, popArgs...)
-	args = append(args, passiveEligibleCountCap)
+	args = append(args, PassiveEligibleCountCap)
 	query := "SELECT COUNT(*), COALESCE(SUM(invalid), 0) FROM (" + inner + ")"
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&eligible, &validityExcluded); err != nil {
-		return 0, 0, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
+		return 0, 0, false, fmt.Errorf("candidates: passive eligible count for bucket %q: %w", pol.Bucket, err)
 	}
-	if eligible >= passiveEligibleCountCap {
-		return -1, -1, nil
-	}
-	return eligible, validityExcluded, nil
+	return eligible, validityExcluded, eligible >= PassiveEligibleCountCap, nil
 }
 
 // passiveValidityExcluded counts the rows in one bucket's window that the validity
@@ -830,24 +861,33 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now t
 // what stage 2 would have withheld (a row admitted only by second-truncation is
 // not counted), never an overcount.
 //
+// The count is CAPPED at PassiveEligibleCountCap, the same bound
+// PassiveEligibleCount uses: a bucket whose invalid rows fill the cap reports the
+// cap with capped true, a LOWER BOUND, instead of paying a full table pass for an
+// exact figure on a path that runs at every session start. capped is false when
+// the count came in under the cap and is therefore exact.
+//
 // A store below the validity floor has no predicate to have excluded anything:
 // zero, not an error.
-func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, error) {
+func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, bool, error) {
 	if !cols.HasValidity {
-		return 0, nil
+		return 0, false, nil
 	}
 	where, args := passivePopulationSQL(pol, req, cols)
 	stamp := req.Now.UTC().Format(stampLayoutForSQL)
 	// NOT (validityMatchesSQL()) is "the predicate would have dropped this row".
 	// The two ? placeholders are bound in the predicate's own text order (until,
-	// then from), after the population's bucket.
+	// then from), after the population's bucket; the cap is the statement's last
+	// binding.
 	args = append(args, stamp, stamp)
-	query := `SELECT COUNT(*) FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `)`
+	inner := `SELECT 1 FROM memories WHERE ` + where + ` AND NOT (` + validityMatchesSQL() + `) LIMIT ?`
+	args = append(args, PassiveEligibleCountCap)
+	query := `SELECT COUNT(*) FROM (` + inner + `)`
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
+		return 0, false, fmt.Errorf("candidates: passive validity exclusion count for bucket %q: %w", pol.Bucket, err)
 	}
-	return n, nil
+	return n, n >= PassiveEligibleCountCap, nil
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the
@@ -1324,6 +1364,23 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// The verdicts, not just the penalty: a dropped loser has to name the row it
 	// lost to, and it is read from the one edge pass that decided the loss.
 	pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, nearDupProtected, threshold)
+	// A protected row is never REMOVED as a near-duplicate. The verdict already
+	// flips when exactly one side is protected, so a protected loser here means
+	// BOTH rows of the pair are (two pinned copies, the pair a pinned fold
+	// writes). The drop branch takes such a pair out of the verdicts before the
+	// removal: both rows stay, nothing is filed as dropped, and no loser names a
+	// winner it did not lose its slot to. The reorder branch keeps the pair, as
+	// every reorder-only reader does, because a demotion keeps both rows.
+	if err == nil && len(pairs) > 0 && pol.DropDemotedLosers {
+		removable := make([]demotionPairs, 0, len(pairs))
+		for _, pr := range pairs {
+			if nearDupProtected[pr.loser] {
+				continue
+			}
+			removable = append(removable, pr)
+		}
+		pairs = removable
+	}
 	// The contradicts veto is a DROP rule: a near-duplicate removal would take one
 	// side out of the window before stage 5 sees it, so the pair would be judged
 	// by the near-duplicate verdict instead of stage 5's contradiction tie-break,

@@ -14,12 +14,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// defaultTimeout bounds a claude -p subprocess call when the caller's context
-// carries no earlier deadline — otherwise a stalled subprocess (auth prompt,
-// network stall, hung MCP init inside it) blocks the classify/reflect loop
-// indefinitely, since resolve/supersede classify candidates one at a time.
-const defaultTimeout = 5 * time.Minute
-
 type claudeCapabilities struct {
 	safeMode        bool
 	restricted      bool
@@ -290,12 +284,10 @@ func (c *CLIClient) Classify(ctx context.Context, systemPrompt, userContent stri
 	return c.run(ctx, userContent, "--system-prompt", systemPrompt)
 }
 
-func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string) (string, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
-		defer cancel()
-	}
+func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string) (_ string, err error) {
+	ctx, cancel := boundHarnessCall(ctx)
+	defer cancel()
+	defer func() { err = explainDefaultBound(ctx, err) }()
 	caps, err := claudeCapabilitiesFor(ctx, c.binary)
 	if err != nil {
 		return "", err

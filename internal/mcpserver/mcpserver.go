@@ -711,11 +711,13 @@ const tagMaxCount = 10
 //
 // The tag is named in the refusal through `assemble.Token`, which is the renderer
 // the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
-// the ASCII-only quoted string. Interpolating it raw would be a second injection
-// on the very surface the first one closes, and a backtick is in the class precisely
-// because it is a character this error string must never contain. A tag that is
-// token-shaped, or that the caller sent longer than the bound a refusal repeats,
-// is withheld instead (refusedTag).
+// the ASCII-only quoted string, with a backtick written as the JSON escape the
+// tag label prints for it, because Token quotes a backtick but leaves it raw.
+// Interpolating the tag raw would be a second injection on the very surface the
+// first one closes, and a backtick is in the class precisely because it is a
+// character this error string must never contain. A tag that is token-shaped, or
+// that the caller sent longer than the bound a refusal repeats, is withheld
+// instead (refusedTag).
 func validateTags(tags []string) ([]string, error) {
 	if len(tags) > tagMaxCount {
 		// Refused, not cut (#1041). The excess used to be sliced away and the
@@ -775,14 +777,15 @@ func validateTags(tags []string) ([]string, error) {
 // credential back that the guard would have refused to store. Both are decided
 // on the tag as the caller sent it, before the cut, so a value cut to the tag
 // bound is not repeated and the length reported is the caller's own. Every
-// other tag is named through assemble.Token, in the form the row would print.
-// RefusalArg alone would not do for those: it quotes with %q, which keeps the
-// data delimiters this sentence must not carry.
+// other tag is named through assemble.Token, in the form the row would print,
+// with a backtick escaped the way the tag label escapes it: Token's quoting
+// keeps a backtick raw. RefusalArg alone would not do for those: it quotes with
+// %q, which keeps the data delimiters this sentence must not carry.
 func refusedTag(orig, cut string) string {
 	if len(orig) > memory.ArgEchoMaxBytes || memory.RejectSecret("tag", orig) != nil {
 		return memory.RefusalArg("tag", orig)
 	}
-	return assemble.Token(cut)
+	return strings.ReplaceAll(assemble.Token(cut), "`", assemble.TagBacktickEscape)
 }
 
 // unsafeTagRune returns "" when no character in t can end a rendered line, a
@@ -1206,7 +1209,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 // resource or resource-template URI before the SDK starts tracking it.
 func (s *Server) handleSubscribe(ctx context.Context, req *mcp.SubscribeRequest) error {
 	if !strings.HasPrefix(req.Params.URI, "ghost://") {
-		return fmt.Errorf("unknown resource URI: %s", memory.RefusalArg("resource URI", req.Params.URI))
+		return invalidParamsError(fmt.Errorf("unknown resource URI: %s", memory.RefusalArg("resource URI", req.Params.URI)))
 	}
 	return nil
 }
@@ -1229,6 +1232,10 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 	}
 }
 
+// notifyLookupTimeout bounds the alias lookup and pushes notifyProjectResource
+// makes on a context detached from the request.
+const notifyLookupTimeout = 5 * time.Second
+
 // notifyProjectResource pushes a resources/updated notification for a
 // project-scoped resource (suffix is "context", "decisions", or "tasks") under
 // every URI alias a client might have subscribed with. Resource identity is
@@ -1238,8 +1245,16 @@ func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
 // delivers resources/updated by exact URI match, we emit on both the hash ID
 // and the project name, each in the percent-encoded form projectResourceURI
 // builds — the form the resource template matches and a client reads with.
-// Best-effort — the ListProjects lookup error is swallowed.
+// Best-effort — the ListProjects lookup error is swallowed, so a failed
+// lookup never fails a write that has already committed. The callers run this
+// after the write, and the request may have been cancelled by then; the
+// lookup and the pushes therefore run on a context detached from the request's
+// cancellation, bounded by notifyLookupTimeout so a stuck database cannot hang
+// the handler. Without that, a cancelled request failed the lookup and only
+// the id form was notified.
 func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyLookupTimeout)
+	defer cancel()
 	emitted := map[string]bool{}
 	emit := func(id string) {
 		if id == "" {
@@ -3698,9 +3713,9 @@ func (s *Server) registerTools() {
 		// left both live with the same-title advice skipped. The refusal names
 		// the successor, the decision that is current, so the caller can
 		// supersede that one instead. The same check runs again inside
-		// SupersedeDecisionReport's transaction; a writer racing past this one
-		// lands in the partial-failure branch below rather than in a silent
-		// repoint.
+		// RecordDecisionSuperseding's transaction; a writer racing past this
+		// one lands in the partial-failure branch below rather than in a
+		// silent repoint.
 		if args.Supersedes != "" {
 			successor, err := s.store.LiveDecisionSuccessor(ctx, args.ProjectID, args.Supersedes)
 			if err != nil {
@@ -3717,15 +3732,34 @@ func (s *Server) registerTools() {
 		if args.Supersedes == "" {
 			sameTitleAdvice = s.sameTitleDecisionAdvice(ctx, args.ProjectID, args.Title)
 		}
-		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		// A decision that supersedes another is recorded and applied in ONE
+		// store transaction, so a request cancelled between the two cannot
+		// leave the new decision live beside the one it replaces, and a retry
+		// of a cancelled call is a fresh write rather than a second live copy.
+		// An error here means nothing was written. A supersede the store
+		// refuses for what the rows say comes back in SupersedeErr with the
+		// decision committed, and is answered below as the partial failure.
+		var (
+			decisionID, memoryID string
+			companionClamped     bool
+			retirement           memory.DecisionRetirement
+			supersedeErr         error
+		)
+		if args.Supersedes == "" {
+			decisionID, memoryID, companionClamped, err = s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		} else {
+			var rec memory.RecordedDecision
+			rec, err = s.store.RecordDecisionSuperseding(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags, args.Supersedes)
+			decisionID, memoryID, companionClamped = rec.DecisionID, rec.MemoryID, rec.CompanionClamped
+			retirement, supersedeErr = rec.Retirement, rec.SupersedeErr
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		supersedeNote := ""
 		supersedeFailed := false
 		if args.Supersedes != "" {
-			retirement, err := s.store.SupersedeDecisionReport(ctx, args.ProjectID, args.Supersedes, decisionID)
-			if err != nil {
+			if err := supersedeErr; err != nil {
 				// The new decision is committed and the old one is NOT marked.
 				// That is a partial failure — the caller asked for one write and
 				// got another — so it is reported as an ERROR result rather than
@@ -3742,10 +3776,10 @@ func (s *Server) registerTools() {
 				// cannot forge a line here or bloat the answer (#1041, #1072).
 				//
 				// The store error is appended rather than dropped because it says
-				// WHICH write failed, and it is safe to append: the id-carrying
-				// sentences in `SupersedeDecisionReport` render their ids through
-				// the same renderer, so the whole sentence is bounded and nothing
-				// raw comes back through it.
+				// WHY the supersede was refused, and it is safe to append: the
+				// id-carrying sentences in the store's `supersedeDecisionTx`
+				// render their ids through the same renderer, so the whole
+				// sentence is bounded and nothing raw comes back through it.
 				supersedeFailed = true
 				var successorErr *memory.DecisionSuccessorError
 				if errors.As(err, &successorErr) {
@@ -3883,6 +3917,13 @@ func (s *Server) registerTools() {
 
 		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
+		// The per-project lines are the one part of this answer that grows with
+		// the store, so they are collected apart from the store-wide lines and
+		// cut as whole rows to the response budget at the end (#1541). Every
+		// project is still counted, so the total below is the whole store's.
+		headLen := sb.Len()
+		projectRows := make([]string, 0, len(projects))
+
 		totalMemories := 0
 		uncountedProjects := 0
 		for _, p := range projects {
@@ -3895,8 +3936,8 @@ func (s *Server) registerTools() {
 				// read is reported rather than dropped: the same rule the
 				// pinned, history and retrieval blocks follow.
 				uncountedProjects++
-				fmt.Fprintf(&sb, "- **%s** (%s): count could not be read: %v\n",
-					assemble.Label(p.Name), shortID(p.ID), err)
+				projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): count could not be read: %v\n",
+					assemble.Label(p.Name), shortID(p.ID), err))
 				continue
 			}
 			totalMemories += count
@@ -3907,9 +3948,10 @@ func (s *Server) registerTools() {
 			// stores the caller's project_id argument as both id and name), and a
 			// newline in one put a second entry on a health report a human reads
 			// (#791).
-			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", assemble.Label(p.Name),
-				shortID(p.ID), count)
+			projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): %d memories\n",
+				assemble.Label(p.Name), shortID(p.ID), count))
 		}
+		// Everything written to sb from here on is store-wide and never cut.
 		if uncountedProjects > 0 {
 			// The total is a sum of what WAS read, so it has to say what it
 			// leaves out rather than print as complete.
@@ -3986,8 +4028,8 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d — unpin or update the pinned row\n", total)
 			for _, r := range pinned {
 				fmt.Fprintf(&sb, "- **%s** (%s): %s\n  contradicted by **%s**: %s\n",
-					assemble.Label(r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
-					assemble.Token(r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
+					memory.RefusalArg("memory_id", r.ID), shortID(r.ProjectID), assemble.PreviewLine(r.Content, 80),
+					memory.RefusalArg("memory_id", r.ContradictedBy), assemble.PreviewLine(r.ContradictedByContent, 80))
 				if r.AlsoContradictedBy > 0 {
 					fmt.Fprintf(&sb, "  (+%d more contradicting rows)\n", r.AlsoContradictedBy)
 				}
@@ -4038,8 +4080,20 @@ func (s *Server) registerTools() {
 		// and a block inserted above them would move their anchor.
 		s.writeRetrievalAuditBlock(ctx, &sb)
 
+		// The rows sit between the count line and the totals, so the framing is
+		// the text before them and the text after them, and only the rows are
+		// cuttable. sb holds everything but the rows.
+		full := sb.String()
+		parts := make([]responsePart, 0, len(projectRows)+2)
+		parts = append(parts, responsePart{text: full[:headLen]})
+		for _, r := range projectRows {
+			parts = append(parts, responsePart{text: r, cuttable: true})
+		}
+		parts = append(parts, responsePart{text: full[headLen:]})
+		text, _ := capResponseParts(parts, s.searchResponseCap(), healthCutAdvice)
+
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -4063,8 +4117,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		var sb strings.Builder
-		sb.WriteString("## Ghost Projects\n\n")
+		rows := make([]string, 0, len(projects))
 		for _, p := range projects {
 			count, err := s.store.CountMemories(ctx, p.ID)
 			// Name and path through assemble.Label, id through assemble.Token, for
@@ -4076,15 +4129,18 @@ func (s *Server) registerTools() {
 				// A count that failed is not a count of zero (#1461): this
 				// listing is how an agent discovers which projects exist, so a
 				// 0 here is a claim it would act on.
-				fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — count could not be read: %v\n",
-					assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), err)
+				rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — count could not be read: %v\n",
+					assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), err))
 				continue
 			}
-			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n",
-				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count)
+			rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n",
+				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count))
 		}
+		// Whole rows are cut from the end to the response budget, in the order
+		// the store lists them (#1541).
+		text, _ := capRowsToResponseBudget("## Ghost Projects\n\n", rows, s.searchResponseCap(), listProjectsCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -4493,7 +4549,7 @@ func (s *Server) registerResources() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// An unresolved name resolves to "". The block is still built — its
 		// `_global` section does not depend on the project, and the base ref
@@ -4738,7 +4794,7 @@ func (s *Server) registerPrompts() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// The same unresolved-name case the tool and the resource handle, and the
 		// same block-plus-sentence: the `_global` section does not depend on the
@@ -5101,6 +5157,19 @@ func parseProjectIDFromURI(rawURI string) (string, error) {
 // store read stays a plain error.
 func invalidParamsError(err error) error {
 	return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: err.Error()}
+}
+
+// resolveProjectRefusal wraps a ResolveProject failure for a resource or
+// template handler. An identifier that matches more than one project is the
+// caller's argument and goes out as -32602; any other failure is a store read
+// that went wrong and stays a plain error. An unknown project is not a
+// failure here: ResolveProject answers it with an empty id and no error.
+func resolveProjectRefusal(err error) error {
+	wrapped := fmt.Errorf("resolve project: %w", err)
+	if errors.Is(err, memory.ErrAmbiguousProject) {
+		return invalidParamsError(wrapped)
+	}
+	return wrapped
 }
 
 // projectResourceNotFound is the refusal of a ghost://project/{project_id}/...

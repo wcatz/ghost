@@ -69,11 +69,12 @@ type RecordResult struct {
 	Downgraded bool
 	// DroppedRef is the id a task's blocked_by or a decision's superseded_by
 	// named when the pointer was dropped: its target was rejected by this run,
-	// is in neither the artifact nor the store, or the pointer is part of a
-	// cycle (DropReason says which). A target the store already holds is never
-	// a drop. The record itself is still imported, without the pointer; this is
-	// how the report says what it lost. Set for a create, a dry run's included,
-	// so the preview shows the drop the apply will make.
+	// is in neither the artifact nor the store, lands in another project than
+	// the record, or the pointer is part of a cycle (DropReason says which). A
+	// target the store already holds, or this run lands, in the record's own
+	// project is never a drop. The record itself is still imported, without the
+	// pointer; this is how the report says what it lost. Set for a create, a dry
+	// run's included, so the preview shows the drop the apply will make.
 	DroppedRef string
 	// DropReason says why DroppedRef was dropped. Its zero value is
 	// DropRejected, the reason the field was first added for.
@@ -92,7 +93,8 @@ const (
 	// run rejected it.
 	DropRejected DropReason = iota
 	// DropAbsent: the record the pointer names is neither in the artifact nor
-	// already in the store.
+	// already in the store, or it is, but in another project than the record
+	// holding the pointer, which leaves nothing that pointer can follow.
 	DropAbsent
 	// DropCycle: the pointer is part of a cycle of pointers, which no order of
 	// writes can satisfy.
@@ -293,8 +295,11 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 			if err := checkSchemaVersion(rec.SchemaVersion); err != nil {
 				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
+			if err := checkHeaderFeatures(rec); err != nil {
+				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
+			}
 			if extra := otherPayloads(rec, TypeHeader); extra != "" {
-				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and nothing else", lineNum, TypeHeader, extra)
+				return nil, nil, fmt.Errorf("line %d: the %q line also carries %s — a header holds the schema version and its declared features", lineNum, TypeHeader, extra)
 			}
 			header = true
 			continue
@@ -359,6 +364,20 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 // because the second is fixable in the file and the first means the user picked
 // the wrong file.
 var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
+
+// checkHeaderFeatures refuses an artifact whose header declares a feature this
+// build does not understand. A newer artifact's fields mean
+// whatever this build guesses, and importing it would store a weaker row while
+// reporting that provenance was kept. A header that declares nothing is accepted,
+// so an artifact written before this mechanism existed still imports.
+func checkHeaderFeatures(rec record) error {
+	for _, f := range rec.Features {
+		if !knownFeatures[f] {
+			return fmt.Errorf("header declares feature %s that this ghost build does not understand", memory.RefusalArg("feature", f))
+		}
+	}
+	return nil
+}
 
 // checkSchemaVersion refuses any version outside the range this build reads. A
 // newer artifact's fields mean whatever this build guesses; an older one is
@@ -430,6 +449,13 @@ type outcome struct {
 	err        error
 }
 
+// landedElsewhere is the project planRecords records for a skipped task or
+// decision whose stored row is not in the project the artifact's record is
+// imported under. A project id holds no control character
+// (memory.CheckImportedProjectID), so this never equals the project of the
+// record that points at it.
+const landedElsewhere = "\x00elsewhere"
+
 // planRecords turns the parsed records into an ordered list of steps, in the
 // order an apply run must write them: projects first, then memories, then tasks,
 // then decisions.
@@ -446,10 +472,11 @@ type outcome struct {
 // artifact does not contain, or a cycle, has its pointer dropped rather than
 // failing the import — an artifact that cannot be read in full is still worth
 // importing as far as it goes. A reference to a record the artifact contains but
-// this run rejects is dropped the same way, as the steps run. Every such drop is
-// named on the dependent record's report line (RecordResult.DroppedRef, with
-// DropReason saying why), and a pointer whose target the store already held
-// before the run is kept rather than dropped, because it resolves.
+// this run rejects, or that lands in another project than the dependent, is
+// dropped the same way, as the steps run. Every such drop is named on the
+// dependent record's report line (RecordResult.DroppedRef, with DropReason
+// saying why), and a pointer whose target the store already held before the run,
+// in the record's own project, is kept rather than dropped, because it resolves.
 //
 // Each child step is given the set of project ids its project will exist under
 // by the time it runs: what the store already holds plus what this artifact's
@@ -528,6 +555,13 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			// the project you already had".
 			detail = fmt.Sprintf("%s → %s (this store already records that checkout or repository)",
 				project.Name, adopted)
+			if !known[adopted] {
+				// Not in the store: an earlier project of this artifact
+				// claimed the checkout or repository. known is still the
+				// store's own set here, as no step has run yet.
+				detail = fmt.Sprintf("%s → %s (an earlier project in this artifact records that checkout or repository)",
+					project.Name, adopted)
+			}
 		}
 		adoptedElsewhere := adopted != project.ID
 		steps = append(steps, step{rec: p, kind: TypeProject, detail: safeDetail(detail, detail, project.ID), opts: opts,
@@ -561,19 +595,31 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			}})
 	}
 	// Which of the artifact's tasks and decisions have landed — been created, or
-	// found already present — by the time a later step runs. orderTasks and
-	// orderDecisions leave a pointer only when it names a record of the artifact
-	// that is ordered before the one holding it, so a target that has not landed
-	// is one this run rejected. Such a pointer can never resolve, exactly like one
-	// naming a record the artifact does not contain, and is dropped the same way
-	// rather than taking its record down with it.
+	// found already present — by the time a later step runs, and the project each
+	// one landed in. orderTasks and orderDecisions leave a pointer only when it
+	// names a record of the artifact that is ordered before the one holding it,
+	// so a target that has not landed is one this run rejected. Such a pointer
+	// can never resolve, exactly like one naming a record the artifact does not
+	// contain, and is dropped the same way rather than taking its record down
+	// with it.
+	//
+	// A target that landed in a project other than the dependent's is dropped
+	// too, and reported like one that exists nowhere (DropAbsent), for the
+	// reason HasTask gives: the store's readers follow these pointers only within
+	// one project, and deleting the other project would rewrite the dependent.
+	// A created record lands in the project it is imported under, after mapping.
+	// A skipped one is the row the store already holds, which can live in
+	// another project than the artifact names, so its project is read back:
+	// landedElsewhere stands for any project but the one it was imported under.
+	// The restore below then keeps the pointer whenever that stored row is in
+	// the dependent's own project after all.
 	//
 	// The set is filled as steps run, in both modes, and it is the dry run's
 	// stand-in for the store's own pre-write check of the pointer, which only an
 	// apply can make (the target of a dry run is never written). It is what keeps
 	// the preview and the apply agreeing about the dependent record (#1147).
-	landedTasks := map[string]bool{}
-	landedDecisions := map[string]bool{}
+	landedTasks := map[string]string{}
+	landedDecisions := map[string]string{}
 	// Which of them this run created. A dropped pointer is restored when the
 	// store already holds its target in the project the record is imported
 	// under, after mapping (#1153); one in another project stays dropped, like a
@@ -590,8 +636,12 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				task := *t
 				dropped, reason := p.droppedRef, p.dropReason
-				if task.BlockedBy != "" && !landedTasks[task.BlockedBy] {
-					dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
+				if task.BlockedBy != "" {
+					if landed, ok := landedTasks[task.BlockedBy]; !ok {
+						dropped, reason, task.BlockedBy = task.BlockedBy, DropRejected, ""
+					} else if landed != task.ProjectID {
+						dropped, reason, task.BlockedBy = task.BlockedBy, DropAbsent, ""
+					}
 				}
 				if dropped != "" {
 					held, err := s.HasTask(ctx, task.ProjectID, dropped)
@@ -606,12 +656,20 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				landedTasks[task.ID] = true
+				landed := task.ProjectID
 				if created {
 					createdTasks[task.ID] = true
 				} else {
 					dropped = ""
+					held, err := s.HasTask(ctx, task.ProjectID, task.ID)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the project of task %s: %w", memory.RefusalArg("task_id", task.ID), err)}
+					}
+					if !held {
+						landed = landedElsewhere
+					}
 				}
+				landedTasks[task.ID] = landed
 				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
@@ -622,8 +680,12 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				decision := *d
 				dropped, reason := p.droppedRef, p.dropReason
-				if decision.SupersededBy != "" && !landedDecisions[decision.SupersededBy] {
-					dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
+				if decision.SupersededBy != "" {
+					if landed, ok := landedDecisions[decision.SupersededBy]; !ok {
+						dropped, reason, decision.SupersededBy = decision.SupersededBy, DropRejected, ""
+					} else if landed != decision.ProjectID {
+						dropped, reason, decision.SupersededBy = decision.SupersededBy, DropAbsent, ""
+					}
 				}
 				if dropped != "" {
 					held, err := s.HasDecision(ctx, decision.ProjectID, dropped)
@@ -638,12 +700,20 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
-				landedDecisions[decision.ID] = true
+				landed := decision.ProjectID
 				if created {
 					createdDecisions[decision.ID] = true
 				} else {
 					dropped = ""
+					held, err := s.HasDecision(ctx, decision.ProjectID, decision.ID)
+					if err != nil {
+						return outcome{action: ActionReject, err: fmt.Errorf("look up the project of decision %s: %w", memory.RefusalArg("decision_id", decision.ID), err)}
+					}
+					if !held {
+						landed = landedElsewhere
+					}
 				}
+				landedDecisions[decision.ID] = landed
 				return outcome{action: actionFor(created), clamped: clamped, droppedRef: dropped, dropReason: reason}
 			}})
 	}
@@ -665,6 +735,17 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 // The mapping is decided before any record runs, which is what lets a dry run
 // and an apply run agree: both read the same map, and the dry run's "skip" for
 // an adopted project is exactly what the apply run does.
+//
+// A project this artifact creates is held to the same rule as one the store
+// already holds. Two projects of one artifact can name the same path, or
+// remotes that normalize to one repository (an older release stored remotes
+// raw, and a hand-merged pair of exports repeats a checkout). The apply inserts
+// the first and its collision check then refuses the second, while the dry run,
+// reading an unchanged store, would promise both. So the later project is
+// mapped onto the earlier one, as it would be onto a store project with that
+// checkout. Only a project the store would accept claims its checkout: one it
+// refuses writes nothing, so the next project is judged on its own record,
+// which is the rule createdIDs follows for a repeated id.
 func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []parsedRecord) (map[string]string, error) {
 	mapping := make(map[string]string, len(projects))
 	live, err := s.PortableProjects(ctx)
@@ -675,12 +756,27 @@ func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []pars
 	for _, p := range live {
 		byID[p.ID] = true
 	}
+	// The checkouts and repositories this run's own projects will create, keyed
+	// the way projectCollision compares them: the path as given, the remote
+	// normalized.
+	claimedPath := map[string]string{}
+	claimedRemote := map[string]string{}
+	// The ids whose mapping is final. A repeated id is decided by its first
+	// record the store would accept: the apply skips every record after that
+	// one, so a later record's path must not remap the id its children
+	// follow. A refused record settles nothing, and the next record with the
+	// id is judged on its own, as the apply judges it.
+	settled := map[string]bool{}
 	for _, rec := range projects {
 		p := *rec.rec.Project
+		if settled[p.ID] {
+			continue
+		}
 		// The very same project, or nothing that collides: keep the artifact's
 		// own id.
 		if byID[p.ID] {
 			mapping[p.ID] = p.ID
+			settled[p.ID] = true
 			continue
 		}
 		// `_global` needs no special case: ProjectForCheckout never returns it
@@ -694,11 +790,31 @@ func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []pars
 		if err != nil {
 			return nil, err
 		}
+		if found == "" && p.Path != "" {
+			found = claimedPath[p.Path]
+		}
+		remote := memory.NormalizeRepoRemote(p.RepoRemote)
+		if found == "" && remote != "" {
+			found = claimedRemote[remote]
+		}
 		if found != "" {
 			mapping[p.ID] = found
+			settled[p.ID] = true
 			continue
 		}
 		mapping[p.ID] = p.ID
+		// The store's own verdict, asked without writing: the same call the
+		// project's step makes, so a project that claims a checkout here is
+		// one both modes create.
+		if created, err := s.ImportProject(ctx, p, false); err == nil && created {
+			settled[p.ID] = true
+			if p.Path != "" {
+				claimedPath[p.Path] = p.ID
+			}
+			if remote != "" {
+				claimedRemote[remote] = p.ID
+			}
+		}
 	}
 	return mapping, nil
 }

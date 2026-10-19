@@ -48,9 +48,6 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	altJSON, _ := json.Marshal(alternatives)
-	tagJSON, _ := json.Marshal(tags)
-
 	// A decision writes a memory — the companion row below is an ordinary memory,
 	// assembled into every search row and quoted into the next reflect prompt — so
 	// losing this transaction to a lock refusal loses a memory, and
@@ -61,6 +58,31 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 		return "", "", false, fmt.Errorf("record decision: begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
+
+	decisionID, memoryID, cut, err := recordDecisionTx(ctx, tx, projectID, title, decision, rationale, alternatives, tags)
+	if err != nil {
+		return "", "", false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
+	}
+	lock.reportHold("decision-record", time.Now())
+
+	if s.onSave != nil {
+		s.onSave(projectID)
+	}
+
+	return decisionID, memoryID, cut, nil
+}
+
+// recordDecisionTx is RecordDecision's writes on the caller's transaction: the
+// decisions row, its companion memory, and that memory's first history and
+// evidence rows. RecordDecisionSuperseding runs it and the supersede on one
+// transaction.
+func recordDecisionTx(ctx context.Context, tx *sql.Tx, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, cut bool, err error) {
+	altJSON, _ := json.Marshal(alternatives)
+	tagJSON, _ := json.Marshal(tags)
 
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO decisions (project_id, title, decision, alternatives, rationale, tags)
@@ -103,16 +125,6 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	if err := appendEvidenceTx(ctx, tx, memoryID, evidenceObserved, Provenance{}, false); err != nil {
 		return "", "", false, fmt.Errorf("record decision memory evidence: %w", err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
-	}
-	lock.reportHold("decision-record", time.Now())
-
-	if s.onSave != nil {
-		s.onSave(projectID)
-	}
-
 	return decisionID, memoryID, cut, nil
 }
 
@@ -237,6 +249,35 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 	}
 	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
 
+	out, err = supersedeDecisionTx(ctx, tx, projectID, oldID, newID)
+	if err != nil {
+		return DecisionRetirement{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return DecisionRetirement{}, fmt.Errorf("supersede decision: commit: %w", err)
+	}
+	lock.reportHold("supersede-decision", time.Now())
+	return out, nil
+}
+
+// supersedeRefusal marks a supersede the store declined for what the rows
+// say, before it wrote anything: the old decision is not in the project, or
+// it already has a different live successor. Every other error from
+// supersedeDecisionTx is a failure of the write itself (a cancelled context,
+// a database error), and the transaction it ran on has to be rolled back.
+// Error and Unwrap are the wrapped error's, so a caller reads the same text
+// and errors.As still finds a DecisionSuccessorError.
+type supersedeRefusal struct{ err error }
+
+func (r supersedeRefusal) Error() string { return r.err.Error() }
+func (r supersedeRefusal) Unwrap() error { return r.err }
+
+// supersedeDecisionTx is SupersedeDecisionReport's checks and writes on the
+// caller's transaction. A refusal is returned as a supersedeRefusal and
+// leaves the transaction untouched.
+func supersedeDecisionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
+	var out DecisionRetirement
 	// Verify the superseding decision exists in this project before pointing
 	// at it — superseded_by is ON DELETE SET NULL, not enforced on insert.
 	var exists int
@@ -246,7 +287,7 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: lookup %s: %w", RefusalArg("decision_id", newID), err)
 	}
 	if exists == 0 {
-		return out, fmt.Errorf("supersede decision: superseding decision %s not found in project %s", RefusalArg("decision_id", newID), RefusalArg("project_id", projectID))
+		return out, supersedeRefusal{fmt.Errorf("supersede decision: superseding decision %s not found in project %s", RefusalArg("decision_id", newID), RefusalArg("project_id", projectID))}
 	}
 
 	// Inside the transaction, so a second writer cannot slip a repoint past a
@@ -256,7 +297,7 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: lookup successor of %s: %w", RefusalArg("decision_id", oldID), err)
 	}
 	if successor != "" && successor != newID {
-		return out, &DecisionSuccessorError{Successor: successor}
+		return out, supersedeRefusal{&DecisionSuccessorError{Successor: successor}}
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -272,18 +313,89 @@ func (s *Store) SupersedeDecisionReport(ctx context.Context, projectID, oldID, n
 		return out, fmt.Errorf("supersede decision: rows affected: %w", err)
 	}
 	if n == 0 {
-		return out, fmt.Errorf("supersede decision: decision %s not found in project %s", RefusalArg("decision_id", oldID), RefusalArg("project_id", projectID))
+		// The UPDATE matched nothing, so it wrote nothing: still a refusal.
+		return out, supersedeRefusal{fmt.Errorf("supersede decision: decision %s not found in project %s", RefusalArg("decision_id", oldID), RefusalArg("project_id", projectID))}
 	}
 
 	out, err = retireDecisionCompanionTx(ctx, tx, projectID, oldID, newID)
 	if err != nil {
 		return DecisionRetirement{}, fmt.Errorf("supersede decision: retire companion: %w", err)
 	}
+	return out, nil
+}
+
+// RecordedDecision is what RecordDecisionSuperseding wrote.
+type RecordedDecision struct {
+	DecisionID       string
+	MemoryID         string
+	CompanionClamped bool
+	// Retirement is what the supersede did to the old decision's companion
+	// memory, as SupersedeDecisionReport reports it.
+	Retirement DecisionRetirement
+	// SupersedeErr is set when the store refused the supersede for what the
+	// rows say: the old decision is not in the project, or it already has a
+	// different live successor (a *DecisionSuccessorError, reachable through
+	// errors.As). The new decision was committed and the old one was left
+	// exactly as it was.
+	SupersedeErr error
+}
+
+// RecordDecisionSuperseding records a decision and marks oldID superseded by
+// it in ONE transaction, so the two land together or not at all. They used to
+// be two writes, RecordDecision and then SupersedeDecisionReport, and a
+// request cancelled between them left the new decision live beside the one it
+// replaces; a retry of the same call then answered a clean success with a
+// second live copy.
+//
+// A non-nil error means nothing was written: a cancelled context, a database
+// failure or a refused argument rolls back both halves, so a retry is a fresh
+// write. A supersede the store REFUSES for what the rows say is the one
+// exception, because the documented answer to it is that the new decision
+// stands and only the supersede failed: the decision commits, the old
+// decision is untouched, and the refusal is returned in SupersedeErr. Both
+// refusals are decided before the supersede writes anything.
+func (s *Store) RecordDecisionSuperseding(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string, oldID string) (RecordedDecision, error) {
+	var out RecordedDecision
+	if err := CheckDecisionArguments(title, decision, rationale, alternatives, tags); err != nil {
+		return out, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The decision-record label and its BEGIN retry, for the reason
+	// RecordDecision has them: this transaction writes a memory.
+	tx, lock, err := s.beginWrite(ctx, "decision-record")
+	if err != nil {
+		return out, fmt.Errorf("record decision: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
+
+	out.DecisionID, out.MemoryID, out.CompanionClamped, err = recordDecisionTx(ctx, tx, projectID, title, decision, rationale, alternatives, tags)
+	if err != nil {
+		return RecordedDecision{}, err
+	}
+	if s.afterDecisionInsert != nil {
+		s.afterDecisionInsert()
+	}
+
+	out.Retirement, err = supersedeDecisionTx(ctx, tx, projectID, oldID, out.DecisionID)
+	if err != nil {
+		var refusal supersedeRefusal
+		if !errors.As(err, &refusal) {
+			return RecordedDecision{}, err
+		}
+		out.Retirement = DecisionRetirement{}
+		out.SupersedeErr = err
+	}
 
 	if err := tx.Commit(); err != nil {
-		return DecisionRetirement{}, fmt.Errorf("supersede decision: commit: %w", err)
+		return RecordedDecision{}, fmt.Errorf("record decision: commit: %w", err)
 	}
-	lock.reportHold("supersede-decision", time.Now())
+	lock.reportHold("decision-record", time.Now())
+
+	if s.onSave != nil {
+		s.onSave(projectID)
+	}
 	return out, nil
 }
 
@@ -475,10 +587,52 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 		if err != nil {
 			return 0, false, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
 		}
-		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+		refs = append(refs, ref.String)
+	}
+	links, over = DecisionLinksOverflow(refs)
+	return links, over, nil
+}
+
+// DecisionLinksOverflow is decisionLinksOverflowTx's rule over source_refs the
+// caller already holds: how many distinct decision links they name between them,
+// and whether those links joined exceed MaxSourceRefLen — the merge the replace
+// drops before it writes. The reflect accounting calls it with the input rows'
+// source_refs, so a dry run lists such a merge as refused instead of as a merge
+// the apply will not write, and the two cannot disagree about the rule.
+func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
+	var refs []string
+	for _, ref := range sourceRefs {
+		refs = append(refs, decisionRefsInSourceRef(ref)...)
 	}
 	unique := dedupeDecisionRefs(refs)
-	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen, nil
+	return len(unique), len(joinDecisionRefs(unique)) > MaxSourceRefLen
+}
+
+// foldedDecisionLinksTx counts the distinct decision links a merge folded into
+// the row target stands for: the target's own and those the sources (rows of
+// projectID) carry. decisionLinksOverflowTx reads one project only, and a
+// promotion's target is in _global, so it is read here by id.
+func foldedDecisionLinksTx(ctx context.Context, tx *sql.Tx, projectID, target string, sources []string) (int, error) {
+	var own sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, target).Scan(&own); err != nil {
+		return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", target), err)
+	}
+	refs := decisionRefsInSourceRef(own.String)
+	for _, id := range sources {
+		if id == "" || id == target {
+			continue
+		}
+		var ref sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`, id, projectID).Scan(&ref)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read source_ref of %s: %w", RefusalArg("memory_id", id), err)
+		}
+		refs = append(refs, decisionRefsInSourceRef(ref.String)...)
+	}
+	return len(dedupeDecisionRefs(refs)), nil
 }
 
 // decisionRefPrefix is the source_ref namespace only RecordDecision (and the

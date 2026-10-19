@@ -185,8 +185,7 @@ func dispatchCommand(argv []string) int {
 			runResolve()
 			return 0
 		case "lifecycle":
-			runLifecycle()
-			return 0
+			return runLifecycle()
 		case "project":
 			sub, given := subArg(argv, 1)
 			switch sub {

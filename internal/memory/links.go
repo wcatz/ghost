@@ -289,7 +289,7 @@ func (s *Store) GetLinks(ctx context.Context, memoryID string) ([]Link, error) {
 		SELECT source_id, target_id, relation, strength, source, created_at, invalidated_at
 		FROM memory_links
 		WHERE (source_id = ? OR target_id = ?) AND invalidated_at IS NULL
-		ORDER BY strength DESC
+		ORDER BY strength DESC, created_at, rowid
 	`, memoryID, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("get links: %w", err)
@@ -589,6 +589,7 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 		WHERE (source_mem.project_id = ? OR source_mem.project_id = ?)
 		  AND (target_mem.project_id = ? OR target_mem.project_id = ?)
 		  AND l.relation = ? AND l.source = ? AND l.invalidated_at IS NULL
+		ORDER BY l.created_at, l.rowid
 	`, projectID, GlobalProjectID, projectID, GlobalProjectID, relation, source)
 	if err != nil {
 		return nil, fmt.Errorf("links by relation source: %w", err)
@@ -671,7 +672,7 @@ func (s *Store) LinksInto(ctx context.Context, projectID, memoryID, relation str
 			WHERE l.relation IN ('supersedes', 'causes') AND l.invalidated_at IS NULL
 			  AND l.target_id = ?
 			  AND (source_mem.project_id IN (?, ?) OR target_mem.project_id IN (?, ?))
-			ORDER BY CASE l.relation WHEN 'supersedes' THEN 0 ELSE 1 END, l.created_at
+			ORDER BY CASE l.relation WHEN 'supersedes' THEN 0 ELSE 1 END, l.created_at, l.rowid
 		`, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
 		if err != nil {
 			return nil, fmt.Errorf("links into: %w", err)
@@ -687,7 +688,7 @@ func (s *Store) LinksInto(ctx context.Context, projectID, memoryID, relation str
 		WHERE l.relation = ? AND l.invalidated_at IS NULL
 		  AND l.target_id = ?
 		  AND (source_mem.project_id IN (?, ?) OR target_mem.project_id IN (?, ?))
-		ORDER BY l.created_at
+		ORDER BY l.created_at, l.rowid
 	`, relation, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("links into: %w", err)
