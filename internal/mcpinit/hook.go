@@ -447,7 +447,14 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** cross-project memories from mixed origins. %s\n", globalOriginGuidance(globals))
 		}
 		if tally.globals.Total() > len(globals) {
-			fmt.Fprintf(&gsb, "(%s)\n", sessionCountsLine(tally.globals, globalsRankPhrase, globalsToolPhrase))
+			// A historical read orders its globals by the decay composite, not
+			// by the current read's pinned, importance, recency order, so the
+			// line names the ranking the rows actually arrived in.
+			rank := globalsRankPhrase
+			if asOf != nil {
+				rank = projectRankPhrase
+			}
+			fmt.Fprintf(&gsb, "(%s)\n", sessionCountsLine(tally.globals, rank, globalsToolPhrase))
 		}
 		for _, m := range globals {
 			it := sessionMemoryToItem(m, asOf)
@@ -841,6 +848,8 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 		// left out, so the heading says the set was cut rather than reading as
 		// the whole of it.
 		projectRankedOut int
+		// globalsRankedOut is the same count for the global rows.
+		globalsRankedOut int
 	)
 	scope := config.LoadForHook().Injection.SessionScope
 
@@ -868,24 +877,24 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// may not have.
 	if gset, err := memory.ReadMemoriesAsOf(context.Background(), db, memory.GlobalOnly, memory.GlobalProjectID, asOf); err == nil {
 		var w int
-		// The globals' ranked-out count is not carried into the tally: their
-		// count line names the current globals ranking (pinned, importance,
-		// recency), and these rows are in the decay composite's order, so the
-		// phrase would misdescribe the cut.
-		globals, w, _ = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
+		// The globals' ranked-out count rides into the tally like the project
+		// half's. These rows are in the decay composite's order, so the count
+		// line takes the composite phrase on this path (see
+		// formatSessionContext), never the current globals ranking.
+		globals, w, globalsRankedOut = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
 		withheldAtT += w
 	}
 	if projectID == "" && len(globals) == 0 && withheldAtT == 0 {
 		return ""
 	}
-	// The project half's tally is the current path's type and goes through the
-	// same count line, so a cut set reads "N shown of M total — K not shown,
+	// Each half's tally is the current path's type and goes through the same
+	// count line, so a cut set reads "N shown of M total — K not shown,
 	// ranked by ...". Rows withheld for validity at T stay out of it: they are
 	// stated once at block level by memory.AsOfValidityNote, counted in
 	// asOfWithheld, and are neither shown nor ranked out.
 	tally := sessionTally{
 		project:      assemble.BucketTally{Shown: len(memories), RankedOut: projectRankedOut},
-		globals:      assemble.BucketTally{Shown: len(globals)},
+		globals:      assemble.BucketTally{Shown: len(globals), RankedOut: globalsRankedOut},
 		asOfWithheld: withheldAtT,
 	}
 	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, globals, tally)
