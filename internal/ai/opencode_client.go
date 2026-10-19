@@ -118,8 +118,25 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if text, ok := salvageDeclinedToolRun(stdout.String()); ok {
-			return text, nil
+		// A call cut by its own context is a failure, never a declined-tool
+		// success. opencode writes the declined shape as it begins to shut
+		// down, so a deadline or cancellation that lands after the answer text
+		// leaves a stream the salvage below would accept — while the run was
+		// killed, not answered. The salvage is for a run that exited on its own
+		// after a declined tool use, and the context being done is what tells
+		// the two apart.
+		if ctx.Err() == nil {
+			if text, ok := salvageDeclinedToolRun(stdout.String()); ok {
+				return text, nil
+			}
+		}
+		// The cause is attached because Wait reports only the kill ("signal:
+		// killed"), never the context error, so a cut would otherwise be
+		// indistinguishable from a run that failed on its own terms. A cut at
+		// the client default is named by explainDefaultBound, which reads the
+		// timer's cause.
+		if cause := ctx.Err(); cause != nil {
+			return "", fmt.Errorf("opencode run: %w: %s: %w", err, harnessFailureOutput(stdout.String(), stderr.String()), cause)
 		}
 		// stderr alone was empty for every one of the 357 failures in
 		// lifecycle.log: opencode reports errors on its JSON stream, not the
@@ -524,6 +541,10 @@ const openCodeNoToolsPreamble = "You have no tools in this session. Do not call 
 // parse and leaves the rest unclassified, so every applied verdict is one the
 // model actually gave. Non-JSON lines (opencode prints the
 // auto-reject notice as plain text) are skipped here.
+//
+// The caller applies it only to a run whose context is still live: opencode
+// writes the same shape as it begins to shut down, so a run the context killed
+// leaves a stream this would accept even though it was never answered.
 func salvageDeclinedToolRun(raw string) (string, bool) {
 	var sb strings.Builder
 	aborted, declined := false, false
