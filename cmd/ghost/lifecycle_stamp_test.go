@@ -1,9 +1,11 @@
 package main
 
-// The lifecycle cooldown stamp (lifecycle-<id>.last) has two placement rules in
+// The lifecycle cooldown stamp (lifecycle-<id>.last) has placement rules in
 // docs/invariants.md: the run start is stamped only after every precondition
-// that can exit non-zero, and a run turned away by another live run writes no
-// stamp. runLifecycle cannot be called from a unit test (it exits the process),
+// that can exit non-zero, with one exception (a config file that cannot be
+// loaded writes the stamp and a failure marker before exiting 1, so the hook
+// does not respawn every turn), and a run turned away by another live run
+// writes no stamp. runLifecycle cannot be called from a unit test (it exits the process),
 // so these tests drive the BUILT binary. The binary is built with go build into
 // the test's temp dir — never a re-exec of the test binary, which under go test
 // is the whole suite — and runs in an environment built from an allowlist with
@@ -104,7 +106,11 @@ func (sb *lifecycleStampSandbox) run(t *testing.T) (int, string) {
 	return ee.ExitCode(), stderr.String()
 }
 
-func TestLifecycleBadConfigWritesNoStamp(t *testing.T) {
+// TestLifecycleBadConfigWritesTheStamp pins the one exception to "no stamp on a
+// failed precondition": a config file that cannot be loaded exits 1, but only
+// after recording the failure and stamping the start, so the stop hook's
+// cooldown holds instead of respawning the run every turn.
+func TestLifecycleBadConfigWritesTheStamp(t *testing.T) {
 	sb := newLifecycleStampSandbox(t)
 	// A config file that does not parse: config.Load returns an error, and
 	// runLifecycle exits 1 on it.
@@ -118,8 +124,8 @@ func TestLifecycleBadConfigWritesNoStamp(t *testing.T) {
 	if !strings.Contains(stderr, "load config") {
 		t.Fatalf("the run did not exit on the config load (the precondition under test):\n%s", stderr)
 	}
-	if _, err := os.Stat(sb.stamp()); !os.IsNotExist(err) {
-		t.Fatalf("a run that exited on a bad config left a cooldown stamp (stat err = %v)", err)
+	if st, err := os.Stat(sb.stamp()); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("a run that exited on a bad config left no cooldown stamp (stat err = %v)\n%s", err, stderr)
 	}
 }
 
