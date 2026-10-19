@@ -3917,6 +3917,13 @@ func (s *Server) registerTools() {
 
 		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
+		// The per-project lines are the one part of this answer that grows with
+		// the store, so they are collected apart from the store-wide lines and
+		// cut as whole rows to the response budget at the end (#1541). Every
+		// project is still counted, so the total below is the whole store's.
+		headLen := sb.Len()
+		projectRows := make([]string, 0, len(projects))
+
 		totalMemories := 0
 		uncountedProjects := 0
 		for _, p := range projects {
@@ -3929,8 +3936,8 @@ func (s *Server) registerTools() {
 				// read is reported rather than dropped: the same rule the
 				// pinned, history and retrieval blocks follow.
 				uncountedProjects++
-				fmt.Fprintf(&sb, "- **%s** (%s): count could not be read: %v\n",
-					assemble.Label(p.Name), shortID(p.ID), err)
+				projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): count could not be read: %v\n",
+					assemble.Label(p.Name), shortID(p.ID), err))
 				continue
 			}
 			totalMemories += count
@@ -3941,9 +3948,10 @@ func (s *Server) registerTools() {
 			// stores the caller's project_id argument as both id and name), and a
 			// newline in one put a second entry on a health report a human reads
 			// (#791).
-			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", assemble.Label(p.Name),
-				shortID(p.ID), count)
+			projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): %d memories\n",
+				assemble.Label(p.Name), shortID(p.ID), count))
 		}
+		// Everything written to sb from here on is store-wide and never cut.
 		if uncountedProjects > 0 {
 			// The total is a sum of what WAS read, so it has to say what it
 			// leaves out rather than print as complete.
@@ -4072,8 +4080,20 @@ func (s *Server) registerTools() {
 		// and a block inserted above them would move their anchor.
 		s.writeRetrievalAuditBlock(ctx, &sb)
 
+		// The rows sit between the count line and the totals, so the framing is
+		// the text before them and the text after them, and only the rows are
+		// cuttable. sb holds everything but the rows.
+		full := sb.String()
+		parts := make([]responsePart, 0, len(projectRows)+2)
+		parts = append(parts, responsePart{text: full[:headLen]})
+		for _, r := range projectRows {
+			parts = append(parts, responsePart{text: r, cuttable: true})
+		}
+		parts = append(parts, responsePart{text: full[headLen:]})
+		text, _ := capResponseParts(parts, s.searchResponseCap(), healthCutAdvice)
+
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -4097,8 +4117,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		var sb strings.Builder
-		sb.WriteString("## Ghost Projects\n\n")
+		rows := make([]string, 0, len(projects))
 		for _, p := range projects {
 			count, err := s.store.CountMemories(ctx, p.ID)
 			// Name and path through assemble.Label, id through assemble.Token, for
@@ -4110,15 +4129,18 @@ func (s *Server) registerTools() {
 				// A count that failed is not a count of zero (#1461): this
 				// listing is how an agent discovers which projects exist, so a
 				// 0 here is a claim it would act on.
-				fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — count could not be read: %v\n",
-					assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), err)
+				rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — count could not be read: %v\n",
+					assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), err))
 				continue
 			}
-			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n",
-				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count)
+			rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n",
+				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count))
 		}
+		// Whole rows are cut from the end to the response budget, in the order
+		// the store lists them (#1541).
+		text, _ := capRowsToResponseBudget("## Ghost Projects\n\n", rows, s.searchResponseCap(), listProjectsCutAdvice)
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
