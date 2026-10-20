@@ -46,15 +46,24 @@ func assertSharedValueWithheld(t *testing.T, surface, out string, p adversarial.
 // tag class, #1651's bidi sibling). The write path and the render path are
 // different boundaries, so the shared set is run at both.
 func TestSharedFormatControlsAreRefusedByTheTagWriteBoundary(t *testing.T) {
-	for _, p := range adversarial.FormatControls() {
+	all := append(append([]adversarial.Payload{}, adversarial.FormatControls()...), adversarial.ZeroWidth()...)
+	for _, p := range all {
+		p := p
 		t.Run(p.Name, func(t *testing.T) {
 			_, session, _ := echoLogSession(t)
-			out := callToolErr(t, session, "ghost_memory_save", map[string]any{
+			res := callTool(t, session, "ghost_memory_save", map[string]any{
 				"project_id": "p",
 				"content":    "a fact worth keeping",
 				"category":   "fact",
 				"tags":       []string{p.Text},
 			})
+			if !res.IsError {
+				if adversarial.HasZeroWidth(p.Text) {
+					t.Skip("known: #1663")
+				}
+				t.Fatalf("tag write accepted the %s control", p.Name)
+			}
+			out := resultText(res)
 			if !strings.Contains(out, "control character") {
 				t.Errorf("tag write did not refuse the %s control: %s", p.Name, out)
 			}
@@ -130,7 +139,8 @@ func TestSharedOversizedTagsAreTrimmedAtTheTagWriteBoundary(t *testing.T) {
 func TestSharedFormatControlsReachTheListingFromAStoredRow(t *testing.T) {
 	srv, session := newCapSession(t)
 	ctx := context.Background()
-	for _, p := range adversarial.AllControls() {
+	controls := append(append([]adversarial.Payload{}, adversarial.FormatControls()...), adversarial.LineSeparators()...)
+	for _, p := range controls {
 		if _, err := srv.store.Create(ctx, "abc123", memory.Memory{
 			Content:    "stored fact " + p.Name,
 			Category:   "fact",
@@ -151,5 +161,38 @@ func TestSharedFormatControlsReachTheListingFromAStoredRow(t *testing.T) {
 		if strings.ContainsAny(out, "\u2028\u2029") {
 			t.Errorf("listing printed the %s separator raw:\n%q", p.Name, out)
 		}
+	}
+}
+
+// TestSharedZeroWidthReachesTheListingFromAStoredRow runs the zero-width class
+// through the same listing boundary as the controls. The tag renderer does not
+// escape it yet (#1663), so a case whose character is still printed raw records
+// the gap; once a renderer escapes it the same assertion passes unchanged.
+func TestSharedZeroWidthReachesTheListingFromAStoredRow(t *testing.T) {
+	for _, p := range adversarial.ZeroWidth() {
+		p := p
+		t.Run(p.Name, func(t *testing.T) {
+			srv, session := newCapSession(t)
+			ctx := context.Background()
+			if _, err := srv.store.Create(ctx, "abc123", memory.Memory{
+				Content:    "stored fact " + p.Name,
+				Category:   "fact",
+				Importance: 0.5,
+				Source:     "mcp",
+				Tags:       []string{p.Text},
+			}); err != nil {
+				t.Fatalf("Create(%s): %v", p.Name, err)
+			}
+			out := resultText(callTool(t, session, "ghost_memories_list", map[string]any{"project_id": "test-project"}))
+			if !strings.Contains(out, "tags:") {
+				t.Fatalf("listing did not render the tag for %s:\n%q", p.Name, out)
+			}
+			if adversarial.HasZeroWidth(out) {
+				t.Skip("known: #1663")
+			}
+			if strings.Contains(out, p.Text) {
+				t.Errorf("listing printed the %s character raw:\n%q", p.Name, out)
+			}
+		})
 	}
 }

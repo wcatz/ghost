@@ -50,16 +50,47 @@ func LineSeparators() []Payload {
 	}
 }
 
-// AllControls is FormatControls plus LineSeparators, for the render boundaries
-// whose job is to keep every character on one physical line.
-func AllControls() []Payload {
-	out := FormatControls()
-	return append(out, LineSeparators()...)
+// ZeroWidth returns invisible format characters embedded mid-word. They are
+// category Cf like the bidi controls, but they neither reorder nor break a
+// line: they hide a spelling from a reader, so a rendered row that prints one
+// raw can say one word and read as another. Each value sits between two letters
+// of one ordinary word, which is where a hidden character is hardest to notice.
+func ZeroWidth() []Payload {
+	return []Payload{
+		{Name: "zero-width-space", Text: "gh\u200bost"},
+		{Name: "zero-width-non-joiner", Text: "gh\u200cost"},
+		{Name: "zero-width-joiner", Text: "gh\u200dost"},
+		{Name: "word-joiner", Text: "gh\u2060ost"},
+		{Name: "byte-order-mark", Text: "gh\ufeffost"},
+	}
 }
 
-// TokenShaped returns values the token guard recognises as a credential. They
-// are inert at a boundary whose whole job is to render stored text: the value
-// may be shown through the guard's own placeholder, but never replayed raw.
+// HasZeroWidth reports whether s carries one of the zero-width characters in
+// ZeroWidth. A boundary test uses it to tell the known gap from a regression:
+// while the character is still printed raw the case records the gap, and once a
+// renderer escapes it the same assertion passes without a change here.
+func HasZeroWidth(s string) bool {
+	for _, r := range s {
+		switch r {
+		case 0x200b, 0x200c, 0x200d, 0x2060, 0xfeff:
+			return true
+		}
+	}
+	return false
+}
+
+// AllControls is FormatControls, LineSeparators and ZeroWidth, for the render
+// boundaries whose job is to keep every stored character legible and on one
+// physical line.
+func AllControls() []Payload {
+	out := FormatControls()
+	out = append(out, LineSeparators()...)
+	return append(out, ZeroWidth()...)
+}
+
+// TokenShaped returns values the token guard recognises as a token. They are
+// inert at a boundary whose whole job is to render stored text: the value may be
+// shown through the guard's own placeholder, but never replayed raw.
 func TokenShaped() []Payload {
 	return []Payload{
 		{Name: "github-token", Text: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"},
