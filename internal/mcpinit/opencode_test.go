@@ -88,6 +88,32 @@ func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
 	}
 }
 
+// TestRenderOpencodeGhostPlugin_V2NudgeDoesNotResumeFinishedSessions guards
+// against a reintroduced #1658 regression: the V2 save reminder must not use
+// delivery "queue" with resume true, because that stores a pending entry in the
+// session inbox that a later server start acts on, resuming finished sessions
+// with no user present. With resume false the reminder is stored with the
+// session and reaches the agent with the session's next turn, never waking a
+// finished session.
+func TestRenderOpencodeGhostPlugin_V2NudgeDoesNotResumeFinishedSessions(t *testing.T) {
+	src := renderOpencodeGhostPlugin("/usr/local/bin/ghost")
+	// The V2 synthetic call must not queue the reminder for later delivery.
+	if strings.Contains(src, `delivery: "queue"`) {
+		t.Error("V2 save reminder must not use delivery \"queue\" — a queued entry is acted on by a later server start, resuming finished sessions (#1658)")
+	}
+	// The V2 synthetic call must not ask opencode to resume the session.
+	if strings.Contains(src, "resume: true") {
+		t.Error("V2 save reminder must not set resume: true — that wakes finished sessions on the next server start (#1658)")
+	}
+	// The V2 synthetic call must store the reminder for the next turn.
+	if !strings.Contains(src, `delivery: "steer"`) {
+		t.Error("V2 save reminder must use delivery \"steer\" so the reminder is stored with the session and reaches the agent with its next turn (#1658)")
+	}
+	if !strings.Contains(src, "resume: false") {
+		t.Error("V2 save reminder must set resume: false so the stop hook never wakes a finished session (#1658)")
+	}
+}
+
 // TestStripJSONC pins the reduction that lets status read opencode's config:
 // comments and trailing commas are dropped, string literals are content —
 // "//" and "," inside a quoted value, an escaped quote before a comment —
