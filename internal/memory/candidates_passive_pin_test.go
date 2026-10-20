@@ -198,11 +198,14 @@ func TestMorePinnedRowsThanTheCapAreRankedAndTheOverflowIsReported(t *testing.T)
 // rows past the window than a bucket without one.
 //
 // The control is the same fixture without the superseder: the figure is the
-// same either way, because the window is the same either way.
+// same either way, because the window is the same either way. Three superseders
+// fetch three replacements past the window, which the count must ignore just as
+// it ignores one.
 func TestPinnedBeyondCountsTheWindowAndNotTheRowsFetchedPastIt(t *testing.T) {
-	for name, superseded := range map[string]bool{
-		"without a superseder":   false,
-		"with a live superseder": true,
+	for name, replacements := range map[string]int{
+		"without a superseder":        0,
+		"with a live superseder":      1,
+		"with three live superseders": 3,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var extra []pinSlotRow
@@ -212,14 +215,14 @@ func TestPinnedBeyondCountsTheWindowAndNotTheRowsFetchedPastIt(t *testing.T) {
 					importance: 0.9 - float32(i)*0.001, pinned: true,
 				})
 			}
-			if superseded {
+			for i := 0; i < replacements; i++ {
 				extra = append(extra, pinSlotRow{
-					id: "replacement", project: "proj", category: "fact", importance: 0.05,
+					id: fmt.Sprintf("replacement%d", i), project: "proj", category: "fact", importance: 0.05,
 				})
 			}
 			st := pinSlotStore(t, 0, extra...)
-			if superseded {
-				if err := st.CreateLink(context.Background(), "replacement", "pin000", "supersedes", 0.9, "manual"); err != nil {
+			for i := 0; i < replacements; i++ {
+				if err := st.CreateLink(context.Background(), fmt.Sprintf("replacement%d", i), fmt.Sprintf("pin%03d", i), "supersedes", 0.9, "manual"); err != nil {
 					t.Fatalf("link: %v", err)
 				}
 			}
@@ -232,12 +235,12 @@ func TestPinnedBeyondCountsTheWindowAndNotTheRowsFetchedPastIt(t *testing.T) {
 			if got := set.PinnedBeyond["proj"]; got != 15 {
 				t.Errorf("PinnedBeyond[proj] = %d, want 15 (60 pinned rows, 45 in the window)", got)
 			}
-			if superseded {
-				// The replacement is still fetched past the window and still holds
-				// a slot: a count that came out right because the replacement was
-				// not fetched would be a pin that lost its row.
-				if !containsStr(passiveIDs(set), "replacement") {
-					t.Errorf("the replacement of a pinned row was not fetched: %v", passiveIDs(set))
+			// Each replacement is still fetched past the window and still holds a
+			// slot: a count that came out right because a replacement was not
+			// fetched would be a pin that lost its row.
+			for i := 0; i < replacements; i++ {
+				if id := fmt.Sprintf("replacement%d", i); !containsStr(passiveIDs(set), id) {
+					t.Errorf("the replacement %s of a pinned row was not fetched: %v", id, passiveIDs(set))
 				}
 			}
 		})
