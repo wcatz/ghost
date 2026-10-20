@@ -192,8 +192,11 @@ func (d *Dir) Release() {
 // Only entries demonstrably created by Ghost are eligible for removal: one
 // with a readable ownerFile marker, or — for a markerless entry, including one
 // whose marker is being written right now — one whose name has exactly the
-// shape Open creates. A markerless entry is removed only once its mtime is
-// older than maxAge. The one markerless REGULAR file is a follow-up id file
+// shape Open creates. The shape is exact down to the pid segment: a name
+// carrying a pid no Ghost run can have (0, or a pid written with a leading
+// zero) is not a name Open produced, so the entry is not Ghost's and is left
+// alone however old it is. A markerless entry is removed only once its mtime
+// is older than maxAge. The one markerless REGULAR file is a follow-up id file
 // (ReassessTargetsName), which is removed once older than idFileStaleAge
 // instead of maxAge, for the reason those two ages differ: see the constant.
 // Anything else, such as a foreign file or directory that happens to live
@@ -339,22 +342,41 @@ func ownerMarker(dir string) (pid int, start string, ok bool) {
 // remove entries it can prove Ghost created — an override root may be shared —
 // so for a markerless entry the name is the only ownership evidence there is.
 // The match is deliberately strict (no sign, spaces, extra dashes, or
-// uppercase hex) so a foreign name cannot accidentally qualify.
+// uppercase hex) so a foreign name cannot accidentally qualify, and the pid
+// segment must be one Open could have written (isPidSegment): a pid Ghost
+// never has is evidence the entry is not Ghost's.
 func isScratchDirName(name string) bool {
 	pid, rest, found := strings.Cut(name, "-")
-	if !found || pid == "" {
+	if !found || !isPidSegment(pid) {
 		return false
-	}
-	for _, r := range pid {
-		if r < '0' || r > '9' {
-			return false
-		}
 	}
 	if len(rest) != 16 {
 		return false
 	}
 	for _, r := range rest {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// isPidSegment reports whether s is a pid in the spelling Open names its
+// directories with: strconv.Itoa(os.Getpid()). A pid is a positive integer, and
+// its decimal form never carries a leading zero, so "0" and "007" are spellings
+// no Ghost run can produce.
+//
+// The rule is this strict because a markerless entry is removed on the
+// strength of its name ALONE — the name is the only ownership evidence there
+// is — and a pid segment Ghost could never have written says the entry is
+// somebody else's. Ghost must never delete what it did not create, and a
+// shared root ($GHOST_SCRATCH_DIR) is writable by whoever else shares it.
+func isPidSegment(s string) bool {
+	if s == "" || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}

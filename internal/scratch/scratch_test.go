@@ -329,6 +329,86 @@ func TestReap_LeavesForeignEntriesAlone(t *testing.T) {
 	}
 }
 
+// TestReap_LeavesMarkerlessEntriesWithImpossiblePidsAlone covers the names
+// Reap cannot place in Open's shape. A pid segment of "0", or one carrying a
+// leading zero, is not a pid any Ghost run can have produced, so an entry
+// wearing one is not Ghost's — and a markerless entry is only ever removed on
+// the strength of its name, so it is left alone however old it is. The two
+// eligible kinds are covered: a per-invocation directory, whose age bound is
+// the caller's maxAge, and the follow-up id file, whose age bound is its own
+// window. The entries that DO name a pid Open could have produced are removed
+// in the same reap, so a survivor is surviving on the pid segment and on
+// nothing else.
+func TestReap_LeavesMarkerlessEntriesWithImpossiblePidsAlone(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	// Older than maxAge for the directories, older than the id file's own
+	// window for the file: each entry is past every age bound that could
+	// otherwise remove it.
+	oldTime := time.Now().Add(-2 * time.Hour)
+	pastWindow := time.Now().Add(-idFileStaleAge - time.Hour)
+
+	impossible := []struct {
+		name  string
+		entry string
+		kind  string // "dir" or "file"
+		mtime time.Time
+	}{
+		{"a directory with pid 0", "0-0123456789abcdef", "dir", oldTime},
+		{"a directory with a leading-zero pid", "007-0123456789abcdef", "dir", oldTime},
+		{"an id file with pid 0", "supersede-reassess-p-20260101T000000Z-0-0123456789abcdef.ids", "file", pastWindow},
+	}
+	for _, tt := range impossible {
+		path := filepath.Join(root, tt.entry)
+		if tt.kind == "dir" {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", path, err)
+			}
+		} else if err := os.WriteFile(path, []byte("# one id\naaaaaaaa1111111111111111111111\n"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, tt.mtime, tt.mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+	}
+
+	// The two controls: the same two kinds with a pid Open could have
+	// produced, both of which this reap must collect.
+	ownDir := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(ownDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", ownDir, err)
+	}
+	if err := os.Chtimes(ownDir, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes %s: %v", ownDir, err)
+	}
+	ownFile := filepath.Join(root, "supersede-reassess-p-20260101T000000Z-123-0123456789abcdef.ids")
+	if err := os.WriteFile(ownFile, []byte("# one id\naaaaaaaa1111111111111111111111\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", ownFile, err)
+	}
+	if err := os.Chtimes(ownFile, pastWindow, pastWindow); err != nil {
+		t.Fatalf("chtimes %s: %v", ownFile, err)
+	}
+
+	removed, err := Reap(time.Hour)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2 (the two entries naming a pid Ghost could have produced)", removed)
+	}
+	for _, tt := range impossible {
+		if _, err := os.Lstat(filepath.Join(root, tt.entry)); err != nil {
+			t.Errorf("%s was removed: %v", tt.name, err)
+		}
+	}
+	for _, p := range []string{ownDir, ownFile} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived a reap that should have collected it (stat err %v)", p, err)
+		}
+	}
+}
+
 // TestUniqueSuffix: the token Open names its directories with is the one shape
 // in this package, so a caller that needs a name nothing else will take uses the
 // same one. Two calls must differ, and the result must be a shape Reap's
@@ -367,6 +447,8 @@ func TestIsScratchDirName(t *testing.T) {
 		{"123-0123456789abcdef ", false}, // trailing space
 		{"", false},                      // empty
 		{"abc-0123456789abcdef", false},  // non-numeric pid
+		{"0-0123456789abcdef", false},    // pid 0 is not a pid
+		{"007-0123456789abcdef", false},  // a pid never carries a leading zero
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
