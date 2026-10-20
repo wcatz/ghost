@@ -244,7 +244,10 @@ type CandidateSet struct {
 	// rows than the window has places reads only the first of them. Set only for
 	// a bucket whose whole window is pinned (the only case in which a pinned row
 	// can be past it); absent otherwise. It is what lets the assembler say how many
-	// pinned rows a cap cut when it never saw some of them.
+	// pinned rows a cap cut when it never saw some of them. The window is the
+	// over-fetch the fetch read and not the selected set: the selected set is the
+	// window plus the replacements of pinned rows, which are fetched past it so
+	// they can hold a slot beside the row they replaced.
 	PinnedBeyond map[string]int
 	// WindowExtra is, per passive bucket, how many rows the set carries beyond the
 	// bucket's over-fetch: the replacements of pinned rows, fetched past the LIMIT

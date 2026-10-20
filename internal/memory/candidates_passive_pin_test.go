@@ -188,6 +188,62 @@ func TestMorePinnedRowsThanTheCapAreRankedAndTheOverflowIsReported(t *testing.T)
 	}
 }
 
+// TestPinnedBeyondCountsTheWindowAndNotTheRowsFetchedPastIt: the count reports
+// the pinned rows that never entered the WINDOW, and the window is the
+// over-fetch the fetch read. A replacement is fetched PAST that window (it
+// supersedes a pinned row of it, so it has to hold a slot beside it), and it is
+// not pinned — so a count that tested the SELECTED set for "all pinned" dropped
+// the whole figure for a bucket whose window was nothing but pinned rows, and a
+// project bucket with a superseded pinned row read as one with fewer pinned
+// rows past the window than a bucket without one.
+//
+// The control is the same fixture without the superseder: the figure is the
+// same either way, because the window is the same either way.
+func TestPinnedBeyondCountsTheWindowAndNotTheRowsFetchedPastIt(t *testing.T) {
+	for name, superseded := range map[string]bool{
+		"without a superseder":   false,
+		"with a live superseder": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var extra []pinSlotRow
+			for i := 0; i < 60; i++ {
+				extra = append(extra, pinSlotRow{
+					id: fmt.Sprintf("pin%03d", i), project: "proj", category: "fact",
+					importance: 0.9 - float32(i)*0.001, pinned: true,
+				})
+			}
+			if superseded {
+				extra = append(extra, pinSlotRow{
+					id: "replacement", project: "proj", category: "fact", importance: 0.05,
+				})
+			}
+			st := pinSlotStore(t, 0, extra...)
+			if superseded {
+				if err := st.CreateLink(context.Background(), "replacement", "pin000", "supersedes", 0.9, "manual"); err != nil {
+					t.Fatalf("link: %v", err)
+				}
+			}
+			pol := SlicePolicy{Bucket: "proj", Order: OrderDecay, OverFetch: 45, ItemCap: 15}
+			set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
+			if err != nil {
+				t.Fatalf("Candidates: %v", err)
+			}
+			// 60 pinned rows, a 45-row window, so 15 of them never entered it.
+			if got := set.PinnedBeyond["proj"]; got != 15 {
+				t.Errorf("PinnedBeyond[proj] = %d, want 15 (60 pinned rows, 45 in the window)", got)
+			}
+			if superseded {
+				// The replacement is still fetched past the window and still holds
+				// a slot: a count that came out right because the replacement was
+				// not fetched would be a pin that lost its row.
+				if !containsStr(passiveIDs(set), "replacement") {
+					t.Errorf("the replacement of a pinned row was not fetched: %v", passiveIDs(set))
+				}
+			}
+		})
+	}
+}
+
 // TestPinnedRowsInsideTheWindowReportNothingBeyond: a window with room reports
 // no pinned rows beyond it.
 func TestPinnedRowsInsideTheWindowReportNothingBeyond(t *testing.T) {
