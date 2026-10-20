@@ -3,6 +3,7 @@ package memory
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -273,6 +274,16 @@ func CheckImportedMemory(m PortableMemory) error {
 	); err != nil {
 		return err
 	}
+	// last_accessed is a timestamp field that reaches the store from the artifact.
+	// Guard it against credentials and validate its format.
+	if m.LastAccessed != nil {
+		if err := rejectSecretFields(secretField{"last_accessed", *m.LastAccessed}); err != nil {
+			return err
+		}
+		if err := checkImportedTimestamp("last_accessed", *m.LastAccessed); err != nil {
+			return err
+		}
+	}
 	// And the lengths, for the same reason the writers apply them: a reference and
 	// a harness name are both printed as labelled fields on every listing, so an
 	// artifact is a way to plant a value that reaches every answer touching the row.
@@ -383,14 +394,30 @@ func CheckImportedTask(t Task) error {
 	if t.Priority < 0 || t.Priority > 4 {
 		return fmt.Errorf("invalid priority %d — must be between 0 and 4", t.Priority)
 	}
-	// Same window as the memory's: after the presence check, before apply=false.
-	// A task's title, description and notes are otherwise unvalidated text that a
-	// normal save refuses, and an artifact carries them.
-	return rejectSecretFields(
+	// branch: guard against credentials first (so a token-bearing oversize
+	// branch is refused by the token guard), then bound its size like other
+	// task text.
+	if err := rejectSecretFields(secretField{"branch", t.Branch}); err != nil {
+		return err
+	}
+	if len(t.Branch) > MaxBranchLen {
+		return fmt.Errorf("branch must be at most %d bytes, got %d — it is stored alongside the task's text and reaches the same renderers", MaxBranchLen, len(t.Branch))
+	}
+	// completed_at and branch are otherwise unvalidated text that a normal save
+	// refuses, and an artifact carries them. Same window as the memory's: after
+	// the presence check, before apply=false.
+	if err := rejectSecretFields(
 		secretField{"title", t.Title},
 		secretField{"description", t.Description},
 		secretField{"notes", t.Notes},
-	)
+		secretField{"completed_at", t.CompletedAt},
+	); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("completed_at", t.CompletedAt); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CheckImportedDecision reports why `ghost import` would refuse this decision, or
@@ -452,7 +479,11 @@ func CheckImportedDecision(d Decision) error {
 		secretField{"title", d.Title},
 		secretField{"decision", d.Decision},
 		secretField{"rationale", d.Rationale},
+		secretField{"created_at", d.CreatedAt},
 	); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("created_at", d.CreatedAt); err != nil {
 		return err
 	}
 	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
@@ -505,6 +536,33 @@ func createdProject(id, path, name, repoRemote string) PortableProject {
 // any writer here produces, while still refusing the class the bound is for: a
 // payload wearing an id's clothes, echoed into every listing that touches the row.
 const MaxImportedIDLen = 128
+
+// MaxBranchLen is the byte cap on a task's branch field.
+//
+// A branch name is a git reference name, not free-form prose, but the import
+// accepts it from an artifact file and must bound it for the same reason the
+// other task text fields are bounded: the row-rendering read tools assume a
+// row is bounded by construction. The cap matches MaxContentLen so a branch
+// cannot be used to sidestep the content cap.
+const MaxBranchLen = MaxContentLen
+
+// checkImportedTimestamp validates that a timestamp field from a portable
+// artifact is either empty or a valid timestamp in one of the formats this
+// store writes. It returns an error naming the field if the value is non-empty
+// and invalid. The accepted layouts are StoredStampLayout (YYYY-MM-DD HH:MM:SS
+// from SQLite's datetime('now')), DateStampLayout (YYYY-MM-DD from SQLite's
+// date()), and time.RFC3339 (from Store.Touch for last_accessed).
+func checkImportedTimestamp(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, layout := range []string{StoredStampLayout, DateStampLayout, time.RFC3339} {
+		if _, err := time.Parse(layout, value); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s must be a valid timestamp (format: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, or RFC3339) or empty", field)
+}
 
 // CheckImportedID reports whether a RECORD id from a portable artifact — a
 // memory's, a task's or a decision's — is one this build will store.
