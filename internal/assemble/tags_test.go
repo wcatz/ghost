@@ -3,6 +3,7 @@ package assemble
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode"
@@ -168,6 +169,45 @@ func TestTagsLabelRendersNothingForAnEmptyList(t *testing.T) {
 	for _, tags := range [][]string{nil, {}} {
 		if got := TagsLabel(tags); got != "" {
 			t.Errorf("TagsLabel(%v) = %q, want \"\"", tags, got)
+		}
+	}
+}
+
+// TestTagsLabelEscapesBidiControls is #1651: json.Marshal does not escape
+// bidirectional controls (category Cf) and neutralizeTagLabel only escaped
+// line-ending/control runes (Cc + line breaks), so a tag holding U+202E etc.
+// was printed raw. The fix makes neutralizeTagLabel also escape bidi controls
+// using the same strconv escape form Data and Label use, so the tag list holds
+// none of them byte-identical and the array still decodes to the stored tag.
+func TestTagsLabelEscapesBidiControls(t *testing.T) {
+	bidiRunes := []rune{
+		0x200E, 0x200F,
+		0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+		0x2066, 0x2067, 0x2068, 0x2069,
+	}
+	for _, r := range bidiRunes {
+		tag := "ok" + string(r) + "EVIL"
+		label := TagsLabel([]string{tag})
+		if strings.ContainsRune(label, r) {
+			t.Errorf("U+%04X: TagsLabel printed it raw: %q", r, label)
+		}
+		// The escape form should be present (strconv.QuoteRuneToASCII without quotes)
+		esc := strconv.QuoteRuneToASCII(r)
+		esc = esc[1 : len(esc)-1]
+		if !strings.Contains(label, esc) {
+			t.Errorf("U+%04X: TagsLabel missing escape %q: %q", r, esc, label)
+		}
+		// The JSON array must still decode to the original tag
+		var decoded []string
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(label, " tags:")), &decoded); err != nil {
+			t.Errorf("U+%04X: label %q is not valid JSON: %v", r, label, err)
+		} else if len(decoded) != 1 || decoded[0] != tag {
+			t.Errorf("U+%04X: label decodes to %q, want stored tag %q", r, decoded, tag)
+		}
+		// The full memory line must stay one physical line
+		line := Item{ID: "pmem00", Category: "fact", Content: "an honest claim", Tags: []string{tag}}.Line()
+		if n := len(strings.FieldsFunc(line, isLineBreak)); n != 1 || strings.ContainsFunc(line, isLineBreak) {
+			t.Errorf("U+%04X: line splits into %d lines under isLineBreak, want exactly one:\n%q", r, n, line)
 		}
 	}
 }

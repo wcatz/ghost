@@ -914,22 +914,27 @@ const TagBacktickEscape = "\\u0060"
 // label has its own, and this is the one place the two rules differ.
 //
 // It also writes every rune of Label's line-ending class (isLineEndingOrControl)
-// as a JSON `\uXXXX` escape (#1488). `json.Marshal` escapes C0 and U+2028/U+2029
-// but leaves NEL (U+0085) and the rest of C1 raw, and an imported tag is stored
-// verbatim, so a NEL in one forged a line in the session-start block. Every rune
-// of that class is in the BMP, so the four-digit escape is exact, and an escape
-// inside a JSON string decodes back to the same rune: the array stays valid and
-// a reader decoding it gets the stored tag unchanged. Outside a JSON string the
-// marshalled array holds only ASCII punctuation, so no escape lands there.
+// and every bidirectional control (isBidiControl) as a JSON `\uXXXX` escape
+// (#1488, #1651). `json.Marshal` escapes C0 and U+2028/U+2029 but leaves NEL
+// (U+0085) and the rest of C1 raw, and an imported tag is stored verbatim, so a
+// NEL in one forged a line in the session-start block. The bidi controls (U+200E,
+// U+200F, U+202A–U+202E, U+2066–U+2069) are category Cf, so neither json.Marshal
+// nor unicode.IsControl covered them. Every rune of these classes is in the BMP,
+// so the four-digit escape is exact, and an escape inside a JSON string decodes
+// back to the same rune: the array stays valid and a reader decoding it gets the
+// stored tag unchanged. Outside a JSON string the marshalled array holds only
+// ASCII punctuation, so no escape lands there.
 func neutralizeTagLabel(s string) string {
 	s = strings.ReplaceAll(neutralizeDelimiters(s), "`", TagBacktickEscape)
-	if !strings.ContainsFunc(s, isLineEndingOrControl) {
+	if !strings.ContainsFunc(s, func(r rune) bool {
+		return isLineEndingOrControl(r) || isBidiControl(r)
+	}) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
 	for _, r := range s {
-		if isLineEndingOrControl(r) {
+		if isLineEndingOrControl(r) || isBidiControl(r) {
 			fmt.Fprintf(&b, "\\u%04x", r)
 			continue
 		}
