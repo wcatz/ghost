@@ -271,7 +271,15 @@ func CheckImportedMemory(m PortableMemory) error {
 		secretField{"source_ref", m.SourceRef},
 		secretField{"agent", m.Agent},
 		secretField{"session_id", m.SessionID},
+		secretField{"created_at", m.CreatedAt},
+		secretField{"updated_at", m.UpdatedAt},
 	); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("created_at", m.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", m.UpdatedAt, timestampLayouts("updated_at")); err != nil {
 		return err
 	}
 	// last_accessed is a timestamp field that reaches the store from the artifact.
@@ -280,7 +288,19 @@ func CheckImportedMemory(m PortableMemory) error {
 		if err := rejectSecretFields(secretField{"last_accessed", *m.LastAccessed}); err != nil {
 			return err
 		}
-		if err := checkImportedTimestamp("last_accessed", *m.LastAccessed); err != nil {
+		if err := checkImportedTimestamp("last_accessed", *m.LastAccessed, timestampLayouts("last_accessed")); err != nil {
+			return err
+		}
+	}
+	// resolved_at is written by the store with datetime('now'), so it uses
+	// StoredStampLayout. It is a pointer because an absent value means "not
+	// resolved" and a stated value is a real claim. Guard it against credentials
+	// and validate its format.
+	if m.ResolvedAt != nil {
+		if err := rejectSecretFields(secretField{"resolved_at", *m.ResolvedAt}); err != nil {
+			return err
+		}
+		if err := checkImportedTimestamp("resolved_at", *m.ResolvedAt, timestampLayouts("resolved_at")); err != nil {
 			return err
 		}
 	}
@@ -403,18 +423,26 @@ func CheckImportedTask(t Task) error {
 	if len(t.Branch) > MaxBranchLen {
 		return fmt.Errorf("branch must be at most %d bytes, got %d — it is stored alongside the task's text and reaches the same renderers", MaxBranchLen, len(t.Branch))
 	}
-	// completed_at and branch are otherwise unvalidated text that a normal save
-	// refuses, and an artifact carries them. Same window as the memory's: after
-	// the presence check, before apply=false.
+	// completed_at, created_at, and updated_at are otherwise unvalidated text
+	// that a normal save refuses, and an artifact carries them. Same window as
+	// the memory's: after the presence check, before apply=false.
 	if err := rejectSecretFields(
 		secretField{"title", t.Title},
 		secretField{"description", t.Description},
 		secretField{"notes", t.Notes},
 		secretField{"completed_at", t.CompletedAt},
+		secretField{"created_at", t.CreatedAt},
+		secretField{"updated_at", t.UpdatedAt},
 	); err != nil {
 		return err
 	}
-	if err := checkImportedTimestamp("completed_at", t.CompletedAt); err != nil {
+	if err := checkImportedTimestamp("completed_at", t.CompletedAt, timestampLayouts("completed_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("created_at", t.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", t.UpdatedAt, timestampLayouts("updated_at")); err != nil {
 		return err
 	}
 	return nil
@@ -480,10 +508,14 @@ func CheckImportedDecision(d Decision) error {
 		secretField{"decision", d.Decision},
 		secretField{"rationale", d.Rationale},
 		secretField{"created_at", d.CreatedAt},
+		secretField{"updated_at", d.UpdatedAt},
 	); err != nil {
 		return err
 	}
-	if err := checkImportedTimestamp("created_at", d.CreatedAt); err != nil {
+	if err := checkImportedTimestamp("created_at", d.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", d.UpdatedAt, timestampLayouts("updated_at")); err != nil {
 		return err
 	}
 	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
@@ -547,21 +579,31 @@ const MaxImportedIDLen = 128
 const MaxBranchLen = MaxContentLen
 
 // checkImportedTimestamp validates that a timestamp field from a portable
-// artifact is either empty or a valid timestamp in one of the formats this
-// store writes. It returns an error naming the field if the value is non-empty
-// and invalid. The accepted layouts are StoredStampLayout (YYYY-MM-DD HH:MM:SS
-// from SQLite's datetime('now')), DateStampLayout (YYYY-MM-DD from SQLite's
-// date()), and time.RFC3339 (from Store.Touch for last_accessed).
-func checkImportedTimestamp(field, value string) error {
+// artifact is either empty or a valid timestamp in one of the formats the
+// store's writer for that column emits. It returns an error naming the field
+// if the value is non-empty and invalid.
+func checkImportedTimestamp(field, value string, layouts []string) error {
 	if value == "" {
 		return nil
 	}
-	for _, layout := range []string{StoredStampLayout, DateStampLayout, time.RFC3339} {
+	for _, layout := range layouts {
 		if _, err := time.Parse(layout, value); err == nil {
 			return nil
 		}
 	}
-	return fmt.Errorf("%s must be a valid timestamp (format: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, or RFC3339) or empty", field)
+	return fmt.Errorf("%s must be a valid timestamp or empty", field)
+}
+
+// timestampLayouts returns the accepted layouts for a given timestamp field.
+func timestampLayouts(field string) []string {
+	switch field {
+	case "last_accessed":
+		return []string{StoredStampLayout, time.RFC3339}
+	default:
+		// created_at, updated_at, resolved_at, completed_at for all record types
+		// are written by datetime('now') or time.Now().UTC().Format(StoredStampLayout).
+		return []string{StoredStampLayout}
+	}
 }
 
 // CheckImportedID reports whether a RECORD id from a portable artifact — a

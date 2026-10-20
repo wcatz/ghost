@@ -318,4 +318,397 @@ func TestImportUnguardedFieldsRefusesCredential(t *testing.T) {
 			t.Errorf("imported last_accessed %q != original %q", importedLastAccessed, storedLastAccessed)
 		}
 	})
+
+	// Six new timestamp fields: test token refusal, wrong layout refusal, and
+	// round-trip acceptance for each.
+	t.Run("memory/created_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", CreatedAt: token,
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted a credential-shaped created_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("memory/created_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", CreatedAt: "not-a-timestamp",
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted an invalid created_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "created_at") {
+			t.Errorf("refusal does not name 'created_at': %v", err)
+		}
+	})
+	t.Run("memory/created_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := src.Upsert(ctx, "p1", "fact", "memory for created_at round-trip", "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		mems, err := src.PortableMemories(ctx, []string{"p1"})
+		if err != nil {
+			t.Fatalf("PortableMemories: %v", err)
+		}
+		dst := testStore(t)
+		if err := dst.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject dst: %v", err)
+		}
+		created, _, _, err := dst.ImportMemory(ctx, mems[0], ImportOptions{Apply: true})
+		if err != nil {
+			t.Fatalf("ImportMemory refused valid created_at: %v", err)
+		}
+		if !created {
+			t.Error("ImportMemory did not create the memory on round-trip")
+		}
+	})
+
+	t.Run("memory/updated_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", UpdatedAt: token,
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted a credential-shaped updated_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("memory/updated_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", UpdatedAt: "not-a-timestamp",
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted an invalid updated_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "updated_at") {
+			t.Errorf("refusal does not name 'updated_at': %v", err)
+		}
+	})
+	t.Run("memory/updated_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := src.Upsert(ctx, "p1", "fact", "memory for updated_at round-trip", "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		mems, err := src.PortableMemories(ctx, []string{"p1"})
+		if err != nil {
+			t.Fatalf("PortableMemories: %v", err)
+		}
+		dst := testStore(t)
+		if err := dst.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject dst: %v", err)
+		}
+		created, _, _, err := dst.ImportMemory(ctx, mems[0], ImportOptions{Apply: true})
+		if err != nil {
+			t.Fatalf("ImportMemory refused valid updated_at: %v", err)
+		}
+		if !created {
+			t.Error("ImportMemory did not create the memory on round-trip")
+		}
+	})
+
+	t.Run("memory/resolved_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", ResolvedAt: &token,
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted a credential-shaped resolved_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("memory/resolved_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		invalid := "not-a-timestamp"
+		_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: "a memory", ResolvedAt: &invalid,
+		}, ImportOptions{Apply: true})
+		if err == nil {
+			t.Fatal("ImportMemory accepted an invalid resolved_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "resolved_at") {
+			t.Errorf("refusal does not name 'resolved_at': %v", err)
+		}
+	})
+	t.Run("memory/resolved_at round-trip via SetResolved", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		id, _, _, err := src.Upsert(ctx, "p1", "fact", "memory for resolved_at round-trip", "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		// Use SetResolved to set resolved_at (this is what the real writer does)
+		if _, err := src.SetResolved(ctx, []string{id}); err != nil {
+			t.Fatalf("SetResolved: %v", err)
+		}
+		mems, err := src.PortableMemories(ctx, []string{"p1"})
+		if err != nil {
+			t.Fatalf("PortableMemories: %v", err)
+		}
+		dst := testStore(t)
+		if err := dst.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject dst: %v", err)
+		}
+		created, _, _, err := dst.ImportMemory(ctx, mems[0], ImportOptions{Apply: true})
+		if err != nil {
+			t.Fatalf("ImportMemory refused valid resolved_at: %v", err)
+		}
+		if !created {
+			t.Error("ImportMemory did not create the memory on round-trip")
+		}
+	})
+
+	t.Run("task/created_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportTask(ctx, Task{
+			ID: "t1", ProjectID: "p1", Title: "a task",
+			Status: "pending", CreatedAt: token,
+		}, true)
+		if err == nil {
+			t.Fatal("ImportTask accepted a credential-shaped created_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("task/created_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportTask(ctx, Task{
+			ID: "t1", ProjectID: "p1", Title: "a task",
+			Status: "pending", CreatedAt: "not-a-timestamp",
+		}, true)
+		if err == nil {
+			t.Fatal("ImportTask accepted an invalid created_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "created_at") {
+			t.Errorf("refusal does not name 'created_at': %v", err)
+		}
+	})
+	t.Run("task/created_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		id, err := src.CreateTask(ctx, "p1", "task for created_at round-trip", "desc", 2)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+		got, err := src.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		_, _, err = src.ImportTask(ctx, got, true)
+		if err != nil {
+			t.Fatalf("ImportTask refused valid created_at: %v", err)
+		}
+	})
+
+	t.Run("task/updated_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportTask(ctx, Task{
+			ID: "t1", ProjectID: "p1", Title: "a task",
+			Status: "pending", UpdatedAt: token,
+		}, true)
+		if err == nil {
+			t.Fatal("ImportTask accepted a credential-shaped updated_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("task/updated_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportTask(ctx, Task{
+			ID: "t1", ProjectID: "p1", Title: "a task",
+			Status: "pending", UpdatedAt: "not-a-timestamp",
+		}, true)
+		if err == nil {
+			t.Fatal("ImportTask accepted an invalid updated_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "updated_at") {
+			t.Errorf("refusal does not name 'updated_at': %v", err)
+		}
+	})
+	t.Run("task/updated_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		id, err := src.CreateTask(ctx, "p1", "task for updated_at round-trip", "desc", 2)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+		got, err := src.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		_, _, err = src.ImportTask(ctx, got, true)
+		if err != nil {
+			t.Fatalf("ImportTask refused valid updated_at: %v", err)
+		}
+	})
+
+	t.Run("decision/created_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportDecision(ctx, Decision{
+			ID: "d1", ProjectID: "p1", Title: "a decision", Status: "active",
+			Decision: "do it", Rationale: "because", CreatedAt: token,
+		}, true)
+		if err == nil {
+			t.Fatal("ImportDecision accepted a credential-shaped created_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("decision/created_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportDecision(ctx, Decision{
+			ID: "d1", ProjectID: "p1", Title: "a decision", Status: "active",
+			Decision: "do it", Rationale: "because", CreatedAt: "not-a-timestamp",
+		}, true)
+		if err == nil {
+			t.Fatal("ImportDecision accepted an invalid created_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "created_at") {
+			t.Errorf("refusal does not name 'created_at': %v", err)
+		}
+	})
+	t.Run("decision/created_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := src.RecordDecision(ctx, "p1", "decision for created_at round-trip", "do it", "rationale", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision: %v", err)
+		}
+		decs, err := src.ListDecisions(ctx, "p1", "", 1)
+		if err != nil {
+			t.Fatalf("ListDecisions: %v", err)
+		}
+		if len(decs) == 0 {
+			t.Fatal("no decision found")
+		}
+		dec := decs[0]
+		_, _, err = src.ImportDecision(ctx, dec, true)
+		if err != nil {
+			t.Fatalf("ImportDecision refused valid created_at: %v", err)
+		}
+	})
+
+	t.Run("decision/updated_at token refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportDecision(ctx, Decision{
+			ID: "d1", ProjectID: "p1", Title: "a decision", Status: "active",
+			Decision: "do it", Rationale: "because", UpdatedAt: token,
+		}, true)
+		if err == nil {
+			t.Fatal("ImportDecision accepted a credential-shaped updated_at")
+		}
+		if !errors.Is(err, ErrSecretContent) {
+			t.Errorf("errors.Is(err, ErrSecretContent) = false for %v", err)
+		}
+	})
+	t.Run("decision/updated_at wrong layout refused", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, err := store.ImportDecision(ctx, Decision{
+			ID: "d1", ProjectID: "p1", Title: "a decision", Status: "active",
+			Decision: "do it", Rationale: "because", UpdatedAt: "not-a-timestamp",
+		}, true)
+		if err == nil {
+			t.Fatal("ImportDecision accepted an invalid updated_at timestamp")
+		}
+		if !strings.Contains(err.Error(), "updated_at") {
+			t.Errorf("refusal does not name 'updated_at': %v", err)
+		}
+	})
+	t.Run("decision/updated_at round-trip", func(t *testing.T) {
+		src := testStore(t)
+		if err := src.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, _, _, err := src.RecordDecision(ctx, "p1", "decision for updated_at round-trip", "do it", "rationale", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision: %v", err)
+		}
+		decs, err := src.ListDecisions(ctx, "p1", "", 1)
+		if err != nil {
+			t.Fatalf("ListDecisions: %v", err)
+		}
+		if len(decs) == 0 {
+			t.Fatal("no decision found")
+		}
+		dec := decs[0]
+		_, _, err = src.ImportDecision(ctx, dec, true)
+		if err != nil {
+			t.Fatalf("ImportDecision refused valid updated_at: %v", err)
+		}
+	})
 }
