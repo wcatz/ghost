@@ -381,3 +381,48 @@ func savedID(t *testing.T, answer string) string {
 	}
 	return id
 }
+
+// TestUnsafeTagRuneRefusesBidiControls is #1651: unsafeTagRune refused control
+// characters (Cc), backtick, and data delimiters, but not Cf runes. The bidi
+// controls (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069) are category Cf, so a
+// ghost_memory_save with a tag holding U+202E was accepted. The fix makes
+// unsafeTagRune refuse Cf runes the way validateScopeKeyValue and blankWriteText
+// already do.
+func TestUnsafeTagRuneRefusesBidiControls(t *testing.T) {
+	bidiRunes := []rune{
+		0x200E, 0x200F,
+		0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+		0x2066, 0x2067, 0x2068, 0x2069,
+	}
+	for _, r := range bidiRunes {
+		tag := "ok" + string(r) + "EVIL"
+		reason := unsafeTagRune(tag)
+		if reason == "" {
+			t.Errorf("U+%04X: unsafeTagRune accepted a bidi control, want refusal", r)
+		}
+		if !strings.Contains(reason, "control character") {
+			t.Errorf("U+%04X: unsafeTagRune reason %q does not name the class", r, reason)
+		}
+	}
+	// A tag without bidi controls should still be accepted
+	if reason := unsafeTagRune("plain-tag"); reason != "" {
+		t.Errorf("plain tag was refused: %s", reason)
+	}
+	// Control characters (Cc) should still be refused
+	if reason := unsafeTagRune("a\x00b"); reason == "" || !strings.Contains(reason, "control character") {
+		t.Errorf("C0 control was not refused as control character: %s", reason)
+	}
+	// Backtick and guillemets should still be refused
+	for _, tc := range []struct {
+		tag    string
+		reason string
+	}{
+		{"a`b", "backtick"},
+		{"a«b", "data delimiter"},
+		{"a»b", "data delimiter"},
+	} {
+		if reason := unsafeTagRune(tc.tag); reason == "" || !strings.Contains(reason, tc.reason) {
+			t.Errorf("%q: unsafeTagRune reason %q does not name %q", tc.tag, reason, tc.reason)
+		}
+	}
+}
