@@ -288,6 +288,11 @@ func TestHistoryRendersAStoredStampOnItsOwnLineOnly(t *testing.T) {
 // TestHistoryCompactNamesNoProjectAsItsOwnLine is the repair report's one line
 // per project. It names the project by id, and a project id is stored text: a
 // project created over MCP records the caller's `project_id` argument as its id.
+//
+// The id is rendered by the line renderer (`assemble.Token`), so the line
+// carries it with its own line break and its own data delimiters ESCAPED: the
+// report names the project, and the project's own bytes cannot become the
+// report's text.
 func TestHistoryCompactNamesNoProjectAsItsOwnLine(t *testing.T) {
 	var out bytes.Buffer
 	err := printHistoryCompact(&out, historyCompactReport{
@@ -300,6 +305,11 @@ func TestHistoryCompactNamesNoProjectAsItsOwnLine(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB") {
 		t.Fatalf("fixture: `ghost history compact` is missing the planted project:\n%s", s)
+	}
+	// The stored id's own bytes are not in the report: the renderer escapes the
+	// line break inside it, so the value cannot be the report's text.
+	if strings.Contains(s, hostileIDFor()) {
+		t.Errorf("`ghost history compact` printed the stored project id raw:\n%s", s)
 	}
 	assertNoForgedLineOutsideADataBlock(t, "ghost history compact", s)
 	assertNotAtLineStart(t, "ghost history compact", s, hostileIDFor())

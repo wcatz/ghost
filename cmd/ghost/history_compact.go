@@ -203,7 +203,25 @@ func printHistoryCompact(w io.Writer, r historyCompactReport) error {
 // the partial report is not a report the operator can compare against.
 func printHistoryCompactLines(w io.Writer, r historyCompactReport) error {
 	for _, p := range r.Projects {
-		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", assemble.Token(p.ProjectID), p.Removed, p.UpdatedAt); err != nil {
+		// The id is stored text, and this line needs BOTH of its properties: a
+		// token-shaped id must not be printed whole, and any other id must not
+		// end this line or open a data block of its own. assemble.Token gives the
+		// second (it escapes the « and » a stored id can carry from an older
+		// artifact, a restored snapshot or a hand-edited row) and not the first
+		// (it neutralises characters, it does not withhold). The guard is asked
+		// first, because the credential verdict has to win over the line
+		// verdict: a value that is both hostile and credential-shaped comes back
+		// as the placeholder, never as an escaped token.
+		//
+		// The report is printed on the FAILURE path too — a run that stopped
+		// partway prints the projects it had already reached, the failing one
+		// among them, above the error — so a renderer that withheld the id in
+		// the error and printed it in the report would leak it one line earlier.
+		rendered := assemble.Token(p.ProjectID)
+		if placeholder, withheld := memory.TokenGuardPlaceholder("project", p.ProjectID); withheld {
+			rendered = placeholder
+		}
+		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", rendered, p.Removed, p.UpdatedAt); err != nil {
 			return err
 		}
 		// Disclosed rather than folded into a total: a row whose stamp no layout
@@ -378,7 +396,10 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 			// project is finished".
 			report.Projects = append(report.Projects, res)
 			report.FailedProject = id
-			return report, fmt.Errorf("project %s: %w", id, err)
+			// The id is stored text, so the sentence that names it goes through the
+			// same renderer as the lock refusal above: an ordinary id is quoted, a
+			// token-shaped one is withheld, and neither can end the line.
+			return report, fmt.Errorf("project %s: %w", memory.RefusalArg("project", id), err)
 		}
 		report.Projects = append(report.Projects, res)
 	}
@@ -500,10 +521,18 @@ func refuseLockedProjects(dataDir string, projectIDs []string) error {
 		return nil
 	}
 	sort.Strings(busy)
+	rendered := make([]string, 0, len(busy))
+	for _, id := range busy {
+		// A stored id is not exempt from the guard for being stored: `ghost import`
+		// writes an artifact's id verbatim, so this sentence can otherwise carry a
+		// token-shaped value into stderr and a log, or split on a line separator
+		// and put text of the value's choosing at the start of a line.
+		rendered = append(rendered, memory.RefusalArg("project", id))
+	}
 	what := "a lifecycle run holds"
 	if len(busy) > 1 {
 		what = "lifecycle runs hold"
 	}
 	return fmt.Errorf("%s the lock for %s — wait for it to finish, or scope the run with --project",
-		what, strings.Join(busy, ", "))
+		what, strings.Join(rendered, ", "))
 }
