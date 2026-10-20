@@ -146,7 +146,7 @@ func assertPhaseExitedItself(t *testing.T, cmd *exec.Cmd) {
 func readPid(t *testing.T, path string) int {
 	t.Helper()
 	var raw []byte
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		b, err := os.ReadFile(path)
 		if err == nil && len(bytes.TrimSpace(b)) > 0 {
@@ -494,22 +494,30 @@ func TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod(t *testing.T) {
 }
 
 // TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind is the process layout a
-// real phase has on a deadline. The CLI harness runs in a process group of its
-// own, as production starts it, so the phase's group signal does not reach it:
-// the phase ends it itself on the deadline's SIGTERM, signalling the harness's
-// group and waiting for it before it exits, and cmd.Wait returns once the phase
-// is reaped. What the phase left behind is in the phase's OWN group — a helper
+// real phase has when the coordinator is signalled. The CLI harness runs in a
+// process group of its own, as production starts it, so the phase's group
+// signal does not reach it: the phase ends it itself on the interruption's
+// SIGTERM, signalling the harness's group and waiting for it before it exits,
+// and cmd.Wait returns once the phase is reaped. The interruption is a signal
+// rather than a deadline because the phase's TERM trap needs the harness's pid
+// file before the SIGTERM lands, and a deadline cannot be timed to follow it;
+// the deadline branch reaches the same grace loop and is covered by
+// TestThePhaseWatchdogKillsAPhaseThatOutlivesTheGracePeriod. What the phase left behind is in the phase's OWN group — a helper
 // that ignores the signal — and the phase being reaped is not that group being
 // empty, so the escalation must still reach it, and the group must be empty
 // once it has.
 func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
 	requireSetsid(t)
-	const (
-		timeout = 150 * time.Millisecond
-		grace   = 250 * time.Millisecond
-	)
+	const grace = 250 * time.Millisecond
 	pidFile := filepath.Join(t.TempDir(), "harness.pid")
-	ctx, cancel, cmd := newPhaseCmd(timeout, phaseWithSweptHarness(pidFile))
+	// A long phase timeout keeps the phase alive until this test triggers the
+	// interruption itself. The phase's TERM trap waits for the harness's pid
+	// file before forwarding SIGTERM, so the interruption must not fire before
+	// that file exists: on a loaded runner setsid may not have been scheduled
+	// yet, and an interruption that landed then would kill the phase while its
+	// trap is still waiting, leaving the harness (in its own group) never
+	// signalled and its pid never recorded.
+	ctx, cancel, cmd := newPhaseCmd(time.Hour, phaseWithSweptHarness(pidFile))
 	defer cancel()
 	// Registered whatever the assertions below do: the sweep is this test's,
 	// and it runs after them.
@@ -517,17 +525,41 @@ func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
 
 	var attempts atomic.Int64
 	phaseDone := make(chan struct{})
-	wg := startPhaseAndWatchdog(t, ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("start the phase: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		phaseWatchdog(rootCtx, ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+	}()
+
+	// Wait until the harness has recorded its pid before interrupting, so the
+	// phase's TERM trap can forward SIGTERM to it (the scenario under test).
+	harness := readPid(t, pidFile)
+
+	// Trigger the interruption now that the harness is ready: cancel the
+	// coordinator root (the watchdog escalates) and the phase context (which
+	// delivers SIGTERM to the phase's group through cmd.Cancel).
+	cancelRoot()
+	cancel()
 
 	if runErr := cmd.Wait(); runErr == nil {
-		t.Fatal("the phase exited on its own instead of taking the deadline's SIGTERM")
+		t.Fatal("the phase exited on its own instead of taking the interruption's SIGTERM")
 	}
 	close(phaseDone)
 
+	wg.Wait()
+
 	// The harness ran in a group of its own, and the phase ended it before the
-	// phase exited: it took the SIGTERM the phase sent its group, and it was
-	// already gone when cmd.Wait returned, before the escalation could run.
-	harness := readPid(t, pidFile)
+	// phase exited: it took the SIGTERM the phase sent its group. The
+	// escalation's group kill cannot reach a harness in its own group, so a
+	// harness that is gone was ended by the phase.
 	if g, err := os.ReadFile(pidFile + ".group"); err != nil || strings.TrimSpace(string(g)) != "own" {
 		t.Fatalf("the harness did not run in a process group of its own (%q, %v); this case is not covered", g, err)
 	}
@@ -537,8 +569,6 @@ func TestThePhaseWatchdogSweepsAHarnessThePhaseLeftBehind(t *testing.T) {
 	if processAlive(harness) {
 		t.Errorf("the harness (pid %d) outlived the phase that spawned it", harness)
 	}
-
-	wg.Wait()
 
 	if n := attempts.Load(); n != 1 {
 		t.Errorf("the escalation fired %d time(s), want exactly 1", n)
