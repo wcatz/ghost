@@ -18,9 +18,8 @@ func importProjectForFixture(t *testing.T, store *Store) {
 }
 
 // TestSharedMalformedStampsAtTheImportBoundary feeds the shared malformed-stamp
-// set through the import path. The save tool refuses an unreadable stamp; the
-// import path is the sibling boundary that must apply the same rule. While it
-// does not, the case is a known gap rather than a failure of this suite.
+// set through the import path. The save tool refuses an unreadable stamp, and
+// the import path is the sibling boundary that applies the same rule.
 func TestSharedMalformedStampsAtTheImportBoundary(t *testing.T) {
 	for _, p := range adversarial.MalformedStamps() {
 		t.Run(p.Name, func(t *testing.T) {
@@ -32,7 +31,7 @@ func TestSharedMalformedStampsAtTheImportBoundary(t *testing.T) {
 				Source: "mcp", ValidFrom: &stamp,
 			}, ImportOptions{Apply: true})
 			if err == nil {
-				t.Skip("known: #1510")
+				t.Errorf("ImportMemory stored an unreadable valid_from (%s)", p.Name)
 			}
 		})
 	}
@@ -58,7 +57,7 @@ func TestSharedOutOfRangeConfidenceAtTheImportBoundary(t *testing.T) {
 				Source: "mcp", Confidence: &c,
 			}, ImportOptions{Apply: true})
 			if err == nil {
-				t.Skip("known: #1510")
+				t.Errorf("ImportMemory stored an out-of-range confidence (%s)", name)
 			}
 		})
 	}
