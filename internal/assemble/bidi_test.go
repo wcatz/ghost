@@ -10,6 +10,10 @@ import (
 
 // bidiRunes is the set of bidirectional controls Data and Label must never print
 // raw. They are category Cf, so unicode.IsControl does not cover them.
+//
+// The WHOLE of that category is covered by the format sweep in format_test.go,
+// which is where the class rule lives; this file pins the subset that reorders a
+// line, which is the one half a reader cannot see either.
 var bidiRunes = []rune{
 	0x200E, 0x200F,
 	0x202A, 0x202B, 0x202C, 0x202D, 0x202E,

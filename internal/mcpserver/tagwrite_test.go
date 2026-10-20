@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/adversarial"
 	"github.com/wcatz/ghost/internal/assemble"
 )
 
@@ -423,6 +424,25 @@ func TestUnsafeTagRuneRefusesBidiControls(t *testing.T) {
 	} {
 		if reason := unsafeTagRune(tc.tag); reason == "" || !strings.Contains(reason, tc.reason) {
 			t.Errorf("%q: unsafeTagRune reason %q does not name %q", tc.tag, reason, tc.reason)
+		}
+	}
+}
+
+// TestUnsafeTagRuneRefusesEveryFormatCharacter is #1663: the write boundary
+// refused the bidirectional controls and the rest of Unicode category Cf went
+// in — so a tag of `gh` + U+200B + `ost` was stored, and a listing printed it
+// as `ghost`. The refusal now covers the whole class, the way
+// validateScopeKeyValue and blankWriteText already do.
+func TestUnsafeTagRuneRefusesEveryFormatCharacter(t *testing.T) {
+	for _, r := range adversarial.FormatRunes() {
+		tag := "ok" + string(r) + "EVIL"
+		reason := unsafeTagRune(tag)
+		if reason == "" {
+			t.Errorf("U+%04X: unsafeTagRune accepted a format character, want refusal", r)
+			continue
+		}
+		if !strings.Contains(reason, "control character") {
+			t.Errorf("U+%04X: unsafeTagRune reason %q does not name the class", r, reason)
 		}
 	}
 }

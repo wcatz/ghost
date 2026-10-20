@@ -356,6 +356,20 @@ lifecycle listings) cut at the same set of breaks.
 The `source=` origin label is printed as a quoted token when it is not a plain
 identifier, not verbatim.
 
+**Every invisible character is made visible.** A control character inside the
+delimiters — ESC and the C1 controls among them, which start terminal sequences
+that recolour, move the cursor or clear the screen — is printed as a visible
+ASCII escape (`\x1b`, `\u009b`), and so is every invisible FORMAT character
+(Unicode category Cf): the bidirectional controls, which reorder how the rest of
+a line displays, and the zero-width ones (U+200B ZERO WIDTH SPACE, U+200C and
+U+200D the non-joiner and the joiner, U+2060 WORD JOINER, U+FEFF ZERO WIDTH
+NO-BREAK SPACE), which hide a spelling inside a line without reordering
+anything. A tag of `gh` + U+200B + `ost` therefore prints as `gh\u200bost` and
+not as `ghost`: two values that differ in bytes must never print identically,
+because a reader cannot see the difference. The stored value is unchanged; only
+its display is escaped. TAB alone is kept as written, since stored prose holds
+tabs and a tab starts no sequence.
+
 Two more fields are printed outside the delimiters *undelimited*, and both earn it
 by being short labels rather than prose. A row's **`tags:[…]`** label is a JSON
 array, so `json.Marshal` already escapes a newline, a quote and a backslash and a
@@ -364,7 +378,11 @@ tag cannot forge a line or break out of its own string — but it does not escap
 tag therefore prints as `<<` or `>>`, the same substitution the delimiters
 themselves use, so a reader who has met one knows the other, and a backtick prints
 as the JSON escape `\u0060` — there is no reader-facing convention for a backtick,
-so it gets the form the surrounding array already uses.
+so it gets the form the surrounding array already uses. Every invisible FORMAT
+character is written as the JSON escape `\uXXXX` for the same reason, so a tag
+carrying one is a tag a reader can tell from its plain twin; a character outside
+the Basic Multilingual Plane is written as the surrogate pair JSON requires, and
+the array still decodes back to the stored tag.
 The label is also **BOUNDED**, the way the `agent=` and `source_ref=` labels beside
 it are: each tag is cut at 64 bytes on a rune boundary and marked
 `…[tag truncated]`, whatever writer produced the row. The write-side cap of 64
@@ -630,8 +648,9 @@ session row with none would be one no `ghost prune` could ever reach.
 
 **A tag is refused at WRITE time, and never costs a record.** All four tools that
 take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
-and `ghost_decision_record` — refuse a tag holding a control character, a backtick
-or a `«»`, naming the position and the tag itself, except that a token-shaped
+and `ghost_decision_record` — refuse a tag holding a control character, an invisible
+FORMAT character (the whole of Unicode category Cf, so U+200B and U+2060 among
+them), a backtick or a `«»`, naming the position and the tag itself, except that a token-shaped
 tag is withheld behind its format and one sent longer than 256 bytes behind its
 length, as in every argument refusal. That is the only place the refusal
 belongs, and the reason is worth stating because getting it wrong costs data: an import-side guard cannot protect a store it never sees, and a

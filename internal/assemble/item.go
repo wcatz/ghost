@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -512,6 +513,11 @@ func Token(s string) string {
 // the shared set the content fold already uses; asking `unicode.IsControl`
 // alongside it covers the C0/C1 classes without a second hand-written list.
 //
+// Beside those four classes it also escapes the invisible FORMAT characters
+// (category Cf), which end no line and close no construct but hide a spelling
+// inside one: a name holding U+200B is a different name from the one a reader
+// sees, so the two must not print alike (#1663).
+//
 // The escaping is `strconv.QuoteToASCII` — the same call Token makes, so the two
 // renderers cannot disagree about what a newline looks like — with the surrounding
 // quotes dropped and the backtick fixed up, because a backtick is printable and is
@@ -534,7 +540,7 @@ func labelNeedsEscaping(s string) bool {
 		switch {
 		case isLineEndingOrControl(r):
 			return true
-		case isBidiControl(r):
+		case isInvisibleFormat(r):
 			return true
 		case r == '`', r == '"', r == '«', r == '»':
 			return true
@@ -627,11 +633,13 @@ func isTokenRune(r rune) bool {
 // Every other control rune is printed as a visible ASCII escape (#1489): ESC
 // and the C1 controls, CSI among them, start terminal sequences that recolour,
 // move the cursor, clear the screen or retitle the window, and a memory is
-// printed to a terminal by the CLI. The bidi controls (U+200E, U+200F,
-// U+202A–U+202E, U+2066–U+2069) are included too: they are category Cf rather
-// than Cc, but they reorder how the rest of a line displays, including the
-// closing delimiter. The form is the one Label uses, the strconv escape
-// (backslash x1b, a, x7f, u009b, u202e), so the two renderers agree.
+// printed to a terminal by the CLI. The invisible FORMAT characters (category
+// Cf) are included too: the bidi controls (U+200E, U+200F, U+202A–U+202E,
+// U+2066–U+2069) reorder how the rest of a line displays, including the closing
+// delimiter, and the rest of the class (U+200B, U+200C, U+200D, U+2060, U+FEFF
+// among them) hides a spelling inside a line, so two values that differ in
+// bytes would print identically. The form is the one Label uses, the strconv
+// escape (backslash x1b, a, x7f, u009b, u202e), so the two renderers agree.
 // TAB is the one exception: stored prose holds tabs, and a tab only advances
 // to the next stop, so it stays as written.
 func Data(s string) string {
@@ -664,27 +672,41 @@ func escapeControls(s string) string {
 }
 
 // isEscapedControl is the set escapeControls prints as an escape: the control
-// runes Label escapes, less TAB, plus the bidirectional controls (category Cf)
-// that unicode.IsControl does not cover — U+200E, U+200F, U+202A–U+202E and
-// U+2066–U+2069 — which reorder how the rest of a line displays.
+// runes Label escapes, less TAB, plus the invisible FORMAT characters
+// (category Cf) that unicode.IsControl does not cover — U+200E, U+200F,
+// U+202A–U+202E and U+2066–U+2069 among them, which reorder how the rest of a
+// line displays, and U+200B, U+200C, U+200D, U+2060 and U+FEFF among the rest,
+// which hide a spelling inside a line without reordering anything.
 func isEscapedControl(r rune) bool {
-	return (r != '\t' && unicode.IsControl(r)) || isBidiControl(r)
+	return (r != '\t' && unicode.IsControl(r)) || isInvisibleFormat(r)
 }
 
-// isBidiControl reports whether r is a bidirectional control that can reorder
-// how the rest of a line displays. They are category Cf, so unicode.IsControl
-// (category Cc) does not cover them. The stored value is never changed; only
-// the rendering escapes them.
-func isBidiControl(r rune) bool {
-	switch {
-	case r == 0x200E || r == 0x200F:
-		return true
-	case r >= 0x202A && r <= 0x202E:
-		return true
-	case r >= 0x2066 && r <= 0x2069:
-		return true
+// isInvisibleFormat reports whether r is a Unicode FORMAT character — category
+// Cf — and so carries no width of its own and prints as nothing a reader can
+// see.
+//
+// It is the WHOLE category rather than the bidirectional subset the renderers
+// escaped first (#1649, #1651). The bidi controls reorder the rest of a line,
+// which is why they were caught first; the rest of Cf hides a spelling INSIDE
+// one — U+200B ZERO WIDTH SPACE, U+200C and U+200D (the non-joiner and the
+// joiner), U+2060 WORD JOINER and U+FEFF ZERO WIDTH NO-BREAK SPACE among them
+// — so a tag of `gh` + U+200B + `ost` printed exactly as `ghost` while being a
+// different string, and two values that differ in bytes printed identically.
+//
+// It is a category test rather than a hand-written list because a list holds
+// only what somebody thought of, and this rule is about the class rather than
+// about its members: a FORMAT character is an instruction to the renderer, not
+// text a reader can see. The stored value is never changed; only the rendering
+// escapes it.
+//
+// The lower bound is a fast path and not a second rule: the lowest FORMAT
+// character is SOFT HYPHEN (U+00AD), and every code point below it is assigned
+// and cannot become one.
+func isInvisibleFormat(r rune) bool {
+	if r < 0x00AD {
+		return false
 	}
-	return false
+	return unicode.In(r, unicode.Cf)
 }
 
 // LineBreakEscape is what a stored line break is printed as: every memory
@@ -914,33 +936,51 @@ const TagBacktickEscape = "\\u0060"
 // label has its own, and this is the one place the two rules differ.
 //
 // It also writes every rune of Label's line-ending class (isLineEndingOrControl)
-// and every bidirectional control (isBidiControl) as a JSON `\uXXXX` escape
-// (#1488, #1651). `json.Marshal` escapes C0 and U+2028/U+2029 but leaves NEL
-// (U+0085) and the rest of C1 raw, and an imported tag is stored verbatim, so a
-// NEL in one forged a line in the session-start block. The bidi controls (U+200E,
-// U+200F, U+202A–U+202E, U+2066–U+2069) are category Cf, so neither json.Marshal
-// nor unicode.IsControl covered them. Every rune of these classes is in the BMP,
-// so the four-digit escape is exact, and an escape inside a JSON string decodes
-// back to the same rune: the array stays valid and a reader decoding it gets the
-// stored tag unchanged. Outside a JSON string the marshalled array holds only
-// ASCII punctuation, so no escape lands there.
+// and every invisible FORMAT character (isInvisibleFormat) as a JSON `\uXXXX`
+// escape (#1488, #1651, #1663). `json.Marshal` escapes C0 and U+2028/U+2029 but
+// leaves NEL (U+0085) and the rest of C1 raw, and an imported tag is stored
+// verbatim, so a NEL in one forged a line in the session-start block. The bidi
+// controls (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069) are category Cf, so
+// neither json.Marshal nor unicode.IsControl covered them; neither did the rest
+// of the category, so a tag of `gh` + U+200B + `ost` printed as `ghost`.
+//
+// The escape is a JSON one, so it has to be one a JSON reader accepts: a rune
+// outside the Basic Multilingual Plane is written as the SURROGATE PAIR JSON
+// requires, because a four-digit `\u` cannot hold a code point above U+FFFF and
+// JSON has no `\U`. Every rune of the class is otherwise in the BMP, where the
+// four-digit escape is exact, and an escape inside a JSON string decodes back to
+// the same rune: the array stays valid and a reader decoding it gets the stored
+// tag unchanged. Outside a JSON string the marshalled array holds only ASCII
+// punctuation, so no escape lands there.
 func neutralizeTagLabel(s string) string {
 	s = strings.ReplaceAll(neutralizeDelimiters(s), "`", TagBacktickEscape)
 	if !strings.ContainsFunc(s, func(r rune) bool {
-		return isLineEndingOrControl(r) || isBidiControl(r)
+		return isLineEndingOrControl(r) || isInvisibleFormat(r)
 	}) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
 	for _, r := range s {
-		if isLineEndingOrControl(r) || isBidiControl(r) {
-			fmt.Fprintf(&b, "\\u%04x", r)
+		if isLineEndingOrControl(r) || isInvisibleFormat(r) {
+			writeJSONEscape(&b, r)
 			continue
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// writeJSONEscape writes r as a JSON string escape: the four-digit `\uXXXX`
+// for a rune in the Basic Multilingual Plane, and the surrogate pair JSON
+// requires for one above it.
+func writeJSONEscape(b *strings.Builder, r rune) {
+	if r > 0xFFFF {
+		hi, lo := utf16.EncodeRune(r)
+		fmt.Fprintf(b, "\\u%04x\\u%04x", hi, lo)
+		return
+	}
+	fmt.Fprintf(b, "\\u%04x", r)
 }
 
 // neutralizeDelimiters rewrites the « and » that open and close a data block into

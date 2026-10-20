@@ -58,9 +58,6 @@ func TestSharedFormatControlsAreRefusedByTheTagWriteBoundary(t *testing.T) {
 				"tags":       []string{p.Text},
 			})
 			if !res.IsError {
-				if adversarial.HasZeroWidth(p.Text) {
-					t.Skip("known: #1663")
-				}
 				t.Fatalf("tag write accepted the %s control", p.Name)
 			}
 			out := resultText(res)
@@ -165,9 +162,9 @@ func TestSharedFormatControlsReachTheListingFromAStoredRow(t *testing.T) {
 }
 
 // TestSharedZeroWidthReachesTheListingFromAStoredRow runs the zero-width class
-// through the same listing boundary as the controls. The tag renderer does not
-// escape it yet (#1663), so a case whose character is still printed raw records
-// the gap; once a renderer escapes it the same assertion passes unchanged.
+// through the same listing boundary as the controls. The tag renderer escapes
+// it, so a case whose character is printed raw is a regression rather than a
+// known gap.
 func TestSharedZeroWidthReachesTheListingFromAStoredRow(t *testing.T) {
 	for _, p := range adversarial.ZeroWidth() {
 		p := p
@@ -188,7 +185,7 @@ func TestSharedZeroWidthReachesTheListingFromAStoredRow(t *testing.T) {
 				t.Fatalf("listing did not render the tag for %s:\n%q", p.Name, out)
 			}
 			if adversarial.HasZeroWidth(out) {
-				t.Skip("known: #1663")
+				t.Errorf("listing printed the %s character raw:\n%q", p.Name, out)
 			}
 			if strings.Contains(out, p.Text) {
 				t.Errorf("listing printed the %s character raw:\n%q", p.Name, out)
