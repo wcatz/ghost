@@ -1573,18 +1573,29 @@ func codexActionCommand(obj codexObject) (string, bool) {
 }
 
 // decodeCodexHooksConfig parses the parts of a hooks.json that both the merge
-// and the pre-flight validation must agree on: the document is a JSON object,
-// a "hooks" member is an object (an explicit null is refused), and each managed
-// event's value is an array (an explicit null is refused the same way, one
-// level down). Sharing this decode is what keeps the pre-flight honest — a
-// document it accepts is a document the merge can act on — and keeps both
-// callers refusing the same shapes with the same parse errors.
+// and the pre-flight validation must agree on: the document is a JSON object
+// (an explicit null is refused), a "hooks" member is an object (an explicit
+// null is refused), and each managed event's value is an array (an explicit
+// null is refused the same way, one level down). Sharing this decode is what
+// keeps the pre-flight honest — a document it accepts is a document the merge
+// can act on — and keeps both callers refusing the same shapes with the same
+// parse errors.
 func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
 	if err := leadingBOMError(existing, "hooks.json"); err != nil {
 		return nil, nil, err
 	}
 	if err := json.Unmarshal(existing, &top); err != nil {
 		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
+	}
+	// A document that is the JSON literal null decodes into a nil map with no
+	// error — an empty object decodes into an empty map, so a nil map means
+	// null and nothing else. The document is not a JSON object, so it is
+	// refused by name rather than read as an empty document to fill in: the
+	// "hooks" member would read as absent and the merge would write ghost's
+	// canonical document over the user's file. The Claude settings path
+	// refuses a null document the same way.
+	if top == nil {
+		return nil, nil, fmt.Errorf("hooks.json is null")
 	}
 
 	events = map[string]json.RawMessage{}
@@ -1923,11 +1934,17 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	if err := leadingBOMError(data, "hooks.json"); err != nil {
 		return nil, err
 	}
-	var top struct {
+	var top *struct {
 		Hooks map[string]json.RawMessage `json:"hooks"`
 	}
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("parse hooks.json: %w", err)
+	}
+	// A document that is null leaves top nil. Init refuses that file, so status
+	// names it rather than reporting the hooks as missing and pointing at an
+	// init that would refuse.
+	if top == nil {
+		return nil, fmt.Errorf("hooks.json is null")
 	}
 	out := make(map[string][]json.RawMessage, len(codexLifecycleEvents))
 	for _, ev := range codexLifecycleEvents {
