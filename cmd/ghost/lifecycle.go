@@ -1242,16 +1242,17 @@ func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionRe
 // reportReductionWarning prints the >50% reduction warning when a consolidation
 // kept less than half its consolidatable input, and prints nothing otherwise.
 //
-// It is called exactly once per run, and WHERE depends on what is knowable. A dry
-// run writes nothing so nothing can fail, so it reports before the (absent)
-// write. A run that applies with promotion off folds the cross-project candidates
-// back into the project either way, so the count cannot move and it also reports
-// before the write. A run that applies WITH promotion on can only know the count
-// afterwards, because a candidate may fail to become a _global row and land back
-// in the project instead — so that one reports after the write. The pre-apply
-// report is skipped rather than printed optimistically and corrected, because a
-// candidate set large enough to cross the 50% line would otherwise produce a
-// report of a reduction that did not happen, followed by silence about it.
+// It is called exactly once per run, and WHERE depends on what is knowable. A
+// dry run writes nothing so nothing can fail, so it reports before the
+// (absent) write. A run that applies reports after the write, in BOTH
+// promotion states, because the count moves there: the write boundary drops a
+// proposal whose content holds a token-shaped value, and a proposal that was
+// never written is not a memory the project holds. With promotion ON the count
+// moves for a second reason as well — a candidate may fail to become a _global
+// row and land back in the project instead. The pre-apply report is skipped
+// rather than printed optimistically and corrected, because a candidate set
+// large enough to cross the 50% line would otherwise produce a report of a
+// reduction that did not happen, followed by silence about it.
 //
 // It takes the slices rather than two pre-counted numbers so the count it
 // reports is derived where it is printed: on the unattended lifecycle path this
@@ -1265,6 +1266,11 @@ func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionRe
 // same way. The input side is len(live) — manual, builtin, pinned and resolved
 // rows are already excluded upstream, and every row left is one ReplaceNonManual
 // would delete.
+//
+// The slices it is handed are the POST-drop ones wherever the count is taken
+// after the write, so a proposal the write boundary refused is in neither of
+// them: it is not a memory the project holds, and counting it would report a
+// corpus that kept more than it did.
 func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) {
 	if len(live) < reductionWarnMinInput {
 		return
@@ -1977,19 +1983,21 @@ func runReflect() {
 	// nobody reads while the exit status stays 0 — so the count it prints has to
 	// be the one that decides whether a memory survived.
 	//
-	// Reported here only when it cannot be wrong: a dry run writes nothing so
-	// nothing can fail, and promotion-off folds the candidates back in either way
-	// so the count cannot move. A run that applies WITH promotion on is reported
-	// after the write instead, because a candidate that fails to become a _global
-	// row lands back in the project, so a pre-apply count of projectMems alone
-	// understates retention by the whole candidate set — and when the candidates
-	// are enough to cross the 50% line, reporting it here would announce a
-	// reduction that did not happen and then say nothing about the real one.
-	if !apply || !parsed.promoteGlobals {
-		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, promotionOutcome{})
-	}
-
+	// A DRY RUN reports it here: it writes nothing, so nothing can fail and the
+	// count cannot move. An apply reports it after the write instead, in BOTH
+	// promotion states, because the count does move there: the write boundary
+	// drops a proposal whose content holds a token-shaped value, and a proposal
+	// that was never written is not a memory the project holds. Counting the
+	// caller's pre-drop lists said the corpus kept more than it did — a round
+	// whose every proposal was dropped wrote nothing and still announced a
+	// reduction, and a round that kept a third of the corpus after a partial
+	// drop reported the pre-drop count, which crossed the line the warning
+	// names. The promotion-on branch already reported after the write, from the
+	// post-drop sets, for the same reason and one more: a candidate that fails
+	// to become a _global row lands back in the project, so a pre-apply count
+	// of projectMems alone understates retention by the whole candidate set.
 	if !apply {
+		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, promotionOutcome{})
 		fmt.Println("Dry run complete. Re-run with --apply to save these results.")
 		return
 	}
@@ -2086,12 +2094,13 @@ func runReflect() {
 	// project forever. That is the worst possible outcome for this control, and
 	// it is one branch below the one that is careful.
 	//
-	// The reduction report is the else-if rather than a second if because the two
-	// contradict each other in this case: nothing was applied, so kept is 0, and
-	// a reduction report would announce "0 retained" immediately after the line
-	// explaining that every proposal held a credential. #664's condition and its
-	// output are untouched in every case that already existed; the only
-	// behaviour this adds is in the !applied case, which did not exist before.
+	// The reduction report is the else branch rather than a second if because the
+	// two contradict each other in this case: nothing was written, so the corpus
+	// still holds every row it held, and a reduction report would announce a
+	// compression that did not happen immediately after the line explaining that
+	// every proposal held a credential. #664's condition and its output are
+	// untouched in every case that already existed; the only behaviour this adds
+	// is in the !applied case, which did not exist before.
 	if !applied {
 		switch {
 		case overflowedTotal > 0 && droppedTotal == 0 && scopeRefusedTotal == 0:
@@ -2114,26 +2123,28 @@ func runReflect() {
 			fmt.Println("Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
 			fmt.Println("  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
 		}
-	} else if apply && parsed.promoteGlobals {
-		// The reduction warning, for the one case the pre-apply report had to skip:
-		// this run applies with promotion on, so only now is it knowable how many
-		// candidates stayed in the project. A candidate that failed promotion is a row
-		// the project still holds, so it counts as retained — the count that decides
-		// whether a memory survived, which is the whole point of the line. `applied` is
-		// what distinguishes this from the pre-apply call: with no failures kept is 0,
-		// and a bare 0 would read as "nothing has been written yet".
+	} else {
+		// The reduction warning, after the write, for every apply.
 		//
-		// Printed even when nothing failed, because the skipped pre-apply report means
-		// this run would otherwise say nothing at all about how hard it compressed.
-		// The POST-drop sets, like every other report after the apply. The
-		// pre-apply report above passes projectMems/globalMems and is right to:
-		// it runs before applyReflection, so the kept sets do not exist yet. This
-		// one runs after, so a proposal that was dropped for holding a credential
-		// is in neither list — and passing the caller's pre-drop lists counted it
-		// as retained, which is the same miscount this function's own commit set
-		// out to fix everywhere else. A partial drop — one good proposal and one
-		// credential — has to report only what was written.
-		reportReductionWarning(os.Stderr, live, keptProjectMems, keptGlobalMems, true,
+		// Two things are knowable only now. A candidate that failed promotion is
+		// a row the project still holds, so it counts as retained — the count
+		// that decides whether a memory survived, which is the whole point of
+		// the line. And a proposal the write boundary dropped is in NEITHER set:
+		// it was never written, so it is not a memory the project holds, and
+		// counting it said the corpus kept more than it did.
+		//
+		// Printed even when nothing failed, because the skipped pre-apply report
+		// means this run would otherwise say nothing at all about how hard it
+		// compressed. The POST-drop sets, like every other report after the
+		// apply: the pre-apply report above passes projectMems/globalMems and
+		// is right to, it runs before applyReflection, so the kept sets do not
+		// exist yet. This one runs after, so a proposal that was dropped for
+		// holding a token is in neither list — and passing the caller's pre-drop
+		// lists counted it as retained, which is the same miscount this
+		// function's own commit set out to fix everywhere else. A partial drop
+		// — one good proposal and one credential — has to report only what was
+		// written.
+		reportReductionWarning(os.Stderr, live, keptProjectMems, keptGlobalMems, parsed.promoteGlobals,
 			promotionOutcome{applied: true, kept: len(keptMems)})
 	}
 
