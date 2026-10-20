@@ -232,8 +232,9 @@ func TestReplaceNonManualNeverComposesAWindowThatEndsBeforeItStarts(t *testing.T
 }
 
 // The same class from the other side: one source row that ITSELF holds an
-// out-of-order window, which is reachable because Store.Create, ImportMemory and
-// RestoreSnapshot write the triple with no order check. Inheriting a pair as a
+// out-of-order window, which is reachable because Store.Create and
+// RestoreSnapshot write the triple with no order check, and an import made
+// before ImportMemory checked it did too. Inheriting a pair as a
 // unit copies the contradiction, so the check has to run on the inherited pair and
 // not only on a composed one.
 func TestReplaceNonManualDoesNotInheritAnOutOfOrderWindow(t *testing.T) {
@@ -431,9 +432,9 @@ func TestReplaceNonManualNeverComposesHalvesWhenNoSourceHasBoth(t *testing.T) {
 // another source — the mirror image of the loss rule 1 exists to remove.
 //
 // Such a row is reachable: Store.Create stores a stamp verbatim (nullIfEmptyPtr
-// maps only the empty string), and ImportMemory and RestoreSnapshot write the
-// column with no check at all. So this is a pre-existing row in a pre-existing
-// database, not a hypothetical one.
+// maps only the empty string), RestoreSnapshot writes the column with no check
+// at all, and ImportMemory did too until it read stamps by the save tool's rule.
+// So this is a row an existing database can hold, not a hypothetical one.
 //
 // Both id orders, because position-independence is the property under test.
 func TestReplaceNonManualAnUnreadableWindowNeverOutranksARealOne(t *testing.T) {

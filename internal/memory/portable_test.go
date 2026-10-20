@@ -174,6 +174,11 @@ func TestImportMemoryRoundTripsEveryColumn(t *testing.T) {
 	if err := src.EnsureProjectWithRepo(ctx, "p1", "/src/p1", "one", "git@github.com:wcatz/one.git"); err != nil {
 		t.Fatalf("EnsureProjectWithRepo: %v", err)
 	}
+	// The validity triple is seeded in the stored layout, which is what a writer
+	// tool stores and so what a normal export carries. A bare date is read by the
+	// importer as the save tool reads one (a valid_until becomes the last second
+	// of that day), so it is not a value that survives unchanged, and
+	// import_stamp_test.go pins that reading.
 	if _, err := src.db.ExecContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
@@ -181,7 +186,7 @@ func TestImportMemoryRoundTripsEveryColumn(t *testing.T) {
 			confidence, scope)
 		VALUES ('m1', 'p1', 'gotcha', 'full row', 0.25, 7, '2026-01-02 03:04:05',
 			'mcp', '["a","b"]', 1, '2026-01-01 00:00:00', '2026-01-03 00:00:00',
-			'2026-01-04 00:00:00', '2026-02-01', '2026-03-01', '2026-01-05',
+			'2026-01-04 00:00:00', '2026-02-01 00:00:00', '2026-03-01 00:00:00', '2026-01-05 00:00:00',
 			'opencode', 'sess-1', 'ref-1', 0.0, '{"environment":"production"}')
 	`); err != nil {
 		t.Fatalf("seed: %v", err)

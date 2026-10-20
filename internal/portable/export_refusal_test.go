@@ -276,6 +276,30 @@ func storeReachableGrounds(cred string) []ground {
 			},
 		},
 		{
+			// A stamp no layout reads, from an import made before the importer read
+			// stamps with the save tool's forms. Named and left out, as the importer
+			// now refuses it.
+			kind: TypeMemory, id: "m-junk-stamp", wantReason: "valid_until must be RFC 3339",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-junk-stamp", "p1", "a body", `[]`, "mcp")
+				plantRaw(t, db, `UPDATE memories SET valid_until = 'next tuesday' WHERE id = 'm-junk-stamp'`)
+			},
+		},
+		{
+			kind: TypeMemory, id: "m-inverted-window", wantReason: "is not after valid_from",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-inverted-window", "p1", "a body", `[]`, "mcp")
+				plantRaw(t, db, `UPDATE memories SET valid_from = '2026-12-01 00:00:00', valid_until = '2026-01-01 00:00:00' WHERE id = 'm-inverted-window'`)
+			},
+		},
+		{
+			kind: TypeMemory, id: "m-confidence-seven", wantReason: "confidence must be between 0 and 1",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-confidence-seven", "p1", "a body", `[]`, "mcp")
+				plantRaw(t, db, `UPDATE memories SET confidence = 7 WHERE id = 'm-confidence-seven'`)
+			},
+		},
+		{
 			kind: TypeMemory, id: "M BAD",
 			wantReason: "record id must hold no control character",
 			plant: func(t *testing.T, db *sql.DB) {
@@ -671,6 +695,21 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 		{name: "memory/last_accessed credential", counterpart: "predicate",
 			importRefuses: func() error {
 				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.LastAccessed = &cred }))
+			}},
+		{name: "memory/stamp unreadable", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { s := "next tuesday"; m.ValidUntil = &s }))
+			}},
+		{name: "memory/window inverted", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
+					from, until := "2026-12-01 00:00:00", "2026-01-01 00:00:00"
+					m.ValidFrom, m.ValidUntil = &from, &until
+				}))
+			}},
+		{name: "memory/confidence range", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { c := 7.0; m.Confidence = &c }))
 			}},
 		{name: "memory/recorded history in the destination", counterpart: "store",
 			why: "a fact about the DESTINATION, and screening on it would be actively wrong: every write appends a memory_history row, so every memory a store exports has one and an export that checked would leave out the whole store. The importer runs it after the presence check, which is the only order in which it means anything — a memory already in the store is a skip."},

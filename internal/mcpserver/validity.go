@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -31,8 +30,8 @@ import (
 //   - A value nobody can read is refused at write time. SQLite holds these
 //     columns as unconstrained text and stage 2 reports an unreadable one as
 //     validity_unparseable — the right treatment for a row that arrived through
-//     an import or a hand edit, and the wrong way to accept a new one when the
-//     caller is present to correct it.
+//     an older import, a restore or a hand edit, and the wrong way to accept a
+//     new one when the caller is present to correct it.
 
 // validityArgs is the validity and provenance tail every writer tool shares:
 // ghost_memory_save, ghost_save_global and ghost_memory_update each embed it
@@ -48,38 +47,13 @@ type validityArgs struct {
 	SourceRef  string `json:"source_ref,omitempty" jsonschema:"Where this came from: a file path, a commit, a URL (e.g. 'docs/runbook.md', 'abc123', 'https://example.com/spec'). Omit when there is no reference."`
 }
 
-// acceptedStampForms is the caller's side of the same contract, in the order the
-// error message lists them. The whole-day form is memory.DateStampLayout because
-// it is the same string the store's readers accept.
-var acceptedStampForms = []string{time.RFC3339, memory.DateStampLayout}
-
 // parseStampArg normalizes one caller-supplied stamp into the stored layout.
 //
-// endOfDay says whether a bare date is the end of a window rather than its
-// start, because the two mean different instants and only one of them is the
-// plain reading. A date as a window's START is midnight and needs no adjustment:
-// a claim that begins on the 1st begins then. As an END it does, because
-// memory.ValidityState's expiry test is a strict "before now" — midnight would
-// retire the row from the first instant of the day the caller said it was true
-// through, and "valid until 2026-12-31" plainly means the whole of the 31st. The
-// stored value
-// is therefore the last second of that day, which is the finest a
-// second-resolution text column can express: the claim stops one second before
-// the day is over rather than a day before it began. A full RFC 3339 stamp is
-// taken at the instant the caller wrote, because there they did say which one,
-//
-// Either way the stored value round-trips: assemble.stampText collapses a
-// boundary to a date only when the instant is the one that date form stands for
-// on that boundary — on a window's end that is this 23:59:59, and on a start or a
-// verification it is midnight, so a 23:59:59 the caller chose there prints in
-// full.
-//
-// nil and an empty string are the same request — "no claim" — and become a nil
-// pointer, so a caller that sends "" does not write a claim with no readable
-// value. Anything else must parse: the layouts are tried in the order they are
-// documented, and a value matching none is an error naming the field, the
-// accepted formats and the value itself, because a rejected date is something
-// the caller can fix and an unreadable stored one is not.
+// The rule itself — the accepted forms, the end-of-day reading of a bare date
+// on a window's end, and the refusal's wording — is memory.NormalizeStampArg,
+// because `ghost import` reads an artifact's stamps by the same rule and two
+// copies of it would drift. What is left here is the argument's JSON shape: nil
+// is "no claim", and a non-string is refused before it reaches the rule.
 func parseStampArg(field string, raw any, endOfDay bool) (*string, error) {
 	if raw == nil {
 		return nil, nil
@@ -88,20 +62,7 @@ func parseStampArg(field string, raw any, endOfDay bool) (*string, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s must be a string timestamp, got %T", field, raw)
 	}
-	if strings.TrimSpace(s) == "" {
-		return nil, nil
-	}
-	for _, layout := range acceptedStampForms {
-		if t, err := time.Parse(layout, s); err == nil {
-			stored := t.UTC()
-			if endOfDay && layout == memory.DateStampLayout {
-				stored = stored.Add(24*time.Hour - time.Second)
-			}
-			out := stored.Format(memory.StoredStampLayout)
-			return &out, nil
-		}
-	}
-	return nil, fmt.Errorf("%s must be RFC 3339 (2026-10-01T09:00:00Z) or a date (2026-10-01), got %s", field, memory.RefusalArg(field, s))
+	return memory.NormalizeStampArg(field, s, endOfDay)
 }
 
 // parseStampFields normalizes the validity triple from one writer's arguments.
@@ -155,12 +116,13 @@ func parseStampFields(args validityArgs) (memory.Validity, error) {
 // outside [0,1] is not a low belief — it is a broken scale, and clamping it
 // into range would invent a rating the caller never gave.
 //
-// This is the tool boundary's contract, not the column's: memories.confidence is
-// a bare REAL with no CHECK, and an imported portable artifact can still carry
-// anything (the value-shape detector, #656, is on main). Nothing downstream
-// corrects such a value either — stage 4's multiplier is pinned at 1.0 — so the
-// renderer shows what the row says, and the one place a caller can state a
-// rating by hand is the one place that refuses a broken one.
+// This is a writer's contract, not the column's: memories.confidence is a bare
+// REAL with no CHECK, so a row a snapshot restore or a hand edit wrote can still
+// hold anything. `ghost import` refuses an out-of-range rating by the same
+// memory.CheckConfidence. Nothing downstream corrects such a value either —
+// stage 4's multiplier is pinned at 1.0 — so the renderer shows what the row
+// says, and the places a rating arrives from outside are the places that refuse
+// a broken one.
 func parseConfidence(raw any) (*float64, error) {
 	if raw == nil {
 		return nil, nil
@@ -174,16 +136,12 @@ func parseConfidence(raw any) (*float64, error) {
 	if f == nil {
 		return nil, nil
 	}
-	// NaN and ±Inf are rejected here rather than relied on not to arrive.
-	// toFloat64 checks the two shapes that can carry them as text (a JSON number
-	// and a string), while a native float64 reaching this handler is unchecked by
-	// it — and a NaN passes every `f < 0 || f > 1` comparison, so it would be
-	// stored and then rendered as "confidence NaN".
-	if math.IsNaN(*f) || math.IsInf(*f, 0) {
-		return nil, fmt.Errorf("confidence must be a finite number between 0 and 1, got %v", *f)
-	}
-	if *f < 0 || *f > 1 {
-		return nil, fmt.Errorf("confidence must be between 0 and 1, got %v", *f)
+	// NaN and ±Inf are rejected rather than relied on not to arrive. toFloat64
+	// checks the two shapes that can carry them as text (a JSON number and a
+	// string), while a native float64 reaching this handler is unchecked by it.
+	// The range rule is memory.CheckConfidence, which `ghost import` applies too.
+	if err := memory.CheckConfidence(*f); err != nil {
+		return nil, err
 	}
 	return f, nil
 }

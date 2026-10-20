@@ -847,6 +847,12 @@ var repairableKinds = map[string]bool{
 	portable.TypeMemory:  true,
 }
 
+// validityAdvice is the repair for a memory left out for its validity window or
+// its confidence. ghost_memory_update takes all four fields and replaces a value
+// in place, keeping the id, links and history; it cannot remove a stamp, so
+// clearing one is the delete-and-re-save the sentence names second.
+const validityAdvice = "  A memory left out for its valid_from, valid_until, verified_at or confidence keeps its id and can be repaired in place: replace the value with ghost_memory_update (an RFC 3339 instant or a date, a window that ends after it starts, a confidence from 0 to 1), then re-export. The tool can replace a stamp but not remove one, so to clear a stamp, delete the row with ghost_memory_delete and re-save it without it."
+
 // reportSkippedRecords names every record an export left out and returns an error
 // when there was one, so the command exits non-zero and a backup script notices.
 //
@@ -859,7 +865,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -878,6 +884,14 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// what was refused, and the child comes back when the project does.
 		if sk.Orphan {
 			hasOrphan = true
+			continue
+		}
+		// A validity or confidence refusal is in neither bucket either: the id is
+		// fine and ghost_memory_update repairs the row in place, so the re-key and
+		// delete advice would send the operator to the one repair that loses the
+		// row's links and history.
+		if sk.Validity {
+			hasValidity = true
 			continue
 		}
 		// A batch can hold both kinds, so the advice is collected rather than
@@ -938,6 +952,11 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	}
 	if hasRepairable || hasUnrepairable {
 		if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
+			return err
+		}
+	}
+	if hasValidity {
+		if _, err := fmt.Fprintln(out, validityAdvice); err != nil {
 			return err
 		}
 	}
