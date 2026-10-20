@@ -87,7 +87,7 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 	}
 
 	pidPath := filepath.Join(dataDir, "lifecycle-"+id+".pid")
-	claimed, err := claimPidFile(pidPath)
+	claimed, reclaimed, err := claimPidFileReclaim(pidPath)
 	if err != nil {
 		// The claim could not be evaluated, which is not evidence that another
 		// run holds it: reporting it as "held" stopped maintenance for the
@@ -96,6 +96,14 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 	}
 	if !claimed {
 		return nil, false, nil
+	}
+	// A claim whose process was gone was left by a run that never recorded an
+	// outcome. Record it now, while this run holds the slot and before it starts
+	// work of its own: the marker then survives even if this run is killed the
+	// same way, and a run that succeeds clears it through FinishLifecycleRun.
+	// Best-effort, like every other lifecycle marker write.
+	if reclaimed {
+		_ = WriteLifecycleFailure(id, nil, UnfinishedLifecycleRunError)
 	}
 	return func() {
 		// Remove the claim only while it is still ours; a later run re-claiming

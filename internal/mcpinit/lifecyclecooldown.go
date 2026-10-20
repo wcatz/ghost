@@ -39,6 +39,46 @@ func lifecycleLastStartFile(projectID string) string {
 	return "lifecycle-" + projectID + ".last"
 }
 
+// UnfinishedLifecycleRunError is the cause recorded for a coordinator that
+// claimed the project and wrote its start stamp, then died before it could
+// record an outcome: SIGKILL, the OOM killer, a power loss. Nothing inside such
+// a process can run, so the evidence is the pair of files it left behind — the
+// stamp and the claim — and this is what both readers call that evidence.
+const UnfinishedLifecycleRunError = "the previous run did not finish; the coordinator was killed before it could record an outcome"
+
+// unfinishedLifecycleRun reports the start time of a run that claimed projectID
+// and never finished. It reads the two files a run leaves at that point: the
+// cooldown stamp (written once the run has work to do) and the per-project pid
+// claim, which a run releases only on its way out with an outcome recorded.
+// Both present and the claim naming no live process is a run that was killed.
+//
+// The stamp is required, not incidental: a run killed between the claim and the
+// stamp burned no cooldown window, so the next stop hook retries at once and
+// there is nothing paused to report. A live claim is a run in progress, not a
+// failure. Every path is fail-silent: a missing, unreadable or non-regular file
+// is not evidence, and this is called from the session-start alert where a
+// bookkeeping problem must never become an error.
+func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
+	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
+		return time.Time{}, false
+	}
+	stamp, err := os.Stat(filepath.Join(dataDir, lifecycleLastStartFile(projectID)))
+	if err != nil || !stamp.Mode().IsRegular() {
+		return time.Time{}, false
+	}
+	// Stat before isAlive: the liveness read opens the file, and a FIFO planted
+	// where a claim belongs would block the session start until its writer
+	// appeared. Only a regular file can be a claim.
+	claim, err := os.Stat(filepath.Join(dataDir, "lifecycle-"+projectID+".pid"))
+	if err != nil || !claim.Mode().IsRegular() {
+		return time.Time{}, false
+	}
+	if isAlive(filepath.Join(dataDir, "lifecycle-"+projectID+".pid")) {
+		return time.Time{}, false
+	}
+	return stamp.ModTime(), true
+}
+
 // lifecycleCooldownActive reports whether this project's last lifecycle START is
 // newer than minInterval, i.e. whether the caller must not spawn again yet. since
 // is the age of that start, for the skip's log line; it is 0 when no start could
