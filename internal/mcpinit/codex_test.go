@@ -2835,6 +2835,61 @@ func TestRunCodex_NullEventValueRefused(t *testing.T) {
 	}
 }
 
+// TestMergeCodexHooksRefusesANullDocument pins the DOCUMENT level of the null
+// rules: a hooks.json whose whole content is the JSON literal null. json.Unmarshal
+// decodes it into a nil map with no error, so the "hooks" member reads as
+// absent, the pre-flight passes and the merge writes ghost's canonical
+// document over the user's file. A null document is not an empty document to
+// fill in, so it is refused by name — the same rule the Claude settings path
+// applies to a null settings.json.
+func TestMergeCodexHooksRefusesANullDocument(t *testing.T) {
+	for _, doc := range []string{"null", "null\n"} {
+		_, err := mergeCodexHooksConfig([]byte(doc), "/new/ghost")
+		if err == nil {
+			t.Errorf("a null document (%q) must be refused, not overwritten with ghost's canonical document", doc)
+			continue
+		}
+		if !strings.Contains(err.Error(), "hooks.json") {
+			t.Errorf("refusal for %q must name the file, got: %v", doc, err)
+		}
+	}
+}
+
+// TestRunCodex_NullDocumentIsRefused pins the install path: a hooks.json whose
+// document is the JSON literal null is refused by the pre-flight — the shared
+// decode the merge uses — before step 3 registers the MCP server, with the file
+// left exactly as written.
+func TestRunCodex_NullDocumentIsRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const seed = "null"
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := RunCodex(&out, false)
+	if err == nil {
+		t.Fatalf("a null hooks.json document must be refused; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("refusal must name the file, got: %v", err)
+	}
+	if _, statErr := os.Stat(codexConfigToml(home)); !os.IsNotExist(statErr) {
+		t.Errorf("a refused hooks.json must leave config.toml unregistered (stat err %v)", statErr)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != seed {
+		t.Errorf("a refused file must be left untouched, got:\n%s", got)
+	}
+}
+
 // TestRunCodex_BlankHooksJSONWritten pins #1296: a 0-byte or whitespace-only
 // hooks.json carries nothing to merge, so it is treated as absent and written
 // as the canonical document in one run, the way a 0-byte config.toml is

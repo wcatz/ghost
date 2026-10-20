@@ -2304,6 +2304,30 @@ func TestCLIMCPInit(t *testing.T) {
 		}
 	})
 
+	// A codex hooks.json whose whole document is the JSON literal null is not
+	// a document the merge can read: the "hooks" member reads as absent, so
+	// the merge would write ghost's canonical document over the user's own.
+	// The install must refuse it instead, naming the file, with the file left
+	// exactly as written and nothing registered.
+	t.Run("a null codex hooks.json is refused", func(t *testing.T) {
+		s := newSandbox(t)
+		hooks := filepath.Join(s.home, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hooks), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		const seed = "null"
+		if err := os.WriteFile(hooks, []byte(seed), 0o600); err != nil {
+			t.Fatalf("seed hooks.json: %v", err)
+		}
+
+		failed := s.mustFail("mcp", "init", "--client", "codex")
+		mustContain(t, "the refusal names the file", failed.stderr, "hooks.json")
+		if got := string(mustReadFile(t, hooks)); got != seed {
+			t.Fatalf("a refused hooks.json must be left exactly as written, got:\n%s", got)
+		}
+		mustNotExist(t, "the codex config.toml", filepath.Join(s.home, ".codex", "config.toml"))
+	})
+
 	t.Run("status for every client", func(t *testing.T) {
 		s := newSandbox(t)
 		cs := s.mcpSession(t)
