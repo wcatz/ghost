@@ -65,8 +65,8 @@ func TestSharedOutOfRangeConfidenceAtTheImportBoundary(t *testing.T) {
 }
 
 // TestSharedTokenShapedTaskBranchAtTheImportBoundary feeds the shared
-// token-shaped set through the import path's task record, whose branch field has
-// no guard of its own yet.
+// token-shaped set through the import path's task record, whose branch field
+// the token guard covers.
 func TestSharedTokenShapedTaskBranchAtTheImportBoundary(t *testing.T) {
 	for _, p := range adversarial.TokenShaped() {
 		t.Run(p.Name, func(t *testing.T) {
@@ -77,7 +77,7 @@ func TestSharedTokenShapedTaskBranchAtTheImportBoundary(t *testing.T) {
 				Branch: p.Text,
 			}, true)
 			if err == nil {
-				t.Skip("known: #1558")
+				t.Errorf("ImportTask stored a token-shaped branch (%s)", p.Name)
 			}
 		})
 	}
