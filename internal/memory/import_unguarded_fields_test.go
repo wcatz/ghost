@@ -763,3 +763,22 @@ func TestImportedStampsAcceptAWholeDay(t *testing.T) {
 		}
 	}
 }
+
+// TestImportedTokenGuardRunsBeforeTheValidityCheck pins the order of the two
+// refusals: export picks its advice from the refusal's kind, so a row that holds
+// a token-shaped field AND an unreadable stamp must be refused as the former, or
+// the report would only ever tell the operator to repair the stamp.
+func TestImportedTokenGuardRunsBeforeTheValidityCheck(t *testing.T) {
+	token := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
+	until := "next tuesday"
+	err := CheckImportedMemory(PortableMemory{
+		ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+		Content: "holds " + token, ValidUntil: &until,
+	})
+	if err == nil {
+		t.Fatal("CheckImportedMemory accepted a token-shaped content with an unreadable valid_until")
+	}
+	if !errors.Is(err, ErrSecretContent) {
+		t.Errorf("refused as %T (%v), want the token guard's refusal", err, err)
+	}
+}

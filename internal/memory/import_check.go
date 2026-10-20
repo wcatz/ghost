@@ -290,21 +290,6 @@ func CheckImportedMemory(m PortableMemory) error {
 	if m.Retention != "" && !IsValidRetention(m.Retention) {
 		return InvalidRetentionError(m.Retention)
 	}
-	// The validity triple and the rating, by the save tool's own rules, so an
-	// artifact is not the way around them: a stamp no accepted form reads, a
-	// window that ends before it starts, and a confidence outside 0 to 1 are each
-	// refused with the save tool's sentence. Every reader treats an unreadable
-	// stamp as no claim, so storing one would serve an expired fact as live.
-	// The messages quote a value only through RefusalArg, which is why they may
-	// run ahead of the token guard below.
-	if _, err := ImportedValidity(m); err != nil {
-		return &ValidityRefusalError{Err: err}
-	}
-	if m.Confidence != nil {
-		if err := CheckConfidence(*m.Confidence); err != nil {
-			return &ValidityRefusalError{Err: err}
-		}
-	}
 	// The secret guard, and the window it runs in is the importer's: after the
 	// presence check, so a record already in the store stays a skip, and before the
 	// apply=false early return, so a dry run classifies a record exactly as the
@@ -326,6 +311,22 @@ func CheckImportedMemory(m PortableMemory) error {
 		secretField{"updated_at", m.UpdatedAt},
 	); err != nil {
 		return err
+	}
+	// The validity triple and the rating, by the save tool's own rules, so an
+	// artifact is not the way around them: a stamp no accepted form reads, a
+	// window that ends before it starts, and a confidence outside 0 to 1 are each
+	// refused with the save tool's sentence. Every reader treats an unreadable
+	// stamp as no claim, so storing one would serve an expired fact as live.
+	// They run after the token guard: export reads a refusal's kind to pick its
+	// advice, and a row that also holds a token-shaped field must be reported as
+	// that, not only as a stamp to repair.
+	if _, err := ImportedValidity(m); err != nil {
+		return &ValidityRefusalError{Err: err}
+	}
+	if m.Confidence != nil {
+		if err := CheckConfidence(*m.Confidence); err != nil {
+			return &ValidityRefusalError{Err: err}
+		}
 	}
 	if err := checkImportedTimestamp("created_at", m.CreatedAt, timestampLayouts("created_at")); err != nil {
 		return err
