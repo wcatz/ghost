@@ -1318,10 +1318,21 @@ func (s *Server) notifyMemoryRow(ctx context.Context, projectID string) {
 	}
 }
 
-// SetEmbedder configures optional vector embedding for hybrid search.
+// SetEmbedder configures optional vector embedding for hybrid search and
+// wires the store's onSave hook to notify the embedding worker via projectCh
+// (non-blocking). The store is type-asserted to *memory.Store, which is the
+// concrete type used in production.
 func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 	s.embedder = e
 	s.projectCh = projectCh
+	if ms, ok := s.store.(*memory.Store); ok {
+		ms.SetOnSave(func(projectID string) {
+			select {
+			case s.projectCh <- projectID:
+			default: // non-blocking
+			}
+		})
+	}
 }
 
 // SetResolveCLI hands the loaded CLI config (harness binaries + model pins) to
@@ -1555,14 +1566,6 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("update failed: %w", err)
 	}
 	s.notifyMemoryRow(ctx, resolvedProjectID)
-
-	// A content change dropped the embedding — nudge the worker to re-embed.
-	if content != nil && s.projectCh != nil {
-		select {
-		case s.projectCh <- resolvedProjectID:
-		default: // non-blocking
-		}
-	}
 
 	msg := fmt.Sprintf("Memory updated (id: %s): %s", assemble.Token(args.MemoryID), strings.Join(changed, ", "))
 	// The same advisory the two save tools carry (#674), and on the same
@@ -2525,14 +2528,6 @@ func (s *Server) registerTools() {
 		}
 		s.notifyMemoryRow(ctx, args.ProjectID)
 
-		// Notify embedding worker of new/updated memory.
-		if s.projectCh != nil {
-			select {
-			case s.projectCh <- args.ProjectID:
-			default: // non-blocking
-			}
-		}
-
 		msg := fmt.Sprintf("Memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
 			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", assemble.Token(id), assemble.Token(duplicateOf), score)
@@ -2649,18 +2644,6 @@ func (s *Server) registerTools() {
 							refusedFiles = append(refusedFiles, refused...)
 							failedFiles = append(failedFiles, failed...)
 							notRegularFiles = append(notRegularFiles, notRegular...)
-							// The imported rows are memory rows, so queue the
-							// project for embedding exactly as the save tools do.
-							// Only a run that wrote at least one row is queued, and
-							// the push is non-blocking like theirs. The store-level
-							// onSave hook is unwired in production, so this push is
-							// the worker's only notification.
-							if imported > 0 && s.projectCh != nil {
-								select {
-								case s.projectCh <- args.ProjectID:
-								default: // non-blocking
-								}
-							}
 							// The same rows change what the project's context
 							// resource serves, so a run that wrote any notifies its
 							// subscribers as a save does. A run that wrote nothing
@@ -3230,14 +3213,6 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyMemoryRow(ctx, memory.GlobalProjectID)
-
-		// Notify embedding worker of new/updated memory.
-		if s.projectCh != nil {
-			select {
-			case s.projectCh <- "_global":
-			default: // non-blocking
-			}
-		}
 
 		msg := fmt.Sprintf("Global memory saved (id: %s)", assemble.Token(id))
 		if duplicateOf != "" {
@@ -3858,19 +3833,6 @@ func (s *Server) registerTools() {
 		// ghost_save_global's own write does, rather than through an inline copy
 		// of that rule.
 		s.notifyMemoryRow(ctx, args.ProjectID)
-
-		// Notify the embedding worker of the companion memory, exactly as the
-		// three save tools do. RecordDecision writes a real memory row and
-		// calls the store's optional onSave callback, but no production caller
-		// registers one, so without this push the row has no vector until the
-		// worker's next sweep and the vector leg, ghost_health's coverage and
-		// any reflect/supersede/resolve pass in that window cannot see it.
-		if s.projectCh != nil {
-			select {
-			case s.projectCh <- args.ProjectID:
-			default: // non-blocking
-			}
-		}
 
 		msg := fmt.Sprintf(
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",

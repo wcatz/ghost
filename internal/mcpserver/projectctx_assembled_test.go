@@ -2036,13 +2036,11 @@ func TestTheProjectContextDoesNotReImportOnAProjectThatAlreadyHasMemories(t *tes
 }
 
 // TestProjectContextFirstContactImportNotifiesEmbeddingWorker is the
-// regression test for the first-contact Claude import's missing queue push:
+// regression test for the first-contact Claude import's embedding notification:
 // `ghost_project_context` imports Claude auto-memory rows when the project
 // holds none, so those rows are memory writes and must queue the project for
-// embedding exactly as the four save tools queue their own. The store's
-// optional onSave callback is unwired in production, so the handler's own push
-// is the only notification the worker gets; without it the imported rows have
-// no vector until the worker's next sweep.
+// embedding exactly as the save tools do. The store's onSave callback is wired
+// to projectCh by the MCP server, so imported rows are queued automatically.
 func TestProjectContextFirstContactImportNotifiesEmbeddingWorker(t *testing.T) {
 	ctx := context.Background()
 	projPath := filepath.Join(t.TempDir(), "proj")
