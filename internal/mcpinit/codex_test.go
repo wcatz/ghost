@@ -3097,6 +3097,15 @@ func TestStatusCodex_UnhealthyWithoutInstall(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, wantFail: "SessionStart hook missing or miswired"},
+		"null hooks document": {seed: func(t *testing.T, home string) {
+			path := codexHooksJSON(home)
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("null\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFail: "cannot read hooks: hooks.json is null"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
