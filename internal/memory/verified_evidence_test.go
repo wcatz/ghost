@@ -523,6 +523,10 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"store.go:SearchFTS":                   true,
 		"store.go:SearchFTSAll":                true,
 		"vector.go:GetByIDs":                   true,
+		// Normalizes a portable record's triple for the import predicate and for
+		// ImportMemory's bind. A reader of the record: no SQL, no write; the write
+		// is ImportMemory's, which is classified on its own.
+		"import_check.go:ImportedValidity": true,
 		// #581's passive read reaches the validity triple through the shared
 		// `memoryColumns` list rather than naming it, which is why the FETCH has NO
 		// entry here and the scan does not report it: this is the documented

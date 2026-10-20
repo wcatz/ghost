@@ -756,17 +756,20 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 // import is another way to reach the same table and must not be the way around
 // its rules. Every REFUSAL about the record's own bytes is made by
 // CheckImportedMemory, which `ghost export` calls too (#813) — see that function
-// for the whole rule and the order. What is left here is the two transformations
+// for the whole rule and the order. What is left here is the three transformations
 // a save also performs and this function therefore still owns:
 //
 //   - content goes through ClampContent, so a long line from another machine is
 //     cut at the same cap with the same marker a normal save would add — and cut
 //     is reported so the caller can say so;
-//   - importance is clamped to [0,1], the same bound a normal save applies.
+//   - importance is clamped to [0,1], the same bound a normal save applies;
+//   - the validity triple is normalized to the stored layout by ImportedValidity,
+//     the save tool's own reading of RFC 3339 and of a bare date.
 //
-// Neither is a refusal, which is why neither is in the predicate: a cut content
-// and a clamped importance still import, so a predicate that refused them would
-// turn a reported adjustment into a lost row.
+// None is a refusal, which is why none is in the predicate: a cut content and a
+// clamped importance still import, so a predicate that refused them would turn a
+// reported adjustment into a lost row. A stamp the rule cannot read IS refused,
+// and the predicate makes that refusal by calling the same ImportedValidity.
 //
 // It does not run Upsert's near-duplicate probe. Upsert exists to stop a live
 // save from adding a redundant row; a restore is not adding knowledge, it is
@@ -852,6 +855,12 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// check and the pre-write project check. A predicate cannot do any of those,
 	// and `ghost export` has no business pretending otherwise.
 	content, cut := ClampContent(m.Content)
+	// The validity triple in the stored layout, read by the rule the predicate
+	// above has just accepted, so the row holds what a save would have stored.
+	validity, err := ImportedValidity(m)
+	if err != nil {
+		return false, false, false, err
+	}
 	// A stated importance is clamped to [0,1], the same bound a normal save
 	// applies. An unstated one is passed as NULL for the COALESCE to default, and
 	// a stated 0 stays 0 — see the field's comment for why the two must not be
@@ -981,7 +990,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	`, m.ID, m.ProjectID, m.Category, content, importance, m.AccessCount,
 		m.LastAccessed, source, string(tags), pinned,
 		m.CreatedAt, m.UpdatedAt, m.ResolvedAt,
-		m.ValidFrom, m.ValidUntil, m.VerifiedAt,
+		validity.ValidFrom, validity.ValidUntil, validity.VerifiedAt,
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID), nullIfEmpty(m.SourceRef),
 		m.Confidence, scopeJSON(m.Scope), retention, expires)
 	if err != nil {
@@ -1030,7 +1039,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// carry `"verified_at": ""`, which every reader of the column treats as no
 	// claim. Empty is not a verification, and treating it as one would suppress a
 	// real arrival stamp.
-	arrivalStamped := recordedVerification(m.VerifiedAt) && !anyCarriedVerification(m.Evidence)
+	arrivalStamped := recordedVerification(validity.VerifiedAt) && !anyCarriedVerification(m.Evidence)
 	if err := appendEvidenceTx(ctx, tx, m.ID, evidenceImported, Provenance{
 		Agent:      m.Agent,
 		SessionID:  m.SessionID,

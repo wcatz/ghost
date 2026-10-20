@@ -207,7 +207,7 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
-		reason, secret, scope, scopeChar, orphan := "", false, false, false, false
+		reason, secret, scope, scopeChar, orphan, validity := "", false, false, false, false, false
 		switch {
 		case orphaned(m.ProjectID):
 			reason, orphan = orphanReason, true
@@ -216,11 +216,13 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			reason, secret = exportRefusal(err)
 			var bound *memory.ScopeBoundError
 			var sch *memory.ScopeKeyValueError
+			var vr *memory.ValidityRefusalError
 			scope = errors.As(err, &bound)
 			scopeChar = errors.As(err, &sch)
+			validity = errors.As(err, &vr)
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, ScopeChar: scopeChar, Orphan: orphan})
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, ScopeChar: scopeChar, Orphan: orphan, Validity: validity})
 			continue
 		}
 		keptMemories = append(keptMemories, m)
@@ -367,6 +369,11 @@ type SkippedRecord struct {
 	// the re-key or delete advice: deleting it would drop the only copy and leave
 	// the project as broken as before.
 	Orphan bool
+	// Validity marks a memory refused for its validity triple or its confidence
+	// (memory.ValidityRefusalError). The id is fine and the row can be repaired
+	// in place, so the report points at ghost_memory_update instead of at
+	// re-keying or deleting, which would lose the row's links and history.
+	Validity bool
 }
 
 // orphanReason is the Reason every Orphan record carries.

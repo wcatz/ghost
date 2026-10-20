@@ -175,7 +175,7 @@ func TestSaveAcceptsRFC3339ValidityStamps(t *testing.T) {
 }
 
 // RFC 3339 permits a fractional second, and it is accepted — which is worth a
-// test of its own, because the obvious reading of acceptedStampForms (RFC3339 and
+// test of its own, because the obvious reading of memory.AcceptedStampForms (RFC3339 and
 // not RFC3339Nano) says the opposite, and a reviewer did read it that way.
 //
 // The layout list is not the reason. time.Parse is documented to accept a

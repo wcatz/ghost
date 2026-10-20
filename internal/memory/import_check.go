@@ -159,6 +159,42 @@ func CheckImportedProject(p PortableProject) error {
 	)
 }
 
+// ValidityRefusalError marks a memory refused for its validity triple or its
+// confidence: an unreadable stamp, a window that does not end after it starts,
+// or a rating outside 0 to 1. Error is the save tool's own sentence, unchanged.
+// It is typed so `ghost export` can tell this refusal from one about the id: the
+// id is fine, and the repair is an edit of the row in place rather than a
+// delete and re-save, which would lose its links and history.
+type ValidityRefusalError struct{ Err error }
+
+func (e *ValidityRefusalError) Error() string { return e.Err.Error() }
+func (e *ValidityRefusalError) Unwrap() error { return e.Err }
+
+// ImportedValidity reads a portable memory's validity triple as the save tool
+// reads it — NormalizeImportedStamp per field, with the end-of-day rule on
+// valid_until alone — and refuses a window that does not end after it starts,
+// judged on the normalized instants so an RFC 3339 pair and a same-day date pair
+// are judged correctly. CheckImportedMemory calls it for the refusal and
+// ImportMemory for the values it binds, so the two cannot read a stamp
+// differently.
+func ImportedValidity(m PortableMemory) (Validity, error) {
+	var v Validity
+	var err error
+	if v.ValidFrom, err = NormalizeImportedStamp("valid_from", m.ValidFrom, false); err != nil {
+		return Validity{}, err
+	}
+	if v.ValidUntil, err = NormalizeImportedStamp("valid_until", m.ValidUntil, true); err != nil {
+		return Validity{}, err
+	}
+	if v.VerifiedAt, err = NormalizeImportedStamp("verified_at", m.VerifiedAt, false); err != nil {
+		return Validity{}, err
+	}
+	if err := CheckWindowOrder(v, Validity{}); err != nil {
+		return Validity{}, err
+	}
+	return v, nil
+}
+
 // CheckImportedMemory reports why `ghost import` would refuse this memory, or nil
 // when it would accept it. It is the only place a memory record is judged.
 //
@@ -253,6 +289,21 @@ func CheckImportedMemory(m PortableMemory) error {
 	// resolves it to the column's own default.
 	if m.Retention != "" && !IsValidRetention(m.Retention) {
 		return InvalidRetentionError(m.Retention)
+	}
+	// The validity triple and the rating, by the save tool's own rules, so an
+	// artifact is not the way around them: a stamp no accepted form reads, a
+	// window that ends before it starts, and a confidence outside 0 to 1 are each
+	// refused with the save tool's sentence. Every reader treats an unreadable
+	// stamp as no claim, so storing one would serve an expired fact as live.
+	// The messages quote a value only through RefusalArg, which is why they may
+	// run ahead of the token guard below.
+	if _, err := ImportedValidity(m); err != nil {
+		return &ValidityRefusalError{Err: err}
+	}
+	if m.Confidence != nil {
+		if err := CheckConfidence(*m.Confidence); err != nil {
+			return &ValidityRefusalError{Err: err}
+		}
 	}
 	// The secret guard, and the window it runs in is the importer's: after the
 	// presence check, so a record already in the store stays a skip, and before the

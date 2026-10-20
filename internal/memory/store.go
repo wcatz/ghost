@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -84,14 +85,15 @@ type Memory struct {
 	// column — no claim was made — while an empty string would look like a
 	// claim about the empty moment. The tools write them (ghost_memory_save,
 	// ghost_save_global, ghost_memory_update) and Create writes them, so a row
-	// with a window is now expressible; ImportMemory and RestoreSnapshot carry
-	// the triple too, and every row written before any of those reads nil, which
+	// with a window is now expressible; ImportMemory (which reads an artifact's
+	// stamps by the save tool's rule) and RestoreSnapshot carry the triple too,
+	// and every row written before any of those reads nil, which
 	// is what stage 2 calls unset. SQLite holds them as unconstrained text, so
 	// the values are the stored strings, not parsed times: interpreting them
 	// belongs to the caller, which is the only layer that knows the request
 	// clock. The tools normalize what they accept into memory.StoredStampLayout,
-	// but nothing here may assume it — an imported artifact, a restored snapshot
-	// or a hand-edited row can hold the whole-day form the readers also accept.
+	// but nothing here may assume it — an older import, a restored snapshot or
+	// a hand-edited row can hold the whole-day form the readers also accept.
 	ValidFrom  *string `json:"valid_from,omitempty"`
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
@@ -3439,6 +3441,97 @@ func ParseStamp(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// AcceptedStampForms are the forms a caller may write a validity stamp in, in
+// the order NormalizeStampArg's refusal lists them: RFC 3339, or a whole day.
+// The whole-day form is DateStampLayout because it is the same string the
+// store's readers accept. The stored layout is not among them; a caller writes
+// an instant or a day, and the stored layout is what both become.
+var AcceptedStampForms = []string{time.RFC3339, DateStampLayout}
+
+// NormalizeStampArg normalizes one caller-supplied stamp into the stored layout.
+// It is the one rule for what a written date means, shared by the writer tools
+// (internal/mcpserver's parseStampArg) and by `ghost import`
+// (NormalizeImportedStamp), so the two cannot disagree about it.
+//
+// endOfDay says whether a bare date is the end of a window rather than its
+// start, because the two mean different instants and only one of them is the
+// plain reading. A date as a window's START is midnight and needs no adjustment:
+// a claim that begins on the 1st begins then. As an END it does, because
+// ValidityState's expiry test is a strict "before now" — midnight would retire
+// the row from the first instant of the day the caller said it was true through,
+// and "valid until 2026-12-31" plainly means the whole of the 31st. The stored
+// value is therefore the last second of that day, which is the finest a
+// second-resolution text column can express: the claim stops one second before
+// the day is over rather than a day before it began. A full RFC 3339 stamp is
+// taken at the instant the caller wrote, because there they did say which one.
+//
+// Either way the stored value round-trips: assemble.stampText collapses a
+// boundary to a date only when the instant is the one that date form stands for
+// on that boundary — on a window's end that is this 23:59:59, and on a start or a
+// verification it is midnight, so a 23:59:59 the caller chose there prints in
+// full.
+//
+// A blank string is "no claim" and becomes a nil pointer, so a caller that sends
+// "" does not write a claim with no readable value. Anything else must parse: the
+// forms are tried in the order they are documented, and a value matching none is
+// an error naming the field, the accepted formats and the value itself (through
+// RefusalArg), because a rejected date is something the caller can fix and an
+// unreadable stored one is not.
+func NormalizeStampArg(field, s string, endOfDay bool) (*string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	for _, layout := range AcceptedStampForms {
+		if t, err := time.Parse(layout, s); err == nil {
+			stored := t.UTC()
+			if endOfDay && layout == DateStampLayout {
+				stored = stored.Add(24*time.Hour - time.Second)
+			}
+			out := stored.Format(StoredStampLayout)
+			return &out, nil
+		}
+	}
+	return nil, fmt.Errorf("%s must be RFC 3339 (2026-10-01T09:00:00Z) or a date (2026-10-01), got %s", field, RefusalArg(field, s))
+}
+
+// NormalizeImportedStamp is NormalizeStampArg for a stamp read from a portable
+// artifact. It accepts one form more, the stored layout, because that is what
+// `ghost export` writes for every row a writer tool stored. A value the stored
+// layout reads is returned as a copy of the raw text, never re-formatted:
+// time.Parse accepts a fractional second the layout does not name, and
+// formatting would truncate it, so a window ParseStamp, CheckWindowOrder and
+// readableStampSQL all order (00:00:00.2 to 00:00:00.8) would be refused over
+// values the row does not hold. Every other value is read exactly as the save
+// tool reads it, end-of-day rule included — so a bare-date valid_until an older
+// import stored, which export writes verbatim, comes back as 23:59:59 of that
+// day rather than the midnight today's readers give it.
+func NormalizeImportedStamp(field string, raw *string, endOfDay bool) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if _, err := time.Parse(StoredStampLayout, *raw); err == nil {
+		out := *raw
+		return &out, nil
+	}
+	return NormalizeStampArg(field, *raw, endOfDay)
+}
+
+// CheckConfidence refuses a trust rating outside [0,1], the rule the writer tools
+// and `ghost import` share. The range is checked rather than clamped: a value
+// outside it is not a low belief but a broken scale, and clamping it would
+// invent a rating nobody gave. NaN and ±Inf are refused first, because a NaN
+// passes every `f < 0 || f > 1` comparison and would be stored and then rendered
+// as "confidence NaN".
+func CheckConfidence(f float64) error {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return fmt.Errorf("confidence must be a finite number between 0 and 1, got %v", f)
+	}
+	if f < 0 || f > 1 {
+		return fmt.Errorf("confidence must be between 0 and 1, got %v", f)
+	}
+	return nil
+}
+
 // CheckWindowOrder refuses a window that does not end after it starts, judging the
 // effective pair: the boundaries the caller supplied, with a missing half taken
 // from what the row already holds.
@@ -3575,8 +3668,9 @@ func nullStringPtr(s sql.NullString) *string {
 // empty moment at the writers that bind the triple.
 //
 // Such a value is reachable rather than hypothetical: Store.Create stores a stamp
-// verbatim, and ImportMemory and RestoreSnapshot write the column with no check at
-// all, so a database can hold a window recorded in prose.
+// verbatim, RestoreSnapshot writes the column with no check at all, and an import
+// made before ImportMemory read stamps by the save tool's rule did too, so a
+// database can hold a window recorded in prose.
 func readableStampPtr(s sql.NullString) *string {
 	if !s.Valid {
 		return nil
@@ -6055,12 +6149,12 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	//
 	// Only when the caller supplied a boundary, which is the only way an edit can
 	// change the window. With nothing supplied the stored pair is judged against
-	// itself, and a row whose own window was written out of order — Store.Create,
-	// ImportMemory and RestoreSnapshot all pass the stamps through with no order
-	// check, and that is deliberate — would refuse an unrelated content or tag
-	// edit over a defect the caller cannot see or fix without restating a window
-	// they never touched. An edit that only moves verified_at is not a window
-	// edit either, and is not refused.
+	// itself, and a row whose own window was written out of order — Store.Create
+	// and RestoreSnapshot pass the stamps through with no order check, and an
+	// import made before ImportMemory checked it did too — would refuse an
+	// unrelated content or tag edit over a defect the caller cannot see or fix
+	// without restating a window they never touched. An edit that only moves
+	// verified_at is not a window edit either, and is not refused.
 	if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
 		if err := CheckWindowOrder(opts.Validity, Validity{
 			ValidFrom:  nullStringPtr(curFrom),
@@ -7096,10 +7190,10 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	//     any source in the set states a complete pair.
 	//
 	// The CheckWindowOrder on rule 1 is not redundant with the unit. A source row
-	// can hold a window that is ITSELF out of order, because Store.Create,
-	// ImportMemory and RestoreSnapshot write the triple with no order check, so
-	// inheriting a pair whole still needs judging. A source failing it falls to
-	// rule 2 and contributes no half.
+	// can hold a window that is ITSELF out of order, because Store.Create and
+	// RestoreSnapshot write the triple with no order check, and an import made
+	// before ImportMemory checked it did too, so inheriting a pair whole still
+	// needs judging. A source failing it falls to rule 2 and contributes no half.
 	if claims.validFrom == nil && claims.validUntil == nil {
 		switch {
 		case haveComplete:
