@@ -925,7 +925,13 @@ func renderMarkerPhases(phases []string) string {
 // and framed as «...» data (quoteData), so instruction-like output reads as
 // quoted text rather than as Ghost's own words. The cap applies before the
 // frame, so the closing delimiter is never cut.
+//
+// Paths are stripped from the stored error text so that markers written by
+// older builds (which stored the raw PathError/LinkError text containing
+// absolute paths) also render without paths, keeping the alert's no-paths
+// contract. stripPaths is the shared string-level helper also used at write time.
 func renderMarkerError(text string) string {
+	text = stripPaths(text)
 	// The guard is asked twice: of the stored text, and of the line built from
 	// it, because moving the interruption ahead of the report can put words
 	// that were apart in the file next to each other on the shown line.

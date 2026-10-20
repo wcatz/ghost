@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -719,9 +720,11 @@ func recordSpawnFailure(projectID string, cfg *config.Config, cause error, stder
 	// Strip filesystem paths from the cause (fs.PathError, os.LinkError) so
 	// the durable marker and the session-start alert keep their no-paths
 	// contract. The hook's stderr line for the same failure already uses
-	// withoutPath; the marker must do the same.
-	stripped := withoutPath(cause)
-	if err := WriteLifecycleFailure(projectID, phases, stripped.Error()); err != nil && stderr != nil {
+	// withoutPath; the marker must do the same. First unwrap with
+	// withoutPath to handle wrapped errors, then apply the string-level
+	// stripPaths to also catch any paths in the unwrapped text.
+	stripped := stripPaths(withoutPath(cause).Error())
+	if err := WriteLifecycleFailure(projectID, phases, stripped); err != nil && stderr != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost hook: cannot record the lifecycle failure marker: %s\n", withoutPath(err))
 	}
 }
@@ -815,4 +818,104 @@ func withoutPath(err error) error {
 		return le.Err
 	}
 	return err
+}
+
+// pathTokenRegexp matches an absolute path token and its leading separator.
+// A token starts at line start or after [\s="',([;] and is either:
+//   - POSIX: / followed by chars not in [\s:"'(),;\[\]] then optionally more path chars,
+//     stopping before a ":" followed by space or end of line
+//   - Windows: [A-Za-z]:[\\/] followed by same char class
+//
+// The regexp captures the leading separator in group 1 and the path in group 2.
+// Group 3 captures optional trailing ": ".
+var pathTokenRegexp = regexp.MustCompile(`(^|[\s="',([;])((?:/[^\s"'(),;:\[\]](?:[^\s"'(),;:\[\]]|:[^\s])*|[A-Za-z]:[\\/][^\s"'(),;:\[\]](?:[^\s"'(),;:\[\]]|:[^\s])*))(:\s)?`)
+
+// stripPaths replaces every absolute path token in the text with "<path>",
+// preserving the leading separator. It also handles the "path with spaces"
+// case: if after a replaced token there is non-empty text without ": " before
+// the next ": ", that intermediate text is dropped too.
+// Lines without matches are returned byte-identical.
+func stripPaths(text string) string {
+	// First pass: replace all path tokens with "<path>"
+	result := pathTokenRegexp.ReplaceAllStringFunc(text, func(m string) string {
+		sub := pathTokenRegexp.FindStringSubmatch(m)
+		if sub == nil {
+			return m
+		}
+		sep := sub[1]
+		trailing := ""
+		if len(sub) > 3 && sub[3] != "" {
+			trailing = sub[3]
+		}
+		return sep + "<path>" + trailing
+	})
+
+	// Second pass: handle "path with spaces" - drop REST between <path> and next ": "
+	// Only for the last <path> before a ": " on each line.
+	// Process line by line to preserve line structure exactly.
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		// Find all positions of "<path>" and ": "
+		pathPos := []int{}
+		for offset := 0; ; {
+			idx := strings.Index(line[offset:], "<path>")
+			if idx == -1 {
+				break
+			}
+			pathPos = append(pathPos, offset+idx)
+			offset += idx + len("<path>")
+		}
+		colonSpacePos := []int{}
+		for offset := 0; ; {
+			idx := strings.Index(line[offset:], ": ")
+			if idx == -1 {
+				break
+			}
+			colonSpacePos = append(colonSpacePos, offset+idx)
+			offset += idx + 2
+		}
+
+		// For each ": ", find the nearest <path> to its left
+		// If the text between them contains no other <path> and no ": ", drop it
+		// Process from right to left to handle positions correctly after modifications
+		type dropRange struct{ start, end int }
+		var toDrop []dropRange
+
+		for _, cs := range colonSpacePos {
+			// Find the rightmost <path> before this ": "
+			var lastPathIdx = -1
+			for _, pp := range pathPos {
+				if pp < cs {
+					lastPathIdx = pp
+				}
+			}
+			if lastPathIdx == -1 {
+				continue
+			}
+			// Check if there's another <path> between lastPathIdx and cs
+			hasOtherPath := false
+			for _, pp := range pathPos {
+				if pp > lastPathIdx && pp < cs {
+					hasOtherPath = true
+					break
+				}
+			}
+			if hasOtherPath {
+				continue
+			}
+			restStart := lastPathIdx + len("<path>")
+			rest := line[restStart:cs]
+			if rest != "" && !strings.Contains(rest, ": ") {
+				toDrop = append(toDrop, dropRange{restStart, cs})
+			}
+		}
+
+		// Apply drops from right to left to preserve indices
+		for j := len(toDrop) - 1; j >= 0; j-- {
+			dr := toDrop[j]
+			line = line[:dr.start] + line[dr.end:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }

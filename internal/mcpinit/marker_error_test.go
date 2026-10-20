@@ -405,3 +405,173 @@ func TestRecordSpawnFailure_MarkerErrorHasNoPaths(t *testing.T) {
 		t.Errorf("alert does not contain the stripped reason: %s", alert)
 	}
 }
+
+// TestRenderMarkerError_StripsPathsFromOldMarkers pins the render-side fix
+// for #1639: a marker written by an older build that stored the raw
+// PathError/LinkError text (including absolute paths) must also render
+// without paths at alert time, because the marker stays on disk for up to
+// lifecycleMarkerMaxAge and would otherwise print the path at every session
+// start. The package already re-checks old markers at render for the token
+// guard; path stripping is now applied at the same render stage.
+func TestRenderMarkerError_StripsPathsFromOldMarkers(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	// Simulate a marker written by an older build that stored the raw
+	// PathError text including the absolute path.
+	absPath := filepath.Join(xdgHome, "ghost", "lifecycle.log")
+	rawError := "open " + absPath + ": is a directory"
+
+	at := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project:      "p1",
+		PhasesFailed: []string{"resolve"},
+		Error:        rawError,
+		At:           at,
+		Version:      1,
+	})
+
+	// The session-start alert must not contain the absolute path
+	alert := lifecycleFailureAlert("p1", "")
+	if strings.Contains(alert, absPath) {
+		t.Errorf("alert renders absolute path from old marker: %s", alert)
+	}
+	if strings.Contains(alert, "lifecycle.log") {
+		t.Errorf("alert renders filename from old marker: %s", alert)
+	}
+	if !strings.Contains(alert, "is a directory") {
+		t.Errorf("alert does not contain the stripped reason: %s", alert)
+	}
+}
+
+// TestStripPaths_Comprehensive covers all the error shapes that must have
+// their absolute paths replaced with "<path>" while preserving readability
+// and not touching URLs, the interrupt sentence, or relative paths.
+func TestStripPaths_Comprehensive(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "wrapped fork/exec error",
+			input: "spawn claude: fork/exec /usr/bin/claude: no such file or directory",
+			want:  "spawn claude: fork/exec <path>: no such file or directory",
+		},
+		{
+			name:  "open form with absolute path",
+			input: "open /h/user/data/ghost/lifecycle.log: is a directory",
+			want:  "open <path>: is a directory",
+		},
+		{
+			name:  "path after later colon",
+			input: "resolve: open /h/x/y.log: permission denied",
+			want:  "resolve: open <path>: permission denied",
+		},
+		{
+			name:  "link two-path form",
+			input: "link /a/b /c/d: file exists",
+			want:  "link <path> <path>: file exists",
+		},
+		{
+			name:  "rename two-path form",
+			input: "rename /a/old /a/new: x",
+			want:  "rename <path> <path>: x",
+		},
+		{
+			name:  "open form simple",
+			input: "open /abs/f: is a directory",
+			want:  "open <path>: is a directory",
+		},
+		{
+			name:  "path with spaces",
+			input: "open /abs/dir with space/f.log: denied",
+			want:  "open <path>: denied",
+		},
+		{
+			name:  "path equals form",
+			input: "path=/etc/passwd",
+			want:  "path=<path>",
+		},
+		{
+			name:  "quoted path",
+			input: "\"/x/y\"",
+			want:  "\"<path>\"",
+		},
+		{
+			name:  "parenthesized path",
+			input: "(/a/b)",
+			want:  "(<path>)",
+		},
+		{
+			name:  "bracketed path",
+			input: "[/a/b]",
+			want:  "[<path>]",
+		},
+		{
+			name:  "path with plus",
+			input: "/opt/a+b/x",
+			want:  "<path>",
+		},
+		{
+			name:  "path with colon in middle",
+			input: "/opt/a:b/x",
+			want:  "<path>",
+		},
+		{
+			name:  "open with colon after path",
+			input: "open /a/b: denied",
+			want:  "open <path>: denied",
+		},
+		{
+			name:  "Windows path backslash",
+			input: "open C:\\Users\\x\\config.yaml: denied",
+			want:  "open <path>: denied",
+		},
+		{
+			name:  "Windows path forward slash",
+			input: "open C:/u/x/config.yaml: denied",
+			want:  "open <path>: denied",
+		},
+		{
+			name:  "URL unchanged",
+			input: "see https://example.com/a/b for details",
+			want:  "see https://example.com/a/b for details",
+		},
+		{
+			name:  "interrupt sentence unchanged",
+			input: "interrupted by SIGTERM while running resolve",
+			want:  "interrupted by SIGTERM while running resolve",
+		},
+		{
+			name:  "relative path unchanged",
+			input: "a / b",
+			want:  "a / b",
+		},
+		{
+			name:  "fraction unchanged",
+			input: "3/4 done",
+			want:  "3/4 done",
+		},
+		{
+			name:  "relative path with dot unchanged",
+			input: "open ./f: x",
+			want:  "open ./f: x",
+		},
+		{
+			name:  "multi-line tail with indentation preserved",
+			input: "  Project: alpha\n    Running consolidation...\n    error: open /abs/path: failed\n    stdout line after",
+			want:  "  Project: alpha\n    Running consolidation...\n    error: open <path>: failed\n    stdout line after",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripPaths(tc.input)
+			if got != tc.want {
+				t.Errorf("stripPaths(%q)\n got: %q\nwant: %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
