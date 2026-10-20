@@ -2,12 +2,12 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
