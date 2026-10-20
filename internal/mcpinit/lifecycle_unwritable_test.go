@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
@@ -149,6 +150,36 @@ func TestLifecycleFailureAlert_UnwritableDataDirIsTheBlockerNotTheMarker(t *test
 	}
 	if strings.Contains(alert, "the harness exited 7") {
 		t.Errorf("the recorded cause is still presented as current: %q", alert)
+	}
+}
+
+// TestExpiredMarkerOnAnUnwritableDataDirNamesTheDirectory pins the expired
+// half of the same rule: the self-clean cannot remove a marker past its age
+// horizon, so the marker is as un-clearable as a current one and the alert
+// must name the directory rather than go silent and repeat the failed removal
+// at every session start.
+func TestExpiredMarkerOnAnUnwritableDataDirNamesTheDirectory(t *testing.T) {
+	skipUnlessModesRestrict(t)
+	dataHome := isolatedHome(t)
+	dataDir := filepath.Join(dataHome, "ghost")
+	at := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, dataHome, testMarker{
+		Project: "proj", PhasesFailed: []string{"resolve"}, Error: "consolidation halted: the harness exited 7", At: at, Version: 1,
+	})
+	refuseDataDirWrites(t, dataDir)
+
+	alert := lifecycleFailureAlert("proj", "proj")
+	if !strings.Contains(alert, "refuses new files") {
+		t.Errorf("the directory was not named as the blocker: %q", alert)
+	}
+	if strings.Contains(alert, "Memory consolidation is paused") {
+		t.Errorf("an expired un-clearable marker still claims consolidation is paused: %q", alert)
+	}
+	if strings.Contains(alert, "the harness exited 7") {
+		t.Errorf("the recorded cause is still presented as current: %q", alert)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the marker must be left for a writable directory, stat err = %v", err)
 	}
 }
 

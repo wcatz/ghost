@@ -789,7 +789,11 @@ func markerCandidates(ids ...string) []markerCandidate {
 //   - marker older than lifecycleMarkerMaxAge (30d), or dated more than
 //     lifecycleMarkerClockSkew (24h) AHEAD: that file DELETED (self-clean),
 //     and only that file — the next candidate is then read and judged by
-//     these same rules, so a current marker behind it still alerts;
+//     these same rules, so a current marker behind it still alerts. When the
+//     removal fails because the data directory refuses new entries, the
+//     marker cannot be cleared either, so the alert names the directory as
+//     the blocker on the same line a current marker gets (see
+//     lifecycleUnclearableAlert) instead of returning silence;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -848,7 +852,20 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// the other reason the path is used. It came from config.DataDirPath
 		// through readLifecycleFailure. The next pass reads what is left, so a
 		// current marker behind the expired one is still shown.
-		if m.path == "" || os.Remove(m.path) != nil {
+		if m.path == "" {
+			return ""
+		}
+		if os.Remove(m.path) != nil {
+			// An expired marker the directory refuses to remove is the same
+			// un-clearable marker the check below reports: it cannot be
+			// cleared, so it cannot be called stale either. The check below
+			// sits after this loop and is never reached from here, so ask it
+			// now rather than return silence and retry the removal at every
+			// session start. A removal that fails for any other reason keeps
+			// the old behaviour.
+			if p, ok := markerAlertProject(m, projectID, projectName); ok {
+				return lifecycleUnclearableAlert(p, at)
+			}
 			return ""
 		}
 		m = nil
@@ -858,35 +875,63 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	}
 	// m is non-nil only via the break above, which requires an alertable age,
 	// so a marker older than lifecycleAlertMaxAge never reaches the render.
-	if m.Project != "" && projectID != "" && m.Project != projectID && m.Project != projectName {
-		return ""
-	}
-	p := m.Project
-	if p == "" {
-		p = projectID
-	}
-	if p == "" {
-		// Neither side can name a project: nothing to report, no retry
-		// command to give. Degenerate — stay silent.
+	p, ok := markerAlertProject(m, projectID, projectName)
+	if !ok {
 		return ""
 	}
 	// A marker that cannot be cleared — the data directory refuses new
 	// entries — is not presented as the current cause: it may be stale, and
 	// the blocker is the directory, not the recorded phase. Surface that
 	// instead, on the same session-start line (#1580).
-	if dataDir, err := config.DataDirPath(); err == nil {
-		if werr := lifecycleBookkeepingWritable(dataDir); werr != nil {
-			p = renderMarkerProject(p)
-			return fmt.Sprintf(
-				"**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry.",
-				withoutPath(werr), p, at.Format(time.RFC3339), p)
-		}
+	if alert := lifecycleUnclearableAlert(p, at); alert != "" {
+		return alert
 	}
 	p = renderMarkerProject(p)
 	return fmt.Sprintf(
 		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
 		p, at.Format(time.RFC3339), renderMarkerPhases(m.PhasesFailed),
 		renderMarkerError(m.Error), p)
+}
+
+// markerAlertProject decides whether a marker is this session's to report and
+// names the project the alert renders: the marker's own project, or the
+// session's when the marker is unattributed. ok is false when both sides name a
+// project and they differ (another project's failure is not this
+// conversation's business), and when neither side names one (degenerate: no
+// retry command to give).
+func markerAlertProject(m *lifecycleFailureMarker, projectID, projectName string) (string, bool) {
+	if m.Project != "" && projectID != "" && m.Project != projectID && m.Project != projectName {
+		return "", false
+	}
+	p := m.Project
+	if p == "" {
+		p = projectID
+	}
+	if p == "" {
+		return "", false
+	}
+	return p, true
+}
+
+// lifecycleUnclearableAlert renders the session-start line for a marker the
+// data directory will not let the alert clear, or "" when the directory is
+// writable now and the marker can be handled normally. It is asked for a
+// current marker and for an expired one whose self-clean removal failed, so
+// both read the directory as the blocker rather than presenting a failure that
+// may already be fixed as the current cause.
+func lifecycleUnclearableAlert(p string, at time.Time) string {
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return ""
+	}
+	werr := lifecycleBookkeepingWritable(dataDir)
+	if werr == nil {
+		return ""
+	}
+	p = renderMarkerProject(p)
+	return fmt.Sprintf(
+		"**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry.",
+		withoutPath(werr), p, at.Format(time.RFC3339), p)
 }
 
 // renderMarkerPhases renders the marker's failed-phase list for the alert, the
