@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mustWrite / mustMkdirAll fail the test on setup errors instead of
@@ -134,6 +135,59 @@ func TestPrune(t *testing.T) {
 	mustWrite(t, filepath.Join(sub, "stale2-beef0000.md"), ghostNote)
 	if err := prune(root, []string{"proj"}, keepSet{}, nil); err == nil {
 		t.Fatal("prune without marker must error")
+	}
+}
+
+// TestIsStagingName pins the reclaim predicate against the names writeIfChanged
+// stages and against names it never stages, so a real note or an unrelated file
+// is not reclaimed along with the orphan.
+func TestIsStagingName(t *testing.T) {
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{"Some-fact.md.ghost-tmp-1234567890", true}, // what CreateTemp stages
+		{"Some-fact.md.ghost-tmp", true},            // the fixed name a build before CreateTemp used
+		{"a.ghost-tmp-b.md", false},                 // a file that merely mentions the marker
+		{"Some-fact.md", false},                     // a note
+		{"notes.txt", false},                        // an unrelated file
+		{"data.ghost-tmp-1", false},                 // marker with no note name before it
+		{".ghost-tmp-1", false},                     // marker with nothing before it
+	}
+	for _, c := range cases {
+		if got := isStagingName(c.base); got != c.want {
+			t.Errorf("isStagingName(%q) = %v, want %v", c.base, got, c.want)
+		}
+	}
+}
+
+// TestPruneReclaimsOnlyAgedStagingFiles pins the grace period. A manual export
+// and the auto-sync worker can run at once, so one pass's prune can reach the
+// other pass's live staging file between its CreateTemp and its Rename; only a
+// file older than the grace — a killed write's orphan — is reclaimed.
+func TestPruneReclaimsOnlyAgedStagingFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+
+	fresh := filepath.Join(sub, "fresh.md.ghost-tmp-1111")
+	mustWrite(t, fresh, "in flight")
+	old := filepath.Join(sub, "old.md.ghost-tmp-2222")
+	mustWrite(t, old, "orphan")
+	past := time.Now().Add(-2 * stagingGrace)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prune(root, []string{"proj"}, keepSet{}, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("a fresh staging file must survive prune: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("an aged staging file must be reclaimed: %v", err)
 	}
 }
 

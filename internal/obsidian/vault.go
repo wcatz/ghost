@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 const markerName = ".ghost-vault"
@@ -45,6 +46,45 @@ func ensureVault(dir string) error {
 	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600)
 }
 
+// tmpMarker is the shared stem of the staging name writeIfChanged gives a note
+// while it is being written, and the name prune reclaims. The writer and the
+// reclaim read this one constant so they cannot drift apart — and the drift is
+// what made the reclaim dead: the writer moved to os.CreateTemp, which names a
+// staged file "<note>.md.ghost-tmp-<random>", while prune still matched a fixed
+// ".ghost-tmp" suffix no staged file ever ended with, so a staging file a killed
+// export left behind kept its note text in the vault forever.
+const tmpMarker = ".ghost-tmp"
+
+// stagingPattern is the os.CreateTemp pattern writeIfChanged stages a note
+// with. It is a function rather than an inline expression so a test can create a
+// file with the real pattern instead of a name that only looks like one.
+func stagingPattern(noteBase string) string { return noteBase + tmpMarker + "-*" }
+
+// stagingGrace bounds how long a staging file may sit before prune reclaims it.
+// A manual export and the auto-sync worker can run at once, so one pass's prune
+// can reach the other pass's live staging file between its os.CreateTemp and its
+// Rename; reclaiming that would fail the write with ENOENT. A file younger than
+// this is left alone, and a killed write's orphan is older than it.
+const stagingGrace = time.Minute
+
+// isStagingName reports whether base names a staging file writeIfChanged can
+// leave behind when it is killed between the create and the rename. Such a name
+// is a note name — one ending in ".md", the only extension the writer stages —
+// followed by tmpMarker and then either nothing (the fixed name a build before
+// the CreateTemp form used) or the "-" plus random suffix CreateTemp appends.
+//
+// The marker is taken from the RIGHT so a name that merely contains it earlier
+// is not mistaken for a staging file, and the ".md" guard keeps an unrelated
+// file that happens to mention the marker from being reclaimed.
+func isStagingName(base string) bool {
+	i := strings.LastIndex(base, tmpMarker)
+	if i <= 0 || !strings.HasSuffix(base[:i], ".md") {
+		return false
+	}
+	rest := base[i+len(tmpMarker):]
+	return rest == "" || rest[0] == '-'
+}
+
 // writeIfChanged writes content atomically (temp+rename), skipping the write
 // when the file already has identical content — no mtime churn.
 func writeIfChanged(path, content string) (bool, error) {
@@ -58,7 +98,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	// (a manual run plus the auto-sync worker), so the rename could publish a
 	// partially interleaved file. Use a unique temp file in the same
 	// directory — rename stays atomic and last-writer-wins is well defined.
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".ghost-tmp-*")
+	f, err := os.CreateTemp(filepath.Dir(path), stagingPattern(filepath.Base(path)))
 	if err != nil {
 		return false, err
 	}
@@ -214,9 +254,10 @@ func keepKey(root, path string) string {
 
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
 // path is not one of the canonical paths this pass wrote. All three guards
-// from the spec are enforced. Orphaned *.ghost-tmp files (left by a crashed
-// writeIfChanged) are also reclaimed — but only inside the managed subtrees,
-// behind the marker guard.
+// from the spec are enforced. Staging files left by a crashed writeIfChanged —
+// the names that writer actually creates, matched through the shared tmpMarker
+// — are also reclaimed, but only inside the managed subtrees, behind the marker
+// guard, and only once older than stagingGrace so a live write is spared.
 func prune(root string, subtrees []string, keep keepSet, knownFolders []string) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
@@ -236,8 +277,14 @@ func prune(root string, subtrees []string, keep keepSet, knownFolders []string) 
 			if d.IsDir() {
 				return nil
 			}
-			if strings.HasSuffix(path, ".ghost-tmp") {
-				return os.Remove(path) // orphan from a crashed write
+			if isStagingName(filepath.Base(path)) {
+				// A fresh staging file may belong to a pass that is still writing
+				// it, so only one older than the grace — a killed write's orphan —
+				// is reclaimed; an age that cannot be read leaves it alone.
+				if fi, err := d.Info(); err == nil && time.Since(fi.ModTime()) >= stagingGrace {
+					return os.Remove(path) // orphan from a crashed write
+				}
+				return nil
 			}
 			if !strings.HasSuffix(path, ".md") {
 				return nil
