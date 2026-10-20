@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -568,15 +569,51 @@ func resolveMarkerIdentity(dataDir, project string) (id, name string, err error)
 	return id, name, nil
 }
 
+// errNotRegularMarker is openMarker's refusal of an open descriptor that is
+// not a regular file.
+var errNotRegularMarker = errors.New("marker is not a regular file")
+
+// openMarker opens a failure marker for reading and returns it only when the
+// open descriptor is a regular file. The data dir is writable by every local
+// process, so a FIFO planted at a marker path used to block os.ReadFile's open
+// until a writer appeared — a hang in the session-start alert, in `ghost
+// context` and in the clear path, where the host either waits or kills the
+// hook at its own timeout — and a symlink was followed to whatever it named.
+// The marker is always a regular file this package wrote, so anything else is
+// no marker. The caller closes the file.
+func openMarker(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, markerOpenFlags, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w (%s)", errNotRegularMarker, info.Mode().Type())
+	}
+	return f, nil
+}
+
 // readLifecycleFailure loads the marker, returning nil when there is none,
 // when it is unparseable, or when its timestamp cannot be interpreted (a
 // marker that cannot be aged safely is never printed and never deleted —
 // fail silent, keep the file for manual inspection).
 // readMarkerAtPath loads and validates a single marker file. A missing,
 // unparseable or undated file reads as no marker rather than an error: this is
-// a best-effort alert, and every failure mode of it must degrade to silence.
+// a best-effort alert, and every failure mode of it must degrade to silence —
+// including a path that is not a regular file at all (openMarker), which is
+// no marker either.
 func readMarkerAtPath(path string) *lifecycleFailureMarker {
-	b, err := os.ReadFile(path)
+	f, err := openMarker(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close() //nolint:errcheck
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return nil
 	}
