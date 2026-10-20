@@ -534,6 +534,8 @@ func labelNeedsEscaping(s string) bool {
 		switch {
 		case isLineEndingOrControl(r):
 			return true
+		case isBidiControl(r):
+			return true
 		case r == '`', r == '"', r == '«', r == '»':
 			return true
 		}
@@ -625,8 +627,11 @@ func isTokenRune(r rune) bool {
 // Every other control rune is printed as a visible ASCII escape (#1489): ESC
 // and the C1 controls, CSI among them, start terminal sequences that recolour,
 // move the cursor, clear the screen or retitle the window, and a memory is
-// printed to a terminal by the CLI. The form is the one Label uses, the
-// strconv escape (backslash x1b, a, x7f, u009b), so the two renderers agree.
+// printed to a terminal by the CLI. The bidi controls (U+200E, U+200F,
+// U+202A–U+202E, U+2066–U+2069) are included too: they are category Cf rather
+// than Cc, but they reorder how the rest of a line displays, including the
+// closing delimiter. The form is the one Label uses, the strconv escape
+// (backslash x1b, a, x7f, u009b, u202e), so the two renderers agree.
 // TAB is the one exception: stored prose holds tabs, and a tab only advances
 // to the next stop, so it stays as written.
 func Data(s string) string {
@@ -659,9 +664,27 @@ func escapeControls(s string) string {
 }
 
 // isEscapedControl is the set escapeControls prints as an escape: the control
-// runes Label escapes, less TAB.
+// runes Label escapes, less TAB, plus the bidirectional controls (category Cf)
+// that unicode.IsControl does not cover — U+200E, U+200F, U+202A–U+202E and
+// U+2066–U+2069 — which reorder how the rest of a line displays.
 func isEscapedControl(r rune) bool {
-	return r != '\t' && unicode.IsControl(r)
+	return (r != '\t' && unicode.IsControl(r)) || isBidiControl(r)
+}
+
+// isBidiControl reports whether r is a bidirectional control that can reorder
+// how the rest of a line displays. They are category Cf, so unicode.IsControl
+// (category Cc) does not cover them. The stored value is never changed; only
+// the rendering escapes them.
+func isBidiControl(r rune) bool {
+	switch {
+	case r == 0x200E || r == 0x200F:
+		return true
+	case r >= 0x202A && r <= 0x202E:
+		return true
+	case r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // LineBreakEscape is what a stored line break is printed as: every memory
