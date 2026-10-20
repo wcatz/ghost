@@ -716,7 +716,12 @@ func recordSpawnFailure(projectID string, cfg *config.Config, cause error, stder
 	if len(phases) == 0 {
 		return
 	}
-	if err := WriteLifecycleFailure(projectID, phases, cause.Error()); err != nil && stderr != nil {
+	// Strip filesystem paths from the cause (fs.PathError, os.LinkError) so
+	// the durable marker and the session-start alert keep their no-paths
+	// contract. The hook's stderr line for the same failure already uses
+	// withoutPath; the marker must do the same.
+	stripped := withoutPath(cause)
+	if err := WriteLifecycleFailure(projectID, phases, stripped.Error()); err != nil && stderr != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost hook: cannot record the lifecycle failure marker: %s\n", withoutPath(err))
 	}
 }

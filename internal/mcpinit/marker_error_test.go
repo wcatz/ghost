@@ -1,6 +1,10 @@
 package mcpinit
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/config"
 )
 
 // markerErrorToken is obviously fake, shaped by the detector's GitHub personal
@@ -341,5 +346,62 @@ func TestTheShownLineIsAskedOfTheTokenGuard(t *testing.T) {
 	}
 	if !strings.Contains(got, "<error withheld: it holds a ") {
 		t.Errorf("the alert does not say the error was withheld: %s", got)
+	}
+}
+
+// TestRecordSpawnFailure_MarkerErrorHasNoPaths pins the fix for #1639:
+// a spawn-failure marker for an unopenable log (or any fs.PathError) must
+// store the error WITHOUT the absolute filesystem path, so the session-start
+// alert keeps its no-paths contract. The hook's stderr already uses
+// withoutPath; the marker must do the same.
+func TestRecordSpawnFailure_MarkerErrorHasNoPaths(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "p1", t.TempDir(), "myproj")
+
+	// Simulate the exact error from opening lifecycle.log when it's a directory:
+	// "open /absolute/data-dir/path/lifecycle.log: is a directory"
+	absPath := filepath.Join(dataHome, "ghost", "lifecycle.log")
+	pathErr := &fs.PathError{
+		Op:   "open",
+		Path: absPath,
+		Err:  errors.New("is a directory"),
+	}
+
+	var stderr bytes.Buffer
+	recordSpawnFailure("p1", &config.Config{Reflection: config.ReflectionConfig{AutoResolve: true}}, pathErr, &stderr)
+
+	// The marker file must not contain the absolute path
+	markerPath := filepath.Join(dataHome, "ghost", projectMarkerFile("p1"))
+	b, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.Contains(string(b), absPath) {
+		t.Errorf("marker stores absolute path %q: %s", absPath, string(b))
+	}
+	// The error should be the withoutPath version: "is a directory"
+	var m struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal marker: %v", err)
+	}
+	if !strings.Contains(m.Error, "is a directory") {
+		t.Errorf("marker error %q does not contain the stripped reason", m.Error)
+	}
+	if strings.Contains(m.Error, "lifecycle.log") {
+		t.Errorf("marker error %q still contains the filename", m.Error)
+	}
+
+	// The session-start alert must also not contain the path
+	alert := lifecycleFailureAlert("p1", "myproj")
+	if strings.Contains(alert, absPath) {
+		t.Errorf("alert renders absolute path: %s", alert)
+	}
+	if strings.Contains(alert, "lifecycle.log") {
+		t.Errorf("alert renders the filename: %s", alert)
+	}
+	if !strings.Contains(alert, "is a directory") {
+		t.Errorf("alert does not contain the stripped reason: %s", alert)
 	}
 }
