@@ -378,7 +378,10 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 			// project is finished".
 			report.Projects = append(report.Projects, res)
 			report.FailedProject = id
-			return report, fmt.Errorf("project %s: %w", id, err)
+			// The id is stored text, so the sentence that names it goes through the
+			// same renderer as the lock refusal above: an ordinary id is quoted, a
+			// token-shaped one is withheld, and neither can end the line.
+			return report, fmt.Errorf("project %s: %w", memory.RefusalArg("project", id), err)
 		}
 		report.Projects = append(report.Projects, res)
 	}
@@ -500,10 +503,18 @@ func refuseLockedProjects(dataDir string, projectIDs []string) error {
 		return nil
 	}
 	sort.Strings(busy)
+	rendered := make([]string, 0, len(busy))
+	for _, id := range busy {
+		// A stored id is not exempt from the guard for being stored: `ghost import`
+		// writes an artifact's id verbatim, so this sentence can otherwise carry a
+		// token-shaped value into stderr and a log, or split on a line separator
+		// and put text of the value's choosing at the start of a line.
+		rendered = append(rendered, memory.RefusalArg("project", id))
+	}
 	what := "a lifecycle run holds"
 	if len(busy) > 1 {
 		what = "lifecycle runs hold"
 	}
 	return fmt.Errorf("%s the lock for %s — wait for it to finish, or scope the run with --project",
-		what, strings.Join(busy, ", "))
+		what, strings.Join(rendered, ", "))
 }

@@ -1437,7 +1437,10 @@ time. It refuses to run while a lifecycle run holds any of the projects' locks, 
 it checks **every** project before it touches any of them — a refusal that arrived
 after the first project had been compacted would be a check that protects nothing.
 The refusal names the projects, so an operator can either wait or re-run scoped with
-`--project`.
+`--project`. Both that sentence and the one naming the project a run stopped in
+render each stored id through `memory.RefusalArg`: an ordinary id is quoted, a
+token-shaped or over-256-byte one is withheld behind a placeholder naming the field
+and the format, and neither can split the sentence over more than one line.
 
 This is the only `ghost history` mode that writes. It opens the store read-write
 like the rest of the command and, under `--apply`, deletes `memory_history` rows and
