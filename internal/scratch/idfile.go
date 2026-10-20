@@ -36,6 +36,12 @@ const idFileStaleAge = 14 * 24 * time.Hour
 // (1–40 characters), the UTC second it was written in, UniqueSuffix's
 // <pid>-<16 hex> run token, and the .ids extension.
 //
+// The pid segment is captured rather than spelled in the pattern, because
+// isPidSegment decides it — the one rule for what a pid segment may look like,
+// shared with the per-invocation directory name. A pid Ghost never has is
+// evidence the file is somebody else's, and the file is removed on the
+// strength of its name alone.
+//
 // It is strict for the reason isScratchDirName is: $GHOST_SCRATCH_DIR may
 // name a directory somebody else writes to, so for an entry with no owner
 // marker the NAME is the only ownership evidence there is. Near misses that
@@ -43,7 +49,7 @@ const idFileStaleAge = 14 * 24 * time.Hour
 // segment longer, uppercase hex, a timestamp missing its Z — and neither does
 // anything that is not a regular file (Reap checks that before asking this).
 var reassessIDFile = regexp.MustCompile(
-	`^supersede-reassess-[A-Za-z0-9._-]{1,40}-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{16}\.ids$`)
+	`^supersede-reassess-[A-Za-z0-9._-]{1,40}-[0-9]{8}T[0-9]{6}Z-([0-9]+)-[0-9a-f]{16}\.ids$`)
 
 // ReassessTargetsName builds the follow-up id file's name: the repair, the
 // project, the UTC second for a human reading a directory listing, and a
@@ -69,10 +75,18 @@ func ReassessTargetsName(projectName string) (string, error) {
 }
 
 // isReassessIDFile reports whether name has exactly the shape
-// ReassessTargetsName writes. It answers a question about a name alone, so a
-// caller deciding whether to REMOVE something must pair it with a regular-file
-// check: a directory or link wearing the name is not the file Ghost wrote.
-func isReassessIDFile(name string) bool { return reassessIDFile.MatchString(name) }
+// ReassessTargetsName writes, the pid segment included: a pid Ghost never has
+// is a name Ghost never wrote, and a match here is what authorizes a deletion.
+// It answers a question about a name alone, so a caller deciding whether to
+// REMOVE something must pair it with a regular-file check: a directory or link
+// wearing the name is not the file Ghost wrote.
+func isReassessIDFile(name string) bool {
+	match := reassessIDFile.FindStringSubmatch(name)
+	if match == nil {
+		return false
+	}
+	return isPidSegment(match[1])
+}
 
 // sanitizeNamePart renders a project name safe to embed in a file name. The
 // name is free text — `ghost resolve --project` takes the next argument

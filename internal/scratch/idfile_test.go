@@ -43,6 +43,10 @@ func TestIsReassessIDFile(t *testing.T) {
 		{"supersede-reassess-myproj-20260927T220356Z-4242-0123456789abcdef0.ids", false},
 		{"supersede-reassess-myproj-20260927T220356Z-4242-0123456789abcdeg.ids", false},
 		{"supersede-reassess-myproj-20260927T220356Z-4242-0123456789abcdefX.ids", false},
+		// The pid segment of the run token: a pid is never 0 and never carries
+		// a leading zero, so neither spelling is one Ghost can have written.
+		{"supersede-reassess-myproj-20260927T220356Z-0-0123456789abcdef.ids", false},
+		{"supersede-reassess-myproj-20260927T220356Z-007-0123456789abcdef.ids", false},
 		// Names that live in the same directory and must never qualify.
 		{valid + ".txt", false},
 		{valid + " ", false},
