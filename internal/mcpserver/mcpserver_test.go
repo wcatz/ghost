@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -3240,5 +3241,42 @@ func TestSearchAllProjectLabelIsBounded(t *testing.T) {
 	}
 	if len(line) > 2*assemble.MaxRenderedProjectIDLen+200 {
 		t.Errorf("the row is %d bytes, want it bounded near the %d-byte label cap", len(line), assemble.MaxRenderedProjectIDLen)
+	}
+}
+
+func TestServerAdvertisedCapabilities(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	caps := session.InitializeResult().Capabilities
+	if caps == nil {
+		t.Fatal("expected capabilities in initialize result")
+	}
+	raw, err := json.Marshal(caps)
+	if err != nil {
+		t.Fatalf("marshal capabilities: %v", err)
+	}
+	if strings.Contains(string(raw), `"logging"`) {
+		t.Errorf("unexpected logging capability in advertised set: %s", raw)
+	}
+	if caps.Completions != nil {
+		t.Errorf("unexpected completions capability: %+v", caps.Completions)
+	}
+	if caps.Experimental != nil {
+		t.Errorf("unexpected experimental capability: %+v", caps.Experimental)
+	}
+	if caps.Extensions != nil {
+		t.Errorf("unexpected extensions capability: %+v", caps.Extensions)
+	}
+	if caps.Tools == nil || !caps.Tools.ListChanged {
+		t.Errorf("expected tools capability with listChanged, got %+v", caps.Tools)
+	}
+	if caps.Prompts == nil || !caps.Prompts.ListChanged {
+		t.Errorf("expected prompts capability with listChanged, got %+v", caps.Prompts)
+	}
+	if caps.Resources == nil || !caps.Resources.ListChanged || !caps.Resources.Subscribe {
+		t.Errorf("expected resources capability with listChanged and subscribe, got %+v", caps.Resources)
 	}
 }

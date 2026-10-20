@@ -1196,6 +1196,11 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		Logger:             logger,
 		SubscribeHandler:   s.handleSubscribe,
 		UnsubscribeHandler: s.handleUnsubscribe,
+		// The SDK's nil-capabilities default advertises a `logging` capability
+		// the server never implements (no ServerSession.Log / notifications/message).
+		// A non-nil empty value overrides that default; tools, prompts and
+		// resources are still inferred from the registered features below.
+		Capabilities: &mcp.ServerCapabilities{},
 	})
 	s.mcp.AddReceivingMiddleware(withholdResourceReadURI)
 
