@@ -454,6 +454,10 @@ func (c *inflatedReader) Read(p []byte) (int, error) {
 // be reached by traversing out of the archive is not a file ghost published. As
 // on the tar path, what is accepted has to be a regular non-empty file.
 //
+// What an entry IS comes from the bits its own header carries rather than
+// from the reader's reading of them, because the reader translates those bits
+// only for an archive stamped Unix or macOS (see zipEntryType).
+//
 // A zip is random-access, so an entry this loop skips is never inflated at
 // all; the one entry it opens is bounded directly, by the same cap.
 func extractZipBinary(archive []byte) ([]byte, error) {
@@ -465,8 +469,8 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 		if f.FileInfo().IsDir() || (f.Name != "ghost" && f.Name != "ghost.exe") {
 			continue
 		}
-		if !f.Mode().IsRegular() {
-			return nil, fmt.Errorf("ghost in the archive is not a regular file")
+		if !zipEntryIsRegular(f) {
+			return nil, fmt.Errorf("ghost in the archive is a %s, not a regular file", zipEntryKind(f))
 		}
 		rc, err := f.Open()
 		if err != nil {
@@ -483,6 +487,73 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 		return binary, nil
 	}
 	return nil, fmt.Errorf("ghost binary not found in archive")
+}
+
+// The Unix file-type bits a zip entry's external attributes can carry, and the
+// values this check reads.
+//
+// Go's zip reader translates those bits into a file mode ONLY when the
+// archive's creator system is Unix or macOS. For FAT, NTFS or VFAT it reports
+// every non-directory entry as a regular file, whatever the bits say — so a
+// link stamped that way reads as an ordinary file, its target text comes back
+// as the binary, and Replace would install a short text file at the install
+// path. The bits are the only place the format records what an entry IS, so
+// they are read here rather than through the reader's translation of them: the
+// creator system is the archive's own claim about itself, and an entry's kind
+// must not depend on how well that claim is believed.
+const (
+	zipTypeMask      = 0o170000
+	zipTypeRegular   = 0o100000
+	zipTypeLink      = 0o120000
+	zipTypeDirectory = 0o040000
+	zipTypeFIFO      = 0o010000
+	zipTypeSocket    = 0o140000
+	zipTypeChar      = 0o020000
+	zipTypeBlock     = 0o060000
+)
+
+// zipEntryType reports the Unix file type the entry's external attributes
+// record, or 0 when they record none. The type is in the high half of the
+// external attributes, which is where a Unix or macOS creator puts the mode —
+// and where a FAT, NTFS or VFAT creator's bits are read as nothing at all.
+func zipEntryType(f *zip.File) uint32 {
+	return (f.ExternalAttrs >> 16) & zipTypeMask
+}
+
+// zipEntryIsRegular reports whether the entry is a regular file.
+//
+// An entry that records no type at all is one. A DOS-created archive carries
+// only an attribute byte — which says what the entry is for the operating
+// system it was made on, and nothing more — and the reader reports such an
+// entry as a regular file too, so refusing it would refuse the archive shape
+// a Windows release can carry.
+func zipEntryIsRegular(f *zip.File) bool {
+	switch zipEntryType(f) {
+	case 0, zipTypeRegular:
+		return true
+	default:
+		return false
+	}
+}
+
+// zipEntryKind names the kind of an entry for a refusal message, so "not a
+// regular file" says which kind was found. It is only asked about an entry
+// that is not a regular file.
+func zipEntryKind(f *zip.File) string {
+	switch zipEntryType(f) {
+	case zipTypeLink:
+		return "link"
+	case zipTypeDirectory:
+		return "directory"
+	case zipTypeFIFO:
+		return "fifo"
+	case zipTypeSocket:
+		return "socket"
+	case zipTypeChar, zipTypeBlock:
+		return "device"
+	default:
+		return "special file"
+	}
 }
 
 // asideSuffix is the fixed name an aside takes when it can be cleared before the
