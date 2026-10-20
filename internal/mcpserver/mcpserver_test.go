@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -2611,8 +2612,7 @@ func TestSaveGlobal_NotifiesEmbeddingWorker(t *testing.T) {
 // TestDecisionRecord_NotifiesEmbeddingWorker pins ghost_decision_record to the
 // same write-path rule the three save tools follow: its companion memory is a
 // memory row, so the project must be queued for embedding. RecordDecision calls
-// the store's onSave callback, but no production caller registers one, so the
-// handler's own push onto projectCh is the only notification the worker gets.
+// the store's onSave callback, which the MCP server wires to projectCh via SetEmbedder.
 func TestDecisionRecord_NotifiesEmbeddingWorker(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -2652,6 +2652,112 @@ func TestDecisionRecord_NotifiesEmbeddingWorker(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("PARITY GAP: ghost_decision_record did not notify the embedding worker for its companion memory")
+	}
+}
+
+// TestMemoryUpdate_NotifiesEmbeddingWorkerWhenContentChanges pins
+// ghost_memory_update to the same write-path rule: when the call carries new
+// content, the store's onSave callback fires and the project is queued for
+// embedding. A metadata-only edit (tags, importance, category) does not queue
+// the project because the text did not change and no re-embed is needed.
+func TestMemoryUpdate_NotifiesEmbeddingWorkerWhenContentChanges(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ch := make(chan string, 4)
+	srv.SetEmbedder(&mockEmbedder{}, ch)
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	// Create a memory first.
+	createResp, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_memory_save",
+		Arguments: map[string]any{
+			"project_id": "test-project",
+			"content":    "original content",
+			"category":   "fact",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_memory_save: %v", err)
+	}
+	createText := ""
+	if createResp.Content != nil {
+		for _, c := range createResp.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				createText += tc.Text
+			}
+		}
+	}
+	// Extract memory ID from response.
+	var memID string
+	if m := regexp.MustCompile(`\(id: ([^)]+)\)`).FindStringSubmatch(createText); len(m) > 1 {
+		memID = m[1]
+	} else {
+		t.Fatalf("could not extract memory id from: %s", createText)
+	}
+
+	// Clear any notification from the create.
+	select {
+	case <-ch:
+	default:
+	}
+
+	// Update with new content — should notify.
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_memory_update",
+		Arguments: map[string]any{
+			"project_id": "test-project",
+			"memory_id":  memID,
+			"content":    "updated content",
+		},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_memory_update: %v", err)
+	}
+
+	select {
+	case got := <-ch:
+		if got != "abc123" {
+			t.Errorf("projectCh notified with %q, want %q", got, "abc123")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ghost_memory_update with new content did not notify embedding worker")
+	}
+
+	// Clear the notification.
+	select {
+	case <-ch:
+	default:
+	}
+
+	// Update with only tags (metadata-only) — should NOT notify.
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_memory_update",
+		Arguments: map[string]any{
+			"project_id": "test-project",
+			"memory_id":  memID,
+			"tags":       []string{"new-tag"},
+		},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_memory_update (tags only): %v", err)
+	}
+
+	select {
+	case <-ch:
+		t.Fatal("ghost_memory_update with metadata-only edit notified embedding worker, but should not")
+	case <-time.After(500 * time.Millisecond):
+		// Expected: no notification
 	}
 }
 

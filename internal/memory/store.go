@@ -6178,6 +6178,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		return err
 	}
 	lock.reportHold("update", time.Now())
+	if s.onSave != nil && newContent != curContent {
+		s.onSave(projectID)
+	}
 	return nil
 }
 
