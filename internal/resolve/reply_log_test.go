@@ -155,3 +155,72 @@ func TestClassifyChunkLogsTheReplyBoundedAndGuarded(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveVetoLogWithholdsStoredIDs pins the Debug "resolve veto kept memory"
+// line: its id is a stored id, and the line reaches the phase's stderr and, on
+// the detached path, lifecycle.log, so it must go through memory.RefusalArg like
+// the reply lines above.
+func TestResolveVetoLogWithholdsStoredIDs(t *testing.T) {
+	log := &replyLog{}
+	rule := memory.Memory{ID: replyLogToken, Category: "gotcha",
+		Content: "NEVER run `dingo database restore` with source and target on the same spindle. Fixed in the 0.31 release notes."}
+	store := &fakeStore{candidates: []memory.Memory{rule}}
+	// The classifier would resolve the rule; the veto must stop it before the
+	// call and log the id it settled on.
+	cls := &fakeClassifier{drop: map[string]bool{rule.Content: true}}
+
+	if _, _, err := Run(context.Background(), store, cls, "proj", true, slog.New(log)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rec := log.only(t, "resolve veto kept memory")
+	if got := rec.attrs["id"]; strings.Contains(got, replyLogFragment) || !strings.Contains(got, "withheld") {
+		t.Errorf("the veto line logged id=%s, want the guard's placeholder", got)
+	}
+	log.assertNothingLeaks(t, replyLogFragment)
+}
+
+// TestReassessVetoLogsWithholdStoredIDs pins the repair pass's two veto lines:
+// the deferred-to-classifier line names the vetoed id AND the newer id that
+// shadowed it, and the kept line names the vetoed id. All are stored ids, and
+// both lines reach the detached lifecycle.log, so each must go through
+// memory.RefusalArg.
+func TestReassessVetoLogsWithholdStoredIDs(t *testing.T) {
+	t.Run("veto kept", func(t *testing.T) {
+		log := &replyLog{}
+		rule := memory.Memory{ID: replyLogToken, Category: "gotcha",
+			Content: "NEVER run `dingo database restore` with source and target on the same spindle"}
+		store := &fakeStore{alreadyResolved: []memory.Memory{rule}}
+		cls := &fakeClassifier{}
+
+		if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, slog.New(log)); err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		rec := log.only(t, "reassess veto kept memory")
+		if got := rec.attrs["id"]; strings.Contains(got, replyLogFragment) || !strings.Contains(got, "withheld") {
+			t.Errorf("the veto line logged id=%s, want the guard's placeholder", got)
+		}
+		log.assertNothingLeaks(t, replyLogFragment)
+	})
+
+	t.Run("veto deferred", func(t *testing.T) {
+		log := &replyLog{}
+		changelog := memory.Memory{ID: replyLogToken, Category: "changelog", UpdatedAt: "2026-09-01 00:00:00",
+			Content: "changelog 0.36.0: always check `internal/resolve/reassess.go` before a repair; #698 landed"}
+		newer := memory.Memory{ID: replyLogToken, Category: "changelog", UpdatedAt: "2026-09-20 00:00:00",
+			Content: "#698 is closed: internal/resolve/reassess.go now takes --only, so the 0.36.0 note is history"}
+		store := &fakeStore{alreadyResolved: []memory.Memory{changelog}, candidates: []memory.Memory{newer}}
+		cls := &fakeClassifier{}
+
+		if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, slog.New(log)); err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		rec := log.only(t, "reassess veto deferred to the classifier")
+		for _, key := range []string{"id", "newer"} {
+			got := rec.attrs[key]
+			if strings.Contains(got, replyLogFragment) || !strings.Contains(got, "withheld") {
+				t.Errorf("the deferred line logged %s=%s, want the guard's placeholder", key, got)
+			}
+		}
+		log.assertNothingLeaks(t, replyLogFragment)
+	})
+}
