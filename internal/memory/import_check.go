@@ -598,11 +598,15 @@ func checkImportedTimestamp(field, value string, layouts []string) error {
 func timestampLayouts(field string) []string {
 	switch field {
 	case "last_accessed":
-		return []string{StoredStampLayout, time.RFC3339}
+		// Store.Touch writes RFC3339; every other stamp writer, and the readers,
+		// use StampLayouts.
+		return append(append([]string{}, StampLayouts...), time.RFC3339)
 	default:
-		// created_at, updated_at, resolved_at, completed_at for all record types
-		// are written by datetime('now') or time.Now().UTC().Format(StoredStampLayout).
-		return []string{StoredStampLayout}
+		// created_at, updated_at, resolved_at and completed_at are written as
+		// StoredStampLayout, but they are read through ParseStamp, which also
+		// takes a whole-day stamp. Export runs this same check, so refusing a
+		// layout the readers accept would leave such a row out of a backup.
+		return StampLayouts
 	}
 }
 

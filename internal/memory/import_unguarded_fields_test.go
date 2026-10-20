@@ -712,3 +712,54 @@ func TestImportUnguardedFieldsRefusesCredential(t *testing.T) {
 		}
 	})
 }
+
+// TestImportedStampsAcceptAWholeDay pins that every stamp column takes the
+// layouts its readers take: ParseStamp reads a whole-day stamp, and Export runs
+// the same predicates, so a refused layout would leave the row out of a backup.
+func TestImportedStampsAcceptAWholeDay(t *testing.T) {
+	const day = "2026-01-04"
+	stamp := time.Date(2026, 1, 4, 10, 0, 0, 0, time.UTC).Format(StoredStampLayout)
+
+	for _, field := range []string{"created_at", "updated_at", "resolved_at", "last_accessed"} {
+		m := PortableMemory{ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp", Content: "a memory", CreatedAt: stamp, UpdatedAt: stamp}
+		v := day
+		switch field {
+		case "created_at":
+			m.CreatedAt = day
+		case "updated_at":
+			m.UpdatedAt = day
+		case "resolved_at":
+			m.ResolvedAt = &v
+		case "last_accessed":
+			m.LastAccessed = &v
+		}
+		if err := CheckImportedMemory(m); err != nil {
+			t.Errorf("memory %s %q refused: %v", field, day, err)
+		}
+	}
+	for _, field := range []string{"created_at", "updated_at", "completed_at"} {
+		tk := Task{ID: "t1", ProjectID: "p1", Title: "a task", Status: "done", Priority: 2, CreatedAt: stamp, UpdatedAt: stamp, CompletedAt: stamp}
+		switch field {
+		case "created_at":
+			tk.CreatedAt = day
+		case "updated_at":
+			tk.UpdatedAt = day
+		case "completed_at":
+			tk.CompletedAt = day
+		}
+		if err := CheckImportedTask(tk); err != nil {
+			t.Errorf("task %s %q refused: %v", field, day, err)
+		}
+	}
+	for _, field := range []string{"created_at", "updated_at"} {
+		d := Decision{ID: "d1", ProjectID: "p1", Title: "a decision", Decision: "do it", Rationale: "because", Status: "active", CreatedAt: stamp, UpdatedAt: stamp}
+		if field == "created_at" {
+			d.CreatedAt = day
+		} else {
+			d.UpdatedAt = day
+		}
+		if err := CheckImportedDecision(d); err != nil {
+			t.Errorf("decision %s %q refused: %v", field, day, err)
+		}
+	}
+}
