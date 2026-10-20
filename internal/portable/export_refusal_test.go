@@ -656,6 +656,22 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 					m.Evidence = []memory.PortableEvidence{{Kind: "observed", SourceRef: cred}}
 				}))
 			}},
+		{name: "memory/created_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.CreatedAt = cred }))
+			}},
+		{name: "memory/updated_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.UpdatedAt = cred }))
+			}},
+		{name: "memory/resolved_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.ResolvedAt = &cred }))
+			}},
+		{name: "memory/last_accessed credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { m.LastAccessed = &cred }))
+			}},
 		{name: "memory/recorded history in the destination", counterpart: "store",
 			why: "a fact about the DESTINATION, and screening on it would be actively wrong: every write appends a memory_history row, so every memory a store exports has one and an export that checked would leave out the whole store. The importer runs it after the presence check, which is the only order in which it means anything — a memory already in the store is a skip."},
 		{name: "memory/project not found", counterpart: "store",
@@ -687,6 +703,26 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 		{name: "task/notes credential", counterpart: "predicate",
 			importRefuses: func() error {
 				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.Notes = "token " + cred }))
+			}},
+		{name: "task/created_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.CreatedAt = cred }))
+			}},
+		{name: "task/updated_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.UpdatedAt = cred }))
+			}},
+		{name: "task/completed_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.CompletedAt = cred }))
+			}},
+		{name: "task/branch credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.Branch = cred }))
+			}},
+		{name: "task/branch too long", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedTask(withTask(func(tk *memory.Task) { tk.Branch = strings.Repeat("x", memory.MaxContentLen+1) }))
 			}},
 		{name: "task/blocker not in this store", counterpart: "store",
 			why: "a fact about the DESTINATION, and the portable importer resolves it before the store is asked: orderTasks drops a pointer to a task the artifact does not contain, and orders the rest so a blocker exists first. A task that is not blocked is the honest state, since the blocker does not exist to be blocked by."},
@@ -745,6 +781,14 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 			importRefuses: func() error {
 				return memory.CheckImportedDecision(withDecision(func(d *memory.Decision) { d.Tags = []string{"ops-" + cred} }))
 			}},
+		{name: "decision/created_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedDecision(withDecision(func(d *memory.Decision) { d.CreatedAt = cred }))
+			}},
+		{name: "decision/updated_at credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedDecision(withDecision(func(d *memory.Decision) { d.UpdatedAt = cred }))
+			}},
 		{name: "decision/superseder not in this store", counterpart: "store",
 			why: "a fact about the DESTINATION, and orderDecisions drops a pointer to a decision the artifact does not contain, exactly as orderTasks does for a blocker."},
 		{name: "decision/project not found", counterpart: "store",
@@ -799,11 +843,14 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 	// is counted from the predicates rather than transcribed, so it cannot drift
 	// from them by being wrong.
 	//
-	// 20 = a project's name and path (2) + a memory's content, source_ref, agent,
-	// session_id, tags, scope keys and scope values (7) + an evidence record's agent, session_id and
-	// source_ref (3) + a task's title, description and notes (3) + a decision's
-	// title, decision, rationale, alternatives and tags (5).
-	if got, want := credentialFields(), 20; got != want {
+	// 30 = a project's name and path (2) + a memory's content, source_ref, agent,
+	// session_id, tags, scope keys and scope values (7) + its created_at,
+	// updated_at, resolved_at and last_accessed (4) + an evidence record's agent,
+	// session_id and source_ref (3) + a task's title, description and notes (3) +
+	// its created_at, updated_at, completed_at and branch (4) + a decision's
+	// title, decision, rationale, alternatives and tags (5) + its created_at and
+	// updated_at (2).
+	if got, want := credentialFields(), 30; got != want {
 		t.Errorf("the table covers %d credential-guarded field(s), want %d — a field was added to a predicate's guard, so it needs a row here", got, want)
 	}
 }
@@ -835,6 +882,10 @@ func credentialFields() int {
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Tags: []string{cred}}))
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Scope: map[string]string{cred: "production"}}))
 	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Scope: map[string]string{"token": cred}}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", CreatedAt: cred}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", UpdatedAt: cred}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", ResolvedAt: &cred}))
+	guard(memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", LastAccessed: &cred}))
 	for _, e := range []memory.PortableEvidence{
 		{Kind: "observed", Agent: "ops-" + cred},
 		{Kind: "observed", SessionID: "ses-" + cred},
@@ -846,6 +897,10 @@ func credentialFields() int {
 	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "token " + cred, Status: "pending"}))
 	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Description: "token " + cred, Status: "pending"}))
 	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Notes: "token " + cred, Status: "pending"}))
+	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Status: "pending", CreatedAt: cred}))
+	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Status: "pending", UpdatedAt: cred}))
+	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Status: "pending", CompletedAt: cred}))
+	guard(memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t", Status: "pending", Branch: cred}))
 	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "token " + cred,
 		Decision: "d", Rationale: "r", Status: "active"}))
 	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
@@ -856,6 +911,10 @@ func credentialFields() int {
 		Decision: "d", Rationale: "r", Alternatives: []string{cred}, Status: "active"}))
 	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
 		Decision: "d", Rationale: "r", Tags: []string{cred}, Status: "active"}))
+	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
+		Decision: "d", Rationale: "r", CreatedAt: cred, Status: "active"}))
+	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
+		Decision: "d", Rationale: "r", UpdatedAt: cred, Status: "active"}))
 	return n
 }
 

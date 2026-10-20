@@ -3,6 +3,7 @@ package memory
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -270,8 +271,38 @@ func CheckImportedMemory(m PortableMemory) error {
 		secretField{"source_ref", m.SourceRef},
 		secretField{"agent", m.Agent},
 		secretField{"session_id", m.SessionID},
+		secretField{"created_at", m.CreatedAt},
+		secretField{"updated_at", m.UpdatedAt},
 	); err != nil {
 		return err
+	}
+	if err := checkImportedTimestamp("created_at", m.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", m.UpdatedAt, timestampLayouts("updated_at")); err != nil {
+		return err
+	}
+	// last_accessed is a timestamp field that reaches the store from the artifact.
+	// Guard it against credentials and validate its format.
+	if m.LastAccessed != nil {
+		if err := rejectSecretFields(secretField{"last_accessed", *m.LastAccessed}); err != nil {
+			return err
+		}
+		if err := checkImportedTimestamp("last_accessed", *m.LastAccessed, timestampLayouts("last_accessed")); err != nil {
+			return err
+		}
+	}
+	// resolved_at is written by the store with datetime('now'), so it uses
+	// StoredStampLayout. It is a pointer because an absent value means "not
+	// resolved" and a stated value is a real claim. Guard it against credentials
+	// and validate its format.
+	if m.ResolvedAt != nil {
+		if err := rejectSecretFields(secretField{"resolved_at", *m.ResolvedAt}); err != nil {
+			return err
+		}
+		if err := checkImportedTimestamp("resolved_at", *m.ResolvedAt, timestampLayouts("resolved_at")); err != nil {
+			return err
+		}
 	}
 	// And the lengths, for the same reason the writers apply them: a reference and
 	// a harness name are both printed as labelled fields on every listing, so an
@@ -383,14 +414,38 @@ func CheckImportedTask(t Task) error {
 	if t.Priority < 0 || t.Priority > 4 {
 		return fmt.Errorf("invalid priority %d — must be between 0 and 4", t.Priority)
 	}
-	// Same window as the memory's: after the presence check, before apply=false.
-	// A task's title, description and notes are otherwise unvalidated text that a
-	// normal save refuses, and an artifact carries them.
-	return rejectSecretFields(
+	// branch: guard against credentials first (so a token-bearing oversize
+	// branch is refused by the token guard), then bound its size like other
+	// task text.
+	if err := rejectSecretFields(secretField{"branch", t.Branch}); err != nil {
+		return err
+	}
+	if len(t.Branch) > MaxBranchLen {
+		return fmt.Errorf("branch must be at most %d bytes, got %d — it is stored alongside the task's text and reaches the same renderers", MaxBranchLen, len(t.Branch))
+	}
+	// completed_at, created_at, and updated_at are otherwise unvalidated text
+	// that a normal save refuses, and an artifact carries them. Same window as
+	// the memory's: after the presence check, before apply=false.
+	if err := rejectSecretFields(
 		secretField{"title", t.Title},
 		secretField{"description", t.Description},
 		secretField{"notes", t.Notes},
-	)
+		secretField{"completed_at", t.CompletedAt},
+		secretField{"created_at", t.CreatedAt},
+		secretField{"updated_at", t.UpdatedAt},
+	); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("completed_at", t.CompletedAt, timestampLayouts("completed_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("created_at", t.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", t.UpdatedAt, timestampLayouts("updated_at")); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CheckImportedDecision reports why `ghost import` would refuse this decision, or
@@ -452,7 +507,15 @@ func CheckImportedDecision(d Decision) error {
 		secretField{"title", d.Title},
 		secretField{"decision", d.Decision},
 		secretField{"rationale", d.Rationale},
+		secretField{"created_at", d.CreatedAt},
+		secretField{"updated_at", d.UpdatedAt},
 	); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("created_at", d.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	if err := checkImportedTimestamp("updated_at", d.UpdatedAt, timestampLayouts("updated_at")); err != nil {
 		return err
 	}
 	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
@@ -505,6 +568,47 @@ func createdProject(id, path, name, repoRemote string) PortableProject {
 // any writer here produces, while still refusing the class the bound is for: a
 // payload wearing an id's clothes, echoed into every listing that touches the row.
 const MaxImportedIDLen = 128
+
+// MaxBranchLen is the byte cap on a task's branch field.
+//
+// A branch name is a git reference name, not free-form prose, but the import
+// accepts it from an artifact file and must bound it for the same reason the
+// other task text fields are bounded: the row-rendering read tools assume a
+// row is bounded by construction. The cap matches MaxContentLen so a branch
+// cannot be used to sidestep the content cap.
+const MaxBranchLen = MaxContentLen
+
+// checkImportedTimestamp validates that a timestamp field from a portable
+// artifact is either empty or a valid timestamp in one of the formats the
+// store's writer for that column emits. It returns an error naming the field
+// if the value is non-empty and invalid.
+func checkImportedTimestamp(field, value string, layouts []string) error {
+	if value == "" {
+		return nil
+	}
+	for _, layout := range layouts {
+		if _, err := time.Parse(layout, value); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s must be a valid timestamp or empty", field)
+}
+
+// timestampLayouts returns the accepted layouts for a given timestamp field.
+func timestampLayouts(field string) []string {
+	switch field {
+	case "last_accessed":
+		// Store.Touch writes RFC3339; every other stamp writer, and the readers,
+		// use StampLayouts.
+		return append(append([]string{}, StampLayouts...), time.RFC3339)
+	default:
+		// created_at, updated_at, resolved_at and completed_at are written as
+		// StoredStampLayout, but they are read through ParseStamp, which also
+		// takes a whole-day stamp. Export runs this same check, so refusing a
+		// layout the readers accept would leave such a row out of a backup.
+		return StampLayouts
+	}
+}
 
 // CheckImportedID reports whether a RECORD id from a portable artifact — a
 // memory's, a task's or a decision's — is one this build will store.
