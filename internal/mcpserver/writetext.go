@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // maxProjectIDLen bounds the byte length of a caller-supplied `project_id` at the
@@ -43,7 +45,7 @@ const maxProjectIDLen = 4096
 // untouched.
 func blankWriteText(value string) bool {
 	return strings.TrimFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+		return unicode.IsSpace(r) || memory.IsFormatRune(r)
 	}) == ""
 }
 

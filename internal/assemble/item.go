@@ -540,7 +540,7 @@ func labelNeedsEscaping(s string) bool {
 		switch {
 		case isLineEndingOrControl(r):
 			return true
-		case isInvisibleFormat(r):
+		case memory.IsFormatRune(r):
 			return true
 		case r == '`', r == '"', r == '«', r == '»':
 			return true
@@ -678,35 +678,7 @@ func escapeControls(s string) string {
 // line displays, and U+200B, U+200C, U+200D, U+2060 and U+FEFF among the rest,
 // which hide a spelling inside a line without reordering anything.
 func isEscapedControl(r rune) bool {
-	return (r != '\t' && unicode.IsControl(r)) || isInvisibleFormat(r)
-}
-
-// isInvisibleFormat reports whether r is a Unicode FORMAT character — category
-// Cf — and so carries no width of its own and prints as nothing a reader can
-// see.
-//
-// It is the WHOLE category rather than the bidirectional subset the renderers
-// escaped first (#1649, #1651). The bidi controls reorder the rest of a line,
-// which is why they were caught first; the rest of Cf hides a spelling INSIDE
-// one — U+200B ZERO WIDTH SPACE, U+200C and U+200D (the non-joiner and the
-// joiner), U+2060 WORD JOINER and U+FEFF ZERO WIDTH NO-BREAK SPACE among them
-// — so a tag of `gh` + U+200B + `ost` printed exactly as `ghost` while being a
-// different string, and two values that differ in bytes printed identically.
-//
-// It is a category test rather than a hand-written list because a list holds
-// only what somebody thought of, and this rule is about the class rather than
-// about its members: a FORMAT character is an instruction to the renderer, not
-// text a reader can see. The stored value is never changed; only the rendering
-// escapes it.
-//
-// The lower bound is a fast path and not a second rule: the lowest FORMAT
-// character is SOFT HYPHEN (U+00AD), and every code point below it is assigned
-// and cannot become one.
-func isInvisibleFormat(r rune) bool {
-	if r < 0x00AD {
-		return false
-	}
-	return unicode.In(r, unicode.Cf)
+	return (r != '\t' && unicode.IsControl(r)) || memory.IsFormatRune(r)
 }
 
 // LineBreakEscape is what a stored line break is printed as: every memory
@@ -936,7 +908,7 @@ const TagBacktickEscape = "\\u0060"
 // label has its own, and this is the one place the two rules differ.
 //
 // It also writes every rune of Label's line-ending class (isLineEndingOrControl)
-// and every invisible FORMAT character (isInvisibleFormat) as a JSON `\uXXXX`
+// and every invisible FORMAT character (memory.IsFormatRune) as a JSON `\uXXXX`
 // escape (#1488, #1651, #1663). `json.Marshal` escapes C0 and U+2028/U+2029 but
 // leaves NEL (U+0085) and the rest of C1 raw, and an imported tag is stored
 // verbatim, so a NEL in one forged a line in the session-start block. The bidi
@@ -955,14 +927,14 @@ const TagBacktickEscape = "\\u0060"
 func neutralizeTagLabel(s string) string {
 	s = strings.ReplaceAll(neutralizeDelimiters(s), "`", TagBacktickEscape)
 	if !strings.ContainsFunc(s, func(r rune) bool {
-		return isLineEndingOrControl(r) || isInvisibleFormat(r)
+		return isLineEndingOrControl(r) || memory.IsFormatRune(r)
 	}) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 8)
 	for _, r := range s {
-		if isLineEndingOrControl(r) || isInvisibleFormat(r) {
+		if isLineEndingOrControl(r) || memory.IsFormatRune(r) {
 			writeJSONEscape(&b, r)
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/wcatz/ghost/internal/adversarial"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // hasRawControl reports the first rune in s that a reader acts on rather than
@@ -13,7 +14,7 @@ import (
 // that end a line without being a control.
 func hasRawControl(s string) (rune, bool) {
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
+		if unicode.IsControl(r) || memory.IsFormatRune(r) || r == 0x2028 || r == 0x2029 {
 			return r, true
 		}
 	}

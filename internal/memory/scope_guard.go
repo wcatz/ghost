@@ -155,7 +155,7 @@ func checkScope(scope map[string]string) error {
 func validateScopeKeyValue(field, value, key string) error {
 	// Blank: empty or only whitespace/format characters.
 	if strings.TrimFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r)
+		return unicode.IsSpace(r) || IsFormatRune(r)
 	}) == "" {
 		return &ScopeKeyValueError{Field: field, Reason: "empty or blank", Key: key}
 	}

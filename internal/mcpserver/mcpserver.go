@@ -803,13 +803,13 @@ func unsafeTagRune(t string) string {
 		switch {
 		case unicode.IsControl(r):
 			return "control character"
-		case unicode.In(r, unicode.Cf):
+		case memory.IsFormatRune(r):
 			// The whole FORMAT category, not only the bidirectional controls:
 			// the rest of it hides a spelling inside a label rather than
 			// reordering a line, and a tag of `gh` + U+200B + `ost` is a
 			// different label from `ghost` while a reader sees one word. It is
 			// the same class validateScopeKeyValue and blankWriteText already
-			// refuse, and it matches assemble.isInvisibleFormat.
+			// refuse.
 			return "control character"
 		case r == '`':
 			return "backtick"

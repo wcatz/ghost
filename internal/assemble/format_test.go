@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"unicode"
 
 	"github.com/wcatz/ghost/internal/adversarial"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // formatRenderer is one renderer under test: the name a failure reports and
@@ -69,7 +69,7 @@ func TestTwoValuesDifferingOnlyInAFormatCharacterNeverRenderIdentically(t *testi
 // is left is what the rendering shows.
 func stripFormatCharacters(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.In(r, unicode.Cf) {
+		if memory.IsFormatRune(r) {
 			return -1
 		}
 		return r
