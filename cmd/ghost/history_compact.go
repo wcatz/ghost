@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -203,7 +202,15 @@ func printHistoryCompact(w io.Writer, r historyCompactReport) error {
 // the partial report is not a report the operator can compare against.
 func printHistoryCompactLines(w io.Writer, r historyCompactReport) error {
 	for _, p := range r.Projects {
-		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", assemble.Token(p.ProjectID), p.Removed, p.UpdatedAt); err != nil {
+		// The id is stored text, so the line that names it goes through the same
+		// guard the sentences around it use: a token-shaped id is withheld rather
+		// than printed whole, and an id holding a line separator cannot end this
+		// line. The report is printed on the FAILURE path too — a run that stopped
+		// partway prints the projects it already compacted, the failing one
+		// among them, above the error — so a renderer that withheld the id in the
+		// error and printed it in the report would leak it one line earlier.
+		rendered := memory.RefusalArg("project", p.ProjectID)
+		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", rendered, p.Removed, p.UpdatedAt); err != nil {
 			return err
 		}
 		// Disclosed rather than folded into a total: a row whose stamp no layout

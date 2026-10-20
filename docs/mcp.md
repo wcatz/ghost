@@ -125,7 +125,11 @@ the last 24 hours' version rows restated their predecessor, or the table or some
 named memory is within 14 days of a retention cap at the current rate. The repair
 is `ghost history compact`, a CLI command with no MCP equivalent, and the warning
 names it — there is no tool here that removes history rows, because that is an
-operator's decision about a table the agent only reads.
+operator's decision about a table the agent only reads. That command's own report
+names each project it compacted, and it renders that stored project id through the
+same `memory.RefusalArg` renderer this warning's own memory id uses — a
+token-shaped project id, legal because `ghost import` writes an artifact's project
+id verbatim, is withheld rather than printed.
 
 ### Retrieval health
 

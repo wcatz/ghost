@@ -31,7 +31,7 @@ The same shape applies at every level: `ghost mcp nope` and `ghost project` (no 
 
 A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost reflect` and `ghost resolve`, each refused with `expected exactly one project`), a file that is not there (`ghost import`), an unknown flag. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
 
-Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path and a stored timestamp through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data.
+Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path and a stored timestamp through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data. A stored PROJECT id a report names goes through `memory.RefusalArg` instead, because a project id is not token-guarded either (`ghost import` writes an artifact's project id verbatim) and a token-shaped one must be withheld rather than printed in full; an ordinary project id reads quoted there, which is the renderer's one visible change to that line.
 
 ## MCP server
 
@@ -1313,7 +1313,7 @@ it used:
 ```
 history compact (dry run — nothing was written; pass --apply to write)
   removing only versions recorded before 2026-09-28 17:14:07
-  my-project  19 redundant version(s), 1 updated_at restored
+  "my-project"  19 redundant version(s), 1 updated_at restored
 ```
 
 A bound that reaches **past** the default is warned about on **stderr**, in a dry
@@ -1440,7 +1440,13 @@ The refusal names the projects, so an operator can either wait or re-run scoped 
 `--project`. Both that sentence and the one naming the project a run stopped in
 render each stored id through `memory.RefusalArg`: an ordinary id is quoted, a
 token-shaped or over-256-byte one is withheld behind a placeholder naming the field
-and the format, and neither can split the sentence over more than one line.
+and the format, and neither can split the sentence over more than one line. The
+**report's own per-project line** renders its id the same way, and it has to: a
+run that stops partway prints the projects it had already reached — the failing one
+among them — above the error, so a report that named the id in full would hand
+over the value the error sentence withholds, one line earlier. An ordinary id
+therefore reads quoted in the report too, which is the renderer's one visible
+change to that line.
 
 This is the only `ghost history` mode that writes. It opens the store read-write
 like the rest of the command and, under `--apply`, deletes `memory_history` rows and
