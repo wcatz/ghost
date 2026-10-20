@@ -1244,15 +1244,19 @@ func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionRe
 //
 // It is called exactly once per run, and WHERE depends on what is knowable. A
 // dry run writes nothing so nothing can fail, so it reports before the
-// (absent) write. A run that applies reports after the write, in BOTH
-// promotion states, because the count moves there: the write boundary drops a
-// proposal whose content holds a token-shaped value, and a proposal that was
-// never written is not a memory the project holds. With promotion ON the count
-// moves for a second reason as well — a candidate may fail to become a _global
-// row and land back in the project instead. The pre-apply report is skipped
-// rather than printed optimistically and corrected, because a candidate set
-// large enough to cross the 50% line would otherwise produce a report of a
-// reduction that did not happen, followed by silence about it.
+// (absent) write — and it counts the proposals BEFORE the drop, because the
+// drop of a token-shaped proposal happens inside applyReflection and a dry
+// run never calls it. A dry run's count can therefore differ from the count
+// the apply prints, which counts the proposals that were written. A run that
+// applies reports after the write, in BOTH promotion states, because the
+// count moves there: the write boundary drops a proposal whose content holds
+// a token-shaped value, and a proposal that was never written is not a memory
+// the project holds. With promotion ON the count moves for a second reason as
+// well — a candidate may fail to become a _global row and land back in the
+// project instead. The pre-apply report is skipped rather than printed
+// optimistically and corrected, because a candidate set large enough to cross
+// the 50% line would otherwise produce a report of a reduction that did not
+// happen, followed by silence about it.
 //
 // It takes the slices rather than two pre-counted numbers so the count it
 // reports is derived where it is printed: on the unattended lifecycle path this
@@ -1983,19 +1987,22 @@ func runReflect() {
 	// nobody reads while the exit status stays 0 — so the count it prints has to
 	// be the one that decides whether a memory survived.
 	//
-	// A DRY RUN reports it here: it writes nothing, so nothing can fail and the
-	// count cannot move. An apply reports it after the write instead, in BOTH
-	// promotion states, because the count does move there: the write boundary
-	// drops a proposal whose content holds a token-shaped value, and a proposal
-	// that was never written is not a memory the project holds. Counting the
-	// caller's pre-drop lists said the corpus kept more than it did — a round
-	// whose every proposal was dropped wrote nothing and still announced a
-	// reduction, and a round that kept a third of the corpus after a partial
-	// drop reported the pre-drop count, which crossed the line the warning
-	// names. The promotion-on branch already reported after the write, from the
-	// post-drop sets, for the same reason and one more: a candidate that fails
-	// to become a _global row lands back in the project, so a pre-apply count
-	// of projectMems alone understates retention by the whole candidate set.
+	// A DRY RUN reports it here: it writes nothing, so nothing can fail. It
+	// counts the proposals BEFORE the drop, because the drop of a token-shaped
+	// proposal happens inside applyReflection, which a dry run never calls, so
+	// its count can differ from the count the apply prints. An apply reports it
+	// after the write instead, in BOTH promotion states, because the count does
+	// move there: the write boundary drops a proposal whose content holds a
+	// token-shaped value, and a proposal that was never written is not a memory
+	// the project holds. Counting the caller's pre-drop lists said the corpus
+	// kept more than it did — a round whose every proposal was dropped wrote
+	// nothing and still announced a reduction, and a round that kept a third of
+	// the corpus after a partial drop reported the pre-drop count, which crossed
+	// the line the warning names. The promotion-on branch already reported after
+	// the write, from the post-drop sets, for the same reason and one more: a
+	// candidate that fails to become a _global row lands back in the project, so
+	// a pre-apply count of projectMems alone understates retention by the whole
+	// candidate set.
 	if !apply {
 		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, promotionOutcome{})
 		fmt.Println("Dry run complete. Re-run with --apply to save these results.")
