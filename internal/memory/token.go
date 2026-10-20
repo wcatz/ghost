@@ -22,7 +22,10 @@ package memory
 // to end a line, reorder a line, or hide in one. An allowlist cannot have that
 // problem, because anything not named is quoted rather than trusted.
 
-import "strconv"
+import (
+	"strconv"
+	"unicode"
+)
 
 // SafeToken renders one stored value that a line prints OUTSIDE the «...» data
 // delimiters, written bare only when every character is one a stored name
@@ -68,4 +71,29 @@ func IsSafeTokenRune(r rune) bool {
 		return true
 	}
 	return r == '.' || r == '_' || r == '-' || r == ':' || r == '/' || r == '@' || r == '+'
+}
+
+// IsFormatRune reports whether r is a Unicode FORMAT character — category Cf —
+// and so carries no width of its own and prints as nothing a reader can see.
+//
+// It is exported for the ONE reason IsSafeTokenRune is: the renderers that
+// print stored text and the write boundaries that refuse it ask the class one
+// rune at a time, and a second copy of the rule is a second rule — the one
+// nobody tests is the one that ships the bug.
+//
+// The class is the WHOLE of category Cf rather than the bidirectional subset
+// the renderers escaped first (#1649, #1651): the bidi controls reorder the
+// rest of a line, and the rest of them (U+200B ZERO WIDTH SPACE, U+2060 WORD
+// JOINER, U+FEFF ZERO WIDTH NO-BREAK SPACE among them) hide a spelling inside
+// one, so a value that differs from another only in one of them prints as the
+// other.
+//
+// The lower bound is a fast path and not a second rule: the lowest FORMAT
+// character is SOFT HYPHEN (U+00AD), and every code point below it is assigned
+// and cannot become one.
+func IsFormatRune(r rune) bool {
+	if r < 0x00AD {
+		return false
+	}
+	return unicode.In(r, unicode.Cf)
 }

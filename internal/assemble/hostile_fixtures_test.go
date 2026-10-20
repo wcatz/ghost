@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/wcatz/ghost/internal/adversarial"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // hasRawControl reports the first rune in s that a reader acts on rather than
@@ -13,7 +14,7 @@ import (
 // that end a line without being a control.
 func hasRawControl(s string) (rune, bool) {
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
+		if unicode.IsControl(r) || memory.IsFormatRune(r) || r == 0x2028 || r == 0x2029 {
 			return r, true
 		}
 	}
@@ -47,9 +48,6 @@ func TestSharedFormatControlsAreEscapedAtEveryAssembleBoundary(t *testing.T) {
 					if !ok {
 						return
 					}
-					if adversarial.HasZeroWidth(string(bad)) {
-						t.Skip("known: #1663")
-					}
 					t.Errorf("%s(%s) printed U+%04X raw: %q", r.name, p.Name, bad, out)
 				})
 			}
@@ -73,9 +71,6 @@ func TestSharedFormatControlsAreEscapedInAMemoryLine(t *testing.T) {
 				Tags:      []string{p.Text},
 			}.Line()
 			if bad, ok := hasRawControl(line); ok {
-				if adversarial.HasZeroWidth(string(bad)) {
-					t.Skip("known: #1663")
-				}
 				// TAB is the one control Data deliberately leaves alone; the
 				// shared set holds none, so anything found here is a renderer gap.
 				t.Errorf("memory line (%s) printed U+%04X raw:\n%q", p.Name, bad, line)

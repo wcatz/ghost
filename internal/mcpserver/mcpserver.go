@@ -803,7 +803,13 @@ func unsafeTagRune(t string) string {
 		switch {
 		case unicode.IsControl(r):
 			return "control character"
-		case isBidiControl(r):
+		case memory.IsFormatRune(r):
+			// The whole FORMAT category, not only the bidirectional controls:
+			// the rest of it hides a spelling inside a label rather than
+			// reordering a line, and a tag of `gh` + U+200B + `ost` is a
+			// different label from `ghost` while a reader sees one word. It is
+			// the same class validateScopeKeyValue and blankWriteText already
+			// refuse.
 			return "control character"
 		case r == '`':
 			return "backtick"
@@ -812,21 +818,6 @@ func unsafeTagRune(t string) string {
 		}
 	}
 	return ""
-}
-
-// isBidiControl reports whether r is a bidirectional control that can reorder
-// how the rest of a line displays. They are category Cf, so unicode.IsControl
-// (category Cc) does not cover them. This matches assemble.isBidiControl.
-func isBidiControl(r rune) bool {
-	switch {
-	case r == 0x200E || r == 0x200F:
-		return true
-	case r >= 0x202A && r <= 0x202E:
-		return true
-	case r >= 0x2066 && r <= 0x2069:
-		return true
-	}
-	return false
 }
 
 // invalidCategory is the refusal every tool that accepts a category returns for a

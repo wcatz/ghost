@@ -1,6 +1,9 @@
 package adversarial
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // This file is the shared hostile-input set for the boundaries where stored or
 // caller-supplied text leaves the store (#1652). The parse-surface corpus above
@@ -77,6 +80,30 @@ func HasZeroWidth(s string) bool {
 		}
 	}
 	return false
+}
+
+// FormatRunes returns every Unicode FORMAT character (category Cf) — the class
+// a renderer must make visible and a write boundary must refuse.
+//
+// It is the whole category rather than the five characters ZeroWidth names,
+// because the rule is about the class: a Cf rune is an instruction to the
+// renderer rather than text a reader can see, and the bidirectional controls
+// the renderers escaped first are members of it. The sweep reads the Unicode
+// tables rather than a list of its own, so a character a later Unicode version
+// adds is covered without a change here.
+func FormatRunes() []rune {
+	var out []rune
+	for _, rng := range unicode.Cf.R16 {
+		for r := rune(rng.Lo); r <= rune(rng.Hi); r += rune(rng.Stride) {
+			out = append(out, r)
+		}
+	}
+	for _, rng := range unicode.Cf.R32 {
+		for r := rune(rng.Lo); r <= rune(rng.Hi); r += rune(rng.Stride) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // AllControls is FormatControls, LineSeparators and ZeroWidth, for the render
