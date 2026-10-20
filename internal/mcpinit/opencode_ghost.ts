@@ -461,12 +461,17 @@ const setupV2 = async (ctx: ContextV2) => {
 						const oldest = nudgedSessions.keys().next().value
 						if (oldest !== undefined) nudgedSessions.delete(oldest)
 					}
+					// "resume: false" so the stop hook never wakes a finished
+					// session: the reminder is stored with the session and reaches
+					// the agent with the session's next turn. Queued delivery with
+					// session wake-up left a pending entry that resumed finished
+					// sessions later (issue #1658).
 					ctx.session.synthetic({
 						sessionID,
 						text: nudgePromptV2(reason),
 						description: "Ghost save reminder",
-						delivery: "queue",
-						resume: true,
+						delivery: "steer",
+						resume: false,
 					}).catch(() => log(`ghost: ${reason}`))
 				}
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
