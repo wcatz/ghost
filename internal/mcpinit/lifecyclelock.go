@@ -87,7 +87,7 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 	}
 
 	pidPath := filepath.Join(dataDir, "lifecycle-"+id+".pid")
-	claimed, reclaimed, err := claimPidFileReclaim(pidPath)
+	claimed, reclaimedAt, err := claimPidFileReclaim(pidPath)
 	if err != nil {
 		// The claim could not be evaluated, which is not evidence that another
 		// run holds it: reporting it as "held" stopped maintenance for the
@@ -101,8 +101,15 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 	// outcome. Record it now, while this run holds the slot and before it starts
 	// work of its own: the marker then survives even if this run is killed the
 	// same way, and a run that succeeds clears it through FinishLifecycleRun.
+	//
+	// Only when the start stamp covers that claim. The stamp file is never
+	// removed, so it outlives the run that wrote it, and a claim NEWER than the
+	// stamp is a run that died before it stamped — one that burned no cooldown
+	// window, and one whose exit skipped the deferred release (an unlocatable
+	// binary) rather than being killed mid-phase. Neither is a paused
+	// consolidation, and neither is reported.
 	// Best-effort, like every other lifecycle marker write.
-	if reclaimed {
+	if lifecycleStampCoversClaim(dataDir, id, reclaimedAt) {
 		_ = WriteLifecycleFailure(id, nil, UnfinishedLifecycleRunError)
 	}
 	return func() {

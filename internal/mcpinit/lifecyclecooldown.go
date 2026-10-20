@@ -62,21 +62,64 @@ func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
 		return time.Time{}, false
 	}
-	stamp, err := os.Stat(filepath.Join(dataDir, lifecycleLastStartFile(projectID)))
-	if err != nil || !stamp.Mode().IsRegular() {
+	startedAt, ok := lifecycleStartStamp(dataDir, projectID)
+	if !ok {
 		return time.Time{}, false
 	}
 	// Stat before isAlive: the liveness read opens the file, and a FIFO planted
 	// where a claim belongs would block the session start until its writer
 	// appeared. Only a regular file can be a claim.
-	claim, err := os.Stat(filepath.Join(dataDir, "lifecycle-"+projectID+".pid"))
+	claimPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
+	claim, err := os.Stat(claimPath)
 	if err != nil || !claim.Mode().IsRegular() {
 		return time.Time{}, false
 	}
-	if isAlive(filepath.Join(dataDir, "lifecycle-"+projectID+".pid")) {
+	if isAlive(claimPath) {
+		return time.Time{}, false
+	}
+	// The stamp must BELONG to this claim. The stamp file is never removed, so
+	// it outlives the run that wrote it, and a claim newer than the stamp is a
+	// run that died before it stamped — one that burned no cooldown window and
+	// has nothing to report. A run that stamped and then died leaves the stamp
+	// newer than its own claim, which is the pair this looks for.
+	if startedAt.Before(claim.ModTime()) {
+		return time.Time{}, false
+	}
+	return startedAt, true
+}
+
+// lifecycleStartStamp returns the mtime of the project's cooldown stamp, and
+// whether a regular stamp file is there at all. A directory, a device or a
+// socket sitting where the stamp belongs is not a record of a run.
+func lifecycleStartStamp(dataDir, projectID string) (time.Time, bool) {
+	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
+		return time.Time{}, false
+	}
+	stamp, err := os.Stat(filepath.Join(dataDir, lifecycleLastStartFile(projectID)))
+	if err != nil || !stamp.Mode().IsRegular() {
 		return time.Time{}, false
 	}
 	return stamp.ModTime(), true
+}
+
+// lifecycleStampCoversClaim reports whether the project's cooldown stamp is at
+// least as new as a claim taken at claimAt — the same rule
+// unfinishedLifecycleRun applies, for the reclaim path, where the claim file
+// has already been replaced by this process's own and the dead claim's own
+// timestamp is the one that matters.
+//
+// A claim newer than the stamp is a run that died before it stamped: it burned
+// no cooldown window, so there is no paused consolidation to report and no
+// marker to write.
+func lifecycleStampCoversClaim(dataDir, projectID string, claimAt time.Time) bool {
+	if claimAt.IsZero() {
+		return false
+	}
+	startedAt, ok := lifecycleStartStamp(dataDir, projectID)
+	if !ok {
+		return false
+	}
+	return !startedAt.Before(claimAt)
 }
 
 // lifecycleCooldownActive reports whether this project's last lifecycle START is

@@ -773,23 +773,26 @@ func claimPidFile(pidPath string) (bool, error) {
 	return claimed, err
 }
 
-// claimPidFileReclaim is claimPidFile that also reports whether the slot it
-// claimed held a previous, no-longer-live claim. A caller that records run
-// outcomes needs the difference: a dead claim is a run that was killed before
-// it could say anything, and the new owner is the one that can say it now.
+// claimPidFileReclaim is claimPidFile that also reports the previous claim it
+// took the slot from: the mtime of a no-longer-live claim, and the zero time
+// when there was none. A caller that records run outcomes needs the
+// difference — a dead claim is a run that was killed before it could say
+// anything, and the new owner is the one that can say it now — and it needs
+// the dead claim's OWN timestamp, because the claim file is replaced by this
+// process's own as part of taking the slot.
 //
-// reclaimed is true only for a REGULAR file naming no live process. A missing
-// path is a first claim and a non-regular one cannot be a claim at all; neither
-// is a run that left anything unfinished.
-func claimPidFileReclaim(pidPath string) (claimed, reclaimed bool, err error) {
+// A dead claim is reported only for a REGULAR file naming no live process. A
+// missing path is a first claim and a non-regular one cannot be a claim at
+// all; neither is a run that left anything unfinished.
+func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, err error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return false, false, fmt.Errorf("open the claim lock: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("open the claim lock: %w", withoutPath(err))
 	}
 	defer lockFile.Close() //nolint:errcheck
 
 	if err := lockExclusive(lockFile); err != nil {
-		return false, false, fmt.Errorf("lock the claim: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("lock the claim: %w", withoutPath(err))
 	}
 	defer unlockFile(lockFile) //nolint:errcheck
 
@@ -801,16 +804,16 @@ func claimPidFileReclaim(pidPath string) (claimed, reclaimed bool, err error) {
 			// Fall through to the write, which decides whether this path can be
 			// replaced; nothing is reclaimed because nothing here was a claim.
 		} else if isAlive(pidPath) {
-			return false, false, nil
+			return false, time.Time{}, nil
 		} else {
-			reclaimed = true
+			reclaimedAt = prior.ModTime()
 		}
 	}
 	token, haveToken := processStartTime(os.Getpid())
 	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {
-		return false, false, fmt.Errorf("write the claim: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("write the claim: %w", withoutPath(err))
 	}
-	return true, reclaimed, nil
+	return true, reclaimedAt, nil
 }
 
 // lifecycleBookkeepingWritable reports whether the data directory accepts new
