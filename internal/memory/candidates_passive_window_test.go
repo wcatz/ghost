@@ -184,6 +184,177 @@ func thresholdScanFixture(t *testing.T, high, tail int) *Store {
 	return st
 }
 
+// decayedBucket seeds one project bucket whose `n` rows are all of `cat` and
+// `ageDays` old, at one importance.
+//
+// The age is what decides the read: a category that does not decay keeps its
+// rank whatever its age, so the window's last rank stays at its importance and
+// the scan ends at the window's edge, while a decaying category's rank has
+// decayed with the rows and the scan has to read the bucket to its end.
+func decayedBucket(t *testing.T, n int, cat string, ageDays int, importance float64) *Store {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "decayed.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := NewStore(db, nil)
+	ctx := context.Background()
+	if err := st.EnsureProject(ctx, "proj", "proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	created := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -ageDays).Format("2006-01-02 15:04:05")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := tx.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			 VALUES (?, 'proj', ?, 'decay fixture', 'manual', ?, 0, ?, ?)`,
+			fmt.Sprintf("%s%06d", cat[:1], i), cat, importance, created, created,
+		); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return st
+}
+
+// TestPassiveThresholdScanReadsWhatTheStopBounds documents the READ COUNT of
+// the threshold scan on both sides of the stop, because the read it bounds is
+// the read and the two buckets below sit on either side of it.
+//
+// A bucket of rows that DO NOT DECAY holds a window whose last rank is its
+// importance, so the stop fires at the window's edge and the scan reads the
+// window plus the row that proves it, whatever the bucket's size. A bucket of
+// AGED rows of a decaying category holds a window whose last rank has decayed
+// far below their importance, every later row is above it, and the scan reads
+// the bucket to its end.
+//
+// The second figure is the real behaviour, not a bound to hold the code to: the
+// scan's stop is exact, so the window it returns is the same either way, and
+// the price of a window whose rows have aged is a read of the whole bucket.
+func TestPassiveThresholdScanReadsWhatTheStopBounds(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	pol := projectPassivePolicy()
+	pol.OverFetch = 45
+	const rows = 1000
+
+	reads := func(st *Store) int64 {
+		t.Helper()
+		cols, err := passiveColumnsFor(st)
+		if err != nil {
+			t.Fatalf("passiveColumnsFor: %v", err)
+		}
+		req := passiveRequest("proj", pol)
+		req.Now = now
+		resetPassiveKeyScan()
+		if _, err := st.passiveWindow(context.Background(), req, pol, cols); err != nil {
+			t.Fatalf("passiveWindow: %v", err)
+		}
+		return passiveKeyScanReads()
+	}
+
+	// A category that never decays: the window's last rank is its importance.
+	if got := reads(decayedBucket(t, rows, "fact", 400, 0.8)); got != int64(pol.OverFetch)+1 {
+		t.Errorf("a bucket of %d rows that do not decay cost %d reads; the stop ends the scan at the window's edge, so it costs the window plus one row",
+			rows, got)
+	}
+	// A decaying category whose rows have aged: the window's last rank has
+	// decayed with them, so the stop cannot hold and the bucket is read whole.
+	if got := reads(decayedBucket(t, rows, "gotcha", 400, 0.8)); got != rows {
+		t.Errorf("a bucket of %d aged rows of a decaying category cost %d reads; the scan reads such a bucket to its end",
+			rows, got)
+	}
+}
+
+// agedAndFreshBucket seeds one project bucket with two groups of gotchas: `aged`
+// of them are `agedDays` old at importance 0.9, and `fresh` of them are one day
+// old at importance 0.5.
+//
+// The groups are the case the decay order exists for: the aged rows carry the
+// higher importance and their rank has decayed with them, so the fresh rows
+// rank above them however the scan reaches them.
+func agedAndFreshBucket(t *testing.T, aged, fresh int) *Store {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := NewStore(db, nil)
+	ctx := context.Background()
+	if err := st.EnsureProject(ctx, "proj", "proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	insert := func(prefix string, n int, imp float64, ageDays int) {
+		created := now.AddDate(0, 0, -ageDays).Format("2006-01-02 15:04:05")
+		for i := 0; i < n; i++ {
+			if _, err := tx.Exec(
+				`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+				 VALUES (?, 'proj', 'gotcha', ?, 'manual', ?, 0, ?, ?)`,
+				fmt.Sprintf("%s%06d", prefix, i), "aged fixture", imp, created, created,
+			); err != nil {
+				t.Fatalf("insert %s %d: %v", prefix, i, err)
+			}
+		}
+	}
+	insert("aged", aged, 0.9, 400)
+	insert("fresh", fresh, 0.5, 1)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return st
+}
+
+// TestPassiveThresholdScanRanksTheFreshRowsAboveTheAgedOnes is the case a
+// read-bound cannot be allowed to break: the window's best rows by importance
+// are the aged ones, and their rank has decayed with them, so the rows the
+// block should show are the fresh ones.
+//
+// The scan reads in importance order, so it meets the aged rows first and
+// fills the window with them. The fresh rows follow, each of them ranks above
+// the aged ones, and they take the window's places — which is what the full
+// ranking of the bucket returns, and what the block must show.
+func TestPassiveThresholdScanRanksTheFreshRowsAboveTheAgedOnes(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	pol := projectPassivePolicy()
+	pol.OverFetch = 45
+	st := agedAndFreshBucket(t, 100, 100)
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("passiveColumnsFor: %v", err)
+	}
+	req := passiveRequest("proj", pol)
+	req.Now = now
+	window, err := st.passiveWindow(context.Background(), req, pol, cols)
+	if err != nil {
+		t.Fatalf("passiveWindow: %v", err)
+	}
+	ids := idsOfMemories(window)
+	if len(ids) != pol.OverFetch {
+		t.Fatalf("the window holds %d rows, want %d", len(ids), pol.OverFetch)
+	}
+	for _, id := range ids {
+		if !strings.HasPrefix(id, "fresh") {
+			t.Fatalf("the window holds the aged row %s; the fresh rows outrank it: %v", id, ids)
+		}
+	}
+	// The full ranking of the bucket is the oracle: it reads every row, ranks
+	// them, and cuts the window.
+	if want := legacyPassiveWindow(t, st, pol, req, cols); !eqStrings(ids, want) {
+		t.Errorf("the window differs from the full ranking:\n got %v\nwant %v", ids, want)
+	}
+}
+
 // TestPassiveThresholdScanReadsDoNotGrowWithTheTail pins the READ COUNT, not a
 // duration: a bucket whose top rows are high-importance and whose tail is far
 // below the window must cost the window's size, so growing the tail from one
