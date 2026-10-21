@@ -1672,7 +1672,7 @@ ghost upgrade --allow-prerelease   # install a prerelease (an rc, a beta)
 ghost upgrade --allow-unattested   # install when the attestation cannot be checked
 ```
 
-A plugin-managed binary refuses this path because the plugin manager owns it; use `/plugin update` in Claude Code instead.
+A plugin-managed binary refuses this path because the plugin manager owns it; use `/plugin update` in Claude Code instead. The refusal is a diagnostic on stderr and the command exits `1`, like every other refusal here — a bad argument, an unknown binary path, a downgrade, a prerelease, or an attestation that is missing, unreachable or unverifiable. Nothing was downloaded, verified or replaced on that path, so the exit status has to say so; only "already up to date" exits `0`.
 
 **What is verified.** The downloaded archive has to agree with three things before a single byte reaches the installed binary:
 
