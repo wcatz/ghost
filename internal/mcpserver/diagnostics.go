@@ -56,6 +56,20 @@ type diagnosticRead struct {
 	release func()
 }
 
+// end releases the read: it rolls the read transaction back, so the read
+// handle's one connection is free again.
+//
+// It is safe to call more than once, so a caller can release the read as soon
+// as its store statements are done and still defer the release for the paths
+// that return early.
+func (d *diagnosticRead) end() {
+	if d == nil || d.release == nil {
+		return
+	}
+	d.release()
+	d.release = nil
+}
+
 // openDiagnosticRead returns the read surface a diagnostic tool call reads
 // through.
 //

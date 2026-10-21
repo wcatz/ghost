@@ -3880,14 +3880,21 @@ func (s *Server) registerTools() {
 			OpenWorldHint: boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		// The embedder's own diagnostics are NETWORK calls, and they run BEFORE
+		// the diagnostic read is opened: the read handle has one connection, and
+		// a report that held it across a probe would make a concurrent search
+		// wait for the probe — up to seven seconds of it — for a connection the
+		// probe does not need (#1738). The lines are rendered below, in the
+		// place the report wants them.
+		embedderLines := s.embedderDiagnosticLines(ctx)
+
 		// The diagnostic read: the store's read-only handle, so this report does
 		// not wait behind a write in flight (#1738). Every read below goes
 		// through it, and it is ONE read transaction, so the counts in the
-		// report describe one committed state.
+		// report describe one committed state. It is released as soon as the
+		// store's statements are done.
 		read := s.openDiagnosticRead(ctx)
-		if read.release != nil {
-			defer read.release()
-		}
+		defer read.end()
 
 		projects, err := read.reader.ListProjects(ctx)
 		if err != nil {
@@ -3983,15 +3990,11 @@ func (s *Server) registerTools() {
 				// (#1461).
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — coverage could not be read: %v\n", err)
 			}
-			// Diagnose the Ollama side when the embedder supports it.
-			if d, ok := s.embedder.(embedderDiagnostics); ok {
-				if !d.Alive(ctx) {
-					sb.WriteString("  ⚠ Ollama unreachable\n")
-				} else if present, err := d.HasModel(ctx); err != nil {
-					fmt.Fprintf(&sb, "  ⚠ could not check Ollama model %q: %v\n", d.Model(), err)
-				} else if !present {
-					fmt.Fprintf(&sb, "  ⚠ model %q not installed in Ollama — run: ollama pull %s\n", d.Model(), d.Model())
-				}
+			// Diagnose the Ollama side when the embedder supports it. The lines
+			// were read before the diagnostic read was opened, so no probe runs
+			// while the read handle's one connection is held.
+			for _, line := range embedderLines {
+				sb.WriteString(line)
 			}
 		} else {
 			sb.WriteString("**Embeddings:** disabled\n")
@@ -4069,6 +4072,11 @@ func (s *Server) registerTools() {
 		// and a block inserted above them would move their anchor.
 		s.writeRetrievalAuditBlock(ctx, &sb, read.store)
 
+		// The store's statements are done, so the read handle's one connection
+		// goes back now: a search that needs it does not wait for the rest of
+		// this answer, which is string building.
+		read.end()
+
 		// The rows sit between the count line and the totals, so the framing is
 		// the text before them and the text after them, and only the rows are
 		// cuttable. sb holds everything but the rows.
@@ -4098,11 +4106,12 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
 		// The diagnostic read: the store's read-only handle, so this listing does
 		// not wait behind a write in flight (#1738). It is ONE read transaction,
-		// so the names and the counts below describe one committed state.
+		// so the names and the counts below describe one committed state, and it
+		// is released as soon as the store's statements are done: the read
+		// handle has one connection, and a search that needs it must not wait
+		// for this listing.
 		read := s.openDiagnosticRead(ctx)
-		if read.release != nil {
-			defer read.release()
-		}
+		defer read.end()
 
 		projects, err := read.reader.ListProjects(ctx)
 		if err != nil {
@@ -4133,6 +4142,10 @@ func (s *Server) registerTools() {
 			rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n",
 				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count))
 		}
+		// The store's statements are done, so the read handle's one connection
+		// goes back now.
+		read.end()
+
 		// Whole rows are cut from the end to the response budget, in the order
 		// the store lists them (#1541).
 		text, _ := capRowsToResponseBudget("## Ghost Projects\n\n", rows, s.searchResponseCap(), listProjectsCutAdvice)
