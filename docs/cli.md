@@ -211,6 +211,8 @@ Supported source tokens include `claude-code`, `opencode`, `codex`, and `goose`.
 
 A stop or session-end payload names its transcript by path, and Ghost opens that path only after confirming it is a regular file: a FIFO, device, socket or directory is logged with one fail-open line and skipped unopened. Opening a FIFO for reading blocks until a writer appears, which would hang a hook that is documented to fail open.
 
+The same rule covers the per-project lifecycle claim — the file that says a maintenance run already holds this project — which the stop hook reads before it spawns one and the session-end hook reads too. The claim is opened without blocking and refused unless the open file is a regular one, so a FIFO, device, directory or symlink planted there reads as **no claim** and the hook spawns the chain it was about to spawn instead of waiting on a claim that was never going to answer. The data directory is created 0700, so only your own processes can put one there.
+
 The same payload path is what names the one entry the hook will sweep in a host's temp directory. The opencode plugin materializes the session's `messages.jsonl` under a `ghost-` plus six-character mkdtemp directory there, and after the run the hook removes exactly that layout — that file alone in a real directory of that name, owned by the current user, directly inside a temp base the host could have used — as two plain removals, the file and then the directory, never a recursive one, so an entry appearing between the check and the removal keeps the directory. Every other `ghost-…` entry of the temp directory is left in place: a pending audit sidecar file, another session's directory, a harness scratch directory and a bench directory all fail the name, layout or ownership check. A codex payload never sweeps anything at all, because codex hands over its own rollout file under its own home rather than a directory materialized in the temp directory. Every failure leaves the entry in place; the sweep is best-effort.
 
 `ghost hook` is normally called by an MCP client or lifecycle adapter, not by hand.
@@ -1458,6 +1460,9 @@ write lock over a whole store's history, and running it twice is a no-op the sec
 time. It refuses to run while a lifecycle run holds any of the projects' locks, and
 it checks **every** project before it touches any of them — a refusal that arrived
 after the first project had been compacted would be a check that protects nothing.
+That check reads each project's claim the way the stop hook reads it: a claim path
+that is not a regular file is no claim, so a FIFO planted where the claim belongs
+cannot hang the command that is asking whether a run is in progress.
 The refusal names the projects, so an operator can either wait or re-run scoped with
 `--project`. Both that sentence and the one naming the project a run stopped in
 render each stored id through `memory.RefusalArg`: an ordinary id is quoted, a

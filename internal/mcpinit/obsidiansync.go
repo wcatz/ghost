@@ -90,9 +90,15 @@ func ensureObsidianSyncRunning() {
 // processStartTime), in which case a live PID additionally has to still
 // carry that token to be reported alive — see isProcessAlive in
 // obsidiansync_unix.go / obsidiansync_windows.go.
+//
+// A path that is not a regular file is no PID file at all, and it is answered
+// without opening it: the read this used to do blocked on a FIFO planted
+// where the lifecycle claim belongs, which hung the stop hook, the session-end
+// hook and `ghost history compact`, and a character device was read without a
+// bound. See readPIDFile.
 func isAlive(pidPath string) bool {
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
+	data, ok := readPIDFile(pidPath)
+	if !ok {
 		return false
 	}
 	pidStr, token, haveToken := strings.Cut(strings.TrimSpace(string(data)), ":")
