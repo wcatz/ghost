@@ -635,13 +635,6 @@ jobs:
               || "$1" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]
           }
 
-          # A line that names a tool attempt or a permission decision is
-          # the MODEL's text, not the provider's: opencode echoes a
-          # rejected tool call in its own stderr, and the command it
-          # names is the model's own. A reason may classify an outage
-          # ONLY when the model produced nothing.
-          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
-
           declare -a candidates=()
           declare -A seen=()
           add_candidate() {
@@ -793,12 +786,15 @@ jobs:
             fi
             [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
             printf '%s: %s\n' "$model" "$reason" >> "$probe_failure_file"
-            # The probe's own stderr may name a tool attempt, which is the
-            # model's text. A reason may classify an outage only when the
-            # model produced nothing.
-            if grep -Eqi "$MODEL_ACTED_STDERR" "$probe_err" 2>/dev/null; then
-              printf 'probe acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
-            fi
+            # Whether the model acted is ONE tested rule, and it is read
+            # from the TRUSTED copy of the scripts: the probe's event
+            # stream AND the process's own stderr. A reason may
+            # classify an outage only when the model produced nothing.
+            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
+              --events "$probe_out" --stderr "$probe_err" \
+              --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+              || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
+                   echo "::warning::the review model rule could not be consulted"; }
             # The reason is provider output and it is not printed: the
             # classification reads it, and the log says which model was
             # skipped.
@@ -887,12 +883,6 @@ jobs:
           # The model's own document, kept apart from the reasons: see
           # the note where it is written.
           : > "${RUNNER_TEMP}/free-review-validation.txt"
-          # A line that names a tool attempt or a permission decision is
-          # the MODEL's text, not the provider's: opencode echoes a
-          # rejected tool call in its own stderr, and the command it
-          # names is the model's own. A reason may classify an outage
-          # ONLY when the model produced nothing.
-          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
           free_review_success=0
           free_attempt=0
           if [ -s "$free_models_file" ]; then
@@ -952,23 +942,17 @@ jobs:
                 break
               fi
 
-              # The model ACTED if its event stream holds anything that
-              # is not an error event, or the process's own stderr
-              # reports a rejected permission or a tool attempt. A reason
-              # may classify an outage ONLY when the model produced
-              # nothing: a stream that is not parseable counts as acted,
-              # so this fails closed.
-              model_acted=0
-              if [ -s model-reply.txt ] \
-                 && ! jq -s -e 'all(.[]; .type == "error")' model-reply.txt >/dev/null 2>&1; then
-                model_acted=1
-              fi
-              if grep -Eqi "$MODEL_ACTED_STDERR" model-stderr.txt 2>/dev/null; then
-                model_acted=1
-              fi
-              if [ "$model_acted" = 1 ]; then
-                printf 'the model acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
-              fi
+              # Whether the model acted is ONE tested rule, and it is
+              # read from the TRUSTED copy of the scripts: the event
+              # stream AND the process's own stderr. A reason may
+              # classify an outage only when the model produced
+              # nothing: a stream that does not parse counts as acted,
+              # so the rule fails closed.
+              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
+                --events model-reply.txt --stderr model-stderr.txt \
+                --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+                || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
+                     echo "::warning::the review model rule could not be consulted"; }
 
               free_failure_reason=$(
                 {
@@ -1128,23 +1112,16 @@ jobs:
             exit 0
           fi
 
-          # The model ACTED if its event stream holds anything that is
-          # not an error event, or the process's own stderr reports a
-          # rejected permission or a tool attempt. A reason may classify
-          # an outage ONLY when the model produced nothing: a stream that
-          # is not parseable counts as acted, so this fails closed.
-          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
-          model_acted=0
-          if [ -s model-reply.txt ] \
-             && ! jq -s -e 'all(.[]; .type == "error")' model-reply.txt >/dev/null 2>&1; then
-            model_acted=1
-          fi
-          if grep -Eqi "$MODEL_ACTED_STDERR" model-stderr.txt 2>/dev/null; then
-            model_acted=1
-          fi
-          if [ "$model_acted" = 1 ]; then
-            printf 'the model acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
-          fi
+          # Whether the model acted is ONE tested rule, and it is read
+          # from the TRUSTED copy of the scripts: the event stream AND
+          # the process's own stderr. A reason may classify an outage
+          # only when the model produced nothing: a stream that does
+          # not parse counts as acted, so the rule fails closed.
+          python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
+            --events model-reply.txt --stderr model-stderr.txt \
+            --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+            || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
+                 echo "::warning::the review model rule could not be consulted"; }
 
           reason=$(
             {
@@ -1201,9 +1178,23 @@ jobs:
           classification="failure"
           cause="no valid free or paid review result was produced"
           model_acted=""
+          # The marker holds what the ONE tested rule found: "acted" when
+          # the model produced something of its own, and "unknown" when
+          # the rule could not be consulted at all - a base branch that
+          # predates it cannot answer. The rule is read from the TRUSTED
+          # copy of the scripts, so a pull request cannot edit the
+          # question.
+          marker=""
           if [ -s "${RUNNER_TEMP}/model-acted.txt" ]; then
-            model_acted="true"
+            marker="$(tr '\n' ' ' < "${RUNNER_TEMP}/model-acted.txt")"
           fi
+          case "${marker}" in
+            *acted*) model_acted="true" ;;
+          esac
+          rule_unknown=0
+          case "${marker}" in
+            *unknown*) rule_unknown=1 ;;
+          esac
           if [ -f "${RUNNER_TEMP}/base-scripts/review_outcome.py" ]; then
             report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py" \
               --free-status "${FREE_STATUS}" \
@@ -1231,6 +1222,15 @@ jobs:
                 echo "::warning::the review outcome helper did not answer; treating the run as a failure"
                 ;;
             esac
+            if [ "${rule_unknown}" = 1 ] && [ "${classification}" = unavailable ]; then
+              # The rule that says whether the model acted could not be
+              # consulted, so the run cannot be told apart from one
+              # where the model acted: it is never an outage. It fails
+              # closed with the DEFAULT cause, because no cause can be
+              # supported from a run nobody read.
+              classification="failure"
+              cause="no valid free or paid review result was produced"
+            fi
           else
             echo "::notice::the base branch carries no review_outcome.py; keeping today's behaviour"
             if [ "${FREE_STATUS}" = success ] || [ "${PAID_STATUS}" = success ]; then
