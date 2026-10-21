@@ -894,7 +894,7 @@ const evidenceAdvice = "  A memory left out because one of its evidence records 
 // out is the TRAVEL of the edge, not the edge.
 //
 // The field that stopped it is named on the `!` line above, and correcting it
-// is an edit of the database, which is the same answer the credential advice
+// is an edit of the database, which is the same answer the token-field advice
 // gives for the fields no tool writes.
 const linkAdvice = "  An edge left out is a claim this store still holds: the artifact does not carry it, so the claim does not travel with this export, and the demotion it causes stays here. The field that stopped it is named above, and no tool edits an edge — `ghost supersede <project> --withdraw <source> <target> --apply` (or the ghost_link_withdraw tool) withdraws a claim you do not want, and correcting the field itself is an edit of the database."
 
