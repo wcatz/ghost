@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -393,20 +394,91 @@ func TestMarkerValidityIsDecidedByFileOrder(t *testing.T) {
 	}
 }
 
-func TestSessionIdIsSanitisedIntoTheMarkerName(t *testing.T) {
+// The session id is free text from the host payload, so the marker is named by
+// a digest of it and never by the id itself: a name that folded would let two
+// sessions share one ledger.
+func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 	newMomentFixture(t)
-	for id, want := range map[string]string{
-		"abc-123":    "working-moment-abc-123.log",
-		"../../evil": "working-moment-.._.._evil.log",
-		"a/b\\c:d e": "working-moment-a_b_c_d_e.log",
-	} {
+	for _, id := range []string{"abc-123", "../../evil", "a/b\\c:d e", strings.Repeat("z", 200)} {
 		p := momentMarkerPath(id)
-		if filepath.Base(p) != want || filepath.Base(filepath.Dir(p)) != "ghost" {
-			t.Errorf("marker for %q = %q, want a file %q directly in the data dir", id, p, want)
+		base := filepath.Base(p)
+		if filepath.Base(filepath.Dir(p)) != "ghost" {
+			t.Errorf("marker for %q = %q, want a file directly in the data dir", id, p)
+		}
+		stem := strings.TrimSuffix(strings.TrimPrefix(base, workMomentMarkerPrefix), workMomentMarkerSuffix)
+		raw, err := hex.DecodeString(stem)
+		if stem == base || err != nil || len(raw) != 16 {
+			t.Errorf("marker for %q = %q, want %s<16 hex-encoded bytes>%s", id, base, workMomentMarkerPrefix, workMomentMarkerSuffix)
 		}
 	}
 	if p := momentMarkerPath("  "); p != "" {
 		t.Errorf("blank session id produced %q", p)
+	}
+	// The same id always names the same marker: the ledger is where the
+	// session-start block wrote it and where the delivery reads it.
+	if p, q := momentMarkerPath("sess-a"), momentMarkerPath("sess-a"); p != q {
+		t.Errorf("one session id named two markers: %q and %q", p, q)
+	}
+	// Two ids that fold onto one sanitized name must not share a file.
+	for _, pair := range [][2]string{{"a b", "a_b"}, {"sess a", "sess_a"}} {
+		if p, q := momentMarkerPath(pair[0]), momentMarkerPath(pair[1]); p == q {
+			t.Errorf("%q and %q share the marker %q", pair[0], pair[1], p)
+		}
+	}
+}
+
+// Two session ids that fold onto one sanitized name — one holding a space
+// where the other holds an underscore, or two sharing their first 80
+// characters — must not share a ledger: the second session would find the row
+// already delivered and its bytes already spent.
+func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
+	f := newMomentFixture(t)
+	const msg = "why does the quartz_migrate step deadlock on ci"
+	for _, c := range []struct{ name, first, second string }{
+		{"a space against an underscore", "sess a", "sess_a"},
+		{"a shared 80-character prefix", strings.Repeat("a", 80) + "1", strings.Repeat("a", 80) + "2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out := f.submit(c.first, msg); out == "" {
+				t.Fatalf("control: the first session delivered nothing")
+			}
+			if out := f.submit(c.second, msg); out == "" {
+				t.Errorf("%q and %q share one ledger, so the second session was silenced by the first", c.first, c.second)
+			}
+		})
+	}
+}
+
+// A marker an older build wrote under the sanitized stem is never read — that
+// name is not injective, so reading it would give two sessions one ledger
+// again — and the age sweep removes it, so it does not sit in the data
+// directory for ever.
+func TestAMarkerUnderTheOldNameIsNeverReadAndIsSwept(t *testing.T) {
+	f := newMomentFixture(t)
+	legacy := filepath.Join(f.dataDir, "working-moment-sess_a.log")
+	if err := os.WriteFile(legacy, []byte("D start 9000 mgotcha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The naming does not point at it, and its contents are not read: a
+	// session starts with an empty ledger, not with another one's rows.
+	if p := momentMarkerPath("sess a"); p == legacy {
+		t.Errorf("the marker path points at the old name %q", legacy)
+	}
+	st, err := readMomentState(momentMarkerPath("sess a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.delivered["mgotcha"] {
+		t.Errorf("the old name's marker was read: %v", st.delivered)
+	}
+	// The sweep takes it once it is past the horizon.
+	aged := time.Now().Add(-workMomentMarkerMaxAge - time.Hour)
+	if err := os.Chtimes(legacy, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	recordSessionStartDelivery("sess-sweep", []string{"x"}, 10)
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("a marker under the old name survived the sweep: %v", err)
 	}
 }
 

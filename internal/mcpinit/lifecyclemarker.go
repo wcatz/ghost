@@ -449,17 +449,23 @@ func LifecycleFailureMarkerFile(project string) string {
 	return projectMarkerFile(project)
 }
 
-// markerStem is the first lifecycleMarkerStemBytes of the project's SHA-256,
-// hex-encoded. 128 bits makes an accidental collision between two projects'
-// markers a non-event, and the prefix-plus-"-" shape keeps the file inside
-// the lifecycle-last-failure-*.json glob the no-project read uses.
-func markerStem(project string) string {
-	sum := sha256.Sum256([]byte(project))
-	return hex.EncodeToString(sum[:lifecycleMarkerStemBytes])
+// markerStem is the first markerStemBytes of the SHA-256 of a name,
+// hex-encoded. 128 bits makes an accidental collision between two names'
+// markers a non-event.
+//
+// It names the lifecycle failure marker's file, where the prefix-plus-"-" shape
+// keeps the file inside the lifecycle-last-failure-*.json glob the no-project
+// read uses, and the working-moment marker's file, on the SESSION id rather
+// than on a project: that id is free text from the host payload, and a name
+// that folded (see sanitizeMarkerProject) would give two sessions one ledger,
+// so one session's delivered rows would silence another's.
+func markerStem(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:markerStemBytes])
 }
 
-// lifecycleMarkerStemBytes is how much of the digest names the file.
-const lifecycleMarkerStemBytes = 16
+// markerStemBytes is how much of the digest names the file.
+const markerStemBytes = 16
 
 // oldProjectMarkerFile is the name an older build gave a project's marker:
 // the sanitized stem. Never written now. It is NOT injective — a marker found
@@ -473,8 +479,9 @@ func oldProjectMarkerFile(project string) string {
 // outside the common set becomes "_" rather than being dropped, and the
 // result is capped against absurd lengths. It is NOT injective: "my project"
 // and "my_project" both map to "my_project", which is why the lifecycle
-// failure marker no longer keys on it (see projectMarkerFile) and only reads
-// its old names through oldProjectMarkerFile.
+// failure marker no longer keys on it (see projectMarkerFile), only reads its
+// old names through oldProjectMarkerFile, and why the working-moment marker
+// names its file by a digest of the session id (see markerStem) instead.
 func sanitizeMarkerProject(project string) string {
 	var b strings.Builder
 	for _, r := range project {
