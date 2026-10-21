@@ -97,13 +97,17 @@ func settingsPath() (string, error) {
 // One leading UTF-8 byte-order mark (what a Windows editor or PowerShell 5.1
 // `-Encoding UTF8` writes) is stripped before decoding, because Claude Code
 // itself reads such a file; save puts it back, so the file keeps its mark.
+//
+// The read goes through readHostConfigFile, so a path that is not a regular
+// file — a FIFO, a device — is refused by name instead of blocking the open
+// until a writer appears.
 func loadSettings(path string) (*settingsFile, error) {
 	s := &settingsFile{
 		path: path,
 		raw:  make(map[string]json.RawMessage),
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readHostConfigFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
 	}
@@ -144,7 +148,12 @@ func (s *settingsFile) save() error {
 	// run creates settings.json, and it is the SECOND run whose save sees a
 	// file to back up — ghost's own output. `ghostManaged` is that case, and
 	// only a file with user content of its own is backed up.
-	if data, err := os.ReadFile(s.path); err == nil && !s.ghostManaged {
+	//
+	// The read is readHostConfigFile's, for the same reason every other read
+	// of this path is: a file that is not a regular file cannot be captured,
+	// and reading it could block. A path that cannot be read is simply not
+	// backed up, exactly as an unreadable file never was.
+	if data, err := readHostConfigFile(s.path); err == nil && !s.ghostManaged {
 		if err := writeBackupOnce(s.path+".bak", data); err != nil {
 			return err
 		}

@@ -120,7 +120,7 @@ func PluginInstalled() bool {
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
+	data, err := readHostConfigFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"))
 	if err != nil {
 		return false
 	}

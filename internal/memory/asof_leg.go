@@ -245,19 +245,16 @@ type asOfHit struct {
 }
 
 // candidatesAsOf is the whole historical retrieval: one read of the recorded
-// set, one keyword pass over the versions that matched, the same window,
-// decay and status demotion the current path applies, and the supersede
-// demotion the recorded supersede sequence supports.
+// set, one keyword pass over the versions that matched, the same window and
+// decay the current path applies, and the demotion the recorded supersede
+// sequence supports.
 //
 // What it deliberately does NOT do is borrow anything that only describes the
 // present. No vector leg (an embedding is a vector of the text as it is now),
 // no link read (memory_links has no history), no near-duplicate demotion (same
 // reason), no scope narrowing against the live pool (the pool IS the historical
 // set). Each of those is a way to answer a question about T with a fact about
-// now, and the caller is told which of them did not run. The status demotion
-// is the one demotion that DOES apply, because both of its inputs — resolved_at
-// and project_id — are versioned: it describes the row as it stood at T rather
-// than borrowing the present's.
+// now, and the caller is told which of them did not run.
 func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p SearchParams, ftsTopK int, set *CandidateSet) (*CandidateSet, error) {
 	at := asOfInstant(req)
 	asof, err := ReadMemoriesAsOf(ctx, cand.queryDB(), req.Mode, req.ProjectID, at)
@@ -328,37 +325,15 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 		// The keyword-only base the FTS paths use (see decayRank): 1/(K+rank+1).
 		// Fusion has no second leg to fuse, so the rank-based base is the whole
 		// score rather than one contribution to a sum.
-		//
-		// The status demotion the current path applies (demoteStatus) applies
-		// here too, and it is the SAME factor: a resolved row, and a `_global`
-		// row in a project-scoped search, are demoted rather than excluded. Its
-		// inputs are the VERSION's — resolved_at and project_id come from the
-		// version row — so the demotion describes the row as it stood at T and
-		// not as it stands now, which is the whole point of a historical read.
-		//
-		// It scales the BASE rather than the composite, which is the same place
-		// the current path scales the fused score: the base is a rank score
-		// whose neighbours sit within a percent or two of each other, so
-		// halving it sinks the row below the rows around it, while a halved
-		// composite would leave a demoted row ahead of a live one whose
-		// importance is under half its own.
-		scores[hits[i].row.ID] = 1.0 / float64(p.RRFK+i+1) *
-			statusDemotionFactor(hits[i].row.ResolvedAt != nil, hits[i].row.ProjectID, p.ProjectID)
+		scores[hits[i].row.ID] = 1.0 / float64(p.RRFK+i+1)
 	}
 
 	// The window and the tail, cut exactly as the current path cuts them: the
 	// window is the top Fetch.Limit by base, decay reorders what is left of it,
 	// and the tail is the rest in the same decay order so a predicate that
 	// removes a window row is backfilled by the row that would have ranked next.
-	//
-	// The cut is by the BASE, and the base carries the demotion, so the
-	// demotion owns the cut the way it owns the current path's: a live project
-	// row that only a demoted row was keeping out of the window takes that
-	// slot. Cutting by the relevance order instead would make the window the
-	// head of one ranking and its answer the order of another.
-	ordered := asOfScoredOrder(hits, scores)
-	windowRows := make([]Memory, 0, min(len(ordered), req.Fetch.Limit))
-	for i, h := range ordered {
+	windowRows := make([]Memory, 0, min(len(hits), req.Fetch.Limit))
+	for i, h := range hits {
 		if i >= req.Fetch.Limit {
 			break
 		}
@@ -367,7 +342,7 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	selected := decayRank(windowRows, scores, p, req.Fetch.Limit, at)
 	selected = asOfSupersedeDemote(selected, hits)
 
-	tail := asOfTail(ordered, selected, req.Fetch.Limit, scores, at)
+	tail := asOfTail(hits, req.Fetch.Limit, scores, at)
 
 	rows := make([]Candidate, 0, len(selected)+len(tail))
 	for _, m := range append(selected, tail...) {
@@ -423,28 +398,6 @@ func asOfSupersedeDemote(window []Memory, hits []asOfHit) []Memory {
 	return StableDemote(window, func(m Memory) string { return m.ID }, penalty)
 }
 
-// asOfScoredOrder is the hits in the order their base scores rank them, with
-// the id as the tie-break so two reads of the same instant agree.
-//
-// The relevance order the hits were sorted into — matched terms, then the
-// historical composite — is the order the base score was derived from, so the
-// two orders differ only where the status demotion moved a row: the demotion
-// scales the base, and the scaled base is what the window and the tail are cut
-// by.
-func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
-	ordered := make([]asOfHit, len(hits))
-	copy(ordered, hits)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		si := scores[ordered[i].row.ID]
-		sj := scores[ordered[j].row.ID]
-		if si != sj {
-			return si > sj
-		}
-		return ordered[i].row.ID < ordered[j].row.ID
-	})
-	return ordered
-}
-
 // asOfTail is the rows the window cut, in the same order the window came back
 // in, and BOUNDED at the window like hydrateTail's. It exists as a function
 // rather than a sort.SliceStable at the call site because the current path's tail
@@ -458,18 +411,15 @@ func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
 // The bound is disclosed rather than silent: the keyword leg's Truncated status
 // says the leg was cut short, and a caller that trusts CoverageComplete instead
 // learns nothing from this function either way.
-//
-// The rows it holds are the ones the window did not take, in the scored order
-// the window was cut from — the window's own rows are named by the window, not
-// by their place in the relevance order, so a row the demotion pushed out of
-// the window is a tail row and a row the demotion pulled into it is not.
-func asOfTail(ordered []asOfHit, window []Memory, limit int, scores map[string]float64, at time.Time) []Memory {
-	taken := make(map[string]bool, len(window))
-	for _, m := range window {
-		taken[m.ID] = true
+func asOfTail(hits []asOfHit, limit int, scores map[string]float64, at time.Time) []Memory {
+	taken := make(map[string]bool, limit)
+	for i := range hits {
+		if i < limit {
+			taken[hits[i].row.ID] = true
+		}
 	}
-	tail := make([]Memory, 0, min(len(ordered), limit))
-	for _, h := range ordered {
+	tail := make([]Memory, 0, min(len(hits), limit))
+	for _, h := range hits {
 		if len(tail) == limit {
 			break
 		}

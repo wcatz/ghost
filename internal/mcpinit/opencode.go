@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -82,7 +83,7 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 	_, _ = fmt.Fprintln(w, "\n[3/3] Installing lifecycle plugin...")
 	changed, err := installOpencodePlugin(w, ghostBin, dryRun)
 	if err != nil {
-		return retryHint(err)
+		return stepError(err)
 	}
 	if changed && !dryRun {
 		_, _ = fmt.Fprintln(w, "Restart opencode to activate.")
@@ -134,9 +135,16 @@ func installOpencodePlugin(w io.Writer, ghostBin string, dryRun bool) (bool, err
 	}
 	want := renderOpencodeGhostPlugin(ghostBin)
 
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == want {
+	existing, err := readHostConfigFile(path)
+	if err == nil && string(existing) == want {
 		_, _ = fmt.Fprintf(w, "  ✓ lifecycle plugin already installed (%s)\n", path)
 		return false, nil
+	}
+	// Only a missing plugin proceeds to a write. A path that is not a regular
+	// file, or one that cannot be read, is refused by name rather than renamed
+	// over: the write would replace what is there without knowing what it is.
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	if dryRun {
@@ -339,7 +347,7 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 		data := src.data
 		if data == nil {
 			var readErr error
-			if data, readErr = os.ReadFile(src.path); readErr != nil {
+			if data, readErr = readHostConfigFile(src.path); readErr != nil {
 				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr), opencodeMCPUnreadable
 			}
 		}

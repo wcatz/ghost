@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
@@ -137,8 +139,10 @@ func Status(w io.Writer) (bool, error) {
 				total++
 				encoded := claudeimport.EncodeProjectPath(p.Path)
 				target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
-				if data, err := os.ReadFile(target); err == nil && strings.Contains(string(data), "stored in Ghost") {
+				if data, err := readHostConfigFile(target); err == nil && strings.Contains(string(data), "stored in Ghost") {
 					redirected++
+				} else if errors.Is(err, errNotRegularFile) {
+					_, _ = fmt.Fprintf(w, "  ! %s \u2014 %v\n", assemble.Label(p.Name), err)
 				}
 			}
 			check(redirected == total,
@@ -193,9 +197,11 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	pluginOK := false
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
-	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findGhostBinary()) {
+	} else if data, rerr := readHostConfigFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findGhostBinary()) {
 		pluginOK = true
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
+	} else if errors.Is(rerr, errNotRegularFile) {
+		check(false, "", fmt.Sprintf("lifecycle plugin unreadable: %v", rerr))
 	} else {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
@@ -342,8 +348,11 @@ func ReportStaleIntegrations(w io.Writer) {
 		stale := true
 		if pluginPath, perr := opencodePluginPath(); perr == nil {
 			want := renderOpencodeGhostPlugin(findGhostBinary())
-			if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == want {
+			if data, rerr := readHostConfigFile(pluginPath); rerr == nil && string(data) == want {
 				stale = false
+			} else if errors.Is(rerr, errNotRegularFile) {
+				hints = append(hints, fmt.Sprintf("opencode lifecycle plugin unreadable: %v", rerr))
+				stale = false // Don't also add the "missing or outdated" hint
 			}
 		}
 		if stale {
@@ -381,7 +390,7 @@ func ReportStaleIntegrations(w io.Writer) {
 			bin := findGhostBinary()
 			stale := false
 			for _, f := range goosePackageFiles(bin) {
-				if data, rerr := os.ReadFile(filepath.Join(pluginDir, f.rel)); rerr != nil || string(data) != f.want {
+				if data, rerr := readHostConfigFile(filepath.Join(pluginDir, f.rel)); rerr != nil || string(data) != f.want {
 					stale = true
 					break
 				}

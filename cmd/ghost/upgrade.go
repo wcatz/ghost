@@ -292,18 +292,6 @@ Claude Code instead.
                       verify: that is always refused.
 `
 
-// pluginManagedRefusal is what a plugin-managed binary answers `ghost upgrade`
-// with.
-//
-// The refusal is a REFUSAL, and it says so the way every other refusal in this
-// command does: on stderr, with exit status 1. Nothing was downloaded, verified
-// or replaced here, so a caller branching on the exit status has to be able to
-// tell "the command ran and there was nothing to do" from "the command was
-// stopped" — and this path was stopped, exactly like a bad argument, an
-// unknown binary path, a downgrade, a prerelease, or an attestation that is
-// missing, unreachable or unverifiable.
-const pluginManagedRefusal = "This ghost binary is managed by the Claude Code plugin — update it with `/plugin update` in Claude Code, not `ghost upgrade`."
-
 // runUpgrade downloads and installs the latest ghost release.
 func runUpgrade(args []string) {
 	opts, err := parseUpgradeArgs(args)
@@ -316,8 +304,8 @@ func runUpgrade(args []string) {
 	// writing into the plugin cache would fight `/plugin update` and be undone
 	// on the next plugin update. Refuse rather than guess.
 	if mcpinit.RunningAsPlugin() {
-		fmt.Fprintln(os.Stderr, pluginManagedRefusal)
-		os.Exit(1)
+		fmt.Println("This ghost binary is managed by the Claude Code plugin — update it with `/plugin update` in Claude Code, not `ghost upgrade`.")
+		return
 	}
 
 	exe, err := os.Executable()
