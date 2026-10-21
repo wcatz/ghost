@@ -669,6 +669,23 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		}
 		return m
 	}
+	// No marker, but a claimed run that wrote its start stamp and never came
+	// back is a failure with no writer left to record it. The stamp is the time
+	// the run started and the claim's dead pid is the evidence it never
+	// finished; synthesised here so the session-start alert speaks for a
+	// coordinator a kill signal reached before any of its own record-keeping.
+	// A marker in the kept-but-silent band is aged the same way as a stored one:
+	// old news is not news, and the stale claim stays for the next run to
+	// reclaim.
+	if projectID != "" {
+		if at, ok := unfinishedLifecycleRun(dataDir, projectID); ok && !markerSilent(at, now) {
+			return &lifecycleFailureMarker{
+				Project: projectID,
+				Error:   UnfinishedLifecycleRunError,
+				At:      at.UTC().Format(time.RFC3339),
+			}
+		}
+	}
 	return nil
 }
 
