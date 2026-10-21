@@ -82,10 +82,19 @@ func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 	// run that died before it stamped — one that burned no cooldown window and
 	// has nothing to report. A run that stamped and then died leaves the stamp
 	// newer than its own claim, which is the pair this looks for.
-	if startedAt.Before(claim.ModTime()) {
+	if !stampCoversClaim(startedAt, claim.ModTime()) {
 		return time.Time{}, false
 	}
 	return startedAt, true
+}
+
+// stampCoversClaim is the one rule both readers apply: a start stamp belongs to
+// a claim only when it is at least as new as the claim. The claim is renamed
+// into place before the stamp is written, so a run that stamped leaves the
+// stamp no older than its claim, and a tie in a coarse mtime still reads as the
+// same run.
+func stampCoversClaim(stamp, claim time.Time) bool {
+	return !stamp.Before(claim)
 }
 
 // lifecycleStartStamp returns the mtime of the project's cooldown stamp, and
@@ -119,7 +128,7 @@ func lifecycleStampCoversClaim(dataDir, projectID string, claimAt time.Time) boo
 	if !ok {
 		return false
 	}
-	return !startedAt.Before(claimAt)
+	return stampCoversClaim(startedAt, claimAt)
 }
 
 // lifecycleCooldownActive reports whether this project's last lifecycle START is
