@@ -2090,10 +2090,19 @@ func runReflect() {
 	// A scope drop is a merge whose sources' scopes disagree: as permanent as an
 	// overflow, so it is reported on its own and does not withhold the
 	// fingerprint either (#1492).
-	droppedTotal := droppedProject.Changed + droppedGlobal.Changed
-	overflowedTotal := droppedProject.Overflow + droppedGlobal.Overflow
-	overflowedLinks := droppedProject.OverflowLinks + droppedGlobal.OverflowLinks
-	scopeRefusedTotal := droppedProject.Scope + droppedGlobal.Scope
+	//
+	// A proposal held back because its memory was written in the SAME SECOND
+	// the window opened is counted apart from the concurrent change (#1745):
+	// nothing moved, the refusal is the window's fail-safe and not an edit, and
+	// the next pass can apply it. It is still a refusal, so it still withholds
+	// the fingerprint — the row it claimed is live and still needs merging.
+	refusals := reflectRefusals{
+		scopeRefused:  droppedProject.Scope + droppedGlobal.Scope,
+		changed:       droppedProject.Changed + droppedGlobal.Changed,
+		sameSecond:    droppedProject.SameSecond + droppedGlobal.SameSecond,
+		overflowed:    droppedProject.Overflow + droppedGlobal.Overflow,
+		overflowLinks: droppedProject.OverflowLinks + droppedGlobal.OverflowLinks,
+	}
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
@@ -2113,15 +2122,17 @@ func runReflect() {
 	// the corpus is byte-identical to what it was. A round where the store
 	// refused every emission it was handed (#1051) ran a transaction but wrote
 	// nothing either: every proposal claimed a memory that changed or was
-	// deleted while the harness was answering, and those rows were left exactly
-	// as they are — this branch is reachable only when that transaction ALSO
-	// deleted nothing, so "left exactly as they are" is the store's done work,
-	// not a guess at it. In both cases a report that went on to say "Applied" and
-	// record the skip fingerprint would be telling the operator the round landed
-	// while the value is still in the store, still injected into every later
-	// session, and now pinned by a signature that makes --skip-unchanged skip the
-	// project forever. That is the worst possible outcome for this control, and
-	// it is one branch below the one that is careful.
+	// deleted while the harness was answering, or was held back because its
+	// memory was written in the same second the window opened, and those rows
+	// were left exactly as they are — this branch is reachable only when that
+	// transaction ALSO deleted nothing, so "left exactly as they are" is the
+	// store's done work, not a guess at it. In both cases a report that went on
+	// to say "Applied" and record the skip fingerprint would be telling the
+	// operator the round landed while the value is still in the store, still
+	// injected into every later session, and now pinned by a signature that
+	// makes --skip-unchanged skip the project forever. That is the worst
+	// possible outcome for this control, and it is one branch below the one
+	// that is careful.
 	//
 	// The reduction report is the else branch rather than a second if because the
 	// two contradict each other in this case: nothing was written, so the corpus
@@ -2131,27 +2142,7 @@ func runReflect() {
 	// untouched in every case that already existed; the only behaviour this adds
 	// is in the !applied case, which did not exist before.
 	if !applied {
-		switch {
-		case overflowedTotal > 0 && droppedTotal == 0 && scopeRefusedTotal == 0:
-			fmt.Printf("Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", overflowedLinks, memory.MaxSourceRefLen)
-			fmt.Println("  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
-		case scopeRefusedTotal > 0 && droppedTotal == 0 && overflowedTotal == 0:
-			fmt.Println("Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
-			fmt.Println("  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
-		case refusalReasons(scopeRefusedTotal, droppedTotal, overflowedTotal) >= 2:
-			// Mixed reasons: each is counted, so neither a scope refusal nor an
-			// overflow is folded into the concurrent-edit line below, and a
-			// concurrent edit is not hidden. Any two of the three make a mix; an
-			// overflow beside a concurrent edit is one too, scope refusal or not.
-			fmt.Printf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", scopeRefusedTotal, droppedTotal, overflowedTotal)
-			fmt.Println("  every memory those proposals named is left exactly as it is")
-		case droppedTotal == 0:
-			fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
-			fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
-		default:
-			fmt.Println("Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
-			fmt.Println("  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
-		}
+		reportAppliedNothing(os.Stdout, refusals)
 	} else {
 		// The reduction warning, after the write, for every apply.
 		//
@@ -2238,14 +2229,21 @@ func runReflect() {
 	// also the one refusal a later run cannot act on, which is what the chain
 	// below has to notice: re-proposing that merge re-produces the same overflow,
 	// so this round stays recordable rather than held open forever (#1228).
-	if overflowedTotal > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d emission(s) stood for %d decision link(s) whose joined source_ref would exceed the %d-byte bound, and were dropped with every merged memory left live; the same merge would overflow again, so split it\n", overflowedTotal, overflowedLinks, memory.MaxSourceRefLen)
+	if refusals.overflowed > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d emission(s) stood for %d decision link(s) whose joined source_ref would exceed the %d-byte bound, and were dropped with every merged memory left live; the same merge would overflow again, so split it\n", refusals.overflowed, refusals.overflowLinks, memory.MaxSourceRefLen)
 	}
 	// A scope refusal is reported on its own terms for the same reason: no row
 	// moved, and the merge was refused because the scopes its sources carry
 	// disagree, which a later run would find again (#1492).
-	if scopeRefusedTotal > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d merge(s) were refused because their sources' scopes disagree, and every source was left live under its own scope; the same merge would be refused again, so merge them by hand under one scope if they are one fact\n", scopeRefusedTotal)
+	if refusals.scopeRefused > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d merge(s) were refused because their sources' scopes disagree, and every source was left live under its own scope; the same merge would be refused again, so merge them by hand under one scope if they are one fact\n", refusals.scopeRefused)
+	}
+	// A proposal held back because its memory was written in the same second the
+	// window opened is reported on its own terms too: nothing changed, the
+	// refusal is the window's fail-safe, and the next pass — a second later —
+	// can apply it (#1745).
+	if refusals.sameSecond > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d proposal(s) were held back because their memories were written in the same second this pass started; run the pass again to apply them\n", refusals.sameSecond)
 	}
 
 	// A save that raced the LLM round trip is preserved untouched by
@@ -2260,19 +2258,19 @@ func runReflect() {
 	// proposal that would have folded them cannot be written at all. Holding it
 	// open is what re-proposed and dropped the same merge on every later run.
 	// A round whose refusals were all scope refusals is the same case (#1492).
-	if !applied && overflowedTotal == 0 && scopeRefusedTotal == 0 {
+	if !applied && refusals.overflowed == 0 && refusals.scopeRefused == 0 {
 		// Not "no preserved survivors" — nothing at all was replaced, so the
 		// corpus still holds whatever it held. Recording a fingerprint over an
 		// unchanged corpus is what would make --skip-unchanged skip this project
 		// permanently, which is how a stored credential stops being revisited at
 		// all. The round did not happen; it must not be recorded as having.
 		fmt.Fprintln(os.Stderr, "note: nothing was written this round, so no skip fingerprint is recorded — the next run will reconsider this project")
-	} else if len(preserved) > 0 && droppedTotal > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were kept untouched (edited, saved, or claimed by a dropped emission), and %d emission(s) claiming a row that changed or was deleted were dropped; not recording the skip fingerprint so the next run re-merges them\n", len(preserved), droppedTotal)
+	} else if len(preserved) > 0 && refusals.dropped() > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were kept untouched (edited, saved, or claimed by a dropped emission), and %s were dropped; not recording the skip fingerprint so the next run re-merges them\n", len(preserved), refusals.droppedPhrase())
 	} else if len(preserved) > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were kept untouched (edited, saved, or claimed by a dropped emission); not recording the skip fingerprint so the next run re-merges them\n", len(preserved))
-	} else if droppedTotal > 0 {
-		fmt.Fprintf(os.Stderr, "note: %d emission(s) claimed a memory that changed or was deleted while consolidation ran and were dropped; not recording the skip fingerprint so the next run can consolidate the project again\n", droppedTotal)
+	} else if refusals.dropped() > 0 {
+		fmt.Fprintf(os.Stderr, "note: %s and were dropped; not recording the skip fingerprint so the next run can consolidate the project again\n", refusals.claimedPhrase())
 	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)
 	} else if err := store.SetReflectInputSignature(ctx, projectID, reflection.InputSignature(consolidatable(postMemories))); err != nil {
@@ -5091,4 +5089,105 @@ func refusalReasons(counts ...int) int {
 		}
 	}
 	return n
+}
+
+// reflectRefusals is what a round's refusals add up to, by reason: the four
+// kinds the store reports and the report names. It is a type rather than four
+// loose counts because the reasons are counted together and read apart — a
+// proposal held back because its memory was written in the same second the
+// window opened is not a change that happened while the harness was answering,
+// and folding the two into one number is what produced that false report
+// (#1745).
+type reflectRefusals struct {
+	// scopeRefused is the merges whose sources' scopes disagree (#1492).
+	scopeRefused int
+	// changed is the proposals whose claimed row changed or was deleted while
+	// the harness was answering (#1051).
+	changed int
+	// sameSecond is the proposals whose claimed row was written in the same
+	// second the consolidation window opened (#1745).
+	sameSecond int
+	// overflowed is the merges that folded more decision links than one
+	// source_ref can carry (#1228).
+	overflowed int
+	// overflowLinks is how many decision links those overflowing merges stood
+	// for.
+	overflowLinks int
+}
+
+// dropped is every refused emission, whatever the reason: the ones whose
+// claimed row moved and the ones held back by the window's fail-safe.
+func (r reflectRefusals) dropped() int { return r.changed + r.sameSecond }
+
+// droppedPhrase names the refused emissions for the note that counts them
+// beside the rows that were kept untouched.
+func (r reflectRefusals) droppedPhrase() string {
+	switch {
+	case r.changed > 0 && r.sameSecond > 0:
+		return fmt.Sprintf("%d emission(s) claiming a row that changed or was deleted and %d held back because their memory was written in the same second this pass started", r.changed, r.sameSecond)
+	case r.sameSecond > 0:
+		return fmt.Sprintf("%d emission(s) held back because their memory was written in the same second this pass started", r.sameSecond)
+	default:
+		return fmt.Sprintf("%d emission(s) claiming a row that changed or was deleted", r.changed)
+	}
+}
+
+// claimedPhrase names the refused emissions for the note that stands alone,
+// when no row was kept untouched to put them beside.
+func (r reflectRefusals) claimedPhrase() string {
+	switch {
+	case r.changed > 0 && r.sameSecond > 0:
+		return fmt.Sprintf("%d emission(s) claimed a memory that changed or was deleted while consolidation ran and %d were held back because their memory was written in the same second this pass started", r.changed, r.sameSecond)
+	case r.sameSecond > 0:
+		return fmt.Sprintf("%d emission(s) were held back because their memory was written in the same second this pass started", r.sameSecond)
+	default:
+		return fmt.Sprintf("%d emission(s) claimed a memory that changed or was deleted while consolidation ran", r.changed)
+	}
+}
+
+// reportAppliedNothing prints why a round that wrote nothing wrote nothing.
+//
+// The reasons are named apart, because each asks the next run for something
+// different. A claim on a row that changed or was deleted asks the next run to
+// re-merge it. A merge whose sources' scopes disagree is permanent, and so is
+// a merge that overflowed one source_ref. A proposal held back because its
+// memory was written in the SAME SECOND the window opened is neither: nothing
+// changed, the refusal is the window's fail-safe comparison and not an edit,
+// and the next pass — a second later — can apply it (#1745). Reporting that
+// one as a concurrent change told the operator a memory moved when nothing
+// did.
+//
+// Each single-reason line prints only when its reason is the round's SOLE one,
+// and a round with more than one prints the mixed line carrying every count.
+func reportAppliedNothing(w io.Writer, r reflectRefusals) {
+	switch {
+	case r.overflowed > 0 && r.changed == 0 && r.sameSecond == 0 && r.scopeRefused == 0:
+		_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", r.overflowLinks, memory.MaxSourceRefLen)
+		_, _ = fmt.Fprintln(w, "  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
+	case r.scopeRefused > 0 && r.changed == 0 && r.sameSecond == 0 && r.overflowed == 0:
+		_, _ = fmt.Fprintln(w, "Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
+		_, _ = fmt.Fprintln(w, "  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
+	case refusalReasons(r.scopeRefused, r.changed, r.sameSecond, r.overflowed) >= 2:
+		// Mixed reasons: each is counted, so neither a scope refusal nor an
+		// overflow is folded into the concurrent-edit line below, and a
+		// concurrent edit is not hidden. Any two of them make a mix; an
+		// overflow beside a concurrent edit is one too, scope refusal or not.
+		// The same-second count is added only when there is one, so a round
+		// without it reads exactly as it always did.
+		if r.sameSecond > 0 {
+			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold, %d were held back because their memories were written in the same second this pass started\n", r.scopeRefused, r.changed, r.overflowed, r.sameSecond)
+		} else {
+			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", r.scopeRefused, r.changed, r.overflowed)
+		}
+		_, _ = fmt.Fprintln(w, "  every memory those proposals named is left exactly as it is")
+	case r.sameSecond > 0 && r.changed == 0:
+		_, _ = fmt.Fprintf(w, "Applied: nothing — %d consolidation proposal(s) were held back because their memories were written in the same second this pass started, so none could be written\n", r.sameSecond)
+		_, _ = fmt.Fprintln(w, "  nothing changed: run the pass again to apply them, and those memories are older by then")
+	case r.changed == 0:
+		_, _ = fmt.Fprintln(w, "Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
+		_, _ = fmt.Fprintln(w, "  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+	default:
+		_, _ = fmt.Fprintln(w, "Applied: nothing — every consolidation proposal claimed a memory that changed or was deleted while consolidation ran, so none could be written")
+		_, _ = fmt.Fprintln(w, "  those memories are left exactly as they are; a dropped claim overwrites nothing and resurrects nothing")
+	}
 }

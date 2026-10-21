@@ -6639,16 +6639,29 @@ type fedGuard struct {
 	// writer saved during the round trip, so the two guards keep one definition
 	// of "concurrent" and one preserved list.
 	concurrent map[string]bool
+	// sameSecond holds the rows of that map that were written in the SECOND the
+	// consolidation window opened (#1745). They are concurrent only because the
+	// window's stamp and the row's own stamp share a second, so a claim over one
+	// of them is refused for want of proof rather than for a change, and the
+	// caller says so. A row that also moved since the pass read it is not in
+	// this set: that one really changed.
+	sameSecond map[string]bool
 }
 
 // newFedGuard marks every candidate the pass did not read, or read differently,
 // as concurrent: an edit or a delete landed while the harness was answering.
-func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[string]bool) *fedGuard {
+//
+// sameSecond is the window's own answer — the rows written in the second the
+// window opened — and only the ones the pass read UNCHANGED stay in it. A row
+// that moved since the pass read it, or that the pass never read at all, is a
+// real concurrency event and is counted as one.
+func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[string]bool, sameSecond map[string]bool) *fedGuard {
 	g := &fedGuard{
 		candidates:      candidates,
 		candidateByID:   make(map[string]replaceCandidate, len(candidates)),
 		fedIDsByContent: make(map[string][]string, len(fed)),
 		concurrent:      concurrent,
+		sameSecond:      make(map[string]bool),
 	}
 	if len(fed) == 0 {
 		g.inactive = true
@@ -6666,38 +6679,37 @@ func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[
 		f, read := fedByID[c.id]
 		if !read || !f.sameAs(c) {
 			concurrent[c.id] = true
+			continue
+		}
+		if sameSecond[c.id] {
+			g.sameSecond[c.id] = true
 		}
 	}
 	return g
 }
 
-// drop reports whether the emission must not be written at all, and keeps every
-// row it would otherwise have taken. A keep restates its source byte-for-byte,
-// so the emitted text IS the claim on the fed row carrying that text; a merge or
-// a rewrite claims the ids it names in ReplacesIDs. Either claim is void the
-// moment the row it points at changed or is gone, and the caller that honours a
-// void claim writes a duplicate beside a live edit or resurrects a delete.
-func (g *fedGuard) drop(m Memory) bool {
+// dropReasonFor reports whether the emission must not be written at all, and
+// keeps every row it would otherwise have taken. A keep restates its source
+// byte-for-byte, so the emitted text IS the claim on the fed row carrying that
+// text; a merge or a rewrite claims the ids it names in ReplacesIDs. Either
+// claim is void the moment the row it points at changed or is gone, and the
+// caller that honours a void claim writes a duplicate beside a live edit or
+// resurrects a delete.
+//
+// The reason is the REFUSAL'S, and it is not decoration (#1745): a claim over a
+// row that really moved is a concurrent change, and a claim over a row the
+// pass read and that was only marked concurrent because it was written in the
+// same second the window opened is a held-back proposal — the next pass can
+// apply it, and reporting it as a change told the operator that a memory
+// moved when nothing did. A claim that fails on both kinds of row is a
+// change: it is void for a reason a later pass cannot undo by waiting.
+func (g *fedGuard) dropReasonFor(m Memory) dropReason {
 	if g.inactive {
-		return false
+		return dropNone
 	}
-	drop := false
-	for _, fid := range g.fedIDsByContent[m.Content] {
-		if _, stored := g.candidateByID[fid]; !stored || g.concurrent[fid] {
-			drop = true
-			break
-		}
-	}
-	if !drop {
-		for _, replaced := range m.ReplacesIDs {
-			if _, stored := g.candidateByID[replaced]; !stored || g.concurrent[replaced] {
-				drop = true
-				break
-			}
-		}
-	}
-	if !drop {
-		return false
+	fails := g.claimFailures(m)
+	if len(fails) == 0 {
+		return dropNone
 	}
 	// Keep every row this emission would otherwise have deleted: the sources it
 	// names, and any stored row carrying the text it emits. Nothing may be lost
@@ -6723,7 +6735,31 @@ func (g *fedGuard) drop(m Memory) bool {
 			g.concurrent[c.id] = true
 		}
 	}
-	return true
+	for _, id := range fails {
+		if !g.sameSecond[id] {
+			return dropChanged
+		}
+	}
+	return dropSameSecond
+}
+
+// claimFailures returns the rows whose state made the emission's claim void:
+// the stored rows carrying the text it emits, and the sources it names. A row
+// that is not stored at all is gone (or stopped being replaceable) and fails
+// the claim like a row that moved.
+func (g *fedGuard) claimFailures(m Memory) []string {
+	var fails []string
+	for _, fid := range g.fedIDsByContent[m.Content] {
+		if _, stored := g.candidateByID[fid]; !stored || g.concurrent[fid] {
+			fails = append(fails, fid)
+		}
+	}
+	for _, replaced := range m.ReplacesIDs {
+		if _, stored := g.candidateByID[replaced]; !stored || g.concurrent[replaced] {
+			fails = append(fails, replaced)
+		}
+	}
+	return fails
 }
 
 // emissionClaimIDs is every candidate an emission could write over: the sources
@@ -7843,32 +7879,44 @@ func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, project
 // the row itself is never deleted. >= (not >) errs toward a rare same-second
 // duplicate, which the next reflection merges, rather than toward silent loss.
 // An empty consolidatedSince writes nothing.
-func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, concurrent map[string]bool) (map[string]bool, error) {
+//
+// The rows written in the SAME SECOND the window opened are added to
+// sameSecond as well, and that is the whole of what they are: the window's
+// stamp and the row's own stamp share a second, so the fail-safe comparison
+// cannot tell such a row from one that arrived during the round. The row may
+// well be one the pass read — it was written before the pass fetched the
+// corpus — and a claim over it is refused all the same, because the pass
+// cannot prove which it was. The refusal stands; only the reason differs, and
+// the caller says that nothing changed (#1745).
+func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, concurrent, sameSecond map[string]bool) error {
 	if consolidatedSince == "" {
-		return concurrent, nil
+		return nil
 	}
 	crows, err := tx.QueryContext(ctx, `
-		SELECT id FROM memories
+		SELECT id, created_at FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
 		  AND `+retentionExemptSQL+`
 	`, projectID, consolidatedSince)
 	if err != nil {
-		return nil, fmt.Errorf("find concurrent memories: %w", err)
+		return fmt.Errorf("find concurrent memories: %w", err)
 	}
 	for crows.Next() {
-		var id string
-		if err := crows.Scan(&id); err != nil {
+		var id, createdAt string
+		if err := crows.Scan(&id, &createdAt); err != nil {
 			crows.Close() //nolint:errcheck
-			return nil, fmt.Errorf("scan concurrent memory: %w", err)
+			return fmt.Errorf("scan concurrent memory: %w", err)
 		}
 		concurrent[id] = true
+		if sameSecond != nil && createdAt == consolidatedSince {
+			sameSecond[id] = true
+		}
 	}
 	crowsErr := crows.Err()
 	crows.Close() //nolint:errcheck
 	if crowsErr != nil {
-		return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
+		return fmt.Errorf("iterate concurrent memories: %w", crowsErr)
 	}
-	return concurrent, nil
+	return nil
 }
 
 // fedGuardFor builds the #1051 guard over projectID's replaceable set, reading
@@ -7891,10 +7939,11 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
+	sameSecond := make(map[string]bool)
+	if err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent, sameSecond); err != nil {
 		return nil, err
 	}
-	return newFedGuard(candidates, fed, concurrent), nil
+	return newFedGuard(candidates, fed, concurrent, sameSecond), nil
 }
 
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
@@ -7982,7 +8031,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			concurrent[id] = true
 		}
 	}
-	if _, err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent); err != nil {
+	sameSecond := make(map[string]bool)
+	if err := s.concurrentSinceTx(ctx, tx, projectID, consolidatedSince, concurrent, sameSecond); err != nil {
 		return nil, EmissionDrops{}, 0, nil, err
 	}
 
@@ -7993,7 +8043,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// dropped rather than written beside it. This is the same guard FoldRows
 	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
 	// behaviour above exactly.
-	guard := newFedGuard(candidates, fed, concurrent)
+	guard := newFedGuard(candidates, fed, concurrent, sameSecond)
 	// candidatesByID backs the scope refusals below: a refused emission's
 	// sources are kept, and knowing which named rows are real candidates lets
 	// the replace mark exactly those.
@@ -8010,6 +8060,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		fedIDs[row.ID] = true
 	}
 	dropEmission := make([]bool, len(memories))
+	// dropReasons is why each refused emission was refused, so the count below
+	// lands in the field that reason owns: a claim over a row that really
+	// moved is a concurrent change, and one over a row written in the same
+	// second the window opened is a held-back proposal (#1745).
+	dropReasons := make([]dropReason, len(memories))
 	overflowed := make([]bool, len(memories))
 	overflowLinks := make([]int, len(memories))
 	scopeRefused := make([]bool, len(memories))
@@ -8094,7 +8149,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	for i, m := range memories {
 		if !verbatimOfKept(m) {
-			dropEmission[i] = guard.drop(m)
+			dropReasons[i] = guard.dropReasonFor(m)
+			dropEmission[i] = dropReasons[i] != dropNone
 		}
 		// A merge whose decision links alone would not fit in a source_ref is not
 		// written: truncating the list is the silent supersede miss, and failing
@@ -8236,6 +8292,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				reason = dropOverflow
 			case scopeRefused[i]:
 				reason = dropScope
+			default:
+				// The corpus guard's own reason: a concurrent change, or a
+				// proposal held back because its memory was written in the same
+				// second the window opened (#1745).
+				if r := dropReasons[i]; r != dropNone {
+					reason = r
+				}
 			}
 			dropped.record(reason, overflowLinks[i])
 			// A refusal about a FOLDED cross-project candidate belongs to the

@@ -16,6 +16,16 @@ import (
 //     or was deleted while the harness was answering. The row is still live and
 //     still needs consolidating, so a later run has to revisit it, and a caller
 //     that recorded a skip fingerprint over it would absorb the survivor.
+//   - SameSecond is the same guard refusing a claim over a row that was written
+//     in the SECOND the consolidation window opened (#1745). Nothing changed:
+//     the window's own stamp and the row's stamp share a second, so the
+//     fail-safe comparison cannot tell that row from one that arrived during
+//     the round. The refusal stands — the pass cannot prove it read the row
+//     before the window opened — but it is not a change, and a caller that
+//     reported it as one told the operator about an edit that never happened.
+//     The row is still live and still needs consolidating, so it withholds the
+//     skip fingerprint exactly as Changed does; only the reason differs, and
+//     the next pass can apply it.
 //   - Overflow is a merge whose decision links alone do not fit in a source_ref.
 //     That is a property of the corpus as it stands, so every later run would
 //     refuse the same merge again: it is reported on its own, and the round it
@@ -40,8 +50,13 @@ import (
 // the project. Callers that report how much a round compressed read this rather
 // than counting proposals.
 type EmissionDrops struct {
-	Changed  int
-	Overflow int
+	Changed int
+	// SameSecond is the emissions refused because the row they claimed was
+	// written in the same second the consolidation window opened. It is a
+	// refusal like any other — the claim is not proved — but nothing changed,
+	// so it is counted apart from Changed (#1745).
+	SameSecond int
+	Overflow   int
 	// OverflowLinks is how many decision links the overflowing merges stood for
 	// in total. It is the reason's own number, printed beside the byte bound it
 	// exceeds so an operator can see how far over the merge was.
@@ -54,14 +69,17 @@ type EmissionDrops struct {
 }
 
 // Total is the number of emissions refused for any reason.
-func (d EmissionDrops) Total() int { return d.Changed + d.Overflow + d.Scope }
+func (d EmissionDrops) Total() int { return d.Changed + d.SameSecond + d.Overflow + d.Scope }
 
 // dropReason is why one emission was refused, so record can count it in the
 // field that reason owns.
 type dropReason int
 
 const (
-	dropChanged dropReason = iota
+	// dropNone is the absence of a refusal: the emission may be written.
+	dropNone dropReason = iota
+	dropChanged
+	dropSameSecond
 	dropOverflow
 	dropScope
 )
@@ -69,13 +87,15 @@ const (
 // record adds one refused emission under the reason it was refused for.
 func (d *EmissionDrops) record(reason dropReason, links int) {
 	switch reason {
+	case dropChanged:
+		d.Changed++
+	case dropSameSecond:
+		d.SameSecond++
 	case dropOverflow:
 		d.Overflow++
 		d.OverflowLinks += links
 	case dropScope:
 		d.Scope++
-	default:
-		d.Changed++
 	}
 }
 
@@ -84,6 +104,7 @@ func (d *EmissionDrops) record(reason dropReason, links int) {
 func (d EmissionDrops) add(o EmissionDrops) EmissionDrops {
 	return EmissionDrops{
 		Changed:       d.Changed + o.Changed,
+		SameSecond:    d.SameSecond + o.SameSecond,
 		Overflow:      d.Overflow + o.Overflow,
 		OverflowLinks: d.OverflowLinks + o.OverflowLinks,
 		Scope:         d.Scope + o.Scope,
@@ -94,6 +115,7 @@ func (d EmissionDrops) add(o EmissionDrops) EmissionDrops {
 func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
 	return EmissionDrops{
 		Changed:       d.Changed - o.Changed,
+		SameSecond:    d.SameSecond - o.SameSecond,
 		Overflow:      d.Overflow - o.Overflow,
 		OverflowLinks: d.OverflowLinks - o.OverflowLinks,
 		Scope:         d.Scope - o.Scope,
@@ -388,17 +410,18 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 }
 
 // dropConcurrentClaims removes the emissions the corpus guard refuses — their
-// claimed row changed or was deleted while the harness was answering — and
-// returns how many were refused, so the caller can report only what was written
-// and can tell a round that wrote nothing from one that did.
+// claimed row changed or was deleted while the harness was answering, or their
+// memory was written in the same second the consolidation window opened — and
+// returns how many were refused, by reason, so the caller can report only what
+// was written and can tell a round that wrote nothing from one that did.
 func dropConcurrentClaims(g *fedGuard, memories []Memory) (live []Memory, dropped EmissionDrops) {
 	if len(memories) == 0 {
 		return memories, EmissionDrops{}
 	}
 	live = make([]Memory, 0, len(memories))
 	for _, m := range memories {
-		if g.drop(m) {
-			dropped.record(dropChanged, 0)
+		if reason := g.dropReasonFor(m); reason != dropNone {
+			dropped.record(reason, 0)
 			continue
 		}
 		live = append(live, m)
