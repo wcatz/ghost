@@ -9602,6 +9602,19 @@ func ftsEdgeRuneTrimmed(r rune) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r)
 }
 
+// ftsHasBaseRune reports whether a trimmed word holds a letter or a digit. A
+// mark is kept at a word's edge so an accent stays on the word it belongs to,
+// but a word made only of marks is not a term: it would match nothing and
+// still take a slot from the term budget.
+func ftsHasBaseRune(word string) bool {
+	for _, r := range word {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // ftsQueryTerms is the term extraction sanitizeFTSN emits, one step earlier: the
 // cleaned terms, their selection values and the prefix flag, capped at maxWords
 // SELECTED by value. It is a function because two callers need the terms
@@ -9626,7 +9639,7 @@ func ftsQueryTerms(text string, maxWords int) []ftsTerm {
 		// punctuation (192.168.9.150, sealed-secrets) is preserved so FTS5's
 		// tokenizer can still split and match exact identifiers.
 		clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
-		if len(clean) >= 1 {
+		if ftsHasBaseRune(clean) {
 			// Quote each word to treat as literal. An interior quote survives
 			// the edge trim and must be doubled per FTS5's escaping rule —
 			// otherwise it unbalances the "..." wrapper and lets the token

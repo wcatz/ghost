@@ -267,3 +267,20 @@ func TestSanitizeFTSKeepsTheTermBudgetForNonLatinWords(t *testing.T) {
 		}
 	}
 }
+
+// TestFTSQueryTermsDropsAWordOfOnlyMarks pins that a combining mark is kept only
+// beside a base character: a word made of marks alone, or of zero-width format
+// characters, is not a term and takes no slot from the budget.
+func TestFTSQueryTermsDropsAWordOfOnlyMarks(t *testing.T) {
+	for _, q := range []string{"\u0301", "\u0301\u0301 \u200b\u200d"} {
+		if got := ftsQueryTerms(q, ftsSearchWordLimit); len(got) != 0 {
+			t.Errorf("ftsQueryTerms(%q) = %d term(s), want none: a word of marks or zero-width characters only matches nothing", q, len(got))
+		}
+	}
+	if got := ftsQueryTerms("\u0301 \u043f\u0440\u0438\u0432\u0435\u0442", ftsSearchWordLimit); len(got) != 1 {
+		t.Errorf("a lone mark beside one real word gave %d term(s), want 1", len(got))
+	}
+	if got := ftsQueryTerms("cafe\u0301", ftsSearchWordLimit); len(got) != 1 {
+		t.Errorf("a word with an edge mark gave %d term(s), want 1: the mark stays on its word", len(got))
+	}
+}
