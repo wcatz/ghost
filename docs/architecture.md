@@ -150,7 +150,7 @@ opencode uses `ghost context` because it cannot consume the hook's stdout inject
 ```text
 host UserPromptSubmit / PostToolUse (Edit|Write|MultiEdit)
   → ghost hook message-submit | edit --source claude-code
-  → read working-moment-<session>.log (rows delivered, bytes spent)
+  → read working-moment-<digest>.log (rows delivered, bytes spent)
   → keyword-only assemble.Run (source working_moment, no embedding, no model)
   → drop delivered rows, apply the keyword floor, fit the remaining allowance
   → claim the delivery in the marker, verify it won, print additionalContext

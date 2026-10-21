@@ -16,7 +16,7 @@ import (
 // The working-moment channel (a block delivered beside a user message or an
 // edit's result) keeps one small file per session in the data directory:
 //
-//	working-moment-<session>.log
+//	working-moment-<digest>.log
 //
 // It answers two questions across separate short-lived hook processes: which
 // rows has this session already been shown, and how many bytes of the host's
@@ -26,9 +26,9 @@ import (
 //
 // Placement and sweeping follow the lifecycle markers beside it, naming does
 // not: the file lives in config.DataDirPath() (a refused resolve means do
-// nothing, never a fallback), the session id is untrusted and is mapped onto a
-// file-name-safe stem by sanitizeMarkerProject (an empty id means there is no
-// marker and so no delivery), the file is private (0600), and anything older than
+// nothing, never a fallback), the session id is untrusted and names the file
+// through a digest of it (an empty id means there is no marker and so no
+// delivery), the file is private (0600), and anything older than
 // workMomentMarkerMaxAge is deleted the next time a session starts.
 //
 // Concurrency. Parallel tool calls in one turn run their hooks at the same time,
@@ -74,6 +74,11 @@ type momentState struct {
 // momentMarkerPath is the marker's path for a session, or "" when there is no
 // marker to be had: no session id, or a data directory this process may not
 // resolve.
+//
+// The file is named by a DIGEST of the session id (markerStem) and never by
+// the id itself: the id is free text from the host payload, and a name that
+// folded would give two sessions one ledger, so the second session would find
+// the row already delivered and the first session's bytes already spent.
 func momentMarkerPath(sessionID string) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return ""
@@ -82,11 +87,7 @@ func momentMarkerPath(sessionID string) string {
 	if err != nil || dataDir == "" {
 		return ""
 	}
-	stem := sanitizeMarkerProject(sessionID)
-	if !safeProjectIDComponent(stem) {
-		return ""
-	}
-	return filepath.Join(dataDir, workMomentMarkerPrefix+stem+workMomentMarkerSuffix)
+	return filepath.Join(dataDir, workMomentMarkerPrefix+markerStem(sessionID)+workMomentMarkerSuffix)
 }
 
 // readMomentState parses the marker in order. A missing file is an empty

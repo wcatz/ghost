@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -393,20 +394,53 @@ func TestMarkerValidityIsDecidedByFileOrder(t *testing.T) {
 	}
 }
 
-func TestSessionIdIsSanitisedIntoTheMarkerName(t *testing.T) {
+// The session id is free text from the host payload, so the marker is named by
+// a digest of it and never by the id itself: a name that folded would let two
+// sessions share one ledger.
+func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 	newMomentFixture(t)
-	for id, want := range map[string]string{
-		"abc-123":    "working-moment-abc-123.log",
-		"../../evil": "working-moment-.._.._evil.log",
-		"a/b\\c:d e": "working-moment-a_b_c_d_e.log",
-	} {
+	for _, id := range []string{"abc-123", "../../evil", "a/b\\c:d e", strings.Repeat("z", 200)} {
 		p := momentMarkerPath(id)
-		if filepath.Base(p) != want || filepath.Base(filepath.Dir(p)) != "ghost" {
-			t.Errorf("marker for %q = %q, want a file %q directly in the data dir", id, p, want)
+		base := filepath.Base(p)
+		if filepath.Base(filepath.Dir(p)) != "ghost" {
+			t.Errorf("marker for %q = %q, want a file directly in the data dir", id, p)
+		}
+		stem := strings.TrimSuffix(strings.TrimPrefix(base, workMomentMarkerPrefix), workMomentMarkerSuffix)
+		raw, err := hex.DecodeString(stem)
+		if stem == base || err != nil || len(raw) != 16 {
+			t.Errorf("marker for %q = %q, want %s<16 hex-encoded bytes>%s", id, base, workMomentMarkerPrefix, workMomentMarkerSuffix)
 		}
 	}
 	if p := momentMarkerPath("  "); p != "" {
 		t.Errorf("blank session id produced %q", p)
+	}
+	// Two ids that fold onto one sanitized name must not share a file.
+	for _, pair := range [][2]string{{"a b", "a_b"}, {"sess a", "sess_a"}} {
+		if p, q := momentMarkerPath(pair[0]), momentMarkerPath(pair[1]); p == q {
+			t.Errorf("%q and %q share the marker %q", pair[0], pair[1], p)
+		}
+	}
+}
+
+// Two session ids that fold onto one sanitized name — one holding a space
+// where the other holds an underscore, or two sharing their first 80
+// characters — must not share a ledger: the second session would find the row
+// already delivered and its bytes already spent.
+func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
+	f := newMomentFixture(t)
+	const msg = "why does the quartz_migrate step deadlock on ci"
+	for _, c := range []struct{ name, first, second string }{
+		{"a space against an underscore", "sess a", "sess_a"},
+		{"a shared 80-character prefix", strings.Repeat("a", 80) + "1", strings.Repeat("a", 80) + "2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out := f.submit(c.first, msg); out == "" {
+				t.Fatalf("control: the first session delivered nothing")
+			}
+			if out := f.submit(c.second, msg); out == "" {
+				t.Errorf("%q and %q share one ledger, so the second session was silenced by the first", c.first, c.second)
+			}
+		})
 	}
 }
 
