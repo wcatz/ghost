@@ -771,7 +771,7 @@ func TestTheUnresolvedNameHonoursTheCallersLimit(t *testing.T) {
 		t.Fatalf("fixture precondition: the base reader returned %d rows for a %d cap, so the cap is not "+
 			"binding and this test would pass without exercising it", len(want), projectContextMemoriesCap)
 	}
-	text, err := srv.buildProjectContext(ctx, "")
+	text, err := srv.buildProjectContext(ctx, "", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext with an empty project: %v", err)
 	}
@@ -793,7 +793,7 @@ func TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn(t *testing.T) 
 		}); err != nil {
 		t.Fatalf("seed global: %v", err)
 	}
-	text, err := srv.buildProjectContext(context.Background(), "")
+	text, err := srv.buildProjectContext(context.Background(), "", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext(\"\"): %v", err)
 	}
@@ -830,7 +830,7 @@ func TestProjectContextLoadDoesNotScaleWithStoreSize(t *testing.T) {
 		srv := perfProjectContextStore(t, n)
 		ctx := context.Background()
 		for i := 0; i < 2; i++ {
-			if _, err := srv.buildProjectContext(ctx, "pcperf"); err != nil {
+			if _, err := srv.buildProjectContext(ctx, "pcperf", "", searchResponseMaxBytes); err != nil {
 				t.Fatalf("buildProjectContext: %v", err)
 			}
 		}
@@ -838,7 +838,7 @@ func TestProjectContextLoadDoesNotScaleWithStoreSize(t *testing.T) {
 		admitted := 0
 		for i := 0; i < 20; i++ {
 			start := time.Now()
-			text, err := srv.buildProjectContext(ctx, "pcperf")
+			text, err := srv.buildProjectContext(ctx, "pcperf", "", searchResponseMaxBytes)
 			total += time.Since(start)
 			if err != nil {
 				t.Fatalf("buildProjectContext: %v", err)
@@ -1017,7 +1017,7 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideTheCrossProjectRows(t *
 
 	// The RESOURCE and the PROMPT read the same body, and a second call site is a
 	// second thing to wire: asserted through buildProjectContext, which both read.
-	body, err := srv.buildProjectContext(context.Background(), "vproj")
+	body, err := srv.buildProjectContext(context.Background(), "vproj", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext vproj: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCrossProjectWhenThereIsNone(t *
 	// BOTH surfaces, because `## Learned Context` is the section each one renders and
 	// the tool is where a project-keyed section above the note is reachable at all.
 	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
-	body, err := srv.buildProjectContext(ctx, "bare")
+	body, err := srv.buildProjectContext(ctx, "bare", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext bare: %v", err)
 	}
@@ -1285,7 +1285,7 @@ func TestTheOwnRowsNoteIsSilentWhenNoMemoryRowWasAdmittedAtAll(t *testing.T) {
 	if len(res.Items) != 0 {
 		t.Fatalf("fixture: %d memory rows were admitted, so the empty-item case is not exercised", len(res.Items))
 	}
-	body, err := srv.buildProjectContext(ctx, "bare")
+	body, err := srv.buildProjectContext(ctx, "bare", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext bare: %v", err)
 	}
@@ -1358,7 +1358,7 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 	}
 
 	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
-	body, err := srv.buildProjectContext(ctx, "vproj")
+	body, err := srv.buildProjectContext(ctx, "vproj", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext vproj: %v", err)
 	}
@@ -1472,7 +1472,7 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 		}
 
 		tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": c.project}))
-		body, err := srv.buildProjectContext(ctx, c.project)
+		body, err := srv.buildProjectContext(ctx, c.project, "", searchResponseMaxBytes)
 		if err != nil {
 			t.Fatalf("buildProjectContext %s: %v", c.project, err)
 		}
@@ -1667,7 +1667,7 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 	}
 
 	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
-	body, err := srv.buildProjectContext(ctx, "bare")
+	body, err := srv.buildProjectContext(ctx, "bare", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext bare: %v", err)
 	}
@@ -1923,7 +1923,7 @@ func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
 // above reads as one table rather than a block of setup.
 func mustProjectContext(t *testing.T, srv *Server, projectID string) string {
 	t.Helper()
-	body, err := srv.buildProjectContext(context.Background(), projectID)
+	body, err := srv.buildProjectContext(context.Background(), projectID, "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext %s: %v", projectID, err)
 	}

@@ -97,7 +97,7 @@ func TestAResolvedProjectsGlobalRowsSitUnderTheGlobalHeading(t *testing.T) {
 
 	// The resource and the prompt body, which render the same rows under different
 	// caps and carry two sections the tool does not.
-	text, err := srv.buildProjectContext(ctx, "vproj")
+	text, err := srv.buildProjectContext(ctx, "vproj", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestTheGlobalProjectContextRendersItsOwnWindow(t *testing.T) {
 	}
 
 	// The resource and the prompt body.
-	text, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
+	text, err := srv.buildProjectContext(ctx, memory.GlobalProjectID, "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext(_global): %v", err)
 	}
@@ -326,7 +326,7 @@ func TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows(t *testing.T) 
 		}
 	}
 
-	resource, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
+	resource, err := srv.buildProjectContext(ctx, memory.GlobalProjectID, "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext(_global): %v", err)
 	}
@@ -352,7 +352,7 @@ func TestTheGlobalProjectContextOnAStoreWithNoGlobalsAtAll(t *testing.T) {
 	srv, session := newValiditySession(t)
 	ctx := context.Background()
 
-	resource, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
+	resource, err := srv.buildProjectContext(ctx, memory.GlobalProjectID, "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext(_global): %v", err)
 	}
@@ -416,7 +416,7 @@ func TestTheProjectContextSplitMovesRowsWithoutChangingTheBlock(t *testing.T) {
 		}
 	}
 
-	text, err := srv.buildProjectContext(ctx, "vproj")
+	text, err := srv.buildProjectContext(ctx, "vproj", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}

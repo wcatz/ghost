@@ -2720,10 +2720,10 @@ func (s *Server) registerTools() {
 				// The section body ends in a newline, so replacing that final
 				// newline with the blank line before the sentence reproduces
 				// projectContextWithNotRegistered byte for byte.
-				parts = append(parts, responsePart{text: "\n" + projectNotRegistered(asked)})
+				parts = append(parts, responsePart{text: "\n" + projectNotRegistered(memory.ProjectArg("project_id", asked))})
 				text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
 			} else {
-				text = projectNotRegistered(asked)
+				text = projectNotRegistered(memory.ProjectArg("project_id", asked))
 			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -4578,12 +4578,9 @@ func (s *Server) registerResources() {
 		// delivered those rows for an unknown name — and the not-registered
 		// sentence is appended rather than returned in place of it. See
 		// projectNotRegistered and buildProjectContext.
-		text, err := s.buildProjectContext(ctx, projectID)
+		text, err := s.buildProjectContext(ctx, projectID, recallProjectPrefaceName(rawID), s.searchResponseCap())
 		if err != nil {
 			return nil, fmt.Errorf("reading project context %s: %w", memory.RefusalArg("project_id", rawID), err)
-		}
-		if projectID == "" {
-			text = projectContextWithNotRegistered(text, rawID)
 		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
@@ -4653,10 +4650,12 @@ func (s *Server) registerResources() {
 		// marked with the window they carry.
 		text := "No global memories saved yet. Use ghost_save_global to add cross-project knowledge."
 		if len(res.Items) > 0 {
-			text = "## Ghost Global Memories\n\n" + projectContextItems(res.Items)
+			pinnedLine := ""
 			if res.Trace != nil {
-				text += projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
+				pinnedLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
 			}
+			parts := responseSection(0, "## Ghost Global Memories", itemLines(res.Items), itemPins(res.Items), pinnedLine)
+			text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
 		} else if note := projectContextEmptyNote(res); note != "" {
 			text = note
 		}
@@ -4821,12 +4820,12 @@ func (s *Server) registerPrompts() {
 		// The same unresolved-name case the tool and the resource handle, and the
 		// same block-plus-sentence: the `_global` section does not depend on the
 		// project. See projectNotRegistered.
-		text, err := s.buildProjectContext(ctx, projectID)
+		renderedID := recallProjectPrefaceName(rawID)
+		preface := "Recall what Ghost knows about project " + renderedID + " before continuing:\n\n"
+		budget := s.searchResponseCap() - len(preface)
+		text, err := s.buildProjectContext(ctx, projectID, recallProjectPrefaceName(rawID), budget)
 		if err != nil {
 			return nil, fmt.Errorf("recall project context for %s: %w", memory.RefusalArg("project_id", rawID), err)
-		}
-		if projectID == "" {
-			text = projectContextWithNotRegistered(text, rawID)
 		}
 		if text == "" {
 			text = "No memories or learned context saved yet for this project."
@@ -4854,11 +4853,10 @@ func (s *Server) registerPrompts() {
 		// already had, because `ProjectArg` is a renderer for a quoted slot and
 		// inventing a second unquoted one here would be a second rule.
 		return &mcp.GetPromptResult{
-			Description: "Ghost's accumulated knowledge for " + memory.ProjectArg("project_id", rawID),
+			Description: "Ghost's accumulated knowledge for " + renderedID,
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{
-					Text: "Recall what Ghost knows about project " + memory.ProjectArg("project_id", rawID) +
-						" before continuing:\n\n" + text,
+					Text: preface + text,
 				}},
 			},
 		}, nil
@@ -4930,8 +4928,12 @@ func (s *Server) registerPrompts() {
 // That split is deliberate rather than partial: the assembler's `Item` carries no
 // field for a decision or a learned summary, and moving those would be a
 // different migration in a commit about which reader selects the rows.
-func (s *Server) buildProjectContext(ctx context.Context, projectID string) (string, error) {
-	var sb strings.Builder
+func (s *Server) buildProjectContext(ctx context.Context, projectID, asked string, budget int) (string, error) {
+	if budget <= 0 {
+		budget = s.searchResponseCap()
+	}
+	askedName := asked
+	var parts []responsePart
 
 	var memories assemble.Result
 	// The same split the tool makes, and for the same reason (#809): the window is
@@ -4950,7 +4952,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		own, globals = projectContextSplit(memories.Items)
 		var ownLine string
 		ownLine, foldedOwn, globalLine = projectContextPinnedLines(memories, projectID, own)
-		projectContextSection(&sb, memorySectionHeading, projectContextItems(own)+ownLine)
+		parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, itemLines(own), itemPins(own), ownLine)...)
 	}
 
 	// Everything keyed on the project is skipped for an unresolved one, and
@@ -4976,12 +4978,12 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		// change newly delimits — the same place the tool and the decisions
 		// resource put theirs.
 		noted := false
-		note := func() {
+		note := func() string {
 			if noted {
-				return
+				return ""
 			}
 			noted = true
-			sb.WriteString(dataDelimiterNote + "\n\n")
+			return dataDelimiterNote + "\n\n"
 		}
 
 		decisions, err := s.store.LiveDecisions(ctx, projectID, 5)
@@ -4989,8 +4991,9 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			return "", fmt.Errorf("list decisions for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if len(decisions) > 0 {
-			sb.WriteString("\n\n## Recent Decisions\n\n")
-			note()
+			head := "\n\n## Recent Decisions\n\n" + note()
+			parts = append(parts, responsePart{text: head})
+			headIdx := len(parts) - 1
 			for _, d := range decisions {
 				// Every field quoted, not just the decision: a decision's title
 				// is as much stored text as its body, written by the same
@@ -4998,9 +5001,11 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 				// lines above have asserted the «...» convention on every one
 				// of them. The id goes through assemble.Token for the reason
 				// Item.Line's does (#791).
-				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s\n",
+				line := fmt.Sprintf("- `%s` **%s**%s: %s\n",
 					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status), quoteData(d.Decision))
+				parts = append(parts, responsePart{text: line, cuttable: true})
 			}
+			parts[headIdx].section = len(parts) - 1 - headIdx
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, projectID)
@@ -5008,9 +5013,11 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			return "", fmt.Errorf("get learned context for %s: %w", memory.RefusalArg("project_id", projectID), err)
 		}
 		if learned != "" {
-			sb.WriteString("\n\n## Learned Context\n\n")
-			note()
-			sb.WriteString(quoteData(learned))
+			head := "\n\n## Learned Context\n\n" + note()
+			parts = append(parts, responsePart{text: head})
+			headIdx := len(parts) - 1
+			parts = append(parts, responsePart{text: quoteData(learned), cuttable: true})
+			parts[headIdx].section = len(parts) - 1 - headIdx
 		}
 	}
 
@@ -5032,8 +5039,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// ONE heading.
 	//
 	// The `seen` filter, the second REQUEST and the `ExcludeSeen` field it is why
-	// we do not use are all explained on projectContextGlobalSection, which is
-	// where the render now lives so the tool and this function cannot drift.
+	// we do not use are all explained where projectContextGlobalRows is defined.
 	//
 	// `_global` IS a project, and the guard below is the one place that knows a
 	// bucket is not a project to count rows for — so it must not also be the place
@@ -5056,7 +5062,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// one heading that is true of it, which for this project is also the whole
 	// block.
 	if projectID == memory.GlobalProjectID {
-		projectContextSection(&sb, globalSectionHeading, projectContextItems(globals)+foldedOwn+globalLine)
+		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(globals), itemPins(globals), foldedOwn+globalLine)...)
 	} else {
 		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
 		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
@@ -5066,43 +5072,31 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		if projectID == "" {
 			limit = projectContextMemoriesCap
 		}
-		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals, foldedOwn, globalLine)
+		rows, line := s.projectContextGlobalRows(ctx, limit, memories.Items, globals, globalLine)
+		sectionNotes := foldedOwn + line
+		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(rows), itemPins(rows), sectionNotes)...)
 	}
 
-	if sb.Len() == 0 {
+	if responsePartsLen(parts) == 0 {
 		// Same two cases as the tool's, and the same function, for the same reasons:
 		// a block the stages emptied is not an empty project, and this is the one
 		// place the project-scoped count and the union-scoped verdict are
 		// reconciled.
+		emptyText := ""
 		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-			return note, nil
-		}
-		// `_global` is not a project to count rows for, so `projectContextOwnRowsNote`
-		// above says nothing about it and the census below would be the answer — and
-		// the census is a claim about a PROJECT. "No memories found for this project"
-		// on a request for `_global` is the same false statement as the one the note
-		// guard exists to prevent, one function earlier, and a review of #817 caught
-		// it on a store whose only global row has a closed window.
-		//
-		// So the census is refused for that id, and what answers instead is the
-		// assembler's own VERDICT about the window: rows were found and withheld,
-		// which is a true and useful thing to say about a bucket of cross-project
-		// memories, and it names no project. A store holding NO globals at all has
-		// `ReasonNoMemories`, which is a census of the WINDOW and is the one case
-		// where "nothing to show" is a fact about the request rather than a claim
-		// about a project — so that half is kept, restated as a fact about the
-		// cross-project rows rather than about a project.
-		//
-		// A real project in the same shape takes the other branch, which is why the
-		// divergence is stated: it gets `projectContextEmptyNote`'s abstention from
-		// the same function, because the count gate above does not apply to it.
-		if projectID == memory.GlobalProjectID {
+			emptyText = note
+		} else if projectID == memory.GlobalProjectID {
 			if note := projectContextEmptyNote(memories); note != "" {
-				return note, nil
+				emptyText = note
+			} else {
+				emptyText = "No memories found among the cross-project rows."
 			}
-			return "No memories found among the cross-project rows.", nil
+		} else {
+			emptyText = "No memories found for this project."
 		}
-		return "No memories found for this project.", nil
+		if emptyText != "" {
+			parts = append(parts, responsePart{text: emptyText})
+		}
 	}
 	// The same note the tool appends, for the same reason, and at the same place:
 	// a block whose rows are all cross-project is not this project's context, and
@@ -5110,11 +5104,14 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// are also how this branch is reached with an EMPTY memory read behind it, which
 	// is the case #788 is about — the function picks the sentence by the verdict, so
 	// this one does not ask what filled the block above.
-	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-		sb.WriteString("\n\n")
-		sb.WriteString(note)
+	if projectID == "" && askedName != "" {
+		parts = append(parts, responsePart{text: "\n\n" + projectNotRegistered(askedName)})
 	}
-	return sb.String(), nil
+	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+		parts = append(parts, responsePart{text: "\n\n" + note})
+	}
+	text, _ := capResponseParts(parts, budget, projectContextCutAdvice)
+	return text, nil
 }
 
 // projectContextMemories assembles the mixed project + `_global` block for one
