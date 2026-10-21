@@ -130,9 +130,10 @@ figures therefore describe the last committed state — which is what a
 diagnostic should report — and they agree with each other, because they come
 from one snapshot. Every other read tool waits for an in-flight write in this
 process: a reader that wants its own writes back inside one tool call has to
-stay on the store's write handle, so a search issued while a project delete is
-running queues behind it (about 0.7 s for a 30 000-row delete, up to a few
-seconds for a purge's checkpoint). See the
+stay on the store's write handle, so a search issued while a write is in flight
+queues behind it for as long as the write holds the store lock — a save in
+milliseconds, a project delete or a reflect apply up to about a second, a purge
+checkpoint up to its busy timeout. See the
 [concurrency contract](architecture.md#concurrency-contract).
 
 The thresholds, and what each one is for, are in

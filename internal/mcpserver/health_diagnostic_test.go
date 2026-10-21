@@ -15,6 +15,7 @@ package mcpserver
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,27 +57,42 @@ func diagnosticServer(t *testing.T) (*Server, *memory.Store, *sql.DB, string) {
 	return New(store, logger, "test"), store, db, path
 }
 
-// holdTheStoreLocked starts a write that holds the store's mutex AND the
-// store's one connection, and returns the function that releases it.
+// blockTheDatabase holds the database's write lock from a second handle, so a
+// write in this process cannot start. It returns the function that releases it.
 //
-// The write is a project delete that cannot start: a second handle holds the
-// database's write lock, so the delete's BEGIN IMMEDIATE waits for it — and it
-// waits holding the store's mutex, which is the state a report used to queue
-// behind. This is the repro from the issue: a project delete with apply, and
-// a diagnostic call on the same session at the same time.
-func holdTheStoreLocked(t *testing.T, store *memory.Store, db *sql.DB, path string) (release func()) {
+// The handle is opened RAW rather than through memory.OpenDB, because OpenDB
+// refuses a store a newer Ghost owns and one fixture needs the store's schema
+// version changed. The DSN is the store's own shape for the one thing this
+// handle does: BEGIN IMMEDIATE takes the database's write lock and holds it,
+// so a write in this process cannot get it.
+func blockTheDatabase(t *testing.T, path string) (release func()) {
 	t.Helper()
-	ctx := context.Background()
-	blocker, err := memory.OpenDB(path)
+	dsn := "file:" + filepath.ToSlash(path) + "?_txlock=immediate&_pragma=busy_timeout(5000)"
+	blocker, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open the blocking handle: %v", err)
 	}
-	// BEGIN IMMEDIATE takes the database's write lock and holds it: the
-	// delete's own BEGIN cannot get it.
-	tx, err := blocker.BeginTx(ctx, nil)
+	tx, err := blocker.BeginTx(context.Background(), nil)
 	if err != nil {
+		_ = blocker.Close()
 		t.Fatalf("begin the blocking transaction: %v", err)
 	}
+	return func() {
+		_ = tx.Rollback()
+		_ = blocker.Close()
+	}
+}
+
+// startTheBlockedWrite starts the write that waits for the database's write
+// lock and returns the channel it reports on.
+//
+// The write is a project delete that cannot start: it waits for the lock, and
+// it waits holding the store's mutex, which is the state a report used to
+// queue behind. This is the repro from the issue: a project delete with
+// apply, and a diagnostic call on the same session at the same time.
+func startTheBlockedWrite(t *testing.T, store *memory.Store, db *sql.DB) <-chan error {
+	t.Helper()
+	ctx := context.Background()
 	done := make(chan error, 1)
 	go func() {
 		_, err := store.DeleteProject(ctx, "abc123", true)
@@ -107,9 +123,17 @@ func holdTheStoreLocked(t *testing.T, store *memory.Store, db *sql.DB, path stri
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+	return done
+}
+
+// holdTheStoreLocked starts a write that holds the store's mutex AND the
+// store's one connection, and returns the function that releases it.
+func holdTheStoreLocked(t *testing.T, store *memory.Store, db *sql.DB, path string) (release func()) {
+	t.Helper()
+	releaseBlock := blockTheDatabase(t, path)
+	done := startTheBlockedWrite(t, store, db)
 	return func() {
-		_ = tx.Rollback()
-		_ = blocker.Close()
+		releaseBlock()
 		<-done
 	}
 }
@@ -179,6 +203,51 @@ func TestListProjectsAnswersWhileAWriteIsInFlight(t *testing.T) {
 	}
 	if strings.Contains(text.Text, "could not be read") {
 		t.Errorf("ghost_list_projects reports a count it could not read while a write was in flight:\n%s", text.Text)
+	}
+}
+
+// TestHealthShowsTheNewerStoreWarningWhileAWriteIsInFlight: the store-version
+// line is the first thing the report says, and it is the one line that says
+// the running server is writing a store a newer Ghost owns — so every save it
+// refuses is lost silently. It has to survive an in-flight write: the operator
+// who needs it is the one looking at a server that is busy.
+func TestHealthShowsTheNewerStoreWarningWhileAWriteIsInFlight(t *testing.T) {
+	srv, store, db, path := diagnosticServer(t)
+
+	// The store is at a schema version this build does not know: the writes are
+	// refused, which is what the report has to say. The version is changed
+	// BEFORE the blocking handle opens, because writing the database's header
+	// needs the write lock the blocker holds.
+	newer := memory.SchemaVersion() + 1
+	if _, err := db.ExecContext(context.Background(), fmt.Sprintf("PRAGMA user_version = %d", newer)); err != nil {
+		t.Fatalf("set the store's schema version: %v", err)
+	}
+	releaseBlock := blockTheDatabase(t, path)
+	done := startTheBlockedWrite(t, store, db)
+	defer func() {
+		releaseBlock()
+		<-done
+	}()
+
+	session := connectedClient(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ghost_health"})
+	if err != nil {
+		t.Fatalf("ghost_health did not answer while a write was in flight: %v", err)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("ghost_health returned %T, want text", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "Writes are being refused") {
+		t.Errorf("ghost_health does not report the newer store while a write is in flight:\n%s", text.Text)
+	}
+	if !strings.Contains(text.Text, fmt.Sprintf("schema v%d", newer)) {
+		t.Errorf("ghost_health does not name the store's schema version while a write is in flight:\n%s", text.Text)
+	}
+	if strings.Contains(text.Text, "could not read") {
+		t.Errorf("ghost_health reports a section it could not read while a write was in flight:\n%s", text.Text)
 	}
 }
 

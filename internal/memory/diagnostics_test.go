@@ -11,6 +11,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -135,6 +136,71 @@ func TestTheDiagnosticReadAnswersWhileAWriteIsInFlight(t *testing.T) {
 	if storeVersion != SchemaVersion() || buildVersion != SchemaVersion() || newer {
 		t.Errorf("the diagnostic store version is (store %d, build %d, newer %t), want both at %d and not newer",
 			storeVersion, buildVersion, newer, SchemaVersion())
+	}
+}
+
+// TestTheDiagnosticReadReportsANewerStore: the store-version line in a health
+// report is the one thing that says the running server is writing a store a
+// newer Ghost owns, so the diagnostic read has to be able to see it. The
+// version is read on the read handle, and the read handle is a different
+// connection to the same file, so it sees what the file carries.
+func TestTheDiagnosticReadReportsANewerStore(t *testing.T) {
+	ctx := context.Background()
+	store, db := diagnosticTestStore(t)
+
+	// A store a newer Ghost owns: the file's schema version above this
+	// build's. PRAGMA takes a literal, not a bound value.
+	newer := SchemaVersion() + 1
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", newer)); err != nil {
+		t.Fatalf("set the store's schema version: %v", err)
+	}
+
+	read, err := store.BeginDiagnosticRead(ctx)
+	if err != nil {
+		t.Fatalf("BeginDiagnosticRead: %v", err)
+	}
+	defer read.Close() //nolint:errcheck
+
+	storeVersion, buildVersion, isNewer, err := read.Store().StoreVersionStatus(ctx)
+	if err != nil {
+		t.Fatalf("StoreVersionStatus: %v", err)
+	}
+	if storeVersion != newer {
+		t.Errorf("the diagnostic read reports the store at schema v%d, want v%d", storeVersion, newer)
+	}
+	if buildVersion != SchemaVersion() {
+		t.Errorf("the diagnostic read reports this build at v%d, want v%d", buildVersion, SchemaVersion())
+	}
+	if !isNewer {
+		t.Error("the diagnostic read does not report the store as newer than this build")
+	}
+}
+
+// TestTheDiagnosticVersionReadFailsLoudly: a version read that cannot be
+// answered must say so rather than answer anyway. The report renders the
+// failure ("could not read the store's schema version"), and a version it did
+// not read — a zero, or a guess — would be rendered as a healthy store, which
+// is the one answer that must never be invented.
+func TestTheDiagnosticVersionReadFailsLoudly(t *testing.T) {
+	store, _ := diagnosticTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	read, err := store.BeginDiagnosticRead(ctx)
+	if err != nil {
+		t.Fatalf("BeginDiagnosticRead: %v", err)
+	}
+	defer read.Close() //nolint:errcheck
+
+	// The caller's deadline reached: the question cannot be answered.
+	cancel()
+	storeVersion, buildVersion, isNewer, err := read.Store().StoreVersionStatus(ctx)
+	if err == nil {
+		t.Fatalf("the version read answered a cancelled context: store v%d, newer %t", storeVersion, isNewer)
+	}
+	if storeVersion != 0 || isNewer {
+		t.Errorf("a failed version read reports (store v%d, newer %t); it must report nothing it did not read", storeVersion, isNewer)
+	}
+	if buildVersion != SchemaVersion() {
+		t.Errorf("a failed version read reports this build at v%d, want v%d", buildVersion, SchemaVersion())
 	}
 }
 
