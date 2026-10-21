@@ -4537,6 +4537,29 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 					return "", "", 0, orderErr
 				}
 			}
+			// The reference the caller stated is written onto the fold target, and
+			// the target may be a decision's companion: the link it carries is
+			// what finds that decision's companion memory and it is Ghost's to
+			// manage, so it is kept beside the caller's reference rather than
+			// replaced by it. A save that folded onto the companion and carried
+			// its own reference dropped the link, and the decision was left with
+			// no companion at all.
+			targetSourceRef := opts.Provenance.SourceRef
+			if targetSourceRef != "" {
+				var targetRef sql.NullString
+				readErr := tx.QueryRowContext(ctx,
+					`SELECT source_ref FROM memories WHERE id = ? AND project_id = ?`,
+					existingID, projectID,
+				).Scan(&targetRef)
+				if readErr != nil && readErr != sql.ErrNoRows {
+					return "", "", 0, fmt.Errorf("lookup fold target source_ref: %w", readErr)
+				}
+				keptRef, refErr := preserveDecisionLinks(targetSourceRef, targetRef.String)
+				if refErr != nil {
+					return "", "", 0, refErr
+				}
+				targetSourceRef = keptRef
+			}
 			res, updateErr := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1,
@@ -4551,7 +4574,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			`, importance*0.2,
 				nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
 				nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
-				opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+				opts.Provenance.Agent, opts.Provenance.SessionID, targetSourceRef,
 				existingID, projectID)
 			if updateErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
@@ -6134,10 +6157,15 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	// no order to be out of, and the UPDATE below writes all three by COALESCE
 	// rather than read-modify-write, so nothing here would use it.
 	var curFrom, curUntil sql.NullString
+	// The stored reference comes out of the same statement, for the same reason:
+	// the links this row carries are what the write below has to keep, and they
+	// have to be the ones the row holds at the moment the write lands.
+	var curSourceRef string
 	err = tx.QueryRowContext(ctx,
-		`SELECT content, category, importance, tags, valid_from, valid_until
+		`SELECT content, category, importance, tags, valid_from, valid_until,
+		        COALESCE(source_ref, '')
 		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
-	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil)
+	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil, &curSourceRef)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("memory %s not found in project %s",
 			RefusalArg("memory_id", id), RefusalArg("project_id", projectID))
@@ -6210,6 +6238,21 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	// NULLIF(?, '') is what makes an empty provenance string mean "keep" rather
 	// than "clear": an undetectable harness is no evidence against the author of
 	// the previous write, and NULLIF turns "" into the NULL COALESCE skips.
+	//
+	// The reference the caller wrote is composed with the decision links this
+	// row already carries before it is written, because the link is what finds
+	// the decision's companion memory and it is Ghost's to manage: an edit
+	// that replaced it left the decision with no companion, and the supersede
+	// answered a plain success while the reversed decision kept ranking. An
+	// omitted reference keeps the stored value whole, links and all.
+	newSourceRef := opts.Provenance.SourceRef
+	if newSourceRef != "" {
+		keptRef, refErr := preserveDecisionLinks(newSourceRef, curSourceRef)
+		if refErr != nil {
+			return refErr
+		}
+		newSourceRef = keptRef
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
 		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
@@ -6225,7 +6268,7 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	`, newContent, newCategory, newImportance, newTags, clearResolved,
 		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
 		nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
-		opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+		opts.Provenance.Agent, opts.Provenance.SessionID, newSourceRef,
 		id); err != nil {
 		return fmt.Errorf("update memory: %w", err)
 	}
