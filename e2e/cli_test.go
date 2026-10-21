@@ -2370,23 +2370,7 @@ func TestCLIMCPInit(t *testing.T) {
 		// The fakes are what `mcp init` finds on PATH, so a sandbox with an
 		// empty bin has no client at all and the message has to say what to do.
 		s := newSandbox(t)
-		bare := &sandbox{
-			t:       s.t,
-			root:    s.root,
-			home:    s.home,
-			config:  s.config,
-			data:    s.data,
-			cache:   s.cache,
-			tmp:     s.tmp,
-			work:    s.work,
-			bin:     filepath.Join(s.root, "empty-bin"),
-			scratch: s.scratch,
-			ollama:  s.ollama,
-		}
-		if err := os.MkdirAll(bare.bin, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		bare.env = bare.buildEnv()
+		bare := bareSandbox(s)
 		r := bare.mustFail("mcp", "init")
 		mustMatch(t, "no client found", r.stderr, "(?i)no supported MCP client|install one of|--client")
 	})
