@@ -103,10 +103,11 @@ func TestRegisterMCPRepairsARegistrationThatIsNotGhosts(t *testing.T) {
 			// The registration it wrote is the contract's own: this build's
 			// binary with the `mcp` argument.
 			// The registration travels as JSON, so the path is compared in
-			// its JSON form (a Windows path's backslashes are escaped there).
+			// its JSON form (a Windows path's backslashes are escaped there),
+			// without its quotes: the Windows stub logs them escaped again.
 			added := claudeCallLog(t, dir, "adds")
 			quotedBin, _ := json.Marshal(ghostBin)
-			if !strings.Contains(added, string(quotedBin)) {
+			if !strings.Contains(added, strings.Trim(string(quotedBin), `"`)) {
 				t.Errorf("the added registration must run this build's binary, got %q", added)
 			}
 			if !strings.Contains(added, "mcp") {
