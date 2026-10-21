@@ -414,6 +414,11 @@ func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 	if p := momentMarkerPath("  "); p != "" {
 		t.Errorf("blank session id produced %q", p)
 	}
+	// The same id always names the same marker: the ledger is where the
+	// session-start block wrote it and where the delivery reads it.
+	if p, q := momentMarkerPath("sess-a"), momentMarkerPath("sess-a"); p != q {
+		t.Errorf("one session id named two markers: %q and %q", p, q)
+	}
 	// Two ids that fold onto one sanitized name must not share a file.
 	for _, pair := range [][2]string{{"a b", "a_b"}, {"sess a", "sess_a"}} {
 		if p, q := momentMarkerPath(pair[0]), momentMarkerPath(pair[1]); p == q {
@@ -441,6 +446,39 @@ func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
 				t.Errorf("%q and %q share one ledger, so the second session was silenced by the first", c.first, c.second)
 			}
 		})
+	}
+}
+
+// A marker an older build wrote under the sanitized stem is never read — that
+// name is not injective, so reading it would give two sessions one ledger
+// again — and the age sweep removes it, so it does not sit in the data
+// directory for ever.
+func TestAMarkerUnderTheOldNameIsNeverReadAndIsSwept(t *testing.T) {
+	f := newMomentFixture(t)
+	legacy := filepath.Join(f.dataDir, "working-moment-sess_a.log")
+	if err := os.WriteFile(legacy, []byte("D start 9000 mgotcha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The naming does not point at it, and its contents are not read: a
+	// session starts with an empty ledger, not with another one's rows.
+	if p := momentMarkerPath("sess a"); p == legacy {
+		t.Errorf("the marker path points at the old name %q", legacy)
+	}
+	st, err := readMomentState(momentMarkerPath("sess a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.delivered["mgotcha"] {
+		t.Errorf("the old name's marker was read: %v", st.delivered)
+	}
+	// The sweep takes it once it is past the horizon.
+	aged := time.Now().Add(-workMomentMarkerMaxAge - time.Hour)
+	if err := os.Chtimes(legacy, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	recordSessionStartDelivery("sess-sweep", []string{"x"}, 10)
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("a marker under the old name survived the sweep: %v", err)
 	}
 }
 
