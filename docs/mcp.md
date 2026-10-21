@@ -374,6 +374,13 @@ because a reader cannot see the difference. The stored value is unchanged; only
 its display is escaped. TAB alone is kept as written, since stored prose holds
 tabs and a tab starts no sequence.
 
+The same escaping applies to the single-line previews printed by
+`ghost_resolve_mark`, `ghost_resolve`, `ghost_link_withdraw`, `ghost_health`
+and the CLI listings (`ghost reflect`, `ghost promote`). These previews are
+bounded by their column width (70, 80, 60 or 120 runes) in their **rendered**
+form: an escape sequence such as `\x1b` or `\u202e` counts as its full length,
+so a preview is at most max runes plus the ellipsis when the text was cut.
+
 Two more fields are printed outside the delimiters *undelimited*, and both earn it
 by being short labels rather than prose. A row's **`tags:[…]`** label is a JSON
 array, so `json.Marshal` already escapes a newline, a quote and a backslash and a
