@@ -209,7 +209,7 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// two, because each run is cut by its own cap.
 	var runs []int
 	for _, pol := range req.Passive {
-		fetched, losers, err := s.passiveBucket(ctx, req, pol, cols)
+		fetched, losers, window, err := s.passiveBucket(ctx, req, pol, cols)
 		if err != nil {
 			return nil, err
 		}
@@ -237,7 +237,7 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 			}
 			set.ValidityExcluded += excluded
 		}
-		beyond, err := s.passivePinnedBeyond(ctx, req, pol, cols, fetched)
+		beyond, err := s.passivePinnedBeyond(ctx, req, pol, cols, window)
 		if err != nil {
 			return nil, err
 		}
@@ -332,16 +332,25 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 // passiveBucket runs one policy: the fetch, the selection, the demotions, and
 // the selected rows followed by the rest of the window.
 //
+// It returns the WINDOW beside the selected rows, because the window is what
+// the pinned-beyond count is about: the count reports the pinned rows that
+// never entered it, and the selected set is wider than the window by the
+// replacements of pinned rows, which are not pinned.
+//
 // The store's shape is resolved ONCE for the whole passive request rather than
 // per bucket: it costs a PRAGMA, and a session start with two buckets would pay
 // for it twice. It is passed down rather than re-read so every bucket's SQL, and
 // every bucket's reading of what its rows carry, agree about which store they are
 // talking to.
-func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, []DroppedLoser, error) {
+func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, []DroppedLoser, []Memory, error) {
 	memories, err := s.passiveWindow(ctx, req, pol, cols)
 	if err != nil {
-		return nil, nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
+		return nil, nil, nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
 	}
+	// The window is captured BEFORE the replacements are appended to it: the
+	// count is about the window the fetch read, and the replacements are fetched
+	// past it.
+	window := memories
 	// The replacement of a pinned row holds a slot too, so it has to be in the
 	// window to be given one: a window cut by rank would leave a pinned row that
 	// was replaced standing without its replacement.
@@ -354,7 +363,11 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 		replacements = nil
 	}
 	memories = append(memories, replacements...)
-	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
+	selected, losers, err := s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return selected, losers, window, nil
 }
 
 // passiveKeyScanVisited counts the rows the threshold scan has read since the
@@ -745,16 +758,24 @@ func passivePopulationSQL(pol SlicePolicy, req CandidateRequest, cols passiveCol
 // and the count is not run. It asks the same population and the same validity
 // predicate the scan does, so a row the scan withholds is not counted as one the
 // window missed.
-func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, fetched []Candidate) (map[string]int, error) {
-	if len(fetched) == 0 || len(fetched) < pol.OverFetch {
+//
+// The test is on the WINDOW and not on the selected set, because the rule is
+// about the window. The selected set is the window plus the replacements of
+// pinned rows, which are fetched PAST the window so they can hold a slot beside
+// the row they replaced — and a replacement is not pinned, so asking the
+// selected set whether it was all pinned dropped the whole figure for every
+// bucket holding a superseded pinned row, and a bucket reported fewer pinned
+// rows past its window than one without one.
+func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, window []Memory) (map[string]int, error) {
+	if len(window) < pol.OverFetch {
 		return nil, nil
 	}
 	read := map[string]int{}
-	for _, c := range fetched {
-		if !c.Pinned {
+	for _, m := range window {
+		if !m.Pinned {
 			return nil, nil
 		}
-		read[c.ProjectID]++
+		read[m.ProjectID]++
 	}
 	where, args := passivePopulationSQL(pol, req, cols)
 	if cols.HasValidity {
