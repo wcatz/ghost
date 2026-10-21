@@ -74,7 +74,7 @@ func TestExportImportRoundTripsDeclaredFeatures(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	data := exportBytes(t, src, "")
-	if !strings.Contains(string(data), `"features":["retention"]`) {
+	if !strings.Contains(string(data), `"features":["links","retention"]`) {
 		t.Fatalf("exported header missing declared features: %s", strings.SplitN(string(data), "\n", 2)[0])
 	}
 	dst := newTestStore(t)

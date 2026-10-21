@@ -348,6 +348,40 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 				continue
 			}
 		}
+		// The same for an EDGE's endpoints, and for the same reason: the memory
+		// that makes the claim is the edge's id in the report, and the memory it
+		// is about is printed beside it. Both are memory ids, and both are
+		// refused by the same function the store refuses them with.
+		if rec.Link != nil && rec.Type == TypeLink && otherPayloads(rec, TypeLink) == "" {
+			if err := memory.CheckImportedID(rec.Link.SourceID); err != nil {
+				unread = append(unread, unreadable{
+					line: lineNum,
+					result: RecordResult{
+						Type:   TypeLink,
+						Line:   lineNum,
+						Action: ActionReject,
+						Detail: "edge id this build will not store",
+						Error:  err,
+					},
+					err: fmt.Errorf("line %d: %s: %w", lineNum, TypeLink, err),
+				})
+				continue
+			}
+			if err := memory.CheckImportedID(rec.Link.TargetID); err != nil {
+				unread = append(unread, unreadable{
+					line: lineNum,
+					result: RecordResult{
+						Type:   TypeLink,
+						Line:   lineNum,
+						Action: ActionReject,
+						Detail: "edge id this build will not store",
+						Error:  err,
+					},
+					err: fmt.Errorf("line %d: %s: %w", lineNum, TypeLink, err),
+				})
+				continue
+			}
+		}
 		recs = append(recs, parsedRecord{rec: rec, line: lineNum})
 	}
 	if !header {
@@ -409,6 +443,11 @@ type parsedRecord struct {
 // id returns the record's id, for the per-record report. A record with no
 // payload has no id, and the empty string is what the report prints alongside
 // the line number that identifies it.
+//
+// An edge of the graph has no id of its own — the table's key is the triple
+// (source, target, relation) — so the report names it by the memory that makes
+// the claim, which is the half of it a reader needs to follow. The other half
+// is in the record's detail.
 func (p parsedRecord) id() string {
 	switch {
 	case p.rec.Project != nil:
@@ -419,6 +458,8 @@ func (p parsedRecord) id() string {
 		return p.rec.Task.ID
 	case p.rec.Decision != nil:
 		return p.rec.Decision.ID
+	case p.rec.Link != nil:
+		return p.rec.Link.SourceID
 	}
 	return ""
 }
@@ -430,10 +471,24 @@ func (p parsedRecord) id() string {
 type step struct {
 	rec     parsedRecord
 	kind    string
+	key     string
 	detail  string
 	check   *projectCheck
 	opts    ImportOptions
 	runFunc func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome
+}
+
+// stepKey is the identity the run's created-ids set knows this step by. It is
+// the record's id for the four kinds that have one, and the edge's own key for
+// a link: the table's primary key is the triple (source, target, relation), so
+// two edges between the same pair of memories are two edges when their
+// relations differ, and a set keyed on the source alone would tell them apart
+// wrongly.
+func (st step) stepKey() string {
+	if st.key != "" {
+		return st.key
+	}
+	return st.rec.id()
 }
 
 // outcome is what running one step produced. A struct rather than a tuple
@@ -487,6 +542,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	var (
 		projects  []parsedRecord
 		memories  []parsedRecord
+		links     []parsedRecord
 		tasks     []parsedRecord
 		decisions []parsedRecord
 	)
@@ -496,6 +552,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			projects = append(projects, p)
 		case TypeMemory:
 			memories = append(memories, p)
+		case TypeLink:
+			links = append(links, p)
 		case TypeTask:
 			tasks = append(tasks, p)
 		case TypeDecision:
@@ -505,8 +563,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			// know is a file from a newer build or a different format, and
 			// dropping it would import a store that is missing data the file
 			// plainly contains.
-			return nil, fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q and %q records",
-				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision)
+			return nil, fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q, %q and %q records",
+				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision, TypeLink)
 		}
 		if err := requirePayload(p); err != nil {
 			return nil, err
@@ -582,6 +640,15 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				return outcome{action: actionFor(created)}
 			}})
 	}
+	// The memories this run lands, and the edges that join them.
+	//
+	// landedMemories holds every memory id that is in the store once the memory
+	// steps have run: one this run created, and one the store already held (a
+	// skip). It is the answer to "is this endpoint there?", and it is answered
+	// the same way in a dry run and in the apply it previews — the dry run's
+	// memory step reports the create it would make, so the edge below is
+	// classified the same way in both modes.
+	landedMemories := map[string]bool{}
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
@@ -591,7 +658,41 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				if err != nil {
 					return outcome{action: ActionReject, err: err}
 				}
+				// The memory is there now — written by this run, or already in the
+				// store — so an edge naming it can be written below.
+				landedMemories[m.ID] = true
 				return outcome{action: actionFor(created), clamped: contentClamped(clamped), downgraded: downgraded}
+			}})
+	}
+	// The edges of the graph, after the memories they join.
+	//
+	// An edge is written only when BOTH its endpoints are memories this run
+	// lands. An edge naming a memory the artifact does not carry — or one the
+	// run refused — is refused rather than written against whatever the store
+	// happens to hold under that id: the artifact is a copy of a graph whose
+	// endpoints it holds, and an edge against a memory nobody landed is a
+	// relationship the file does not describe. The refusal is per record, so the
+	// rest of the file still imports — and the run says so, which is what keeps a
+	// partial import from reading as a complete one.
+	for _, p := range links {
+		l := *p.rec.Link
+		steps = append(steps, step{rec: p, kind: TypeLink, key: linkKey(&l), detail: linkDetail(&l), opts: opts,
+			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
+				if !landedMemories[l.SourceID] {
+					return outcome{action: ActionReject, err: fmt.Errorf(
+						"the edge's source %s is not a memory this import lands — an edge joins two memories the artifact holds, and this one names a memory that was refused or is not in the artifact",
+						memory.RefusalArg("source_id", l.SourceID))}
+				}
+				if !landedMemories[l.TargetID] {
+					return outcome{action: ActionReject, err: fmt.Errorf(
+						"the edge's target %s is not a memory this import lands — an edge joins two memories the artifact holds, and this one names a memory that was refused or is not in the artifact",
+						memory.RefusalArg("target_id", l.TargetID))}
+				}
+				created, err := s.ImportLink(ctx, l, opts.Apply)
+				if err != nil {
+					return outcome{action: ActionReject, err: err}
+				}
+				return outcome{action: actionFor(created)}
 			}})
 	}
 	// Which of the artifact's tasks and decisions have landed — been created, or
@@ -844,6 +945,26 @@ func liveProjectIDs(ctx context.Context, s *memory.Store) (map[string]bool, erro
 	return out, nil
 }
 
+// linkKey is the identity of one edge of the graph: the three columns the
+// table's primary key is made of. Two edges between the same pair of memories
+// are two edges when their relations differ, so a key on the source alone would
+// tell them apart wrongly — and the run's created-ids set has to tell them
+// apart, because a repeated edge in one artifact is a skip in the dry run
+// exactly as it is on apply.
+func linkKey(l *memory.PortableLink) string {
+	return l.SourceID + "\x00" + l.TargetID + "\x00" + l.Relation
+}
+
+// linkDetail is the label a report line shows for an edge: the relation and the
+// memory it is about. The memory that MAKES the claim is the record's own id,
+// so the report prints it beside the detail.
+//
+// The target goes through the shared id renderer, so an id carrying a newline
+// cannot forge a line of the report that names it.
+func linkDetail(l *memory.PortableLink) string {
+	return l.Relation + " " + assemble.Token(l.TargetID)
+}
+
 // requirePayload rejects a record whose type claims a payload it does not carry.
 // `{"type":"memory"}` is not a memory with no fields — it is a malformed file,
 // and importing it would write an empty row or fail the write with an error
@@ -866,6 +987,10 @@ func requirePayload(p parsedRecord) error {
 	case TypeDecision:
 		if p.rec.Decision == nil {
 			missing = TypeDecision
+		}
+	case TypeLink:
+		if p.rec.Link == nil {
+			missing = TypeLink
 		}
 	}
 	if missing != "" {
@@ -892,6 +1017,7 @@ func otherPayloads(rec record, own string) string {
 		{TypeMemory, rec.Memory != nil},
 		{TypeTask, rec.Task != nil},
 		{TypeDecision, rec.Decision != nil},
+		{TypeLink, rec.Link != nil},
 	} {
 		if k.present && k.kind != own {
 			extra = append(extra, fmt.Sprintf("%q", k.kind))
@@ -1026,6 +1152,7 @@ func (c createdIDs) add(kind, id string) {
 // here before the store's validation can refuse it.
 func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, onRecord func(RecordResult), created createdIDs) {
 	var got outcome
+	key := st.stepKey()
 	switch {
 	case st.check != nil && !st.check.available(st.check.projectID):
 		// The project is available neither in the store nor from this run's
@@ -1036,7 +1163,7 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		got = outcome{action: ActionReject, err: fmt.Errorf(
 			"project %s not found — the artifact carries no record for it and this store does not have it",
 			memory.RefusalArg("project_id", st.check.projectID))}
-	case created.has(st.kind, st.rec.id()):
+	case created.has(st.kind, key):
 		// An earlier step in this run wrote this id, so the store's presence
 		// check answers "present" — in the apply run it already has. Reported
 		// without asking the store again: the answer is the one the apply run
@@ -1049,7 +1176,7 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 	// it whether or not anything was written: a dry run's create is a promise to
 	// write, and the next record with the same id has to read as a skip.
 	if got.action == ActionCreate {
-		created.add(st.kind, st.rec.id())
+		created.add(st.kind, key)
 	}
 	result := RecordResult{
 		Type:       st.kind,

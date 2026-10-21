@@ -604,10 +604,11 @@ byte-identical, because a value every character of which is allowlisted is
 written bare.
 
 **Validation is separate, and refuses rather than clamps.** `ghost import`
-refuses a record id — a memory's, a task's or a decision's — carrying a control
-character, whitespace, a backtick or a `«»`, and one longer than 128 bytes. A
-project's id, name and path are refused the same characters *except* whitespace
-and *except* any length, because a project id is routinely a filesystem path and
+refuses a record id — a memory's, a task's, a decision's or an **edge's
+endpoint**'s — carrying a control character, whitespace, a backtick or a `«»`,
+and one longer than 128 bytes. A project's id, name and path are refused the
+same characters *except* whitespace and *except* any length, because a project
+id is routinely a filesystem path and
 `/Users/w/My Projects/ghost` is a real one; a deep checkout is a longer one, and
 `ghost export` writes it into the artifact, so bounding it would make `ghost
 import` refuse a file `ghost export` had just written. An id is a primary key, so

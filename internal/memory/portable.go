@@ -153,6 +153,75 @@ type PortableEvidence struct {
 	VerifiedAt *string  `json:"verified_at,omitempty"`
 }
 
+// PortableLink is one edge of the memory graph as the artifact carries it.
+//
+// It is a distinct type from Link rather than a reuse of it because the artifact
+// is a wire format and not a view of a row: it carries the CLAIM, and leaves out
+// the bookkeeping a live row holds — the rowid, and the withdrawal stamp of an
+// edge that is no longer live. A withdrawn claim is not carried at all: an
+// edge the store invalidated is a claim somebody took back, and an import is
+// not a claim about it.
+//
+// The fields are the ones a reader of the graph acts on. SourceID makes the
+// claim and TargetID is what it is about, so the pair is directed and the
+// relation says which way it reads. Strength is how strongly the classifier
+// judged the pair. Source names the writer that made the claim ('llm' for the
+// supersede pass, 'auto' for the linker, 'manual' for a person), and the
+// supersede pass reads it to find the edges it owns. CreatedAt is the stamp of
+// the JUDGEMENT rather than of the write — the supersede pass compares it with
+// an endpoint's updated_at to decide whether the pair has moved since it was
+// judged, so an edge restored with the import time instead would read as
+// judged now, and the pass would leave it alone.
+type PortableLink struct {
+	SourceID  string  `json:"source_id"`
+	TargetID  string  `json:"target_id"`
+	Relation  string  `json:"relation"`
+	Strength  float64 `json:"strength"`
+	Source    string  `json:"source"`
+	CreatedAt string  `json:"created_at"`
+}
+
+// CarriedLinkRelations are the relations of the memory graph the portable
+// artifact carries, and the rule for which ones they are is the rule the rest
+// of the artifact follows: a value travels when nothing recomputes it.
+//
+// The linking worker writes the `related` edges from the cosine similarity of
+// two vectors, and the near-duplicate fold writes the `duplicate` ones from the
+// text of two memories. Both are DERIVED, and a worker rebuilds them after an
+// import. The supersede pass writes the `supersedes` and `causes` edges, and
+// each one is a classifier's judgement about a pair of memories: nothing
+// recomputes it, because recomputing it means asking the classifier again.
+// Those two travel, because a restore that dropped them would leave a memory a
+// `supersedes` edge had demoted undemoted, and would leave the withdraw and
+// reassess repairs with no edge to act on.
+//
+// The other two relations the table's CHECK allows, `contradicts` and
+// `elaborates`, have no writer in this build: nothing creates one, so there is
+// nothing to carry and nothing to lose.
+func CarriedLinkRelations() []string {
+	return []string{"supersedes", "causes"}
+}
+
+// carriedLinkRelation reports whether a relation is one the artifact carries.
+func carriedLinkRelation(relation string) bool {
+	for _, r := range CarriedLinkRelations() {
+		if r == relation {
+			return true
+		}
+	}
+	return false
+}
+
+// carriedLinkSource reports whether a link's source column is one the table's
+// own CHECK accepts.
+func carriedLinkSource(source string) bool {
+	switch source {
+	case "auto", "llm", "manual":
+		return true
+	}
+	return false
+}
+
 // recordedVerification reports whether an imported memory's validity column is a
 // real claim that somebody checked it, which is what earns the arrival record its
 // verified_at.
@@ -451,6 +520,175 @@ func portableEvidence(ctx context.Context, db *sql.DB, ids []string) (map[string
 		rows.Close() //nolint:errcheck
 	}
 	return out, nil
+}
+
+// PortableLinks returns the edges of the carried relations that TOUCH the given
+// projects, in a deterministic order.
+//
+// "Touch" is either endpoint, and that is the whole of the difference between
+// this read and a narrower one. An edge between a project memory and a memory
+// of another project is that project's edge as much as the other's — the
+// supersede demotion it causes has no project predicate at all — so an export
+// that filtered on both endpoints would not know the edge was there, and could
+// not say that it left it out. The exporter decides which edges it can carry
+// (both endpoints in the artifact), so this read has to hand it every edge in
+// the neighbourhood, not only the ones that travel.
+//
+// Only LIVE edges are read. An edge the store invalidated is a claim somebody
+// took back, and the artifact carries claims, not withdrawals.
+//
+// The order is (source, target, relation), so two exports of an unchanged store
+// are byte-identical.
+func (s *Store) PortableLinks(ctx context.Context, projectIDs []string) ([]PortableLink, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	// The relations and the project ids ride as parameters, and the query text
+	// carries only placeholders — the same rule the other portable reads follow.
+	relations := CarriedLinkRelations()
+	relPh := make([]string, len(relations))
+	args := make([]any, 0, len(relations)+2*len(projectIDs))
+	for i, r := range relations {
+		relPh[i] = "?"
+		args = append(args, r)
+	}
+	projPh := make([]string, len(projectIDs))
+	for i := range projectIDs {
+		projPh[i] = "?"
+	}
+	for _, id := range projectIDs {
+		args = append(args, id)
+	}
+	for _, id := range projectIDs {
+		args = append(args, id)
+	}
+	projects := strings.Join(projPh, ",")
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at
+		FROM memory_links l
+		WHERE l.invalidated_at IS NULL
+		  AND l.relation IN (`+strings.Join(relPh, ",")+`)
+		  AND (l.source_id IN (SELECT id FROM memories WHERE project_id IN (`+projects+`))
+		    OR l.target_id IN (SELECT id FROM memories WHERE project_id IN (`+projects+`)))
+		ORDER BY l.source_id, l.target_id, l.relation
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("portable links: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []PortableLink
+	for rows.Next() {
+		var l PortableLink
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.Relation, &l.Strength, &l.Source, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("portable links: %w", err)
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// ImportLink inserts one edge of the graph that the artifact carries, and
+// reports created=false when the edge is already in the store.
+//
+// It never overwrites and never revives. The row is written only when there is
+// no row for its (source, target, relation) at all: an edge the store already
+// holds is the live copy — the artifact is the older of the two — and an edge
+// the store holds WITHDRAWN stays withdrawn, because a withdrawal is an
+// explicit act and an import is not a claim about it. `CreateLink`'s upsert
+// does the opposite of both (it keeps the higher strength and clears the
+// invalidation), which is right for a live judgement and wrong for a restore.
+//
+// A `supersedes` edge files the same history row `CreateLink` files: the claim
+// changes the target's standing, and a corpus whose audit shows a supersede and
+// no withdrawal reads as though the stale claim were still live. The row is
+// written in the same transaction as the edge, and only when the edge BECOMES
+// active — a re-import of an artifact whose edge is already there is a skip and
+// writes nothing.
+//
+// The endpoints are NOT checked here. Whether they exist is a fact about the
+// run rather than about the record: a dry run has created nothing yet, so a
+// check against the store would refuse the edge in the preview and accept it
+// in the run it previews. The caller knows which memories the run lands, and
+// the store's own foreign key is the backstop behind that answer.
+func (s *Store) ImportLink(ctx context.Context, l PortableLink, apply bool) (created bool, err error) {
+	// The lock is taken here, above the presence check, for the reason the other
+	// importers give: the presence check is a read whose answer decides whether
+	// a write happens, so the two have to be atomic together.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The presence check comes FIRST among the store's own checks, and that
+	// order matters in one direction: an edge the store already holds is a
+	// SKIP, never a rejection. Ahead of this check, an edge whose endpoint id
+	// this build refuses on shape (a pre-#791 write, a restored snapshot, a
+	// hand edit) would make a re-run FAIL over an edge that is not being written
+	// and could not be.
+	var present int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM memory_links WHERE source_id = ? AND target_id = ? AND relation = ?`,
+		l.SourceID, l.TargetID, l.Relation,
+	).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import link: check whether the edge is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
+	// THEN CheckImportedLink, the importer's OWN refusal predicate and the same
+	// one `ghost export` calls (#813). It takes the record and never the store.
+	if err := CheckImportedLink(l); err != nil {
+		return false, err
+	}
+	if !apply {
+		return true, nil
+	}
+
+	// The insert and the history row that records it share a transaction, so an
+	// edge cannot land without the claim it makes about the target. The
+	// conflict clause is DO NOTHING rather than an update: an edge that appeared
+	// between the check above and this write is left exactly as it is, live or
+	// withdrawn, and the write reports itself as a skip.
+	tx, _, err := s.beginWrite(ctx, "import-link")
+	if err != nil {
+		return false, fmt.Errorf("import link: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at)
+		VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')))
+		ON CONFLICT(source_id, target_id, relation) DO NOTHING
+	`, l.SourceID, l.TargetID, l.Relation, l.Strength, l.Source, l.CreatedAt)
+	if err != nil {
+		return false, fmt.Errorf("import link: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("import link rows: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if l.Relation == "supersedes" {
+		// The edge makes the claim, so the history row names the memory that
+		// made it — the one that replaced the target — exactly as CreateLink's
+		// does. Without it, a corpus whose audit shows a supersede and no
+		// withdrawal reads as though the stale claim were still live.
+		if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+			phase:     phaseSupersede,
+			relatedID: l.SourceID,
+		}}, []string{l.TargetID}); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit import link: %w", err)
+	}
+	return true, nil
 }
 
 // projectCollision reports whether a *different* project already records p's

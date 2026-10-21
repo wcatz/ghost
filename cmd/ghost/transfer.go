@@ -113,9 +113,14 @@ per line, readable, diffable and editable.
                      is to leave the flag off.
 
 Embeddings are not exported: they are derived from content by a local model and
-the embedding worker rebuilds them. Memory links are not exported either — they
-only mean something between two memories that are both present, and the linking
-worker recomputes related edges after an import.
+the embedding worker rebuilds them. The ` + "`related`" + ` edges of the memory graph are not exported
+either — they are derived the same way, and the linking worker recomputes them
+after an import. The ` + "`supersedes`" + ` and ` + "`causes`" + ` edges ARE exported: each one is a
+classifier's judgement about a pair of memories, and nothing recomputes it, so
+an artifact that dropped them would restore a store in which a memory a
+` + "`supersedes`" + ` edge had demoted was no longer demoted. An edge travels only when both
+its endpoints are memories the artifact carries; one whose endpoint is missing
+is left out, and the export says how many.
 
 A record ` + "`ghost import`" + ` would refuse is LEFT OUT and named on stderr, and
 the command exits non-zero. The exporter applies the importer's own refusal
@@ -148,6 +153,12 @@ A record whose id is already in the database is skipped, never overwritten: the
 artifact is the older of the two copies, so overwriting would restore stale data
 over live data. This also makes re-running an import always safe, which is how
 you repair a run that rejected a record.
+
+The ` + "`supersedes`" + ` and ` + "`causes`" + ` edges of the memory graph are imported with the
+memories they join, and an edge naming a memory the artifact does not carry is
+rejected and named. An edge the store already holds is left alone, and an edge
+the store holds WITHDRAWN stays withdrawn — an import is not a claim about a
+withdrawal.
 
 Imported memory content is held to the same length cap and the same validation
 as a normal save, so an artifact from another machine cannot write a row Ghost
@@ -872,6 +883,21 @@ const validityAdvice = "  A memory left out for its valid_from, valid_until, ver
 // is worth the cost.
 const evidenceAdvice = "  A memory left out because one of its evidence records carries a stamp no accepted form reads or a rating outside 0 to 1 keeps its id, but no tool edits an evidence record: they are appended by a save, an import and a reflect. The repair is to delete the row with ghost_memory_delete and re-save it, which loses its links, history and evidence, and then re-export."
 
+// linkAdvice is the repair for an EDGE of the memory graph left out of the
+// artifact.
+//
+// It is a sentence of its own because an edge is neither re-keyable nor
+// deletable through Ghost: there is no command that edits an edge, and the only
+// command that removes one withdraws the CLAIM rather than repairing the row.
+// The claim itself is not wrong — the edge is live, and the demotion it causes
+// still applies in this store — so the sentence says that first: what was left
+// out is the TRAVEL of the edge, not the edge.
+//
+// The field that stopped it is named on the `!` line above, and correcting it
+// is an edit of the database, which is the same answer the token-field advice
+// gives for the fields no tool writes.
+const linkAdvice = "  An edge left out is a claim this store still holds: the artifact does not carry it, so the claim does not travel with this export, and the demotion it causes stays here. The field that stopped it is named above, and no tool edits an edge — `ghost supersede <project> --withdraw <source> <target> --apply` (or the ghost_link_withdraw tool) withdraws a claim you do not want, and correcting the field itself is an edit of the database."
+
 // reportSkippedRecords names every record an export left out and returns an error
 // when there was one, so the command exits non-zero and a backup script notices.
 //
@@ -884,7 +910,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence, hasLink bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -919,6 +945,16 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// the delete advice would not say why the row is in the artifact's way.
 		if sk.Evidence {
 			hasEvidence = true
+			continue
+		}
+		// An EDGE is in a bucket of its own, and it must not fall into the
+		// "unrepairable" one: that sentence names a command per KIND, and it
+		// looks up the kinds it names — a link in that bucket would leave the
+		// list empty and the sentence would print nothing at all, or name a
+		// kind it has no sentence for. An edge is not re-keyable and not
+		// deletable either, so it gets its own advice below.
+		if sk.Type == portable.TypeLink {
+			hasLink = true
 			continue
 		}
 		// A batch can hold both kinds, so the advice is collected rather than
@@ -994,6 +1030,11 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	}
 	if hasOrphan {
 		if _, err := fmt.Fprintln(out, "  A record left out because its project was left out is not refused for anything of its own, and deleting it would drop the only copy: fix the project and re-export, and the record is written with it."); err != nil {
+			return err
+		}
+	}
+	if hasLink {
+		if _, err := fmt.Fprintln(out, linkAdvice); err != nil {
 			return err
 		}
 	}
@@ -1275,12 +1316,24 @@ func fieldListInToolOrder(tool string, fields []string) string {
 // backup script is about to act on.
 func printExportSummary(out io.Writer, path string, stats portable.Stats) error {
 	headline := fmt.Sprintf("exported %s to %s",
-		pluralRecords(stats.Projects, stats.Memories, stats.Tasks, stats.Decisions), path)
+		pluralRecords(stats.Projects, stats.Memories, stats.Links, stats.Tasks, stats.Decisions), path)
 	if len(stats.Skipped) > 0 {
 		headline += fmt.Sprintf(" — %s left out, see below", countLabel(len(stats.Skipped)))
 	}
-	_, err := fmt.Fprintln(out, headline)
-	return err
+	if _, err := fmt.Fprintln(out, headline); err != nil {
+		return err
+	}
+	// The edges that did not travel get their own line, because they are lost
+	// and nothing else in the report would say so: the demotion an edge causes
+	// goes with it, and a reader of the artifact would not know the store held
+	// a claim the file no longer carries.
+	if stats.LinksLeftOut > 0 {
+		if _, err := fmt.Fprintf(out, "  %s left out: an endpoint of the edge is not a memory this artifact carries, so the edge did not travel\n",
+			pluralCount(stats.LinksLeftOut, "link", "links")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // printImportReport states what an import did, or — for a dry run — what it
@@ -1399,11 +1452,11 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 // scans for; the per-record lines came before it and the rejected ones follow.
 func printImportReport(out io.Writer, path string, report portable.ImportReport, opts portable.ImportOptions) error {
 	created := report.Created["project"] + report.Created["memory"] +
-		report.Created["task"] + report.Created["decision"]
+		report.Created["link"] + report.Created["task"] + report.Created["decision"]
 	skipped := report.Skipped["project"] + report.Skipped["memory"] +
-		report.Skipped["task"] + report.Skipped["decision"]
+		report.Skipped["link"] + report.Skipped["task"] + report.Skipped["decision"]
 	summary := pluralRecords(report.Created["project"], report.Created["memory"],
-		report.Created["task"], report.Created["decision"])
+		report.Created["link"], report.Created["task"], report.Created["decision"])
 
 	// A run that created nothing says so, rather than "imported no records" —
 	// which reads as a failure and is in fact the correct answer to a re-run of
@@ -1532,11 +1585,14 @@ func runImportCore(ctx context.Context, store *memory.Store, path string, opts p
 }
 
 // pluralRecords renders "N projects, M memories, …" for the counts that are
-// non-zero, in a fixed order, with a noun that agrees with its count.
-func pluralRecords(projects, memories, tasks, decisions int) string {
+// non-zero, in a fixed order, with a noun that agrees with its count. The order
+// is the artifact's own: projects, then memories, then links, then tasks, then
+// decisions.
+func pluralRecords(projects, memories, links, tasks, decisions int) string {
 	parts := []string{
 		pluralCount(projects, "project", "projects"),
 		pluralCount(memories, "memory", "memories"),
+		pluralCount(links, "link", "links"),
 		pluralCount(tasks, "task", "tasks"),
 		pluralCount(decisions, "decision", "decisions"),
 	}

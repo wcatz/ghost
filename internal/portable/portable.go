@@ -65,6 +65,7 @@ const minReadableSchemaVersion = 1
 // drop a field this build cannot interpret.
 var knownFeatures = map[string]bool{
 	"retention": true,
+	"links":     true,
 }
 
 // declaredFeatures returns the feature list this build writes, derived from
@@ -88,6 +89,7 @@ const (
 	TypeMemory   = "memory"
 	TypeTask     = "task"
 	TypeDecision = "decision"
+	TypeLink     = "link"
 )
 
 // record is one line of the artifact: a type discriminator plus that type's
@@ -100,6 +102,7 @@ type record struct {
 	Memory   *memory.PortableMemory  `json:"memory,omitempty"`
 	Task     *memory.Task            `json:"task,omitempty"`
 	Decision *memory.Decision        `json:"decision,omitempty"`
+	Link     *memory.PortableLink    `json:"link,omitempty"`
 
 	// SchemaVersion is on the header line only. It is omitted elsewhere: a
 	// payload that repeated it would raise the question of which value governs
@@ -124,7 +127,7 @@ func headerLine() []byte {
 }
 
 // Export writes the store as an artifact: a header line, then every project,
-// memory, task and decision.
+// memory, link, task and decision.
 //
 // A projectFilter of "" exports everything; anything else must match a project's
 // id or name exactly, and a filter that matches nothing is an error. Silently
@@ -136,11 +139,13 @@ func headerLine() []byte {
 // the caller never named. An exact id wins before any name is considered, since
 // an id is unique and ids and names share the filter's one namespace.
 //
-// Records are written projects first, then memories, then tasks, then decisions.
-// Projects come first because a memory names a project, and an artifact a user
-// has edited by hand is read in order — a memory before its project would be a
-// rejected record in a file that is otherwise fine. Within each kind the order
-// is the store's id order, which is what makes the output byte-reproducible.
+// Records are written projects first, then memories, then links, then tasks,
+// then decisions. Projects come first because a memory names a project, and an
+// artifact a user has edited by hand is read in order — a memory before its
+// project would be a rejected record in a file that is otherwise fine. The
+// links come after the memories because both their endpoints are memories.
+// Within each kind the order is the store's id order, which is what makes the
+// output byte-reproducible.
 //
 // The export does not write embeddings, and does not leave a partial file behind
 // a failure it can foresee: the caller removes the file when Export returns an
@@ -260,11 +265,55 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		keptDecisions = append(keptDecisions, d)
 	}
 
+	// The edges of the graph, and the ones that travel with the artifact.
+	//
+	// An edge travels only when BOTH its endpoints are memories the artifact
+	// carries, and that is the whole of the rule: the endpoints are ordinary
+	// memories the artifact already holds, so there is no foreign key to fail
+	// and no relationship to fabricate. An edge whose endpoint is not in the
+	// artifact is left out and counted, because the demotion it causes is then
+	// lost with it — and a count of what was written is not a count of what
+	// exists.
+	//
+	// An edge the artifact DOES carry is then judged by the IMPORTER's own
+	// predicate, exactly as a project, a memory, a task and a decision are: a
+	// store can already hold an edge this build refuses to import (a hand
+	// write, a restored snapshot, an older build), and an export that carried
+	// one produced an artifact its own importer then rejected — the same hole
+	// #813 closed for the other four kinds of record. A refused edge is left
+	// out and NAMED, on the same `!` line and with the same reason, and the
+	// export exits non-zero because of it.
+	links, err := s.PortableLinks(ctx, ids)
+	if err != nil {
+		return Stats{}, fmt.Errorf("export links: %w", err)
+	}
+	carried := make(map[string]bool, len(keptMemories))
+	for _, m := range keptMemories {
+		carried[m.ID] = true
+	}
+	keptLinks := make([]memory.PortableLink, 0, len(links))
+	linksLeftOut := 0
+	for _, l := range links {
+		if !carried[l.SourceID] || !carried[l.TargetID] {
+			linksLeftOut++
+			continue
+		}
+		if reason, secret := exportRefusal(memory.CheckImportedLink(l)); reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeLink, ID: l.SourceID, Reason: reason, Secret: secret})
+			continue
+		}
+		keptLinks = append(keptLinks, l)
+	}
+
 	stats := Stats{
 		Projects:  len(keptProjects),
 		Memories:  len(keptMemories),
+		Links:     len(keptLinks),
 		Tasks:     len(keptTasks),
 		Decisions: len(keptDecisions),
+	}
+	if linksLeftOut > 0 {
+		stats.LinksLeftOut = linksLeftOut
 	}
 	if len(skipped) > 0 {
 		stats.Skipped = skipped
@@ -292,6 +341,12 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	for i := range keptMemories {
 		m := keptMemories[i]
 		if err := write(record{Type: TypeMemory, Memory: &m}); err != nil {
+			return Stats{}, err
+		}
+	}
+	for i := range keptLinks {
+		l := keptLinks[i]
+		if err := write(record{Type: TypeLink, Link: &l}); err != nil {
 			return Stats{}, err
 		}
 	}
@@ -389,10 +444,24 @@ const orphanReason = "the project it names was left out of this artifact"
 
 // Stats is what an export wrote, and what it deliberately left out.
 type Stats struct {
-	Projects  int
-	Memories  int
-	Tasks     int
-	Decisions int
+	Projects int
+	Memories int
+	// Links is the number of edges of the memory graph the artifact carries.
+	// Only the relations nothing recomputes travel (memory.CarriedLinkRelations):
+	// the `related` edges the linking worker writes are rebuilt after an import.
+	Links int
+	// LinksLeftOut is the number of live edges of those relations the artifact
+	// did NOT carry, because one of their endpoints is not a memory it carries.
+	// It is a count rather than a row in Skipped, and the difference is
+	// deliberate: a record Skipped holds is one `ghost import` would refuse, so
+	// the export names it and exits non-zero, while an edge left out is a
+	// CONSEQUENCE of a scope — a project the export did not cover, or an edge
+	// that reached into one — and the export is complete for what it covered.
+	// The count is what says so out loud: the demotion the edge caused is lost
+	// with it, and nothing else in the report would say so.
+	LinksLeftOut int
+	Tasks        int
+	Decisions    int
 	// Skipped holds every record left out, in the order the artifact would have
 	// written them: projects, then memories, tasks and decisions. It is empty for
 	// an ordinary store, and a caller that reports an export must say so when it
