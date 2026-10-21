@@ -371,10 +371,28 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	// removeErr is nil unless the stale registration's removal failed, and is
 	// read only by the rollback the add-json failure path runs.
 	var removeErr error
-	alreadyRegistered := err == nil && strings.Contains(currentOutput, "Command:")
-	correctPath := strings.Contains(currentOutput, ghostBin)
+	// The registration is judged by the SAME rule the status check judges it
+	// by (claudeMCPVerdict): this build's ghost binary, run with the
+	// contract's arguments. A registration that is anything else — a foreign
+	// command, a command that only begins with the ghost's path, the wrong
+	// arguments, no arguments at all — is drift the installer repairs, so it
+	// takes the remove-then-add path below and is reported as updated rather
+	// than as already registered (#1711). The old test was two substring
+	// searches over the whole rendering, which read a foreign command as
+	// ghost's whenever the ghost path appeared anywhere in it, and read the
+	// wrong arguments as ghost's whenever the command was right — so init
+	// printed "already registered" and skipped the repair the status report
+	// had just asked for.
+	//
+	// A client that could not be asked holds no registration this run can
+	// see, so the verdict starts from nothing registered.
+	present, current := false, false
+	if err == nil {
+		present, current, _ = claudeMCPVerdict(currentOutput, ghostBin)
+	}
+	alreadyRegistered := present
 
-	if alreadyRegistered && correctPath {
+	if current {
 		_, _ = fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
 		return nil
 	}
