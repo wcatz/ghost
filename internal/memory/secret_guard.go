@@ -107,9 +107,18 @@ const ProjectIdentifierLabel = "project identifier"
 // ArgEchoMaxBytes is the longest argument a refusal repeats back; see RefusalArg.
 const ArgEchoMaxBytes = 256
 
-// ProjectArg renders a caller's project argument — the value a `project_id` or
-// `project` tool parameter carries, or a CLI's project operand — for a sentence
-// that REFUSES it.
+// ProjectArg renders a caller's argument — the value a `project_id` or `project`
+// tool parameter carries, a CLI's project operand, a file path the installer
+// names, or a prompt's own argument — for a sentence or a prompt that quotes
+// it.
+//
+// It is named for the project argument because that is the one that reaches
+// most surfaces; the RULE it carries is the one every caller-supplied argument
+// a sentence quotes follows, and the field says which argument it is. The
+// prompts are the second caller of it (#1712): `record_decision` quotes its
+// `topic` here, because a topic is caller text too and the two halves of that
+// are the same — a value the guard recognises is withheld, and a value it does
+// not is quoted, so it cannot close the slot it sits in.
 //
 // It is a RENDERER, and saying so is not the same as saying it is everywhere: a
 // refusal that quotes a project argument has to come through here, and one that

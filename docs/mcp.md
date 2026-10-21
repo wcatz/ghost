@@ -317,6 +317,8 @@ A write notifies every resource whose rows it changes. `_global` is a project as
 
 A missing or empty required argument (`project_id` for `recall_project`; `project_id` or `topic` for `record_decision`) answers JSON-RPC -32602 (invalid params) with the argument named, the code the SDK uses for an unknown template name. A `project_id` that matches more than one project answers -32602 too, from `recall_project` and from the context resource alike; a failed store read during that lookup is a plain error (code 0).
 
+Both prompts render the arguments they are given rather than interpolating them. `project_id` and `topic` go through the same token guard the refusals use, so a value holding a credential is withheld behind a placeholder naming the argument and the credential's format — the topic is named `topic`, so an agent that pasted one knows which argument to change — and a value the guard does not recognise comes back quoted. The quoting is what keeps a topic holding a quote or a line break from closing the quoted slot it sits in: it cannot add a sentence of its own to the instruction the client hands its model, and the message stays one line.
+
 ## Agent guidance
 
 The server embeds instructions that encourage agents to:

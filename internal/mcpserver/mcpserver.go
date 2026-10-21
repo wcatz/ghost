@@ -4842,11 +4842,29 @@ func (s *Server) registerPrompts() {
 		// not recognise: `ProjectArg` supplies the quotation marks the sentence
 		// already wrote itself.
 		rendered := memory.ProjectArg("project_id", projectID)
+		// The TOPIC is a caller-supplied argument too, and it reaches the model
+		// twice — in the description the client shows beside the prompt's name,
+		// and in the user message it sends — so it went in raw while the project
+		// identifier beside it was rendered. A topic holding a quote closed the
+		// quoted slot it sat in and added a sentence of its own to the
+		// instruction: `x" for project "other".` made the message name two
+		// project ids before it asked for the decision, and a token-shaped topic
+		// came back whole where the project identifier beside it was withheld
+		// (#1712).
+		//
+		// It is `ProjectArg` and not `RefusalArg` because the topic must come
+		// back WHOLE: it is what the decision is ABOUT, and a placeholder would
+		// leave the agent no subject to record. `ProjectArg` is the unbounded
+		// whole-value renderer, and it returns exactly `%q` for a value the
+		// guard does not recognise — so an ordinary topic is byte-identical to
+		// what it was, and one holding a quote or a line break comes back
+		// quoted, which is what keeps it inside the slot it sits in.
+		renderedTopic := memory.ProjectArg("topic", topic)
 		return &mcp.GetPromptResult{
-			Description: "Structure and record a decision about " + topic,
+			Description: "Structure and record a decision about " + renderedTopic,
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{
-					Text: "Help me record a design decision about \"" + topic + "\" for project " + rendered + ". " +
+					Text: "Help me record a design decision about " + renderedTopic + " for project " + rendered + ". " +
 						"Ask me for (or infer from context): a short title, the decision itself, the rationale, and any " +
 						"alternatives considered. Then call ghost_decision_record with project_id=" + rendered + " to save it.",
 				}},
