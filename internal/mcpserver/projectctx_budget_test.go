@@ -371,3 +371,169 @@ func TestRecallProjectPromptNearBudget(t *testing.T) {
 		t.Errorf("prompt length %d outside 15800..%d", len(text), searchResponseMaxBytes)
 	}
 }
+
+// longIDToolStore is the store the project-context tool's budget cases share: a
+// `_global` bucket holding twenty rows of about 7,900 bytes each, so the answer
+// on every path is well over the 16,000-byte budget and whole rows are cut.
+func longIDToolStore(t *testing.T) *memory.Store {
+	t.Helper()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		content := fmt.Sprintf("global memory %d %s", i, strings.Repeat("b", 7900))
+		if _, _, _, err := store.Upsert(ctx, "_global", "fact", content, "mcp", 0.5, nil); err != nil {
+			t.Fatalf("Upsert global: %v", err)
+		}
+	}
+	return store
+}
+
+// projectContextToolText calls ghost_project_context and returns its text.
+func projectContextToolText(t *testing.T, session *mcp.ClientSession, projectID string) string {
+	t.Helper()
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ghost_project_context",
+		Arguments: map[string]any{"project_id": projectID},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	text := ""
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			text += tc.Text
+		}
+	}
+	return text
+}
+
+// The tool's NOT-REGISTERED answer is the one that echoed the caller's project
+// id whole, and the echo is FRAMING: a framing at or over the budget makes the
+// fit pass keep every row, so the cap stopped applying at all and a 20,000-byte
+// id produced an answer of about 180 KB with no cut notice.
+//
+// The id is bounded at 512 bytes — the bound the context resource and the
+// recall_project prompt already use — so an id past it is withheld and the
+// framing stays small enough for the cut to apply. An id at or under the bound
+// is still echoed whole, because the sentence names the project the caller
+// asked about.
+//
+// The ordinary name is the case that must not move: its sentence is the one
+// origin/main printed, byte for byte.
+func TestProjectContextToolWithAnUnknownProjectIDStaysWithinBudget(t *testing.T) {
+	const notRegistered = `Project "no-such-project" is not registered with Ghost yet — nothing has ever been ` +
+		`saved for it. Call ghost_memory_save to create it.`
+	cases := []struct {
+		name         string
+		projectID    string
+		wantEchoed   bool
+		wantSentence string
+	}{
+		{
+			name:       "an id at the bound is echoed whole",
+			projectID:  strings.Repeat("a", 512),
+			wantEchoed: true,
+		},
+		{
+			name:      "an id past the bound is withheld",
+			projectID: strings.Repeat("a", 513),
+		},
+		{
+			name:      "a very long id is withheld",
+			projectID: strings.Repeat("a", 20000),
+		},
+		{
+			name:         "an ordinary name is unchanged",
+			projectID:    "no-such-project",
+			wantEchoed:   true,
+			wantSentence: notRegistered,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := longIDToolStore(t)
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			srv := New(store, logger, "test")
+			session := connectedClient(t, srv)
+
+			text := projectContextToolText(t, session, tc.projectID)
+			if len(text) > searchResponseMaxBytes {
+				t.Errorf("answer is %d bytes, budget is %d", len(text), searchResponseMaxBytes)
+			}
+			if !strings.Contains(text, projectContextCutAdvice) {
+				t.Errorf("no cut notice in the answer: %.200s", text)
+			}
+			if tc.wantEchoed {
+				if !strings.Contains(text, tc.projectID) {
+					t.Errorf("the %d-byte id was not echoed whole", len(tc.projectID))
+				}
+				if strings.Contains(text, "withheld") {
+					t.Errorf("the %d-byte id was withheld: %.200s", len(tc.projectID), text)
+				}
+			} else {
+				if strings.Contains(text, tc.projectID) {
+					t.Errorf("the %d-byte id was echoed", len(tc.projectID))
+				}
+				if !strings.Contains(text, "withheld") {
+					t.Errorf("the %d-byte id was not withheld: %.200s", len(tc.projectID), text)
+				}
+			}
+			if tc.wantSentence != "" && !strings.Contains(text, tc.wantSentence) {
+				t.Errorf("the not-registered sentence changed: %.200s", text)
+			}
+		})
+	}
+}
+
+// A REGISTERED long project id is a REGRESSION GUARD, not a reproduction: the
+// tool never echoes a resolved id, so this answer was within the budget before
+// the not-registered answer was bounded. It is held here because that is the
+// property the bound relies on — the echo is on the unknown-name path only.
+func TestProjectContextToolWithARegisteredLongProjectIDStaysWithinBudget(t *testing.T) {
+	longID := strings.Repeat("a", 20000)
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, longID, longID, longID); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		content := fmt.Sprintf("project memory %d %s", i, strings.Repeat("a", 7900))
+		if _, _, _, err := store.Upsert(ctx, longID, "fact", content, "mcp", 0.5, nil); err != nil {
+			t.Fatalf("Upsert project: %v", err)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		content := fmt.Sprintf("global memory %d %s", i, strings.Repeat("b", 7900))
+		if _, _, _, err := store.Upsert(ctx, "_global", "fact", content, "mcp", 0.5, nil); err != nil {
+			t.Fatalf("Upsert global: %v", err)
+		}
+	}
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	text := projectContextToolText(t, session, longID)
+	if len(text) > searchResponseMaxBytes {
+		t.Errorf("answer is %d bytes, budget is %d", len(text), searchResponseMaxBytes)
+	}
+	if !strings.Contains(text, projectContextCutAdvice) {
+		t.Errorf("no cut notice in the answer: %.200s", text)
+	}
+}
