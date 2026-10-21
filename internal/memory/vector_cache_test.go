@@ -888,8 +888,9 @@ func TestVectorCacheRespectsAPinnedSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("no epoch inside the pinned transaction")
 	}
-	pinned := &Store{db: s.db, snapshot: tx, logger: rs.logger, embeddingIdentity: identityCurrent,
+	pinned := &Store{db: s.db, snapshot: tx, logger: rs.logger,
 		foreignWarned: rs.foreignWarned, scratch: rs.scratch, vcache: rs.vcache}
+	pinned.embeddingIdentity.Store(identityPtr(identityCurrent))
 
 	// Another handle deletes the target, and a plain search publishes the newer
 	// state to the shared cache.
@@ -929,8 +930,9 @@ func TestVectorCacheRespectsAPinnedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx2.Rollback() //nolint:errcheck
-	current := &Store{db: s.db, snapshot: tx2, logger: rs.logger, embeddingIdentity: identityCurrent,
+	current := &Store{db: s.db, snapshot: tx2, logger: rs.logger,
 		foreignWarned: rs.foreignWarned, scratch: rs.scratch, vcache: rs.vcache}
+	current.embeddingIdentity.Store(identityPtr(identityCurrent))
 	res, _, err = current.searchVectorLeg(ctx, cacheProj, q, 20, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1051,8 +1053,9 @@ func TestVectorCacheDoesNotPublishACopyANewerWriteOverlapped(t *testing.T) {
 	if _, ok := readVectorEpoch(ctx, tx); !ok {
 		t.Fatal("no epoch in the pinned snapshot")
 	}
-	pinned := &Store{db: s.db, snapshot: tx, logger: rs.logger, embeddingIdentity: identityCurrent,
+	pinned := &Store{db: s.db, snapshot: tx, logger: rs.logger,
 		foreignWarned: rs.foreignWarned, scratch: rs.scratch, vcache: rs.vcache}
+	pinned.embeddingIdentity.Store(identityPtr(identityCurrent))
 
 	writer := openCacheStoreAt(t, path)
 	var wrote bool

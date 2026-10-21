@@ -400,7 +400,7 @@ func (s *Store) HistoryGrowth(ctx context.Context) (HistoryGrowthResult, error) 
 // same lock twice.
 func (s *Store) historyWindowCounts(ctx context.Context) (rows, noOp int64, err error) {
 	query, args := historyWindowGrowthStmt()
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&rows, &noOp); err != nil {
+	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&rows, &noOp); err != nil {
 		return 0, 0, fmt.Errorf("count history versions in the window: %w", err)
 	}
 	return rows, noOp, nil
@@ -425,7 +425,7 @@ type memoryHistoryCounts struct {
 // statement ran outside it.
 func (s *Store) historyPerMemoryCounts(ctx context.Context) ([]memoryHistoryCounts, error) {
 	query, args := historyPerMemoryGrowthStmt()
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read per-memory history counts: %w", err)
 	}

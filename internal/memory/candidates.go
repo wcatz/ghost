@@ -533,8 +533,8 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	s.mu.RLock()
 	demotion := s.demotionThreshold
 	floor := s.vectorMinSimilarity
-	identity := s.embeddingIdentity
 	s.mu.RUnlock()
+	identity := s.embeddingIdentityValue()
 	// A store bound to the transaction: every read below has to come from the
 	// snapshot, and the primary handle's single connection is held by the
 	// transaction itself.
@@ -553,7 +553,6 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		logger:              s.logger,
 		demotionThreshold:   demotion,
 		vectorMinSimilarity: floor,
-		embeddingIdentity:   identity,
 		foreignWarned:       s.foreignWarned,
 		// The corpus scratch crosses for the same reason: this store runs the
 		// real vector leg, and a pool of its own would be a pool of one that is
@@ -564,6 +563,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		// the epoch inside this transaction and takes a hit only on a match.
 		vcache: s.vcache,
 	}
+	cand.embeddingIdentity.Store(identityPtr(identity))
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}
 	if req.AsOf != nil {

@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -193,7 +194,14 @@ type Store struct {
 	// that do not. Empty (the default, and the state of the bench harness and
 	// of tests) means no identity is configured: every recorded vector is
 	// searched and only the presence of a row matters.
-	embeddingIdentity string
+	//
+	// It is an atomic pointer rather than a plain string because a DIAGNOSTIC
+	// read has to learn it without the store's mutex: that mutex is held for
+	// the whole of an in-flight write, and a health report that waits for the
+	// write to finish to learn a value set once at startup has waited for
+	// nothing (#1738). Every reader loads it; the store's mutex does not guard
+	// it.
+	embeddingIdentity atomic.Pointer[string]
 
 	// foreignWarned gates the warning loadVectorRows logs when a search
 	// skips vectors recorded under a retired identity: it records which
@@ -279,19 +287,44 @@ func (s *Store) vectorMinSimilarityFloor() float32 {
 // worker as unembedded, so they are rewritten in place. Until it is called, the
 // store searches whatever vectors exist regardless of which model wrote them —
 // the pre-identity behaviour.
+//
+// It takes the store's write lock, as every configuration change here does: a
+// search holds the read lock across its corpus pass, and the vector scan's
+// guard is written against a writer being able to take that lock.
 func (s *Store) SetEmbeddingIdentity(identity string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.embeddingIdentity = identity
+	s.embeddingIdentity.Store(&identity)
+}
+
+// embeddingIdentityValue returns the identity set by SetEmbeddingIdentity, or
+// "" when none is configured.
+//
+// It loads the atomic rather than reading the field under the store's mutex,
+// because the diagnostic read must learn the identity without waiting for an
+// in-flight write to finish (see embeddingIdentity).
+func (s *Store) embeddingIdentityValue() string {
+	if p := s.embeddingIdentity.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// identityPtr returns a pointer to the identity, for a store literal that
+// carries one.
+func identityPtr(identity string) *string {
+	return &identity
 }
 
 // configuredEmbeddingIdentity returns the identity set by
-// SetEmbeddingIdentity under the read lock. It is not called with the lock
-// already held.
+// SetEmbeddingIdentity, or "" when none is configured.
+//
+// The value is process configuration rather than store state: it is set once,
+// when the store is built, and does not change while the server serves. It is
+// therefore read without the store's mutex, so a reader never queues behind a
+// write in flight to learn it (#1738).
 func (s *Store) configuredEmbeddingIdentity() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.embeddingIdentity
+	return s.embeddingIdentityValue()
 }
 
 // NewStore creates a new memory store from an open database.
@@ -356,8 +389,14 @@ func (s *Store) warnNoReadHandle() {
 	})
 }
 
-// queryDB is the read surface the search seams use: the snapshot transaction
+// queryDB is the read surface a store's readers use: the snapshot transaction
 // when one is in force, otherwise the store's own handle.
+//
+// It is what makes ONE implementation serve two places. A search seam reads
+// through it so the search's statements share the snapshot transaction
+// Candidates opened, and a diagnostic read reads through it so the same
+// statement runs on the read transaction BeginDiagnosticRead opened (#1738).
+// A store with neither reads its own handle, which is the ordinary case.
 func (s *Store) queryDB() Queryer {
 	if s.snapshot != nil {
 		return s.snapshot
@@ -516,7 +555,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT id, path, name, created_at, updated_at FROM projects ORDER BY name ASC
 	`)
 	if err != nil {
@@ -9196,7 +9235,7 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 	defer s.mu.RUnlock()
 
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE project_id = ?`, projectID).Scan(&count)
+	err := s.queryDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE project_id = ?`, projectID).Scan(&count)
 	return count, err
 }
 

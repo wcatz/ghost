@@ -53,7 +53,7 @@ func collectAndSortBaseline(t *testing.T, s *Store, projectID string, queryVec [
 		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
 			t.Fatalf("baseline scan: %v", err)
 		}
-		if s.embeddingIdentity != "" && model != s.embeddingIdentity {
+		if identity := s.embeddingIdentityValue(); identity != "" && model != identity {
 			continue
 		}
 		vec := bytesToFloat32s(blob)
@@ -379,10 +379,13 @@ func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 // configured embedding identity before it takes the read lock, because the copy
 // that follows runs with the read lock held and a second RLock on an RWMutex
 // that already has a writer waiting blocks that writer's readers — including
-// the second one — forever. The deadlock needs a waiting writer to be visible,
-// which a test cannot arrange, so what this pins is the half that is
-// observable: with a read lock already outstanding, the search still completes
-// instead of taking a write lock or waiting on itself.
+// the second one — forever. The identity itself is process configuration and
+// is read without the lock at all (#1738), so this pins the property that
+// survives that change: the search takes the store's read lock ONCE. The
+// deadlock needs a waiting writer to be visible, which a test cannot arrange,
+// so what this pins is the half that is observable: with a read lock already
+// outstanding, the search still completes instead of taking a write lock or
+// waiting on itself.
 func TestVectorSearchReadsIdentityBeforeTakingTheLock(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	for i := range 200 {

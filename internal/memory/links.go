@@ -363,7 +363,7 @@ func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string
 		LIMIT ?
 	`
 	args := []any{projectID, limit}
-	if s.embeddingIdentity != "" {
+	if identity := s.embeddingIdentityValue(); identity != "" {
 		query = `
 		SELECT m.id
 		FROM memories m
@@ -373,7 +373,7 @@ func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string
 		ORDER BY m.created_at DESC
 		LIMIT ?
 		`
-		args = []any{projectID, s.embeddingIdentity, limit}
+		args = []any{projectID, identity, limit}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -414,7 +414,7 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("get embedding: %w", err)
 	}
-	if identity := s.embeddingIdentity; identity != "" && model != identity {
+	if identity := s.embeddingIdentityValue(); identity != "" && model != identity {
 		return nil, nil
 	}
 	return bytesToFloat32s(blob), nil
@@ -450,7 +450,7 @@ func (s *Store) EmbeddingStats(ctx context.Context) (embedded, stale, total int,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	identity := s.embeddingIdentity
+	identity := s.embeddingIdentityValue()
 	const countQuery = `
 		SELECT
 			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
@@ -459,7 +459,7 @@ func (s *Store) EmbeddingStats(ctx context.Context) (embedded, stale, total int,
 				WHERE ? <> '' AND e.model <> ?),
 			(SELECT COUNT(*) FROM memories)
 	`
-	if err = s.db.QueryRowContext(ctx, countQuery, identity, identity, identity, identity).
+	if err = s.queryDB().QueryRowContext(ctx, countQuery, identity, identity, identity, identity).
 		Scan(&embedded, &stale, &total); err != nil {
 		return 0, 0, 0, fmt.Errorf("count embeddings: %w", err)
 	}
@@ -472,10 +472,10 @@ func (s *Store) LinkStats(ctx context.Context) (links, scans int, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_links WHERE invalidated_at IS NULL`).Scan(&links); err != nil {
+	if err = s.queryDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_links WHERE invalidated_at IS NULL`).Scan(&links); err != nil {
 		return 0, 0, fmt.Errorf("count links: %w", err)
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM link_scans`).Scan(&scans); err != nil {
+	if err = s.queryDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM link_scans`).Scan(&scans); err != nil {
 		return 0, 0, fmt.Errorf("count link scans: %w", err)
 	}
 	return links, scans, nil
@@ -868,7 +868,7 @@ func (s *Store) PinnedRowsWithContradictions(ctx context.Context, limit int) ([]
 	// Composed here, from literals, so the write-seam scan can read its head.
 	scope := scopesConflictSQL("m.scope", "o.scope")
 	query := pinnedContradictionArmTarget + scope + " UNION " + pinnedContradictionArmSource + scope + pinnedContradictionTail
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.queryDB().QueryContext(ctx, query)
 	if err != nil {
 		return nil, 0, fmt.Errorf("pinned rows with contradictions: %w", err)
 	}

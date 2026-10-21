@@ -3880,7 +3880,23 @@ func (s *Server) registerTools() {
 			OpenWorldHint: boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
-		projects, err := s.store.ListProjects(ctx)
+		// The embedder's own diagnostics are NETWORK calls, and they run BEFORE
+		// the diagnostic read is opened: the read handle has one connection, and
+		// a report that held it across a probe would make a concurrent search
+		// wait for the probe — up to seven seconds of it — for a connection the
+		// probe does not need (#1738). The lines are rendered below, in the
+		// place the report wants them.
+		embedderLines := s.embedderDiagnosticLines(ctx)
+
+		// The diagnostic read: the store's read-only handle, so this report does
+		// not wait behind a write in flight (#1738). Every read below goes
+		// through it, and it is ONE read transaction, so the counts in the
+		// report describe one committed state. It is released as soon as the
+		// store's statements are done.
+		read := s.openDiagnosticRead(ctx)
+		defer read.end()
+
+		projects, err := read.reader.ListProjects(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list projects: %w", err)
 		}
@@ -3893,7 +3909,7 @@ func (s *Server) registerTools() {
 		// refused, "0 memories" reads as lost data and sends an agent hunting
 		// for something that was never deleted; said first, it reads as the
 		// explanation for the counts.
-		s.writeStoreVersionLine(ctx, &sb)
+		s.writeStoreVersionLine(ctx, &sb, read.reporter)
 
 		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
@@ -3907,7 +3923,7 @@ func (s *Server) registerTools() {
 		totalMemories := 0
 		uncountedProjects := 0
 		for _, p := range projects {
-			count, err := s.store.CountMemories(ctx, p.ID)
+			count, err := read.reader.CountMemories(ctx, p.ID)
 			if err != nil {
 				// A project whose count failed used to be skipped in silence —
 				// no bullet, and a total that quietly excluded it — so an
@@ -3945,7 +3961,7 @@ func (s *Server) registerTools() {
 		}
 
 		if s.embedder != nil {
-			if embedded, stale, total, err := s.store.EmbeddingStats(ctx); err == nil {
+			if embedded, stale, total, err := read.reader.EmbeddingStats(ctx); err == nil {
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — %d/%d memories embedded\n", embedded, total)
 				switch {
 				case total > 0 && embedded == 0:
@@ -3974,21 +3990,17 @@ func (s *Server) registerTools() {
 				// (#1461).
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — coverage could not be read: %v\n", err)
 			}
-			// Diagnose the Ollama side when the embedder supports it.
-			if d, ok := s.embedder.(embedderDiagnostics); ok {
-				if !d.Alive(ctx) {
-					sb.WriteString("  ⚠ Ollama unreachable\n")
-				} else if present, err := d.HasModel(ctx); err != nil {
-					fmt.Fprintf(&sb, "  ⚠ could not check Ollama model %q: %v\n", d.Model(), err)
-				} else if !present {
-					fmt.Fprintf(&sb, "  ⚠ model %q not installed in Ollama — run: ollama pull %s\n", d.Model(), d.Model())
-				}
+			// Diagnose the Ollama side when the embedder supports it. The lines
+			// were read before the diagnostic read was opened, so no probe runs
+			// while the read handle's one connection is held.
+			for _, line := range embedderLines {
+				sb.WriteString(line)
 			}
 		} else {
 			sb.WriteString("**Embeddings:** disabled\n")
 		}
 
-		if links, scans, err := s.store.LinkStats(ctx); err == nil {
+		if links, scans, err := read.reader.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
 		} else {
 			// The line used to be omitted on a failed read, so its absence
@@ -4002,7 +4014,7 @@ func (s *Server) registerTools() {
 		// disagree with it. Report-only: no row is unpinned, resolved or withheld
 		// here. A failed read is reported rather than dropped, so the section's
 		// absence means only "nothing to review".
-		if pinned, total, perr := s.store.PinnedRowsWithContradictions(ctx, maxHealthPinnedContradictions); perr != nil {
+		if pinned, total, perr := read.reader.PinnedRowsWithContradictions(ctx, maxHealthPinnedContradictions); perr != nil {
 			fmt.Fprintf(&sb, "**Pinned rows with open contradictions:** could not be read: %v\n", perr)
 		} else if total > 0 {
 			fmt.Fprintf(&sb, "\n**Pinned rows with open contradictions:** %d — unpin or update the pinned row\n", total)
@@ -4036,7 +4048,7 @@ func (s *Server) registerTools() {
 		// deadline reaching it after ListProjects succeeded is a realistic way to
 		// get here. `ghost mcp status` reports the same error rather than
 		// swallowing it, and the two cannot be allowed to disagree about it.
-		growth, growthErr := s.store.HistoryGrowth(ctx)
+		growth, growthErr := read.reader.HistoryGrowth(ctx)
 		switch {
 		case growthErr != nil:
 			fmt.Fprintf(&sb, "**History:** could not be read: %v\n", growthErr)
@@ -4058,7 +4070,12 @@ func (s *Server) registerTools() {
 		// retrieved, and what the agent did with it. It goes LAST because every
 		// line above it is already something an agent or a script reads by name,
 		// and a block inserted above them would move their anchor.
-		s.writeRetrievalAuditBlock(ctx, &sb)
+		s.writeRetrievalAuditBlock(ctx, &sb, read.store)
+
+		// The store's statements are done, so the read handle's one connection
+		// goes back now: a search that needs it does not wait for the rest of
+		// this answer, which is string building.
+		read.end()
 
 		// The rows sit between the count line and the totals, so the framing is
 		// the text before them and the text after them, and only the rows are
@@ -4087,7 +4104,16 @@ func (s *Server) registerTools() {
 			OpenWorldHint: boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
-		projects, err := s.store.ListProjects(ctx)
+		// The diagnostic read: the store's read-only handle, so this listing does
+		// not wait behind a write in flight (#1738). It is ONE read transaction,
+		// so the names and the counts below describe one committed state, and it
+		// is released as soon as the store's statements are done: the read
+		// handle has one connection, and a search that needs it must not wait
+		// for this listing.
+		read := s.openDiagnosticRead(ctx)
+		defer read.end()
+
+		projects, err := read.reader.ListProjects(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list projects: %w", err)
 		}
@@ -4099,7 +4125,7 @@ func (s *Server) registerTools() {
 
 		rows := make([]string, 0, len(projects))
 		for _, p := range projects {
-			count, err := s.store.CountMemories(ctx, p.ID)
+			count, err := read.reader.CountMemories(ctx, p.ID)
 			// Name and path through assemble.Label, id through assemble.Token, for
 			// the reasons the health listing above gives. The path is the one that
 			// has to stay copyable: it is printed for a human to paste into a
@@ -4116,6 +4142,10 @@ func (s *Server) registerTools() {
 			rows = append(rows, fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n",
 				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count))
 		}
+		// The store's statements are done, so the read handle's one connection
+		// goes back now.
+		read.end()
+
 		// Whole rows are cut from the end to the response budget, in the order
 		// the store lists them (#1541).
 		text, _ := capRowsToResponseBudget("## Ghost Projects\n\n", rows, s.searchResponseCap(), listProjectsCutAdvice)

@@ -74,7 +74,7 @@ func labelReasons(reasons []string) string {
 //
 // Additive by construction: it appends to what the caller has already written and
 // renders its own failure, so nothing above it can be dropped by this block failing.
-func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Builder) {
+func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Builder, store *memory.Store) {
 	// The concrete store, type-asserted at call time. audit.BuildReport takes a
 	// *memory.Store because the two readers it needs are on the concrete type and
 	// not on provider.MemoryStore, so the assertion is what makes this block
@@ -82,15 +82,19 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 	// rather than a reason to fail the whole tool. Reaching for the concrete type
 	// is a boundary crossing rather than an escape hatch: nothing in this file
 	// writes, and both readers below are read-only.
-	store, ok := s.store.(*memory.Store)
-	if !ok {
+	//
+	// The store is the diagnostic view when the server has one (#1738), so the
+	// figures are read on the read handle: a report that has to wait for an
+	// in-flight write to reach this block is a report that arrives after the
+	// write it was meant to describe.
+	if store == nil {
 		return
 	}
 	// The no-project state is answered BEFORE the figures, because it is a claim about
 	// whether there is a subject at all. The whole-store aggregate has no project to
 	// filter on and so cannot answer it: a store with no projects and a store with
 	// projects that have never recorded a call both return zero sources.
-	projects, err := s.store.ListProjects(ctx)
+	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		fmt.Fprintf(sb, "**Retrieval audit:** could not be read: %v\n", err)
 		return

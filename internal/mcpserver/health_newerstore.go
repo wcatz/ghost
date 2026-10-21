@@ -33,9 +33,12 @@ type storeVersionReporter interface {
 // It says nothing at all on a healthy store. A permanent line reading
 // "schema v18 (current)" would be a line every operator learns to skip, and the
 // one time the answer matters is the one time it would be ignored.
-func (s *Server) writeStoreVersionLine(ctx context.Context, sb *strings.Builder) {
-	reporter, ok := s.store.(storeVersionReporter)
-	if !ok {
+// The reporter is the diagnostic view when there is one (#1738): the version
+// is read on the same handle as the rest of the report, so a report that has
+// to wait for an in-flight write to reach this line is a report that arrives
+// after the write it was meant to describe.
+func (s *Server) writeStoreVersionLine(ctx context.Context, sb *strings.Builder, reporter storeVersionReporter) {
+	if reporter == nil {
 		return
 	}
 	storeVersion, buildVersion, newer, err := reporter.StoreVersionStatus(ctx)

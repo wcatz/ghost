@@ -157,10 +157,13 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 		ph[i] = "?"
 		args[i] = id
 	}
-	// Read the identity before taking the lock, for the reason searchVector does:
-	// the reads below run with the read lock held, and a second RLock on a
-	// RWMutex with a writer waiting blocks that writer's readers — including this
-	// one — forever.
+	// The identity is process configuration, read without the store's mutex: it
+	// is set once, at startup, and a reader that had to take the read lock for
+	// it would queue behind a write in flight for a value that cannot change
+	// (#1738). The reads below run with the read lock held, and a second RLock
+	// on a RWMutex with a writer waiting blocks that writer's readers —
+	// including this one — forever, so this is the only lock this function
+	// takes.
 	identity := s.configuredEmbeddingIdentity()
 
 	s.mu.RLock()
@@ -364,9 +367,10 @@ func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec 
 // mirror of the keyword leg's SQL predicate; a zero now returns every row in the
 // window, marked rather than withheld, which is what the exported wrappers get.
 func (s *Store) searchVectorLegAt(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string, now time.Time) ([]ScoredMemory, vectorLegFacts, error) {
-	// Read the identity before taking the lock: the helper below runs with the
-	// read lock held, and a second RLock on a RWMutex that has a writer waiting
-	// blocks that writer's readers — including this one — forever.
+	// The identity is process configuration, read without the store's mutex (see
+	// EmbeddingCosines): the helper below runs with the read lock held, and a
+	// second RLock on a RWMutex that has a writer waiting blocks that writer's
+	// readers — including this one — forever.
 	identity := s.configuredEmbeddingIdentity()
 
 	// A search the cache can serve scores a shared immutable copy of the corpus
@@ -1350,7 +1354,7 @@ func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limi
 // searchVectorAllLegAt is searchVectorAllLeg with the validity clock named, for
 // the reason searchVectorLegAt gives.
 func (s *Store) searchVectorAllLegAt(ctx context.Context, queryVec []float32, limit int, now time.Time) ([]ScoredMemory, vectorLegFacts, error) {
-	// Read the identity before taking the lock, as searchVectorLeg does.
+	// The identity is read without the store's mutex, as searchVectorLeg does.
 	identity := s.configuredEmbeddingIdentity()
 
 	cp, err := s.vectorCorpusFor(ctx, queryVec, identity)

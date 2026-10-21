@@ -121,6 +121,21 @@ could not count is not a project with no memories. `ghost_list_projects` names
 the failure the same way, since a `0` there is a figure an agent acts on when
 choosing where to save.
 
+**The two diagnostic tools do not wait for a write in flight.** `ghost_health`
+and `ghost_list_projects` read the store through its read-only handle, in ONE
+read transaction, so they answer while a write is still in flight: a report
+that waited for the write it was meant to describe would arrive after it, and a
+caller with a deadline would get a cancellation instead of a report. The
+figures therefore describe the last committed state — which is what a
+diagnostic should report — and they agree with each other, because they come
+from one snapshot. Every other read tool waits for an in-flight write in this
+process: a reader that wants its own writes back inside one tool call has to
+stay on the store's write handle, so a search issued while a write is in flight
+queues behind it for as long as the write holds the store lock — a save in
+milliseconds, a project delete or a reflect apply up to about a second, a purge
+checkpoint up to its busy timeout. See the
+[concurrency contract](architecture.md#concurrency-contract).
+
 The thresholds, and what each one is for, are in
 [`ghost mcp status`](cli.md#ghost-mcp-status). The short version: more than 20% of
 the last 24 hours' version rows restated their predecessor, or the table or some
