@@ -1822,6 +1822,9 @@ func TestAResolvedRowIsNotAPermanentlyEmptyProject(t *testing.T) {
 			t.Errorf("%s reported an empty project without saying the row exists; the count already read for the gate "+
 				"is what makes that sentence, and it was discarded:\n%s", name, block)
 		}
+		if n := strings.Count(block, "Ghost holds 1 memory for this project"); n > 1 {
+			t.Errorf("%s gave the own-rows note %d times; an emptied block says it once:\n%s", name, n, block)
+		}
 	}
 }
 

@@ -5077,6 +5077,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 		parts = append(parts, responseSection(responsePartsLen(parts), globalSectionHeading, itemLines(rows), itemPins(rows), sectionNotes)...)
 	}
 
+	ownNoted := false
 	if responsePartsLen(parts) == 0 {
 		// Same two cases as the tool's, and the same function, for the same reasons:
 		// a block the stages emptied is not an empty project, and this is the one
@@ -5085,6 +5086,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 		emptyText := ""
 		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 			emptyText = note
+			ownNoted = true
 		} else if projectID == memory.GlobalProjectID {
 			if note := projectContextEmptyNote(memories); note != "" {
 				emptyText = note
@@ -5112,8 +5114,10 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 		}
 		parts = append(parts, responsePart{text: sep + projectNotRegistered(askedName)})
 	}
-	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
-		parts = append(parts, responsePart{text: "\n\n" + note})
+	if !ownNoted {
+		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+			parts = append(parts, responsePart{text: "\n\n" + note})
+		}
 	}
 	text, _ := capResponseParts(parts, budget, projectContextCutAdvice)
 	return text, nil
