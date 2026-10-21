@@ -268,9 +268,13 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 
 	terms := historicalTerms(req.Query)
 	var hits []asOfHit
-	for _, row := range asof.Rows {
-		n := 0
-		if len(terms) > 0 {
+	// No extracted term means no term matched, never "no keyword filter": the
+	// current leg returns no rows for such a query, and treating the empty list
+	// as a filter that passes everything would report the whole in-scope set as
+	// an answerable keyword result.
+	if len(terms) > 0 {
+		for _, row := range asof.Rows {
+			n := 0
 			tokens := tokenizeForMatch(row.Content)
 			for _, term := range terms {
 				if term.matches(tokens) {
@@ -280,8 +284,8 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 			if n == 0 {
 				continue
 			}
+			hits = append(hits, asOfHit{row: row, hits: n})
 		}
-		hits = append(hits, asOfHit{row: row, hits: n})
 	}
 	// Relevance order: more matched terms first, then the historical composite
 	// (the same decay rule the current read ranks on, at T), then id. The

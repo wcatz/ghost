@@ -149,6 +149,52 @@ func TestCandidatesAsOfCannotResurrectARedactedCredential(t *testing.T) {
 	}
 }
 
+// TestCandidatesAsOfWithNoExtractableTermReturnsNoRows: a term match over no
+// terms matches nothing. The extraction drops a query whose every word trims to
+// empty — punctuation only, or a word whose letters the ASCII edge trim does not
+// keep — and the historical leg used to read that empty list as "no keyword
+// filter" and call every in-scope version a hit. The same query without as_of
+// returns no rows, so the historical answer must not turn "the query was never
+// applied" into an answerable block of the whole project.
+func TestCandidatesAsOfWithNoExtractableTermReturnsNoRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, content := range []string{
+		"the deploy key rotation runbook lives in the ops wiki",
+		"the retention window is seven days for session rows",
+	} {
+		if _, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact", content, "mcp", 0.5, nil, Provenance{}); err != nil {
+			t.Fatalf("save %q: %v", content, err)
+		}
+	}
+	at := asOfAt(t, asOfStampFarFuture)
+	for _, query := range []string{"!!!", "日本語"} {
+		set, err := s.Candidates(ctx, CandidateRequest{
+			ProjectID: testProject,
+			Mode:      ProjectScoped,
+			Query:     query,
+			Condition: CondFTSOnly,
+			Params:    DefaultSearchParams(),
+			Now:       at,
+			AsOf:      &at,
+			Fetch:     Fetch{FTSTopK: 20, VectorTopK: 20, Limit: 10},
+		})
+		if err != nil {
+			t.Fatalf("Candidates as_of %q: %v", query, err)
+		}
+		if len(set.Rows) != 0 {
+			t.Errorf("query %q returns %v, want no rows: no term was extracted, so the keyword leg matched nothing", query, candidateIDs(t, set))
+		}
+		leg := set.Legs["fts"]
+		if !leg.Applicable || !leg.Attempted || !leg.Available {
+			t.Errorf("query %q reports the keyword leg as %+v, want it applicable, attempted and available: the leg ran and answered nothing", query, leg)
+		}
+		if leg.Eligible != 0 {
+			t.Errorf("query %q reports %d eligible rows, want 0: an empty term list must not make every version eligible", query, leg.Eligible)
+		}
+	}
+}
+
 // TestCandidatesAsOfBoundsTheTailLikeTheCurrentPath: the current path caps the
 // tail at the window, so a candidate set never exceeds roughly twice Fetch.Limit
 // however many rows matched. A historical read that returns every match instead
