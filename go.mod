@@ -1,6 +1,6 @@
 module github.com/wcatz/ghost
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/klauspost/compress v1.20.3
