@@ -897,7 +897,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 		globals:      assemble.BucketTally{Shown: len(globals), RankedOut: globalsRankedOut},
 		asOfWithheld: withheldAtT,
 	}
-	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, globals, tally)
+	block := fitHistoricalSessionBlock(projectID, project, asOf, &memories, &globals, &tally)
 	if readErr != "" {
 		block += "\n\n(" + readErr + ")"
 	}
@@ -905,6 +905,128 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 		block += "\n\n" + gapNote
 	}
 	return block
+}
+
+// fitHistoricalSessionBlock fits a historical block to the whole-block byte cap
+// the current block carries (sessionStartByteCap), measured on the block's own
+// render, and returns the block.
+//
+// The block a historical read renders is the block the host receives, so it
+// carries the same cap the current one does. It did not: the rows were built
+// with their whole stored content and the block was rendered with no measure,
+// so fifteen rows of a memory at the store's own 8,000-byte cap made a block
+// of over a hundred thousand bytes — and a host over its 10,000-character
+// limit replaces the whole thing with a 2,000-character preview, so the reader
+// got a fragment of a block rather than the block.
+//
+// The rules are the current path's, because the two blocks are one block: the
+// lowest-ranked row goes first, an UNPINNED row before any pinned one
+// (Budget.KeepPinned — a pin is a slot guarantee, so it is the last thing the
+// cap takes), and the block is re-rendered after every cut, because the count
+// line grows with each cut and a cap measured against a stale count line is
+// the bug the current path's fit pass was written to avoid.
+//
+// A framing already over the host's own limit is the one case where cutting
+// cannot help: the block would be over the cap with every row gone, so the
+// rows are kept rather than cut for nothing (the current path's FramingCeiling
+// rule). The question is asked ONCE, from the framing as it stands with every
+// row cut, which is the longest the count line can make it.
+func fitHistoricalSessionBlock(projectID, project string, asOf time.Time, memories *[]sessionMemory, globals *[]sessionMemory, tally *sessionTally) string {
+	render := func() string {
+		return formatSessionContext(projectID, project, &asOf, *memories, "", nil, nil, 0, *globals, *tally)
+	}
+	// Whether the framing alone is the excess, and whether that has been asked
+	// yet. It is asked ONCE, on the first over-cap iteration, and never
+	// re-asked: the answer does not depend on how many rows have been cut.
+	asked, framingIsTheExcess := false, false
+	for {
+		block := render()
+		if len(block) <= sessionStartByteCap {
+			return block
+		}
+		if !asked {
+			asked = true
+			framingIsTheExcess = len(historicalAllCutBlock(projectID, project, asOf, *tally)) >= sessionHostLimit
+		}
+		if framingIsTheExcess {
+			return block
+		}
+		if !cutHistoricalRow(memories, globals, tally) {
+			return block
+		}
+	}
+}
+
+// historicalAllCutBlock is the framing with every row cut: the block as it
+// stands when nothing is shown. It is the longest the count line can make the
+// block, because each cut adds to what the count line says, and it is the only
+// reading of "can cutting reach the cap" that does not depend on how many rows
+// have been cut when the question is asked.
+func historicalAllCutBlock(projectID, project string, asOf time.Time, tally sessionTally) string {
+	cut := tally
+	cut.project.Shown = 0
+	cut.project.RankedOut += tally.project.Shown
+	cut.project.ByteCut += tally.project.Shown
+	cut.globals.Shown = 0
+	cut.globals.RankedOut += tally.globals.Shown
+	cut.globals.ByteCut += tally.globals.Shown
+	return formatSessionContext(projectID, project, &asOf, nil, "", nil, nil, 0, nil, cut)
+}
+
+// cutHistoricalRow gives up the lowest-ranked row of the block: an UNPINNED row
+// before any pinned one, because a pin is a slot guarantee and the cap takes it
+// last.
+//
+// The block renders the project's rows first and the globals' last — the order
+// the current path's item list carries — so the lowest-ranked row of the block
+// is the last of the globals', and that is the first row given up.
+//
+// It reports whether a row was given up: a block with no rows left has nothing
+// more to give way, and its framing is what it is.
+//
+// A row given up for size is counted as cut FOR SIZE (BucketTally.ByteCut) and
+// not as outranked, so the count line says which rows the cap took. The count
+// itself stays the same: a row that was shown and is now cut moves from the
+// shown half to the not-shown half.
+func cutHistoricalRow(memories, globals *[]sessionMemory, tally *sessionTally) bool {
+	if at := lowestUnpinnedRow(*globals); at >= 0 {
+		cutHistoricalRowAt(globals, &tally.globals, at)
+		return true
+	}
+	if at := lowestUnpinnedRow(*memories); at >= 0 {
+		cutHistoricalRowAt(memories, &tally.project, at)
+		return true
+	}
+	// Every row is pinned: the lowest-ranked one goes, pin or not, because a
+	// block over the host's limit delivers none of its rows.
+	if len(*globals) > 0 {
+		cutHistoricalRowAt(globals, &tally.globals, len(*globals)-1)
+		return true
+	}
+	if len(*memories) > 0 {
+		cutHistoricalRowAt(memories, &tally.project, len(*memories)-1)
+		return true
+	}
+	return false
+}
+
+// lowestUnpinnedRow is the lowest-ranked unpinned row of a bucket, or -1 when
+// the bucket holds none.
+func lowestUnpinnedRow(rows []sessionMemory) int {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].Pinned {
+			return i
+		}
+	}
+	return -1
+}
+
+// cutHistoricalRowAt drops the row at index i and counts it as cut for size.
+func cutHistoricalRowAt(rows *[]sessionMemory, tally *assemble.BucketTally, i int) {
+	*rows = append((*rows)[:i:i], (*rows)[i+1:]...)
+	tally.Shown--
+	tally.RankedOut++
+	tally.ByteCut++
 }
 
 // historicalSessionMemories turns a recorded set into the renderer's own row
@@ -925,9 +1047,23 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 // It returns the shown rows, how many in-scope rows were withheld for validity
 // at asOf, and how many in-scope rows valid at asOf the cap left out (ranked
 // out, since the set arrives in composite order).
+//
+// The rows carry the same per-item PREVIEW the current block's rows carry
+// (sessionRowsFrom): 200 bytes for a project row, 300 for a global one. A
+// preview has to say it was cut, so the ellipsis is the renderer's, and the
+// stored row is untouched either way. Without it the whole stored content
+// reached the block — a memory at the store's own 8,000-byte cap rendered in
+// full, fifteen times over.
 func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]sessionMemory, int, int) {
 	withheld, rankedOut := 0, 0
 	out := make([]sessionMemory, 0, min(len(rows), cap))
+	// The bucket's own preview budget, decided by the bucket the rows are read
+	// for: the globals' rows are the ones with the larger budget, exactly as
+	// sessionRowsFrom gives them.
+	previewBytes := sessionDisplayBytes
+	if projectID == memory.GlobalProjectID {
+		previewBytes = globalsDisplayBytes
+	}
 	for _, row := range rows {
 		if row.ProjectID != projectID {
 			continue
@@ -992,7 +1128,7 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 		out = append(out, sessionMemory{
 			ID:            row.ID,
 			Category:      row.Category,
-			Content:       row.Content,
+			Content:       truncateUTF8(row.Content, previewBytes),
 			Tags:          row.Tags,
 			Importance:    float64(row.Importance),
 			Pinned:        row.Pinned,

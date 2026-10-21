@@ -357,6 +357,15 @@ that goes line by line. The stored text is unchanged; only its display is folded
 renders the same as a folded break, which is the price of a one-way display fold.
 The single-line previews (`ghost_resolve`, `ghost_resolve_mark`, the prune and
 lifecycle listings) cut at the same set of breaks.
+**A row in the session-start block is a PREVIEW, and the block itself is CAPPED.**
+The memory rows of the session-start block — the hook's own stdout injection,
+`ghost context`, and the opencode plugin's copy of it — show at most 200 bytes
+of a memory's text, 300 for a cross-project row, with an ellipsis where the text
+was cut, and the whole block is fitted to a 9,000-byte cap: the lowest-ranked
+rows are given up to keep it there, and the block's count line says how many
+were given up for size. The stored text is untouched; `ghost_memories_list` reads
+it back whole. A historical read (`ghost context --as-of`) carries the same two
+budgets, so a block of the past is the same size as a block of the present.
 The `source=` origin label is printed as a quoted token when it is not a plain
 identifier, not verbatim.
 
