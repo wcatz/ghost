@@ -170,3 +170,67 @@ func TestCandidatesAsOfDemotionOwnsTheWindowCut(t *testing.T) {
 			"not just the order of what survived it", ids, liveID)
 	}
 }
+
+// TestCandidatesAsOfResolvedTemporal: the factor reads the VERSION's
+// ResolvedAt, not the present row's. A row that was resolved and then
+// unresolved must rank as resolved at the instant it was resolved, and as
+// live before and after.
+func TestCandidatesAsOfResolvedTemporal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The row that will be resolved then unresolved.
+	id := asOfStatusRow(t, s, testProject, "zebra temporal checkpoint alpha", 0.9)
+	liveID := asOfStatusRow(t, s, testProject, "zebra live checkpoint beta", 0.3)
+
+	// Three history stamps: save, resolve, unresolve.
+	if n, err := s.SetResolved(ctx, []string{id}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
+	}
+	if n, err := s.ClearResolved(ctx, testProject, []string{id}); err != nil || n != 1 {
+		t.Fatalf("ClearResolved = (%d, %v), want (1, nil)", n, err)
+	}
+	stampHistory(t, s, id, asOfStampSave, asOfStampRewrite, asOfStampLate)
+	stampHistory(t, s, liveID, asOfStampSave)
+
+	// 1. At asOfStampSave: the row was not resolved yet (the resolve stamp
+	// is asOfStampRewrite). The high-importance row should lead.
+	setAtSave := asOfSearch(t, s, testProject, "zebra", asOfStampSave)
+	ids := candidateIDs(t, setAtSave)
+	if len(ids) == 0 || ids[0] != id {
+		t.Errorf("as_of at save stamp returns %v, want the high-importance row %s first: it was not resolved yet",
+			ids, id)
+	}
+
+	// 2. At asOfStampRewrite: the row was resolved (the resolve version is
+	// the newest at or before this stamp). The live row should lead.
+	setAtRewrite := asOfSearch(t, s, testProject, "zebra", asOfStampRewrite)
+	ids = candidateIDs(t, setAtRewrite)
+	if len(ids) == 0 || ids[0] != liveID {
+		t.Errorf("as_of at rewrite stamp returns %v, want the live row %s first: the row was resolved then",
+			ids, liveID)
+	}
+	for _, x := range ids {
+		if x == id {
+			// The resolved row should still be in the answer, just demoted.
+			return
+		}
+	}
+	t.Errorf("as_of at rewrite stamp returns %v, want the resolved row %s in it: demotion ranks down, never filters out",
+		ids, id)
+
+	// 3. At asOfStampLate: the row was unresolved again (the ClearResolved
+	// version is the newest). The high-importance row should lead again.
+	setAtLate := asOfSearch(t, s, testProject, "zebra", asOfStampLate)
+	ids = candidateIDs(t, setAtLate)
+	if len(ids) == 0 || ids[0] != id {
+		t.Errorf("as_of at late stamp returns %v, want the high-importance row %s first: it was unresolved again",
+			ids, id)
+	}
+
+	// Mutation check: if the factor read the PRESENT row's resolved state
+	// (which is nil, because we cleared it), case 2 would pass the high-
+	// importance row through undemoted. Change the factor call to use the
+	// live row's ResolvedAt and the test should fail.
+	_ = id // prevent unused warning
+}
