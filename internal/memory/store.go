@@ -9583,6 +9583,38 @@ func sanitizeFTSN(text string, maxWords int) string {
 	return strings.Join(words, " OR ")
 }
 
+// ftsEdgeRuneTrimmed reports whether a rune is trimmed from a query word's
+// edges.
+//
+// The kept set is a letter, a digit and a mark of ANY script, not the ASCII
+// letters and digits it was: a word written in a script the ASCII set does not
+// name trimmed to nothing, so the query reached the index as an empty term
+// list and a memory written in that script could not be found by a query in it.
+// A MARK is kept because it belongs to the letter it follows — a decomposed
+// accent would otherwise leave a bare letter behind, and the term would then
+// name a different word than the caller wrote.
+//
+// The trim still removes what FTS5 reads as a separator at a word's edge
+// (punctuation, symbols, whitespace), and the interior is untouched either way:
+// the interior punctuation of an exact identifier (192.168.9.150,
+// sealed-secrets) is what the index's own tokenizer splits on.
+func ftsEdgeRuneTrimmed(r rune) bool {
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r)
+}
+
+// ftsHasBaseRune reports whether a trimmed word holds a letter or a digit. A
+// mark is kept at a word's edge so an accent stays on the word it belongs to,
+// but a word made only of marks is not a term: it would match nothing and
+// still take a slot from the term budget.
+func ftsHasBaseRune(word string) bool {
+	for _, r := range word {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // ftsQueryTerms is the term extraction sanitizeFTSN emits, one step earlier: the
 // cleaned terms, their selection values and the prefix flag, capped at maxWords
 // SELECTED by value. It is a function because two callers need the terms
@@ -9603,13 +9635,11 @@ func ftsQueryTerms(text string, maxWords int) []ftsTerm {
 		// "term"*, so the 'sqlite*' syntax advertised in the tool description
 		// actually works instead of degrading to an exact-token match.
 		prefix := strings.HasSuffix(word, "*")
-		// Strip non-alphanumeric characters from edges only — interior
+		// Strip what FTS5 would read as a separator from edges only — interior
 		// punctuation (192.168.9.150, sealed-secrets) is preserved so FTS5's
 		// tokenizer can still split and match exact identifiers.
-		clean := strings.TrimFunc(word, func(r rune) bool {
-			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-		})
-		if len(clean) >= 1 {
+		clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
+		if ftsHasBaseRune(clean) {
 			// Quote each word to treat as literal. An interior quote survives
 			// the edge trim and must be doubled per FTS5's escaping rule —
 			// otherwise it unbalances the "..." wrapper and lets the token

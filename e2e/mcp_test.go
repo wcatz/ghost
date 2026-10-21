@@ -1373,3 +1373,51 @@ func TestMCPNoAnswerBar(t *testing.T) {
 		}
 	}
 }
+
+// TestMCPSearchInANonLatinScript: a query written in a script the term
+// extraction used to strip reached the index as an empty term list, so the tool
+// answered a search in that script with nothing — on the current path and on
+// the as_of path alike, and the as_of path has no vector leg to reach the row
+// by. The extraction keeps a letter, a digit and a mark of any script now, so
+// the answer carries the row again.
+//
+// The CJK case is the one with a limit rather than a fix: the index reads an
+// unspaced CJK run as ONE token, so a query for the run matches it whole (or
+// matches a prefix of it, with a trailing `*`) and never a word inside it.
+func TestMCPSearchInANonLatinScript(t *testing.T) {
+	s := newSandbox(t)
+	// The embedding backend is OFF, so the answer can only come from the
+	// keyword leg: with the stub embedder on, the vector leg reaches a row the
+	// keyword leg cannot, and the search would pass for the wrong reason.
+	s.reconfigure(configOpts{disableEmbedding: true})
+	seed := s.mcpSession(t)
+	for _, content := range []string{
+		"日本語 deployment note",
+		"память про запуск деплоя",
+	} {
+		call(t, seed, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject, "content": content, "category": "architecture",
+		})
+	}
+
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"日本語", "日本語"},
+		{"日本語*", "日本語"},
+		{"память", "память"},
+		{"пам*", "память"},
+	} {
+		out := call(t, s.mcpSession(t), "ghost_memory_search", map[string]any{
+			"project_id": e2eProject, "query": tc.query,
+		})
+		if !strings.Contains(out, "outcome=answerable") {
+			t.Errorf("the search for %q did not answer:\n%s", tc.query, out)
+			continue
+		}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("the search for %q returned no row holding %q:\n%s", tc.query, tc.want, out)
+		}
+	}
+}
