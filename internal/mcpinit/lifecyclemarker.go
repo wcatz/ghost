@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -755,6 +756,25 @@ func markerExpired(at, now time.Time) bool {
 	return age > lifecycleMarkerMaxAge || age < -lifecycleMarkerClockSkew
 }
 
+// removeMarkerFile removes the file holding a marker. It is a var so a test
+// can put the file away between the read and the removal — the one race a
+// caller can lose — without racing for it.
+var removeMarkerFile = os.Remove
+
+// markerFileRemoved removes the file holding a marker and reports whether the
+// file is GONE.
+//
+// A file that is ALREADY GONE counts as gone: two session starts can walk the
+// same expired marker, and the one that loses the race finds the file already
+// removed rather than a directory that refuses. That is the sweep done, not a
+// refusal — so the caller carries on to the next candidate instead of naming
+// the directory as the blocker over a marker that is already gone, which
+// would hide the current failure behind it.
+func markerFileRemoved(path string) bool {
+	err := removeMarkerFile(path)
+	return err == nil || errors.Is(err, fs.ErrNotExist)
+}
+
 // sweepExpiredMarkers removes the expired markers the patterns match and
 // returns the first one the data directory refused to remove, or nil when
 // there was none.
@@ -793,7 +813,7 @@ func sweepExpiredMarkers(now time.Time, patterns ...string) *lifecycleFailureMar
 			if !markerExpired(at, now) {
 				continue
 			}
-			if os.Remove(m.path) != nil {
+			if !markerFileRemoved(m.path) {
 				return m
 			}
 			removed++
@@ -958,7 +978,7 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		if m.path == "" {
 			return ""
 		}
-		if os.Remove(m.path) != nil {
+		if !markerFileRemoved(m.path) {
 			// An expired marker the directory refuses to remove is the same
 			// un-clearable marker the check below reports: it cannot be
 			// cleared, so it cannot be called stale either. The check below
