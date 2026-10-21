@@ -19,26 +19,42 @@ import (
 // value the printer takes so the output contract is testable without a
 // database or a real root.
 type maintenanceStatusView struct {
-	Root       string
-	RootBytes  int64
-	RootFiles  int
-	Budget     int64
-	Runs       []memory.MaintenanceRun
-	NoDatabase bool
+	Root      string
+	RootBytes int64
+	RootFiles int
+	// RootMeasureErr is why the scratch root could not be measured. scratch.Size
+	// returns (0, 0, err) when its walk meets an entry it cannot read, so the
+	// zeros that come back with the error are a FAILED measurement and never an
+	// empty root: the header names the failure instead of printing the zeros
+	// as the root's size.
+	RootMeasureErr error
+	Budget         int64
+	Runs           []memory.MaintenanceRun
+	NoDatabase     bool
 }
 
 // printMaintenanceStatus renders the status view: one header line with the
 // live scratch bytes against the configured budget, then one human-readable
 // line per recorded run (timestamp, kind, scratch bytes, reaped counts,
 // note). Empty states — no database, no runs, disabled budget — print
-// explicit sentences instead of nothing.
+// explicit sentences instead of nothing, and so does a scratch root that could
+// not be measured: the failure is named in the header rather than printed as a
+// size of zero.
 func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 	budget := "budget disabled (scratch.max_bytes = 0)"
 	if v.Budget > 0 {
 		budget = fmt.Sprintf("budget %d bytes", v.Budget)
 	}
-	if _, err := fmt.Fprintf(w, "scratch root: %s (%d bytes in %d files; %s)\n",
-		v.Root, v.RootBytes, v.RootFiles, budget); err != nil {
+	usage := fmt.Sprintf("%d bytes in %d files", v.RootBytes, v.RootFiles)
+	if v.RootMeasureErr != nil {
+		// A measurement that failed is not an empty measurement: the counts
+		// scratch.Size returns with its error are zeros, and printing them as
+		// the root's size reports an unmeasured root as an empty one — which
+		// is what this line used to do, silently and with exit 0.
+		usage = fmt.Sprintf("could not be measured: %v", v.RootMeasureErr)
+	}
+	if _, err := fmt.Fprintf(w, "scratch root: %s (%s; %s)\n",
+		v.Root, usage, budget); err != nil {
 		return err
 	}
 	switch {
@@ -72,8 +88,10 @@ const maintenanceUsage = `Usage: ghost maintenance status
 
 // runMaintenanceStatus implements `ghost maintenance status`: live scratch
 // usage + the most recent hygiene runs. Best-effort on the scratch side (an
-// unusable root is reported in the header, not fatal); the database decides
-// between "runs" and the explicit no-database state.
+// unusable root, and a root that could not be measured, are reported in the
+// header, not fatal — the budget check that measures the same root warns and
+// continues rather than refusing the spawn); the database decides between
+// "runs" and the explicit no-database state.
 func runMaintenanceStatus() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -103,14 +121,7 @@ func runMaintenanceStatus() {
 	} else {
 		// The database existing means the data dir exists, so Root() creates
 		// no phantom directory — only the scratch subdir any spawn would make.
-		if root, rErr := scratch.Root(); rErr == nil {
-			view.Root = root
-			if b, f, sErr := scratch.Size(root); sErr == nil {
-				view.RootBytes, view.RootFiles = b, f
-			}
-		} else {
-			view.Root = fmt.Sprintf("(unavailable: %v)", rErr)
-		}
+		measureScratchRoot(&view)
 
 		db, err := memory.OpenDB(dbPath)
 		if err != nil {
@@ -130,6 +141,34 @@ func runMaintenanceStatus() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// measureScratchRoot fills the view's scratch-root fields from the live root.
+//
+// The failure is part of the measurement, and it travels with the counts:
+// scratch.Size returns (0, 0, err) when its walk meets an entry it cannot
+// read — a directory the owner cannot enter, a file it cannot stat — because a
+// partial count would be a claim about bytes it never saw. So a caller that
+// kept only the numbers would report an unmeasured root as an empty one, which
+// is what `ghost maintenance status` used to print.
+//
+// A root that cannot be resolved at all is the same state one step earlier:
+// there is nothing to measure, and the reason is reported rather than a size
+// nobody measured.
+func measureScratchRoot(view *maintenanceStatusView) {
+	root, err := scratch.Root()
+	if err != nil {
+		view.Root = "(unavailable)"
+		view.RootMeasureErr = err
+		return
+	}
+	view.Root = root
+	bytes, files, err := scratch.Size(root)
+	if err != nil {
+		view.RootMeasureErr = err
+		return
+	}
+	view.RootBytes, view.RootFiles = bytes, files
 }
 
 // parseCleanScratchArgs parses `ghost maintenance clean-scratch` arguments.

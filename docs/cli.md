@@ -1529,6 +1529,15 @@ stale entries were reaped and possibly a loud warning emitted) are recorded to
 the database; quiet under-budget spawns add no rows. `0` budget prints as
 disabled.
 
+A root that could not be **measured** is reported as such: the header names
+the failure — an entry under the root the walk could not read — instead of
+printing a byte and file count. The count of a failed measurement is zero, and
+zero reads exactly like an empty root, which is the one thing the line must
+not claim. The command still exits `0`: the scratch side of this report is
+best-effort by design, the same way the budget check that measures the same
+root warns and continues rather than refusing the spawn. A root that does not
+exist yet is the other state, and it holds nothing for real.
+
 ### `ghost maintenance clean-scratch`
 
 Reports pre-scratch-root debris — `~/.cache/ghost-tmp` and the shared system
