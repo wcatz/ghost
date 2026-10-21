@@ -449,6 +449,11 @@ keyword-only score is capped at 0.3/61 ≈ 0.0049. That is what keeps resolved
 memories and shared rules findable while stopping them from leading every
 result.
 
+A historical (`as_of`) read applies the same factor, and can: both of its
+inputs — `resolved_at` and `project_id` — are versioned, so the demotion
+describes the row as it stood at the instant asked about rather than as it
+stands now (see [Historical retrieval](#historical-retrieval-as_of)).
+
 The demotion only reorders what the legs already fetched: each leg pulls
 `limit*2` rows from the project *plus* `_global`, so `_global` rows count
 against that budget and neither leg drops them. When a project matches fewer
@@ -1428,7 +1433,7 @@ table a later migration has not created yet — answers an `as_of` read in full
 |---|---|---|
 | keyword leg | FTS5 over `memories_fts` | term match over the versions' own text — `memories_fts` holds current content only |
 | vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded, and so is `explain` with `as_of` (`explain` is a projection of the current ranking, and an `as_of` read ranks nothing — so a historical request would otherwise have come back as a present-day payload with nothing to say so; the handler refuses the pair with a message naming both, and `assemble.Run` and `Store.Candidates` refuse it too, as defence in depth for a caller that reaches them directly). The two refusals live at different layers, and the difference matters to anyone auditing the contract: the `explain` one is on an input the tool accepts and is **advertised in the tool's own `as_of` and `explain` argument descriptions**, while the `vector_only` one is a store-level guard on `CandidateRequest.Condition` — a condition `ghost_memory_search` never sets, because its handler hardcodes `Condition: assemble.CondHybrid`. The tool's published schema therefore has no argument that can trigger it |
-| ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order. The window and the tail are cut the way the current path cuts them, tail included, so a set is at most about twice the window however many versions matched |
+| ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order. The window and the tail are cut the way the current path cuts them, tail included, so a set is at most about twice the window however many versions matched. The **status demotion applies here too**, on the same factor and at the same point: a resolved row, and a `_global` row in a project-scoped read, are scaled by `× 0.5` before the cut, out of the VERSION row's `resolved_at` and `project_id`, so a historical answer ranks them below the project's live memories exactly as a current one does |
 | link graph | supersede and near-duplicate demotion, `contradicts` edges | **not read** — `memory_links` records when an edge was invalidated, never what the graph looked like at T. The supersede demotion uses the recorded sequence instead, and the edge status is `not_applicable` so the conflict stage makes no claim in either direction |
 | evidence counts (`memory_provenance`, v18) | read on the same snapshot as the rows, recorded in the trace | **not read** — an evidence record is one *observation* of a memory, not a version of it, so nothing in that table can be placed at an instant and a count taken now would be a present-day claim about a past memory. The counts therefore stay zero, and a zero renders as "no recorded evidence", which is why the `as_of` disclosure says the counts were not read rather than leaving that phrase to stand as a claim |
 | edges status | `ok` / `unavailable` / `err` | adds `not_applicable`: "no edge joins these candidates" is a claim, and a retrieval that made none must not render it |
@@ -1437,6 +1442,23 @@ The term extraction is the **same** one the FTS leg uses (`ftsQueryTerms`, so th
 10-term budget, the identifier ranking and the stopword rule are one rule), and a
 term is matched as the PHRASE FTS5 would make it — `ghost_windows_arm64` is three
 adjacent tokens — with a trailing `*` still meaning a prefix match.
+
+The **status demotion is part of that ranking**, on the same factor and at the
+same point as the current path's: `statusDemotionFactor` scales the base score of
+a resolved row, and of a `_global` row in a project-scoped read, by `× 0.5`
+before the window is cut. Both of its inputs are versioned — `resolved_at` and
+`project_id` come from the version row — so the demotion describes the row as it
+stood at T, which is the one thing a historical read may talk about. It scales
+the BASE rather than the historical composite, which is where the current path
+scales the fused score: the base is a rank score whose neighbours sit within a
+percent or two of each other, so halving it sinks the row below the rows around
+it, while a halved composite would leave a demoted row ahead of a live one whose
+importance is under half its own. And it owns the CUT, not only the order: the
+window is cut by the demoted base and the tail is the rows that window did not
+take, so a demoted row cannot hold the slot a live project row would have had.
+Without it a historical read ranked a high-importance resolved row — or a
+`_global` row — above a lower-importance live project row, the opposite of what
+the same query over the present returns from the same store.
 
 Every surface states the instant and what did not run, in one shared sentence
 (`memory.AsOfSourceNote` plus the assembler's retrieval half), one shared
