@@ -55,13 +55,6 @@ func (c contentChangedStore) StoreEmbeddingForContent(ctx context.Context, memor
 	return c.mockStore.StoreEmbeddingForContent(ctx, memoryID, vec, model, content)
 }
 
-// failingUnembeddedStore fails UnembeddedMemoryIDs, which EmbedPending calls.
-type failingUnembeddedStore struct{ *mockStore }
-
-func (failingUnembeddedStore) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
-	return nil, errors.New("list unembedded failed")
-}
-
 // failingContentStorePending fails GetMemoryContent during EmbedPending.
 type failingContentStorePending struct {
 	*mockStore
@@ -74,13 +67,6 @@ func (f failingContentStorePending) UnembeddedMemoryIDs(ctx context.Context, pro
 
 func (f failingContentStorePending) GetMemoryContent(ctx context.Context, id string) (string, error) {
 	return "", errors.New("content fetch failed")
-}
-
-// panickingUnembeddedStore panics in UnembeddedMemoryIDs, which safeProcessProject recovers.
-type panickingUnembeddedStore struct{ *mockStore }
-
-func (panickingUnembeddedStore) UnembeddedMemoryIDs(context.Context, string, string, int) ([]string, error) {
-	panic("simulated panic in UnembeddedMemoryIDs")
 }
 
 func embedStubMem(embedStatus int) *httptest.Server {
