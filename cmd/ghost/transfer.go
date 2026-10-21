@@ -883,6 +883,21 @@ const validityAdvice = "  A memory left out for its valid_from, valid_until, ver
 // is worth the cost.
 const evidenceAdvice = "  A memory left out because one of its evidence records carries a stamp no accepted form reads or a rating outside 0 to 1 keeps its id, but no tool edits an evidence record: they are appended by a save, an import and a reflect. The repair is to delete the row with ghost_memory_delete and re-save it, which loses its links, history and evidence, and then re-export."
 
+// linkAdvice is the repair for an EDGE of the memory graph left out of the
+// artifact.
+//
+// It is a sentence of its own because an edge is neither re-keyable nor
+// deletable through Ghost: there is no command that edits an edge, and the only
+// command that removes one withdraws the CLAIM rather than repairing the row.
+// The claim itself is not wrong — the edge is live, and the demotion it causes
+// still applies in this store — so the sentence says that first: what was left
+// out is the TRAVEL of the edge, not the edge.
+//
+// The field that stopped it is named on the `!` line above, and correcting it
+// is an edit of the database, which is the same answer the credential advice
+// gives for the fields no tool writes.
+const linkAdvice = "  An edge left out is a claim this store still holds: the artifact does not carry it, so the claim does not travel with this export, and the demotion it causes stays here. The field that stopped it is named above, and no tool edits an edge — `ghost supersede <project> --withdraw <source> <target> --apply` (or the ghost_link_withdraw tool) withdraws a claim you do not want, and correcting the field itself is an edit of the database."
+
 // reportSkippedRecords names every record an export left out and returns an error
 // when there was one, so the command exits non-zero and a backup script notices.
 //
@@ -895,7 +910,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence, hasLink bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -930,6 +945,16 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// the delete advice would not say why the row is in the artifact's way.
 		if sk.Evidence {
 			hasEvidence = true
+			continue
+		}
+		// An EDGE is in a bucket of its own, and it must not fall into the
+		// "unrepairable" one: that sentence names a command per KIND, and it
+		// looks up the kinds it names — a link in that bucket would leave the
+		// list empty and the sentence would print nothing at all, or name a
+		// kind it has no sentence for. An edge is not re-keyable and not
+		// deletable either, so it gets its own advice below.
+		if sk.Type == portable.TypeLink {
+			hasLink = true
 			continue
 		}
 		// A batch can hold both kinds, so the advice is collected rather than
@@ -1005,6 +1030,11 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	}
 	if hasOrphan {
 		if _, err := fmt.Fprintln(out, "  A record left out because its project was left out is not refused for anything of its own, and deleting it would drop the only copy: fix the project and re-export, and the record is written with it."); err != nil {
+			return err
+		}
+	}
+	if hasLink {
+		if _, err := fmt.Fprintln(out, linkAdvice); err != nil {
 			return err
 		}
 	}

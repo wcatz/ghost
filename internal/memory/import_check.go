@@ -2,16 +2,18 @@ package memory
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode"
 )
 
 // This file is the WHOLE of what `ghost import` refuses a record for, in one
-// place, as four functions that touch nothing: `CheckImportedProject`,
-// `CheckImportedMemory`, `CheckImportedTask` and `CheckImportedDecision`. Each
-// `Import*` below portable.go calls exactly one of them, and `internal/portable`
-// calls the same one to decide what an EXPORT may write.
+// place, as five functions that touch nothing: `CheckImportedProject`,
+// `CheckImportedMemory`, `CheckImportedTask`, `CheckImportedDecision` and
+// `CheckImportedLink`. Each `Import*` below portable.go calls exactly one of
+// them, and `internal/portable` calls the same one to decide what an EXPORT
+// may write.
 //
 // Why the predicates exist, and why they are one per record type rather than
 // four call sites each:
@@ -696,6 +698,19 @@ func CheckImportedLink(l PortableLink) error {
 	}
 	if !carriedLinkSource(l.Source) {
 		return fmt.Errorf("invalid link source %s — must be one of: auto, llm, manual", RefusalArg("source", l.Source))
+	}
+	// The strength is the classifier's rating of the pair, and it is a rating on
+	// the same scale as a confidence: a value outside [0,1] is a broken scale
+	// rather than a weak judgement, and clamping it would invent a rating nobody
+	// gave. It is refused rather than clamped, the way `CheckConfidence` refuses
+	// a confidence outside the range — and the two are read by the same rule on
+	// purpose, so an edge and a memory cannot be guarded on one route and not
+	// the other.
+	if math.IsNaN(l.Strength) || math.IsInf(l.Strength, 0) {
+		return fmt.Errorf("link strength must be a finite number between 0 and 1, got %v", l.Strength)
+	}
+	if l.Strength < 0 || l.Strength > 1 {
+		return fmt.Errorf("link strength must be between 0 and 1, got %v", l.Strength)
 	}
 	// The stamp is the JUDGEMENT's, and the supersede pass compares it with an
 	// endpoint's updated_at as text, so an unreadable one would compare as

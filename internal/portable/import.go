@@ -404,13 +404,10 @@ var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
 // whatever this build guesses, and importing it would store a weaker row while
 // reporting that provenance was kept. A header that declares nothing is accepted,
 // so an artifact written before this mechanism existed still imports.
-//
-// The refusal names the way out, because the common case is a file a colleague's
-// newer Ghost wrote: the file is fine and this build is the old one.
 func checkHeaderFeatures(rec record) error {
 	for _, f := range rec.Features {
 		if !knownFeatures[f] {
-			return fmt.Errorf("header declares feature %s that this ghost build does not understand — upgrade ghost, or re-export with the build that wrote it", memory.RefusalArg("feature", f))
+			return fmt.Errorf("header declares feature %s that this ghost build does not understand", memory.RefusalArg("feature", f))
 		}
 	}
 	return nil

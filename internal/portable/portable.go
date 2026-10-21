@@ -274,6 +274,15 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	// artifact is left out and counted, because the demotion it causes is then
 	// lost with it — and a count of what was written is not a count of what
 	// exists.
+	//
+	// An edge the artifact DOES carry is then judged by the IMPORTER's own
+	// predicate, exactly as a project, a memory, a task and a decision are: a
+	// store can already hold an edge this build refuses to import (a hand
+	// write, a restored snapshot, an older build), and an export that carried
+	// one produced an artifact its own importer then rejected — the same hole
+	// #813 closed for the other four kinds of record. A refused edge is left
+	// out and NAMED, on the same `!` line and with the same reason, and the
+	// export exits non-zero because of it.
 	links, err := s.PortableLinks(ctx, ids)
 	if err != nil {
 		return Stats{}, fmt.Errorf("export links: %w", err)
@@ -287,6 +296,10 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	for _, l := range links {
 		if !carried[l.SourceID] || !carried[l.TargetID] {
 			linksLeftOut++
+			continue
+		}
+		if reason, secret := exportRefusal(memory.CheckImportedLink(l)); reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeLink, ID: l.SourceID, Reason: reason, Secret: secret})
 			continue
 		}
 		keptLinks = append(keptLinks, l)

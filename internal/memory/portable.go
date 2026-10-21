@@ -622,8 +622,8 @@ func (s *Store) ImportLink(ctx context.Context, l PortableLink, apply bool) (cre
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// The presence check comes FIRST among the store's own checks, and that order
-	// is load-bearing in one direction: an edge the store already holds is a
+	// The presence check comes FIRST among the store's own checks, and that
+	// order matters in one direction: an edge the store already holds is a
 	// SKIP, never a rejection. Ahead of this check, an edge whose endpoint id
 	// this build refuses on shape (a pre-#791 write, a restored snapshot, a
 	// hand edit) would make a re-run FAIL over an edge that is not being written

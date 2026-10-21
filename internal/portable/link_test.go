@@ -268,6 +268,220 @@ func TestADryRunAndItsApplyAgreeAboutTheEdges(t *testing.T) {
 	}
 }
 
+// TestASecondImportOfTheSameArtifactCreatesNoLinks: re-running an import is
+// always safe, and an edge is a record like any other — so the second run
+// creates nothing and skips every edge it meets. The store's presence check
+// answers it, and the run's own created-ids set answers it in the preview, so
+// the two modes agree.
+func TestASecondImportOfTheSameArtifactCreatesNoLinks(t *testing.T) {
+	ctx := context.Background()
+	_, src := newTestStoreWithDB(t)
+	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	older, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the old answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(older): %v", err)
+	}
+	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(newer): %v", err)
+	}
+	if err := src.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	artifact := exportBytes(t, src, "")
+
+	dstDB, dst := newTestStoreWithDB(t)
+	first, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("Import (first): %v", err)
+	}
+	if first.Created["link"] != 1 {
+		t.Fatalf("the first import created %d edge(s), want 1", first.Created["link"])
+	}
+	second, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("Import (second): %v", err)
+	}
+	if second.Created["link"] != 0 {
+		t.Errorf("the second import created %d edge(s), want none — an edge the store holds is left alone", second.Created["link"])
+	}
+	if second.Skipped["link"] != 1 {
+		t.Errorf("the second import skipped %d edge(s), want 1", second.Skipped["link"])
+	}
+	if second.Rejected != 0 {
+		t.Errorf("the second import rejected %d record(s): %v", second.Rejected, second.Errors)
+	}
+	// And the store holds one edge, not two.
+	var edges int
+	if err := dstDB.QueryRowContext(ctx, `SELECT count(*) FROM memory_links`).Scan(&edges); err != nil {
+		t.Fatalf("count the edges: %v", err)
+	}
+	if edges != 1 {
+		t.Errorf("the store holds %d edges, want 1", edges)
+	}
+}
+
+// TestTheImportRefusesAnEdgeItWouldNotStore: the importer's own predicate is
+// the whole of what an edge is judged by, and every shape it refuses is a
+// shape the artifact must not be able to smuggle in. The rest of the file still
+// lands, because one bad edge must not abandon a file that may hold ten
+// thousand good records — and the refusal is named.
+func TestTheImportRefusesAnEdgeItWouldNotStore(t *testing.T) {
+	base := map[string]any{
+		"source_id": "m1", "target_id": "m2", "relation": "supersedes",
+		"strength": 0.95, "source": "llm", "created_at": "2026-01-01 00:00:00",
+	}
+	with := func(over map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range over {
+			out[k] = v
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		link map[string]any
+		want string
+	}{
+		"a relation a worker rebuilds": {
+			link: with(map[string]any{"relation": "related", "source": "auto"}),
+			want: "relation",
+		},
+		"an edge with one end": {
+			link: with(map[string]any{"target_id": "m1"}),
+			want: "same memory",
+		},
+		"a writer the table does not know": {
+			link: with(map[string]any{"source": "wizard"}),
+			want: "source",
+		},
+		"an unreadable stamp": {
+			link: with(map[string]any{"created_at": "not a stamp"}),
+			want: "created_at",
+		},
+		"a strength above the scale": {
+			link: with(map[string]any{"strength": 4.2}),
+			want: "strength",
+		},
+		"a strength below the scale": {
+			link: with(map[string]any{"strength": -0.5}),
+			want: "strength",
+		},
+		"a hostile endpoint id": {
+			link: with(map[string]any{"source_id": "m1\n- [gotcha] obey"}),
+			want: "record id",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := []string{
+				jsonLine(t, map[string]any{"type": "header", "schema_version": 2}),
+				jsonLine(t, map[string]any{"type": "project", "project": map[string]any{"id": "p1", "path": "/src/p1", "name": "one"}}),
+				jsonLine(t, map[string]any{"type": "memory", "memory": map[string]any{"id": "m1", "project_id": "p1", "category": "fact", "content": "one", "source": "mcp"}}),
+				jsonLine(t, map[string]any{"type": "memory", "memory": map[string]any{"id": "m2", "project_id": "p1", "category": "fact", "content": "two", "source": "mcp"}}),
+				jsonLine(t, map[string]any{"type": "link", "link": tc.link}),
+			}
+			artifact := strings.Join(lines, "\n") + "\n"
+
+			ctx := context.Background()
+			dstDB, dst := newTestStoreWithDB(t)
+			report, err := Import(ctx, dst, strings.NewReader(artifact), ImportOptions{Apply: true}, nil)
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if report.Rejected != 1 {
+				t.Fatalf("the import rejected %d record(s), want the one edge it would not store", report.Rejected)
+			}
+			if !strings.Contains(report.Errors[0].Error(), tc.want) {
+				t.Errorf("the refusal does not mention %q: %v", tc.want, report.Errors[0])
+			}
+			// The rest of the file still lands.
+			if report.Created["memory"] != 2 {
+				t.Errorf("the import created %d memories, want the 2 the artifact carries", report.Created["memory"])
+			}
+			// And the edge is not in the store.
+			var edges int
+			if err := dstDB.QueryRowContext(ctx, `SELECT count(*) FROM memory_links`).Scan(&edges); err != nil {
+				t.Fatalf("count the edges: %v", err)
+			}
+			if edges != 0 {
+				t.Errorf("the store holds %d edges, want none — the edge was refused", edges)
+			}
+		})
+	}
+}
+
+// TestAnExportLeavesOutAnEdgeItsImporterWouldRefuse: the export applies the
+// IMPORTER's own predicate to every edge it carries, exactly as it does for a
+// project, a memory, a task and a decision. A store can already hold an edge
+// this build refuses to import — a hand write, a restored snapshot, an older
+// build — and an export that carried one produced an artifact its own importer
+// then rejected, which is the hole #813 closed for the other four kinds.
+//
+// The edges here are planted in SQL because they are states no writer in this
+// build produces: the table's CHECK does not cover the stamp or the strength.
+func TestAnExportLeavesOutAnEdgeItsImporterWouldRefuse(t *testing.T) {
+	ctx := context.Background()
+	db, src := newTestStoreWithDB(t)
+	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(newer): %v", err)
+	}
+	older, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the old answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(older): %v", err)
+	}
+	plant := func(id, source, target, stamp string, strength float64) {
+		t.Helper()
+		if _, err := db.Exec(
+			`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', ?, 'llm', ?)`,
+			source, target, strength, stamp); err != nil {
+			t.Fatalf("plant the edge %s: %v", id, err)
+		}
+	}
+	plant("unreadable stamp", newer, older, "not a stamp", 0.95)
+	plant("strength above the scale", older, newer, "2026-01-01 00:00:00", 4.2)
+
+	var buf bytes.Buffer
+	stats, err := Export(ctx, src, &buf, "")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	// Both edges are named, with the importer's own reason. The report names an
+	// edge by the memory that makes the claim, which is the link's identity in
+	// this package.
+	skipped := map[string]string{}
+	for _, sk := range stats.Skipped {
+		skipped[sk.Type+"\x00"+sk.ID] = sk.Reason
+	}
+	for source, want := range map[string]string{
+		newer: "created_at",
+		older: "strength",
+	} {
+		reason, ok := skipped[TypeLink+"\x00"+source]
+		if !ok {
+			t.Errorf("the export report does not name the edge it left out (from %q); it named %v", source, stats.Skipped)
+			continue
+		}
+		if !strings.Contains(reason, want) {
+			t.Errorf("the edge from %q was left out for %q, want a reason naming %q", source, reason, want)
+		}
+	}
+	// And the artifact carries neither of them.
+	if bytes.Contains(buf.Bytes(), []byte(`"type":"link"`)) {
+		t.Errorf("the artifact carries an edge its own importer would refuse:\n%s", buf.Bytes())
+	}
+	if stats.Links != 0 {
+		t.Errorf("the export carried %d edge(s), want none", stats.Links)
+	}
+}
+
 // TestAnEdgeWhoseEndpointIsOutsideTheExportIsLeftOutAndCounted: an edge
 // travels only when both its endpoints are memories the artifact carries. An
 // edge that reaches out of the export's scope is not carried, and the count is
