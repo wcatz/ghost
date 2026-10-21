@@ -55,9 +55,9 @@ func TestHistoricalSessionMemoriesUnreadableStampIsNoBound(t *testing.T) {
 		}},
 	}
 
-	got, _, _ := historicalSessionMemories(rows, "p1", nil, sessionMemoriesCap, time.Now())
+	got, _, _ := historicalSessionItems(rows, "p1", nil, sessionMemoriesCap, time.Now())
 	if len(got) != 2 {
-		t.Fatalf("historicalSessionMemories returned %d rows, want 2", len(got))
+		t.Fatalf("historicalSessionItems returned %d rows, want 2", len(got))
 	}
 
 	// Unreadable means no bound, not a pointer to the zero time.
@@ -77,9 +77,12 @@ func TestHistoricalSessionMemoriesUnreadableStampIsNoBound(t *testing.T) {
 		t.Errorf("created_at = %v, want the zero time for an unreadable value", unread.CreatedAt)
 	}
 
-	// And nothing fabricated may reach the line the agent reads.
+	// And nothing fabricated may reach the line the agent reads. The row goes
+	// through the block's own row builder and renderer, which is the path the
+	// shipped block takes.
 	asOf := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	line := sessionMemoryToItem(unread, &asOf).Line()
+	memories, _ := sessionRowsFrom(got)
+	line := sessionMemoryToItem(memories[0], &asOf).Line()
 	if strings.Contains(line, "0001-01-01") {
 		t.Errorf("the block invented a validity date Ghost never recorded:\n%s", line)
 	}
@@ -97,7 +100,7 @@ func TestHistoricalSessionMemoriesUnreadableStampIsNoBound(t *testing.T) {
 	if y, m, d := whole.ValidFrom.Date(); y != 2026 || m != time.February || d != 1 {
 		t.Errorf("valid_from = %v, want 2026-02-01", whole.ValidFrom)
 	}
-	if line := sessionMemoryToItem(whole, &asOf).Line(); !strings.Contains(line, "valid from 2026-02-01") {
+	if line := sessionMemoryToItem(memories[1], &asOf).Line(); !strings.Contains(line, "valid from 2026-02-01") {
 		t.Errorf("the whole-day stamp did not reach the line as its recorded claim:\n%s", line)
 	}
 }

@@ -1111,12 +1111,14 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	dropped := []string(nil)
 	var fitNotes []string
 	prev := p.notes()
-	// Whether the framing alone is the excess, and whether that has been asked
-	// yet. It is asked ONCE, on the first over-cap iteration, and never re-asked:
-	// see framingIsTheExcess for why re-reading it is the bug.
-	var framingIsExcess, framingAsked bool
+	// Whether the answer could not be made to fit at all: the envelope has
+	// neither a row nor a note left to give way.
+	var impossible bool
 
-	for {
+	// The measure: the block as it stands, re-derived and rendered. The fit
+	// rule (FitItems) calls it before every cut and once more at the end, so
+	// it is the ONE place the block is rendered.
+	measure := func(items []Item) int {
 		// Re-derive everything a row or note drop can change, and nothing else.
 		// The outcome is recomputed rather than carried: the row that cleared a
 		// floor may be the row that was just dropped, and a verdict that
@@ -1137,12 +1139,62 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		prev = res.Notes
 		measured := res.Bytes
 		if p.req.Budget.Measure != nil {
-			measured = p.req.Budget.Measure(p.items, p.trace)
+			measured = p.req.Budget.Measure(items, p.trace)
 		}
-		if p.req.Budget.MaxBytes <= 0 || measured <= p.req.Budget.MaxBytes {
-			break
-		}
+		return measured
+	}
 
+	// The cut: the row the rule gives up, dropped from the items and from the
+	// rows beside them, and recorded as a response_fit decision so a cut row
+	// is never recorded as delivered.
+	cut := func(items []Item, at int) []Item {
+		// p.rows alongside p.items, or notes()'s gate on an empty row set
+		// stays false and the removal breakdown — the thing that makes an
+		// empty answer's leading sentence checkable — disappears on exactly
+		// the case this post-pass creates.
+		lowest := p.items[at]
+		p.items = append(p.items[:at:at], p.items[at+1:]...)
+		if len(p.rows) > at {
+			p.rows = append(p.rows[:at:at], p.rows[at+1:]...)
+		}
+		p.dropped[lowest.ID] = reasonBudgetDropped
+		p.droppedBy[stageResponseFit]++
+		p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reasonBudgetDropped, lowest.Score)
+		dropped = append(dropped, lowest.ID)
+		return p.items
+	}
+
+	// What else can give way when no row is left: the search envelope's notes.
+	// A caller with its own render has nothing else, and an envelope with
+	// neither rows nor notes cannot answer at all.
+	giveWay := func() bool {
+		switch {
+		case p.req.Budget.Measure != nil:
+			// The caller's own framing is over the cap with no row left to cut.
+			// The envelope's notes and verdict are not what the caller emits, so
+			// there is nothing further to give way and no search answer to fail.
+			return false
+		case len(res.Notes) > 0:
+			// Cut from the end, which is where boundNotes already puts the
+			// per-row detail: the sentences that qualify the answer survive the
+			// pressure and the detail is what goes.
+			p.noteCut++
+			return true
+		default:
+			impossible = true
+			return false
+		}
+	}
+
+	// The fit rule, shared with every other caller that fits a block of rows
+	// to a byte cap: the search envelope never cuts its LAST row (#1483), and
+	// a Budget.Measure caller is excluded from that because its contract is
+	// to cut down to none (FramingCeiling).
+	kept, outcome := FitItems(p.items, p.req.Budget, measure, p.allCutFraming, cut, giveWay, p.req.Budget.Measure == nil)
+	p.items = kept
+
+	switch outcome {
+	case FitFramingIsTheExcess:
 		// A caller's own render that is at or over its ceiling with NO row in it cannot
 		// be helped by cutting rows: the framing alone is the excess, and cutting
 		// every row would deliver nothing for no gain. Keep the rows, stop. Between
@@ -1153,73 +1205,35 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		// longest the cuts can make it. A check that re-read the framing each
 		// iteration would read a different question each time (see
 		// framingIsTheExcess).
-		if !framingAsked {
-			framingAsked = true
-			framingIsExcess = p.framingIsTheExcess()
-		}
-		if framingIsExcess {
-			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
-			p.trace.Notes = res.Notes
-			return res, nil
-		}
-
+		p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
+		p.trace.Notes = res.Notes
+		return res, nil
+	case FitLastRowKept:
 		// The search envelope never cuts its LAST row (#1483). A single row larger
 		// than the budget — a memory at the store's content cap whose line breaks
 		// fold to `⏎` renders past it — would otherwise be dropped and the answer
 		// would claim nothing trustworthy was found about a row nothing judged. It
 		// is kept whole, the notice says so, and the pass stops: the notice makes
 		// the render larger, so measuring again would only re-enter this branch.
-		// A Budget.Measure caller is excluded because its contract is to cut down
-		// to none (FramingCeiling). The notes are not cut first: an answer with a
-		// row does not render them, so cutting them would change no byte.
-		if len(p.items) == 1 && p.req.Budget.Measure == nil {
-			p.firstKept = true
-			res.Response = p.response(res)
-			res.Bytes = len(res.Response)
-			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
-			p.trace.Notes = res.Notes
-			return res, nil
-		}
-
-		switch {
-		case len(p.items) > 0:
-			// p.rows alongside p.items, or notes()'s gate on an empty row set
-			// stays false and the removal breakdown — the thing that makes an
-			// empty answer's leading sentence checkable — disappears on exactly
-			// the case this post-pass creates.
-			at := len(p.items) - 1
-			if p.req.Budget.KeepPinned {
-				for i := at; i >= 0; i-- {
-					if !p.items[i].Pinned {
-						at = i
-						break
-					}
-				}
-			}
-			lowest := p.items[at]
-			p.items = append(p.items[:at:at], p.items[at+1:]...)
-			if len(p.rows) > at {
-				p.rows = append(p.rows[:at:at], p.rows[at+1:]...)
-			}
-			p.dropped[lowest.ID] = reasonBudgetDropped
-			p.droppedBy[stageResponseFit]++
-			p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reasonBudgetDropped, lowest.Score)
-			dropped = append(dropped, lowest.ID)
-		case p.req.Budget.Measure != nil:
-			// The caller's own framing is over the cap with no row left to cut.
-			// The envelope's notes and verdict are not what the caller emits, so
-			// there is nothing further to give way and no search answer to fail.
-			p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
-			p.trace.Notes = res.Notes
-			return res, nil
-		case len(res.Notes) > 0:
-			// Cut from the end, which is where boundNotes already puts the
-			// per-row detail: the sentences that qualify the answer survive the
-			// pressure and the detail is what goes.
-			p.noteCut++
-		default:
+		// The notes are not cut first: an answer with a row does not render them,
+		// so cutting them would change no byte.
+		p.firstKept = true
+		res.Response = p.response(res)
+		res.Bytes = len(res.Response)
+		p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
+		p.trace.Notes = res.Notes
+		return res, nil
+	case FitNoRowsLeft:
+		if impossible {
+			// The verdict, its reason and the machine line are last, and if they
+			// still do not fit there is no answer to return: ErrResponseBudgetExceeded
+			// says the budget was impossible, which is a different fact from
+			// `empty` and one this package must not report as an absence.
 			return Result{}, ErrResponseBudgetExceeded
 		}
+		p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
+		p.trace.Notes = res.Notes
+		return res, nil
 	}
 
 	p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
@@ -1227,9 +1241,10 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	return res, nil
 }
 
-// framingIsTheExcess reports whether cutting rows cannot help this caller's own
-// render, so the rows are kept rather than cut for nothing: its framing, measured
-// with every row it holds cut, is at or over Budget.FramingCeiling.
+// allCutFraming is the size of this caller's own render as it stands with every
+// row cut, and it is the size the fit rule decides the ceiling against: cutting
+// rows cannot help once the framing alone is at or over
+// Budget.FramingCeiling, so the rows are kept rather than cut for nothing.
 //
 // WHY THE MEASURE IS OF AN ALL-CUT BLOCK. A caller's framing is not independent
 // of the cuts it makes — the session-start block's count line gains a clause for
@@ -1249,13 +1264,14 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 // row is the only thing this seam can tell it that with. The real trace is
 // untouched — a hypothetical cut recorded as a real one would name rows in the
 // retrieval record that this run never dropped.
-func (p *pipeline) framingIsTheExcess() bool {
+//
+// 0 means there is no ceiling to be at, or no row to cut: cutting is not what
+// makes this block too large either way, so the caps that do apply carry on.
+func (p *pipeline) allCutFraming() int {
 	if p.req.Budget.Measure == nil || p.req.Budget.FramingCeiling <= 0 || len(p.items) == 0 {
-		// No ceiling to be at, or no row to cut: cutting is not what makes this
-		// block too large either way, so the caps that do apply carry on below.
-		return false
+		return 0
 	}
-	return p.req.Budget.Measure(nil, p.allCutTrace()) >= p.req.Budget.FramingCeiling
+	return p.req.Budget.Measure(nil, p.allCutTrace())
 }
 
 // allCutTrace is a copy of the trace as it would stand if the fit pass cut every

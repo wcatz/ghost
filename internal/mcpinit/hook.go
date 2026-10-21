@@ -837,10 +837,10 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	projectID, project := resolveSessionProject(context.Background(), store, cwd)
 
 	var (
-		memories []sessionMemory
-		globals  []sessionMemory
-		gapNote  string
-		readErr  string
+		projectItems []assemble.Item
+		globalItems  []assemble.Item
+		gapNote      string
+		readErr      string
 		// withheldAtT counts the in-scope rows left out because their window was
 		// closed or not yet open at asOf.
 		withheldAtT int
@@ -864,7 +864,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 			readErr = "This store's recorded history could not be read, so nothing below is a reading of that instant: " + err.Error()
 		default:
 			var w int
-			memories, w, projectRankedOut = historicalSessionMemories(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
+			projectItems, w, projectRankedOut = historicalSessionItems(set.Live(), projectID, scope, sessionMemoriesCap, asOf)
 			withheldAtT += w
 			gapNote = set.UnknownNote()
 		}
@@ -881,10 +881,10 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 		// half's. These rows are in the decay composite's order, so the count
 		// line takes the composite phrase on this path (see
 		// formatSessionContext), never the current globals ranking.
-		globals, w, globalsRankedOut = historicalSessionMemories(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
+		globalItems, w, globalsRankedOut = historicalSessionItems(gset.Live(), memory.GlobalProjectID, scope, globalsCap, asOf)
 		withheldAtT += w
 	}
-	if projectID == "" && len(globals) == 0 && withheldAtT == 0 {
+	if projectID == "" && len(globalItems) == 0 && withheldAtT == 0 {
 		return ""
 	}
 	// Each half's tally is the current path's type and goes through the same
@@ -893,11 +893,66 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// stated once at block level by memory.AsOfValidityNote, counted in
 	// asOfWithheld, and are neither shown nor ranked out.
 	tally := sessionTally{
-		project:      assemble.BucketTally{Shown: len(memories), RankedOut: projectRankedOut},
-		globals:      assemble.BucketTally{Shown: len(globals), RankedOut: globalsRankedOut},
+		project:      assemble.BucketTally{Shown: len(projectItems), RankedOut: projectRankedOut},
+		globals:      assemble.BucketTally{Shown: len(globalItems), RankedOut: globalsRankedOut},
 		asOfWithheld: withheldAtT,
 	}
-	block := formatSessionContext(projectID, project, &asOf, memories, "", nil, nil, 0, globals, tally)
+	// The rows, in the order the block renders them: the project's own first,
+	// then the globals'. The fit rule gives up the lowest-ranked row of that
+	// order, which is the last of the globals' — the same order the current
+	// path's rows arrive in, so the two blocks give up the same rows.
+	items := make([]assemble.Item, 0, len(projectItems)+len(globalItems))
+	items = append(items, projectItems...)
+	items = append(items, globalItems...)
+
+	// The block, rendered the way the current path renders it: the rows
+	// through the same row builder (sessionRowsFrom), so the per-item preview
+	// is the same budget, and the block through the same renderer.
+	render := func(rows []assemble.Item, t sessionTally) string {
+		mem, glob := sessionRowsFrom(rows)
+		return formatSessionContext(projectID, project, &asOf, mem, "", nil, nil, 0, glob, t)
+	}
+	// The cut: the row the rule gives up, counted as cut FOR SIZE, so the
+	// count line says which rows the cap took rather than calling them
+	// outranked.
+	cut := func(rows []assemble.Item, at int) []assemble.Item {
+		it := rows[at]
+		if it.ProjectID == memory.GlobalProjectID {
+			tally.globals.Shown--
+			tally.globals.RankedOut++
+			tally.globals.ByteCut++
+		} else {
+			tally.project.Shown--
+			tally.project.RankedOut++
+			tally.project.ByteCut++
+		}
+		return append(rows[:at:at], rows[at+1:]...)
+	}
+	// The framing with every row cut: the size the ceiling is decided
+	// against. The count line grows with every cut, so this is the longest
+	// the framing can be, and the question is asked once.
+	allCutFraming := func() int {
+		allCut := tally
+		allCut.project.Shown = 0
+		allCut.project.RankedOut += tally.project.Shown
+		allCut.project.ByteCut += tally.project.Shown
+		allCut.globals.Shown = 0
+		allCut.globals.RankedOut += tally.globals.Shown
+		allCut.globals.ByteCut += tally.globals.Shown
+		return len(render(nil, allCut))
+	}
+
+	// The fit rule, the current path's own (assemble.FitItems): the block is
+	// measured, and while it is over the cap the lowest-ranked row goes and
+	// the block is measured again. A caller with its own render cuts down to
+	// none, and a framing already over the host's own limit keeps its rows
+	// rather than being cut for nothing.
+	items, _ = assemble.FitItems(items, assemble.Budget{
+		MaxBytes:       sessionStartByteCap,
+		KeepPinned:     true,
+		FramingCeiling: sessionHostLimit,
+	}, func(rows []assemble.Item) int { return len(render(rows, tally)) }, allCutFraming, cut, nil, false)
+	block := render(items, tally)
 	if readErr != "" {
 		block += "\n\n(" + readErr + ")"
 	}
@@ -907,7 +962,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	return block
 }
 
-// historicalSessionMemories turns a recorded set into the renderer's own row
+// historicalSessionItems turns a recorded set into the assembler's own row
 // type, narrowed to one project, narrowed by the session scope, and capped.
 //
 // The project narrowing is the one the live loader applies: its memories query
@@ -925,9 +980,16 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 // It returns the shown rows, how many in-scope rows were withheld for validity
 // at asOf, and how many in-scope rows valid at asOf the cap left out (ranked
 // out, since the set arrives in composite order).
-func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]sessionMemory, int, int) {
+//
+// The rows are the assembler's own, and the block renders them through the same
+// row builder the current path uses (sessionRowsFrom), so the per-item PREVIEW
+// is the same one: 200 bytes for a project row, 300 for a global one, with the
+// ellipsis that says a row was cut. The stored row is untouched either way —
+// without the preview the whole stored content reached the block, a memory at
+// the store's own 8,000-byte cap rendered in full, fifteen times over.
+func historicalSessionItems(rows []memory.AsOfRow, projectID string, scope map[string]string, cap int, asOf time.Time) ([]assemble.Item, int, int) {
 	withheld, rankedOut := 0, 0
-	out := make([]sessionMemory, 0, min(len(rows), cap))
+	out := make([]assemble.Item, 0, min(len(rows), cap))
 	for _, row := range rows {
 		if row.ProjectID != projectID {
 			continue
@@ -989,7 +1051,7 @@ func historicalSessionMemories(rows []memory.AsOfRow, projectID string, scope ma
 		}
 		// ValidityState is computed at render time from the parsed timestamps.
 		// We pass the parsed timestamps and let the renderer compute the state.
-		out = append(out, sessionMemory{
+		out = append(out, assemble.Item{
 			ID:            row.ID,
 			Category:      row.Category,
 			Content:       row.Content,
