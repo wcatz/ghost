@@ -1156,6 +1156,13 @@ type promotionOutcome struct {
 	// kept is how many candidates failed promotion and were written back into the
 	// project. Only meaningful once applied.
 	kept int
+	// retained is how many rows the project holds that the corpus it was handed
+	// carried and that are still there, plus the rows the replace wrote. It
+	// counts rows rather than proposals because a refused proposal writes none
+	// of its own and leaves all of its sources live. Only meaningful once
+	// applied AND retainedKnown.
+	retained      int
+	retainedKnown bool
 }
 
 // keptInProject is how many candidates the project still holds. Before the apply
@@ -1176,7 +1183,17 @@ func (o promotionOutcome) keptInProject() int {
 // up with — the count that decides whether a memory survived. Reading
 // len(projectMems) alone understates retention by the whole candidate set and
 // fires the warning on rounds that lost nothing.
+//
+// After a write that handed the corpus to a project replace, the caller has
+// already read the count off the replace (promotion.retained): the corpus rows
+// it left live plus the rows it wrote. Counting one per proposal got a refused
+// merge wrong — the store writes no row for it and keeps all N of its sources,
+// so the project holds N rows where the proposal counted one. retainedKnown is
+// false before the write and on a dry run, where the fallbacks above still apply.
 func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) int {
+	if promotion.retainedKnown {
+		return promotion.retained
+	}
 	if promoteGlobals {
 		return len(projectMems) + promotion.keptInProject()
 	}
@@ -1274,7 +1291,12 @@ func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionRe
 // The slices it is handed are the POST-drop ones wherever the count is taken
 // after the write, so a proposal the write boundary refused is in neither of
 // them: it is not a memory the project holds, and counting it would report a
-// corpus that kept more than it did.
+// corpus that kept more than it did. The store can also refuse a proposal
+// after that filter, and it keeps every source row live when it does — so a
+// post-write count does not come from the slices at all. promotion.retained is
+// the project replace's own record of the corpus rows it left live plus the
+// rows it wrote, and it is what makes a refused N-source merge count as N held
+// rows rather than the one proposal it never wrote.
 func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) {
 	if len(live) < reductionWarnMinInput {
 		return
@@ -2136,9 +2158,12 @@ func runReflect() {
 		// Two things are knowable only now. A candidate that failed promotion is
 		// a row the project still holds, so it counts as retained — the count
 		// that decides whether a memory survived, which is the whole point of
-		// the line. And a proposal the write boundary dropped is in NEITHER set:
-		// it was never written, so it is not a memory the project holds, and
-		// counting it said the corpus kept more than it did.
+		// the line. And the rows a refused proposal leaves live are not the one
+		// proposal the caller still holds: the store writes none of it and keeps
+		// all of its sources, so the count comes from the replace's own record
+		// of what it left live rather than from the proposals. A refused merge
+		// counted as one would report a compression that did not happen beside
+		// the refusal note saying its sources are still there.
 		//
 		// Printed even when nothing failed, because the skipped pre-apply report
 		// means this run would otherwise say nothing at all about how hard it
@@ -2151,8 +2176,32 @@ func runReflect() {
 		// function's own commit set out to fix everywhere else. A partial drop
 		// — one good proposal and one credential — has to report only what was
 		// written.
-		reportReductionWarning(os.Stderr, live, keptProjectMems, keptGlobalMems, parsed.promoteGlobals,
-			promotionOutcome{applied: true, kept: len(keptMems)})
+		promotion := promotionOutcome{applied: true, kept: len(keptMems)}
+		// A project replace is the only caller of the store that hands it the
+		// corpus and gets the rows it left live back. With promotion off the
+		// cross-project candidates are folded into it, and a reflect of _global
+		// folds them too; with promotion on a project proposal is what makes
+		// the replace run. A global-only apply runs no replace and consumes
+		// nothing, so the project still holds every consolidatable row it held,
+		// and the candidates it could not promote are written back on top of
+		// those.
+		replaceRan := len(keptProjectMems) > 0 ||
+			((!parsed.promoteGlobals || projectID == memory.GlobalProjectID) && len(keptGlobalMems) > 0)
+		switch {
+		case replaceRan:
+			// The replace's Retained is the corpus rows it left live plus the
+			// rows it wrote; the candidates that failed to promote are written
+			// into the project AFTER it, so they are rows on top of that.
+			promotion.retained = droppedProject.Retained + len(keptMems)
+			promotion.retainedKnown = true
+		default:
+			// A global-only apply runs no replace and consumes nothing, so the
+			// project still holds every consolidatable row it held — keptMems
+			// among them — and they are the whole of what is retained.
+			promotion.retained = len(live)
+			promotion.retainedKnown = true
+		}
+		reportReductionWarning(os.Stderr, live, keptProjectMems, keptGlobalMems, parsed.promoteGlobals, promotion)
 	}
 
 	// A round that wrote something counts as applied, and that includes a

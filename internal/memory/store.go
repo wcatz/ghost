@@ -7958,6 +7958,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	for _, c := range candidates {
 		candidatesByID[c.id] = c
 	}
+	// fedIDs is the corpus the pass was handed, so the retained count below can
+	// tell a reuse of a corpus row from a reuse of a row the corpus did not
+	// carry: the corpus row is counted with the corpus, and only the other is
+	// counted on its own.
+	fedIDs := make(map[string]bool, len(fed))
+	for _, row := range fed {
+		fedIDs[row.ID] = true
+	}
 	dropEmission := make([]bool, len(memories))
 	overflowed := make([]bool, len(memories))
 	overflowLinks := make([]int, len(memories))
@@ -8265,6 +8273,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// provenance stamp below makes it a write after all.
 	var reflected []string
 	reused := 0
+	// reusedIDs are the rows this replace updated in place. They are rows the
+	// project holds AND rows this replace wrote, so the retained count below
+	// needs them: a reuse of a row the corpus did not carry is counted on its
+	// own, and a reuse of a corpus row is counted with the corpus.
+	var reusedIDs []string
+	// fresh is the rows this replace INSERTS, which are the part of what the
+	// project holds afterwards that no pre-replace candidate accounts for.
+	fresh := 0
 	// successorOf maps the ids this pass consumed to the row that now holds
 	// their content, so the consumed rows' delete history can say where their
 	// knowledge went. Only ids the caller declared (Memory.ReplacesIDs, which the
@@ -8306,6 +8322,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
 			id := stored.id
+			reusedIDs = append(reusedIDs, id)
 			// created_at is reset deliberately: consolidated knowledge counts
 			// as refreshed (issue #279). The row identity — and with it its
 			// embeddings, links, and access stats — survives.
@@ -8471,6 +8488,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 		reflected = append(reflected, newID)
+		fresh++
 		for _, replaced := range folded.ReplacesIDs {
 			successorOf[replaced] = newID
 		}
@@ -8585,6 +8603,35 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
+	// What the project holds from this replace: every row of the corpus the
+	// pass was handed that is still there, plus every row it wrote. A refused
+	// merge contributes all its sources here and none of them as an emitted
+	// row, which is the correction a caller counting proposals from the result
+	// would otherwise miss.
+	//
+	// The corpus is re-read rather than taken from keptLive. keptLive is built
+	// from the replaceable rows, and a corpus row that was pinned, resolved or
+	// made persistent while the harness was answering is no longer one: it is
+	// in neither the delete set nor keptLive, and it is still a row the project
+	// holds. A count that skipped it understated what the project held, and
+	// could raise a reduction warning on a round that lost nothing. A corpus
+	// row this replace consumed is gone, and so is one deleted while the
+	// harness was answering, so neither is counted.
+	stillThere, err := corpusRowsStillPresent(ctx, tx, projectID, fed)
+	if err != nil {
+		return nil, EmissionDrops{}, 0, nil, err
+	}
+	retained := fresh + stillThere
+	// A reuse of a row the corpus did not carry is a row this replace wrote and
+	// the corpus part above cannot see. A reuse of a corpus row is already
+	// counted there.
+	for _, id := range reusedIDs {
+		if !fedIDs[id] {
+			retained++
+		}
+	}
+	dropped.Retained = retained
+
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
 		s.logger.Info("preserved memory identity across reflection replace",
 			"project_id", RefusalArg("project_id", projectID), "reused", reused, "concurrent_kept", len(concurrent))
@@ -8602,6 +8649,49 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		lock.reportHold("replace", time.Now())
 	}
 	return preserved, dropped, deleted, appliedByCategory, nil
+}
+
+// corpusChunkIDs is how many corpus ids one count query names, so a large
+// corpus does not build a statement with more parameters than SQLite accepts.
+const corpusChunkIDs = 200
+
+// corpusRowsStillPresent counts the rows of a corpus that are still in the
+// table, whatever their pinned, resolved or retention state is now.
+//
+// It is read inside the caller's transaction, so it sees that transaction's own
+// deletes: a row the replace consumed is gone and is not counted, and neither
+// is one deleted while the harness was answering. A row that is still there is
+// a row the project holds, and a corpus row that was pinned, resolved or made
+// persistent in that window is one the replace never reaches — it is not a
+// replaceable candidate, so it is in neither the delete set nor the set of
+// candidates the pass keeps live, and it is still there.
+func corpusRowsStillPresent(ctx context.Context, tx *sql.Tx, projectID string, fed []CorpusRow) (int, error) {
+	if len(fed) == 0 {
+		return 0, nil
+	}
+	ids := make([]string, 0, len(fed))
+	for _, row := range fed {
+		ids = append(ids, row.ID)
+	}
+	present := 0
+	for start := 0; start < len(ids); start += corpusChunkIDs {
+		end := min(start+corpusChunkIDs, len(ids))
+		ph := make([]string, end-start)
+		args := make([]any, 0, end-start+1)
+		args = append(args, projectID)
+		for i, id := range ids[start:end] {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM memories WHERE project_id = ? AND id IN (`+strings.Join(ph, ",")+`)`,
+			args...).Scan(&n); err != nil {
+			return 0, fmt.Errorf("count the corpus rows still present: %w", err)
+		}
+		present += n
+	}
+	return present, nil
 }
 
 // RestoreResult is what a restore did, for the caller that reports it.

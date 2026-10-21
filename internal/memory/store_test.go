@@ -1154,6 +1154,364 @@ func TestReplaceNonManualReportsPreservedSurvivors(t *testing.T) {
 	})
 }
 
+// liveRowCount counts the project's live rows, the number a caller comparing a
+// round's retention against its own input has to agree with.
+func liveRowCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, testProject).Scan(&n); err != nil {
+		t.Fatalf("count live rows: %v", err)
+	}
+	return n
+}
+
+// projectRowCount counts every row the project holds, resolved ones included: a
+// resolved row is still a row, and the retained count is about rows.
+func projectRowCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE project_id = ?`, testProject).Scan(&n); err != nil {
+		t.Fatalf("count project rows: %v", err)
+	}
+	return n
+}
+
+// TestReplaceNonManualReportsTheRowsItLeavesLive: the count a caller needs
+// after an apply is the rows the project still holds, not the proposals that
+// survived a filter. Every refusal the store makes — a scope that disagrees, a
+// decision-link overflow, a claim on a row that moved — writes no row of its
+// own and takes none of its sources, so a refused N-source merge leaves N rows
+// live and is not one retained memory. Retained is that count, and it is the
+// store's own: the replaceable rows it kept live from the corpus it was handed,
+// plus the rows it inserted.
+//
+// Every case asserts the count against the rows the project really holds, so a
+// count that drifts from the corpus cannot pass.
+func TestReplaceNonManualReportsTheRowsItLeavesLive(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a merge refused for decision links keeps every source live", func(t *testing.T) {
+		s := testStore(t)
+		// Thirteen decisions, whose links joined exceed one source_ref, so the
+		// merge that names them is refused as an overflow and writes nothing.
+		var mems []string
+		for i := 0; i < 13; i++ {
+			_, mem, _, err := s.RecordDecision(ctx, testProject,
+				fmt.Sprintf("Decision %d", i), fmt.Sprintf("choice %d", i), "because", nil, nil)
+			if err != nil {
+				t.Fatalf("RecordDecision %d: %v", i, err)
+			}
+			mems = append(mems, mem)
+		}
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy pipeline requires a manual approval gate",
+			Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy pipeline refuses an unreviewed release",
+			Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		fed := corpusRows(t, s, append(append([]string{}, mems...), aID, bID)...)
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "decision", Content: "thirteen decisions in one", Importance: 0.9, ReplacesIDs: mems},
+			{Category: "fact", Content: "the deploy pipeline needs an approval gate and refuses an unreviewed release",
+				Importance: 0.6, ReplacesIDs: []string{aID, bID}},
+		}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Overflow != 1 {
+			t.Fatalf("dropped.Overflow = %d, want 1: the merge whose links do not fit is refused", dropped.Overflow)
+		}
+		// The thirteen sources stay live, and the other merge wrote one row.
+		if dropped.Retained != 14 {
+			t.Errorf("dropped.Retained = %d, want 14: the thirteen sources the refusal kept and the row the other merge wrote",
+				dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 14 {
+			t.Errorf("the project holds %d live rows, want the 14 the count names", got)
+		}
+	})
+
+	t.Run("a merge refused for a scope conflict keeps every source live", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.5,
+			Tags: []string{}, Scope: map[string]string{"environment": "production"},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.5,
+			Tags: []string{}, Scope: map[string]string{"environment": "staging"},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is charlie", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+
+		// The sources disagree on scope, so the merge is refused and each of
+		// them stays live under its own scope.
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy hosts are one fact", Importance: 0.6,
+			Tags: []string{}, ReplacesIDs: []string{aID, bID, cID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Scope != 1 {
+			t.Fatalf("dropped.Scope = %d, want 1: the merge's sources disagree on scope", dropped.Scope)
+		}
+		if dropped.Retained != 3 {
+			t.Errorf("dropped.Retained = %d, want 3: every source the refusal kept is still live", dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 3 {
+			t.Errorf("the project holds %d live rows, want the 3 the count names", got)
+		}
+	})
+
+	t.Run("a merge claiming an edited row keeps that source live", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID)
+		// The edit lands while the harness is answering, so the merge names a
+		// row that is no longer the one the pass read.
+		edited := "the deploy host is alpha (edited)"
+		if err := s.UpdateMemory(ctx, testProject, aID, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory A: %v", err)
+		}
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy host is alpha and bravo, one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{aID, bID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Changed != 1 {
+			t.Fatalf("dropped.Changed = %d, want 1: the merge claimed a row that moved", dropped.Changed)
+		}
+		// Both sources are still live — the edited one and the one beside it —
+		// and nothing was written, so the count is the two rows.
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the edited source and the one beside it are both still live",
+				dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d live rows, want the 2 the count names", got)
+		}
+	})
+
+	t.Run("a corpus row pinned mid-round is still a row the project holds", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is charlie", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+		// The pin lands while the harness is answering. A is no longer a
+		// replaceable candidate, so the replace never reaches it: it is in
+		// neither the delete set nor the set of candidates the pass keeps live.
+		// It is still a row the project holds.
+		if err := s.TogglePin(ctx, aID, true); err != nil {
+			t.Fatalf("TogglePin A: %v", err)
+		}
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy hosts are one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{bID, cID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Total() != 0 {
+			t.Fatalf("dropped.Total() = %d, want 0: the merge named two rows that were there", dropped.Total())
+		}
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the pinned row is still there beside the row the merge wrote",
+				dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d live rows, want the 2 the count names", got)
+		}
+	})
+
+	t.Run("a corpus row resolved mid-round is still a row the project holds", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is charlie", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+		// The resolve lands while the harness is answering. A is resolved, so
+		// it is not a replaceable candidate either — and it is still a row of
+		// the project.
+		if _, err := s.SetResolved(ctx, []string{aID}); err != nil {
+			t.Fatalf("SetResolved A: %v", err)
+		}
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy hosts are one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{bID, cID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Total() != 0 {
+			t.Fatalf("dropped.Total() = %d, want 0: the merge named two rows that were there", dropped.Total())
+		}
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the resolved row is still there beside the row the merge wrote",
+				dropped.Retained)
+		}
+		if got := projectRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d rows, want the 2 the count names", got)
+		}
+	})
+
+	t.Run("a plain successful merge counts the rows the project holds", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the queue consumer drains the backlog in one pass",
+			Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the queue consumer retries a failed delivery",
+			Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy pipeline requires a manual approval gate",
+			Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "fact", Content: "the queue consumer drains the backlog in one pass and retries a failed delivery",
+				Importance: 0.6, Tags: []string{}, ReplacesIDs: []string{aID, bID}},
+			{Category: "fact", Content: "the deploy pipeline requires a manual approval gate",
+				Importance: 0.5, Tags: []string{}},
+		}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Total() != 0 {
+			t.Fatalf("dropped.Total() = %d, want 0: nothing was refused", dropped.Total())
+		}
+		// The untouched row of the corpus is still live beside the row the
+		// merge wrote, and those two are all the project holds.
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the row the merge left untouched and the row it wrote",
+				dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d live rows, want the 2 the count names", got)
+		}
+		if getOne(t, s, cID).Content != "the deploy pipeline requires a manual approval gate" {
+			t.Errorf("the untouched row was not kept as it is")
+		}
+	})
+
+	t.Run("an apply with no project half reports no project retention", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		fed := corpusRows(t, s, aID)
+
+		// A cross-project candidate alone: no project half, so no replace runs
+		// and the store reports no project retention at all.
+		_, promoted, kept, projectDropped, globalDropped, _, _, err := s.ApplyReflection(ctx, testProject, nil,
+			[]Memory{{
+				Category: "fact", Content: "the deploy host is alpha, everywhere", Importance: 0.6,
+				Tags: []string{}, ReplacesIDs: []string{aID},
+			}}, "", true, fed)
+		if err != nil {
+			t.Fatalf("ApplyReflection: %v", err)
+		}
+		if promoted != 1 || len(kept) != 0 {
+			t.Errorf("promoted = %d, kept = %d, want the candidate promoted and none kept back", promoted, len(kept))
+		}
+		if projectDropped.Total() != 0 || globalDropped.Total() != 0 {
+			t.Errorf("dropped = %d/%d, want no refusal on either half", projectDropped.Total(), globalDropped.Total())
+		}
+		// Zero here means "no project replace ran", not "nothing was retained":
+		// the project still holds the row the global-only apply consumed
+		// nothing from.
+		if projectDropped.Retained != 0 {
+			t.Errorf("projectDropped.Retained = %d, want 0: no project replace ran", projectDropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 1 {
+			t.Errorf("the project holds %d live rows, want the 1 it held: a global-only apply consumes nothing", got)
+		}
+	})
+}
+
 // TestStoreRestoreSnapshot_PreservesResolved guards the restore leg of #318:
 // --restore must not delete a resolved memory that reflection never touched.
 func TestStoreRestoreSnapshot_PreservesResolved(t *testing.T) {

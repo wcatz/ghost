@@ -30,6 +30,15 @@ import (
 //
 // Total is the count of refused emissions for any reason, which is what "every
 // proposal was refused" and "the round wrote nothing" read.
+//
+// Retained is a count of ROWS rather than emissions, and only a project replace
+// fills it: the rows of the corpus it was handed that are still there — a
+// refusal's sources, a row that moved, a row that stopped being replaceable
+// while the harness was answering — plus the rows it wrote. A refusal writes no
+// row of its own and takes none of its sources, so one refused emission is not
+// one retained memory — an N-source merge the store refused leaves N rows in
+// the project. Callers that report how much a round compressed read this rather
+// than counting proposals.
 type EmissionDrops struct {
 	Changed  int
 	Overflow int
@@ -38,6 +47,10 @@ type EmissionDrops struct {
 	// exceeds so an operator can see how far over the merge was.
 	OverflowLinks int
 	Scope         int
+	// Retained is the corpus rows still live plus the rows the replace wrote.
+	// It is meaningful only when a project replace ran; a global-only apply
+	// leaves it zero.
+	Retained int
 }
 
 // Total is the number of emissions refused for any reason.
@@ -74,6 +87,7 @@ func (d EmissionDrops) add(o EmissionDrops) EmissionDrops {
 		Overflow:      d.Overflow + o.Overflow,
 		OverflowLinks: d.OverflowLinks + o.OverflowLinks,
 		Scope:         d.Scope + o.Scope,
+		Retained:      d.Retained + o.Retained,
 	}
 }
 
@@ -83,6 +97,7 @@ func (d EmissionDrops) sub(o EmissionDrops) EmissionDrops {
 		Overflow:      d.Overflow - o.Overflow,
 		OverflowLinks: d.OverflowLinks - o.OverflowLinks,
 		Scope:         d.Scope - o.Scope,
+		Retained:      d.Retained - o.Retained,
 	}
 }
 
