@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -377,6 +378,177 @@ func sweepAwayOnce(t *testing.T, path string) {
 		return os.Remove(p)
 	}
 	t.Cleanup(func() { removeMarkerFile = restore })
+}
+
+// TestSessionStart_ARefusedExpiredMarkerDoesNotOutrankTheCurrentOne pins the
+// no-project read's choice when an expired marker the directory refuses to
+// remove sits beside a current failure. The expired marker is 40 days old, so
+// it is past the age horizon and the sweep must try to remove it; the removal
+// is refused, so the file stays on disk. The current failure is stamped an
+// hour AHEAD — inside the tolerated clock skew, so it is a real, recent
+// failure and is never swept — and a stamp dated ahead of now ranks BELOW
+// every stamp at or before it, so the expired marker used to outrank it. The
+// read then returned the expired one, the alert tried to remove it, the
+// removal failed, and the session was told about the directory (or told
+// nothing at all) instead of about the failure that is actually current.
+//
+// The per-project read already passes over every marker the sweep could not
+// remove; this pins the same rule on the no-project read, whose ranking is
+// over every marker in the data directory.
+func TestSessionStart_ARefusedExpiredMarkerDoesNotOutrankTheCurrentOne(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	expiredPath := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "stale", PhasesFailed: []string{"reflect"}, Error: "boom",
+		At: time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "current", PhasesFailed: []string{"resolve"}, Error: "boom",
+		At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	refuseRemovalOf(t, expiredPath)
+
+	m := readLifecycleFailure("", "")
+	if m == nil {
+		t.Fatal("the current failure must still be read")
+	}
+	if m.Project != "current" {
+		t.Errorf("the read returned project %q, want the current failure", m.Project)
+	}
+
+	alert := lifecycleFailureAlert("", "")
+	if !strings.Contains(alert, "for project current") {
+		t.Errorf("the current failure must be the one shown, got: %q", alert)
+	}
+	if strings.Contains(alert, "stale") {
+		t.Errorf("the expired marker must not be shown, got: %q", alert)
+	}
+	if strings.Contains(alert, "refuses new files") {
+		t.Errorf("the directory is writable, so it is not the blocker, got: %q", alert)
+	}
+}
+
+// TestSessionStart_ARefusedExpiredMarkerNamesTheCurrentFailureOnAnUnwritableDir
+// is the same rule on a data directory that refuses new files, where the
+// expired marker cannot be removed because the directory itself is the
+// blocker. The blocker line is still the line the directory earns, but the
+// failure it names must be the current one: the expired marker is a dead
+// file, and a session told about a 40-day-old failure instead of the current
+// one is told about the wrong thing.
+func TestSessionStart_ARefusedExpiredMarkerNamesTheCurrentFailureOnAnUnwritableDir(t *testing.T) {
+	skipUnlessModesRestrict(t)
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "stale", PhasesFailed: []string{"reflect"}, Error: "boom",
+		At: time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "current", PhasesFailed: []string{"resolve"}, Error: "boom",
+		At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	refuseDataDirWrites(t, filepath.Join(xdgHome, "ghost"))
+
+	alert := lifecycleFailureAlert("", "")
+
+	if !strings.Contains(alert, "project current") {
+		t.Errorf("the blocker line must name the current failure, got: %q", alert)
+	}
+	if strings.Contains(alert, "project stale") {
+		t.Errorf("the blocker line must not name the expired marker, got: %q", alert)
+	}
+}
+
+// TestSessionStart_RefusedExpiredMarkersAloneStillNameTheDirectory pins the
+// fallback the no-project read ends on when nothing current is left: two
+// markers 40 days old, for two different projects, both of them markers the
+// sweep could not remove, and no current failure beside them. The ranking has
+// nothing to rank — every marker is dead — so the read falls back to the
+// first refused one, and the alert names the directory as the blocker: a
+// marker that can be neither cleared nor called stale is still something the
+// reader has to be told about, and the directory is what has to be fixed.
+//
+// The directory refuses new files here, so both removals are refused and the
+// blocker line is the line it earns. It passes with and without the skips in
+// the ranking — before them the ranking returned an expired marker and the
+// alert reported the same thing — so what it pins is that the fallback still
+// reports it.
+func TestSessionStart_RefusedExpiredMarkersAloneStillNameTheDirectory(t *testing.T) {
+	skipUnlessModesRestrict(t)
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "stale-one", PhasesFailed: []string{"reflect"}, Error: "boom",
+		At: time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "stale-two", PhasesFailed: []string{"resolve"}, Error: "boom",
+		At: time.Now().UTC().Add(-41 * 24 * time.Hour).Format(time.RFC3339), Version: 1,
+	})
+	refuseDataDirWrites(t, filepath.Join(xdgHome, "ghost"))
+
+	alert := lifecycleFailureAlert("", "")
+
+	if alert == "" {
+		t.Fatal("a marker the directory refuses to remove must still be reported")
+	}
+	if !strings.Contains(alert, "refuses new files") {
+		t.Errorf("the directory was not named as the blocker: %q", alert)
+	}
+	if !strings.Contains(alert, "project stale-one") && !strings.Contains(alert, "project stale-two") {
+		t.Errorf("the blocker line must name one of the two refused markers, got: %q", alert)
+	}
+}
+
+// TestSessionStart_AnExpiredMarkerTheSweepDidNotReachIsNeverReported pins the
+// other half of the same rule: the sweep's bound is a bound on REMOVALS, so
+// the expired markers past it stay on disk for the next session start — and
+// none of them may be reported as the failure this session has to show. A
+// marker 40 days old is past the age horizon whatever the sweep did with it,
+// and a stamp dated ahead of now ranks below every stamp at or before it, so
+// an expired marker the sweep did not reach used to outrank a current failure
+// stamped an hour ahead — and the alert removed it on the way past, spending a
+// removal past the bound.
+func TestSessionStart_AnExpiredMarkerTheSweepDidNotReachIsNeverReported(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	// One more expired marker than the sweep's bound allows it to remove.
+	expired := make([]string, 0, lifecycleSelfCleanMaxPasses+1)
+	for i := range lifecycleSelfCleanMaxPasses + 1 {
+		expired = append(expired, writeMarkerFile(t, xdgHome, testMarker{
+			Project: fmt.Sprintf("stale-%d", i), PhasesFailed: []string{"reflect"}, Error: "boom",
+			At: time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339), Version: 1,
+		}))
+	}
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "current", PhasesFailed: []string{"resolve"}, Error: "boom",
+		At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), Version: 1,
+	})
+
+	alert := lifecycleFailureAlert("", "")
+	if !strings.Contains(alert, "for project current") {
+		t.Errorf("the current failure must be the one shown, got: %q", alert)
+	}
+	// The bound holds: one session start removes at most
+	// lifecycleSelfCleanMaxPasses expired markers, and the one it did not
+	// reach stays on disk for the next one.
+	remaining := 0
+	for _, path := range expired {
+		if _, err := os.Stat(path); err == nil {
+			remaining++
+		}
+	}
+	if remaining == 0 {
+		t.Errorf("the session start removed all %d expired markers, past the bound of %d", len(expired), lifecycleSelfCleanMaxPasses)
+	}
 }
 
 // TestSessionStart_ExpiredMarkerOnAnUnwritableDataDirNamesTheDirectory pins
