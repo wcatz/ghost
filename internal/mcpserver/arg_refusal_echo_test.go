@@ -8,6 +8,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -337,6 +338,105 @@ func assertNoRefusalEcho(t *testing.T, out, v string) {
 	}
 	if len(out) > 2048 {
 		t.Errorf("refusal is %d bytes, want a bounded sentence: %.200s", len(out), out)
+	}
+}
+
+// The SDK's own schema refusal is the one argument refusal that never reaches
+// a Ghost handler: the arguments are checked against the tool's advertised
+// input schema before any handler runs, and the SDK's refusal repeats the
+// caller's value and any unexpected property name verbatim. It is the same
+// rule this file states, so it is walked here with the same two values.
+//
+// The two shapes are walked, because the SDK prints them differently: a value
+// of the wrong type is printed RAW (`type: ghp_… has type "string"`), and an
+// unknown property's NAME is printed quoted (`unexpected additional properties
+// ["ghp_…"]`). A fix that covered one and not the other would leave the other
+// echoing, so each is walked with a token-shaped value and with an oversized
+// one.
+func TestSchemaRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
+	big := strings.Repeat("z", refusalBigValue)
+	for label, v := range map[string]string{"token": echoToken, "big": big} {
+		t.Run("wrong type/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": v}))
+			assertNoRefusalEcho(t, out, v)
+			// The refusal still says what it wanted, and where: the withheld
+			// value is the one thing in it that is gone.
+			if !strings.Contains(out, "/properties/pin") {
+				t.Errorf("the refusal no longer names the argument: %.300s", out)
+			}
+			if !strings.Contains(out, `has type "string", want "boolean"`) {
+				t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+			}
+		})
+		t.Run("unexpected property/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{v: "x"}))
+			assertNoRefusalEcho(t, out, v)
+			if !strings.Contains(out, "unexpected additional properties") {
+				t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+			}
+		})
+		// A value that is an OBJECT where the schema wants a scalar is printed
+		// whole, so the caller's text is inside it rather than beside it.
+		t.Run("nested object/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{
+				"pin": map[string]any{"held": v},
+			}))
+			assertNoRefusalEcho(t, out, v)
+		})
+	}
+}
+
+// schemaRefusalArgs are the arguments of a call that is refused for a reason
+// other than the one under test: a project, and content worth saving.
+func schemaRefusalArgs(extra map[string]any) map[string]any {
+	args := map[string]any{"project_id": "p", "content": "a fact worth keeping"}
+	for k, v := range extra {
+		args[k] = v
+	}
+	return args
+}
+
+// The refusal is a diagnostic, and withholding the caller's text must not cost
+// it: an ordinary value the guard has no verdict on is still named, and so is
+// an ordinary unknown property — the case an agent has to act on.
+func TestSchemaRefusalStillNamesAnOrdinaryValueAndProperty(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"colour": "blue"}))
+	if !strings.Contains(out, "colour") {
+		t.Errorf("the refusal no longer names the unexpected property: %.300s", out)
+	}
+	if !strings.Contains(out, "unexpected additional properties") {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+	}
+
+	_, session2, _ := echoLogSession(t)
+	out2 := callToolErr(t, session2, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": "yes"}))
+	if !strings.Contains(out2, "yes") {
+		t.Errorf("the refusal no longer names the ordinary value: %.300s", out2)
+	}
+	if !strings.Contains(out2, `has type "string", want "boolean"`) {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out2)
+	}
+}
+
+// A caller can send as many unexpected properties as it likes, and the SDK
+// prints every name. The refusal is a diagnostic rather than an answer, so it
+// is bounded rather than a list of every name the caller sent.
+func TestSchemaRefusalWithManyUnexpectedPropertiesIsBounded(t *testing.T) {
+	extra := map[string]any{}
+	for i := range 500 {
+		extra[fmt.Sprintf("unexpected_property_%d", i)] = "v"
+	}
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(extra))
+	if len(out) > 2048 {
+		t.Errorf("the refusal is %d bytes, want a bounded sentence: %.200s", len(out), out)
+	}
+	if !strings.Contains(out, "unexpected additional properties") {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
 	}
 }
 

@@ -1211,6 +1211,11 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		Capabilities: &mcp.ServerCapabilities{},
 	})
 	s.mcp.AddReceivingMiddleware(withholdResourceReadURI)
+	// The SDK's own schema refusal repeats the caller's value and any
+	// unexpected property name verbatim, and it is produced before any handler
+	// runs — so it bypasses every memory.RefusalArg on this path. The
+	// middleware that withholds it is the same shape as the one above.
+	s.mcp.AddReceivingMiddleware(withholdSchemaRefusal)
 
 	s.registerTools()
 	s.registerResources()

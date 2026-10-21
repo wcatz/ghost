@@ -45,6 +45,8 @@ ghost mcp
 
 MCP clients normally spawn this command themselves. Do not run it as a long-lived daemon unless your client is configured to manage the process.
 
+A call whose arguments do not match the tool's advertised input schema is refused by the protocol library before Ghost sees the call, and the caller's own text in that refusal is withheld behind the same token guard every other refusal uses — the tool-call contract is in [MCP surface](mcp.md).
+
 ### `ghost mcp init`
 
 Configures supported MCP clients:
