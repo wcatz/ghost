@@ -300,6 +300,31 @@ func storeReachableGrounds(cred string) []ground {
 			},
 		},
 		{
+			// An EVIDENCE record's own stamp, from an import made before the
+			// importer read an evidence record's claims with the save tool's forms.
+			// The support summary counts a stamped record as a verification, so a
+			// stamp nobody can read is a claim the count would rest on. Named and
+			// left out, as the importer now refuses it.
+			kind: TypeMemory, id: "m-junk-evidence-stamp",
+			wantField: "evidence[0].observed_at", wantReason: "must be RFC 3339",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-junk-evidence-stamp", "p1", "a body", `[]`, "mcp")
+				plantRaw(t, db, `INSERT INTO memory_provenance
+					(memory_id, kind, observed_at) VALUES (?, 'observed', 'not a date')`, "m-junk-evidence-stamp")
+			},
+		},
+		{
+			// And the same record's rating: a confidence of 99 is not a low belief
+			// but a broken scale, and the save tool refuses it.
+			kind: TypeMemory, id: "m-junk-evidence-confidence",
+			wantField: "evidence[0].confidence", wantReason: "confidence must be between 0 and 1",
+			plant: func(t *testing.T, db *sql.DB) {
+				plantMemory(t, db, "m-junk-evidence-confidence", "p1", "a body", `[]`, "mcp")
+				plantRaw(t, db, `INSERT INTO memory_provenance
+					(memory_id, kind, confidence) VALUES (?, 'observed', 99)`, "m-junk-evidence-confidence")
+			},
+		},
+		{
 			kind: TypeMemory, id: "M BAD",
 			wantReason: "record id must hold no control character",
 			plant: func(t *testing.T, db *sql.DB) {
@@ -710,6 +735,20 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 		{name: "memory/confidence range", counterpart: "predicate",
 			importRefuses: func() error {
 				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) { c := 7.0; m.Confidence = &c }))
+			}},
+		{name: "memory/evidence stamp unreadable", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
+					s := "not a date"
+					m.Evidence = []memory.PortableEvidence{{Kind: "observed", ObservedAt: &s}}
+				}))
+			}},
+		{name: "memory/evidence confidence range", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedMemory(withMemory(func(m *memory.PortableMemory) {
+					c := 99.0
+					m.Evidence = []memory.PortableEvidence{{Kind: "observed", Confidence: &c}}
+				}))
 			}},
 		{name: "memory/recorded history in the destination", counterpart: "store",
 			why: "a fact about the DESTINATION, and screening on it would be actively wrong: every write appends a memory_history row, so every memory a store exports has one and an export that checked would leave out the whole store. The importer runs it after the presence check, which is the only order in which it means anything — a memory already in the store is a skip."},

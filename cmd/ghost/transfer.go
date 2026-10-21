@@ -851,7 +851,26 @@ var repairableKinds = map[string]bool{
 // its confidence. ghost_memory_update takes all four fields and replaces a value
 // in place, keeping the id, links and history; it cannot remove a stamp, so
 // clearing one is the delete-and-re-save the sentence names second.
-const validityAdvice = "  A memory left out for its valid_from, valid_until, verified_at or confidence keeps its id and can be repaired in place: replace the value with ghost_memory_update (an RFC 3339 instant or a date, a window that ends after it starts, a confidence from 0 to 1), then re-export. The tool can replace a stamp but not remove one, so to clear a stamp, delete the row with ghost_memory_delete and re-save it without it."
+//
+// A memory repaired in place may be named again on the next export if its
+// evidence records include a stale copy of the same claim. The evidence record
+// is not updated by ghost_memory_update, so re-export will refuse the row a
+// second time — the supported route is the same delete-and-save-again the
+// evidence advice names, with its stated cost.
+const validityAdvice = "  A memory left out for its valid_from, valid_until, verified_at or confidence keeps its id and can be repaired in place: replace the value with ghost_memory_update (an RFC 3339 instant or a date, a window that ends after it starts, a confidence from 0 to 1), then re-export. The tool can replace a stamp but not remove one, so to clear a stamp, delete the row with ghost_memory_delete and re-save it without it. A repaired row may be named again if its evidence records hold a stale copy of the same claim — the evidence row is not updated by ghost_memory_update, so the supported route is the same delete-and-save-again the evidence advice names, with its stated cost."
+
+// evidenceAdvice is the repair for a memory left out because one of its EVIDENCE
+// records carries a stamp no accepted form reads or a rating outside 0 to 1.
+//
+// It is a sentence of its own rather than another clause of validityAdvice,
+// because the repair is not the same one: ghost_memory_update takes the four
+// fields of a memory's own claim and no tool edits an evidence row at all, so
+// naming that tool here would send the operator to a call that rejects the
+// edit. The row's id is fine, but deleting the memory with ghost_memory_delete
+// and re-saving it loses its links, its history and its evidence. The advice
+// names the delete-and-re-save so the operator can decide whether the repair
+// is worth the cost.
+const evidenceAdvice = "  A memory left out because one of its evidence records carries a stamp no accepted form reads or a rating outside 0 to 1 keeps its id, but no tool edits an evidence record: they are appended by a save, an import and a reflect. The repair is to delete the row with ghost_memory_delete and re-save it, which loses its links, history and evidence, and then re-export."
 
 // reportSkippedRecords names every record an export left out and returns an error
 // when there was one, so the command exits non-zero and a backup script notices.
@@ -865,7 +884,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity bool
+	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -892,6 +911,14 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// row's links and history.
 		if sk.Validity {
 			hasValidity = true
+			continue
+		}
+		// An evidence refusal is in neither bucket either, for the same reason and
+		// a second one: the id is fine, and no tool edits an evidence row, so the
+		// re-key advice would send the operator to an edit that cannot be made and
+		// the delete advice would not say why the row is in the artifact's way.
+		if sk.Evidence {
+			hasEvidence = true
 			continue
 		}
 		// A batch can hold both kinds, so the advice is collected rather than
@@ -957,6 +984,11 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	}
 	if hasValidity {
 		if _, err := fmt.Fprintln(out, validityAdvice); err != nil {
+			return err
+		}
+	}
+	if hasEvidence {
+		if _, err := fmt.Fprintln(out, evidenceAdvice); err != nil {
 			return err
 		}
 	}
