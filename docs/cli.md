@@ -184,7 +184,10 @@ case on a full 20 000-row table. It adds no index, deliberately: a standalone
 `recorded_at` index would cost a fifth of the cost of *writing* a history row, on
 every save, to save those milliseconds on a status line. The same read, and the same
 warning sentences, appear in the `ghost_health` MCP tool, so a terminal and an agent
-looking at one store are told the same thing about it.
+looking at one store are told the same thing about it. The MCP tool reads them through
+the store's read-only handle, so `ghost_health` answers while a write in that server's
+process is still in flight; this command is a process of its own, so it never queues
+behind the server's store lock.
 
 ### `ghost mcp wiring`
 

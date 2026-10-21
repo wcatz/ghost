@@ -303,7 +303,7 @@ func (s *Store) retrievalRecordTotals(ctx context.Context, floor time.Time) ([]r
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read retrieval totals: %w", err)
 	}
@@ -387,7 +387,7 @@ func (s *Store) retrievalVerdictTotals(ctx context.Context, floor time.Time) ([]
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read retrieval verdict totals: %w", err)
 	}
@@ -455,7 +455,7 @@ func (s *Store) retrievalContradictedIDs(ctx context.Context, floor time.Time) (
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read contradicted ids: %w", err)
 	}

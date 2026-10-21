@@ -284,8 +284,13 @@ func pragmaInt(ctx context.Context, q Queryer, pragma string) (int, error) {
 // duration of a bulk import or a vacuum with no way for the caller to give up,
 // which is the same hazard as the pre-BEGIN probe this check exists to avoid,
 // one level up.
+//
+// It reads on the store's own handle, and on the read handle when a diagnostic
+// read is in force (#1738): a health report that has to wait for an in-flight
+// write to reach this line is a report that arrives after the write it was
+// meant to describe.
 func (s *Store) StoreVersionStatus(ctx context.Context) (storeVersion, buildVersion int, newer bool, err error) {
-	version, err := pragmaInt(ctx, s.db, "user_version")
+	version, err := pragmaInt(ctx, s.queryDB(), "user_version")
 	if err != nil {
 		return 0, SchemaVersion(), false, err
 	}
