@@ -124,6 +124,7 @@ jobs:
           # guarantee. Publication is therefore enforced from the EXIT
           # trap and a failed publish now fails loudly.
           GATE_WRITTEN=0
+          GATE_PENDING=0
           HEADREF=""
           PAGES_FILE=""
 
@@ -144,7 +145,7 @@ jobs:
           on_exit() {
             rc=$?
             if [ -n "$PAGES_FILE" ]; then rm -f "$PAGES_FILE"; fi
-            if [ "$GATE_WRITTEN" != 1 ]; then
+            if [ "$GATE_WRITTEN" != 1 ] && [ "$GATE_PENDING" != 1 ]; then
               if [ -n "$HEADREF" ]; then
                 # Fail closed and visibly: the sweep did not finish, so
                 # its verdict is unknown, but the check still exists and
@@ -191,6 +192,42 @@ jobs:
               exit 0
               ;;
           esac
+
+          # A gate that is still PENDING on REVIEW-UNAVAILABLE is the
+          # review's own report that the models were unavailable: an
+          # outage, not a verdict. It is left pending while NO review
+          # judged this head — the review that just ran produced
+          # nothing — because a completed gate published here would
+          # replace it with a verdict nobody reached, and a green gate on
+          # a pull request nothing was judged on is the exact harm the
+          # pending gate exists to avoid.
+          #
+          # A review that DOES judge this head completes it: the gate
+          # published below is the newer check run of the same name, and
+          # a re-run of the review is what the gate has always meant.
+          # The marker is the reviewer's own — post_review.py appends it
+          # to every review it posts, and the Reviewer workflow reads it
+          # back the same way.
+          #
+          # The title is the one the Reviewer workflow publishes
+          # (.github/workflows/reviewer.yml, the publish-pending-gate
+          # job) and the one the scheduled retry looks for
+          # (.github/workflows/review-retry.yml).
+          PENDING_TITLES="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEADREF/check-runs" --paginate \
+            --jq '.check_runs[] | select(.name == "review-gate" and .status != "completed") | .output.title // ""')"
+          PENDING_TITLE="$(printf '%s\n' "$PENDING_TITLES" | grep -F "REVIEW-UNAVAILABLE" | head -n 1 || true)"
+          if [ -n "$PENDING_TITLE" ]; then
+            if gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" --paginate \
+                 --jq ".[] | (.body // \"\")
+                        | select(contains(\"<!-- ghost-review:${HEADREF} -->\")) | \"judged\"" \
+                 | grep -q .; then
+              echo "::notice::a review judged this head; the pending gate is completed below"
+            else
+              echo "::notice::the review-gate is pending on REVIEW-UNAVAILABLE and is left pending: ${PENDING_TITLE}"
+              GATE_PENDING=1
+              exit 0
+            fi
+          fi
 
           PAGES_FILE="$(mktemp)"
           CURSOR_ARG=()
