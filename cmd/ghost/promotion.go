@@ -69,7 +69,7 @@ type reflectionApplier interface {
 // stands has to keep the skip fingerprint unrecorded, and a merge dropped
 // because its decision links do not fit in a source_ref would be re-proposed on
 // every run if it did the same (#1228).
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, applied bool, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, applied bool, err error) {
 	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
 	//
 	// The order is load-bearing and it was the other way round here first.
@@ -305,12 +305,32 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 	return keptProject, keptGlobal, n + m
 }
 
+// replacedKey is the handle one entry of the replaced-ids join hangs on.
+//
+// The join has two kinds of handle, and they are not interchangeable. A merge
+// or rewrite survivor is keyed on the TEXT it produced, because text is the
+// only handle the operation list and the emitted list share for it. A
+// `superseded by` drop is keyed on the ID of the row it named, because that
+// row is the one the drop says replaces the dropped one — and the text would
+// pair the drop with any row that happens to carry the same words, which is a
+// claim about a row nothing said anything about.
+//
+// One map holds both kinds, so the two have to be told apart, and a struct key
+// is what tells them apart: a stored id and a memory's text are different
+// things, and a text is any bytes at all, so a memory whose content happened
+// to be an id would otherwise be read as that id's claim.
+type replacedKey struct {
+	text string
+	id   string
+}
+
 // reflectMemoriesToMemory converts proposals to store rows. replaced maps an
-// emitted memory's TEXT to the input ids that merge or rewrite consumed to produce
-// it, and is carried through as Memory.ReplacesIDs so ReplaceNonManual can stamp
-// the successor id on those rows' delete history: a rewrite or a merge gives the
-// row a new id, and without the mapping a reader following one memory's history
-// stops exactly where the memory changed.
+// emitted memory's TEXT — or, for the successor a drop named, its ID — to the
+// input ids that emission stands in for, and is carried through as
+// Memory.ReplacesIDs so ReplaceNonManual can stamp the successor id on those
+// rows' delete history: a rewrite or a merge gives the row a new id, and
+// without the mapping a reader following one memory's history stops exactly
+// where the memory changed.
 //
 // Text is the join key because it is the only handle the operation list and the
 // emitted list share — the operations are resolved before the memories are, and
@@ -318,16 +338,31 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 // are the same fact as far as consolidation is concerned, so they legitimately
 // share the mapping.
 //
-// An emission that restates an input row verbatim (RestatesID set) is NOT one of
-// them, and takes no ids from the join. It consumed nothing: it is that row's
-// keep, pass-through, grounding-refusal re-emit or drop-guard re-add, and it can
-// carry a merge's text only because the row it restates already does. Joined by
-// text it inherited the merge's sources, so the replace read the row's own keep
-// as a claim on rows the merge named: when the merge was then refused (its
-// decision links overflowed, its scopes disagreed), the keep was dropped as a
-// claim on a row that changed while consolidation ran, the round reported a
-// concurrent edit nobody made and withheld its skip fingerprint.
-func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, replaced map[string][]string) []memory.Memory {
+// An emission that restates an input row verbatim (RestatesID set) takes
+// NOTHING from that text join. It consumed nothing of a merge: it is that
+// row's keep, pass-through, grounding-refusal re-emit or drop-guard re-add,
+// and it can carry a merge's text only because the row it restates already
+// does. Joined by text it inherited the merge's sources, so the replace read
+// the row's own keep as a claim on rows the merge named: when the merge was
+// then refused (its decision links overflowed, its scopes disagreed), the keep
+// was dropped as a claim on a row that changed while consolidation ran, the
+// round reported a concurrent edit nobody made and withheld its skip
+// fingerprint.
+//
+// What a restatement DOES take is the ids of the rows a `superseded by` drop
+// said it replaces, and those are keyed on the successor's ID. A drop of A
+// against a kept B says B stands where A stood, so B claims A: A is deleted
+// into B rather than left as a row nothing accounted for, its delete history
+// names B, and a decision companion's link — the only thing a later supersede
+// finds the companion by — reaches B instead of dying with A. Without the
+// claim A was an unaccounted candidate: deleted with no successor named, the
+// link gone, and a later supersede of that decision retired nothing while the
+// row stating the reversed decision kept ranking.
+//
+// A MERGE of the successor with other facts already inherited the link,
+// because the merge's own ids named the dropped row. The keep is where the
+// link was lost: a keep names no ids of its own, so it inherited nothing.
+func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, replaced map[replacedKey][]string) []memory.Memory {
 	if len(mems) == 0 {
 		return nil
 	}
@@ -335,7 +370,9 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 	for i, m := range mems {
 		var replaces []string
 		if m.RestatesID == "" {
-			replaces = replaced[m.Content]
+			replaces = replaced[replacedKey{text: m.Content}]
+		} else {
+			replaces = replaced[replacedKey{id: m.RestatesID}]
 		}
 		rows[i] = memory.Memory{
 			ProjectID:   projectID,
@@ -350,13 +387,22 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 	return rows
 }
 
-// replacedIDsByText inverts the operation list into the shape
+// replacedIDsFor inverts the operation list into the shape
 // reflectMemoriesToMemory consumes: for every merge and every rewrite (and every
 // drop that named a witness), the ids it disposed of, keyed by the text that
-// replaced them. A drop naming no witness contributes nothing — an obsolete drop
-// has no successor, and inventing one would put a false pointer on a delete row.
+// replaced them; and for every drop that named a successor, the ids it disposed
+// of, keyed by that successor's id. A drop naming no witness contributes
+// nothing — an obsolete drop has no successor, and inventing one would put a
+// false pointer on a delete row.
 //
-// The key is the CLAMPED text, and that is load-bearing. clampReflectMemories runs
+// The drops that named a successor are keyed SEPARATELY, by the successor's id.
+// The text key alone cannot carry them: a successor the response KEPT restates
+// its row verbatim, and a restatement takes nothing from the text join (see
+// reflectMemoriesToMemory), so the dropped row was accounted for by nothing at
+// all — deleted as an unaccounted candidate, with no successor named and the
+// links it carried gone with it.
+//
+// The text key is the CLAMPED text, and that is load-bearing. clampReflectMemories runs
 // before this and rewrites every emission in place, so an emission over
 // memory.MaxContentLen reaches the store truncated while the operation list still
 // holds the original — keying on the original matched nothing, and the ids of
@@ -364,18 +410,28 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 // silently dropped. Clamping the key with the same function the emission went
 // through puts both sides in the same space without mutating the result or
 // threading a second copy of the clamped emissions through.
-func replacedIDsByText(result *reflection.ReflectionResult) map[string][]string {
-	out := map[string][]string{}
+func replacedIDsFor(result *reflection.ReflectionResult) map[replacedKey][]string {
+	out := map[replacedKey][]string{}
 	if result == nil {
 		return out
 	}
 	for _, m := range result.Merges {
 		key, _ := memory.ClampContent(m.Text)
-		out[key] = append(out[key], m.IDs...)
+		out[replacedKey{text: key}] = append(out[replacedKey{text: key}], m.IDs...)
 	}
 	for _, r := range result.Replacements {
 		key, _ := memory.ClampContent(r.Text)
-		out[key] = append(out[key], r.ID)
+		out[replacedKey{text: key}] = append(out[replacedKey{text: key}], r.ID)
+	}
+	// The successor of a supersession, keyed by the row the drop named. The
+	// parser upper-cases that id, and that is the spelling the store holds for
+	// every id Ghost mints, so the key meets the RestatesID of the row the
+	// successor restates.
+	for _, d := range result.Drops {
+		if d.Successor == "" {
+			continue
+		}
+		out[replacedKey{id: d.Successor}] = append(out[replacedKey{id: d.Successor}], d.ID)
 	}
 	return out
 }

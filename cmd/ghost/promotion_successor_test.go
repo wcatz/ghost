@@ -33,7 +33,7 @@ func TestReplacedIDsSurviveTheContentClamp(t *testing.T) {
 	if cut := clampReflectMemories(emissions); cut == 0 {
 		t.Fatal("clampReflectMemories did not clamp the over-cap emission; the fixture does not test the case")
 	}
-	rows := reflectMemoriesToMemory("p1", emissions, replacedIDsByText(result))
+	rows := reflectMemoriesToMemory("p1", emissions, replacedIDsFor(result))
 	if len(rows) != 1 {
 		t.Fatalf("converted %d rows, want 1", len(rows))
 	}
@@ -55,7 +55,7 @@ func TestReplacedIDsIgnoresAnObsoleteDrop(t *testing.T) {
 	result := &reflection.ReflectionResult{
 		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "an unrelated surviving fact"}},
 	}
-	out := replacedIDsByText(result)
+	out := replacedIDsFor(result)
 	if len(out) != 0 {
 		t.Errorf("a result with no merges or replacements produced %v, want nothing", out)
 	}
@@ -75,7 +75,7 @@ func TestReplacedIDsCombineMergesAndRewritesForOneEmission(t *testing.T) {
 		Replacements: []reflection.Replacement{{ID: "m3", Text: text}},
 		Memories:     []reflection.ReflectMemory{{Category: "convention", Content: text}},
 	}
-	rows := reflectMemoriesToMemory("p1", result.Memories, replacedIDsByText(result))
+	rows := reflectMemoriesToMemory("p1", result.Memories, replacedIDsFor(result))
 	if len(rows) != 1 {
 		t.Fatalf("converted %d rows, want 1", len(rows))
 	}
@@ -88,6 +88,86 @@ func TestReplacedIDsCombineMergesAndRewritesForOneEmission(t *testing.T) {
 		seen[id] = true
 	}
 	for _, want := range []string{"m1", "m2", "m3"} {
+		if !seen[want] {
+			t.Errorf("ReplacesIDs = %v, missing %s", got, want)
+		}
+	}
+}
+
+// TestReplacedIDsReachTheKeptSuccessorOfASupersession: a drop that names a
+// successor says that row replaces the dropped one, so the successor claims it.
+// The successor is the row the drop NAMED, so the join is keyed on its id and
+// not on its text.
+//
+// Without the claim the dropped row was accounted for by nothing at all: the
+// replace deleted it as a row no emission carried, its delete history named no
+// successor, and a decision companion's link — the only thing a later supersede
+// finds the companion by — died with it.
+func TestReplacedIDsReachTheKeptSuccessorOfASupersession(t *testing.T) {
+	result := &reflection.ReflectionResult{
+		Drops: []reflection.Drop{{ID: "dropped", Reason: "superseded by", Successor: "KEPT"}},
+		Memories: []reflection.ReflectMemory{
+			{Category: "fact", Content: "the surviving row", RestatesID: "KEPT"},
+		},
+	}
+	rows := reflectMemoriesToMemory("p1", result.Memories, replacedIDsFor(result))
+	if len(rows) != 1 {
+		t.Fatalf("converted %d rows, want 1", len(rows))
+	}
+	if len(rows[0].ReplacesIDs) != 1 || rows[0].ReplacesIDs[0] != "dropped" {
+		t.Errorf("ReplacesIDs = %v, want the dropped row the successor replaces", rows[0].ReplacesIDs)
+	}
+}
+
+// TestReplacedIDsLeaveAKeepNoDropNamesAlone: the join is keyed on the
+// successor's ID, so a keep no drop names takes nothing from it — even when
+// its text is the text a merge produced.
+//
+// Joining it by text instead would hand the keep the merge's sources, and the
+// replace would read the row's own keep as a claim on rows the merge named:
+// when the merge was then refused, the keep was dropped as a claim on a row
+// that changed while consolidation ran, and the round reported a concurrent
+// edit nobody made.
+func TestReplacedIDsLeaveAKeepNoDropNamesAlone(t *testing.T) {
+	const text = "one consolidated statement of the rule"
+	result := &reflection.ReflectionResult{
+		Merges: []reflection.Merge{{IDs: []string{"m1", "m2"}, Text: text}},
+		Memories: []reflection.ReflectMemory{
+			{Category: "fact", Content: text, RestatesID: "kept"},
+		},
+	}
+	rows := reflectMemoriesToMemory("p1", result.Memories, replacedIDsFor(result))
+	if len(rows) != 1 {
+		t.Fatalf("converted %d rows, want 1", len(rows))
+	}
+	if len(rows[0].ReplacesIDs) != 0 {
+		t.Errorf("ReplacesIDs = %v, want none — a keep no drop names consumed nothing", rows[0].ReplacesIDs)
+	}
+}
+
+// TestReplacedIDsReachAMergedSuccessorOfASupersession: a successor the
+// response MERGED inherits the dropped row through the text join, because the
+// merge's own ids name it. The successor-keyed join does not change that —
+// there is no emission restating a merged row — so the link still reaches the
+// merged row.
+func TestReplacedIDsReachAMergedSuccessorOfASupersession(t *testing.T) {
+	const text = "one consolidated statement of the rule"
+	result := &reflection.ReflectionResult{
+		Merges:       []reflection.Merge{{IDs: []string{"kept", "other"}, Text: text}},
+		Replacements: []reflection.Replacement{{ID: "dropped", Text: text}},
+		Drops:        []reflection.Drop{{ID: "dropped", Reason: "superseded by", Successor: "KEPT"}},
+		Memories:     []reflection.ReflectMemory{{Category: "convention", Content: text}},
+	}
+	rows := reflectMemoriesToMemory("p1", result.Memories, replacedIDsFor(result))
+	if len(rows) != 1 {
+		t.Fatalf("converted %d rows, want 1", len(rows))
+	}
+	got := rows[0].ReplacesIDs
+	seen := map[string]bool{}
+	for _, id := range got {
+		seen[id] = true
+	}
+	for _, want := range []string{"kept", "other", "dropped"} {
 		if !seen[want] {
 			t.Errorf("ReplacesIDs = %v, missing %s", got, want)
 		}
