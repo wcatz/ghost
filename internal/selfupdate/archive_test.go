@@ -64,6 +64,42 @@ func zipWith(t *testing.T, entries ...archiveEntry) []byte {
 	return buf.Bytes()
 }
 
+// stampedZipEntry is a zip entry whose header carries a chosen creator system
+// and attribute bits. Those two decide how a zip reader reports the entry, so
+// a test has to be able to choose them.
+type stampedZipEntry struct {
+	name           string
+	creatorVersion uint16
+	externalAttrs  uint32
+	body           []byte
+}
+
+// zipWithStamped builds an in-memory .zip whose entries carry the creator
+// system and the attribute bits the caller chose.
+func zipWithStamped(t *testing.T, entries ...stampedZipEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		w, err := zw.CreateHeader(&zip.FileHeader{
+			Name:           e.name,
+			Method:         zip.Store,
+			CreatorVersion: e.creatorVersion,
+			ExternalAttrs:  e.externalAttrs,
+		})
+		if err != nil {
+			t.Fatalf("zip entry %s: %v", e.name, err)
+		}
+		if _, err := w.Write(e.body); err != nil {
+			t.Fatalf("zip body %s: %v", e.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // TestExtractBinaryReadsBothReleaseArchiveShapes is the Windows half of
 // #558: ghost_0.33.0_windows_amd64.zip is a zip, and handing it to a gzip
 // reader failed every Windows upgrade at "gzip: invalid header" — the command
@@ -291,6 +327,88 @@ func TestExtractBinaryRefusesAnEntryThatIsNotTheBinary(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q should explain the refusal (%q)", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractBinaryRefusesALinkEntryInAZip closes a hole the zip reader
+// leaves open by itself. A zip reader translates the Unix mode bits only for
+// an archive stamped Unix or macOS; for FAT or NTFS it reports every
+// non-directory entry as a regular file, whatever the bits say. A link
+// stamped that way was therefore accepted, and the text of its target came
+// back as the binary — a short file that Replace would install over the
+// executable behind a successful upgrade.
+//
+// The creator system is the archive's own claim, so the kind of the entry is
+// read from the bits it carries rather than from the reader's reading of
+// them: the bits are the only place the format records what an entry is.
+func TestExtractBinaryRefusesALinkEntryInAZip(t *testing.T) {
+	tests := []struct {
+		name           string
+		creatorVersion uint16
+	}{
+		{name: "an archive stamped FAT", creatorVersion: 0<<8 | 20},
+		{name: "an archive stamped NTFS", creatorVersion: 11<<8 | 20},
+		{name: "an archive stamped Unix", creatorVersion: 3<<8 | 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archive := zipWithStamped(t, stampedZipEntry{
+				name:           "ghost.exe",
+				creatorVersion: tt.creatorVersion,
+				externalAttrs:  0o120777 << 16,
+				body:           []byte("/etc/passwd\n"),
+			})
+
+			got, err := ExtractBinary(archive)
+			if err == nil {
+				t.Fatalf("ExtractBinary returned %q with no error; a link entry is not the binary", got)
+			}
+			if !strings.Contains(err.Error(), "link") {
+				t.Errorf("error %q should say the entry is a link", err)
+			}
+			if !strings.Contains(err.Error(), "not a regular file") {
+				t.Errorf("error %q should say the entry is not a regular file", err)
+			}
+		})
+	}
+}
+
+// TestExtractBinaryAcceptsAZipEntryThatRecordsNoType is the other side of
+// the rule above: an entry that records no file type at all is a regular
+// file. That is what a DOS-created archive holds — the attribute byte says
+// what it is for the operating system it was made on, and nothing more — and
+// refusing it would refuse the archive shape a Windows release can carry.
+func TestExtractBinaryAcceptsAZipEntryThatRecordsNoType(t *testing.T) {
+	binary := []byte("MZ pretend executable")
+
+	tests := []struct {
+		name           string
+		creatorVersion uint16
+		externalAttrs  uint32
+	}{
+		{name: "an archive stamped FAT with no attribute bits", creatorVersion: 0<<8 | 20},
+		{name: "an archive stamped NTFS with no attribute bits", creatorVersion: 11<<8 | 20},
+		{name: "an archive stamped Unix with a regular file's mode", creatorVersion: 3<<8 | 20, externalAttrs: 0o100644 << 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archive := zipWithStamped(t, stampedZipEntry{
+				name:           "ghost.exe",
+				creatorVersion: tt.creatorVersion,
+				externalAttrs:  tt.externalAttrs,
+				body:           binary,
+			})
+
+			got, err := ExtractBinary(archive)
+			if err != nil {
+				t.Fatalf("ExtractBinary: %v", err)
+			}
+			if !bytes.Equal(got, binary) {
+				t.Errorf("extracted %q, want %q", got, binary)
 			}
 		})
 	}
