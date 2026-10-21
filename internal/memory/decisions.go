@@ -565,6 +565,39 @@ func boundedDecisionRefs(base string, refs []string) (string, error) {
 	return "", errDecisionRefsOverflow
 }
 
+// preserveDecisionLinks composes the reference a caller wrote with the decision
+// links the row already carries, so a writer that stores a source_ref never
+// drops a link.
+//
+// The link is Ghost's to manage: it is what finds a decision's companion
+// memory, and the lookup reads it as a TOKEN, so a link an edit replaced left
+// the decision with no companion — the supersede answered a plain success
+// while the reversed decision kept ranking and the companion's row stayed
+// live. The caller's own reference is kept WHOLE beside the link, the way a
+// consolidation successor carries "runbook.md,decision:<id>", and the composed
+// value is held to MaxSourceRefLen because a value over it would not
+// re-import.
+//
+// The link is never traded for the reference: a reference that does not fit
+// beside the links is refused rather than shortened, because a truncated path
+// is a different path and a dropped link is the silent supersede miss.
+//
+// The stored value is read by the caller, in the transaction that writes the
+// row, so the links composed here are the ones the row holds at the moment the
+// write lands.
+func preserveDecisionLinks(ref, stored string) (string, error) {
+	links := decisionRefsInSourceRef(stored)
+	if len(links) == 0 {
+		return ref, nil
+	}
+	out := extendDecisionRefs(ref, links)
+	if len(out) > MaxSourceRefLen {
+		return "", fmt.Errorf("source_ref %s and the decision links this row carries do not fit in one source_ref (%d-byte bound) — shorten the reference, or omit source_ref to keep the link",
+			RefusalArg("source_ref", ref), MaxSourceRefLen)
+	}
+	return out, nil
+}
+
 // decisionLinksOverflowTx reports how many distinct decision links the rows ids
 // name and whether their joined value would exceed MaxSourceRefLen — the one
 // case boundedDecisionRefs refuses. ReplaceNonManual asks it per emission before
