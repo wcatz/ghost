@@ -1,0 +1,132 @@
+# Re-runs the review for pull requests whose review-gate is stuck on
+# REVIEW-UNAVAILABLE.
+#
+# The Reviewer workflow classifies why a run produced no review result.
+# When the models were unavailable — an outage, not a verdict — it
+# publishes the `review-gate` check run as PENDING with that title, and
+# this workflow re-runs that review until a model answers. Without it the
+# gate stayed red until somebody re-ran the failed job by hand, and a
+# pull request nothing was wrong with read as one that could not be
+# trusted.
+#
+# WHAT IS RETRIED: an OPEN pull request whose CURRENT head carries a
+# review-gate that is still pending and titled REVIEW-UNAVAILABLE. A new
+# push moves the head, and the normal review runs on every push as it
+# always did — this workflow only picks up a head that is stuck.
+#
+# THE BOUND IS PER HEAD: the attempt counter of the Reviewer run that
+# published the pending gate. A head that has been attempted
+# MAX_ATTEMPTS times is reported and left alone, so a permanent outage
+# cannot loop forever.
+#
+# PERMISSIONS: `actions: write` is what re-running a workflow run needs,
+# and nothing here writes to a repository, a pull request or a check run.
+# `checks: read` reads the gate, `pull-requests: read` lists the open
+# pull requests.
+#
+# The gate is found by its TITLE, the one the Reviewer workflow publishes
+# (.github/workflows/reviewer.yml, the publish-pending-gate job) and the
+# one the sweeper leaves alone (.github/workflows/sweeper.yml).
+
+name: Review retry
+
+on:
+  schedule:
+    # Every half hour, off the hour so it does not pile onto the top of
+    # the hour with every other scheduled job in the account.
+    - cron: '13,43 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  checks: read
+  pull-requests: read
+  contents: read
+
+concurrency:
+  group: review-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Re-run the reviews that are stuck
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # How many times one head may be attempted, the first run
+          # included. Four re-runs after the first attempt.
+          MAX_ATTEMPTS: '5'
+        run: |
+          set -euo pipefail
+
+          # The pull requests to look at, with the head each one is on
+          # NOW: a gate pending on an older head belongs to a review
+          # that a newer push has already replaced. The repository is
+          # named because this workflow checks nothing out, so there is
+          # no checkout for gh to read the repository from.
+          PULL_REQUESTS="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"')"
+          if [ -z "$PULL_REQUESTS" ]; then
+            echo "::notice::no open pull requests; nothing to retry"
+            exit 0
+          fi
+
+          retried=0
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            read -r number sha _rest <<< "$entry"
+            if [ -z "${number:-}" ] || [ -z "${sha:-}" ]; then
+              continue
+            fi
+
+            # The pending gate on this head, and the run that published
+            # it: the check run carries the run's id as its external id
+            # and links to it as its details url.
+            pending="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?per_page=100" \
+              | jq -r '[.check_runs[]
+                    | select(.name == "review-gate"
+                      and .status != "completed"
+                      and ((.output.title // "") | startswith("REVIEW-UNAVAILABLE")))]
+                   | .[0] // empty')"
+            run_id="$(printf '%s' "$pending" | jq -r '.external_id // empty' 2>/dev/null)"
+            if ! printf '%s' "$run_id" | grep -Eq '^[0-9]+$'; then
+              run_id="$(printf '%s' "$pending" | jq -r '.details_url // ""' 2>/dev/null \
+                | sed -n 's|.*/actions/runs/\([0-9][0-9]*\).*|\1|p')"
+            fi
+            if ! printf '%s' "$run_id" | grep -Eq '^[0-9]+$'; then
+              # The check run named no run: find the newest Reviewer run
+              # for this head instead.
+              run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&per_page=100" \
+                | jq -r --arg sha "$sha" '[.workflow_runs[]
+                      | select(.name == "Reviewer" and .head_sha == $sha)]
+                     | .[0].id // empty')"
+            fi
+            if ! printf '%s' "$run_id" | grep -Eq '^[0-9]+$'; then
+              echo "::notice::PR #${number}: a review-gate is pending on REVIEW-UNAVAILABLE, but no review run was found to re-run"
+              continue
+            fi
+
+            run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            status="$(printf '%s' "$run" | jq -r '.status // ""')"
+            attempt="$(printf '%s' "$run" | jq -r '.run_attempt // 1')"
+            if [ "$status" != "completed" ]; then
+              # A review is in flight. Re-running it now would cancel
+              # the one that is running, because the Reviewer workflow
+              # cancels its own earlier run for the same pull request.
+              echo "::notice::PR #${number}: the review run ${run_id} is ${status}; not re-running it"
+              continue
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::notice::PR #${number}: the review run ${run_id} has been attempted ${attempt} times; leaving this head alone"
+              continue
+            fi
+
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/rerun" >/dev/null
+            retried=$((retried + 1))
+            echo "::notice::PR #${number}: re-running the review (run ${run_id}, attempt $((attempt + 1)) of ${MAX_ATTEMPTS})"
+          done <<< "$PULL_REQUESTS"
+
+          echo "re-ran ${retried} review(s)"
