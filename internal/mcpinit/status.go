@@ -189,38 +189,64 @@ func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
 		// The client exits non-zero when it holds no server by that name.
 		return false, "MCP server not registered"
 	}
+	present, current, why := claudeMCPVerdict(string(out), ghostBin)
+	if !present {
+		// Nothing that runs a program: no registration this build can read,
+		// which is the state the check has always called missing.
+		return false, "MCP server not registered"
+	}
+	if current {
+		return true, ""
+	}
+	return false, why + " — " + claudeMCPRepair
+}
+
+// claudeMCPVerdict judges one `claude mcp get ghost` rendering.
+//
+// present reports that the rendering describes a registration named ghost at
+// all. current reports that this registration runs the ghost binary this run
+// resolved, with the contract's stdio invocation — the registration the
+// installer writes, so nothing has to change. why names the drift in the
+// status report's words, for the caller that reports it.
+//
+// BOTH the status check and the installer ask it the same question, so the two
+// cannot disagree about what "registered" means: a registration the status
+// report calls drift is a registration the installer repairs, and a
+// registration the installer leaves alone is one the status report calls
+// registered (#1710, #1711). The rule is one function, not one copy per
+// caller — the installer's own test was two substring searches over the whole
+// rendering, which read a foreign command as ghost's whenever the ghost path
+// appeared anywhere in it, and read the wrong arguments as ghost's whenever
+// the command was right.
+func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) {
 	// The same rendering the rollback reads back, through the same parser: one
 	// reader for the `claude mcp get` output.
-	reg, described := parseClaudeRegistration(string(out))
+	reg, described := parseClaudeRegistration(out)
 	command, _ := reg.config["command"].(string)
 	if command == "" {
 		if !described {
-			// Nothing that runs a program: no registration this build can
-			// read, which is the state the check has always called missing.
-			return false, "MCP server not registered"
+			return false, false, ""
 		}
 		// A registration that names a server but runs no command — an http one
 		// — is registered and wrong, the same drift as a command that runs
 		// another program.
-		return false, "MCP server registered, but it does not run the ghost binary — " + claudeMCPRepair
+		return true, false, "MCP server registered, but it does not run the ghost binary"
 	}
 	resolved, rerr := exec.LookPath(command)
 	if rerr != nil {
 		// There is no program there to run: the binary was moved away, or the
 		// registration names a path that never held one.
-		return false, fmt.Sprintf("MCP server registered for a command that is not there (%s) — %s",
-			command, claudeMCPRepair)
+		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", command)
 	}
 	if !mcpCommandIsGhost(resolved, ghostBin) {
-		return false, fmt.Sprintf("MCP server registered for a different binary (%s) — %s",
-			command, claudeMCPRepair)
+		return true, false, fmt.Sprintf("MCP server registered for a different binary (%s)", command)
 	}
 	args, _ := reg.config["args"].([]string)
 	if len(args) != 1 || args[0] != "mcp" {
-		return false, fmt.Sprintf("MCP server registered with the wrong arguments (%s), expected \"mcp\" — %s",
-			claudeMCPArgsLabel(args), claudeMCPRepair)
+		return true, false, fmt.Sprintf("MCP server registered with the wrong arguments (%s), expected \"mcp\"",
+			claudeMCPArgsLabel(args))
 	}
-	return true, ""
+	return true, true, ""
 }
 
 // claudeMCPRepair is the repair every drift line names: the one command that
