@@ -679,9 +679,10 @@ func TestSessionStart_SilentMarkersConsumeNoSelfCleanPass(t *testing.T) {
 // days ahead is past the 24h tolerated skew, so it must not be shown, and in a
 // session that resolves to no project the real failure from an hour ago (keyed
 // under another project) must be the one reported instead of being shadowed by
-// the future stamp. The skewed file stays on disk: the self-clean removes only
-// the file it read, and the ranking never lets the future stamp win that read
-// while a real failure exists (a lone future marker is swept, pinned by
+// the future stamp. The skewed file is swept like any other expired marker: the
+// no-project read sweeps every expired marker it walks, so one the ranking
+// buries behind a current failure does not stay on disk until that failure
+// ages out (a lone future marker was swept long before this, pinned by
 // TestSessionStart_FutureMarkerPastClockSkewSelfCleans).
 func TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure(t *testing.T) {
 	isolatedHome(t)
@@ -708,8 +709,8 @@ func TestSessionStart_TwentyDayFutureMarkerDoesNotHideARecentFailure(t *testing.
 	if strings.Contains(firstLine, "for project skewed") {
 		t.Errorf("the 20-days-ahead marker must not be shown, got: %s", firstLine)
 	}
-	if _, err := os.Stat(futurePath); err != nil {
-		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
+	if _, err := os.Stat(futurePath); !os.IsNotExist(err) {
+		t.Errorf("the skewed marker is expired and must be swept like any other, stat err = %v", err)
 	}
 }
 
@@ -751,9 +752,11 @@ func TestSessionStart_FutureDistanceBuysNoRankInTheNoProjectRead(t *testing.T) {
 // takes the marker newestMarker ranks first — and a stamp dated ahead ranks
 // below every stamp dated at or before now, so a many-months-ahead stamp cannot
 // shadow a real failure from an hour ago that is keyed under another project.
-// The genuinely recent failure is the one reported. The skewed file stays on
-// disk: it never wins the read while the real failure exists, and a lone future
-// marker past the skew is swept (TestSessionStart_FarFutureMarkerSelfCleans).
+// The genuinely recent failure is the one reported. The skewed file is swept
+// like any other expired marker: the no-project read sweeps every expired
+// marker it walks, so one the ranking buries behind a current failure does not
+// stay on disk until that failure ages out. A lone future marker past the
+// skew is swept the same way (TestSessionStart_FarFutureMarkerSelfCleans).
 func TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
@@ -779,8 +782,8 @@ func TestSessionStart_FarFutureMarkerDoesNotHideANewerFailure(t *testing.T) {
 	if strings.Contains(firstLine, "for project skewed") {
 		t.Errorf("the skewed future marker must not be shown, got: %s", firstLine)
 	}
-	if _, err := os.Stat(futurePath); err != nil {
-		t.Errorf("the skewed marker ranks below the real failure and is not the file read, so it stays on disk: %v", err)
+	if _, err := os.Stat(futurePath); !os.IsNotExist(err) {
+		t.Errorf("the skewed marker is expired and must be swept like any other, stat err = %v", err)
 	}
 }
 
