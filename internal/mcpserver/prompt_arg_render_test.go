@@ -237,7 +237,7 @@ func TestRecordDecisionPromptRendersAnOrdinaryTopicUnchanged(t *testing.T) {
 // it sits in reads; the fixture has to name the classes it covers rather than
 // hide them.
 func TestRecordDecisionPromptRendersControlAndFormatCharacters(t *testing.T) {
-	const topic = "cache \u202eevil\u202b\u0007 layer"
+	const topic = "cache \u202eevil\u200b\u202b\u0007 layer"
 
 	description, message := readDecisionPrompt(t, topic)
 
