@@ -177,6 +177,12 @@ func Status(w io.Writer) (bool, error) {
 // Those are the same two things the codex and opencode checks hold their own
 // registrations to (codexMCPCurrent, opencodeMCPEntryVerdict), so one rule
 // judges every client's registration.
+//
+// Every message names the repair as well as the drift, the way the codex and
+// opencode checks do: a line that says what is wrong and not what to run
+// about it leaves the reader to guess, and the repair here is one command —
+// `ghost mcp init --client claude` re-registers the server with this build's
+// binary.
 func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
 	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
 	if err != nil {
@@ -196,31 +202,37 @@ func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
 		// A registration that names a server but runs no command — an http one
 		// — is registered and wrong, the same drift as a command that runs
 		// another program.
-		return false, "MCP server registered, but it does not run the ghost binary"
+		return false, "MCP server registered, but it does not run the ghost binary — " + claudeMCPRepair
 	}
 	resolved, rerr := exec.LookPath(command)
 	if rerr != nil {
 		// There is no program there to run: the binary was moved away, or the
 		// registration names a path that never held one.
-		return false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", command)
+		return false, fmt.Sprintf("MCP server registered for a command that is not there (%s) — %s",
+			command, claudeMCPRepair)
 	}
 	if !mcpCommandIsGhost(resolved, ghostBin) {
-		return false, fmt.Sprintf("MCP server registered for a different binary (%s)", command)
+		return false, fmt.Sprintf("MCP server registered for a different binary (%s) — %s",
+			command, claudeMCPRepair)
 	}
 	args, _ := reg.config["args"].([]string)
 	if len(args) != 1 || args[0] != "mcp" {
-		return false, fmt.Sprintf("MCP server registered with the wrong arguments (%s) — expected \"mcp\"",
-			claudeMCPArgsLabel(args))
+		return false, fmt.Sprintf("MCP server registered with the wrong arguments (%s), expected \"mcp\" — %s",
+			claudeMCPArgsLabel(args), claudeMCPRepair)
 	}
 	return true, ""
 }
 
+// claudeMCPRepair is the repair every drift line names: the one command that
+// re-registers Claude Code's ghost server with this build's binary.
+const claudeMCPRepair = "run ghost mcp init --client claude"
+
 // claudeMCPArgsLabel renders the arguments a registration carries for the
-// status line: the list as the client printed it, or "(none)" when it carries
+// status line: the list as the client printed it, or "none" when it carries
 // none.
 func claudeMCPArgsLabel(args []string) string {
 	if len(args) == 0 {
-		return "(none)"
+		return "none"
 	}
 	return strings.Join(args, " ")
 }
