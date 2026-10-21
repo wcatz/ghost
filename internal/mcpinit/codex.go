@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1170,7 +1171,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		return false, err
 	}
 
-	existing, err := os.ReadFile(path)
+	existing, err := readHostConfigFile(path)
 	if os.IsNotExist(err) {
 		want := renderCodexMCPServerBlock(ghostBin)
 		if dryRun {
@@ -1186,7 +1187,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		_, _ = fmt.Fprintf(w, "  + created config.toml with the ghost MCP server (%s)\n", path)
 		return true, nil
 	} else if err != nil {
-		return false, fmt.Errorf("read config.toml: %w", err)
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	// The file's own line ending decides the join below, and the split strips
@@ -1874,9 +1875,9 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 		return false, err
 	}
 
-	existing, err := os.ReadFile(path)
+	existing, err := readHostConfigFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("read hooks.json: %w", err)
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	// A blank file — 0 bytes, or only whitespace — carries nothing to merge, so
 	// it is written as if it were absent, the way installCodexMCP appends to a
@@ -1922,14 +1923,18 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 // loadCodexHooksRules parses the installed hooks.json into per-event rule
 // lists for status. Missing or malformed files surface as errors so status
 // can report them as actionable failures.
+//
+// The read goes through readHostConfigFile, so a path that is not a regular
+// file is refused by name instead of blocking the open until a writer
+// appears.
 func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	path, err := codexHooksPath()
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readHostConfigFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read hooks.json: %w", err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if err := leadingBOMError(data, "hooks.json"); err != nil {
 		return nil, err
@@ -2053,17 +2058,24 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, gho
 // A refusal names the file and carries the edit that clears it — repair it or
 // delete it — rather than the generic re-run hint, which a re-run cannot
 // satisfy: the file stays invalid until the user acts on it.
+//
+// A path that is not a regular file is refused the same way, and with the
+// edit that clears it: the file has to be replaced or deleted, which no
+// re-run does.
 func validateCodexHooksFile() error {
 	path, err := codexHooksPath()
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(path)
+	data, err := readHostConfigFile(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read hooks.json: %w", err)
+		if errors.Is(err, errNotRegularFile) {
+			return fmt.Errorf("read %s: %w\n  Replace it with a regular file, or delete it, then re-run `ghost mcp init`", path, err)
+		}
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 	// A blank file — 0 bytes, or only whitespace — carries nothing to merge and
 	// installCodexHooks writes the canonical document over it, the way the
@@ -2117,14 +2129,14 @@ func RunCodex(w io.Writer, dryRun bool) error {
 	_, _ = fmt.Fprintln(w, "\n[3/4] Merging ghost MCP server into config.toml...")
 	mcpChanged, err := installCodexMCP(w, ghostBin, dryRun)
 	if err != nil {
-		return retryHint(err)
+		return stepError(err)
 	}
 
 	// Step 4: Lifecycle hooks — JSON merge into hooks.json.
 	_, _ = fmt.Fprintln(w, "\n[4/4] Installing lifecycle hooks...")
 	hooksChanged, err := installCodexHooks(w, ghostBin, dryRun)
 	if err != nil {
-		return retryHint(err)
+		return stepError(err)
 	}
 
 	// Codex skips non-managed hooks until the user trusts the exact
@@ -2159,14 +2171,21 @@ func RunCodex(w io.Writer, dryRun bool) error {
 // codexMCPEntryStatus validates the [mcp_servers.ghost] table against the
 // resolved ghost binary. The returned message explains the failure for the
 // status check line.
+//
+// A config.toml that is not there is reported as missing. One that is there
+// and cannot be read — a FIFO at the path, say — is reported as that, with
+// the file named: it is not a missing table, and the repair is not an init.
 func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	path, err := codexConfigTomlPath()
 	if err != nil {
 		return false, err.Error()
 	}
-	data, err := os.ReadFile(path)
+	data, err := readHostConfigFile(path)
 	if err != nil {
-		return false, "config.toml not found (run ghost mcp init --client codex)"
+		if os.IsNotExist(err) {
+			return false, "config.toml not found (run ghost mcp init --client codex)"
+		}
+		return false, fmt.Sprintf("cannot read %s: %v", path, err)
 	}
 	// Read the file the way the merge scans it: one leading byte-order mark is
 	// stripped, so a BOM-prefixed ghost header is seen instead of being read as

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -101,7 +102,7 @@ func Run(w io.Writer, dryRun bool) error {
 	_, _ = fmt.Fprintln(w, "\n[5/10] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w, dryRun)
 	if err != nil {
-		return retryHint(err)
+		return stepError(err)
 	}
 
 	// Step 6: SessionStart hook.
@@ -185,6 +186,17 @@ func ensureConfigBootstrap(w io.Writer, dryRun bool) error {
 // retryHint wraps an error with a re-run suggestion.
 func retryHint(err error) error {
 	return fmt.Errorf("%w\n  Re-run `ghost mcp init` to retry", err)
+}
+
+// stepError wraps a step's failure with the re-run hint, except for a host
+// configuration path that is not a regular file. That one stays until the
+// user replaces the file, so a re-run cannot clear it and the hint would
+// misdirect — the same reasoning the codex hooks pre-flight applies.
+func stepError(err error) error {
+	if errors.Is(err, errNotRegularFile) {
+		return err
+	}
+	return retryHint(err)
 }
 
 // ensureScratchSpace makes sure Ghost's owned scratch root (internal/scratch)
@@ -607,6 +619,9 @@ func parseJSONObject(value string) (map[string]any, bool) {
 // file is valid: init populates it. A refusal names the file and the field and
 // carries the edit that clears it rather than Run's generic re-run hint, which
 // a re-run cannot satisfy — the file stays invalid until the user repairs it.
+//
+// A path that is not a regular file is refused the same way, and with the edit
+// that clears it: the file has to be replaced or deleted, which no re-run does.
 func validateSettingsFile() error {
 	path, err := settingsPath()
 	if err != nil {
@@ -617,6 +632,9 @@ func validateSettingsFile() error {
 		err = sf.validate()
 	}
 	if err != nil {
+		if errors.Is(err, errNotRegularFile) {
+			return fmt.Errorf("%w\n  Replace it with a regular file, or delete it, then re-run `ghost mcp init`", err)
+		}
 		return fmt.Errorf("%w\n  Fix the named field in %s, then re-run `ghost mcp init`", err, path)
 	}
 	return nil
@@ -1841,7 +1859,16 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		target := filepath.Join(dir, "MEMORY.md")
 
 		// Check if redirect already exists and is current.
-		if data, err := os.ReadFile(target); err == nil {
+		data, err := readHostConfigFile(target)
+		if err != nil {
+			// Only a missing redirect is created. Anything else — not a regular
+			// file, or unreadable — is left as it is and named, never written over.
+			if !errors.Is(err, os.ErrNotExist) {
+				_, _ = fmt.Fprintf(w, "  ! %s — %v\n", assemble.Label(p.Name), err)
+				continue
+			}
+			// File doesn't exist yet — that's fine, we'll create it.
+		} else {
 			content := string(data)
 			safeName := sanitizeName(p.Name)
 			currentContent := fmt.Sprintf(`# %s Project Memory

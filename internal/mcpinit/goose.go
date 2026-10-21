@@ -199,7 +199,7 @@ func RunGoose(w io.Writer, dryRun bool) error {
 	_, _ = fmt.Fprintln(w, "\n[3/3] Installing goose plugin package...")
 	changed, err := installGoosePackage(w, ghostBin, dryRun)
 	if err != nil {
-		return retryHint(err)
+		return stepError(err)
 	}
 	if changed && !dryRun {
 		_, _ = fmt.Fprintln(w, "Restart goose to activate.")
@@ -256,7 +256,14 @@ func installGoosePackage(w io.Writer, ghostBin string, dryRun bool) (bool, error
 	changed := false
 	for _, f := range goosePackageFiles(ghostBin) {
 		path := filepath.Join(dir, f.rel)
-		if existing, rerr := os.ReadFile(path); rerr == nil && string(existing) == f.want {
+		existing, rerr := readHostConfigFile(path)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				// File doesn't exist yet — that's fine, we'll install it.
+			} else {
+				return changed, fmt.Errorf("read %s: %w", path, rerr)
+			}
+		} else if string(existing) == f.want {
 			_, _ = fmt.Fprintf(w, "  ✓ %s already current (%s)\n", f.label, path)
 			continue
 		}
@@ -319,7 +326,7 @@ func StatusGoose(w io.Writer) (bool, error) {
 	default:
 		allCurrent := true
 		for _, f := range goosePackageFiles(ghostBin) {
-			data, rerr := os.ReadFile(filepath.Join(dir, f.rel))
+			data, rerr := readHostConfigFile(filepath.Join(dir, f.rel))
 			if rerr != nil || string(data) != f.want {
 				allCurrent = false
 				break
