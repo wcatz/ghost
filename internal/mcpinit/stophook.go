@@ -737,16 +737,41 @@ func recordSpawnFailure(projectID string, cfg *config.Config, cause error, stder
 // open+truncate+write is not atomic and this call site runs outside any
 // lock. When haveToken is false, the bare-PID legacy format is written,
 // same as before this token support existed.
+//
+// The staging file is a UNIQUE name beside the claim (os.CreateTemp, the
+// shape the failure marker and the start stamp publish theirs with) and it
+// is REMOVED when the publish fails. A fixed ".tmp" sibling left two things
+// behind: the staging file itself, which nothing sweeps — the data
+// directory keeps it for as long as the store exists — and a name anybody
+// could point somewhere else, because os.WriteFile follows a symlink: a
+// link planted at that name was written THROUGH, so the claim text landed
+// in a file the caller never named. os.CreateTemp opens with O_EXCL under
+// a name nobody can guess, so a link at it is refused rather than
+// followed, and the rename publishes a regular file over the claim path.
 func atomicWritePID(path string, pid int, token string, haveToken bool) error {
 	content := strconv.Itoa(pid)
 	if haveToken {
 		content += ":" + token
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write([]byte(content)); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // claimPidFile atomically claims pidPath for the current process. It takes
