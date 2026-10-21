@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -79,7 +80,9 @@ const (
 	// passed over inside the read (markerSilent) and spends no pass, and in a
 	// session that resolves to no project the candidate set is one file per
 	// project, so charging a skip here could exhaust the bound on files that
-	// are never removed and hide the current failure behind them.
+	// are never removed and hide the current failure behind them. The no-project
+	// read's sweep of the expired markers counts against the same bound, so a
+	// session start never spends an unbounded number of removals.
 	lifecycleSelfCleanMaxPasses = 8
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
@@ -644,6 +647,15 @@ func readMarkerAtPath(path string) *lifecycleFailureMarker {
 // not returned: it is kept on disk by design, so returning it would let it end
 // the caller's read and hide a marker behind it. Passing it over inside the
 // read costs the caller no self-clean pass.
+//
+// BOTH branches SWEEP their expired markers first, because both return ONE
+// marker and the caller removes the file it read: an expired marker the read
+// never reached was never returned and never removed, so the dead file stayed
+// on disk for as long as the marker in front of it did. The no-project branch
+// ranks every marker in the data directory and returns the one that ranks
+// first, so the markers it ranked below were never reached; the project
+// branch returns the FIRST candidate that is neither silent nor another
+// project's, so the candidates behind it were never reached either.
 func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -656,10 +668,43 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		// case, because some news beats none when there is nothing to filter
 		// by — so keep it, and surface the most recent failure rather than
 		// whatever sorts first.
-		return newestMarker(now, filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
-			filepath.Join(dataDir, legacyMarkerFile))
+		patterns := []string{
+			filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
+			filepath.Join(dataDir, legacyMarkerFile),
+		}
+		// The expired markers go first: this read ranks what is left and
+		// returns one marker, so the caller never reaches the expired ones
+		// the ranking buried.
+		blocked := sweepExpiredMarkers(now, patterns...)
+		// The ranking decides what is shown: a current failure is never
+		// hidden by a marker the sweep could not remove. The blocked marker
+		// is the fallback, for the case where nothing current is left — it
+		// can be neither cleared nor called stale, so the caller names the
+		// directory as the blocker.
+		if m := newestMarker(now, patterns...); m != nil {
+			return m
+		}
+		if len(blocked) > 0 {
+			return blocked[0]
+		}
+		return nil
 	}
-	for _, c := range markerCandidates(projectID, projectName) {
+	candidates := markerCandidates(projectID, projectName)
+	// The same sweep, over this project's own candidates: the lookup below
+	// returns the FIRST candidate it can use and never reads the ones behind
+	// it, so an expired marker behind the current one — a name-keyed digest,
+	// an old-stem file, the shared legacy file — was never reached and never
+	// removed, and stayed on disk until the marker in front of it aged out.
+	blocked := sweepExpiredMarkers(now, markerCandidatePaths(dataDir, candidates)...)
+	for _, c := range candidates {
+		// A candidate the sweep could not remove is expired and stays on
+		// disk. It must not hide a current failure behind it, so the lookup
+		// carries on past it — past every one of them, not only the first
+		// the sweep met; it is reported at the end instead, when there is
+		// nothing current to show.
+		if blockedCandidate(blocked, c.name) {
+			continue
+		}
 		m := readMarkerAtPath(filepath.Join(dataDir, c.name))
 		if m == nil {
 			continue
@@ -693,6 +738,13 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 			}
 		}
 	}
+	// Nothing current to show: the markers the sweep could not remove are
+	// then the only thing left, and the first of them that is this session's
+	// to report — another project's expired marker must not speak for this
+	// session.
+	if b := firstBlockedForSession(blocked, candidates, projectID, projectName); b != nil {
+		return b
+	}
 	return nil
 }
 
@@ -725,6 +777,99 @@ func ranksAbove(candidateAt, incumbentAt, now time.Time) bool {
 func markerSilent(at, now time.Time) bool {
 	age := now.Sub(at)
 	return age > lifecycleAlertMaxAge && age <= lifecycleMarkerMaxAge
+}
+
+// markerExpired reports whether a stamp is past an expiry bound, so the file
+// holding it must be swept rather than kept: older than
+// lifecycleMarkerMaxAge on the age side, or dated more than
+// lifecycleMarkerClockSkew ahead on the forward side.
+//
+// It is ONE predicate for both readers of the rule — the alert's own age test
+// and the no-project read's sweep — so a marker the sweep removes is one the
+// alert would have removed, and a marker it keeps is one the alert would have
+// kept. The kept-but-silent band (markerSilent) is inside these bounds, so a
+// marker in it is not expired and stays on disk by design.
+func markerExpired(at, now time.Time) bool {
+	age := now.Sub(at)
+	return age > lifecycleMarkerMaxAge || age < -lifecycleMarkerClockSkew
+}
+
+// removeMarkerFile removes the file holding a marker. It is a var so a test
+// can put the file away between the read and the removal — the one race a
+// caller can lose — without racing for it.
+var removeMarkerFile = os.Remove
+
+// markerFileRemoved removes the file holding a marker and reports whether the
+// file is GONE.
+//
+// A file that is ALREADY GONE counts as gone: two session starts can walk the
+// same expired marker, and the one that loses the race finds the file already
+// removed rather than a directory that refuses. That is the sweep done, not a
+// refusal — so the caller carries on to the next candidate instead of naming
+// the directory as the blocker over a marker that is already gone, which
+// would hide the current failure behind it.
+func markerFileRemoved(path string) bool {
+	err := removeMarkerFile(path)
+	return err == nil || errors.Is(err, fs.ErrNotExist)
+}
+
+// sweepExpiredMarkers removes the expired markers the given paths name — a
+// literal path or a pattern — and returns the markers the data directory
+// refused to remove, in the order they were met.
+//
+// Every expired marker is tried, not only the first one that could not be
+// removed: a refusal says nothing about the next file, and stopping at the
+// first would leave the markers behind it unswept and unread — the lookup
+// would meet one of them, fail to remove it again, and take the session's
+// current failure with it.
+//
+// The expired ones are removed HERE, where the read reaches them, rather than
+// left to the caller's loop: every read returns ONE marker, so a caller that
+// removes the file it read never reached the expired markers behind it. The
+// no-project read ranks every marker in the data directory and returns the one
+// that ranks first; the project read returns the first candidate it can use.
+// Neither reads the ones behind, so both sweep them here — over the data
+// directory's markers and over this project's own candidates respectively.
+//
+// A marker the directory will not remove is returned rather than swallowed: it
+// can be neither cleared nor called stale, so the caller reports the directory
+// as the blocker instead of presenting a failure that may already be fixed as
+// the current cause.
+//
+// The removals are bounded by lifecycleSelfCleanMaxPasses, the same bound the
+// caller's loop works under, so one session start never spends an unbounded
+// number of them.
+func sweepExpiredMarkers(now time.Time, paths ...string) []*lifecycleFailureMarker {
+	var blocked []*lifecycleFailureMarker
+	removed := 0
+	for _, path := range paths {
+		matches, err := filepath.Glob(path)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			m := readMarkerAtPath(match)
+			if m == nil {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339, m.At)
+			if err != nil {
+				continue
+			}
+			if !markerExpired(at, now) {
+				continue
+			}
+			if !markerFileRemoved(m.path) {
+				blocked = append(blocked, m)
+				continue
+			}
+			removed++
+			if removed >= lifecycleSelfCleanMaxPasses {
+				return blocked
+			}
+		}
+	}
+	return blocked
 }
 
 // newestMarker reads every path it can and returns the marker that ranks first:
@@ -801,6 +946,64 @@ func markerCandidates(ids ...string) []markerCandidate {
 	return out
 }
 
+// markerCandidatePaths is where the candidates live, in the lookup order, for
+// a caller that sweeps them instead of reading them. The names carry no glob
+// metacharacter — the digest is hex and the old stem folds everything else to
+// "_" — so each path is a literal the sweep can name.
+func markerCandidatePaths(dataDir string, candidates []markerCandidate) []string {
+	paths := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		paths = append(paths, filepath.Join(dataDir, c.name))
+	}
+	return paths
+}
+
+// blockedCandidate reports whether the candidate named name is one of the
+// markers the sweep could not remove — every one of them, because a refusal
+// says nothing about the files behind it.
+func blockedCandidate(blocked []*lifecycleFailureMarker, name string) bool {
+	for _, m := range blocked {
+		if filepath.Base(m.path) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// firstBlockedForSession returns the first of the markers the sweep could not
+// remove that is this session's to report, or nil when none of them is.
+func firstBlockedForSession(blocked []*lifecycleFailureMarker, candidates []markerCandidate, projectID, projectName string) *lifecycleFailureMarker {
+	for _, m := range blocked {
+		if blockedIsThisSessions(m, candidates, projectID, projectName) {
+			return m
+		}
+	}
+	return nil
+}
+
+// blockedIsThisSessions reports whether the marker the sweep could not remove
+// is this session's to report, judged by the rules the lookup applies to the
+// candidate it came from: a digest marker is this project's own file, so it
+// counts unless it records another project; an old-stem file may hold another
+// project's failure — the old stem folded punctuation — so it counts only
+// when it records this one. Another project's expired marker must not speak
+// for this session: it would name a blocker where the session has a failure
+// of its own to show.
+func blockedIsThisSessions(blocked *lifecycleFailureMarker, candidates []markerCandidate, projectID, projectName string) bool {
+	name := filepath.Base(blocked.path)
+	for _, c := range candidates {
+		if c.name != name {
+			continue
+		}
+		if !c.checkProject {
+			_, ok := markerAlertProject(blocked, projectID, projectName)
+			return ok
+		}
+		return blocked.Project == "" || blocked.Project == projectID || blocked.Project == projectName
+	}
+	return false
+}
+
 // lifecycleFailureAlert renders the one-line session-start alert for the
 // current session, or "" when nothing should be printed.
 //
@@ -811,13 +1014,17 @@ func markerCandidates(ids ...string) []markerCandidate {
 //     a marker behind it — a newer failure, or an in-tolerance future one the
 //     ranking places below every stamp at or before now — still alerts;
 //   - marker older than lifecycleMarkerMaxAge (30d), or dated more than
-//     lifecycleMarkerClockSkew (24h) AHEAD: that file DELETED (self-clean),
-//     and only that file — the next candidate is then read and judged by
-//     these same rules, so a current marker behind it still alerts. When the
-//     removal fails because the data directory refuses new entries, the
-//     marker cannot be cleared either, so the alert names the directory as
-//     the blocker on the same line a current marker gets (see
-//     lifecycleUnclearableAlert) instead of returning silence;
+//     lifecycleMarkerClockSkew (24h) AHEAD: that file DELETED (self-clean) —
+//     and EVERY expired file the read reaches is deleted, not only the one it
+//     returns, because every read returns one marker and the expired ones
+//     behind it were otherwise never reached: the no-project read over the
+//     data directory's markers, the project read over its own candidates. The
+//     next candidate is then read and judged by these same rules, so a
+//     current marker behind it still alerts. When the removal fails because
+//     the data directory refuses new entries, the marker cannot be cleared
+//     either, so the alert names the directory as the blocker on the same line
+//     a current marker gets (see lifecycleUnclearableAlert) instead of
+//     returning silence;
 //   - otherwise print when the marker's project matches the session's
 //     resolved project ID OR its resolved name (the lifecycle command may
 //     have been run by either), when the marker has no project (cannot be
@@ -835,9 +1042,8 @@ func markerCandidates(ids ...string) []markerCandidate {
 // withheld by the token guard or framed as data — see renderMarkerError.
 func lifecycleFailureAlert(projectID, projectName string) string {
 	var (
-		m   *lifecycleFailureMarker
-		at  time.Time
-		age time.Duration
+		m  *lifecycleFailureMarker
+		at time.Time
 	)
 	// Each pass either returns or removes the expired file it read, so the
 	// loop ends when the candidates run out; the bound is only a backstop. A
@@ -853,7 +1059,6 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		if err != nil {
 			return ""
 		}
-		age = time.Since(at)
 		// Expired on EITHER side, each on its own bound: past
 		// lifecycleMarkerMaxAge on the age side, or past
 		// lifecycleMarkerClockSkew (24h of tolerated skew) on the forward
@@ -865,7 +1070,7 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		// tolerance the skew is ordinary and the marker still alerts; beyond
 		// it the stamp is implausible and is swept by the removal below rather
 		// than left to linger.
-		if age <= lifecycleMarkerMaxAge && age >= -lifecycleMarkerClockSkew {
+		if !markerExpired(at, time.Now()) {
 			break
 		}
 		// Remove the expired file that was read, and only that file. Not
@@ -879,7 +1084,7 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 		if m.path == "" {
 			return ""
 		}
-		if os.Remove(m.path) != nil {
+		if !markerFileRemoved(m.path) {
 			// An expired marker the directory refuses to remove is the same
 			// un-clearable marker the check below reports: it cannot be
 			// cleared, so it cannot be called stale either. The check below
