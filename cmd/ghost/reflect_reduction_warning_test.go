@@ -61,19 +61,28 @@ var (
 // directory.
 func reflectReductionRound(t *testing.T, project string, contents []string, ops func(ids []string) []string) (dataHome, stdout, stderr string) {
 	t.Helper()
+	rows := make([]memory.Memory, len(contents))
+	for i, content := range contents {
+		rows[i] = memory.Memory{Category: "fact", Source: "mcp", Importance: 0.6, Content: content}
+	}
+	return reflectReductionRoundRows(t, project, rows, ops)
+}
+
+// reflectReductionRoundRows is the same round with the seeded rows given whole,
+// so a row can carry a scope the write refuses to merge across.
+func reflectReductionRoundRows(t *testing.T, project string, rows []memory.Memory, ops func(ids []string) []string) (dataHome, stdout, stderr string) {
+	t.Helper()
 	dataHome = isolatedLifecycleEnv(t)
 	ctx := context.Background()
 	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
 	s := openReflectStore(t, dataHome, project)
-	ids := make([]string, 0, len(contents))
-	for _, content := range contents {
-		id, err := s.Create(ctx, project, memory.Memory{
-			Category: "fact", Source: "mcp", Importance: 0.6, Content: content,
-		})
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		id, err := s.Create(ctx, project, row)
 		if err != nil {
-			t.Fatalf("seed %q: %v", content, err)
+			t.Fatalf("seed %q: %v", row.Content, err)
 		}
 		ids = append(ids, id)
 	}
@@ -177,5 +186,50 @@ func TestRunReflectDoesNotReportAReductionItDidNotMake(t *testing.T) {
 	}
 	if got := liveRowCount(t, dataHome, "reducez2"); got != 6 {
 		t.Errorf("the project holds %d live rows, want the 6 it held before the round", got)
+	}
+}
+
+// TestRunReflectCountsAScopeRefusedMergeAsTheSourcesItLeavesLive: a merge the
+// store refuses writes no row of its own, and it does not take its sources
+// either — every one of them stays live under its own scope. Counting that
+// proposal as one retained memory therefore understates the project by N-1
+// rows, and a round that kept five of six announces a reduction that did not
+// happen beside the refusal note saying the rows are still there.
+//
+// Four bastion rows are merged across disagreeing scopes and refused; the two
+// queue rows merge into one. The project holds five rows, which is over half of
+// six, so no reduction warning belongs on this round.
+func TestRunReflectCountsAScopeRefusedMergeAsTheSourcesItLeavesLive(t *testing.T) {
+	dataHome, stdout, stderr := reflectReductionRoundRows(t, "reducez3",
+		[]memory.Memory{
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: reduceBastionA,
+				Scope: map[string]string{"environment": "production"}},
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: reduceBastionB,
+				Scope: map[string]string{"environment": "staging"}},
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: "the bastion logs every handshake"},
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: "the bastion rotates operator keys every quarter",
+				Scope: map[string]string{"environment": "production"}},
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: reduceQueueA},
+			{Category: "fact", Source: "mcp", Importance: 0.6, Content: reduceQueueB},
+		},
+		func(ids []string) []string {
+			return []string{
+				"merge " + ids[0] + "," + ids[1] + "," + ids[2] + "," + ids[3] + " -> " +
+					"the bastion accepts connections on port 2222, terminates idle sessions on port 2222, logs every handshake and rotates operator keys every quarter",
+				"merge " + ids[4] + "," + ids[5] + " -> " + reduceQueueM,
+			}
+		})
+
+	if strings.Contains(stderr, ">50% reduction") {
+		t.Errorf("the project holds 5 of 6 rows, so there is no reduction to report; stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "1 merge(s) were refused because their sources' scopes disagree") {
+		t.Errorf("the refused merge and its four live sources were not reported; stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "Applied: 1 memories consolidated") {
+		t.Errorf("the queue merge was not reported as written; stdout:\n%s", stdout)
+	}
+	if got := liveRowCount(t, dataHome, "reducez3"); got != 5 {
+		t.Errorf("the project holds %d live rows, want the 5: four refused sources and the one written merge", got)
 	}
 }

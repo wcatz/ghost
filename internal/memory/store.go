@@ -7958,6 +7958,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	for _, c := range candidates {
 		candidatesByID[c.id] = c
 	}
+	// fedIDs is the corpus the pass was handed. Retained counts only those rows,
+	// so a memory saved during the round trip — which the guard keeps but the
+	// consolidator never saw — cannot inflate the retention a reduction warning
+	// compares against its own input.
+	fedIDs := make(map[string]bool, len(fed))
+	for _, row := range fed {
+		fedIDs[row.ID] = true
+	}
 	dropEmission := make([]bool, len(memories))
 	overflowed := make([]bool, len(memories))
 	overflowLinks := make([]int, len(memories))
@@ -8265,6 +8273,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// provenance stamp below makes it a write after all.
 	var reflected []string
 	reused := 0
+	// fresh is the rows this replace INSERTS, which are the part of what the
+	// project holds afterwards that no pre-replace candidate accounts for.
+	fresh := 0
 	// successorOf maps the ids this pass consumed to the row that now holds
 	// their content, so the consumed rows' delete history can say where their
 	// knowledge went. Only ids the caller declared (Memory.ReplacesIDs, which the
@@ -8471,6 +8482,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 		reflected = append(reflected, newID)
+		fresh++
 		for _, replaced := range folded.ReplacesIDs {
 			successorOf[replaced] = newID
 		}
@@ -8584,6 +8596,19 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 	}
+
+	// What the project holds from this replace: every candidate it kept live —
+	// a reused row, a row a refused emission spared, a row that moved during the
+	// round — plus every row it inserted. A refused merge contributes all its
+	// sources here and none of them as an emitted row, which is the correction a
+	// caller counting proposals from the result would otherwise miss.
+	retained := fresh
+	for id := range keptLive {
+		if len(fedIDs) == 0 || fedIDs[id] {
+			retained++
+		}
+	}
+	dropped.Retained = retained
 
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
 		s.logger.Info("preserved memory identity across reflection replace",
