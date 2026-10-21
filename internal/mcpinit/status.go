@@ -59,11 +59,13 @@ func Status(w io.Writer) (bool, error) {
 
 	reportConfigFile(w)
 
-	// 3. MCP server registration.
+	// 3. MCP server registration — judged on what it RUNS, not on whether a
+	// server named ghost exists: a registration left pointing at a moved,
+	// deleted or unrelated program leaves every session without ghost's tools
+	// while the report calls it registered.
 	if claudeBin != "" {
-		out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
-		registered := err == nil && strings.Contains(string(out), "Command:")
-		check(registered, "MCP server registered", "MCP server not registered")
+		registered, why := claudeMCPEntryStatus(claudeBin, ghostBin)
+		check(registered, "MCP server registered", why)
 	}
 
 	// 4-6. Settings: permissions, hook, autoMemoryEnabled.
@@ -158,6 +160,96 @@ func Status(w io.Writer) (bool, error) {
 		_, _ = fmt.Fprintln(w, "Run `ghost mcp init` to fix issues.")
 	}
 	return healthy, nil
+}
+
+// claudeMCPEntryStatus judges the registration `claude mcp get ghost` reports
+// against the ghost binary this run resolved. The returned message explains
+// the failure for the status check's line.
+//
+// The registration is judged on WHAT IT RUNS, not on whether a server named
+// ghost exists. A registration that names another program — one that was moved
+// away, deleted, or was never ghost's at all — leaves every Claude Code
+// session without ghost's tools, and a report that called it registered sent
+// the operator looking for the problem elsewhere (#1710). So the command must
+// resolve to the ghost binary this run found, and the arguments must be the
+// contract's stdio invocation: `ghost mcp`.
+//
+// Those are the same two things the codex and opencode checks hold their own
+// registrations to (codexMCPCurrent, opencodeMCPEntryVerdict), so one rule
+// judges every client's registration.
+func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
+	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
+	if err != nil {
+		// The client exits non-zero when it holds no server by that name.
+		return false, "MCP server not registered"
+	}
+	// The same rendering the rollback reads back, through the same parser: one
+	// reader for the `claude mcp get` output.
+	reg, described := parseClaudeRegistration(string(out))
+	command, _ := reg.config["command"].(string)
+	if command == "" {
+		if !described {
+			// Nothing that runs a program: no registration this build can
+			// read, which is the state the check has always called missing.
+			return false, "MCP server not registered"
+		}
+		// A registration that names a server but runs no command — an http one
+		// — is registered and wrong, the same drift as a command that runs
+		// another program.
+		return false, "MCP server registered, but it does not run the ghost binary"
+	}
+	resolved, rerr := exec.LookPath(command)
+	if rerr != nil {
+		// There is no program there to run: the binary was moved away, or the
+		// registration names a path that never held one.
+		return false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", command)
+	}
+	if !mcpCommandIsGhost(resolved, ghostBin) {
+		return false, fmt.Sprintf("MCP server registered for a different binary (%s)", command)
+	}
+	args, _ := reg.config["args"].([]string)
+	if len(args) != 1 || args[0] != "mcp" {
+		return false, fmt.Sprintf("MCP server registered with the wrong arguments (%s) — expected \"mcp\"",
+			claudeMCPArgsLabel(args))
+	}
+	return true, ""
+}
+
+// claudeMCPArgsLabel renders the arguments a registration carries for the
+// status line: the list as the client printed it, or "(none)" when it carries
+// none.
+func claudeMCPArgsLabel(args []string) string {
+	if len(args) == 0 {
+		return "(none)"
+	}
+	return strings.Join(args, " ")
+}
+
+// mcpCommandIsGhost reports whether a resolved MCP command path is the ghost
+// binary this run resolved. Identity is the file itself, not its spelling, so
+// a symlink onto the resolved binary is the same registration rather than a
+// different one, and a binary that was moved away is nothing like it. When
+// ghost is not on PATH at all there is no reference to compare against, so the
+// command is accepted by name — the ghost-binary check has already failed that
+// run, and a registration the client can still spawn is not a second thing to
+// report against it.
+//
+// The rule is shared by every client's registration check, so "the ghost
+// binary" means one thing in all of them.
+func mcpCommandIsGhost(resolved, ghostBin string) bool {
+	if ghostBin == "" {
+		base := filepath.Base(resolved)
+		return strings.EqualFold(strings.TrimSuffix(base, filepath.Ext(base)), "ghost")
+	}
+	want, err := os.Stat(ghostBin)
+	if err != nil {
+		return false
+	}
+	got, err := os.Stat(resolved)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(got, want)
 }
 
 // StatusOpencode checks the health of the Ghost ↔ opencode integration.
