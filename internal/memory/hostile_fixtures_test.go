@@ -37,6 +37,28 @@ func TestSharedMalformedStampsAtTheImportBoundary(t *testing.T) {
 	}
 }
 
+// TestSharedMalformedStampsAtTheEvidenceBoundary feeds the same set through an
+// EVIDENCE record's own stamp, which is a moment a reader interprets exactly as
+// a memory's own is: the support summary counts a stamped record as a
+// verification, so one nobody can read is a claim the count would rest on.
+func TestSharedMalformedStampsAtTheEvidenceBoundary(t *testing.T) {
+	for _, p := range adversarial.MalformedStamps() {
+		t.Run(p.Name, func(t *testing.T) {
+			store := portableTestStore(t)
+			importProjectForFixture(t, store)
+			stamp := p.Text
+			_, _, _, err := store.ImportMemory(context.Background(), PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Content: "a fact",
+				Source:   "mcp",
+				Evidence: []PortableEvidence{{Kind: "observed", ObservedAt: &stamp}},
+			}, ImportOptions{Apply: true})
+			if err == nil {
+				t.Errorf("ImportMemory stored an unreadable evidence observed_at (%s)", p.Name)
+			}
+		})
+	}
+}
+
 // TestSharedOutOfRangeConfidenceAtTheImportBoundary feeds the shared confidence
 // class through the import path, which is the sibling of the save tool's range
 // check.

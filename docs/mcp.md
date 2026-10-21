@@ -619,6 +619,8 @@ the import predicates: `CheckImportedMemory`, `CheckImportedTask` and
 `rationale` from an artifact, because an import is another way to reach the same
 table and must not be the way around a store's existing rows.
 
+**A stamp and a rating are refused by the save tool's rules, on the evidence records too.** A memory's own `valid_from`, `valid_until`, `verified_at` and `confidence` are read the way `ghost_memory_save` reads them: RFC 3339 or a bare date, stored in the layout every reader parses, and a rating from 0 to 1. The same kinds of value live on each of a memory's `evidence` records — `observed_at`, `verified_at` and `confidence` — and they are read by the same rules, because they are the same kinds of claim: a stamp is a moment a reader interprets, and a rating outside 0 to 1 is a broken scale rather than a low belief. `ghost import` refuses a stamp no accepted form reads and a rating outside 0 to 1 by name, with the record's position in the list (`evidence[0].verified_at`), in a dry run and an apply alike. The rule is not tidiness: the support summary counts a record carrying a verification stamp as a verification whatever its kind, so an unreadable stamp or a rating of 99 would have the memory reported as supported by verified observations on the strength of values the save path would never have written. `ghost export` asks the same predicate, so a stored row holding one is named and left out of the artifact rather than carried into every later round trip.
+
 **A `project_id` is capped at WRITE time, and the cap is a write rule alone.**
 `ensureProjectFor` refuses a `project_id` that is whitespace-only, that is not
 valid UTF-8, that carries a NUL byte, or that exceeds 4096 bytes — the largest

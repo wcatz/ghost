@@ -1619,6 +1619,8 @@ skipping the append: the save *did* happen, and "observed by nobody in particula
 is a true statement. `observed_at` is NULL only for the migration's seed, which can
 say what the columns hold now and cannot say when the fact was first observed.
 
+**An imported evidence record's own claims are read by the save tool's rules.** `observed_at`, `verified_at` and `confidence` are the same kinds of value on an evidence row as on the memory it belongs to, and an artifact's evidence records arrive through the one path whose input is a file that came from somewhere. `CheckImportedMemory` reads each of them through `memory.ImportedEvidence`: the stamps through `NormalizeImportedStamp` (RFC 3339 or a bare date, kept in the stored layout every reader parses) and the rating through `memory.CheckConfidence`, so a stamp no accepted form reads — or a rating outside 0 to 1 — is refused by name with the record's position in the list, and `ImportMemory` binds the values that same rule read. The rule is not tidiness: `EvidenceCounts.Verified` counts any record carrying a verification stamp, whatever its kind, so an unreadable stamp would have the support summary report a memory as supported by verified observations on the strength of a value no reader can interpret, and every reader treats an unreadable stamp as no claim at all. `ghost export` asks the same predicate, so a stored row holding one is named and left out of the artifact rather than carried into every later round trip.
+
 **The foreign key cascades, and that is the difference from the change log.**
 `memory_history.memory_id` has no foreign key on purpose — the audit of a deletion
 must outlive the row, and the `delete` tombstone is the whole point of it. Evidence

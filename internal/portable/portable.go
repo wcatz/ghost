@@ -207,7 +207,7 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
-		reason, secret, scope, scopeChar, orphan, validity := "", false, false, false, false, false
+		reason, secret, scope, scopeChar, orphan, validity, evidence := "", false, false, false, false, false, false
 		switch {
 		case orphaned(m.ProjectID):
 			reason, orphan = orphanReason, true
@@ -217,12 +217,14 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			var bound *memory.ScopeBoundError
 			var sch *memory.ScopeKeyValueError
 			var vr *memory.ValidityRefusalError
+			var er *memory.EvidenceRefusalError
 			scope = errors.As(err, &bound)
 			scopeChar = errors.As(err, &sch)
 			validity = errors.As(err, &vr)
+			evidence = errors.As(err, &er)
 		}
 		if reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, ScopeChar: scopeChar, Orphan: orphan, Validity: validity})
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret, Scope: scope, ScopeChar: scopeChar, Orphan: orphan, Validity: validity, Evidence: evidence})
 			continue
 		}
 		keptMemories = append(keptMemories, m)
@@ -374,6 +376,12 @@ type SkippedRecord struct {
 	// in place, so the report points at ghost_memory_update instead of at
 	// re-keying or deleting, which would lose the row's links and history.
 	Validity bool
+	// Evidence marks a memory refused because one of its EVIDENCE records carries
+	// a stamp no accepted form reads or a rating outside 0 to 1
+	// (memory.EvidenceRefusalError). The id is fine, but no tool edits an
+	// evidence row at all, so the report points at the delete-and-re-save rather
+	// than at an edit that would be refused.
+	Evidence bool
 }
 
 // orphanReason is the Reason every Orphan record carries.
