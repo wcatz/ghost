@@ -40,6 +40,14 @@ type maintenanceStatusView struct {
 // explicit sentences instead of nothing, and so does a scratch root that could
 // not be measured: the failure is named in the header rather than printed as a
 // size of zero.
+//
+// The root path and the failure are rendered through assemble.Label, the
+// renderer the rest of this file uses. Both are partly names somebody else
+// chose: the root's path is the configured scratch root, and the failure
+// carries the name of the entry the walk could not read — a name any local
+// process can pick. Printed raw, a name holding a line break ends the header
+// line and the rest of the name becomes a second line of output, which a
+// reader takes for the product's own.
 func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 	budget := "budget disabled (scratch.max_bytes = 0)"
 	if v.Budget > 0 {
@@ -51,10 +59,10 @@ func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 		// scratch.Size returns with its error are zeros, and printing them as
 		// the root's size reports an unmeasured root as an empty one — which
 		// is what this line used to do, silently and with exit 0.
-		usage = fmt.Sprintf("could not be measured: %v", v.RootMeasureErr)
+		usage = fmt.Sprintf("could not be measured: %s", assemble.Label(v.RootMeasureErr.Error()))
 	}
 	if _, err := fmt.Fprintf(w, "scratch root: %s (%s; %s)\n",
-		v.Root, usage, budget); err != nil {
+		assemble.Label(v.Root), usage, budget); err != nil {
 		return err
 	}
 	switch {

@@ -1538,6 +1538,12 @@ best-effort by design, the same way the budget check that measures the same
 root warns and continues rather than refusing the spawn. A root that does not
 exist yet is the other state, and it holds nothing for real.
 
+The failure is printed escaped, like every other name this CLI prints. The
+entry the walk could not read is a name any local process can choose, and the
+walk puts that name in the error it returns — so a name holding a line break
+or a control character must not end the header line and become a second line
+of output wearing the product's own voice.
+
 ### `ghost maintenance clean-scratch`
 
 Reports pre-scratch-root debris — `~/.cache/ghost-tmp` and the shared system

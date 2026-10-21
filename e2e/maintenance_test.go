@@ -38,11 +38,15 @@ func TestMaintenanceStatusReportsAnUnmeasurableScratchRoot(t *testing.T) {
 
 	// The scratch root holds a readable file and a directory nobody can
 	// enter, so the walk fails on the second and the measurement is a failure
-	// rather than a count.
+	// rather than a count. The entry's NAME carries a line break and a control
+	// character: the name is one any local process can choose, and it rides
+	// back in the error the walk returns, so it must not be able to end the
+	// header line and become a second line of output.
+	const hostile = "locked\nname\x01"
 	if err := os.WriteFile(filepath.Join(s.scratch, "readable"), []byte("small"), 0o600); err != nil {
 		t.Fatalf("write the readable file: %v", err)
 	}
-	locked := filepath.Join(s.scratch, "locked")
+	locked := filepath.Join(s.scratch, hostile)
 	if err := os.Mkdir(locked, 0o700); err != nil {
 		t.Fatalf("mkdir the locked directory: %v", err)
 	}
@@ -58,4 +62,7 @@ func TestMaintenanceStatusReportsAnUnmeasurableScratchRoot(t *testing.T) {
 	r := s.mustRun("maintenance", "status")
 	mustMatch(t, "maintenance status with an unreadable scratch entry", r.stdout, "(?i)could not be measured")
 	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, "0 bytes in 0 files")
+	// The name is printed escaped, so it ends no line and adds none.
+	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, hostile)
+	mustContain(t, "maintenance status with an unreadable scratch entry", r.stdout, `locked\nname\x01`)
 }

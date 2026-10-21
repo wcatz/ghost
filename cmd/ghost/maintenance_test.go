@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -141,6 +142,24 @@ func TestPrintMaintenanceStatus_NoDatabase(t *testing.T) {
 	}
 }
 
+// skipWithoutPOSIXModes skips a fixture that needs a mode bit to actually deny
+// a read.
+//
+// Two hosts have to be excluded, and only one of them is obvious. Root reads a
+// mode-0o000 directory whatever its bits say. Windows is the other: os.Geteuid
+// returns -1 there, so an euid check alone does not fire, and os.Chmod there
+// only sets FILE_ATTRIBUTE_READONLY, which blocks neither a read nor a
+// directory listing — so the walk succeeds and the fixture fails.
+func skipWithoutPOSIXModes(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not deny a read or a listing on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-0o000 directory is still readable")
+	}
+}
+
 // TestPrintMaintenanceStatus_UnmeasuredRootIsNotEmpty: a scratch root the
 // command could not measure is not a scratch root it measured as empty.
 // scratch.Size returns (0, 0, err) for a walk that met an entry it cannot
@@ -180,9 +199,7 @@ func TestPrintMaintenanceStatus_UnmeasuredRootIsNotEmpty(t *testing.T) {
 // empty root. The root's path is still reported, so the operator knows WHICH
 // root could not be measured.
 func TestMeasureScratchRootReportsAFailedWalk(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: a mode-0o000 directory is still readable")
-	}
+	skipWithoutPOSIXModes(t)
 	root := t.TempDir()
 	locked := filepath.Join(root, "locked")
 	if err := os.Mkdir(locked, 0o700); err != nil {
@@ -263,6 +280,59 @@ func TestMeasureScratchRootReportsAnUnresolvableRoot(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "could not be measured") {
 		t.Errorf("an unresolvable root must say so:\n%s", buf.String())
+	}
+}
+
+// TestPrintMaintenanceStatus_EscapesAHostileEntryName: the entry that made
+// the measurement fail is a name any local process can choose, and scratch.Size
+// puts that name in the error it returns. Printed raw, a name holding a line
+// break ends the header line and the rest of the name becomes a second line of
+// output — a line a reader takes for the product's own. So the failure is
+// rendered through the same renderer the rest of this file uses, and the name
+// comes out escaped.
+func TestPrintMaintenanceStatus_EscapesAHostileEntryName(t *testing.T) {
+	skipWithoutPOSIXModes(t)
+	// A line break and a control character in one name.
+	const hostile = "bad\nname\x01"
+	root := t.TempDir()
+	locked := filepath.Join(root, hostile)
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatalf("mkdir the locked directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "hidden"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write the file behind the lock: %v", err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("lock the directory: %v", err)
+	}
+	// The temp dir's own cleanup has to be able to read the tree again.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	view := maintenanceStatusView{Budget: 536870912}
+	measureScratchRoot(&view)
+	if view.RootMeasureErr == nil {
+		t.Fatal("the locked directory did not fail the measurement")
+	}
+
+	var buf bytes.Buffer
+	if err := printMaintenanceStatus(&buf, view); err != nil {
+		t.Fatalf("printMaintenanceStatus: %v", err)
+	}
+	out := buf.String()
+	// Two lines: the header, and the sentence saying no runs are recorded. A
+	// name holding a line break would make a third — the rest of the name,
+	// wearing the product's own voice.
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("the status printed %d lines, want 2 — the entry name forged one:\n%q", len(lines), out)
+	}
+	// The name is printed escaped, never raw.
+	if strings.Contains(out, hostile) {
+		t.Errorf("the entry name was printed raw:\n%q", out)
+	}
+	if !strings.Contains(lines[0], `bad\nname\x01`) {
+		t.Errorf("the entry name must be printed escaped on the header line:\n%q", lines[0])
 	}
 }
 
