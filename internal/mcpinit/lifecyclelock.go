@@ -16,9 +16,13 @@ import (
 // pidInFile returns the pid recorded in pidPath, or 0 when the file is missing
 // or malformed. Only the pid is read; the creation-time token that
 // isProcessAlive uses is irrelevant for the ownership check in release.
+//
+// A path that is not a regular file is no claim and is answered without
+// opening it, for the reason readPIDFile gives: the read blocked on a FIFO
+// planted where the claim belongs.
 func pidInFile(pidPath string) int {
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
+	data, ok := readPIDFile(pidPath)
+	if !ok {
 		return 0
 	}
 	pidStr, _, _ := strings.Cut(strings.TrimSpace(string(data)), ":")
