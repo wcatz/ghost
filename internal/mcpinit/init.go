@@ -615,10 +615,11 @@ func parseJSONObject(value string) (map[string]any, bool) {
 }
 
 // validateSettingsFile loads ~/.claude/settings.json and validates every part
-// of it `ghost mcp init` parses, before any step acts on the file. An absent
-// file is valid: init populates it. A refusal names the file and the field and
-// carries the edit that clears it rather than Run's generic re-run hint, which
-// a re-run cannot satisfy — the file stays invalid until the user repairs it.
+// of it `ghost mcp init` parses, before any step acts on the file. An absent or
+// blank file is valid: init populates it. A refusal names the file and the
+// field and carries the edit that clears it rather than Run's generic re-run
+// hint, which a re-run cannot satisfy — the file stays invalid until the user
+// repairs it.
 //
 // A path that is not a regular file is refused the same way, and with the edit
 // that clears it: the file has to be replaced or deleted, which no re-run does.
