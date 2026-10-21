@@ -180,6 +180,21 @@ const documentPrefix = "search_document:"
 // CLIENT's name, and that name is this suite's to choose.
 var harnessBinaries = []string{"opencode", "claude", "codex", "goose"}
 
+// fakeHarnessTools are the host programs the fake harness scripts call by
+// name. A shell script that calls `grep` needs a `grep` to call, and the
+// sandbox's PATH is closed, so each one is linked into the tools directory
+// rather than reached through a host directory on PATH. They are required: a
+// host without one cannot run this suite, and saying so up front beats a fake
+// that dies halfway through a test.
+var fakeHarnessTools = []string{"cat", "date", "grep", "head", "rm", "sed", "sleep", "tr"}
+
+// productTools are the host programs Ghost itself resolves by name: git for
+// repository identity, lsof and fuser for the scratch cleanup probe, ps for
+// the darwin source-detection fallback. A host that has none of them gets no
+// link for one, and Ghost degrades exactly as it does on a machine without
+// them.
+var productTools = []string{"git", "lsof", "fuser", "ps"}
+
 // sandbox is one isolated filesystem plus the environment that reaches it.
 // Every command a test runs goes through it, so a test cannot accidentally
 // inherit the developer's own Ghost state.
@@ -194,6 +209,7 @@ type sandbox struct {
 	tmp     string // TMPDIR
 	work    string // the directory sessions run in
 	bin     string // fake harness directory, first on PATH
+	tools   string // the programs the sandbox may run by name, second on PATH
 	scratch string // GHOST_SCRATCH_DIR
 
 	env     []string
@@ -221,32 +237,99 @@ func newSandbox(t *testing.T) *sandbox {
 		tmp:     filepath.Join(root, "tmp"),
 		work:    filepath.Join(root, "work"),
 		bin:     filepath.Join(root, "bin"),
+		tools:   filepath.Join(root, "tools"),
 		scratch: filepath.Join(root, "scratch"),
 		started: time.Now(),
 	}
-	for _, d := range []string{s.home, s.config, s.data, s.cache, s.tmp, s.work, s.bin, s.scratch} {
+	for _, d := range []string{s.home, s.config, s.data, s.cache, s.tmp, s.work, s.bin, s.tools, s.scratch} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
 	s.ollama = newOllamaStub(t, fakeModel, fakeDimensions)
 	s.writeHarnessFakes()
+	s.writeTools()
 	s.writeConfig(configOpts{})
 	s.env = s.buildEnv()
 	return s
+}
+
+// writeTools fills the tools directory: a link to the binary under test, so
+// that "ghost" resolves to it by name wherever the build lives, and links to
+// the host programs the sandboxed program and the fake harnesses call by
+// name.
+//
+// The list is closed on purpose. The sandbox's PATH names this directory and
+// the fake bin and nothing else, so a program the host installed elsewhere —
+// an MCP client above all — cannot be found from inside the sandbox: a client
+// the sandbox can reach is a client the suite may drive instead of its fakes
+// (#1759). The link to the binary under test is what keeps that true when
+// GHOST_E2E_BIN points at an installed build, whose directory is the host's
+// and would otherwise have to go on PATH for "ghost" to resolve.
+func (s *sandbox) writeTools() {
+	s.t.Helper()
+	link := func(name, target string) {
+		if err := os.Symlink(target, filepath.Join(s.tools, name)); err != nil {
+			s.t.Fatalf("link %s into the tools directory: %v", name, err)
+		}
+	}
+	link("ghost", ghostBin)
+	for _, name := range fakeHarnessTools {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			s.t.Fatalf("the fake harnesses call %q, which this host does not have: %v", name, err)
+		}
+		link(name, target)
+	}
+	for _, name := range productTools {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			continue // the host does not have it; Ghost degrades the same way
+		}
+		link(name, target)
+	}
+}
+
+// bareSandbox returns a sandbox that shares s's filesystem but whose
+// fake-harness directory is EMPTY, so no MCP client is on its PATH at all.
+// It is the sandbox the "no client on PATH" contract is judged in, and the
+// one a host-installed client would be found in when the PATH carries the
+// host's own directories.
+func bareSandbox(s *sandbox) *sandbox {
+	bare := &sandbox{
+		t:       s.t,
+		root:    s.root,
+		home:    s.home,
+		config:  s.config,
+		data:    s.data,
+		cache:   s.cache,
+		tmp:     s.tmp,
+		work:    s.work,
+		bin:     filepath.Join(s.root, "empty-bin"),
+		tools:   s.tools,
+		scratch: s.scratch,
+		ollama:  s.ollama,
+	}
+	if err := os.MkdirAll(bare.bin, 0o755); err != nil {
+		s.t.Fatal(err)
+	}
+	bare.env = bare.buildEnv()
+	return bare
 }
 
 // buildEnv assembles the child environment from an allowlist. It is built, not
 // filtered: os.Environ() minus a list of prefixes cannot answer "is there a
 // variable here nobody thought of", and a sandbox assembled that way inherits
 // whatever the developer had exported.
+//
+// The PATH names two directories, both inside the sandbox: the fake harnesses
+// and the tools the fakes and Ghost itself call by name. A host directory on
+// it would put the host's own programs — an MCP client above all — within
+// reach of a sandboxed program, and the suite would then drive a real client
+// where the end-to-end rules say the harnesses are fakes (#1759).
 func (s *sandbox) buildEnv() []string {
-	binDir := filepath.Dir(ghostBin)
 	return []string{
-		"PATH=" + s.bin + string(os.PathListSeparator) + binDir +
-			string(os.PathListSeparator) + "/usr/local/bin" +
-			string(os.PathListSeparator) + "/usr/bin" +
-			string(os.PathListSeparator) + "/bin",
+		"PATH=" + s.bin + string(os.PathListSeparator) + s.tools,
 		"HOME=" + s.home,
 		"USERPROFILE=" + s.home,
 		"USER=e2e",
