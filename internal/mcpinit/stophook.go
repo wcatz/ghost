@@ -769,25 +769,51 @@ func atomicWritePID(path string, pid int, token string, haveToken bool) error {
 // that. The error names the step and the operating system's reason but not the
 // path, because the path is built from a project id and a caller prints it.
 func claimPidFile(pidPath string) (bool, error) {
+	claimed, _, err := claimPidFileReclaim(pidPath)
+	return claimed, err
+}
+
+// claimPidFileReclaim is claimPidFile that also reports the previous claim it
+// took the slot from: the mtime of a no-longer-live claim, and the zero time
+// when there was none. A caller that records run outcomes needs the
+// difference — a dead claim is a run that was killed before it could say
+// anything, and the new owner is the one that can say it now — and it needs
+// the dead claim's OWN timestamp, because the claim file is replaced by this
+// process's own as part of taking the slot.
+//
+// A dead claim is reported only for a REGULAR file naming no live process. A
+// missing path is a first claim and a non-regular one cannot be a claim at
+// all; neither is a run that left anything unfinished.
+func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, err error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return false, fmt.Errorf("open the claim lock: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("open the claim lock: %w", withoutPath(err))
 	}
 	defer lockFile.Close() //nolint:errcheck
 
 	if err := lockExclusive(lockFile); err != nil {
-		return false, fmt.Errorf("lock the claim: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("lock the claim: %w", withoutPath(err))
 	}
 	defer unlockFile(lockFile) //nolint:errcheck
 
-	if isAlive(pidPath) {
-		return false, nil
+	// Stat before the liveness read so a FIFO or directory where the claim
+	// belongs is answered without opening it: isAlive's read would block on a
+	// FIFO forever, and neither shape can be a claim.
+	if prior, statErr := os.Stat(pidPath); statErr == nil {
+		if !prior.Mode().IsRegular() {
+			// Fall through to the write, which decides whether this path can be
+			// replaced; nothing is reclaimed because nothing here was a claim.
+		} else if isAlive(pidPath) {
+			return false, time.Time{}, nil
+		} else {
+			reclaimedAt = prior.ModTime()
+		}
 	}
 	token, haveToken := processStartTime(os.Getpid())
 	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {
-		return false, fmt.Errorf("write the claim: %w", withoutPath(err))
+		return false, time.Time{}, fmt.Errorf("write the claim: %w", withoutPath(err))
 	}
-	return true, nil
+	return true, reclaimedAt, nil
 }
 
 // lifecycleBookkeepingWritable reports whether the data directory accepts new
