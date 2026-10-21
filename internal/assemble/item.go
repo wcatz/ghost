@@ -591,19 +591,23 @@ func PreviewLine(s string, max int) string {
 		s = s[:i]
 	}
 
+	if max <= 0 {
+		return ""
+	}
+
 	var b strings.Builder
 	b.Grow(max * 6) // worst case: each rune becomes a 6-rune escape like \u202e
 	renderedRunes := 0
 	cut := false
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if r == utf8.RuneError {
-			// Invalid UTF-8: copy the byte as-is (never happens for valid input)
+		if r == utf8.RuneError && n == 1 {
+			// Truly invalid UTF-8 byte: render as U+FFFD (1 rune)
 			if renderedRunes+1 > max {
 				cut = true
 				break
 			}
-			b.WriteByte(s[i])
+			b.WriteString("\uFFFD")
 			renderedRunes++
 			i++
 			continue

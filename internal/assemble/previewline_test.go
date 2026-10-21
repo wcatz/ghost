@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/adversarial"
 )
@@ -173,9 +174,44 @@ func TestPreviewLineLineBreaksCutNotEscape(t *testing.T) {
 
 // TestPreviewLineManyFormatRunesStaysWithinMax verifies that a preview with
 // many format characters (category Cf) stays within the max rune bound and
-// never ends mid-escape.
+// never ends mid-escape. It also checks exact outputs for key cases.
 func TestPreviewLineManyFormatRunesStaysWithinMax(t *testing.T) {
-	// Build a string with many format runes (U+200B ZERO WIDTH SPACE)
+	// Exact output table for format rune bounding
+	for _, tc := range []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		// U+202E RIGHT-TO-LEFT OVERRIDE
+		{"rlo only max 3", "\u202eabc", 3, "…"},
+		{"rlo only max 6", "\u202eabc", 6, "\\u202e…"},
+		// U+200B ZERO WIDTH SPACE
+		{"zwsp between ascii max 7", "a\u200bb", 7, "a\\u200b…"},
+		// Many format runes
+		{"many zwsp max 20", strings.Repeat("a\u200b", 70), 20, "a\\u200ba\\u200ba…"},
+		// max 0
+		{"max 0", "abc", 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PreviewLine(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("PreviewLine(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+			// The output without ellipsis must equal the full rendering of some prefix of the input
+			withoutEllipsis := strings.TrimSuffix(got, "…")
+			if !utf8.ValidString(got) {
+				t.Errorf("PreviewLine output is not valid UTF-8: %q", got)
+			}
+			// The rendered runes (excluding ellipsis) must not exceed max
+			runes := len([]rune(withoutEllipsis))
+			if runes > tc.max {
+				t.Errorf("PreviewLine rendered %d runes (excl ellipsis), max %d: %q", runes, tc.max, got)
+			}
+		})
+	}
+
+	// Also test the general case: many format runes stays within bound
 	const many = 70
 	var b strings.Builder
 	for i := 0; i < many; i++ {
@@ -184,10 +220,6 @@ func TestPreviewLineManyFormatRunesStaysWithinMax(t *testing.T) {
 	}
 	in := b.String() // 140 runes: "a\u200ba\u200b..."
 
-	// With max=20, each "a\u200b" renders as "a\u200b" (1 + 6 = 7 runes)
-	// So we can fit 2 full pairs = 14 runes, then "a" = 15, then stop before next ZWSP
-	// Actually: each "a" = 1 rune, each ZWSP = 6 runes escape (\u200b)
-	// So with max=20: "a" (1) + ZWSP (6) = 7, "a" (1) + ZWSP (6) = 14, "a" (1) = 15, next ZWSP would be 21 > 20, so stop
 	got := PreviewLine(in, 20)
 
 	// Must not exceed max runes in rendered form (plus ellipsis if cut)
@@ -202,6 +234,10 @@ func TestPreviewLineManyFormatRunesStaysWithinMax(t *testing.T) {
 	// Must end with ellipsis since we cut
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("PreviewLine did not end with ellipsis: %q", got)
+	}
+	// Output must be valid UTF-8
+	if !utf8.ValidString(got) {
+		t.Errorf("PreviewLine output is not valid UTF-8: %q", got)
 	}
 }
 
