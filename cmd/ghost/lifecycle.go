@@ -1591,6 +1591,15 @@ func gatedLLMTier(c reflection.Consolidator, logger *slog.Logger) reflection.Con
 	return reflection.NewGatedConsolidator(c, logger)
 }
 
+// reflectWindowStamp is the consolidation window's stamp: the store's own
+// notion of "now", the same clock that writes created_at. It is a seam so
+// the command-level same-second test can pin the window to a seeded row's
+// second without racing the wall clock; production always uses the store's
+// clock.
+var reflectWindowStamp = func(ctx context.Context, s *memory.Store) (string, error) {
+	return s.CurrentTimestamp(ctx)
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
@@ -1767,7 +1776,7 @@ func runReflect() {
 	// seen by the consolidator and must survive the replace. Capturing after
 	// GetAll would leave a gap where a concurrent save is neither in the
 	// snapshot nor recent enough to be preserved.
-	consolidatedSince, err := store.CurrentTimestamp(ctx)
+	consolidatedSince, err := reflectWindowStamp(ctx, store)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: get timestamp: %v\n", err)
 		os.Exit(1)
