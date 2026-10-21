@@ -8,8 +8,10 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 
@@ -338,6 +340,248 @@ func assertNoRefusalEcho(t *testing.T, out, v string) {
 	if len(out) > 2048 {
 		t.Errorf("refusal is %d bytes, want a bounded sentence: %.200s", len(out), out)
 	}
+}
+
+// The SDK's own schema refusal is the one argument refusal that never reaches
+// a Ghost handler: the arguments are checked against the tool's advertised
+// input schema before any handler runs, and the SDK's refusal repeats the
+// caller's value and any unexpected property name verbatim. It is the same
+// rule this file states, so it is walked here with the same two values.
+//
+// The two shapes are walked, because the SDK prints them differently: a value
+// of the wrong type is printed RAW (`type: ghp_… has type "string"`), and an
+// unknown property's NAME is printed quoted (`unexpected additional properties
+// ["ghp_…"]`). A fix that covered one and not the other would leave the other
+// echoing, so each is walked with a token-shaped value and with an oversized
+// one.
+func TestSchemaRefusalsNeverEchoATokenOrAnUnboundedValue(t *testing.T) {
+	big := strings.Repeat("z", refusalBigValue)
+	for label, v := range map[string]string{"token": echoToken, "big": big} {
+		t.Run("wrong type/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": v}))
+			assertNoRefusalEcho(t, out, v)
+			// The refusal still says what it wanted, and where: the withheld
+			// value is the one thing in it that is gone.
+			if !strings.Contains(out, "/properties/pin") {
+				t.Errorf("the refusal no longer names the argument: %.300s", out)
+			}
+			if !strings.Contains(out, `has type "string", want "boolean"`) {
+				t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+			}
+		})
+		t.Run("unexpected property/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{v: "x"}))
+			assertNoRefusalEcho(t, out, v)
+			if !strings.Contains(out, "unexpected additional properties") {
+				t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+			}
+		})
+		// A value that is an OBJECT where the schema wants a scalar is printed
+		// whole, so the caller's text is inside it rather than beside it.
+		t.Run("nested object/"+label, func(t *testing.T) {
+			_, session, _ := echoLogSession(t)
+			out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{
+				"pin": map[string]any{"held": v},
+			}))
+			assertNoRefusalEcho(t, out, v)
+		})
+	}
+}
+
+// schemaRefusalArgs are the arguments of a call that is refused for a reason
+// other than the one under test: a project, and content worth saving.
+func schemaRefusalArgs(extra map[string]any) map[string]any {
+	args := map[string]any{"project_id": "p", "content": "a fact worth keeping"}
+	for k, v := range extra {
+		args[k] = v
+	}
+	return args
+}
+
+// The refusal is a diagnostic, and withholding the caller's text must not cost
+// it: an ordinary value the guard has no verdict on is still named, and so is
+// an ordinary unknown property — the case an agent has to act on.
+func TestSchemaRefusalStillNamesAnOrdinaryValueAndProperty(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"colour": "blue"}))
+	if !strings.Contains(out, "colour") {
+		t.Errorf("the refusal no longer names the unexpected property: %.300s", out)
+	}
+	if !strings.Contains(out, "unexpected additional properties") {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+	}
+
+	_, session2, _ := echoLogSession(t)
+	out2 := callToolErr(t, session2, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": "yes"}))
+	if !strings.Contains(out2, "yes") {
+		t.Errorf("the refusal no longer names the ordinary value: %.300s", out2)
+	}
+	if !strings.Contains(out2, `has type "string", want "boolean"`) {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out2)
+	}
+}
+
+// A caller can send as many unexpected properties as it likes, and the SDK
+// prints every name. The refusal is a diagnostic rather than an answer, so it
+// is bounded rather than a list of every name the caller sent.
+func TestSchemaRefusalWithManyUnexpectedPropertiesIsBounded(t *testing.T) {
+	extra := map[string]any{}
+	for i := range 500 {
+		extra[fmt.Sprintf("unexpected_property_%d", i)] = "v"
+	}
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(extra))
+	if len(out) > 2048 {
+		t.Errorf("the refusal is %d bytes, want a bounded sentence: %.200s", len(out), out)
+	}
+	if !strings.Contains(out, "unexpected additional properties") {
+		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
+	}
+}
+
+// sdkSchemaRefusalPrefix is the SDK's own marker on the refusal it produces
+// before any handler runs. It is written out here rather than read from the
+// implementation, so that a change in EITHER one is caught: the middleware
+// keys on this wording, and a wording the SDK no longer uses would switch the
+// guard off for every tool without anything noticing.
+const sdkSchemaRefusalPrefix = `validating "arguments": `
+
+// The guard keys on the SDK's wording, so this is the test that notices the
+// SDK changing it. Every other test here would still pass with the guard off:
+// the refusal would reach the caller holding the caller's value whole, and a
+// test that only checked "the call was refused" would read that as a refusal
+// like any other.
+func TestTheSDKSchemaRefusalStillStartsWithThePrefixTheGuardKeysOn(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": "not a boolean"}))
+	if !strings.HasPrefix(out, sdkSchemaRefusalPrefix) {
+		t.Errorf("the SDK's schema refusal no longer starts with %q, so the guard is keyed on a wording the SDK "+
+			"no longer uses and it withholds nothing: %.300s", sdkSchemaRefusalPrefix, out)
+	}
+}
+
+// Every tool, walked: the SDK's schema refusal is the same shape for all of
+// them, so the guard has to hold for all of them. The list is read at run time
+// through a client session, so a tool added later is walked with the rest.
+func TestEveryToolRefusesAnUnexpectedTokenPropertyWithoutEchoingIt(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	tools := listToolSchemas(t, session)
+	for _, tool := range tools {
+		t.Run(tool.name, func(t *testing.T) {
+			if !tool.refusesExtra {
+				// The walk is only valid for a tool whose schema refuses an
+				// undeclared property: otherwise the call would not be refused
+				// at all and the handler would run with it.
+				t.Errorf("%s: the input schema does not refuse an undeclared property, so this walk cannot use it", tool.name)
+				return
+			}
+			out := callToolErr(t, session, tool.name, map[string]any{echoToken: "x"})
+			assertNoRefusalEcho(t, out, echoToken)
+			if !strings.Contains(out, "unexpected additional properties") {
+				t.Errorf("the refusal no longer says what was wrong: %.300s", out)
+			}
+		})
+	}
+}
+
+// The other shape the SDK prints, walked over every property of every tool
+// that a token-shaped string is WRONG for.
+//
+// A string-typed property is left out on purpose: the token would be a valid
+// value there, the call would not be refused, and the handler would run with
+// it. A tool whose properties are all strings (or untyped, which accepts
+// anything) therefore has no wrong-typed case to walk, and the refusal it
+// produces is the undeclared-property one above.
+func TestEveryToolRefusesAWrongTypedTokenWithoutEchoingIt(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	tools := listToolSchemas(t, session)
+	walked := 0
+	for _, tool := range tools {
+		for _, property := range tool.wrongTyped {
+			walked++
+			t.Run(tool.name+"/"+property, func(t *testing.T) {
+				out := callToolErr(t, session, tool.name, map[string]any{property: echoToken})
+				assertNoRefusalEcho(t, out, echoToken)
+				if !strings.Contains(out, "has type") {
+					t.Errorf("the refusal no longer says what was wrong: %.300s", out)
+				}
+				if !strings.Contains(out, "/properties/"+property) {
+					t.Errorf("the refusal no longer names the argument: %.300s", out)
+				}
+			})
+		}
+	}
+	if walked == 0 {
+		t.Fatal("no tool offered a property a token-shaped string is wrong for")
+	}
+}
+
+// toolSchema is one registered tool's input schema, read from the list a
+// client session gets.
+type toolSchema struct {
+	name string
+	// refusesExtra says whether the schema refuses a property it does not
+	// declare. The walk is only valid for a tool that does: otherwise the call
+	// it makes would be accepted and the handler would run with it.
+	refusesExtra bool
+	// wrongTyped names the properties a token-shaped string cannot satisfy.
+	wrongTyped []string
+}
+
+// listToolSchemas reads every registered tool's input schema through a client
+// session, so a tool added later is walked with the rest.
+func listToolSchemas(t *testing.T, session *mcp.ClientSession) []toolSchema {
+	t.Helper()
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(res.Tools) == 0 {
+		t.Fatal("the server listed no tools")
+	}
+	out := make([]toolSchema, 0, len(res.Tools))
+	for _, tool := range res.Tools {
+		schema, ok := tool.InputSchema.(map[string]any)
+		if !ok {
+			t.Fatalf("tool %s has an input schema of an unreadable shape: %T", tool.Name, tool.InputSchema)
+		}
+		listed := toolSchema{name: tool.Name}
+		if extra, ok := schema["additionalProperties"].(bool); ok && !extra {
+			listed.refusesExtra = true
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		for name, raw := range properties {
+			property, _ := raw.(map[string]any)
+			if !acceptsString(property) {
+				listed.wrongTyped = append(listed.wrongTyped, name)
+			}
+		}
+		sort.Strings(listed.wrongTyped)
+		out = append(out, listed)
+	}
+	return out
+}
+
+// acceptsString reports whether a property's schema accepts a string. The
+// schema's "type" is one name or a list of them (a slice property is
+// "null" or "array"), an untyped property accepts anything, and a
+// string-typed one accepts the token; only the others are wrong-typed for a
+// token-shaped string.
+func acceptsString(property map[string]any) bool {
+	switch declared := property["type"].(type) {
+	case string:
+		return declared == "" || declared == "string"
+	case []any:
+		for _, t := range declared {
+			if name, ok := t.(string); ok && name == "string" {
+				return true
+			}
+		}
+		return len(declared) == 0
+	}
+	return true
 }
 
 func TestArgumentRefusalsStillNameTheArgumentAndTheShape(t *testing.T) {
