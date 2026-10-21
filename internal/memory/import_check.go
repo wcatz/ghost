@@ -656,6 +656,57 @@ func CheckImportedDecision(d Decision) error {
 	return rejectSecretList("tags", d.Tags)
 }
 
+// CheckImportedLink reports why `ghost import` would refuse this edge of the
+// memory graph, or nil when it would accept it. It is the only place a link
+// record is judged, and `ghost export` calls it exactly as `ImportLink` does,
+// so an export cannot write an edge its own importer would refuse.
+//
+// The order is the importer's. The endpoint ids' SHAPE comes first and above
+// every message that could name one: an id is printed inside backticks and
+// outside the «...» data delimiters on every listing, so a newline in it forges
+// a line — and a message that interpolated the id would carry the payload into
+// the very report that names it. The relation comes next, because it decides
+// whether the edge is one this format carries at all, and the closed sets come
+// last.
+//
+// The relation is the interesting refusal. Only the relations nothing recomputes
+// travel (see CarriedLinkRelations): the `related` edges the linking worker
+// writes are rebuilt after an import, so an artifact carrying one would put a
+// derived edge into a store that is about to rebuild it, and an edge of a
+// relation no worker writes would be a claim the format does not express.
+func CheckImportedLink(l PortableLink) error {
+	if l.SourceID == "" {
+		return fmt.Errorf("link source_id is required")
+	}
+	if err := CheckImportedID(l.SourceID); err != nil {
+		return fmt.Errorf("link source_id: %w", err)
+	}
+	if l.TargetID == "" {
+		return fmt.Errorf("link target_id is required")
+	}
+	if err := CheckImportedID(l.TargetID); err != nil {
+		return fmt.Errorf("link target_id: %w", err)
+	}
+	if l.SourceID == l.TargetID {
+		return fmt.Errorf("link source_id and target_id are the same memory — an edge needs two ends")
+	}
+	if !carriedLinkRelation(l.Relation) {
+		return fmt.Errorf("invalid link relation %s — the artifact carries %s; the other relations are derived, and a worker rebuilds them after an import",
+			RefusalArg("relation", l.Relation), strings.Join(CarriedLinkRelations(), " and "))
+	}
+	if !carriedLinkSource(l.Source) {
+		return fmt.Errorf("invalid link source %s — must be one of: auto, llm, manual", RefusalArg("source", l.Source))
+	}
+	// The stamp is the JUDGEMENT's, and the supersede pass compares it with an
+	// endpoint's updated_at as text, so an unreadable one would compare as
+	// something no writer meant. It is the memory's own rule, on the same field
+	// name.
+	if err := checkImportedTimestamp("created_at", l.CreatedAt, timestampLayouts("created_at")); err != nil {
+		return err
+	}
+	return nil
+}
+
 // createdProject assembles the project record a WRITE is about to store (repoRemote
 // is the already-normalised remote, which the creation routes hold), so
 // `CheckImportedProject` judges the stored shape rather than the caller's spelling
