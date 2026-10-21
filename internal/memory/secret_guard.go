@@ -188,6 +188,42 @@ func RefusalArg(field, value string) string {
 	return ProjectArg(field, value)
 }
 
+// TokenGuardPlaceholder returns the placeholder a refusal would print for a
+// value the token guard withholds, and whether the guard withheld it at all.
+//
+// It is for the surfaces that need BOTH of a stored value's properties: the
+// guard's withholding (a credential-shaped value must not be printed whole) and
+// the line renderer's escaping (any other value must not end the line or open a
+// data block). RefusalArg alone gives the first and not the second — it quotes
+// with %q, which keeps printable non-ASCII as itself, so a stored id holding
+// « or » reaches the reader raw — and the line renderer alone gives the second
+// and not the first.
+//
+// The two are not merged here, and this is not a merge of them: the caller keeps
+// the choice of which renderer draws the value the guard did NOT withhold,
+// because that choice belongs to the surface. What lives here is only the
+// guard's answer and the placeholder that goes with it, so the placeholder has
+// ONE spelling wherever it appears and a value the guard recognises is withheld
+// the same way in every sentence that names it.
+//
+// The guard is asked FIRST, because the credential verdict has to win over the
+// line verdict: a value that is both hostile and credential-shaped must come
+// back as the placeholder, never as an escaped rendering of the token.
+//
+// A value the guard does not recognise comes back empty and false, and the
+// caller renders it with whatever renderer its surface uses — the guard has no
+// opinion about a value it did not withhold.
+func TokenGuardPlaceholder(field, value string) (string, bool) {
+	if rejectSecret(field, value) == nil {
+		return "", false
+	}
+	// RefusalArg, not ProjectArg: for a value the guard recognises the two agree
+	// (RefusalArg's length branch defers to ProjectArg for a guarded value), and
+	// RefusalArg is the renderer a refusal sentence uses, so the placeholder here
+	// is byte-identical to the one beside it.
+	return RefusalArg(field, value), true
+}
+
 // secretField is one caller-supplied text to check, named the way the caller
 // named the argument so the refusal says which one to fix.
 type secretField struct{ name, text string }

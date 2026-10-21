@@ -31,7 +31,7 @@ The same shape applies at every level: `ghost mcp nope` and `ghost project` (no 
 
 A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost reflect` and `ghost resolve`, each refused with `expected exactly one project`), a file that is not there (`ghost import`), an unknown flag. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
 
-Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path and a stored timestamp through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data. The invisible characters are made visible rather than printed raw: a control character and every invisible FORMAT character (Unicode category Cf — the bidirectional controls, which reorder a line, and the zero-width ones such as U+200B ZERO WIDTH SPACE, U+2060 WORD JOINER and U+FEFF ZERO WIDTH NO-BREAK SPACE, which hide a spelling inside one) are printed as a visible escape, so a tag of `gh` + U+200B + `ost` reads as `gh\u200bost` and not as `ghost`.
+Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path and a stored timestamp through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline — or any other character that ends a line for a reader, including the U+2028 and U+2029 separators `unicode.IsControl` does not cover — inside a stored id, project name or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data. A stored PROJECT id is the one value that needs a second property as well, because a project id is not token-guarded either (`ghost import` writes an artifact's project id verbatim) and a token-shaped one must be withheld rather than printed in full: a sentence naming one renders it through `memory.RefusalArg` (an ordinary id reads quoted there), while a report line naming one renders it through `assemble.Token` and withholds it behind the same placeholder only when the guard recognises it (an ordinary id reads bare there). The invisible characters are made visible rather than printed raw: a control character and every invisible FORMAT character (Unicode category Cf — the bidirectional controls, which reorder a line, and the zero-width ones such as U+200B ZERO WIDTH SPACE, U+2060 WORD JOINER and U+FEFF ZERO WIDTH NO-BREAK SPACE, which hide a spelling inside one) are printed as a visible escape, so a tag of `gh` + U+200B + `ost` reads as `gh\u200bost` and not as `ghost`.
 
 ## MCP server
 
@@ -1442,7 +1442,19 @@ time. It refuses to run while a lifecycle run holds any of the projects' locks, 
 it checks **every** project before it touches any of them — a refusal that arrived
 after the first project had been compacted would be a check that protects nothing.
 The refusal names the projects, so an operator can either wait or re-run scoped with
-`--project`.
+`--project`. Both that sentence and the one naming the project a run stopped in
+render each stored id through `memory.RefusalArg`: an ordinary id is quoted, a
+token-shaped or over-256-byte one is withheld behind a placeholder naming the field
+and the format, and neither can split the sentence over more than one line. The
+**report's own per-project line** needs both of a stored id's properties rather
+than one, and holds both: a token-shaped id is withheld behind the same
+placeholder, and any other id is rendered by `assemble.Token`, which escapes the
+`«` and `»` a stored id can carry from an older import artifact, a restored
+snapshot or a hand-edited row. It has to hold both, because a run that stops
+partway prints the projects it had already reached — the failing one among them —
+above the error, so a report that named the id in full would hand over the value
+the error sentence withholds, one line earlier. An ordinary id therefore prints
+**bare** in the report, the shape it had before the guard reached it.
 
 This is the only `ghost history` mode that writes. It opens the store read-write
 like the rest of the command and, under `--apply`, deletes `memory_history` rows and
