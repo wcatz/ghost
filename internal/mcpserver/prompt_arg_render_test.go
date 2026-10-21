@@ -27,8 +27,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 const (
@@ -109,6 +111,22 @@ func assertOneQuotedSpan(t *testing.T, what, slot, topic string) {
 	}
 	if got != topic {
 		t.Errorf("%s holds %q, want the caller's topic %q", what, got, topic)
+	}
+}
+
+// assertNoInvisibleRune fails on any rune the renderer has to escape: a
+// control character, or one of the invisible FORMAT characters (category Cf).
+//
+// It is asked of the WHOLE surface rather than of the topic's span, because
+// the surface is what a reader — and a terminal — sees: a control character
+// left raw starts a terminal sequence, and a FORMAT character left raw hides
+// or reorders a spelling inside a line.
+func assertNoInvisibleRune(t *testing.T, what, text string) {
+	t.Helper()
+	for _, r := range text {
+		if unicode.IsControl(r) || memory.IsFormatRune(r) {
+			t.Errorf("%s carries the raw rune %U", what, r)
+		}
 	}
 }
 
@@ -199,4 +217,74 @@ func TestRecordDecisionPromptRendersAnOrdinaryTopicUnchanged(t *testing.T) {
 		decisionTopicSlot(t, description, decisionDescriptionPrefix, ""), topic)
 	assertOneQuotedSpan(t, "the message",
 		decisionTopicSlot(t, message, decisionMessagePrefix, decisionProjectSlot), topic)
+}
+
+// TestRecordDecisionPromptRendersControlAndFormatCharacters is the invisible
+// half.
+//
+// A topic holding a RIGHT-TO-LEFT OVERRIDE, a ZERO WIDTH SPACE and a BEL is
+// still a topic, and it used to reach the client byte for byte: the override
+// reordered how the rest of the line displayed, the zero-width space hid a
+// spelling inside one, and the BEL is a control character a reader cannot
+// see at all.
+//
+// The renderer quotes them, so the span reads back as the caller's topic —
+// the escapes are how the topic survives — and none of those runes is left
+// raw in the text the client shows or sends.
+//
+// The runes are written as Go escapes on purpose. A raw U+200B in a source
+// file is a spelling nobody can see, and a raw U+202E reverses how the line
+// it sits in reads; the fixture has to name the classes it covers rather than
+// hide them.
+func TestRecordDecisionPromptRendersControlAndFormatCharacters(t *testing.T) {
+	const topic = "cache \u202eevil\u202b\u0007 layer"
+
+	description, message := readDecisionPrompt(t, topic)
+
+	assertOneQuotedSpan(t, "the description",
+		decisionTopicSlot(t, description, decisionDescriptionPrefix, ""), topic)
+	assertOneQuotedSpan(t, "the message",
+		decisionTopicSlot(t, message, decisionMessagePrefix, decisionProjectSlot), topic)
+
+	for _, out := range []struct{ what, text string }{
+		{"the description", description},
+		{"the message", message},
+	} {
+		for _, r := range []rune{'\u202e', '\u200b', '\u0007'} {
+			if strings.ContainsRune(out.text, r) {
+				t.Errorf("%s carries the raw rune %U", out.what, r)
+			}
+		}
+		assertNoInvisibleRune(t, out.what, out.text)
+	}
+}
+
+// TestRecordDecisionPromptRendersANonLatinTopicReadably is the other half of
+// that one: escaping is not the same as mangling.
+//
+// A topic is ordinary text in any script, and a renderer that escaped every
+// non-ASCII rune would hand the reader an escaped blob instead of what the
+// caller wrote. An accent, an apostrophe and a few CJK characters come back
+// as themselves, in the one quoted span the template leaves for the topic —
+// which is what "readably, as the template intends" means here: the same
+// wording the template has always used, around the caller's own text.
+func TestRecordDecisionPromptRendersANonLatinTopicReadably(t *testing.T) {
+	const topic = "café de l'équipe, 咖啡馆"
+
+	description, message := readDecisionPrompt(t, topic)
+
+	assertOneQuotedSpan(t, "the description",
+		decisionTopicSlot(t, description, decisionDescriptionPrefix, ""), topic)
+	assertOneQuotedSpan(t, "the message",
+		decisionTopicSlot(t, message, decisionMessagePrefix, decisionProjectSlot), topic)
+
+	for _, out := range []struct{ what, text string }{
+		{"the description", description},
+		{"the message", message},
+	} {
+		if !strings.Contains(out.text, topic) {
+			t.Errorf("%s does not carry the caller's topic readably:\n%s", out.what, out.text)
+		}
+		assertNoInvisibleRune(t, out.what, out.text)
+	}
 }
