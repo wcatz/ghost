@@ -145,8 +145,11 @@ func ftsTermValue(clean string) int {
 //   - version/IP-like digit runs: 1.2.3, 192.168.9.150;
 //   - ALL-CAPS acronyms (>= 2 letters): NDCG, SHA.
 //
-// All checks are ASCII: sanitizeFTSN's edge trim already strips non-ASCII
-// from term edges, and the corpus/query vocabulary is code-domain English.
+// All checks are ASCII, and a term in another script is a CONTENT word rather
+// than an identifier: the shapes above are code-domain English ones, and the
+// corpus's identifiers are ASCII even where the prose around them is not. A
+// word in another script therefore ranks with an ordinary content word, which
+// is the tier it wants.
 func isIdentifierTerm(w string) bool {
 	hasLetter, hasDigit := false, false
 	allCaps := true

@@ -54,7 +54,7 @@ func TestAsOfWithNoExtractableTermAnswersNothing(t *testing.T) {
 
 	now := time.Now().UTC()
 	asOf := now.Add(time.Minute)
-	for _, query := range []string{"!!!", "日本語"} {
+	for _, query := range []string{"!!!", "€"} {
 		req := baseRequest()
 		req.Query = query
 		req.Now = now

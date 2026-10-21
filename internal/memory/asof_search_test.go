@@ -151,11 +151,11 @@ func TestCandidatesAsOfCannotResurrectARedactedCredential(t *testing.T) {
 
 // TestCandidatesAsOfWithNoExtractableTermReturnsNoRows: a term match over no
 // terms matches nothing. The extraction drops a query whose every word trims to
-// empty — punctuation only, or a word whose letters the ASCII edge trim does not
-// keep — and the historical leg used to read that empty list as "no keyword
-// filter" and call every in-scope version a hit. The same query without as_of
-// returns no rows, so the historical answer must not turn "the query was never
-// applied" into an answerable block of the whole project.
+// empty — punctuation only, or a word holding nothing the trim keeps — and the
+// historical leg used to read that empty list as "no keyword filter" and call
+// every in-scope version a hit. The same query without as_of returns no rows,
+// so the historical answer must not turn "the query was never applied" into an
+// answerable block of the whole project.
 func TestCandidatesAsOfWithNoExtractableTermReturnsNoRows(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -168,7 +168,7 @@ func TestCandidatesAsOfWithNoExtractableTermReturnsNoRows(t *testing.T) {
 		}
 	}
 	at := asOfAt(t, asOfStampFarFuture)
-	for _, query := range []string{"!!!", "日本語"} {
+	for _, query := range []string{"!!!", "€"} {
 		set, err := s.Candidates(ctx, CandidateRequest{
 			ProjectID: testProject,
 			Mode:      ProjectScoped,

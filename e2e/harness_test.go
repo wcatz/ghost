@@ -290,6 +290,11 @@ type configOpts struct {
 	// noAnswerCosine is written as context.no_answer_cosine. Empty keeps 0 (off),
 	// the value every other sandbox runs with.
 	noAnswerCosine string
+	// disableEmbedding turns the embedding backend off. A keyword-only test
+	// needs it: with the stub embedder on, the VECTOR leg reaches a row the
+	// keyword leg cannot, so a search meant to prove the keyword leg matched
+	// would pass for the wrong reason.
+	disableEmbedding bool
 	// extra is appended verbatim, for the handful of keys with no field here.
 	extra string
 }
@@ -304,8 +309,8 @@ type configOpts struct {
 func (s *sandbox) writeConfig(opts configOpts) {
 	var sb strings.Builder
 	sb.WriteString("# Written by the e2e suite. Every value here is a test decision.\n")
-	fmt.Fprintf(&sb, "embedding:\n  enabled: true\n  ollama_url: %s\n  model: %s\n  dimensions: %d\n",
-		s.ollama.URL, fakeModel, fakeDimensions)
+	fmt.Fprintf(&sb, "embedding:\n  enabled: %t\n  ollama_url: %s\n  model: %s\n  dimensions: %d\n",
+		!opts.disableEmbedding, s.ollama.URL, fakeModel, fakeDimensions)
 	sb.WriteString("linking:\n  enabled: false\n")
 	// The query-mode relevance cutoff (#954) is OFF here, for the reason linking
 	// is off one line above: it trims the tail of a search answer where relevance
