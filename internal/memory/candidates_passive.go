@@ -387,13 +387,28 @@ func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
 // passiveWindow is a policy's window: the top OverFetch rows under the policy's
 // own order, kept by a THRESHOLD SCAN rather than by sorting the bucket.
 //
-// The scan is exact because of one fact about the rank: every factor of the
-// decay — the category factor, the tier factor and the pin's — is at most 1, so
-// a row's rank is never above its importance (see decayRankingSQL and
+// The scan's stop is exact because of one fact about the rank: every factor of
+// the decay — the category factor, the tier factor and the pin's — is at most 1,
+// so a row's rank is never above its importance (see decayRankingSQL and
 // RetentionDecayFactor). Rows are therefore read in `importance DESC` order,
 // which `idx_memories_project_imp` serves, and no row still unread can outrank
 // the window once the next row's importance falls below the window's k-th rank:
 // an unread row's rank is at most its importance.
+//
+// THAT STOP IS WHAT BOUNDS THE READ, AND IT BOUNDS IT ONLY WHILE THE WINDOW'S
+// ROWS HAVE NOT LOST RANK TO DECAY. The threshold it compares against is the
+// window's k-th RANK, and a rank decays: a bucket of rows that do not decay
+// (fact, preference, convention), or rows that are fresh, holds a k-th rank
+// close to their importance, the scan ends at the window's edge, and a bucket
+// of any size costs the same read. A bucket whose best rows are old rows of a
+// decaying category is the other case: their rank has decayed with them, the
+// k-th rank sits far below their importance, every later row is above it, and
+// the scan reads the bucket to its end.
+//
+// The window is the same either way, because the stop is exact: the rows the
+// scan never reached cannot enter it, so the window is the policy's top rows
+// over the population whether the scan ended at the window's edge or at the
+// end of the bucket.
 //
 // Pinned rows are read as their own population and seed the window, because a
 // pin outranks every unpinned row whatever its rank. Once the window is full of
@@ -421,6 +436,12 @@ func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol Sli
 // one, read in importance order and offered to the window until the stop
 // condition fires. `window` is the best-first window to seed, so the pinned scan
 // seeds the unpinned one.
+//
+// The stop is the only thing that ends the scan, so the read it bounds is the
+// read: while the window's k-th rank is close to its importance the scan ends
+// at the window's edge, and a bucket whose best rows have aged and decayed
+// carries a k-th rank far below their importance, so every later row is above
+// it and the scan reads the bucket to its end.
 func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, pinned bool, window []passiveRankKey) ([]passiveRankKey, error) {
 	query, args := passiveKeyScanSQL(pol, req, cols, pinned)
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)
@@ -437,7 +458,8 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 		if len(window) >= pol.OverFetch && passiveRankKeyStopsAt(key, window[len(window)-1], pol.Order) {
 			// key and every row after it rank below the window's last place, so
 			// none of them can enter it. Stopping here is what makes the read
-			// O(window) instead of O(bucket).
+			// O(window) instead of O(bucket) — while the window's rows have not
+			// lost rank to decay.
 			break
 		}
 		window = insertPassiveRankKey(window, key, pol.Order, pol.OverFetch)
@@ -499,6 +521,12 @@ func insertPassiveRankKey(window []passiveRankKey, key passiveRankKey, order str
 // the k-th importance. An unread row's primary key is at most its importance
 // (the score's because every decay factor is at most 1, importance's trivially),
 // which is what makes the comparison sound.
+//
+// It is the scan's only stop, so it also sets the read: while the window's
+// k-th score is close to its importance the scan ends at the window's edge,
+// and when the window's rows have aged and decayed the k-th score sits far
+// below their importance, every later row is above it, and the scan reads the
+// bucket to its end.
 func passiveRankKeyStopsAt(key, last passiveRankKey, order string) bool {
 	if order == OrderPinnedImportanceUpdated {
 		return key.importance <= last.importance
