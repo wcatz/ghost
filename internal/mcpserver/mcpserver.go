@@ -5105,7 +5105,12 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 	// is the case #788 is about — the function picks the sentence by the verdict, so
 	// this one does not ask what filled the block above.
 	if projectID == "" && askedName != "" {
-		parts = append(parts, responsePart{text: "\n\n" + projectNotRegistered(askedName)})
+		// One blank line before the sentence: a row already ends in a newline.
+		sep := "\n\n"
+		if n := len(parts); n > 0 && strings.HasSuffix(parts[n-1].text, "\n") {
+			sep = "\n"
+		}
+		parts = append(parts, responsePart{text: sep + projectNotRegistered(askedName)})
 	}
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 		parts = append(parts, responsePart{text: "\n\n" + note})

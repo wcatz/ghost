@@ -205,6 +205,32 @@ func TestProjectContextResourceUnresolvedEmptyStoreNoLeadingNewline(t *testing.T
 	}
 }
 
+func TestProjectContextResourceUnresolvedNameAfterGlobalRowsHasOneBlankLine(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	if _, _, _, err := store.Upsert(ctx, "_global", "fact", "a small global fact", "mcp", 0.5, nil); err != nil {
+		t.Fatalf("Upsert global: %v", err)
+	}
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	res, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ghost://project/nope/context"})
+	if err != nil {
+		t.Fatalf("ReadResource: %v", err)
+	}
+	text := res.Contents[0].Text
+	if !strings.Contains(text, "\n\nProject ") {
+		t.Fatalf("missing not-registered sentence after a blank line: %q", text)
+	}
+	if strings.Contains(text, "\n\n\nProject ") {
+		t.Errorf("two blank lines before the not-registered sentence: %q", text)
+	}
+}
+
 func TestProjectContextResourceLongUnresolvedNameFitsBudget(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
