@@ -70,7 +70,7 @@ func reflectReductionRound(t *testing.T, project string, contents []string, ops 
 
 // reflectReductionRoundRows is the same round with the seeded rows given whole,
 // so a row can carry a scope the write refuses to merge across.
-func reflectReductionRoundRows(t *testing.T, project string, rows []memory.Memory, ops func(ids []string) []string) (dataHome, stdout, stderr string) {
+func reflectReductionRoundRows(t *testing.T, project string, rows []memory.Memory, ops func(ids []string) []string, extraArgs ...string) (dataHome, stdout, stderr string) {
 	t.Helper()
 	dataHome = isolatedLifecycleEnv(t)
 	ctx := context.Background()
@@ -97,9 +97,10 @@ func reflectReductionRoundRows(t *testing.T, project string, rows []memory.Memor
 	calls := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("GHOST_CLI_CLAUDE_BINARY", opsReflectHarness(t, calls, ops(ids)))
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	args := append([]string{"reflect", project, "--tier", "cli", "--apply"}, extraArgs...)
 	var out, errOut strings.Builder
 	captureOutput(t, &out, &errOut, func() {
-		runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply")
+		runReflectArgs(t, args...)
 	})
 	if n := countLines(t, calls); n != 1 {
 		t.Fatalf("the harness answered %d rounds, want 1", n)
@@ -231,5 +232,57 @@ func TestRunReflectCountsAScopeRefusedMergeAsTheSourcesItLeavesLive(t *testing.T
 	}
 	if got := liveRowCount(t, dataHome, "reducez3"); got != 5 {
 		t.Errorf("the project holds %d live rows, want the 5: four refused sources and the one written merge", got)
+	}
+}
+
+// TestRunReflectCountsAGlobalOnlyApplyAsTheRowsTheProjectStillHolds: an apply
+// whose only proposals are cross-project candidates runs no project replace, so
+// the store reports no project retention at all — a zero that means "no replace
+// ran" and not "nothing was retained". The project still holds every row it
+// held, and a count that read that zero as the retention would announce a
+// compression that did not happen.
+//
+// Six rows, two merges of three rows each into cross-project candidates, applied
+// with --promote-globals. Both candidates are written to _global and the project
+// keeps its six rows, so there is no reduction to report.
+func TestRunReflectCountsAGlobalOnlyApplyAsTheRowsTheProjectStillHolds(t *testing.T) {
+	const project = "reduceglobal"
+	const bastionMerge = "across all projects the bastion accepts connections on port 2222, " +
+		"terminates idle sessions on port 2222 and logs every handshake"
+	const queueMerge = "across all projects the queue consumer drains the backlog in one pass, " +
+		"retries a failed delivery and alerts the on-call engineer"
+	rows := make([]memory.Memory, 0, 6)
+	for _, content := range []string{
+		reduceBastionA, reduceBastionB, "the bastion logs every handshake",
+		reduceQueueA, reduceQueueB, "the queue consumer alerts the on-call engineer",
+	} {
+		rows = append(rows, memory.Memory{Category: "fact", Source: "mcp", Importance: 0.6, Content: content})
+	}
+	dataHome, stdout, stderr := reflectReductionRoundRows(t, project, rows,
+		func(ids []string) []string {
+			return []string{
+				"merge " + strings.Join(ids[:3], ",") + " -> " + bastionMerge,
+				"merge " + strings.Join(ids[3:], ",") + " -> " + queueMerge,
+			}
+		},
+		"--promote-globals")
+
+	// Both proposals are cross-project candidates, so the round has no project
+	// half: no project proposal, and the candidates are promoted rather than
+	// folded into the project.
+	if !strings.Contains(stdout, "Global-scoped (2)") {
+		t.Errorf("the two candidates are not classified as global, so this is not the global-only path; stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Project-scoped") {
+		t.Errorf("a project-scoped proposal ran, so the project half is not empty; stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Promoted 2/2 global memories") {
+		t.Errorf("neither candidate was promoted, so this is not the global-only path; stdout:\n%s", stdout)
+	}
+	if strings.Contains(stderr, ">50% reduction") {
+		t.Errorf("the project kept every row it held, so there is no reduction to report; stderr:\n%s", stderr)
+	}
+	if got := liveRowCount(t, dataHome, project); got != 6 {
+		t.Errorf("the project holds %d live rows, want the 6 it held: a global-only apply consumes nothing", got)
 	}
 }
