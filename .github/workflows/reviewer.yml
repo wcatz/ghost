@@ -1238,7 +1238,7 @@ jobs:
               cause="a review result was produced"
             fi
           fi
-          echo "classification=${classification}"
+          echo "classification=${classification}" >> "$GITHUB_OUTPUT"
           {
             echo "cause<<REVIEW_OUTCOME_CAUSE_EOF"
             printf '%s\n' "${cause}"
