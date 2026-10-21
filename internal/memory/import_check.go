@@ -195,6 +195,58 @@ func ImportedValidity(m PortableMemory) (Validity, error) {
 	return v, nil
 }
 
+// EvidenceRefusalError marks a memory refused for one of its evidence records'
+// stamps or its rating: a moment no accepted form reads, or a belief outside 0
+// to 1. Error is the save tool's own sentence, with the record's position in
+// front of it.
+//
+// It is typed apart from ValidityRefusalError because the REPAIR is different.
+// A validity refusal is fixed in place with ghost_memory_update, which takes
+// the four fields of a memory's own claim; no tool edits an evidence row at
+// all, so the export report has to send the operator to the delete-and-re-save
+// rather than to an edit that would be refused.
+type EvidenceRefusalError struct{ Err error }
+
+func (e *EvidenceRefusalError) Error() string { return e.Err.Error() }
+func (e *EvidenceRefusalError) Unwrap() error { return e.Err }
+
+// ImportedEvidence reads ONE evidence record's own stamps and its rating by the
+// rules the save tool applies to a memory's own, and returns the record with
+// its stamps in the stored layout.
+//
+// The stamps are the save tool's, because an evidence record's stamp is a
+// moment exactly as a memory's is: `observed_at` says when the observation was
+// recorded and `verified_at` says when the fact was checked, and a reader
+// interprets both. NormalizeImportedStamp is the rule the memory's own triple
+// is read by, so a hand-typed RFC 3339 moment is normalized rather than stored
+// as text every reader treats as no claim, and a stamp no accepted form reads
+// is refused by name instead of being stored unread.
+//
+// The rating is the save tool's too: a belief outside 0 to 1 is not a low belief
+// but a broken scale, and CheckConfidence is the one rule for it.
+//
+// The index is the record's position in the memory's evidence list, and it is
+// in every message: the VALUE is refused, not the memory, and the position is
+// what says which record. It is never the record's id, which is the value being
+// refused wherever an id is refused.
+func ImportedEvidence(index int, e PortableEvidence) (PortableEvidence, error) {
+	observed, err := NormalizeImportedStamp(fmt.Sprintf("evidence[%d].observed_at", index), e.ObservedAt, false)
+	if err != nil {
+		return PortableEvidence{}, err
+	}
+	verified, err := NormalizeImportedStamp(fmt.Sprintf("evidence[%d].verified_at", index), e.VerifiedAt, false)
+	if err != nil {
+		return PortableEvidence{}, err
+	}
+	if e.Confidence != nil {
+		if err := CheckConfidence(*e.Confidence); err != nil {
+			return PortableEvidence{}, fmt.Errorf("evidence[%d].%w", index, err)
+		}
+	}
+	e.ObservedAt, e.VerifiedAt = observed, verified
+	return e, nil
+}
+
 // CheckImportedMemory reports why `ghost import` would refuse this memory, or nil
 // when it would accept it. It is the only place a memory record is judged.
 //
@@ -412,6 +464,26 @@ func CheckImportedMemory(m PortableMemory) error {
 			secretField{fmt.Sprintf("evidence[%d].source_ref", i), e.SourceRef},
 		); err != nil {
 			return err
+		}
+		// The record's own stamps and its rating, by the save tool's rules, so an
+		// artifact is not the way around them: a stamp no accepted form reads and a
+		// rating outside 0 to 1 are each refused by name, naming the record's
+		// position in the list.
+		//
+		// The two are read because the support summary COUNTS them. A record
+		// carrying a verification stamp is counted as a verification whatever its
+		// kind, so an unreadable stamp or a rating of 99 would report a memory as
+		// supported by verified observations on the strength of values the save
+		// path would never have written — and every reader treats an unreadable
+		// stamp as no claim at all, so the stored record would say one thing and
+		// the count another.
+		//
+		// It runs AFTER the token guard, for the reason the memory's own validity
+		// check runs after it: export reads a refusal's kind to pick its advice,
+		// and a row that also holds a token-shaped field must be reported as that,
+		// not as a stamp to repair.
+		if _, err := ImportedEvidence(i, e); err != nil {
+			return &EvidenceRefusalError{Err: err}
 		}
 		// An empty id is not refused: the importer mints one for it, so it is also
 		// left out of the repeat check. A whitespace-only id is not empty to that

@@ -527,6 +527,10 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// ImportMemory's bind. A reader of the record: no SQL, no write; the write
 		// is ImportMemory's, which is classified on its own.
 		"import_check.go:ImportedValidity": true,
+		// The same for an EVIDENCE record's own stamps: it normalizes them for the
+		// import predicate and for the bind, so a reader of the record in the same
+		// way. The write is ImportMemory's, which is classified on its own.
+		"import_check.go:ImportedEvidence": true,
 		// #581's passive read reaches the validity triple through the shared
 		// `memoryColumns` list rather than naming it, which is why the FETCH has NO
 		// entry here and the scan does not report it: this is the documented

@@ -764,12 +764,16 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 //     is reported so the caller can say so;
 //   - importance is clamped to [0,1], the same bound a normal save applies;
 //   - the validity triple is normalized to the stored layout by ImportedValidity,
-//     the save tool's own reading of RFC 3339 and of a bare date.
+//     the save tool's own reading of RFC 3339 and of a bare date;
+//   - each evidence record's own stamps are normalized the same way by
+//     ImportedEvidence, and its rating is judged by the same CheckConfidence the
+//     memory's own rating is judged by.
 //
 // None is a refusal, which is why none is in the predicate: a cut content and a
 // clamped importance still import, so a predicate that refused them would turn a
 // reported adjustment into a lost row. A stamp the rule cannot read IS refused,
-// and the predicate makes that refusal by calling the same ImportedValidity.
+// and the predicate makes that refusal by calling the same ImportedValidity and
+// ImportedEvidence.
 //
 // It does not run Upsert's near-duplicate probe. Upsert exists to stop a live
 // save from adding a redundant row; a restore is not adding knowledge, it is
@@ -860,6 +864,20 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	validity, err := ImportedValidity(m)
 	if err != nil {
 		return false, false, false, err
+	}
+	// The evidence records' own stamps and rating, read by the rule the predicate
+	// above has just accepted, for the same reason: an evidence row's stamp is a
+	// moment a reader interprets, so the stored one is the layout every reader
+	// parses rather than the artifact's own spelling of it. A stamp in the stored
+	// layout is kept as its raw text, so an export of a store this build wrote
+	// re-imports byte-stable.
+	evidence := make([]PortableEvidence, len(m.Evidence))
+	for i, e := range m.Evidence {
+		read, err := ImportedEvidence(i, e)
+		if err != nil {
+			return false, false, false, &EvidenceRefusalError{Err: err}
+		}
+		evidence[i] = read
 	}
 	// A stated importance is clamped to [0,1], the same bound a normal save
 	// applies. An unstated one is passed as NULL for the COALESCE to default, and
@@ -1005,7 +1023,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// The evidence the artifact itself carried, then the record of the arrival.
 	// The order is the order they happened in, and MemoryProvenance reads forwards:
 	// the observations came first, on the machine the artifact was exported from.
-	for _, e := range m.Evidence {
+	for _, e := range evidence {
 		if err := importEvidenceTx(ctx, tx, m.ID, e); err != nil {
 			return false, false, downgraded, err
 		}
@@ -1039,7 +1057,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// carry `"verified_at": ""`, which every reader of the column treats as no
 	// claim. Empty is not a verification, and treating it as one would suppress a
 	// real arrival stamp.
-	arrivalStamped := recordedVerification(validity.VerifiedAt) && !anyCarriedVerification(m.Evidence)
+	arrivalStamped := recordedVerification(validity.VerifiedAt) && !anyCarriedVerification(evidence)
 	if err := appendEvidenceTx(ctx, tx, m.ID, evidenceImported, Provenance{
 		Agent:      m.Agent,
 		SessionID:  m.SessionID,
