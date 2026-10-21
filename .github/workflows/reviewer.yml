@@ -786,7 +786,10 @@ jobs:
             fi
             [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
             printf '%s: %s\n' "$model" "$reason" >> "$probe_failure_file"
-            notice "review model ${model} skipped: ${reason}"
+            # The reason is provider output and it is not printed: the
+            # classification reads it, and the log says which model was
+            # skipped.
+            notice "review model ${model} skipped"
           done
 
           if [ -z "$selected_model" ]; then
@@ -831,14 +834,6 @@ jobs:
             fi
           done
 
-          workflow_escape() {
-            local value="${1-}"
-            value=${value//%/%25}
-            value=${value//$'\r'/%0D}
-            value=${value//$'\n'/%0A}
-            printf '%s' "$value"
-          }
-
           # This is deliberately the same trusted extraction and schema gate
           # used by post_review.py; a non-empty event stream alone is not a
           # successful review.
@@ -876,6 +871,9 @@ jobs:
           free_models_file="${RUNNER_TEMP}/reviewer-free-models.txt"
           failure_file="${RUNNER_TEMP}/free-review-failure.txt"
           : > "$failure_file"
+          # The model's own document, kept apart from the reasons: see
+          # the note where it is written.
+          : > "${RUNNER_TEMP}/free-review-validation.txt"
           free_review_success=0
           free_attempt=0
           if [ -s "$free_models_file" ]; then
@@ -939,17 +937,26 @@ jobs:
                 {
                   jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
                   cat model-stderr.txt 2>/dev/null || true
-                  cat model-validation.err 2>/dev/null || true
                 } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
               )
+              # The MODEL's own document is kept apart from the reason.
+              # The validation error quotes values the model chose, so a
+              # reason that carried it would be text a model wrote - and a
+              # model can write the provider's own words, which would let
+              # a pull request choose whether its review reads as an
+              # outage. The classification reads this file only as the
+              # sign that a model ANSWERED.
+              if [ -s model-validation.err ]; then
+                cat model-validation.err >> "${RUNNER_TEMP}/free-review-validation.txt"
+              fi
               if printf '%s' "$free_failure_reason" | grep -Fqi 'agent not found'; then
                 printf 'review_status=agent_fatal\nagent_fatal=true\n' >> "$GITHUB_OUTPUT"
                 echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
                 exit 0
               fi
-              [ -n "$free_failure_reason" ] || free_failure_reason="free review exited ${free_status} without a valid findings document"
+              [ -n "$free_failure_reason" ] || free_failure_reason="free review exited ${free_status} with no provider message"
               printf '%s: %s\n' "$model" "$free_failure_reason" >> "$failure_file"
-              echo "::warning::free review model ${model} failed: $(workflow_escape "$free_failure_reason"); trying remaining free candidates"
+              echo "::warning::free review model ${model} failed; trying remaining free candidates"
             done < "$free_models_file"
           fi
 
@@ -1039,13 +1046,15 @@ jobs:
 
           failure_file="${RUNNER_TEMP}/free-review-failure.txt"
           if [ -s "$failure_file" ]; then
-            free_failure_reason=$(head -c 400 "$failure_file" | tr '\n' ' ' || true)
+            free_failure_reason="the free path reported a failure"
           elif [ "${SELECT_MODEL_OUTCOME}" = failure ]; then
             free_failure_reason="free model selection did not complete"
           else
-            free_failure_reason="no free candidate produced a valid findings document"
+            free_failure_reason="no free candidate produced a usable reply"
           fi
-          echo "::warning::free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"
+          # The reason is not printed: it is provider output, and the log
+          # says which path failed and which model is taking over.
+          echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"
 
           : > model-reply.txt
           : > model-stderr.txt
@@ -1086,20 +1095,26 @@ jobs:
             {
               jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
               cat model-stderr.txt 2>/dev/null || true
-              cat model-validation.err 2>/dev/null || true
             } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
           )
-          # The reason is kept for the classification step, which reads it
-          # to tell a spent usage window (an outage) from a paid model
-          # that answered with something unusable (a failure).
+          # The reason is the PROVIDER's words only: the opencode
+          # process's own error events and its stderr. The model's own
+          # document is kept apart, because a reason that quoted it would
+          # be text a model wrote, and a model can write the provider's
+          # words — which would let a pull request choose whether its
+          # review reads as an outage. The classification reads the
+          # validation file only as the sign that a model ANSWERED.
           printf '%s\n' "$reason" > "${RUNNER_TEMP}/paid-review-failure.txt"
+          if [ -s model-validation.err ]; then
+            cp model-validation.err "${RUNNER_TEMP}/paid-review-validation.txt"
+          fi
           if printf '%s' "$reason" | grep -Fqi 'agent not found'; then
             printf 'paid_status=agent_fatal\npaid_agent_fatal=true\n' >> "$GITHUB_OUTPUT"
             echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
             exit 0
           fi
           printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
-          echo "::error::paid fallback ${PAID_MODEL} failed: $(workflow_escape "${reason:-no valid findings document}")"
+          echo "::error::paid fallback ${PAID_MODEL} failed"
           exit 0
 
       - name: Classify the review result
@@ -1137,6 +1152,8 @@ jobs:
               --free-failures "${RUNNER_TEMP}/free-probe-failure.txt" \
               --free-failures "${RUNNER_TEMP}/free-review-failure.txt" \
               --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt" \
+              --free-validation "${RUNNER_TEMP}/free-review-validation.txt" \
+              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt" \
               --select-agent-fatal "${SELECT_AGENT_FATAL}" \
               --free-agent-fatal "${FREE_AGENT_FATAL}" \
               --paid-agent-fatal "${PAID_AGENT_FATAL}" 2>/dev/null)"

@@ -18,10 +18,23 @@ had:
   failure     - everything else, exactly as it behaved before
 
 The input is what the two paths reported: the free path's status and its
-per-candidate failure reasons, the paid step's status and reason, and the
-fatal flags the steps raise. The output is the outcome and the cause,
+per-candidate failure reasons, the paid step's status and reason, the
+fatal flags the steps raise, and the validation errors each path
+produced. The output is the outcome and a FIXED LABEL naming the cause,
 which the workflow prints in the job log and puts in the title of the
 pending review-gate.
+
+TWO RULES MAKE THE ANSWER WORTH TRUSTING.
+
+The reasons are the PROVIDER's own words - the opencode process's error
+events and its stderr - and never the model's. A model can write
+anything, including the provider's own phrases, so a reason a model wrote
+is not evidence of an outage. The model's own document is read apart, and
+only as the sign that a model ANSWERED.
+
+And the CAUSE is a label, never a reason. The gate title is a place a
+reader trusts, and it says which of two things happened, not what a
+provider said about it.
 
 No network, no filesystem, no GitHub calls: everything here is a function
 of its arguments, so it is unit-tested off-CI (test_review_outcome.py).
@@ -37,46 +50,70 @@ OUTCOME_SUCCESS = "success"
 OUTCOME_UNAVAILABLE = "unavailable"
 OUTCOME_FAILURE = "failure"
 
+# The causes are FIXED LABELS. A reason is provider output, and the gate
+# title is a place a reader trusts: the title says which of two things
+# happened, never what a provider said about it.
+CAUSE_PAID_USAGE_LIMIT = "paid fallback usage limit"
+CAUSE_FREE_UNREACHABLE = "free models unreachable"
+CAUSE_MODEL_ANSWERED = "a model answered with a document nobody can use"
+CAUSE_AGENT_MISSING = "the reviewer agent did not register"
+CAUSE_FREE_STEP_FATAL = "the free review step could not run"
+CAUSE_NO_RESULT = "no valid free or paid review result was produced"
+CAUSE_FREE_RESULT = "a review result was produced by the free path"
+CAUSE_PAID_RESULT = "a review result was produced by the paid fallback"
+
 # The cause is carried in a check run title (255 characters) and in a job
-# log line, and it can quote a provider's own error text, so it is one
-# bounded line.
+# log line, so it is one bounded line.
 MAX_CAUSE = 200
 
-# The free path's reasons that name an OUTAGE of the model service: a
-# rate limit, or a connection the provider dropped. The paid fallback's
-# reason for the same thing is its own usage window (is_usage_limit).
-_OUTAGE_WORDS = (
-    "rate limit", "ratelimit", "rate_limit", "too many requests",
-    "socket", "econnreset", "econnrefused", "econnaborted", "etimedout",
-    "connection reset", "connection refused", "connection closed",
-    "connection aborted", "connection error", "broken pipe",
-    "transport", "network error", "dns",
-    "timed out", "timeout", "deadline exceeded",
-    "temporarily unavailable", "service unavailable", "overloaded",
-    "bad gateway", "gateway timeout", "internal server error",
-    "upstream",
+# The signs that a MODEL ANSWERED: a validation failure, an unusable
+# findings document, a verdict word. A model that answered has produced a
+# verdict, whatever the transport did on the way, and a verdict is not an
+# outage - so these force a failure on BOTH paths, before the
+# usage-limit and transport branches are asked. They are checked against
+# every text the run reported, so a reason that quotes a model's own
+# words cannot smuggle an outage past them.
+_ANSWERED_MARKERS = (
+    "validation failed",
+    "reply validation failed",
+    "unparseable",
+    "could not parse",
+    "invalid findings",
+    "unusable findings",
+    "no valid findings",
+    "findings document",
+    "verdict",
+    "severity must be",
+    "summary must be",
+    "no json object",
 )
 
-# The HTTP status codes that mean the provider refused the call rather
-# than the model answering badly. Matched as whole numbers so a byte
-# count that happens to contain one is not read as a status code.
-_OUTAGE_CODES = re.compile(r"\b(?:429|500|502|503|504)\b")
-
-# The reasons that name a failure of the REVIEW rather than an outage of
-# the models. They win over the outage words: a reason carrying one of
-# them is a failure even when it also mentions a transport error, because
-# a model that answered with a document nobody can use produced a
-# verdict the reviewer cannot trust.
-_VERDICT_WORDS = (
-    "invalid findings", "unusable findings", "unparseable", "could not parse",
-    "validation failed", "reply validation failed", "findings document",
-    "agent not found", "did not register",
-    "no such file", "enoent", "base-scripts",
+# The provider's own words for an outage, and nothing looser: a phrase a
+# model could write belongs in _ANSWERED_MARKERS or nowhere, because a
+# reason a model wrote is not evidence of an outage.
+_OUTAGE_PATTERNS = (
+    # The paid fallback's shared usage window, in the provider's words.
+    "go usage limit exceeded",
+    # The free tier's rate limit, in the provider's words.
+    "rate limit exceeded",
+    "too many requests",
+    "http 429",
+    # A dropped or reset connection, in the provider's words.
+    "the socket connection was closed unexpectedly",
+    "socket hang up",
+    "connection reset by peer",
+    "connection refused",
+    "connection closed",
+    "broken pipe",
+    "econnreset",
+    "econnrefused",
+    "econnaborted",
+    "etimedout",
 )
 
 
 class Decision(NamedTuple):
-    """The outcome of a review run and the reason for it."""
+    """The outcome of a review run and the label naming its cause."""
     outcome: str
     cause: str
 
@@ -107,16 +144,27 @@ def parse_failures(text):
     return failures
 
 
+def model_answered(text):
+    """True when the text shows a MODEL answered.
+
+    A validation failure, an unusable findings document or a verdict word
+    all mean the same thing: the model produced something, and what it
+    produced has to be judged rather than waited for.
+    """
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in _ANSWERED_MARKERS)
+
+
 def is_outage(reason):
     """True when the reason names an outage of the model service."""
     text = str(reason or "").lower()
     if not text:
         return False
-    if any(word in text for word in _VERDICT_WORDS):
+    if model_answered(text):
         return False
-    if any(word in text for word in _OUTAGE_WORDS):
-        return True
-    return bool(_OUTAGE_CODES.search(text))
+    return any(pattern in text for pattern in _OUTAGE_PATTERNS)
 
 
 def is_usage_limit(reason):
@@ -124,71 +172,68 @@ def is_usage_limit(reason):
 
     The paid model is an opencode-go one, so its usage limit is the
     account's Go window: the one window every paid model shares, which
-    comes back by itself later.
+    comes back by itself later. The provider names it exactly, and the
+    phrase is matched exactly - a looser match would be a phrase a model
+    could write.
     """
-    return "usage limit" in str(reason or "").lower()
-
-
-def _failure_cause(free_failures, paid_reason):
-    """Name what the failure was, as far as the reasons name it."""
-    cause = "no valid free or paid review result was produced"
-    for _model, reason in free_failures:
-        if any(word in str(reason or "").lower() for word in _VERDICT_WORDS):
-            return one_line(cause + " (a free candidate answered with an "
-                                "unusable findings document)")
-    if paid_reason:
-        return one_line(cause + " (the paid fallback failed: "
-                        + one_line(paid_reason, 120) + ")")
-    return cause
+    return "go usage limit exceeded" in str(reason or "").lower()
 
 
 def decide(free_status, free_failures, paid_status, paid_reason,
+           free_validation="", paid_validation="",
            select_agent_fatal=False, free_agent_fatal=False,
            paid_agent_fatal=False):
     """Classify a review run.
 
     `free_failures` is a list of (model, reason) pairs: every free
-    candidate that failed, with the reason it failed. `free_status` and
+    candidate that failed, with the provider's reason. `free_status` and
     `paid_status` are the two steps' own statuses, and `paid_reason` is
-    what the paid step said when it failed.
+    the provider's reason when the paid step failed. The two validation
+    texts are the MODEL's own document errors, and they are read only as
+    the sign that a model answered.
     """
     free_status = str(free_status or "").strip()
     paid_status = str(paid_status or "").strip()
     paid_reason = str(paid_reason or "")
+    free_validation = str(free_validation or "")
+    paid_validation = str(paid_validation or "")
     free_failures = list(free_failures or [])
 
     if free_status == "success":
-        return Decision(OUTCOME_SUCCESS, "a review result was produced by the free path")
+        return Decision(OUTCOME_SUCCESS, CAUSE_FREE_RESULT)
     if paid_status == "success":
-        return Decision(OUTCOME_SUCCESS, "a review result was produced by the paid fallback")
+        return Decision(OUTCOME_SUCCESS, CAUSE_PAID_RESULT)
+
+    # A model that ANSWERED has produced a verdict, whatever the
+    # transport did on the way. This is asked first, on both paths: a
+    # model can write the provider's own words, so a report that carries
+    # a model's words is never evidence of an outage.
+    reported = [paid_reason, free_validation, paid_validation]
+    reported += [reason for _model, reason in free_failures]
+    if any(model_answered(text) for text in reported):
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ANSWERED)
 
     if select_agent_fatal or free_agent_fatal or paid_agent_fatal:
-        return Decision(OUTCOME_FAILURE,
-                        "the reviewer agent did not register, so no review "
-                        "was run with the read-only tool set")
+        return Decision(OUTCOME_FAILURE, CAUSE_AGENT_MISSING)
 
     # The paid fallback's usage window is spent. That is an outage
     # whatever the free path did.
     if paid_status != "success" and is_usage_limit(paid_reason):
-        return Decision(OUTCOME_UNAVAILABLE,
-                        "the paid fallback failed: " + one_line(paid_reason))
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_PAID_USAGE_LIMIT)
 
     # A free step that could not RUN at all - a missing trusted script, a
     # credential in the model step, no workspace - is a failure of the
     # pipeline rather than of the models.
     if free_status == "fatal":
-        return Decision(OUTCOME_FAILURE, "the free review step could not run")
+        return Decision(OUTCOME_FAILURE, CAUSE_FREE_STEP_FATAL)
 
     # Every free candidate failed on a rate limit or a dropped connection,
     # and the paid step produced no result either.
     if (paid_status != "success" and free_failures
             and all(is_outage(reason) for _model, reason in free_failures)):
-        return Decision(
-            OUTCOME_UNAVAILABLE,
-            "every free candidate failed on a rate limit or a dropped "
-            "connection")
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_FREE_UNREACHABLE)
 
-    return Decision(OUTCOME_FAILURE, _failure_cause(free_failures, paid_reason))
+    return Decision(OUTCOME_FAILURE, CAUSE_NO_RESULT)
 
 
 def _read(path):
@@ -214,10 +259,18 @@ def main(argv):
     parser.add_argument("--paid-status", default="",
                         help="the paid step's status")
     parser.add_argument("--free-failures", action="append", default=[],
-                        help="a file of `<model>: <reason>` lines "
-                             "(repeatable)")
+                        help="a file of `<model>: <reason>` lines, the "
+                             "provider's reasons only (repeatable)")
     parser.add_argument("--paid-reason", default="",
-                        help="a file holding the paid step's reason")
+                        help="a file holding the paid step's reason, the "
+                             "provider's words only")
+    parser.add_argument("--free-validation", default="",
+                        help="a file holding the free step's validation "
+                             "error: the model's own document, read only as "
+                             "the sign that a model answered")
+    parser.add_argument("--paid-validation", default="",
+                        help="a file holding the paid step's validation "
+                             "error")
     parser.add_argument("--select-agent-fatal", default="")
     parser.add_argument("--free-agent-fatal", default="")
     parser.add_argument("--paid-agent-fatal", default="")
@@ -229,6 +282,8 @@ def main(argv):
 
     decision = decide(args.free_status, failures, args.paid_status,
                       _read(args.paid_reason),
+                      free_validation=_read(args.free_validation),
+                      paid_validation=_read(args.paid_validation),
                       select_agent_fatal=_flag(args.select_agent_fatal),
                       free_agent_fatal=_flag(args.free_agent_fatal),
                       paid_agent_fatal=_flag(args.paid_agent_fatal))

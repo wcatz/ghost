@@ -1,11 +1,18 @@
 """The review outcome decision: an outage of the review models is not a
-verdict, and only an outage is allowed to leave the review-gate pending.
+verdict, only an outage is allowed to leave the review-gate pending, and
+a model that ANSWERED is never an outage.
 
 The five cases the decision has to answer are the ones the pipeline can
 actually reach: the paid fallback's shared usage window is spent, every
 free candidate dropped on a rate limit or a closed socket, a model that
 answered with a findings document nobody can use, an agent that did not
 register, and a review that did come back.
+
+The last group is the sharp one: a model can write anything, including the
+provider's own words, so a reason that a model wrote is never evidence of
+an outage. A validation failure, an unparseable document, or a verdict
+word anywhere in what the run reported is a failure on both paths, before
+the usage-limit and transport branches are asked.
 """
 
 import contextlib
@@ -16,7 +23,8 @@ import tempfile
 import unittest
 
 import review_outcome
-from review_outcome import (OUTCOME_FAILURE, OUTCOME_SUCCESS,
+from review_outcome import (CAUSE_FREE_UNREACHABLE, CAUSE_PAID_USAGE_LIMIT,
+                            OUTCOME_FAILURE, OUTCOME_SUCCESS,
                             OUTCOME_UNAVAILABLE, decide, parse_failures)
 
 DROPPED_SOCKET = "The socket connection was closed unexpectedly"
@@ -24,7 +32,18 @@ RATE_LIMIT = "rate limit exceeded (HTTP 429)"
 INVALID_DOCUMENT = ("reply validation failed: findings[0].severity must be "
                     "one of blocker|should-fix|nit")
 USAGE_LIMIT = "ERROR: Go usage limit exceeded"
-UNKNOWN_FAILURE = "the free review exited 1 without a valid findings document"
+UNKNOWN_FAILURE = "the free review exited 1 with no provider message"
+
+# What a model can write: the provider's own words, inside a document
+# nobody can use.
+FORGED_VALIDATION = ("reply validation failed: verdict must be one of "
+                     "blocker|should-fix|nit|clean, got 'Go usage limit "
+                     "exceeded'")
+FORGED_SOCKET = ("reply validation failed: summary must be a non-empty "
+                 "string, got 'The socket connection was closed "
+                 "unexpectedly'")
+FORGED_RATE_LIMIT = ("reply validation failed: summary must be a non-empty "
+                      "string, got 'rate limit exceeded (HTTP 429)'")
 
 
 class TestThePaidFallback(unittest.TestCase):
@@ -32,21 +51,68 @@ class TestThePaidFallback(unittest.TestCase):
         decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
                           "failed", USAGE_LIMIT)
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
-        self.assertIn("Go usage limit exceeded", decision.cause)
+        self.assertEqual(decision.cause, CAUSE_PAID_USAGE_LIMIT)
 
     def test_the_paid_usage_window_wins_over_the_free_path(self):
         # The free path failing for a reason of its own does not make the
-        # spent usage window a verdict.
-        decision = decide("failed", [("opencode/big-pickle", INVALID_DOCUMENT)],
+        # spent usage window a verdict. A model that ANSWERED is a
+        # different thing, and that is asked first.
+        decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
                           "failed", USAGE_LIMIT)
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
 
-    def test_a_paid_failure_beside_a_free_outage_is_still_unavailable(self):
-        # The free path was an outage and the paid step produced no
-        # result: nothing here is a verdict.
+    def test_a_model_that_answered_beats_the_usage_window(self):
+        decision = decide("failed", [("opencode/big-pickle", INVALID_DOCUMENT)],
+                          "failed", USAGE_LIMIT)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_paid_failure_that_is_not_a_usage_limit_is_not_unavailable(self):
         decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
                           "failed", "the paid model answered with nothing")
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+
+    def test_only_the_providers_own_phrase_is_the_usage_window(self):
+        # "usage limit" on its own is not the window: the provider names
+        # it, and a model can write anything.
+        decision = decide("failed", [], "failed", "usage limit reached")
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+
+class TestAModelThatAnswered(unittest.TestCase):
+    def test_a_forged_validation_never_reads_as_the_usage_window(self):
+        # The exploit: a model that answers with a document carrying the
+        # provider's own phrase must not turn the run into an outage.
+        decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
+                          "failed", FORGED_VALIDATION)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertNotIn("usage limit", decision.cause)
+
+    def test_a_forged_validation_never_reads_as_a_transport_outage(self):
+        decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
+                          "failed", "the paid model answered with nothing",
+                          free_validation=FORGED_SOCKET)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_forged_rate_limit_in_a_validation_never_reads_as_an_outage(self):
+        decision = decide("failed", [], "failed", "the paid model answered "
+                          "with nothing", free_validation=FORGED_RATE_LIMIT)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_validation_failure_on_the_paid_path_is_a_failure(self):
+        decision = decide("failed", [], "failed", USAGE_LIMIT,
+                          paid_validation=FORGED_VALIDATION)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_validation_failure_beats_the_transport_branch(self):
+        decision = decide("failed", [("opencode/big-pickle", DROPPED_SOCKET)],
+                          "failed", "the paid model answered with nothing",
+                          free_validation=INVALID_DOCUMENT)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_verdict_word_in_a_reason_is_a_failure(self):
+        decision = decide("failed", [], "failed",
+                          "the reply carried no verdict")
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
 
 
 class TestTheFreePath(unittest.TestCase):
@@ -56,21 +122,21 @@ class TestTheFreePath(unittest.TestCase):
                            ("opencode/longcat-2.5-preview-free", RATE_LIMIT)],
                           "failed", "the paid model did not answer")
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
-        self.assertIn("free candidate", decision.cause)
+        self.assertEqual(decision.cause, CAUSE_FREE_UNREACHABLE)
 
     def test_one_free_candidate_with_an_unusable_document_is_a_failure(self):
         decision = decide("failed",
                           [("opencode/ling-3.1-flash-free", INVALID_DOCUMENT)],
                           "failed", "the paid model did not answer")
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
-        self.assertIn("findings document", decision.cause)
 
     def test_one_free_candidate_on_an_outage_beside_another_that_is_not(self):
         # "ONLY on rate limits or dropped connections": one candidate that
         # failed for another reason is enough to make the run a failure.
         decision = decide("failed",
                           [("opencode/ling-3.1-flash-free", DROPPED_SOCKET),
-                           ("opencode/longcat-2.5-preview-free", INVALID_DOCUMENT)],
+                           ("opencode/longcat-2.5-preview-free",
+                            INVALID_DOCUMENT)],
                           "failed", "the paid model did not answer")
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
 
@@ -78,6 +144,17 @@ class TestTheFreePath(unittest.TestCase):
         decision = decide("failed", [("opencode/big-pickle", UNKNOWN_FAILURE)],
                           "failed", "the paid model did not answer")
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_only_the_providers_own_phrases_are_an_outage(self):
+        # A loose word would be a phrase a model could write, so only the
+        # provider's own messages count as an outage.
+        for reason in ("the socket stayed open",
+                       "the provider did not answer before the timeout",
+                       "the reply carried 429 findings"):
+            with self.subTest(reason=reason):
+                decision = decide("failed", [("m", reason)], "failed",
+                                  "the paid model did not answer")
+                self.assertEqual(decision.outcome, OUTCOME_FAILURE)
 
     def test_no_free_candidate_at_all_is_a_failure(self):
         # Nothing was tried, so nothing says the models were unavailable.
@@ -116,6 +193,25 @@ class TestASuccessfulReview(unittest.TestCase):
     def test_a_success_outranks_a_spent_usage_window(self):
         decision = decide("success", [], "failed", USAGE_LIMIT)
         self.assertEqual(decision.outcome, OUTCOME_SUCCESS)
+
+
+class TestTheCause(unittest.TestCase):
+    def test_an_unavailable_cause_is_a_fixed_label(self):
+        # The reason text is provider output and the gate title is a place
+        # a reader trusts: the title carries a label, never a reason.
+        for decision in (decide("failed", [], "failed", USAGE_LIMIT),
+                         decide("failed", [("m", DROPPED_SOCKET)], "failed",
+                                "the paid model did not answer")):
+            with self.subTest(cause=decision.cause):
+                self.assertIn(decision.cause,
+                              (CAUSE_PAID_USAGE_LIMIT, CAUSE_FREE_UNREACHABLE))
+                self.assertNotIn(USAGE_LIMIT, decision.cause)
+                self.assertNotIn(DROPPED_SOCKET, decision.cause)
+
+    def test_a_cause_is_one_bounded_line(self):
+        decision = decide("failed", [], "failed", "x" * 5000)
+        self.assertLessEqual(len(decision.cause), review_outcome.MAX_CAUSE)
+        self.assertNotIn("\n", decision.cause)
 
 
 class TestTheFailureFile(unittest.TestCase):
@@ -165,18 +261,24 @@ class TestTheCommand(unittest.TestCase):
         report = self._run("opencode/big-pickle: %s\n" % DROPPED_SOCKET,
                            "the paid model did not answer")
         self.assertEqual(report["outcome"], OUTCOME_UNAVAILABLE)
-        self.assertTrue(report["cause"])
+        self.assertEqual(report["cause"], CAUSE_FREE_UNREACHABLE)
 
     def test_the_command_reads_a_spent_usage_window(self):
         report = self._run("opencode/big-pickle: %s\n" % DROPPED_SOCKET,
                            USAGE_LIMIT)
         self.assertEqual(report["outcome"], OUTCOME_UNAVAILABLE)
-        self.assertIn("Go usage limit exceeded", report["cause"])
+        self.assertEqual(report["cause"], CAUSE_PAID_USAGE_LIMIT)
 
     def test_the_command_reads_a_fatal_flag(self):
         report = self._run("opencode/big-pickle: %s\n" % DROPPED_SOCKET,
                            USAGE_LIMIT, flags={"free_agent_fatal": "true"})
         self.assertEqual(report["outcome"], OUTCOME_FAILURE)
+
+    def test_the_command_never_reports_a_reason(self):
+        report = self._run("opencode/big-pickle: %s\n" % DROPPED_SOCKET,
+                           USAGE_LIMIT)
+        self.assertNotIn(USAGE_LIMIT, report["cause"])
+        self.assertNotIn(DROPPED_SOCKET, report["cause"])
 
     def test_a_missing_failure_file_is_not_a_crash(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -186,13 +288,6 @@ class TestTheCommand(unittest.TestCase):
                     "--paid-reason", missing]
             report = self._call(argv)
         self.assertEqual(report["outcome"], OUTCOME_FAILURE)
-
-
-class TestTheCause(unittest.TestCase):
-    def test_a_cause_is_one_bounded_line(self):
-        decision = decide("failed", [], "failed", "x" * 5000)
-        self.assertLessEqual(len(decision.cause), review_outcome.MAX_CAUSE)
-        self.assertNotIn("\n", decision.cause)
 
 
 if __name__ == "__main__":
