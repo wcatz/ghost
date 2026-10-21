@@ -2920,7 +2920,19 @@ func (s *Server) registerTools() {
 		// The response byte budget (#1039): a browse is bounded by the caller's
 		// `limit` alone, so 60 memories at the store's 8 KB content cap is a
 		// 485 KB answer. Cut whole rows from the end and say how many went.
-		text, _ := capRowsToResponseBudget("", memoryLines(memories, nil), s.searchResponseCap(), memoriesListCutAdvice)
+		// A filtered browse widens its scope to the project plus the `_global`
+		// bucket (ListMemories), so its rows come from more than one bucket and
+		// each row names the bucket it came from, the same way ghost_search_all
+		// does — otherwise a cross-project memory is indistinguishable from the
+		// project's own. An unfiltered browse is the project's own rows alone and
+		// carries no bucket label.
+		var rows []string
+		if args.Category != "" || args.Retention != "" {
+			rows = searchAllLines(memories)
+		} else {
+			rows = memoryLines(memories, nil)
+		}
+		text, _ := capRowsToResponseBudget("", rows, s.searchResponseCap(), memoriesListCutAdvice)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
